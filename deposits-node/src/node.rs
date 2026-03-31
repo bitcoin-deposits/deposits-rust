@@ -8480,52 +8480,30 @@ impl Node {
             }
         };
 
-        // Apply a FeeCollect(0) to the ledger to create a real pending update
         let block_height = self.wallet.get_block_height().unwrap_or(0);
-        let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
         let op = LedgerOperation::FeeCollect {
             deposit_id,
             amount: 0,
             block_height,
         };
 
-        {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let arc = ledgers.get(ledger_id).unwrap().clone();
-            let mut ledger = arc.write().unwrap();
-            if let Err(e) = ledger.append_operation_with_block(op, block_height, block_hash) {
-                return (false, None, Some(format!("Failed to stage test update: {}", e)));
-            }
-        }
-
-        if let Err(e) = self.sign_last_update(ledger_id) {
-            return (false, None, Some(format!("Failed to sign test update: {}", e)));
-        }
-
         let start = std::time::Instant::now();
-        match self.sign_and_broadcast(ledger_id).await {
+        match self.commit_operation(ledger_id, op).await {
             Ok(_) => {
                 let total_ms = start.elapsed().as_secs_f64() * 1000.0;
-                // The cosign succeeded — read the cosigner info from the latest update
-                let (cosigner, cosign_ms) = {
+                let cosigner = {
                     let ledgers = self.handler.ledgers.lock().unwrap();
-                    if let Some(arc) = ledgers.get(ledger_id) {
-                        let l = arc.read().unwrap();
-                        if let Some(last) = l.history.last() {
-                            let pk = last.cosigner_pubkey.map(|pk| hex::encode(pk.serialize()))
-                                .unwrap_or_default();
-                            (pk, total_ms)
-                        } else {
-                            (String::new(), total_ms)
-                        }
-                    } else {
-                        (String::new(), total_ms)
-                    }
+                    ledgers.get(ledger_id)
+                        .and_then(|arc| {
+                            let l = arc.read().unwrap();
+                            l.history.last()
+                                .and_then(|u| u.cosigner_pubkey.map(|pk| hex::encode(pk.serialize())))
+                        })
+                        .unwrap_or_default()
                 };
-
                 let result = serde_json::json!({
                     "cosigner": cosigner,
-                    "cosign_ms": cosign_ms,
+                    "cosign_ms": total_ms,
                 });
                 (true, Some(result.to_string()), None)
             }
@@ -8744,12 +8722,12 @@ impl Node {
                 continue;
             }
 
-            // Apply each FeeCollect operation
+            // Commit each FeeCollect operation via the staged flow
             for (deposit_id, amount) in fee_ops {
                 tracing::info!(
                     "Collecting fee: deposit={}... amount={} sats",
                     hex::encode(&deposit_id[..8]),
-                    amount / 1000 // Convert msats to sats for logging
+                    amount / 1000
                 );
 
                 let operation = LedgerOperation::FeeCollect {
@@ -8758,42 +8736,12 @@ impl Node {
                     block_height: current_block,
                 };
 
-                {
-                    let mut ledger = ledger_arc.write().unwrap();
-                    if let Err(e) = ledger.append_operation_with_block(
-                        operation,
-                        current_block,
-                        block_hash,
-                    ) {
-                        tracing::warn!(
-                            "Failed to collect fee from deposit {}...: {:?}",
-                            hex::encode(&deposit_id[..8]),
-                            e
-                        );
-                        continue;
-                    }
-                }
-
-                // Sign the update
-                if let Err(e) = self.sign_last_update(&ledger_id) {
-                    tracing::warn!("Failed to sign fee collection update: {}", e);
+                if let Err(e) = self.commit_operation(&ledger_id, operation).await {
+                    tracing::warn!(
+                        "Failed to collect fee from deposit {}...: {}",
+                        hex::encode(&deposit_id[..8]), e
+                    );
                     continue;
-                }
-
-                // Validate chain before persisting
-                if let Err(e) = self.validate_chain_before_persist(&ledger_id) {
-                    tracing::warn!("Chain validation failed for fee collection: {}", e);
-                    continue;
-                }
-
-                // Save ledger to disk
-                if let Err(e) = self.handler.persist_ledger_to_disk(&ledger_id) {
-                    tracing::warn!("Failed to save ledger after fee collection: {}", e);
-                }
-
-                // Broadcast to Nostr
-                if let Err(e) = self.broadcast_last_update(&ledger_id).await {
-                    tracing::warn!("Failed to broadcast fee collection: {}", e);
                 }
             }
         }
@@ -10821,62 +10769,35 @@ impl Node {
         payment_hash: [u8; 32],
         invoice_id: String,
     ) -> Result<u64, Error> {
-        // Check if there are existing quorum members
-        let has_quorum = {
+        let sequence_number = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
+            let arc = ledgers.get(ledger_id)
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
-            let ledger = ledger_arc.read().unwrap();
-            !ledger.state.quorum_members.is_empty()
-        };
-
-        // Append the operation
-        let new_balance = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone();
-
-            let mut ledger = ledger_arc.write().unwrap();
-
+            let ledger = arc.read().unwrap();
             if !ledger.state.deposits.contains_key(&deposit_id) {
                 return Err(Error::Protocol(format!(
-                    "Deposit not found for id {}",
-                    hex::encode(deposit_id)
+                    "Deposit not found for id {}", hex::encode(deposit_id)
                 )));
             }
-
-            let sequence_number = ledger.sequence() + 1;
-
-            let operation = LedgerOperation::InvoiceCredit {
-                payment_hash,
-                deposit_id,
-                amount: amount_msats,
-                invoice_id,
-                sequence_number,
-            };
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to credit deposit: {:?}", e)))?;
-
-            ledger.state.deposits.get(&deposit_id)
-                .map(|d| d.balance)
-                .unwrap_or(0)
+            ledger.sequence() + 1
         };
 
-        // Sign and broadcast
-        if has_quorum {
-            self.sign_and_broadcast(ledger_id).await?;
-        } else {
-            self.operator_sign_persist_broadcast(ledger_id).await?;
-        }
+        let operation = LedgerOperation::InvoiceCredit {
+            payment_hash,
+            deposit_id,
+            amount: amount_msats,
+            invoice_id,
+            sequence_number,
+        };
+
+        self.commit_operation(ledger_id, operation).await?;
+
+        let new_balance = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = ledgers.get(ledger_id).unwrap();
+            let ledger = arc.read().unwrap();
+            ledger.state.deposits.get(&deposit_id).map(|d| d.balance).unwrap_or(0)
+        };
 
         tracing::info!(
             "Credited deposit {} with {} msats (invoice), new balance: {} msats",
