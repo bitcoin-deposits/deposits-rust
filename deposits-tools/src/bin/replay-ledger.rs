@@ -1527,9 +1527,9 @@ fn browse_updates(updates: &[SignedLedgerUpdate], start_seq: Option<u64>) -> Res
     let mut terminal = ratatui::try_init().map_err(|e| {
         format!("--browse requires a terminal: {}", e)
     })?;
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+    // Don't capture mouse — allows text selection in the terminal.
+    // Mouse scroll won't work but keyboard navigation (j/k/PgUp/PgDn) does.
     let result = browse_loop(&mut terminal, &mut state, updates);
-    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
     ratatui::restore();
     result
 }
