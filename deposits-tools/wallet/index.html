@@ -2006,8 +2006,9 @@ async function sendVerifyRequest(verifierPubkey, params, timeoutMs = 30000) {
 
   let event;
   if (window.nostr) {
-    event = await createEventNip07(25500, content, tags);
-  } else {
+    try { event = await createEventNip07(25500, content, tags); } catch {}
+  }
+  if (!event) {
     const nostrKey = deriveSecretKey(state.seed, 0);
     event = await createEvent(nostrKey, 25500, content, tags);
   }
