@@ -1991,11 +1991,13 @@ window.doOpenDeposit = async function() {
   }
 };
 
-// Create and sign a nostr event via NIP-07 browser extension (window.nostr)
+// Create and sign a nostr event via NIP-07 browser extension (window.nostr).
+// Returns null if the extension is unavailable or the user denies signing.
 async function createEventNip07(kind, content, tags) {
-  if (!window.nostr) throw new Error('No NIP-07 extension found (install nos2x, Alby, etc.)');
+  if (!window.nostr?.signEvent) return null;
   const event = { kind, content, tags, created_at: Math.floor(Date.now() / 1000) };
-  return await window.nostr.signEvent(event);
+  const signed = await window.nostr.signEvent(event);
+  return signed || null;
 }
 
 // Send a kind 25500 event to the lightning-verify service and wait for kind 25501 response.
