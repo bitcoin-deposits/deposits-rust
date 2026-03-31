@@ -2035,8 +2035,10 @@ async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, ke
   }
 
   if (window.nostr) {
-    const nip07pubkey = await window.nostr.getPublicKey();
-    log(`Signing with NIP-07 extension (${nip07pubkey.slice(0, 16)}...)`);
+    try {
+      const nip07pubkey = await window.nostr.getPublicKey();
+      if (nip07pubkey) log(`Signing with NIP-07 extension (${nip07pubkey.slice(0, 16)}...)`);
+    } catch {}
   } else {
     log('No NIP-07 extension — using wallet key. Install nos2x or Alby to verify with your nostr identity.');
   }
