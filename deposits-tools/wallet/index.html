@@ -2022,7 +2022,13 @@ async function sendVerifyRequest(verifierPubkey, params, timeoutMs = 30000) {
     }, timeoutMs);
 
     pendingRequests.set(event.id, { resolve, reject, timeout });
-    wsSend(['EVENT', event]);
+    // Send on ALL connected relays — the verifier may be on any of them
+    const payload = JSON.stringify(['EVENT', event]);
+    let sent = 0;
+    for (const s of sockets) {
+      if (s.ws && s.ws.readyState === WebSocket.OPEN) { s.ws.send(payload); sent++; }
+    }
+    if (sent === 0) log('WARNING: no connected relays for verify request', 'error');
     log(`Sent verify request (${event.id.slice(0, 12)}...)`);
   });
 }
