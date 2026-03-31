@@ -2116,10 +2116,12 @@ async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, ke
     log(`Pay ${linkResp.amount_sats} sats to verify. Invoice: ${linkResp.invoice.slice(0, 40)}...`);
 
     // Copy invoice to clipboard if available
-    if (navigator.clipboard) {
-      await navigator.clipboard.writeText(linkResp.invoice);
-      log('Invoice copied to clipboard. Pay it, then click OK.', 'success');
-    }
+    try {
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(linkResp.invoice);
+        log('Invoice copied to clipboard. Pay it, then click OK.', 'success');
+      }
+    } catch {}
 
     const paid = confirm(
       `Pay this invoice to verify your lightning address:\n\n`
