@@ -1063,8 +1063,8 @@ impl Ledger {
         // Apply state changes
         self.apply_state_changes(&staged.operation)?;
 
-        // Update chain state
-        self.state.chain_tip_hash = staged.update.current_hash;
+        // Update chain state — chain_tip uses chain_hash() which folds in the operator signature
+        self.state.chain_tip_hash = staged.update.chain_hash();
         self.state.sequence = staged.update.sequence_number;
 
         // Set opened_at_block for new deposits
