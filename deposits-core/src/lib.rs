@@ -146,7 +146,7 @@ pub use validation::{
     LedgerStateSnapshot, ChainStatus, SignatureReport, RuleCheck,
 };
 pub use ledger::{
-    Ledger, LedgerRole, LedgerProtocolState, LedgerValidator, LedgerManager,
+    Ledger, LedgerRole, LedgerProtocolState, LedgerValidator, LedgerManager, StagedUpdate,
 };
 pub use handler::{Handler, PendingAck};
 pub use message_processor::{

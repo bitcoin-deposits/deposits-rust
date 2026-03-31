@@ -18,6 +18,17 @@ use crate::error::{DepositsError, DepositsResult};
 use crate::messages::LedgerOperation;
 use crate::types::{Deposit, DisputeState, PendingInvoice, QuorumState, LedgerState, SignedLedgerUpdate};
 
+/// An update that has been validated and serialized but NOT applied to the ledger.
+/// The ledger state is unchanged until `commit_staged` is called.
+/// This allows cosigning and operator signing to happen before any state mutation.
+#[derive(Clone, Debug)]
+pub struct StagedUpdate {
+    /// The operation to be applied.
+    pub operation: LedgerOperation,
+    /// The fully-built (but initially unsigned) update.
+    pub update: SignedLedgerUpdate,
+}
+
 /// Role of a node in a ledger relationship.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LedgerRole {
@@ -964,6 +975,109 @@ impl Ledger {
         self.history.push(signed_update);
 
         Ok((prev_hash, new_hash, sequence))
+    }
+
+    /// Validate and build an update WITHOUT applying state changes.
+    /// Returns a StagedUpdate that must be signed (and optionally cosigned)
+    /// before being committed via `commit_staged`.
+    ///
+    /// The ledger state is completely unchanged after this call.
+    pub fn stage_operation(
+        &self,
+        operation: LedgerOperation,
+        block_height: u32,
+        block_hash: [u8; 32],
+    ) -> DepositsResult<StagedUpdate> {
+        use crate::tlv::TlvEncode;
+        use bitcoin::hashes::{Hash, sha256};
+
+        if self.is_closed() {
+            return Err(DepositsError::InvalidState(
+                "Cannot append to closed ledger".to_string(),
+            ));
+        }
+
+        self.validate_operation(&operation)?;
+
+        if let LedgerOperation::FeeChange { deposit_id, new_fees, effective_block } = &operation {
+            crate::operation_validation::validate_deposit_fee_change(
+                self, deposit_id, new_fees, *effective_block, block_height,
+            ).map_err(|e| DepositsError::ProtocolViolation {
+                violation_type: "fee_change_violation".to_string(),
+                details: e,
+            })?;
+        }
+
+        let message_bytes = operation.tlv_encode();
+        let prev_hash = self.state.chain_tip_hash;
+        let sequence = self.next_sequence();
+
+        let mut hash_input = Vec::new();
+        hash_input.extend_from_slice(&sequence.to_le_bytes());
+        hash_input.extend_from_slice(&prev_hash);
+        hash_input.extend_from_slice(&message_bytes);
+        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+
+        let update = SignedLedgerUpdate {
+            message_type: operation.message_type(),
+            message: message_bytes,
+            operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosign_signature: [0u8; 64],
+            operator_id: self.state.operator_key,
+            ledger_id: self.state.ledger_id,
+            sequence_number: sequence,
+            previous_hash: prev_hash,
+            current_hash: new_hash,
+            block_height,
+            block_hash,
+        };
+
+        Ok(StagedUpdate { operation, update })
+    }
+
+    /// Commit a signed StagedUpdate: apply state changes, update hash chain, push to history.
+    ///
+    /// The update MUST have a non-zero operator_signature. If the ledger has an active
+    /// quorum, the cosign_signature must also be non-zero.
+    ///
+    /// Call this only after signing (and cosigning if needed).
+    pub fn commit_staged(&mut self, staged: StagedUpdate) -> DepositsResult<()> {
+        // Verify the staged update matches our current chain tip
+        if staged.update.previous_hash != self.state.chain_tip_hash {
+            return Err(DepositsError::InvalidState(format!(
+                "Staged update previous_hash {} doesn't match chain tip {}",
+                hex::encode(&staged.update.previous_hash[..4]),
+                hex::encode(&self.state.chain_tip_hash[..4]),
+            )));
+        }
+
+        // Verify operator signature is present
+        if staged.update.operator_signature == [0u8; 64] {
+            return Err(DepositsError::InvalidState(
+                "Cannot commit unsigned update".to_string(),
+            ));
+        }
+
+        // Apply state changes
+        self.apply_state_changes(&staged.operation)?;
+
+        // Update chain state
+        self.state.chain_tip_hash = staged.update.current_hash;
+        self.state.sequence = staged.update.sequence_number;
+
+        // Set opened_at_block for new deposits
+        if let LedgerOperation::DepositOpen { deposit_id, .. } = &staged.operation {
+            if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
+                deposit.opened_at_block = staged.update.block_height;
+            }
+        }
+
+        // Push to history
+        self.history.push(staged.update);
+
+        Ok(())
     }
 
     /// Update the signature on the last history entry.

@@ -233,6 +233,10 @@ pub struct Node {
     /// Used by quorum_add to await the member's consent signature
     pending_consent_requests: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<ConsentResult>>>>,
 
+    /// Per-ledger staging lock. Only one update can be in-flight at a time per ledger.
+    /// Prevents concurrent state mutations and ensures cosign requests are serialized.
+    staging_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+
     /// Semaphore to limit concurrent request_cosign calls.
     /// Multiple concurrent mini loops compete for shared channels (response_rx,
     /// ledger_rx) and can deadlock when all operators are in batch-await simultaneously.
@@ -438,6 +442,7 @@ impl Node {
             pending_collateral_requests: Mutex::new(HashMap::new()),
             pending_cosign_requests: Arc::new(Mutex::new(HashMap::new())),
             pending_consent_requests: Arc::new(Mutex::new(HashMap::new())),
+            staging_locks: Mutex::new(HashMap::new()),
             cosign_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
             pending_invoices: Arc::new(Mutex::new(Self::load_pending_invoices(&config.data_dir))),
             processed_requests: Mutex::new(std::collections::HashSet::new()),
@@ -9997,6 +10002,126 @@ impl Node {
     ///
     /// # Returns
     /// The Nostr event ID of the broadcast update
+    /// Acquire the per-ledger staging lock. Only one update can be in-flight at a time.
+    async fn acquire_staging_lock(&self, ledger_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.staging_locks.lock().unwrap();
+            locks.entry(ledger_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        lock.lock_owned().await
+    }
+
+    /// The single correct way to create a new ledger update as an operator.
+    ///
+    /// 1. Stage: validate + build update (no state changes)
+    /// 2. Cosign: request cosignature from quorum (if active)
+    /// 3. Operator sign: sign the update (including cosign data)
+    /// 4. Persist: write to disk first (crash safety)
+    /// 5. Apply: modify ledger state + push to history
+    /// 6. Broadcast: publish to relays
+    pub async fn commit_operation(
+        &self,
+        ledger_id: &str,
+        operation: deposits_core::messages::LedgerOperation,
+    ) -> Result<String, Error> {
+        use deposits_core::ledger::StagedUpdate;
+        use bitcoin::secp256k1::{Secp256k1, Keypair};
+        use bitcoin::hashes::{sha256, Hash};
+
+        // Acquire per-ledger lock — one update at a time
+        let _lock = self.acquire_staging_lock(ledger_id).await;
+
+        let block_height = self.wallet.get_block_height().unwrap_or(0);
+        let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+
+        // 1. Stage: validate + build, no state changes
+        let mut staged: StagedUpdate = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = ledgers.get(ledger_id)
+                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
+                .clone();
+            let ledger = arc.read().unwrap();
+            ledger.stage_operation(operation, block_height, block_hash)
+                .map_err(|e| Error::Protocol(format!("Stage failed: {}", e)))?
+        };
+
+        // 2. Cosign (if quorum active)
+        let quorum_active = self.is_quorum_active(ledger_id);
+        if quorum_active {
+            let cosign = self.request_cosign(ledger_id, &staged.update).await?;
+            staged.update.cosigner_pubkey = Some(cosign.cosigner_pubkey);
+            staged.update.member_ledger_hash = Some(cosign.member_ledger_hash);
+            staged.update.cosign_signature = cosign.cosign_signature;
+            // Recompute hash to include cosign data
+            staged.update.current_hash = staged.update.compute_hash();
+        }
+
+        // 3. Operator sign (covers everything including cosign data)
+        {
+            let secp = &self.secp;
+            let mut sig_input = Vec::new();
+            sig_input.extend_from_slice(&staged.update.sequence_number.to_le_bytes());
+            sig_input.extend_from_slice(&staged.update.previous_hash);
+            sig_input.extend_from_slice(&staged.update.current_hash);
+            sig_input.extend_from_slice(&staged.update.message);
+            let hash = sha256::Hash::hash(&sig_input);
+            let msg = bitcoin::secp256k1::Message::from_digest(*hash.as_byte_array());
+            let keypair = Keypair::from_secret_key(secp, &self.wallet.operator_secret());
+            let sig = secp.sign_schnorr(&msg, &keypair);
+            staged.update.operator_signature = sig.serialize();
+        }
+
+        // 4. Persist to disk FIRST (crash safety — we know what's been committed)
+        {
+            let wallet_dir = self.data_dir.join("wallet");
+            let ledgers_dir = wallet_dir.join("ledgers");
+            let path = ledgers_dir.join(format!("{}.jsonl", ledger_id));
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                use std::io::Write;
+                // Serialize as the JSONL Update format
+                let mut update_value = serde_json::to_value(&staged.update).unwrap_or_default();
+                if let Some(obj) = update_value.as_object_mut() {
+                    obj.insert("type".to_string(), serde_json::json!("Update"));
+                }
+                let _ = writeln!(file, "{}", serde_json::to_string(&update_value).unwrap_or_default());
+            }
+        }
+
+        // 5. Apply state changes
+        let update_clone = staged.update.clone();
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = ledgers.get(ledger_id)
+                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
+                .clone();
+            let mut ledger = arc.write().unwrap();
+            ledger.commit_staged(staged)
+                .map_err(|e| Error::Protocol(format!("Commit failed: {}", e)))?;
+        }
+
+        // Mark ledger dirty for state persistence
+        self.dirty_ledgers.lock().unwrap().insert(ledger_id.to_string());
+
+        // 6. Broadcast
+        let event_id = self.nostr.broadcast_ledger_update(&update_clone).await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to broadcast update seq={}: {}", update_clone.sequence_number, e);
+                String::new()
+            });
+
+        tracing::info!(
+            "Committed seq={} for ledger {}... (cosigned={}, event={})",
+            update_clone.sequence_number,
+            &ledger_id[..16.min(ledger_id.len())],
+            quorum_active,
+            if event_id.len() > 16 { &event_id[..16] } else { &event_id },
+        );
+
+        Ok(event_id)
+    }
+
     pub async fn sign_and_broadcast(&self, ledger_id: &str) -> Result<String, Error> {
         let sab_start = std::time::Instant::now();
 
