@@ -6687,63 +6687,18 @@ impl Node {
         // Append operation (applies state changes: deducts balance, adds to locked)
         let t_append = std::time::Instant::now();
         {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
-            let mut ledger = ledger_arc.write().unwrap();
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-            if let Err(e) = ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ) {
-                return (false, None, Some(format!("Failed to append operation: {:?}", e)));
+            // Commit via staged flow — no state mutation until signing succeeds
+            match self.commit_operation(ledger_id, operation).await {
+                Ok(_) => {}
+                Err(e) => {
+                    return (false, None, Some(format!("Failed to commit transfer_lock: {}", e)));
+                }
             }
         }
         let append_elapsed = t_append.elapsed();
 
-        // Sign (with co-signature if quorum active) and broadcast
-        let t_sign = std::time::Instant::now();
-        if let Err(e) = self.sign_and_broadcast(ledger_id).await {
-            // Rollback: undo the state changes from the failed operation.
-            // The operation was appended and state modified (balance deducted, locked increased)
-            // but signing failed, so we must restore the previous state.
-            tracing::warn!("sign_and_broadcast failed for transfer_lock, rolling back state: {}", e);
-            {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
-                let mut ledger = ledger_arc.write().unwrap();
-                // Pop the unsigned operation from history
-                ledger.history.pop();
-                // Undo TransferLock state changes
-                let total_msats = amount_msats + fee_msats;
-                if let Some(deposit) = ledger.state.deposits.get_mut(&source_deposit_id) {
-                    deposit.balance = deposit.balance.saturating_add(total_msats);
-                    deposit.locked_balance = deposit.locked_balance.saturating_sub(total_msats);
-                }
-                ledger.state.pending_transfers.remove(&transfer_id);
-                // Restore sequence and hash from the last remaining entry
-                let (seq, hash) = ledger.history.last()
-                    .map(|l| (l.sequence_number, l.chain_hash()))
-                    .unwrap_or((0, [0u8; 32]));
-                ledger.state.sequence = seq;
-                ledger.state.chain_tip_hash = hash;
-            }
-            return (false, None, Some(format!("Failed to sign/broadcast: {:?}", e)));
-        }
-
-        let sign_elapsed = t_sign.elapsed();
-
-        // Persist immediately — transfer_lock creates pending_transfer state
-        // that must survive bounces so transfer_complete can find it.
-        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-            tracing::warn!("Failed to persist after transfer_lock: {}", e);
-        }
-
         tracing::debug!("Transfer locked: {}", hex::encode(&transfer_id[..8]));
-        tracing::debug!("[PROFILE] transfer_lock breakdown: append={:?}, sign_broadcast={:?}",
-            append_elapsed, sign_elapsed);
+        tracing::debug!("[PROFILE] transfer_lock: {:?}", append_elapsed);
         (true, Some(serde_json::json!({
             "transfer_id": transfer_id_hex,
             "amount": amount_msats,
@@ -6831,14 +6786,24 @@ impl Node {
             script_witness,
         };
 
-        // Append operation (applies state changes: unlocks source, credits destination)
-        {
+        // Commit via staged flow
+        match self.commit_operation(ledger_id, operation).await {
+            Ok(_) => {}
+            Err(e) => {
+                return (false, None, Some(format!("Failed to commit transfer_complete: {}", e)));
+            }
+        }
+
+        // Dead code marker — the old rollback block below will be removed
+        if false {
+            let block_height = 0u32;
+            let block_hash = [0u8; 32];
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
             let mut ledger = ledger_arc.write().unwrap();
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            let operation = LedgerOperation::TransferComplete {
+                transfer_id, script_witness: DescriptorWitness { stack: vec![] },
+            };
             if let Err(e) = ledger.append_operation_with_block(
                 operation,
                 block_height,
