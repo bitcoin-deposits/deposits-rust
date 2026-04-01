@@ -458,7 +458,13 @@ impl Node {
             deposit_allowlist: RwLock::new(Self::load_list(&config.data_dir, "deposit_allowlist.txt")),
             deposit_denylist: RwLock::new(Self::load_list(&config.data_dir, "deposit_denylist.txt")),
             deposit_domain_allowlist: RwLock::new(Self::load_list(&config.data_dir, "deposit_domain_allowlist.txt")),
-            attestation_verifier_pubkey: std::env::var("ATTESTATION_VERIFIER_PUBKEY").ok().filter(|s| !s.is_empty()),
+            attestation_verifier_pubkey: std::env::var("ATTESTATION_VERIFIER_PUBKEY").ok().filter(|s| !s.is_empty()).map(|s| {
+                // Normalize npub/hex to hex at load time
+                match nostr_sdk::PublicKey::parse(&s) {
+                    Ok(pk) => pk.to_hex(),
+                    Err(_) => s,
+                }
+            }),
             max_deposit_balance_msats: std::env::var("MAX_DEPOSIT_BALANCE_MSATS")
                 .ok()
                 .and_then(|s| s.parse().ok())

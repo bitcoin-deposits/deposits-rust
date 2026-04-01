@@ -641,6 +641,50 @@ body.hide-amounts .amt { visibility: hidden; }
       <div id="qr-modal-text" style="color:var(--muted); font-size:11px; max-width:90vw; text-align:center; word-break:break-all; cursor:pointer;" onclick="event.stopPropagation(); copyQRText()"></div>
     </div>
   </div>
+
+  <!-- Verification flow modal -->
+  <div id="verify-modal" class="modal-overlay">
+    <div class="modal" style="max-width:380px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <h3 style="color:var(--fg); margin:0; font-size:14px;">Verify Lightning Address</h3>
+        <a href="#" onclick="event.preventDefault(); dismissVerifyModal()" style="color:var(--muted); font-size:18px; text-decoration:none;">&times;</a>
+      </div>
+
+      <!-- Step 1: Enter address -->
+      <div id="verify-step-address">
+        <div style="font-size:12px; color:var(--muted); margin-bottom:8px;" id="verify-domain-hint"></div>
+        <input id="verify-address-input" type="text" placeholder="you@wallet.com" style="width:100%; box-sizing:border-box; margin-bottom:8px;" onkeydown="if(event.key==='Enter')verifySubmitAddress()">
+        <button id="verify-address-btn" onclick="verifySubmitAddress()" style="width:100%;">Verify</button>
+      </div>
+
+      <!-- Step 2: Pay invoice -->
+      <div id="verify-step-invoice" style="display:none;">
+        <div style="text-align:center; margin-bottom:8px;">
+          <canvas id="verify-invoice-qr" style="cursor:pointer; image-rendering:pixelated; border-radius:4px;" onclick="showQRFullscreenFrom('verify')"></canvas>
+        </div>
+        <div style="font-size:12px; color:var(--muted); margin-bottom:4px;" id="verify-invoice-amount"></div>
+        <div style="display:flex; gap:6px; align-items:center; margin-bottom:8px;">
+          <code id="verify-invoice-text" style="flex:1; font-size:10px; word-break:break-all; max-height:40px; overflow:hidden; text-overflow:ellipsis;"></code>
+          <a href="#" id="verify-invoice-copy" onclick="event.preventDefault(); copyVerifyInvoice()" style="font-size:11px; white-space:nowrap;">[copy]</a>
+        </div>
+        <div id="verify-invoice-status" style="font-size:11px; color:var(--muted); text-align:center;"></div>
+      </div>
+
+      <!-- Step 3: Enter challenge amounts -->
+      <div id="verify-step-amounts" style="display:none;">
+        <div style="font-size:12px; color:var(--muted); margin-bottom:8px;">Check your lightning wallet for incoming payments. Enter the amounts you received (comma-separated, in sats):</div>
+        <input id="verify-amounts-input" type="text" placeholder="e.g. 42, 17, 99" style="width:100%; box-sizing:border-box; margin-bottom:8px;" onkeydown="if(event.key==='Enter')verifySubmitAmounts()">
+        <div id="verify-amounts-error" style="font-size:11px; color:var(--red); margin-bottom:6px; display:none;"></div>
+        <button id="verify-amounts-btn" onclick="verifySubmitAmounts()" style="width:100%;">Submit</button>
+      </div>
+
+      <!-- Step 4: Result -->
+      <div id="verify-step-result" style="display:none;">
+        <div id="verify-result-msg" style="font-size:12px; margin-bottom:10px;"></div>
+        <button id="verify-result-btn" style="width:100%; display:none;"></button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script type="module">
@@ -2060,8 +2104,22 @@ async function sendVerifyRequest(verifierPubkey, params, timeoutMs = 30000) {
   });
 }
 
-// Full verification flow: prompt for lightning address, drive the challenge-response,
-// then retry deposit open on success
+// Verification flow state — stored here so modal callbacks can access it
+let _verifyState = null;
+
+function showVerifyStep(step) {
+  for (const s of ['address', 'invoice', 'amounts', 'result']) {
+    document.getElementById(`verify-step-${s}`).style.display = s === step ? '' : 'none';
+  }
+}
+
+window.dismissVerifyModal = function() {
+  document.getElementById('verify-modal').classList.remove('visible');
+  if (_verifyState?.pollTimer) clearInterval(_verifyState.pollTimer);
+  _verifyState = null;
+};
+
+// Full verification flow — opens modal instead of using prompt/confirm/alert
 async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, keyIndex, verifierPubkey, allowedDomains) {
   const name = operatorName || ledgerId.slice(0, 12) + '...';
 
@@ -2080,96 +2138,184 @@ async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, ke
   }
 
   const domainHint = allowedDomains.length > 0
-    ? ` (accepted domains: ${allowedDomains.join(', ')})`
-    : '';
+    ? `Accepted domains: ${allowedDomains.join(', ')}`
+    : 'Enter your lightning address to verify ownership.';
 
-  const address = prompt(
-    `${name} requires a verified lightning address to open a deposit.\n\n`
-    + `Enter your lightning address${domainHint}:`
-  );
+  _verifyState = { ledgerId, operatorName, alias, pubkeyHex, keyIndex, verifierPubkey, allowedDomains, name };
+
+  document.getElementById('verify-domain-hint').textContent = domainHint;
+  document.getElementById('verify-address-input').value = '';
+  document.getElementById('verify-address-btn').disabled = false;
+  showVerifyStep('address');
+  document.getElementById('verify-modal').classList.add('visible');
+  document.getElementById('verify-address-input').focus();
+}
+
+window.verifySubmitAddress = async function() {
+  const vs = _verifyState;
+  if (!vs) return;
+  const input = document.getElementById('verify-address-input');
+  const btn = document.getElementById('verify-address-btn');
+  const address = input.value.trim();
   if (!address || !address.includes('@')) {
-    log('Verification cancelled.', 'error');
+    input.style.borderColor = 'var(--red)';
     return;
   }
+  input.style.borderColor = '';
+  btn.disabled = true;
+  btn.textContent = 'Verifying...';
 
   try {
-    // Step 1: Request verification (may return immediately if NIP-05 or already attested)
     log(`Requesting verification for ${address}...`);
-    const linkResp = await sendVerifyRequest(verifierPubkey, { lightning_address: address });
+    const linkResp = await sendVerifyRequest(vs.verifierPubkey, { lightning_address: address });
 
     if (linkResp.status === 'already_verified') {
-      log('Already verified! Retrying deposit...', 'success');
-      return retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorName);
+      verifyShowResult('Already verified!', 'success', true);
+      return;
     }
-
     if (linkResp.status === 'verified') {
       log(`Verified via NIP-05! Attestation: ${linkResp.attestation_event_id?.slice(0, 16)}...`, 'success');
-      return retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorName);
+      verifyShowResult('Verified via NIP-05!', 'success', true);
+      return;
     }
-
     if (!linkResp.invoice) {
       throw new Error(linkResp.message || linkResp.error || 'Unexpected response from verifier');
     }
 
-    // Step 2: Show invoice for payment
-    const sessionId = linkResp.session_id;
+    // Show invoice step
+    vs.sessionId = linkResp.session_id;
+    vs.invoice = linkResp.invoice;
+    const amountText = `Pay ${linkResp.amount_sats} sats to verify your address`;
+    document.getElementById('verify-invoice-amount').textContent = amountText;
+    document.getElementById('verify-invoice-text').textContent = linkResp.invoice;
+    document.getElementById('verify-invoice-copy').textContent = '[copy]';
+    document.getElementById('verify-invoice-status').textContent = 'Waiting for payment...';
+    try { renderQR(document.getElementById('verify-invoice-qr'), linkResp.invoice, 200); } catch {}
     logWithCopy(`Pay ${linkResp.amount_sats} sats to verify:`, linkResp.invoice);
+    showVerifyStep('invoice');
 
-    const paid = confirm(
-      `Pay this invoice to verify your lightning address:\n\n`
-      + `${linkResp.invoice}\n\n`
-      + `Amount: ${linkResp.amount_sats} sats\n\n`
-      + `Click OK after paying.`
-    );
-    if (!paid) { log('Verification cancelled.', 'error'); return; }
-
-    // Step 3: Request challenge
-    log('Checking payment and sending challenge...');
-    let challengeResp;
-    for (let i = 0; i < 10; i++) {
-      challengeResp = await sendVerifyRequest(verifierPubkey, { action: 'challenge', session_id: sessionId });
-      if (challengeResp.status === 'challenge_sent') break;
-      if (challengeResp.status === 'payment_pending') {
-        log('Payment not confirmed yet, retrying in 3s...');
-        await new Promise(r => setTimeout(r, 3000));
-      } else {
-        throw new Error(challengeResp.message || 'Challenge failed');
+    // Auto-poll for payment confirmation
+    let attempts = 0;
+    vs.pollTimer = setInterval(async () => {
+      attempts++;
+      if (attempts > 60) { // 3 minutes
+        clearInterval(vs.pollTimer);
+        document.getElementById('verify-invoice-status').textContent = 'Payment not detected. Try again?';
+        return;
       }
-    }
-    if (challengeResp.status !== 'challenge_sent') {
-      throw new Error('Payment was not confirmed in time');
-    }
+      try {
+        const challengeResp = await sendVerifyRequest(vs.verifierPubkey, { action: 'challenge', session_id: vs.sessionId });
+        if (challengeResp.status === 'challenge_sent') {
+          clearInterval(vs.pollTimer);
+          log(challengeResp.message || 'Challenge payments sent! Check your wallet.');
+          document.getElementById('verify-amounts-input').value = '';
+          document.getElementById('verify-amounts-error').style.display = 'none';
+          document.getElementById('verify-amounts-btn').disabled = false;
+          document.getElementById('verify-amounts-btn').textContent = 'Submit';
+          showVerifyStep('amounts');
+          document.getElementById('verify-amounts-input').focus();
+        } else if (challengeResp.status === 'payment_pending') {
+          document.getElementById('verify-invoice-status').textContent =
+            `Waiting for payment... (${attempts * 3}s)`;
+        } else {
+          clearInterval(vs.pollTimer);
+          throw new Error(challengeResp.message || 'Challenge failed');
+        }
+      } catch (e) {
+        clearInterval(vs.pollTimer);
+        verifyShowResult(`Error: ${e.message}`, 'error', false);
+      }
+    }, 3000);
 
-    log(challengeResp.message || 'Challenge payments sent! Check your wallet.');
+  } catch (e) {
+    log(`Verification failed: ${e.message}`, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Verify';
+    verifyShowResult(`Error: ${e.message}`, 'error', false);
+  }
+};
 
-    // Step 4: Prompt for amounts
-    const amountsStr = prompt(
-      `Check your lightning wallet for incoming payments.\n\n`
-      + `Enter the amounts you received (comma-separated, in sats):`
-    );
-    if (!amountsStr) { log('Verification cancelled.', 'error'); return; }
+window.copyVerifyInvoice = async function() {
+  const vs = _verifyState;
+  if (!vs?.invoice) return;
+  const link = document.getElementById('verify-invoice-copy');
+  try { await navigator.clipboard.writeText(vs.invoice); link.textContent = '[copied]'; } catch {}
+};
 
-    const amounts = amountsStr.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+window.verifySubmitAmounts = async function() {
+  const vs = _verifyState;
+  if (!vs) return;
+  const input = document.getElementById('verify-amounts-input');
+  const btn = document.getElementById('verify-amounts-btn');
+  const errEl = document.getElementById('verify-amounts-error');
+  const amountsStr = input.value.trim();
+  if (!amountsStr) { input.style.borderColor = 'var(--red)'; return; }
+  input.style.borderColor = '';
 
-    // Step 5: Submit verification
+  const amounts = amountsStr.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+  if (amounts.length === 0) { input.style.borderColor = 'var(--red)'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Verifying...';
+  errEl.style.display = 'none';
+
+  try {
     log('Verifying amounts...');
-    const verifyResp = await sendVerifyRequest(verifierPubkey, {
+    const verifyResp = await sendVerifyRequest(vs.verifierPubkey, {
       action: 'verify',
-      session_id: sessionId,
+      session_id: vs.sessionId,
       amounts,
     });
 
     if (verifyResp.status !== 'verified') {
-      throw new Error(verifyResp.message || verifyResp.error || 'Verification failed');
+      const msg = verifyResp.message || verifyResp.error || 'Verification failed';
+      // Check for retryable "attempts remaining" error
+      if (msg.includes('attempt') && msg.includes('remaining')) {
+        errEl.textContent = msg;
+        errEl.style.display = '';
+        input.value = '';
+        input.focus();
+        btn.disabled = false;
+        btn.textContent = 'Submit';
+        return;
+      }
+      throw new Error(msg);
     }
 
     log(`Verified! Attestation: ${verifyResp.attestation_event_id?.slice(0, 16)}...`, 'success');
-
-    // Step 6: Retry deposit open
-    return retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorName);
+    verifyShowResult('Verified!', 'success', true);
 
   } catch (e) {
     log(`Verification failed: ${e.message}`, 'error');
+    verifyShowResult(`Failed: ${e.message}`, 'error', false);
+  }
+};
+
+function verifyShowResult(msg, type, canRetryOpen) {
+  const msgEl = document.getElementById('verify-result-msg');
+  const btn = document.getElementById('verify-result-btn');
+  msgEl.textContent = msg;
+  msgEl.style.color = type === 'success' ? 'var(--green, #4a4)' : 'var(--red)';
+  showVerifyStep('result');
+
+  if (type === 'success' && canRetryOpen) {
+    btn.style.display = '';
+    btn.textContent = 'Open Deposit';
+    btn.onclick = async () => {
+      const vs = _verifyState;
+      dismissVerifyModal();
+      if (vs) await retryDepositOpen(vs.ledgerId, vs.alias, vs.pubkeyHex, vs.keyIndex, vs.operatorName);
+    };
+  } else if (type === 'error') {
+    btn.style.display = '';
+    btn.textContent = 'Try Again';
+    btn.onclick = () => {
+      document.getElementById('verify-address-btn').disabled = false;
+      document.getElementById('verify-address-btn').textContent = 'Verify';
+      showVerifyStep('address');
+    };
+  } else {
+    btn.style.display = 'none';
   }
 }
 
@@ -3250,6 +3396,8 @@ function showRecvResult(text) {
 window.showQRFullscreenFrom = function(source) {
   const textEl = source === 'wallet'
     ? document.getElementById('wallet-recv-text')
+    : source === 'verify'
+    ? document.getElementById('verify-invoice-text')
     : document.getElementById('invoice-text');
   const text = textEl ? textEl.textContent : '';
   if (!text) return;
