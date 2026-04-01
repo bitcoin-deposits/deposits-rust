@@ -86,8 +86,10 @@ if [ -n "$EPHEMERAL_RELAYS" ]; then
     done
 fi
 
-# Ledger relay is the slow/durable relay
-RELAYS="$RELAYS --slow-relay $LEDGER_RELAY"
+# Ledger relay(s) are the slow/durable relays (comma-separated)
+for r in $(echo "$LEDGER_RELAY" | tr ',' ' '); do
+    RELAYS="$RELAYS --slow-relay $r"
+done
 
 # --- Start deposits-node ---
 echo "Starting deposits-node..."

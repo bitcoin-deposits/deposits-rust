@@ -407,22 +407,6 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
         s
     });
 
-    // Env var fallbacks for relays (useful in Docker Compose)
-    if relays.is_empty() {
-        if let Ok(val) = std::env::var("RELAYS") {
-            for url in val.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                relays.push(url.to_string());
-            }
-        }
-    }
-    if slow_relays.is_empty() {
-        if let Ok(val) = std::env::var("SLOW_RELAYS") {
-            for url in val.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                slow_relays.push(url.to_string());
-            }
-        }
-    }
-
     // Create data directory
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("Failed to create data dir: {}", e))?;
