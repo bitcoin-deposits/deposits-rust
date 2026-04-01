@@ -1986,19 +1986,16 @@ window.doOpenDeposit = async function() {
     }
 
     log(`Opening deposit on ${operatorName || ledgerId.slice(0, 12)}...`);
-    const openResponse = await sendRequest(ledgerId, 'deposit_open', {
-      deposit_pubkey: pubkeyHex,
-      fee_fixed: feeFixed,
-      fee_bps: feeBps,
-      fee_frequency: feeFreq,
-    });
+    const openParams = { deposit_pubkey: pubkeyHex };
+    if (feeFixed || feeBps) { openParams.fee_fixed = feeFixed; openParams.fee_bps = feeBps; openParams.fee_frequency = feeFreq; }
+    const openResponse = await sendRequest(ledgerId, 'deposit_open', openParams);
 
     if (!openResponse.success && !(openResponse.error || '').includes('already')) {
       const code = openResponse.result?.code;
       if (code === 'attestation_required') {
         const verifierPubkey = openResponse.result?.verifier_pubkey;
         const allowedDomains = openResponse.result?.allowed_domains || [];
-        await showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, keyIndex, verifierPubkey, allowedDomains);
+        await showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, keyIndex, verifierPubkey, allowedDomains, feeFixed, feeBps, feeFreq);
         return;
       }
       if (code === 'not_authorized' || code === 'denied') {
@@ -2120,7 +2117,7 @@ window.dismissVerifyModal = function() {
 };
 
 // Full verification flow — opens modal instead of using prompt/confirm/alert
-async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, keyIndex, verifierPubkey, allowedDomains) {
+async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, keyIndex, verifierPubkey, allowedDomains, feeFixed, feeBps, feeFreq) {
   const name = operatorName || ledgerId.slice(0, 12) + '...';
 
   if (!verifierPubkey) {
@@ -2141,7 +2138,7 @@ async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, ke
     ? `Accepted domains: ${allowedDomains.join(', ')}`
     : 'Enter your lightning address to verify ownership.';
 
-  _verifyState = { ledgerId, operatorName, alias, pubkeyHex, keyIndex, verifierPubkey, allowedDomains, name };
+  _verifyState = { ledgerId, operatorName, alias, pubkeyHex, keyIndex, verifierPubkey, allowedDomains, name, feeFixed: feeFixed || 0, feeBps: feeBps || 0, feeFreq: feeFreq || 2016 };
 
   document.getElementById('verify-domain-hint').textContent = domainHint;
   document.getElementById('verify-address-input').value = '';
@@ -2304,7 +2301,7 @@ function verifyShowResult(msg, type, canRetryOpen) {
     btn.onclick = async () => {
       const vs = _verifyState;
       dismissVerifyModal();
-      if (vs) await retryDepositOpen(vs.ledgerId, vs.alias, vs.pubkeyHex, vs.keyIndex, vs.operatorName);
+      if (vs) await retryDepositOpen(vs.ledgerId, vs.alias, vs.pubkeyHex, vs.keyIndex, vs.operatorName, vs.feeFixed, vs.feeBps, vs.feeFreq);
     };
   } else if (type === 'error') {
     btn.style.display = '';
@@ -2319,28 +2316,12 @@ function verifyShowResult(msg, type, canRetryOpen) {
   }
 }
 
-async function retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorName) {
+async function retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorName, feeFixed, feeBps, feeFreq) {
   log('Retrying deposit open...');
-  const adFilter = { kinds: [39100], '#d': [ledgerTag(ledgerId)] };
-  const adEvents = await fetchEvents(adFilter, 5000);
-  let feeFixed = 0, feeBps = 0, feeFreq = 2016;
-  if (adEvents.length > 0) {
-    try {
-      const ad = JSON.parse(adEvents[0].content);
-      const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
-      const periodsPerYear = Math.floor(52560 / period);
-      feeFixed = (ad.min_fee_sats || 0) * periodsPerYear;
-      feeBps = ad.annual_fee_bps || 0;
-      feeFreq = period;
-    } catch {}
-  }
 
-  const openResponse = await sendRequest(ledgerId, 'deposit_open', {
-    deposit_pubkey: pubkeyHex,
-    fee_fixed: feeFixed,
-    fee_bps: feeBps,
-    fee_frequency: feeFreq,
-  });
+  const retryParams = { deposit_pubkey: pubkeyHex };
+  if (feeFixed || feeBps) { retryParams.fee_fixed = feeFixed; retryParams.fee_bps = feeBps; retryParams.fee_frequency = feeFreq || 2016; }
+  const openResponse = await sendRequest(ledgerId, 'deposit_open', retryParams);
 
   if (!openResponse.success && !(openResponse.error || '').includes('already')) {
     throw new Error(openResponse.error || 'deposit_open failed after verification');
@@ -2692,14 +2673,14 @@ window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
 
   try {
     log(`Opening deposit on ${operatorName || ledgerId.slice(0,12)}...`);
-    const resp = await sendRequest(ledgerId, 'deposit_open', {
-      deposit_pubkey: pubkeyHex, fee_fixed: feeFixed, fee_bps: feeBps, fee_frequency: feeFreq,
-    });
+    const quickOpenParams = { deposit_pubkey: pubkeyHex };
+    if (feeFixed || feeBps) { quickOpenParams.fee_fixed = feeFixed; quickOpenParams.fee_bps = feeBps; quickOpenParams.fee_frequency = feeFreq; }
+    const resp = await sendRequest(ledgerId, 'deposit_open', quickOpenParams);
     if (!resp.success && !(resp.error || '').includes('already')) {
       const code = resp.result?.code;
       if (code === 'attestation_required') {
         await showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, keyIndex,
-          resp.result?.verifier_pubkey, resp.result?.allowed_domains || []);
+          resp.result?.verifier_pubkey, resp.result?.allowed_domains || [], feeFixed, feeBps, feeFreq);
         return;
       }
       if (code === 'not_authorized' || code === 'denied') {
