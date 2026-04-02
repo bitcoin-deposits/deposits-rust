@@ -1563,6 +1563,7 @@ impl Node {
                         }
                         timed_periodic!("auto_complete_deposits", node.auto_complete_deposits());
                         timed_periodic!("auto_credit_received_payments", node.auto_credit_received_payments());
+                        timed_periodic!("auto_complete_outbound_payments", node.auto_complete_outbound_payments());
                         timed_periodic!("auto_complete_withdrawals", node.auto_complete_withdrawals());
                         timed_periodic!("auto_collect_fees", node.auto_collect_fees());
                         timed_periodic!("auto_timeout_transfers", node.auto_timeout_transfers());
@@ -6192,107 +6193,43 @@ impl Node {
             }
         }
 
-        // Pay invoice via LdkCli (external payment)
+        // Pay invoice via LdkCli — dispatch payment and return immediately.
+        // The background auto_complete_outbound_payments task will poll LDK
+        // and commit InvoiceFulfill or InvoiceFail.
         let cli = LdkCli::from_env();
-        let pay_result = cli.pay_invoice(invoice_str);
+        match cli.pay_invoice(invoice_str) {
+            Ok(_) => {
+                tracing::info!("LDK payment dispatched for {}..., will complete in background",
+                    hex::encode(&payment_id[..8]));
+            }
+            Err(e) => {
+                tracing::warn!("LDK pay_invoice failed for {}...: {}, failing lock",
+                    hex::encode(&payment_id[..8]), e);
 
-        // Poll for payment completion (with timeout)
-        let mut preimage: Option<[u8; 32]> = None;
-        let mut payment_succeeded = false;
-
-        if pay_result.is_ok() {
-            // Wait for payment to complete
-            for _ in 0..30 {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-                if let Ok(payments) = cli.list_payments() {
-                    for p in payments.payments {
-                        if let Ok(p_hash) = hex::decode(&p.id) {
-                            if p_hash.len() >= 32 && p_hash[..32] == payment_id[..] {
-                                match p.status {
-                                    1 => {
-                                        // Succeeded
-                                        payment_succeeded = true;
-                                        if let Some(ref pre_hex) = p.preimage {
-                                            if let Ok(pre_bytes) = hex::decode(pre_hex) {
-                                                if pre_bytes.len() == 32 {
-                                                    let mut pre = [0u8; 32];
-                                                    pre.copy_from_slice(&pre_bytes);
-                                                    preimage = Some(pre);
-                                                }
-                                            }
-                                        }
-                                        break;
-                                    }
-                                    2 => {
-                                        // Failed
-                                        break;
-                                    }
-                                    _ => continue, // Still pending
-                                }
-                            }
-                        }
-                    }
-                    if payment_succeeded || preimage.is_some() {
-                        break;
-                    }
+                let fail_sequence = {
+                    let ledger = ledger_arc.read().unwrap();
+                    ledger.next_sequence()
+                };
+                let fail_operation = LedgerOperation::InvoiceFail {
+                    deposit_id,
+                    amount: amount_msat,
+                    payment_id,
+                    sequence_number: fail_sequence,
+                };
+                if let Err(e2) = self.commit_operation(ledger_id, fail_operation).await {
+                    tracing::error!("Failed to commit fail: {}", e2);
                 }
+                return (false, None, Some(format!("Payment failed: {}", e)));
             }
         }
 
-        // Create fulfill or fail operation
-        let final_sequence = {
-            let ledger = ledger_arc.read().unwrap();
-            ledger.next_sequence()
-        };
-
-        if payment_succeeded {
-            let pre = preimage.unwrap_or([0u8; 32]);
-            let fulfill_operation = LedgerOperation::InvoiceFulfill {
-                deposit_id,
-                amount: amount_msat,
-                payment_id,
-                sequence_number: final_sequence,
-                witness: witness.clone(),
-                preimage: pre,
-            };
-
-            if let Err(e) = self.commit_operation(ledger_id, fulfill_operation).await {
-                tracing::error!("Failed to commit fulfill: {}", e);
-            }
-
-            tracing::info!("Payment {} fulfilled, {} msat debited from {}",
-                hex::encode(&payment_id[..8]), amount_msat,
-                &deposit_pubkey_hex[..16]);
-
-            let result = serde_json::json!({
-                "payment_id": hex::encode(&payment_id),
-                "deposit_pubkey": deposit_pubkey_hex,
-                "amount_msat": amount_msat,
-                "preimage": preimage.map(|p| hex::encode(p)),
-                "status": "succeeded",
-            });
-            (true, Some(result.to_string()), None)
-        } else {
-            // Payment failed - unlock funds
-            let fail_operation = LedgerOperation::InvoiceFail {
-                deposit_id,
-                amount: amount_msat,
-                payment_id,
-                sequence_number: final_sequence,
-            };
-
-            if let Err(e) = self.commit_operation(ledger_id, fail_operation).await {
-                tracing::error!("Failed to commit fail: {}", e);
-            }
-
-            tracing::warn!("Payment {} failed, {} msat unlocked for {}",
-                hex::encode(&payment_id[..8]), amount_msat,
-                &deposit_pubkey_hex[..16]);
-
-            let error_msg = pay_result.err().map(|e| e.to_string()).unwrap_or_else(|| "Payment timed out".to_string());
-            (false, None, Some(format!("Payment failed: {}", error_msg)))
-        }
+        let result = serde_json::json!({
+            "payment_id": hex::encode(&payment_id),
+            "deposit_pubkey": deposit_pubkey_hex,
+            "amount_msat": amount_msat,
+            "status": "pending",
+        });
+        (true, Some(result.to_string()), None)
     }
 
     /// Process a withdrawal request from a depositor
@@ -8842,6 +8779,119 @@ impl Node {
 
         // Persist after any changes
         self.save_pending_invoices();
+    }
+
+    /// Resolve open outbound invoice locks by checking LDK payment status.
+    ///
+    /// Scans all owned ledgers for open_invoice_locks. For each, queries LDK
+    /// for the payment status and commits InvoiceFulfill (if succeeded) or
+    /// InvoiceFail (if failed). Pending payments are left alone.
+    pub async fn auto_complete_outbound_payments(&self) {
+        use crate::ldk_cli::LdkCli;
+
+        // Collect open locks from all owned ledgers
+        let mut open_locks: Vec<(String, [u8; 32], deposits_core::types::OpenInvoiceLock)> = Vec::new();
+        {
+            let ledgers = match self.handler.ledgers.try_lock() {
+                Ok(l) => l,
+                Err(_) => {
+                    tracing::warn!("auto_complete_outbound_payments: ledgers lock contended, skipping");
+                    return;
+                }
+            };
+            for (lid, arc) in ledgers.iter() {
+                let ledger = arc.read().unwrap();
+                for (payment_id, lock) in &ledger.state.open_invoice_locks {
+                    open_locks.push((lid.clone(), *payment_id, lock.clone()));
+                }
+            }
+        }
+
+        if open_locks.is_empty() {
+            return;
+        }
+
+        tracing::info!("auto_complete_outbound: checking {} open invoice lock(s)", open_locks.len());
+
+        let cli = LdkCli::from_env();
+        let payments = match cli.list_payments() {
+            Ok(resp) => resp.payments,
+            Err(e) => {
+                tracing::warn!("auto_complete_outbound: failed to list payments: {}", e);
+                return;
+            }
+        };
+
+        for (ledger_id, payment_id, lock) in open_locks {
+            let payment_hex = hex::encode(payment_id);
+            let matching = payments.iter().find(|p| p.id == payment_hex);
+
+            match matching {
+                Some(p) if p.status == 1 => {
+                    // Succeeded — commit InvoiceFulfill
+                    let mut preimage = [0u8; 32];
+                    if let Some(ref pre_hex) = p.preimage {
+                        if let Ok(pre_bytes) = hex::decode(pre_hex) {
+                            if pre_bytes.len() == 32 {
+                                preimage.copy_from_slice(&pre_bytes);
+                            }
+                        }
+                    }
+
+                    let sequence = {
+                        let ledgers = self.handler.ledgers.lock().unwrap();
+                        match ledgers.get(&ledger_id) {
+                            Some(arc) => arc.read().unwrap().next_sequence(),
+                            None => continue,
+                        }
+                    };
+
+                    let op = deposits_core::messages::LedgerOperation::InvoiceFulfill {
+                        deposit_id: lock.deposit_id,
+                        amount: lock.amount,
+                        payment_id,
+                        sequence_number: sequence,
+                        witness: DescriptorWitness { stack: vec![] },
+                        preimage,
+                    };
+
+                    match self.commit_operation(&ledger_id, op).await {
+                        Ok(_) => tracing::info!("auto_complete_outbound: fulfilled payment {}..., {} msat",
+                            &payment_hex[..16], lock.amount),
+                        Err(e) => tracing::error!("auto_complete_outbound: failed to fulfill {}...: {}",
+                            &payment_hex[..16], e),
+                    }
+                }
+                Some(p) if p.status == 2 => {
+                    // Failed — commit InvoiceFail
+                    let sequence = {
+                        let ledgers = self.handler.ledgers.lock().unwrap();
+                        match ledgers.get(&ledger_id) {
+                            Some(arc) => arc.read().unwrap().next_sequence(),
+                            None => continue,
+                        }
+                    };
+
+                    let op = deposits_core::messages::LedgerOperation::InvoiceFail {
+                        deposit_id: lock.deposit_id,
+                        amount: lock.amount,
+                        payment_id,
+                        sequence_number: sequence,
+                    };
+
+                    match self.commit_operation(&ledger_id, op).await {
+                        Ok(_) => tracing::info!("auto_complete_outbound: failed payment {}..., {} msat unlocked",
+                            &payment_hex[..16], lock.amount),
+                        Err(e) => tracing::error!("auto_complete_outbound: failed to record fail {}...: {}",
+                            &payment_hex[..16], e),
+                    }
+                }
+                _ => {
+                    // Still pending or not found in LDK — leave alone
+                    tracing::debug!("auto_complete_outbound: payment {}... still pending", &payment_hex[..16]);
+                }
+            }
+        }
     }
 
     /// Find the ledger_id for a specific deposit offer

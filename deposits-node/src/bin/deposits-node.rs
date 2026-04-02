@@ -4452,6 +4452,7 @@ async fn lightning_command(args: &[String]) -> Result<(), Box<dyn std::error::Er
         eprintln!("  info                                 Show LDK node info");
         eprintln!("  channels                             List Lightning channels");
         eprintln!("  payments                             List payments");
+        eprintln!("  locks    [ledger_id]                  Show open invoice locks awaiting completion");
         eprintln!("\nDeposit Payment Commands:");
         eprintln!("  send     Pay invoice FROM a deposit (lock, pay, fulfill in one step)");
         eprintln!("\nLedger Operation Commands:");
@@ -4469,6 +4470,7 @@ async fn lightning_command(args: &[String]) -> Result<(), Box<dyn std::error::Er
         "info" => lightning_info(&args[1..]).await,
         "channels" => lightning_channels(&args[1..]).await,
         "payments" => lightning_payments(&args[1..]).await,
+        "locks" => lightning_open_locks(&args[1..]).await,
         // Ledger operation commands
         "lock" => lightning_lock(&args[1..]).await,
         "fail" => lightning_fail(&args[1..]).await,
@@ -4623,6 +4625,63 @@ async fn lightning_payments(_args: &[String]) -> Result<(), Box<dyn std::error::
         println!("    Status: {}", status);
         println!();
     }
+    Ok(())
+}
+
+/// Show open invoice locks awaiting completion
+async fn lightning_open_locks(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_config(args)?;
+    let node = Node::new(config).await?;
+    let ledgers = node.handler.ledgers.lock().unwrap();
+
+    let mut total = 0;
+    for (lid, arc) in ledgers.iter() {
+        let ledger = arc.read().unwrap();
+        if ledger.state.open_invoice_locks.is_empty() {
+            continue;
+        }
+        println!("Ledger {}...:", &lid[..16.min(lid.len())]);
+        for (payment_id, lock) in &ledger.state.open_invoice_locks {
+            println!("  Payment: {}", hex::encode(payment_id));
+            println!("    Deposit: {}", hex::encode(lock.deposit_id));
+            println!("    Amount:  {} msat ({} sats)", lock.amount, lock.amount / 1000);
+            println!("    Locked at seq: {}", lock.lock_sequence);
+            println!();
+            total += 1;
+        }
+    }
+
+    if total == 0 {
+        println!("No open invoice locks.");
+    } else {
+        println!("{} open lock(s) total.", total);
+
+        // If LDK is available, show payment status for each
+        use deposits_node::ldk_cli::LdkCli;
+        let cli = LdkCli::from_env();
+        if let Ok(resp) = cli.list_payments() {
+            println!("\nLDK payment status:");
+            for (lid, arc) in ledgers.iter() {
+                let ledger = arc.read().unwrap();
+                for (payment_id, _lock) in &ledger.state.open_invoice_locks {
+                    let hex_id = hex::encode(payment_id);
+                    let matching = resp.payments.iter().find(|p| p.id == hex_id);
+                    let status = match matching {
+                        Some(p) => match p.status {
+                            0 => "PENDING",
+                            1 => "SUCCEEDED (needs fulfill)",
+                            2 => "FAILED (needs fail)",
+                            _ => "UNKNOWN",
+                        },
+                        None => "NOT FOUND in LDK",
+                    };
+                    println!("  {}... on {}...: {}",
+                        &hex_id[..16], &lid[..16.min(lid.len())], status);
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

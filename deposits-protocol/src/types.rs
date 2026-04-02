@@ -548,6 +548,20 @@ impl PendingInvoice {
 
 /// A pending conditional transfer between deposits.
 ///
+/// An outbound Lightning invoice lock awaiting payment completion.
+/// Tracked in LedgerState.open_invoice_locks so the operator can
+/// resolve stuck locks by checking LDK payment status.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenInvoiceLock {
+    /// The deposit that funds are locked from.
+    #[serde(with = "serde_deposit_id")]
+    pub deposit_id: DepositId,
+    /// Amount locked (millisatoshis).
+    pub amount: u64,
+    /// Sequence number of the InvoiceLock operation.
+    pub lock_sequence: u64,
+}
+
 /// Created by TransferLock, resolved by TransferComplete (funds to destination)
 /// or TransferFail (funds returned to source).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1147,6 +1161,11 @@ pub struct LedgerState {
     /// Key is the transfer_id (hash of the signing message).
     #[serde(with = "serde_transfer_id_map", default)]
     pub pending_transfers: HashMap<[u8; 32], PendingTransfer>,
+    /// Open outbound invoice locks awaiting fulfill or fail.
+    /// Key is the payment_id (payment hash). Populated by InvoiceLock,
+    /// removed by InvoiceFulfill or InvoiceFail.
+    #[serde(with = "serde_transfer_id_map", default)]
+    pub open_invoice_locks: HashMap<[u8; 32], OpenInvoiceLock>,
     /// Current sequence number.
     pub sequence: u64,
     /// Hash chain tip — SHA256(prev_hash || update_message) for the latest update.
@@ -1210,6 +1229,7 @@ impl LedgerState {
             quorum_expiry: None,
             collateral_attestations: HashMap::new(),
             pending_transfers: HashMap::new(),
+            open_invoice_locks: HashMap::new(),
             sequence: 0,
             chain_tip_hash: [0u8; 32],
             joined_quorums: Vec::new(),
@@ -1292,20 +1312,27 @@ impl LedgerState {
                     deposit.credit(*amount);
                 }
             }
-            LedgerOperation::InvoiceLock { deposit_id, amount, .. } => {
+            LedgerOperation::InvoiceLock { deposit_id, amount, payment_id, sequence_number, .. } => {
                 if let Some(deposit) = next.deposits.get_mut(deposit_id) {
                     deposit.lock(*amount)?;
                 }
+                next.open_invoice_locks.insert(*payment_id, OpenInvoiceLock {
+                    deposit_id: *deposit_id,
+                    amount: *amount,
+                    lock_sequence: *sequence_number,
+                });
             }
-            LedgerOperation::InvoiceFail { deposit_id, amount, .. } => {
+            LedgerOperation::InvoiceFail { payment_id, deposit_id, amount, .. } => {
                 if let Some(deposit) = next.deposits.get_mut(deposit_id) {
                     deposit.unlock(*amount);
                 }
+                next.open_invoice_locks.remove(payment_id);
             }
-            LedgerOperation::InvoiceFulfill { deposit_id, amount, .. } => {
+            LedgerOperation::InvoiceFulfill { payment_id, deposit_id, amount, .. } => {
                 if let Some(deposit) = next.deposits.get_mut(deposit_id) {
                     deposit.fulfill(*amount);
                 }
+                next.open_invoice_locks.remove(payment_id);
             }
             LedgerOperation::OnchainCredit { deposit_id, amount, .. } => {
                 if let Some(deposit) = next.deposits.get_mut(deposit_id) {
