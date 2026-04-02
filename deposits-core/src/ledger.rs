@@ -777,6 +777,17 @@ impl Ledger {
             if let Ok(msg) = DepositsMessage::decode(&update.message) {
                 if let Some(operation) = msg.to_operation() {
                     self.apply_state_changes(&operation)?;
+                    // Set opened_at_block and initial last_fee_assessment for new deposits
+                    if let LedgerOperation::DepositOpen { deposit_id, .. } = &operation {
+                        if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
+                            if update.block_height > 0 {
+                                deposit.opened_at_block = update.block_height;
+                                if deposit.last_fee_assessment == 0 {
+                                    deposit.last_fee_assessment = update.block_height;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             self.state.sequence = update.sequence_number;

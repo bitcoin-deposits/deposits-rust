@@ -2285,7 +2285,7 @@ window.doOpenDeposit = async function() {
     let feeFixed = 0, feeBps = 0, feeFreq = 2016, operatorName = '';
     if (ad) {
       const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
-      feeFixed = (ad.min_fee_sats || 0) * Math.floor(52560 / period);
+      feeFixed = (ad.min_fee_sats || 0) * 1000 * Math.floor(52560 / period);
       feeBps = ad.annual_fee_bps || 0;
       feeFreq = period;
       operatorName = ad.operator_name || '';
@@ -2990,7 +2990,7 @@ window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
   let feeFixed = 0, feeBps = 0, feeFreq = 2016, operatorName = '';
   if (ad) {
     const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
-    feeFixed = (ad.min_fee_sats || 0) * Math.floor(52560 / period);
+    feeFixed = (ad.min_fee_sats || 0) * 1000 * Math.floor(52560 / period);
     feeBps = ad.annual_fee_bps || 0;
     feeFreq = period;
     operatorName = ad.operator_name || '';
@@ -3644,7 +3644,7 @@ window.doWalletRecvOnchain = async function() {
       try {
         const ad = JSON.parse(adEvents[0].content);
         const period = ad.fee_period_blocks > 0 ? ad.fee_period_blocks : 2016;
-        feeFixed = (ad.min_fee_sats || 0) * Math.floor(52560 / period);
+        feeFixed = (ad.min_fee_sats || 0) * 1000 * Math.floor(52560 / period);
         feeBps = ad.annual_fee_bps || 0;
         feeFreq = period;
       } catch {}

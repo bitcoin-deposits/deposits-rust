@@ -245,10 +245,10 @@ pub fn validate_fee_minimum(
         0
     };
 
-    // Check fixed fee meets minimum per period
+    // Check fixed fee meets minimum per period (both in msats)
     if proposed_fixed_per_period < min_fixed_per_period {
         return Err(format!(
-            "Proposed fixed fee {} sats/period is below operator minimum {} sats/period",
+            "Proposed fixed fee {} msats/period is below operator minimum {} msats/period",
             proposed_fixed_per_period, min_fixed_per_period
         ));
     }

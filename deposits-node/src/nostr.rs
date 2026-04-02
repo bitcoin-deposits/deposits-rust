@@ -640,7 +640,7 @@ impl LedgerAdvertisement {
         let frequency = self.fee_period_blocks;
         let periods_per_year = if frequency > 0 { BLOCKS_PER_YEAR / frequency as u64 } else { 0 };
         deposits_core::types::FeeStructure {
-            annualized_msats: self.min_fee_sats.saturating_mul(periods_per_year),
+            annualized_msats: self.min_fee_sats.saturating_mul(periods_per_year).saturating_mul(1000),
             annualized_bps: self.annual_fee_bps as u16,
             frequency_blocks: frequency,
         }
@@ -648,11 +648,11 @@ impl LedgerAdvertisement {
 
     /// Get minimum acceptable fee parameters for deposit validation.
     ///
-    /// Returns (min_annual_bps, min_fixed_per_period) where:
+    /// Returns (min_annual_bps, min_fixed_per_period_msats) where:
     /// - min_annual_bps: minimum annual fee in basis points
-    /// - min_fixed_per_period: minimum fixed fee per collection period in sats
+    /// - min_fixed_per_period_msats: minimum fixed fee per collection period in msats
     pub fn minimum_fees(&self) -> (u16, u64) {
-        (self.annual_fee_bps as u16, self.min_fee_sats)
+        (self.annual_fee_bps as u16, self.min_fee_sats.saturating_mul(1000))
     }
 }
 
