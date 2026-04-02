@@ -2241,7 +2241,10 @@ impl Node {
     }
 
     /// Handle a ledger request from Nostr
-    async fn handle_ledger_request(&self, request: crate::nostr::LedgerRequest) {
+    async fn handle_ledger_request(&self, mut request: crate::nostr::LedgerRequest) {
+        // Resolve truncated ledger IDs (16-char Nostr tags) to full 64-char IDs
+        request.ledger_id = self.resolve_ledger_id(&request.ledger_id);
+
         // Skip requests that THIS daemon process sent (Nostr broadcasts to all subscribers).
         // We track sent event IDs rather than filtering by pubkey, because CLI commands
         // use the same operator key and we want the daemon to process those.
@@ -12157,8 +12160,25 @@ impl Node {
     }
 
     /// Check if a ledger exists by ledger_id (no clone).
+    /// Resolve a possibly-truncated ledger ID to the full 64-char ID.
+    /// Returns the input unchanged if already full-length or not found.
+    fn resolve_ledger_id(&self, ledger_id: &str) -> String {
+        if ledger_id.len() >= 64 { return ledger_id.to_string(); }
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        ledgers.keys()
+            .find(|k| k.starts_with(ledger_id))
+            .cloned()
+            .unwrap_or_else(|| ledger_id.to_string())
+    }
+
     fn has_ledger(&self, ledger_id: &str) -> bool {
-        self.handler.ledgers.lock().unwrap().contains_key(ledger_id)
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        if ledgers.contains_key(ledger_id) { return true; }
+        // Prefix match for truncated IDs (16-char tags from Nostr events)
+        if ledger_id.len() < 64 {
+            return ledgers.keys().any(|k| k.starts_with(ledger_id));
+        }
+        false
     }
 
     /// Check if a ledger exists by reserves_key (no clone).
@@ -12182,6 +12202,12 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(arc) = ledgers.get(ledger_id) {
                 (ledger_id.to_string(), arc.clone())
+            } else if ledger_id.len() < 64 {
+                // Prefix match for truncated IDs
+                match ledgers.iter().find(|(k, _)| k.starts_with(ledger_id)) {
+                    Some((lid, arc)) => (lid.clone(), arc.clone()),
+                    None => return false,
+                }
             } else {
                 // Try reserves_key lookup
                 match ledgers.iter().find(|(_, a)| a.read().unwrap().reserves_key() == ledger_id) {
