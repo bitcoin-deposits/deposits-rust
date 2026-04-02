@@ -1283,6 +1283,9 @@ impl LedgerState {
                 next.quorum_state = QuorumState::Active;
             }
             LedgerOperation::DepositOpen { deposit_id, descriptor, fees, transfer_fees, is_collateral, receive_requires_sig, fee_change_after_blocks, fee_change_notice_blocks, fee_change_limit_bps, .. } => {
+                if next.deposits.contains_key(deposit_id) {
+                    return Err(crate::DepositsError::DepositAlreadyExists);
+                }
                 let mut deposit = Deposit::new(descriptor.clone(), fees.clone());
                 if let Some(tf) = transfer_fees {
                     deposit.transfer_fees = tf.clone();
@@ -1295,6 +1298,11 @@ impl LedgerState {
                 next.deposits.insert(*deposit_id, deposit);
             }
             LedgerOperation::DepositClose { deposit_id } => {
+                let deposit = next.deposits.get(deposit_id)
+                    .ok_or(crate::DepositsError::DepositNotFound)?;
+                if deposit.balance > 0 {
+                    return Err(crate::DepositsError::NonZeroBalance { balance: deposit.balance });
+                }
                 next.deposits.remove(deposit_id);
             }
             LedgerOperation::FeeChange { deposit_id, new_fees, effective_block } => {
@@ -1308,14 +1316,14 @@ impl LedgerState {
                 }
             }
             LedgerOperation::InvoiceCredit { deposit_id, amount, .. } => {
-                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
-                    deposit.credit(*amount);
-                }
+                let deposit = next.deposits.get_mut(deposit_id)
+                    .ok_or(crate::DepositsError::DepositNotFound)?;
+                deposit.credit(*amount);
             }
             LedgerOperation::InvoiceLock { deposit_id, amount, payment_id, sequence_number, .. } => {
-                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
-                    deposit.lock(*amount)?;
-                }
+                let deposit = next.deposits.get_mut(deposit_id)
+                    .ok_or(crate::DepositsError::DepositNotFound)?;
+                deposit.lock(*amount)?;
                 next.open_invoice_locks.insert(*payment_id, OpenInvoiceLock {
                     deposit_id: *deposit_id,
                     amount: *amount,
@@ -1323,36 +1331,36 @@ impl LedgerState {
                 });
             }
             LedgerOperation::InvoiceFail { payment_id, deposit_id, amount, .. } => {
-                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
-                    deposit.unlock(*amount);
-                }
+                let deposit = next.deposits.get_mut(deposit_id)
+                    .ok_or(crate::DepositsError::DepositNotFound)?;
+                deposit.unlock(*amount);
                 next.open_invoice_locks.remove(payment_id);
             }
             LedgerOperation::InvoiceFulfill { payment_id, deposit_id, amount, .. } => {
-                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
-                    deposit.fulfill(*amount);
-                }
+                let deposit = next.deposits.get_mut(deposit_id)
+                    .ok_or(crate::DepositsError::DepositNotFound)?;
+                deposit.fulfill(*amount);
                 next.open_invoice_locks.remove(payment_id);
             }
             LedgerOperation::OnchainCredit { deposit_id, amount, .. } => {
-                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
-                    deposit.credit(*amount);
-                }
+                let deposit = next.deposits.get_mut(deposit_id)
+                    .ok_or(crate::DepositsError::DepositNotFound)?;
+                deposit.credit(*amount);
             }
             LedgerOperation::OnchainLock { deposit_id, amount, .. } => {
-                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
-                    deposit.lock(*amount)?;
-                }
+                let deposit = next.deposits.get_mut(deposit_id)
+                    .ok_or(crate::DepositsError::DepositNotFound)?;
+                deposit.lock(*amount)?;
             }
             LedgerOperation::OnchainFail { deposit_id, .. } => {
-                if let Some(_deposit) = next.deposits.get_mut(deposit_id) {
-                    // TODO: Need to look up the withdrawal amount from withdrawal_id
-                }
+                let _deposit = next.deposits.get_mut(deposit_id)
+                    .ok_or(crate::DepositsError::DepositNotFound)?;
+                // TODO: Need to look up the withdrawal amount from withdrawal_id
             }
             LedgerOperation::OnchainFulfill { deposit_id, amount, .. } => {
-                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
-                    deposit.fulfill(*amount);
-                }
+                let deposit = next.deposits.get_mut(deposit_id)
+                    .ok_or(crate::DepositsError::DepositNotFound)?;
+                deposit.fulfill(*amount);
             }
             LedgerOperation::FeeCollect { deposit_id, amount, block_height } => {
                 if let Some(deposit) = next.deposits.get_mut(deposit_id) {
@@ -1464,11 +1472,17 @@ impl LedgerState {
                 nonce, source_deposit_id, destination_deposit_id, amount, fee,
                 completion_script, timeout_height, transfer_id, ..
             } => {
-                if let Some(deposit) = next.deposits.get_mut(source_deposit_id) {
-                    let total = amount + fee;
-                    deposit.balance = deposit.balance.saturating_sub(total);
-                    deposit.locked_balance = deposit.locked_balance.saturating_add(total);
+                let deposit = next.deposits.get_mut(source_deposit_id)
+                    .ok_or(crate::DepositsError::DepositNotFound)?;
+                let total = amount + fee;
+                if deposit.available_balance() < total {
+                    return Err(crate::DepositsError::InsufficientDepositBalance {
+                        available: deposit.available_balance(),
+                        required: total,
+                    });
                 }
+                deposit.balance = deposit.balance.saturating_sub(total);
+                deposit.locked_balance = deposit.locked_balance.saturating_add(total);
                 next.pending_transfers.insert(*transfer_id, PendingTransfer {
                     transfer_id: *transfer_id,
                     nonce: *nonce,

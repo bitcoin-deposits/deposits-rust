@@ -6812,6 +6812,10 @@ impl Node {
     /// Process a co-sign request from an operator.
     ///
     /// When another operator wants to update their ledger where we are a quorum member,
+    fn format_op_short(op: &LedgerOperation) -> String {
+        format!("disc:{}", op.discriminant())
+    }
+
     /// they send us a co-sign request. We validate the update and return our ECDSA signature.
     ///
     /// The signature covers: cosign_data || our_ledger_current_hash
@@ -7133,6 +7137,43 @@ impl Node {
                 }
             }
         };
+
+        // Validate the operation before signing.
+        //
+        // cosign_data = sequence_number (8 LE) || previous_hash (32) || message (TLV)
+        // Extract the message and validate it against the local copy of the operator's ledger.
+        if cosign_data.len() > 40 {
+            let message_bytes = &cosign_data[40..]; // skip 8 (seq) + 32 (prev_hash)
+            match LedgerOperation::tlv_decode(message_bytes) {
+                Ok(operation) => {
+                    // Validate against local ledger state
+                    if let Some(ref arc) = operator_ledger_arc {
+                        let ledger = arc.read().unwrap();
+                        // Try applying the operation to a clone to check validity
+                        match ledger.state.apply(&operation) {
+                            Ok(_) => {
+                                tracing::debug!("Cosign validation passed: seq={} op={}",
+                                    sequence_number, Self::format_op_short(&operation));
+                            }
+                            Err(e) => {
+                                tracing::warn!("Cosign validation FAILED: seq={} op={} error={}",
+                                    sequence_number, Self::format_op_short(&operation), e);
+                                return (false, None, Some(format!(
+                                    "Operation validation failed: {}", e
+                                )));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Cosign: failed to decode operation TLV: {}", e);
+                    return (false, None, Some(format!("Failed to decode operation: {}", e)));
+                }
+            }
+        } else {
+            tracing::warn!("Cosign: cosign_data too short ({} bytes)", cosign_data.len());
+            return (false, None, Some("cosign_data too short".to_string()));
+        }
 
         // Build tagged hash following BIP-340 convention:
         // sha256(sha256(tag) || sha256(tag) || data)
