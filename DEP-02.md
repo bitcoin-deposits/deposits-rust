@@ -37,20 +37,19 @@ The event content is a base64-encoded TLV stream:
 
 | Type | Name | Size | Description |
 |---|---|---|---|
-| 0 | message | variable | Inner operation (TLV-encoded) |
-| 2 | message_type | 2 | Operation type constant (for fast filtering without deserializing) |
-| 4 | operator_id | 33 | Operator's compressed secp256k1 pubkey |
-| 6 | ledger_id | 32 | Ledger identifier hash |
-| 8 | sequence_number | 8 | Monotonically increasing sequence (u64 LE) |
-| 10 | previous_hash | 32 | Chain hash of the previous update |
-| 16 | cosign_signature | 64 | Schnorr co-signature from quorum member |
-| 18 | operator_signature | 64 | Schnorr signature from operator |
-| 20 | block_height | 4 | Block height at creation |
-| 22 | block_hash | 32 | Block hash at creation |
-| 24 | cosigner_pubkey | 33 | Co-signing quorum member's pubkey |
-| 26 | member_ledger_hash | 32 | Co-signer's ledger tip hash for causal ordering |
+| 0 | operator_id | 33 | Operator's compressed secp256k1 pubkey |
+| 2 | ledger_id | 32 | Ledger identifier hash |
+| 4 | sequence_number | 8 | Monotonically increasing sequence (u64 BE) |
+| 6 | previous_hash | 32 | Chain hash of the previous update |
+| 8 | message | variable | Inner operation (TLV-encoded) |
+| 10 | block_height | 4 | Block height at creation |
+| 12 | block_hash | 32 | Block hash at creation |
+| 14 | cosigner_pubkey | 33 | Co-signing quorum member's pubkey |
+| 16 | member_ledger_hash | 32 | Co-signer's ledger tip hash for causal ordering |
+| 18 | cosign_signature | 64 | Schnorr co-signature from quorum member |
+| 20 | operator_signature | 64 | Schnorr signature from operator |
 
-Type 12 is reserved. `current_hash` is derived by the receiver (see Hash Chain).
+`current_hash` is derived by the receiver (see Hash Chain).
 
 ## Hash Chain
 
@@ -64,7 +63,7 @@ Type 12 is reserved. `current_hash` is derived by the receiver (see Hash Chain).
 
     chain_hash = SHA256(current_hash (32 bytes) || operator_signature (64 bytes))
 
-The operator signs `current_hash`. Their signature is folded into `chain_hash`, which becomes the next update's `previous_hash`. Both signatures are committed to the chain without circularity.
+The operator signs the content and co-signature (see Signing). Their signature is folded into `chain_hash`, which becomes the next update's `previous_hash`. Both signatures are committed to the chain without circularity.
 
 `member_ledger_hash` and `cosign_signature` are included in `current_hash` only when present and non-zero. After `QuorumBegin`, these fields are mandatory on all subsequent updates — omitting them is non-conforming. Before quorum establishment, they are always omitted. The first update (sequence 0) has `previous_hash` = `[0; 32]`.
 
@@ -77,15 +76,17 @@ All protocol signatures use Schnorr (BIP-340). On-chain transaction signatures f
 The quorum member signs a tagged hash over the update content and their ledger's tip:
 
     tag = SHA256("deposits/cosign")
-    digest = SHA256(tag || tag || message || message_type (2 LE) || sequence_number (8 LE) || previous_hash || member_ledger_hash)
+    cosign_data = sequence_number (8 LE) || previous_hash || message
+    digest = SHA256(tag || tag || cosign_data || member_ledger_hash)
 
 `current_hash` is not signed directly -- it incorporates the co-signature itself, so it cannot be known at signing time.
 
 ### Operator
 
-    sig_input = SHA256(sequence_number (8 LE) || previous_hash || current_hash || message)
+    operator_signing_data = cosign_data || cosign_signature
+    sig_input = SHA256(operator_signing_data)
 
-The operator signs `sig_input` after `current_hash` is finalized (which requires the co-signature).
+The operator signs `SHA256(sequence_number || previous_hash || message || cosign_signature)`. This seals the bilateral agreement — both parties' signatures cover the same content.
 
 ## Operations
 
@@ -142,8 +143,12 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 56 | operator_id | 33 | LedgerOpen |
 | 58 | reserves_id | variable | LedgerOpen, QuorumBegin, QuorumJoin |
 | 62 | reserves_amount | 8 | LedgerOpen, QuorumBegin |
+| 82 | membership_expires | 4 | QuorumJoin |
+| 84 | new_outpoint_txid | 32 | QuorumBegin |
 | 86 | quorum_expiry | 4 | QuorumBegin (shortest member collateral lock) |
 | 88 | total_collateral | 8 | QuorumBegin (sum of attested collateral, msats) |
+| 90 | spending_txid | 32 | QuorumBegin |
+| 92 | new_outpoint_vout | 4 | QuorumBegin |
 | 96 | genesis_block | 4 | LedgerOpen |
 | 6 | quorum_members | N*33 | QuorumBegin |
 
@@ -151,6 +156,9 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 
 | Type | Name | Size | Used by |
 |---|---|---|---|
+| 16 | invoice | variable | DepositOpen (BOLT11 string, optional) |
+| 18 | cosigner_sig | 64 | DepositOpen (co-signer guarantee, optional) |
+| 24 | deposit_pubkey | 33 | DepositOpen |
 | 200 | deposit_id | 16 | DepositOpen, DepositClose, FeeChange, DepositKeyRotate, FeeCollect |
 | 202 | descriptor | variable | DepositOpen (miniscript) |
 | 204 | witness | variable | TransferLock, DepositKeyRotate (nested) |
@@ -180,21 +188,29 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 216 | completion_script | variable | TransferLock (miniscript) |
 | 218 | timeout_height | 4 | TransferLock |
 | 220 | transfer_id | 32 | TransferLock, TransferComplete, TransferFail |
+| 222 | block_hash | 32 | TransferLock |
 | 224 | script_witness | variable | TransferComplete (nested) |
 | 228 | fail_reason | 1 | TransferFail (1=timeout, 0=reserved) |
 
-#### Lightning and On-chain
+#### Lightning
 
 | Type | Name | Size | Used by |
 |---|---|---|---|
 | 14 | payment_hash | 32 | InvoiceCredit, InvoiceLock, InvoiceFulfill |
-| 16 | invoice | variable | DepositOpen (BOLT11 string) |
 | 26 | invoice_id | variable | InvoiceCredit |
+| 28 | sequence_number | 8 | InvoiceCredit, InvoiceLock, InvoiceFulfill |
+| 30 | payment_id | 32 | InvoiceCredit, InvoiceLock, InvoiceFulfill |
 | 34 | preimage | 32 | InvoiceFulfill |
+
+#### On-chain
+
+| Type | Name | Size | Used by |
+|---|---|---|---|
 | 66 | txid | 32 | OnchainCredit, OnchainFulfill |
 | 68 | vout | 4 | OnchainCredit |
 | 70 | destination_address | variable | OnchainLock, OnchainFulfill |
 | 72 | withdrawal_id | 32 | OnchainLock, OnchainFail, OnchainFulfill |
+| 74 | funding_address | variable | OnchainCredit |
 
 #### Quorum and Collateral
 
@@ -202,6 +218,10 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 |---|---|---|---|
 | 44 | quorum_member | 33 | QuorumAddMember, QuorumRemoveMember, CollateralAttestation |
 | 38 | collateral_operator | 33 | CollateralAttestation |
+| 40 | signature | 64 | CollateralAttestation |
+| 42 | ledger_hash | 32 | CollateralAttestation |
+| 46 | quorum_member_sig | 64 | QuorumBegin |
+| 48 | operator_sig | 64 | QuorumBegin |
 | 76 | lock_until_block | 4 | CollateralLock, CollateralAttestation |
 | 114 | member_ledger_id | variable | QuorumAddMember, QuorumJoin |
 | 124 | collateral_ledger_id | variable | CollateralAttestation |

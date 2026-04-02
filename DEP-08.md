@@ -72,9 +72,45 @@ When `is_collateral` is true:
 - The deposit holds operator capital on a quorum member's ledger, backing the operator's obligations elsewhere
 - If the operator misbehaves, the member operating this ledger may confiscate the locked funds
 
+## Access Control
+
+Operators MAY restrict which pubkeys can open deposits. When enabled, deposit_open requests are evaluated in order:
+
+1. **Denylist**: always checked. Matching pubkeys are rejected unconditionally.
+2. **Pubkey allowlist**: if the sender's pubkey is listed, the deposit is allowed.
+3. **Domain attestation**: the operator queries relays for a Kind 55502 attestation (see DEP-04) from a trusted verifier, tagged with the sender's pubkey. If found, the lightning address domain is checked against an allowed domains list.
+
+If none of the above permit the deposit, the operator responds with an error containing:
+
+```json
+{
+  "code": "attestation_required",
+  "verifier_pubkey": "<hex>",
+  "allowed_domains": ["domain1.com", "domain2.com"]
+}
+```
+
+The wallet then initiates verification with the indicated verifier (Kind 25500/25501 exchange).
+
+The operator's verifier pubkey (`ATTESTATION_VERIFIER_PUBKEY`) accepts both hex and npub bech32 formats; it is normalized to hex at load time.
+
+## Deposit Recovery
+
+Wallets can recover deposits from relays using only their seed. The procedure:
+
+1. Derive compressed pubkeys at key indices 0 through N (at least 20).
+2. Compute `deposit_id = SHA256("pk(<compressed_pubkey_hex>)")[0..16]` for each.
+3. Query relays for Kind 9100 events with matching `#i` tags.
+4. For each match, decode the TLV content and extract the full 64-character ledger ID from field tag 2 (LEDGER_ID).
+5. Look up the operator name from the Kind 39100 advertisement for that ledger.
+6. Add the deposit to local state and fetch its balance via `balance_query`.
+
+This allows wallet restoration from seed alone, without requiring a remote state backup.
+
 ## Related DEPs
 
 - [DEP-02](DEP-02.md): Wire format (DepositOpen, DepositClose, DepositKeyRotate fields)
+- [DEP-04](DEP-04.md): Peer messaging (domain attestation, subkey management, verification protocol)
 - [DEP-05](DEP-05.md): Quorum and collateral (collateral deposits, obligation limits)
 - [DEP-07](DEP-07.md): Fee schedules (periodic and transfer fees, fee changes)
 - [DEP-09](DEP-09.md): Transfers (two-phase transfer protocol)

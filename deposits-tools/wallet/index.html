@@ -133,21 +133,28 @@ body.hide-amounts .amt { visibility: hidden; }
       <div class="form-group">
         <label>Network</label>
         <select id="setup-network">
-          <option value="regtest" selected>regtest</option>
+          <option value="regtest">regtest</option>
           <option value="signet">signet</option>
           <option value="testnet">testnet</option>
-          <option value="bitcoin">bitcoin</option>
+          <option value="bitcoin" selected>bitcoin</option>
         </select>
       </div>
       <button class="primary" onclick="initWallet()" style="width:100%; margin-top:8px;">Create New Wallet</button>
+      <button id="setup-nip07-btn" onclick="initWalletNip07()" style="width:100%; margin-top:6px; display:none;">Use NIP-07 Extension</button>
+      <label style="font-size:11px; color:var(--muted); margin-top:8px; cursor:pointer;">
+        <input type="checkbox" id="setup-save-keychain" checked style="margin:0; vertical-align:middle;"> Save to browser password manager
+      </label>
 
       <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
         <div style="color:var(--muted); font-size:11px; margin-bottom:8px;">Import existing wallet</div>
-        <div class="form-group">
-          <label>Recovery phrase or hex seed</label>
-          <textarea id="setup-seed" rows="2" style="font-family:var(--font); font-size:12px; padding:6px 10px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px; outline:none; width:100%; resize:vertical;" placeholder="12 words, 24 words, or 64 hex chars"></textarea>
-        </div>
-        <button onclick="importWallet()" style="width:100%">Import</button>
+        <form onsubmit="event.preventDefault(); importWallet();" autocomplete="on">
+          <input type="text" name="username" autocomplete="username" value="deposits-wallet" style="display:none;">
+          <div class="form-group">
+            <label>Recovery phrase or hex seed</label>
+            <input id="setup-seed" type="password" name="password" autocomplete="current-password" placeholder="12 words, 24 words, or 64 hex chars" style="font-family:var(--font); font-size:12px; width:100%;">
+          </div>
+          <button type="submit" style="width:100%">Import</button>
+        </form>
       </div>
     </div>
   </div>
@@ -533,11 +540,32 @@ body.hide-amounts .amt { visibility: hidden; }
     <!-- Settings tab -->
     <div id="tab-settings" class="panel">
       <div class="card">
-        <h3>Wallet Identity</h3>
+        <h3>Nostr Identity</h3>
+        <div class="kv"><span class="k">Signing mode</span><span class="v" id="settings-signing-mode">Wallet key</span></div>
         <div class="kv"><span class="k">Nostr pubkey</span><span class="v" id="settings-npub">—</span></div>
-        <div class="kv"><span class="k">Deposit key index</span><span class="v" id="settings-key-index">0</span></div>
+        <div id="settings-nip07-toggle" style="margin-top:6px;">
+          <button id="settings-nip07-btn" onclick="toggleNip07()" style="font-size:11px;">Switch to NIP-07 extension</button>
+        </div>
+        <div class="kv" style="margin-top:6px;"><span class="k">Deposit key index</span><span class="v" id="settings-key-index">0</span></div>
         <div class="kv"><span class="k">Network</span><span class="v" id="settings-network">—</span></div>
         <div class="kv"><span class="k">Relays</span><span class="v" id="settings-relay">—</span></div>
+      </div>
+      <div class="card" id="settings-attest-card" style="display:none;">
+        <h3>Subkey Attestation</h3>
+        <div style="font-size:11px; color:var(--muted); margin-bottom:8px;">
+          Sign an attestation authorizing another pubkey to act on behalf of this wallet.
+          Give the operator the resulting <code>v</code> and <code>va</code> tags.
+        </div>
+        <div class="form-group">
+          <label>Subkey pubkey (hex)</label>
+          <input id="attest-subkey-input" type="text" placeholder="64-char hex pubkey" style="font-size:11px;" onkeydown="if(event.key==='Enter')createSubkeyAttestation()">
+        </div>
+        <button onclick="createSubkeyAttestation()">Sign Attestation</button>
+        <div id="attest-result" style="display:none; margin-top:8px; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:4px; font-size:11px;">
+          <div class="kv"><span class="k">v (account)</span><span class="v" id="attest-v" style="word-break:break-all; cursor:pointer;" onclick="copyAttestField('v')"></span></div>
+          <div class="kv"><span class="k">va (signature)</span><span class="v" id="attest-va" style="word-break:break-all; cursor:pointer;" onclick="copyAttestField('va')"></span></div>
+          <div style="margin-top:4px; color:var(--muted);">Click values to copy.</div>
+        </div>
       </div>
       <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:baseline;">
@@ -654,7 +682,10 @@ body.hide-amounts .amt { visibility: hidden; }
       <div id="verify-step-address">
         <div style="font-size:12px; color:var(--muted); margin-bottom:8px;" id="verify-domain-hint"></div>
         <input id="verify-address-input" type="text" placeholder="you@wallet.com" style="width:100%; box-sizing:border-box; margin-bottom:8px;" onkeydown="if(event.key==='Enter')verifySubmitAddress()">
-        <button id="verify-address-btn" onclick="verifySubmitAddress()" style="width:100%;">Verify</button>
+        <div style="display:flex; gap:6px;">
+          <button id="verify-address-btn" onclick="verifySubmitAddress()" style="flex:1;">Verify</button>
+          <button id="verify-nip07-btn" onclick="verifySwitchToNip07()" style="flex:1; display:none; font-size:11px;">Use NIP-07 identity</button>
+        </div>
       </div>
 
       <!-- Step 2: Pay invoice -->
@@ -977,7 +1008,7 @@ let state = {
   seed: null,        // Uint8Array(32)
   mnemonic: null,    // BIP-39 recovery phrase (if generated)
   backupVerified: false,
-  network: 'regtest',
+  network: 'bitcoin',
   relays: [],  // populated from setup page or advertisement relay_url
   ledgerRelay: '',  // durable relay — set on setup page (e.g. wss://relay.ynniv.com)
   deposits: [],
@@ -1002,8 +1033,16 @@ function saveState() {
     keyIndex: state.keyIndex,
     backupVerified: state.backupVerified || false,
     evidence: state.evidence || [],
+    useNip07: state.useNip07 || false,
+    identityRelays: state.identityRelays || [],
   };
   localStorage.setItem(STATE_KEY, JSON.stringify(s));
+
+  // Debounced sync to relay
+  clearTimeout(saveState._remoteTimer);
+  saveState._remoteTimer = setTimeout(() => {
+    saveStateRemote().catch(e => console.warn('Remote state sync failed:', e));
+  }, 5000);
 }
 
 function loadState() {
@@ -1012,7 +1051,7 @@ function loadState() {
   try {
     const s = JSON.parse(raw);
     state.seed = hexToBytes(s.seed);
-    state.network = s.network || 'regtest';
+    state.network = s.network || 'bitcoin';
     state.relays = (s.relays || (s.relay ? [s.relay] : []))
       .filter(r => r && r !== s.ledgerRelay); // strip ledger relay from operator list
     state.ledgerRelay = s.ledgerRelay || '';
@@ -1021,8 +1060,275 @@ function loadState() {
     state.deposits = s.deposits || [];
     state.keyIndex = s.keyIndex || 0;
     state.evidence = s.evidence || [];
+    state.useNip07 = s.useNip07 || false;
+    state.identityRelays = s.identityRelays || [];
     return true;
   } catch { return false; }
+}
+
+// ============================================================
+// NIP-04 encrypt/decrypt (for wallet key mode — NIP-07 mode uses extension)
+// ============================================================
+
+async function nip04Encrypt(secretKey, pubkeyHex, plaintext) {
+  // ECDH shared secret (x-coordinate of shared point)
+  const shared = secp.getSharedSecret(secretKey, '02' + pubkeyHex);
+  const sharedX = shared.slice(1, 33); // strip prefix, take x-coordinate
+  const key = await crypto.subtle.importKey('raw', sharedX, { name: 'AES-CBC' }, false, ['encrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(16));
+  const encoded = new TextEncoder().encode(plaintext);
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, key, encoded);
+  const cipherB64 = btoa(String.fromCharCode(...new Uint8Array(encrypted)));
+  const ivB64 = btoa(String.fromCharCode(...iv));
+  return cipherB64 + '?iv=' + ivB64;
+}
+
+async function nip04Decrypt(secretKey, pubkeyHex, ciphertext) {
+  const [cipherB64, ivParam] = ciphertext.split('?iv=');
+  if (!ivParam) throw new Error('Missing IV');
+  const shared = secp.getSharedSecret(secretKey, '02' + pubkeyHex);
+  const sharedX = shared.slice(1, 33);
+  const key = await crypto.subtle.importKey('raw', sharedX, { name: 'AES-CBC' }, false, ['decrypt']);
+  const iv = Uint8Array.from(atob(ivParam), c => c.charCodeAt(0));
+  const cipher = Uint8Array.from(atob(cipherB64), c => c.charCodeAt(0));
+  const decrypted = await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, key, cipher);
+  return new TextDecoder().decode(decrypted);
+}
+
+// ============================================================
+// Remote state sync (kind 30078, encrypted to self)
+// ============================================================
+
+const REMOTE_STATE_D_TAG = 'deposits-wallet/state';
+
+function buildRemoteState() {
+  return JSON.stringify({
+    network: state.network,
+    relays: state.relays,
+    ledgerRelay: state.ledgerRelay,
+    deposits: state.deposits,
+    keyIndex: state.keyIndex,
+    useNip07: state.useNip07 || false,
+    evidence: state.evidence || [],
+  });
+}
+
+function applyRemoteState(s) {
+  if (s.network) state.network = s.network;
+  if (s.relays) state.relays = s.relays;
+  if (s.ledgerRelay) state.ledgerRelay = s.ledgerRelay;
+  if (s.deposits) state.deposits = s.deposits;
+  if (s.keyIndex) state.keyIndex = s.keyIndex;
+  if (s.useNip07 !== undefined) state.useNip07 = s.useNip07;
+  if (s.evidence) state.evidence = s.evidence;
+}
+
+let _lastSavedRemoteHash = null;
+
+// Send a signed event to a list of relay URLs via short-lived connections
+function sendToRelays(event, urls) {
+  const payload = JSON.stringify(['EVENT', event]);
+  for (const url of urls) {
+    try {
+      const ws = new WebSocket(url);
+      ws.onopen = () => { ws.send(payload); setTimeout(() => ws.close(), 2000); };
+      ws.onerror = () => ws.close();
+    } catch {}
+  }
+}
+
+// Fetch events from a list of relay URLs via short-lived connections
+function fetchFromRelays(filter, urls, timeoutMs = 8000) {
+  return new Promise(resolve => {
+    const events = new Map();
+    let pending = urls.length;
+    if (pending === 0) return resolve([]);
+    const timer = setTimeout(finish, timeoutMs);
+
+    function finish() {
+      clearTimeout(timer);
+      resolve([...events.values()]);
+    }
+
+    for (const url of urls) {
+      try {
+        const ws = new WebSocket(url);
+        const subId = 'q' + Math.random().toString(36).slice(2, 8);
+        ws.onopen = () => ws.send(JSON.stringify(['REQ', subId, filter]));
+        ws.onmessage = (msg) => {
+          try {
+            const data = JSON.parse(msg.data);
+            if (data[0] === 'EVENT' && data[2]?.id) events.set(data[2].id, data[2]);
+            if (data[0] === 'EOSE') { ws.close(); if (--pending <= 0) finish(); }
+          } catch {}
+        };
+        ws.onerror = () => { ws.close(); if (--pending <= 0) finish(); };
+      } catch { if (--pending <= 0) finish(); }
+    }
+  });
+}
+
+async function saveStateRemote() {
+  const plaintext = buildRemoteState();
+  const hash = bytesToHex(sha256(utf8ToBytes(plaintext)));
+  if (hash === _lastSavedRemoteHash) return; // no change
+
+  const nostrKey = deriveSecretKey(state.seed, 0);
+  const pubkey = getPublicKeyHex(nostrKey);
+
+  let encrypted;
+  if (state.useNip07 && window.nostr?.nip04) {
+    try { encrypted = await window.nostr.nip04.encrypt(pubkey, plaintext); } catch {}
+  }
+  if (!encrypted) {
+    encrypted = await nip04Encrypt(nostrKey, pubkey, plaintext);
+  }
+
+  const tags = [['d', REMOTE_STATE_D_TAG]];
+  const event = await createEvent(nostrKey, 30078, encrypted, tags);
+
+  // Publish to operator relays
+  const payload = JSON.stringify(['EVENT', event]);
+  for (const s of sockets) {
+    if (s.ws && s.ws.readyState === WebSocket.OPEN) s.ws.send(payload);
+  }
+
+  // Also publish to identity relays (NIP-07 user's relays)
+  const idRelays = (state.identityRelays || []).filter(u => !state.relays.includes(u) && u !== state.ledgerRelay);
+  if (idRelays.length > 0) sendToRelays(event, idRelays);
+
+  _lastSavedRemoteHash = hash;
+  console.log('State synced to relay');
+}
+
+async function loadStateRemote() {
+  const nostrKey = deriveSecretKey(state.seed, 0);
+  const pubkey = getPublicKeyHex(nostrKey);
+
+  const filter = { kinds: [30078], authors: [pubkey], '#d': [REMOTE_STATE_D_TAG], limit: 1 };
+
+  // Fetch from both operator relays and identity relays
+  const [operatorEvents, idEvents] = await Promise.all([
+    fetchEvents(filter, 8000),
+    (state.identityRelays || []).length > 0
+      ? fetchFromRelays(filter, state.identityRelays, 8000)
+      : Promise.resolve([]),
+  ]);
+
+  // Use the most recent event
+  const all = [...operatorEvents, ...idEvents];
+  if (all.length === 0) return null;
+  all.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+
+  const content = all[0].content;
+  let plaintext;
+  if (state.useNip07 && window.nostr?.nip04) {
+    try { plaintext = await window.nostr.nip04.decrypt(pubkey, content); } catch {}
+  }
+  if (!plaintext) {
+    try { plaintext = await nip04Decrypt(nostrKey, pubkey, content); } catch {}
+  }
+  if (!plaintext) return null;
+
+  try { return JSON.parse(plaintext); } catch { return null; }
+}
+
+// ============================================================
+// Deposit recovery — scan relays for deposits opened with our derived keys
+// ============================================================
+
+async function recoverDeposits() {
+  const scanLimit = Math.max(state.keyIndex + 1, 20);
+  const candidates = []; // { index, pubkeyHex, depositIdHex }
+  const idToCandidate = {};
+
+  for (let i = 0; i < scanLimit; i++) {
+    const key = deriveSecretKey(state.seed, i);
+    const pubkey = getCompressedPubkey(key);
+    const pubkeyHex = bytesToHex(pubkey);
+    const depositId = computeDepositId(pubkey);
+    const depositIdHex = bytesToHex(depositId);
+    candidates.push({ index: i, pubkeyHex, depositIdHex });
+    idToCandidate[depositIdHex] = candidates[candidates.length - 1];
+  }
+
+  // Skip IDs we already have
+  const knownIds = new Set(state.deposits.filter(d => d.deposit_pubkey)
+    .map(d => bytesToHex(computeDepositId(hexToBytes(d.deposit_pubkey)))));
+  const searchIds = candidates.map(c => c.depositIdHex).filter(id => !knownIds.has(id));
+  if (searchIds.length === 0) return 0;
+
+  // Query in batches (relay filters have size limits)
+  const batchSize = 50;
+  let recovered = 0;
+  for (let i = 0; i < searchIds.length; i += batchSize) {
+    const batch = searchIds.slice(i, i + batchSize);
+    const events = await fetchEvents({ kinds: [9100], '#i': batch, limit: batch.length }, 10000);
+
+    const seenIds = new Set();
+    for (const ev of events) {
+      const iTags = (ev.tags || []).filter(t => t[0] === 'i').map(t => t[1]);
+      const dTag = (ev.tags || []).find(t => t[0] === 'd');
+      const ledgerTag = dTag ? dTag[1] : null;
+      if (!ledgerTag) continue;
+
+      // Extract full ledger ID from TLV content (tag 2 = LEDGER_ID, 32 bytes)
+      let ledgerId = null;
+      let operatorName = '';
+      try {
+        const tlv = parseTlv(Uint8Array.from(atob(ev.content), c => c.charCodeAt(0)));
+        const lidField = tlv.find(r => r.type === 2 && r.value.length === 32);
+        if (lidField) ledgerId = bytesToHex(lidField.value);
+        log(`Recovery: TLV decode tag=${ledgerTag}, full_id=${ledgerId || 'NOT FOUND'}, tlv_fields=[${tlv.map(r => r.type + ':' + r.value.length + 'B').join(',')}]`);
+      } catch (e) {
+        log(`Recovery: TLV decode failed for tag=${ledgerTag}: ${e.message}`, 'error');
+      }
+      if (!ledgerId) continue;
+
+      // Try to get operator name from ad
+      try {
+        const ads = await fetchEvents({ kinds: [39100], limit: 50 }, 5000);
+        const match = ads.find(a => {
+          const dTag = (a.tags || []).find(t => t[0] === 'd');
+          return dTag && dTag[1] === ledgerId.slice(0, 16);
+        });
+        if (match) {
+          try { operatorName = JSON.parse(match.content).operator_name || ''; } catch {}
+        }
+      } catch {}
+
+      for (const depositIdHex of iTags) {
+        if (seenIds.has(depositIdHex)) continue;
+        const cand = idToCandidate[depositIdHex];
+        if (!cand) continue;
+        seenIds.add(depositIdHex);
+
+        const alias = operatorName
+          ? `${operatorName}-${cand.index}`
+          : `recovered-${cand.index}`;
+
+        state.deposits.push({
+          alias,
+          ledger_id: ledgerId,
+          deposit_pubkey: cand.pubkeyHex,
+          key_index: cand.index,
+          status: 'active',
+          operator_name: operatorName,
+        });
+        if (cand.index >= state.keyIndex) state.keyIndex = cand.index + 1;
+        recovered++;
+        log(`Recovered deposit '${alias}' (key ${cand.index}) on ${ledgerId.slice(0, 12)}...`);
+      }
+    }
+  }
+
+  if (recovered > 0) {
+    saveState();
+    renderDeposits();
+    resubscribeUpdates();
+    await syncAll();
+  }
+  return recovered;
 }
 
 // ============================================================
@@ -2075,7 +2381,7 @@ async function sendVerifyRequest(verifierPubkey, params, timeoutMs = 30000) {
   const tags = [['p', pubkeyHex]];
 
   let event;
-  if (window.nostr) {
+  if (state.useNip07) {
     try { event = await createEventNip07(25500, content, tags); } catch {}
   }
   if (!event) {
@@ -2125,13 +2431,13 @@ async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, ke
     return;
   }
 
-  if (window.nostr) {
+  if (state.useNip07 && window.nostr) {
     try {
       const nip07pubkey = await window.nostr.getPublicKey();
       if (nip07pubkey) log(`Signing with NIP-07 extension (${nip07pubkey.slice(0, 16)}...)`);
     } catch {}
   } else {
-    log('No NIP-07 extension — using wallet key. Install nos2x or Alby to verify with your nostr identity.');
+    log('Signing with wallet key.');
   }
 
   const domainHint = allowedDomains.length > 0
@@ -2143,6 +2449,8 @@ async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, ke
   document.getElementById('verify-domain-hint').textContent = domainHint;
   document.getElementById('verify-address-input').value = '';
   document.getElementById('verify-address-btn').disabled = false;
+  document.getElementById('verify-address-btn').textContent = 'Verify';
+  document.getElementById('verify-nip07-btn').style.display = (!state.useNip07 && window.nostr) ? '' : 'none';
   showVerifyStep('address');
   document.getElementById('verify-modal').classList.add('visible');
   document.getElementById('verify-address-input').focus();
@@ -2229,6 +2537,23 @@ window.verifySubmitAddress = async function() {
     btn.disabled = false;
     btn.textContent = 'Verify';
     verifyShowResult(`Error: ${e.message}`, 'error', false);
+  }
+};
+
+window.verifySwitchToNip07 = async function() {
+  if (!window.nostr) return;
+  try {
+    const pk = await window.nostr.getPublicKey();
+    if (!pk) { log('NIP-07 extension denied access.', 'error'); return; }
+    state.useNip07 = true;
+    saveState();
+    log(`Switched to NIP-07 identity (${pk.slice(0, 16)}...)`);
+    document.getElementById('verify-nip07-btn').style.display = 'none';
+    // Update settings UI too
+    const nostrKey = deriveSecretKey(state.seed, 0);
+    updateSigningModeUI(getPublicKeyHex(nostrKey));
+  } catch (e) {
+    log(`NIP-07 error: ${e.message}`, 'error');
   }
 };
 
@@ -5309,25 +5634,67 @@ function parseRelays(input) {
   return input.split(',').map(s => s.trim()).filter(s => s.startsWith('ws'));
 }
 
+function getSetupConfig() {
+  return {
+    relayInput: document.getElementById('setup-relay').value || '',
+    ledgerRelay: document.getElementById('setup-ledger-relay').value || 'wss://relay.ynniv.com',
+    network: document.getElementById('setup-network').value,
+    saveKeychain: document.getElementById('setup-save-keychain').checked,
+  };
+}
+
 window.initWallet = async function() {
-  const relayInput = document.getElementById('setup-relay').value || '';
-  const ledgerRelay = document.getElementById('setup-ledger-relay').value || 'ws://localhost:7779';
-  const network = document.getElementById('setup-network').value;
+  const cfg = getSetupConfig();
 
   // Generate 12-word mnemonic
   const mnemonic = generateMnemonic(12);
   state.seed = await mnemonicToSeed(mnemonic);
   state.mnemonic = mnemonic;
-  state.network = network;
-  state.relays = parseRelays(relayInput);
-  state.ledgerRelay = ledgerRelay;
+  state.network = cfg.network;
+  state.relays = parseRelays(cfg.relayInput);
+  state.ledgerRelay = cfg.ledgerRelay;
   state.deposits = [];
   state.keyIndex = 0;
+  state.useNip07 = false;
   saveState();
 
-  // Save to keychain immediately — on Safari this reloads the page,
-  // which is fine since state is already persisted to localStorage.
-  await saveToKeychain(true);
+  if (cfg.saveKeychain) {
+    // Save to keychain immediately — on Safari this reloads the page,
+    // which is fine since state is already persisted to localStorage.
+    await saveToKeychain(true);
+  }
+
+  startMainUI();
+};
+
+window.initWalletNip07 = async function() {
+  if (!window.nostr) { log('No NIP-07 extension detected.', 'error'); return; }
+  try {
+    const pk = await window.nostr.getPublicKey();
+    if (!pk) { log('NIP-07 extension denied access.', 'error'); return; }
+  } catch (e) {
+    log(`NIP-07 error: ${e.message}`, 'error');
+    return;
+  }
+
+  const cfg = getSetupConfig();
+
+  // Still generate a wallet key for deposit signing — NIP-07 is for identity only
+  const mnemonic = generateMnemonic(12);
+  state.seed = await mnemonicToSeed(mnemonic);
+  state.mnemonic = mnemonic;
+  state.network = cfg.network;
+  state.relays = parseRelays(cfg.relayInput);
+  state.ledgerRelay = cfg.ledgerRelay;
+  state.deposits = [];
+  state.keyIndex = 0;
+  state.useNip07 = true;
+  state.identityRelays = await getNip07Relays();
+  saveState();
+
+  if (cfg.saveKeychain) {
+    await saveToKeychain(true);
+  }
 
   startMainUI();
 };
@@ -5338,7 +5705,7 @@ window.importWallet = async function() {
 
   const network = document.getElementById('setup-network').value;
   const relayInput = document.getElementById('setup-relay').value || '';
-  const ledgerRelay = document.getElementById('setup-ledger-relay').value || 'ws://localhost:7779';
+  const ledgerRelay = document.getElementById('setup-ledger-relay').value || 'wss://relay.ynniv.com';
 
   if (isValidMnemonic(input)) {
     // BIP-39 mnemonic
@@ -5360,6 +5727,34 @@ window.importWallet = async function() {
   state.keyIndex = 0;
   saveState();
   startMainUI();
+
+  // Try to restore remote state after relays connect, then scan for deposits
+  setTimeout(async () => {
+    let restored = false;
+    try {
+      const remote = await loadStateRemote();
+      if (remote && remote.deposits && remote.deposits.length > 0) {
+        log(`Found remote backup (${remote.deposits.length} deposit(s)). Restoring...`);
+        applyRemoteState(remote);
+        saveState();
+        renderDeposits();
+        resubscribeUpdates();
+        log('Restored from remote backup.', 'success');
+        restored = true;
+      }
+    } catch (e) { console.warn('Remote restore failed:', e); }
+
+    // Also scan for deposits by derived keys (catches anything not in remote backup)
+    try {
+      log('Scanning for deposits...');
+      const found = await recoverDeposits();
+      if (found > 0) {
+        log(`Recovered ${found} deposit(s) from relay scan.`, 'success');
+      } else if (!restored) {
+        log('No deposits found on connected relays.');
+      }
+    } catch (e) { console.warn('Deposit recovery failed:', e); }
+  }, 3000);
 };
 
 window.resetWallet = function() {
@@ -5526,6 +5921,92 @@ window.changeRelays = function() {
   document.getElementById('settings-relay').textContent = state.relays.join(', ');
 };
 
+// --- NIP-07 relay helper ---
+
+async function getNip07Relays() {
+  if (!window.nostr?.getRelays) return [];
+  try {
+    const relayMap = await window.nostr.getRelays();
+    if (relayMap && typeof relayMap === 'object') {
+      return Object.keys(relayMap).filter(u => u.startsWith('ws'));
+    }
+  } catch {}
+  return [];
+}
+
+// --- Signing mode (wallet key vs NIP-07) ---
+
+function updateSigningModeUI(walletPubkey) {
+  const isNip07 = state.useNip07;
+  document.getElementById('settings-signing-mode').textContent = isNip07 ? 'NIP-07 extension' : 'Wallet key';
+  document.getElementById('settings-npub').textContent = isNip07 ? '(from extension)' : walletPubkey;
+  document.getElementById('settings-nip07-btn').textContent = isNip07 ? 'Switch to wallet key' : 'Switch to NIP-07 extension';
+  document.getElementById('settings-attest-card').style.display = isNip07 ? 'none' : '';
+
+  if (isNip07 && window.nostr?.getPublicKey) {
+    window.nostr.getPublicKey().then(pk => {
+      if (pk) document.getElementById('settings-npub').textContent = pk;
+    }).catch(() => {});
+  }
+}
+
+window.toggleNip07 = async function() {
+  if (!state.useNip07) {
+    // Switching TO NIP-07
+    if (!window.nostr) {
+      log('No NIP-07 extension detected. Install nos2x or Alby.', 'error');
+      return;
+    }
+    try {
+      const pk = await window.nostr.getPublicKey();
+      if (!pk) { log('NIP-07 extension denied access.', 'error'); return; }
+      state.useNip07 = true;
+      state.identityRelays = await getNip07Relays();
+      saveState();
+      log(`Switched to NIP-07 extension (${pk.slice(0, 16)}...)`);
+    } catch (e) {
+      log(`NIP-07 extension error: ${e.message}`, 'error');
+      return;
+    }
+  } else {
+    // Switching BACK to wallet key
+    state.useNip07 = false;
+    state.identityRelays = [];
+    saveState();
+    log('Switched to wallet key.');
+  }
+  const nostrKey = deriveSecretKey(state.seed, 0);
+  updateSigningModeUI(getPublicKeyHex(nostrKey));
+};
+
+window.createSubkeyAttestation = function() {
+  const input = document.getElementById('attest-subkey-input').value.trim().toLowerCase();
+  if (!input || input.length !== 64 || !/^[0-9a-f]+$/.test(input)) {
+    document.getElementById('attest-subkey-input').style.borderColor = 'var(--red)';
+    return;
+  }
+  document.getElementById('attest-subkey-input').style.borderColor = '';
+
+  const accountKey = deriveSecretKey(state.seed, 0);
+  const accountPubkey = getPublicKeyHex(accountKey);
+
+  // Attestation: SHA256("nostr301:<subkey-hex>"), signed with Schnorr
+  const msg = utf8ToBytes('nostr301:' + input);
+  const digest = sha256(msg);
+  const sig = schnorr.sign(digest, accountKey);
+  const sigHex = bytesToHex(sig);
+
+  document.getElementById('attest-v').textContent = accountPubkey;
+  document.getElementById('attest-va').textContent = sigHex;
+  document.getElementById('attest-result').style.display = '';
+  log(`Attestation created for subkey ${input.slice(0, 16)}...`);
+};
+
+window.copyAttestField = async function(field) {
+  const el = document.getElementById(field === 'v' ? 'attest-v' : 'attest-va');
+  try { await navigator.clipboard.writeText(el.textContent); log(`Copied ${field} tag`); } catch {}
+};
+
 window.discoverLedgers = discoverLedgers;
 
 function startMainUI() {
@@ -5535,8 +6016,8 @@ function startMainUI() {
 
   const nostrKey = deriveSecretKey(state.seed, 0);
   const npub = getPublicKeyHex(nostrKey);
-  document.getElementById('settings-npub').textContent = npub;
   document.getElementById('settings-key-index').textContent = state.keyIndex;
+  updateSigningModeUI(npub);
   document.getElementById('settings-network').textContent = state.network;
   document.getElementById('settings-relay').textContent = state.relays.join(', ') + ' + ' + state.ledgerRelay;
   document.getElementById('settings-seed').value = bytesToHex(state.seed);
@@ -5578,6 +6059,13 @@ if (loadState()) {
   setTimeout(restoreFromHash, 500);
 } else {
   document.getElementById('setup-panel').style.display = '';
+  // Show NIP-07 button if extension is available (check now + after delay for late injection)
+  function checkNip07() {
+    if (window.nostr) document.getElementById('setup-nip07-btn').style.display = '';
+  }
+  checkNip07();
+  setTimeout(checkNip07, 500);
+  setTimeout(checkNip07, 2000);
 }
 
 // Handle back/forward navigation
