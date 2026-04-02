@@ -1186,14 +1186,64 @@ fn decode_update(update: &SignedLedgerUpdate) {
 // Dump update to file
 // =========================================================================
 
+fn tlv_to_json(data: &[u8], lookup: fn(u64) -> (&'static str, Enc)) -> Vec<serde_json::Value> {
+    let mut records = Vec::new();
+    let mut off = 0;
+    while off < data.len() {
+        let (tag, tlen) = match read_varint_at(data, off) { Some(v) => v, None => break };
+        off += tlen;
+        let (len, llen) = match read_varint_at(data, off) { Some(v) => v, None => break };
+        off += llen;
+        let end = off + len as usize;
+        if end > data.len() { break; }
+        let val = &data[off..end];
+        off = end;
+
+        let (name, enc) = lookup(tag);
+        let formatted = match enc {
+            Enc::U8 if val.len() == 1 => serde_json::json!(val[0]),
+            Enc::U16 if val.len() == 2 => serde_json::json!(u16::from_be_bytes([val[0], val[1]])),
+            Enc::U32 if val.len() == 4 => {
+                let mut buf = [0u8; 4]; buf.copy_from_slice(val);
+                serde_json::json!(u32::from_be_bytes(buf))
+            }
+            Enc::U64 if val.len() == 8 => {
+                let mut buf = [0u8; 8]; buf.copy_from_slice(val);
+                serde_json::json!(u64::from_be_bytes(buf))
+            }
+            Enc::Str => serde_json::json!(String::from_utf8_lossy(val)),
+            Enc::OpTlv => {
+                // Recurse into inner operation TLV
+                let inner = tlv_to_json(val, lookup_op_field);
+                serde_json::json!({"_tlv": inner, "_base64": BASE64.encode(val)})
+            }
+            Enc::FeeTlv => {
+                let inner = tlv_to_json(val, |t| match t {
+                    0 => ("annualized_msats", Enc::U64),
+                    2 => ("annualized_bps", Enc::U16),
+                    4 => ("frequency_blocks", Enc::U32),
+                    _ => ("unknown", Enc::Bytes),
+                });
+                serde_json::json!(inner)
+            }
+            _ => serde_json::json!(hex::encode(val)),
+        };
+        records.push(serde_json::json!({"tag": tag, "name": name, "value": formatted}));
+    }
+    records
+}
+
 fn dump_update_json(update: &SignedLedgerUpdate) -> String {
-    let content_b64 = BASE64.encode(update.tlv_encode());
+    let envelope_bytes = update.tlv_encode();
+    let content_b64 = BASE64.encode(&envelope_bytes);
     let ledger_id_hex = hex::encode(update.ledger_id);
     let op_name = LedgerOperation::tlv_decode(&update.message)
         .map(|op| format_op(&op))
         .unwrap_or_else(|_| "?".to_string());
 
-    // Build a JSON representation matching the Nostr event content structure
+    let envelope_tlv = tlv_to_json(&envelope_bytes, lookup_slu_field);
+    let operation_tlv = tlv_to_json(&update.message, lookup_op_field);
+
     serde_json::json!({
         "sequence_number": update.sequence_number,
         "ledger_id": ledger_id_hex,
@@ -1209,6 +1259,8 @@ fn dump_update_json(update: &SignedLedgerUpdate) -> String {
         "member_ledger_hash": update.member_ledger_hash.map(hex::encode),
         "operation": op_name,
         "content_base64": content_b64,
+        "envelope_tlv": envelope_tlv,
+        "operation_tlv": operation_tlv,
     }).to_string()
 }
 
