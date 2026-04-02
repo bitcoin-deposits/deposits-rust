@@ -474,7 +474,7 @@ fn dedup_ledger_files(matches: Vec<LedgerMatch>, has_node_filter: bool) -> Vec<L
     results
 }
 
-fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbose: bool, until_hash: Option<&str>, decode_seq: Option<u64>, browse: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbose: bool, until_hash: Option<&str>, decode_seq: Option<u64>, dump_seq: Option<u64>, browse: bool) -> Result<(), Box<dyn std::error::Error>> {
     let all_matches = find_ledger_files(data_root, prefix, node_filter);
     let matches = dedup_ledger_files(all_matches, node_filter.is_some());
 
@@ -526,6 +526,20 @@ fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbo
     if let Some(seq) = decode_seq {
         match updates.iter().find(|u| u.sequence_number == seq) {
             Some(update) => { decode_update(update); return Ok(()); }
+            None => {
+                eprintln!("No update with sequence {} in {}", seq, m.path.display());
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if let Some(seq) = dump_seq {
+        match updates.iter().find(|u| u.sequence_number == seq) {
+            Some(update) => {
+                let path = dump_update_to_file(update)?;
+                println!("{}", path);
+                return Ok(());
+            }
             None => {
                 eprintln!("No update with sequence {} in {}", seq, m.path.display());
                 std::process::exit(1);
@@ -745,7 +759,7 @@ async fn fetch_updates_from_relay(relay_url: &str, ledger_id: &str) -> Result<Ve
     Ok(updates)
 }
 
-async fn run_nostr(relay_url: &str, ledger_id: &str, verbose: bool, until_hash: Option<&str>, decode_seq: Option<u64>, browse: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_nostr(relay_url: &str, ledger_id: &str, verbose: bool, until_hash: Option<&str>, decode_seq: Option<u64>, dump_seq: Option<u64>, browse: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut updates = fetch_updates_from_relay(relay_url, ledger_id).await?;
 
     if updates.is_empty() {
@@ -764,6 +778,20 @@ async fn run_nostr(relay_url: &str, ledger_id: &str, verbose: bool, until_hash: 
     if let Some(seq) = decode_seq {
         match updates.iter().find(|u| u.sequence_number == seq) {
             Some(update) => { decode_update(update); return Ok(()); }
+            None => {
+                eprintln!("No update with sequence {} from relay", seq);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if let Some(seq) = dump_seq {
+        match updates.iter().find(|u| u.sequence_number == seq) {
+            Some(update) => {
+                let path = dump_update_to_file(update)?;
+                println!("{}", path);
+                return Ok(());
+            }
             None => {
                 eprintln!("No update with sequence {} from relay", seq);
                 std::process::exit(1);
@@ -1155,6 +1183,44 @@ fn decode_update(update: &SignedLedgerUpdate) {
 }
 
 // =========================================================================
+// Dump update to file
+// =========================================================================
+
+fn dump_update_json(update: &SignedLedgerUpdate) -> String {
+    let content_b64 = BASE64.encode(update.tlv_encode());
+    let ledger_id_hex = hex::encode(update.ledger_id);
+    let op_name = LedgerOperation::tlv_decode(&update.message)
+        .map(|op| format_op(&op))
+        .unwrap_or_else(|_| "?".to_string());
+
+    // Build a JSON representation matching the Nostr event content structure
+    serde_json::json!({
+        "sequence_number": update.sequence_number,
+        "ledger_id": ledger_id_hex,
+        "operator_id": hex::encode(update.operator_id.serialize()),
+        "block_height": update.block_height,
+        "block_hash": hex::encode(update.block_hash),
+        "previous_hash": hex::encode(update.previous_hash),
+        "current_hash": hex::encode(update.current_hash),
+        "chain_hash": hex::encode(update.chain_hash()),
+        "cosign_signature": hex::encode(update.cosign_signature),
+        "operator_signature": hex::encode(update.operator_signature),
+        "cosigner_pubkey": update.cosigner_pubkey.map(|pk| hex::encode(pk.serialize())),
+        "member_ledger_hash": update.member_ledger_hash.map(hex::encode),
+        "operation": op_name,
+        "content_base64": content_b64,
+    }).to_string()
+}
+
+fn dump_update_to_file(update: &SignedLedgerUpdate) -> Result<String, Box<dyn std::error::Error>> {
+    let filename = format!("update_seq{}.json", update.sequence_number);
+    let json = dump_update_json(update);
+    let pretty = serde_json::to_string_pretty(&serde_json::from_str::<serde_json::Value>(&json)?)?;
+    std::fs::write(&filename, &pretty)?;
+    Ok(filename)
+}
+
+// =========================================================================
 // TUI Browse Mode
 // =========================================================================
 
@@ -1384,6 +1450,7 @@ struct BrowseState {
     right_lines: Vec<Line<'static>>,
     right_scroll: u16,
     cached_idx: Option<usize>,
+    status_msg: Option<String>,
 }
 
 fn refresh_right(state: &mut BrowseState, updates: &[SignedLedgerUpdate]) {
@@ -1423,8 +1490,10 @@ fn browse_loop(
             frame.render_stateful_widget(list, left, &mut state.list_state);
 
             // Right: TLV decode
-            let title = if let Some(idx) = state.list_state.selected() {
-                format!(" seq {} ", updates[idx].sequence_number)
+            let title = if let Some(ref msg) = state.status_msg {
+                format!(" {} ", msg)
+            } else if let Some(idx) = state.list_state.selected() {
+                format!(" seq {} [d=dump] ", updates[idx].sequence_number)
             } else { " Decode ".to_string() };
             let para = Paragraph::new(state.right_lines.clone())
                 .block(Block::bordered().title(title))
@@ -1436,6 +1505,7 @@ fn browse_loop(
             match event::read()? {
                 Event::Key(key) => {
                     if key.kind != KeyEventKind::Press { continue; }
+                    state.status_msg = None; // clear on any key
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Down | KeyCode::Char('j') => {
@@ -1459,6 +1529,16 @@ fn browse_loop(
                         }
                         KeyCode::PageUp => {
                             state.right_scroll = state.right_scroll.saturating_sub(20);
+                        }
+                        KeyCode::Char('d') => {
+                            if let Some(idx) = state.list_state.selected() {
+                                if idx < updates.len() {
+                                    match dump_update_to_file(&updates[idx]) {
+                                        Ok(path) => state.status_msg = Some(format!("Dumped to {}", path)),
+                                        Err(e) => state.status_msg = Some(format!("Dump failed: {}", e)),
+                                    }
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -1521,6 +1601,7 @@ fn browse_updates(updates: &[SignedLedgerUpdate], start_seq: Option<u64>) -> Res
         right_lines: Vec::new(),
         right_scroll: 0,
         cached_idx: None,
+        status_msg: None,
     };
     refresh_right(&mut state, updates);
 
@@ -1557,7 +1638,8 @@ fn print_help() {
     eprintln!("  --node, -n <name>       Only search this node's ledgers (JSONL mode)");
     eprintln!("  --until <hash_prefix>   Stop replay at this chain_hash");
     eprintln!("  --decode <seq>          Annotated TLV hexdump of a single update");
-    eprintln!("  --browse                TUI browser (up/down to navigate, q to quit)");
+    eprintln!("  --dump <seq>            Dump a single update to update_seqN.json");
+    eprintln!("  --browse                TUI browser (up/down to navigate, d to dump, q to quit)");
     eprintln!("  --verbose, -v           Print each operation as it's applied");
     eprintln!("  --help, -h              Show this help");
     eprintln!();
@@ -1566,6 +1648,7 @@ fn print_help() {
     eprintln!("  replay-ledger 183c -n alice -v              # JSONL, verbose");
     eprintln!("  replay-ledger 183c --until a536             # JSONL, stop at hash");
     eprintln!("  replay-ledger 183c --decode 5               # Decode seq 5");
+    eprintln!("  replay-ledger 183c --dump 5                 # Dump seq 5 to file");
     eprintln!("  replay-ledger 183c --browse                 # TUI browser");
     eprintln!("  replay-ledger 183c --browse --decode 5      # Browse starting at seq 5");
     eprintln!("  replay-ledger --relay ws://localhost:7779    # List ledgers on relay");
@@ -1581,6 +1664,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut relay_url: Option<String> = None;
     let mut until_hash: Option<String> = None;
     let mut decode_seq: Option<u64> = None;
+    let mut dump_seq: Option<u64> = None;
     let mut browse = false;
     let mut verbose = false;
 
@@ -1607,6 +1691,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 decode_seq = Some(args[i + 1].parse().expect("--decode requires a sequence number"));
                 i += 2;
             }
+            "--dump" if i + 1 < args.len() => {
+                dump_seq = Some(args[i + 1].parse().expect("--dump requires a sequence number"));
+                i += 2;
+            }
             "--browse" => { browse = true; i += 1; }
             "--verbose" | "-v" => { verbose = true; i += 1; }
             "--help" | "-h" => { print_help(); return Ok(()); }
@@ -1626,11 +1714,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if prefix.is_empty() || prefix.len() < 16 {
             let selected = rt.block_on(list_relay_ledgers(&url, &prefix))?;
             match selected {
-                Some(lid) => rt.block_on(run_nostr(&url, &lid, verbose, until_hash.as_deref(), decode_seq, browse)),
+                Some(lid) => rt.block_on(run_nostr(&url, &lid, verbose, until_hash.as_deref(), decode_seq, dump_seq, browse)),
                 None => Ok(()),
             }
         } else {
-            rt.block_on(run_nostr(&url, &prefix, verbose, until_hash.as_deref(), decode_seq, browse))
+            rt.block_on(run_nostr(&url, &prefix, verbose, until_hash.as_deref(), decode_seq, dump_seq, browse))
         }
     } else {
         // JSONL mode
@@ -1638,6 +1726,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("Data root not found: {}. Use --data-root or --relay.", data_root.display());
             std::process::exit(1);
         }
-        run_jsonl(&data_root, &prefix, node_filter.as_deref(), verbose, until_hash.as_deref(), decode_seq, browse)
+        run_jsonl(&data_root, &prefix, node_filter.as_deref(), verbose, until_hash.as_deref(), decode_seq, dump_seq, browse)
     }
 }
