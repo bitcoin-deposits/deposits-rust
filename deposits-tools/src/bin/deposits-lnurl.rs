@@ -3,26 +3,31 @@
 //! Serves LUD-06/LUD-16 endpoints that translate LNURL-pay callbacks into
 //! deposits-node `make_invoice` requests via Nostr.
 //!
-//! Each deposit gets a lightning address: `<deposit_id>@<domain>`
+//! Lightning address format: `<deposit_pubkey>@<ledger_prefix>.<base_domain>`
+//!
+//! The ledger ID comes from the subdomain (wildcard DNS). A single server
+//! handles all ledgers via `*.<base_domain>`.
 //!
 //! Flow:
-//!   1. Payer resolves `user@domain` → GET /.well-known/lnurlp/<deposit_id>
-//!   2. Response: metadata, min/max, callback URL
-//!   3. Payer calls callback with ?amount=<msats>
-//!   4. Server sends kind 20101 make_invoice to operator relay
-//!   5. Operator responds with kind 20102 containing BOLT11 invoice
-//!   6. Server returns invoice to payer
+//!   1. Payer resolves `pubkey@a08153ed.pay.example.com`
+//!   2. GET https://a08153ed.pay.example.com/.well-known/lnurlp/<pubkey>
+//!   3. Response: metadata, min/max, callback URL
+//!   4. Payer calls callback with ?amount=<msats>
+//!   5. Server extracts ledger ID from Host header subdomain
+//!   6. Server sends kind 20101 make_invoice to operator relay
+//!   7. Operator responds with kind 20102 containing BOLT11 invoice
+//!   8. Server returns invoice to payer
 //!
 //! Env vars:
 //!   LNURL_NSEC          - Service key (hex or nsec) for signing Nostr requests
 //!   LNURL_RELAYS        - Comma-separated relay URLs
-//!   LNURL_DOMAIN        - Public domain (for lightning address metadata)
+//!   LNURL_DOMAIN        - Base domain (e.g. pay.example.com). Subdomains = ledger IDs.
 //!   LNURL_LISTEN        - HTTP listen address (default: 0.0.0.0:3000)
 //!   LNURL_MIN_SATS      - Minimum payment (default: 1)
 //!   LNURL_MAX_SATS      - Maximum payment (default: 1000000)
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Host, Path, Query, State},
     http::StatusCode,
     response::Json,
     routing::get,
@@ -97,26 +102,122 @@ fn env_or_file(name: &str) -> Option<String> {
 // LNURL-pay endpoints
 // ============================================================================
 
-/// GET /.well-known/lnurlp/<deposit_id>
+// Bech32 charset for encoding ledger IDs into DNS-safe subdomains
+const BECH32_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+/// Encode bytes as bech32 data characters (no HRP, no checksum — just the data part).
+/// 32 bytes → 52 chars, fits in a DNS label.
+fn bytes_to_bech32_data(bytes: &[u8]) -> String {
+    // Convert 8-bit groups to 5-bit groups
+    let mut result = Vec::new();
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in bytes {
+        acc = (acc << 8) | b as u32;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            result.push(BECH32_CHARSET[((acc >> bits) & 0x1f) as usize]);
+        }
+    }
+    if bits > 0 {
+        result.push(BECH32_CHARSET[((acc << (5 - bits)) & 0x1f) as usize]);
+    }
+    String::from_utf8(result).unwrap()
+}
+
+/// Decode bech32 data characters back to bytes.
+fn bech32_data_to_bytes(s: &str) -> Option<Vec<u8>> {
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut result = Vec::new();
+    for c in s.bytes() {
+        let idx = BECH32_CHARSET.iter().position(|&ch| ch == c)?;
+        acc = (acc << 5) | idx as u32;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            result.push((acc >> bits) as u8);
+        }
+    }
+    Some(result)
+}
+
+/// Encode a hex ledger ID to a bech32-data subdomain label.
+fn ledger_to_subdomain(hex_id: &str) -> Option<String> {
+    let bytes = hex::decode(hex_id).ok()?;
+    Some(bytes_to_bech32_data(&bytes))
+}
+
+/// Decode a bech32-data subdomain label back to a hex ledger ID.
+fn subdomain_to_ledger(subdomain: &str) -> Option<String> {
+    let bytes = bech32_data_to_bytes(subdomain)?;
+    if bytes.len() == 32 { Some(hex::encode(bytes)) } else { None }
+}
+
+fn lnurl_err(msg: &str) -> (StatusCode, Json<LnurlError>) {
+    (StatusCode::BAD_REQUEST, Json(LnurlError {
+        status: "ERROR",
+        reason: msg.to_string(),
+    }))
+}
+
+/// Extract ledger ID (full hex) from the Host header subdomain.
 ///
-/// Returns LNURL-pay metadata for the deposit. The deposit_id encodes
-/// both the ledger and deposit: `<ledger_prefix>-<deposit_pubkey>`
+/// Host `2qp9n7kzjmqyw...pay.example.com` with base_domain `pay.example.com`
+/// → subdomain decoded from bech32 data → full 64-char hex ledger ID.
+///
+/// Also accepts raw hex subdomains for backwards compatibility.
+/// Falls back to LNURL_DEFAULT_LEDGER if no subdomain.
+fn extract_ledger_from_host(host: &str, base_domain: &str) -> Option<String> {
+    // Strip port if present
+    let host_no_port = host.split(':').next().unwrap_or(host);
+    let base_no_port = base_domain.split(':').next().unwrap_or(base_domain);
+
+    if host_no_port.ends_with(base_no_port) && host_no_port.len() > base_no_port.len() {
+        let prefix = &host_no_port[..host_no_port.len() - base_no_port.len()];
+        let prefix = prefix.trim_end_matches('.');
+        if !prefix.is_empty() {
+            // Try bech32-data decode first
+            if let Some(hex_id) = subdomain_to_ledger(prefix) {
+                return Some(hex_id);
+            }
+            // Fall back to raw hex
+            if prefix.len() == 64 && prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Some(prefix.to_string());
+            }
+            // Treat as truncated hex prefix
+            return Some(prefix.to_string());
+        }
+    }
+
+    // Fallback: check env var for single-ledger deployments
+    std::env::var("LNURL_DEFAULT_LEDGER").ok()
+}
+
+/// GET /.well-known/lnurlp/<deposit_pubkey>
+///
+/// Returns LNURL-pay metadata. Ledger ID comes from the Host subdomain.
 async fn lnurlp_metadata(
     State(state): State<Arc<AppState>>,
-    Path(deposit_id): Path<String>,
+    Host(host): Host,
+    Path(deposit_pubkey): Path<String>,
 ) -> Result<Json<LnurlPayResponse>, (StatusCode, Json<LnurlError>)> {
-    // deposit_id format: <ledger_id_hex>-<deposit_pubkey_hex>
-    // or just <deposit_pubkey_hex> if ledger is implicit
+    let ledger_hex = extract_ledger_from_host(&host, &state.domain)
+        .ok_or_else(|| lnurl_err("Could not determine ledger from host. Use <ledger>.<domain> or set LNURL_DEFAULT_LEDGER."))?;
+
+    let subdomain = ledger_to_subdomain(&ledger_hex).unwrap_or(ledger_hex.clone());
+    let addr_domain = format!("{}.{}", subdomain, state.domain);
     let metadata = format!(
         "[[\"text/plain\",\"Pay to deposit {}\"],[\"text/identifier\",\"{}@{}\"]]",
-        &deposit_id[..16.min(deposit_id.len())],
-        deposit_id,
-        state.domain,
+        &deposit_pubkey[..16.min(deposit_pubkey.len())],
+        deposit_pubkey,
+        addr_domain,
     );
 
     Ok(Json(LnurlPayResponse {
         tag: "payRequest",
-        callback: format!("https://{}/lnurl/callback/{}", state.domain, deposit_id),
+        callback: format!("https://{}/lnurl/callback/{}", addr_domain, deposit_pubkey),
         min_sendable: state.min_msats,
         max_sendable: state.max_msats,
         metadata,
@@ -124,31 +225,22 @@ async fn lnurlp_metadata(
     }))
 }
 
-/// GET /lnurl/callback/<deposit_id>?amount=<msats>
+/// GET /lnurl/callback/<deposit_pubkey>?amount=<msats>
 ///
-/// Creates an invoice via the operator's deposits-node and returns it.
+/// Creates an invoice via the operator's deposits-node. Ledger from Host subdomain.
 async fn lnurlp_callback(
     State(state): State<Arc<AppState>>,
-    Path(deposit_id): Path<String>,
+    Host(host): Host,
+    Path(deposit_pubkey): Path<String>,
     Query(params): Query<CallbackParams>,
 ) -> Result<Json<CallbackResponse>, (StatusCode, Json<LnurlError>)> {
-    let err = |msg: &str| -> (StatusCode, Json<LnurlError>) {
-        (StatusCode::BAD_REQUEST, Json(LnurlError {
-            status: "ERROR",
-            reason: msg.to_string(),
-        }))
-    };
+    let ledger_id = extract_ledger_from_host(&host, &state.domain)
+        .ok_or_else(|| lnurl_err("Could not determine ledger from host"))?;
 
     if params.amount < state.min_msats || params.amount > state.max_msats {
-        return Err(err(&format!("Amount must be between {} and {} msats",
+        return Err(lnurl_err(&format!("Amount must be between {} and {} msats",
             state.min_msats, state.max_msats)));
     }
-
-    // Parse deposit_id: "ledger_hex-pubkey_hex"
-    let (ledger_id, deposit_pubkey) = match deposit_id.split_once('-') {
-        Some((l, p)) => (l.to_string(), p.to_string()),
-        None => return Err(err("Invalid deposit_id format. Expected: <ledger_id>-<deposit_pubkey>")),
-    };
 
     let amount_sats = params.amount / 1000;
     let description = params.comment.as_deref().unwrap_or("LNURL deposit");
@@ -168,7 +260,7 @@ async fn lnurlp_callback(
     let event = EventBuilder::new(Kind::Custom(20101), content.to_string())
         .tags(tags)
         .sign_with_keys(&state.keys)
-        .map_err(|e| err(&format!("Failed to sign event: {}", e)))?;
+        .map_err(|e| lnurl_err(&format!("Failed to sign event: {}", e)))?;
 
     let event_id = event.id.to_hex();
 
@@ -179,7 +271,7 @@ async fn lnurlp_callback(
     // Send to relays
     if let Err(e) = state.client.send_event(event).await {
         state.pending.lock().await.remove(&event_id);
-        return Err(err(&format!("Failed to send request: {}", e)));
+        return Err(lnurl_err(&format!("Failed to send request: {}", e)));
     }
 
     log::info!("Sent make_invoice: deposit={}-{}, amount={} sats, event={}...",
@@ -195,11 +287,11 @@ async fn lnurlp_callback(
         Ok(Ok(resp)) => resp,
         Ok(Err(_)) => {
             state.pending.lock().await.remove(&event_id);
-            return Err(err("Request cancelled"));
+            return Err(lnurl_err("Request cancelled"));
         }
         Err(_) => {
             state.pending.lock().await.remove(&event_id);
-            return Err(err("Timeout waiting for invoice from operator"));
+            return Err(lnurl_err("Timeout waiting for invoice from operator"));
         }
     };
 
@@ -210,7 +302,7 @@ async fn lnurlp_callback(
             let error = response.get("error")
                 .and_then(|v| v.as_str())
                 .unwrap_or("No invoice in response");
-            err(error)
+            lnurl_err(error)
         })?;
 
     Ok(Json(CallbackResponse {
@@ -323,6 +415,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("  domain: {}", domain);
     log::info!("  relays: {:?}", relay_urls);
     log::info!("  limits: {}-{} sats", min_sats, max_sats);
+    log::info!("  address format: <deposit_pubkey>@<bech32_ledger_id>.{}", domain);
 
     // Connect to relays
     let opts = Options::default().connection_timeout(Some(std::time::Duration::from_secs(30)));
