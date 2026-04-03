@@ -217,6 +217,29 @@ services:
       regtest:
         ipv4_address: 172.21.0.50
 
+  # =========================================================================
+  # LNURL-pay gateway — Nostr-native invoice creation for deposits
+  # =========================================================================
+
+  lnurl:
+    build:
+      context: ../
+      dockerfile: deposits-tools/Dockerfile.lnurl
+    container_name: lnurl
+    profiles: [lightning]
+    ports:
+      - "3000:3000"
+    environment:
+      LNURL_NSEC: "${LNURL_NSEC:-4c4e55524c7061790000000000000000000000000000000000000000000000ff}"
+      LNURL_RELAYS: "ws://alice:7777,ws://bob:7777,ws://charlie:7777,ws://diana:7777"
+      LNURL_DOMAIN: "${LNURL_DOMAIN:-localhost:3000}"
+      LNURL_LISTEN: "0.0.0.0:3000"
+      LNURL_MIN_SATS: "1"
+      LNURL_MAX_SATS: "1000000"
+      RUST_LOG: "info"
+    networks:
+      - regtest
+
   # Web wallet — static HTML served via nginx (live-mounted for dev)
   wallet:
     image: nginx:alpine

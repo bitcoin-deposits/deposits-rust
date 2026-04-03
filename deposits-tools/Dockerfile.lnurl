@@ -1,0 +1,39 @@
+FROM rust:slim-bookworm AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends pkg-config libssl-dev gcc libc6-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy workspace Cargo.toml (keep the [patch] section)
+COPY Cargo.toml ./
+
+# Copy the nostr-sdk performance fork
+COPY nostr-sdk-performance/ nostr-sdk-performance/
+
+# Copy crates needed for deposits-tools
+COPY deposits-protocol/ deposits-protocol/
+COPY deposits-core/ deposits-core/
+COPY deposits-tools/ deposits-tools/
+
+# Stub out deposits-node so workspace resolves
+COPY deposits-node/Cargo.toml deposits-node/Cargo.toml
+RUN mkdir -p deposits-node/src && echo "" > deposits-node/src/lib.rs && \
+    mkdir -p deposits-node/src/bin && \
+    echo "fn main() {}" > deposits-node/src/bin/deposits-node.rs
+
+RUN cargo build --release --bin deposits-lnurl
+
+# Runtime
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/deposits-lnurl /usr/local/bin/
+
+EXPOSE 3000
+
+CMD ["deposits-lnurl"]
