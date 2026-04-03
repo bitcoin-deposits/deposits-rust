@@ -1057,6 +1057,17 @@ impl Node {
         use nostr_sdk::{Filter, Kind, Timestamp};
         use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
 
+        // Skip our own ledgers — they're managed via open_ledger, not reimport
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let is_own = ledgers.iter().any(|(k, arc)| {
+                k.starts_with(ledger_id) && arc.read().unwrap().operator_key() == self.node_id
+            });
+            if is_own {
+                return Ok(()); // silently skip our own ledger
+            }
+        }
+
         let local_tip_seq = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers.get(ledger_id)
