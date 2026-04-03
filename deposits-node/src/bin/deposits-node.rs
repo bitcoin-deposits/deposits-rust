@@ -1011,8 +1011,9 @@ async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
 async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-node quorum <add|join|begin|request|list> [args...]");
+        eprintln!("Usage: deposits-node quorum <add|remove|join|begin|request|list> [args...]");
         eprintln!("  add      Add a quorum member to our ledger");
+        eprintln!("  remove   Remove a quorum member from our ledger");
         eprintln!("  join     Record that we joined another operator's quorum");
         eprintln!("  begin    Activate quorum-based Taproot spending");
         eprintln!("  request  Request a peer to join our quorum");
@@ -1021,13 +1022,14 @@ async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
     match args[0].as_str() {
         "add" => quorum_add(&args[1..]).await,
+        "remove" => quorum_remove(&args[1..]).await,
         "join" => quorum_join_cmd(&args[1..]).await,
         "begin" => quorum_begin(&args[1..]).await,
         "request" => quorum_request(&args[1..]).await,
         "list" => quorum_list(&args[1..]).await,
         cmd => {
             eprintln!("Unknown quorum subcommand: {}", cmd);
-            eprintln!("Usage: deposits-node quorum <add|join|begin|request|list> [args...]");
+            eprintln!("Usage: deposits-node quorum <add|remove|join|begin|request|list> [args...]");
             Ok(())
         }
     }
@@ -2760,6 +2762,51 @@ async fn quorum_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Member: {}", quorum_member);
     println!("  Ledger: {}", ledger_id);
     println!("  Member's collateral ledger: {}", member_ledger_id);
+
+    Ok(())
+}
+
+/// Remove a quorum member from our ledger (before quorum is activated).
+/// Usage: quorum remove <ledger_id> <member_pubkey>
+async fn quorum_remove(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut positional = Vec::new();
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            positional.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    if positional.len() < 2 {
+        eprintln!("Usage: deposits-node quorum remove <ledger_id> <member_pubkey>");
+        return Ok(());
+    }
+
+    let ledger_id = &positional[0];
+    let member_pubkey = &positional[1];
+
+    let config = parse_config(&config_args)?;
+
+    println!("Removing quorum member...");
+    println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!("  Member: {}...", &member_pubkey[..16.min(member_pubkey.len())]);
+
+    let params = serde_json::json!({
+        "member_pubkey": member_pubkey,
+    });
+
+    let result = send_daemon_request(&config, ledger_id, "quorum_remove", params).await?;
+    println!("Quorum member removed.");
+    println!("{}", serde_json::to_string_pretty(&result)?);
 
     Ok(())
 }

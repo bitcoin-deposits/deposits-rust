@@ -2283,7 +2283,7 @@ impl Node {
 
         // Silently drop operator-only actions if we're not the operator
         // (these are broadcast but only the operator should respond)
-        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump", "complete_offer", "deposit_credit", "quorum_add", "quorum_join", "collateral_record", "quorum_begin", "resync"];
+        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump", "complete_offer", "deposit_credit", "quorum_add", "quorum_remove", "quorum_join", "collateral_record", "quorum_begin", "resync"];
         if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
             tracing::info!("DROP not_operator: action={}, ledger={}...",
                 request.action, &request.ledger_id[..16.min(request.ledger_id.len())]);
@@ -2466,6 +2466,7 @@ impl Node {
             "complete_offer" => self.process_complete_offer_request(&request).await,
             "deposit_credit" => self.process_deposit_credit_request(&request).await,
             "quorum_add" => self.process_quorum_add_request(&request).await,
+            "quorum_remove" => self.process_quorum_remove_request(&request).await,
             "quorum_join" => self.process_quorum_join_request(&request).await,
             "consent_request" => self.process_consent_request(&request).await,
             "collateral_record" => self.process_collateral_record_request(&request).await,
@@ -7951,6 +7952,40 @@ impl Node {
                 tracing::error!("quorum_add failed: {}", e);
                 (false, None, Some(e.to_string()))
             }
+        }
+    }
+
+    async fn process_quorum_remove_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+        use std::str::FromStr;
+
+        let member_pubkey_hex = match request.params.get("member_pubkey").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return (false, None, Some("Missing member_pubkey parameter".to_string())),
+        };
+
+        let quorum_member = match PublicKey::from_str(member_pubkey_hex) {
+            Ok(pk) => pk,
+            Err(e) => return (false, None, Some(format!("Invalid member_pubkey: {}", e))),
+        };
+
+        let ledger_id = &request.ledger_id;
+
+        tracing::info!("Removing quorum member {}... from ledger {}...",
+            &member_pubkey_hex[..16.min(member_pubkey_hex.len())],
+            &ledger_id[..16.min(ledger_id.len())]);
+
+        let operation = LedgerOperation::QuorumRemoveMember {
+            quorum_member,
+            operator_signature: [0u8; 64], // filled by commit_operation
+        };
+
+        match self.commit_operation(ledger_id, operation).await {
+            Ok(_) => {
+                tracing::info!("Quorum member removed: {}...", &member_pubkey_hex[..16.min(member_pubkey_hex.len())]);
+                let result = serde_json::json!({ "removed": member_pubkey_hex });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => (false, None, Some(format!("Failed to remove quorum member: {}", e))),
         }
     }
 
