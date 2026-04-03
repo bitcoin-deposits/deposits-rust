@@ -322,6 +322,7 @@ pub async fn process_collateral_lock_request(
     };
 
     // Lock the collateral (now includes co-signing and broadcast)
+    // In direct CLI mode, the node itself is the quorum member pledging collateral
     match node.lock_collateral(
         ledger_id,
         &descriptor,
@@ -329,6 +330,7 @@ pub async fn process_collateral_lock_request(
         amount_msats,
         lock_until_block,
         requesting_operator,
+        node.node_id,
     ).await {
         Ok(attestation) => {
             // Serialize attestation as JSON then base64 encode for easy shell parsing

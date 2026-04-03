@@ -6793,6 +6793,20 @@ impl Node {
             self.node_id
         };
 
+        // Derive quorum member pubkey from request sender (the node pledging collateral)
+        let quorum_member = match hex::decode(&request.sender) {
+            Ok(x_only_bytes) if x_only_bytes.len() == 32 => {
+                let mut compressed = [0u8; 33];
+                compressed[0] = 0x02;
+                compressed[1..].copy_from_slice(&x_only_bytes);
+                match PublicKey::from_slice(&compressed) {
+                    Ok(pk) => pk,
+                    Err(_) => return (false, None, Some("Invalid sender pubkey".to_string())),
+                }
+            }
+            _ => return (false, None, Some("Invalid sender pubkey format".to_string())),
+        };
+
         // Lock the collateral (now includes co-signing and broadcast)
         match self.lock_collateral(
             &ledger_id,
@@ -6801,6 +6815,7 @@ impl Node {
             amount_msats,
             lock_until_block,
             requesting_operator,
+            quorum_member,
         ).await {
             Ok(attestation) => {
                 // Serialize attestation as JSON then base64 encode
@@ -10289,6 +10304,7 @@ impl Node {
         amount_msats: u64,
         lock_until_block: u32,
         requesting_operator: PublicKey,
+        quorum_member: PublicKey,
     ) -> Result<deposits_core::CollateralAttestationMsg, Error> {
         use bitcoin::hashes::{sha256, Hash};
         use bitcoin::secp256k1::{Secp256k1, Message};
@@ -10380,8 +10396,8 @@ impl Node {
             // Create operator's attestation signature
             let mut sign_content = Vec::new();
             sign_content.extend_from_slice(b"COLLATERAL_ATTESTATION:");
-            sign_content.extend_from_slice(&self.node_id.serialize());
             sign_content.extend_from_slice(&requesting_operator.serialize());
+            sign_content.extend_from_slice(&quorum_member.serialize());
             sign_content.extend_from_slice(&locked_amount.to_le_bytes());
             sign_content.extend_from_slice(&block_height.to_le_bytes());
             sign_content.extend_from_slice(&lock_expiry.to_le_bytes());
@@ -10396,8 +10412,8 @@ impl Node {
             let attestation_signature: [u8; 64] = *sig.as_ref();
 
             deposits_core::CollateralAttestationMsg {
-                operator: self.node_id,
-                quorum_member: requesting_operator,
+                operator: requesting_operator,
+                quorum_member,
                 collateral_ledger_id,
                 amount: locked_amount,
                 block_height,

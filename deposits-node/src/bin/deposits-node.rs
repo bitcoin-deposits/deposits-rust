@@ -3087,7 +3087,10 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     if let Some(att_json) = attestation_json {
         let our_ledger_ids: Vec<String> = {
             let ledgers = node.handler.ledgers.lock().unwrap();
-            ledgers.keys().cloned().collect()
+            ledgers.iter()
+                .filter(|(_, arc)| arc.read().unwrap().operator_key() == node.node_id)
+                .map(|(k, _)| k.clone())
+                .collect()
         };
 
         if our_ledger_ids.is_empty() {
