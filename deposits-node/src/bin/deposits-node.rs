@@ -2933,10 +2933,16 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
     let mut config_args = Vec::new();
     let mut positional_args = Vec::new();
+    let mut explicit_index: Option<u32> = None;
 
     // Separate config args from positional args
     let mut i = 0;
     while i < args.len() {
+        if args[i] == "--index" && i + 1 < args.len() {
+            explicit_index = Some(args[i + 1].parse().map_err(|_| "Invalid --index value")?);
+            i += 2;
+            continue;
+        }
         if args[i].starts_with("--") {
             config_args.push(args[i].clone());
             if i + 1 < args.len() && !args[i + 1].starts_with("--") {
@@ -2953,10 +2959,10 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     let mut node = Node::new(config.clone()).await?;
 
     // Determine if we're in wallet mode (3 positional args) or legacy mode (4+ positional args)
-    // Wallet mode: <ledger_id> <amount_msats> <lock_blocks>
+    // Wallet mode: <ledger_id> <amount_msats> <lock_blocks> [--index N]
     // Legacy mode: <reserves_id> <deposit_secret> <amount_msats> <lock_blocks>
     let (ledger_id, deposit_secret, amount_msats, lock_blocks, requesting_operator_hex) =
-        if positional_args.len() >= 4 && positional_args[1].len() == 64 && hex::decode(&positional_args[1]).is_ok() {
+        if positional_args.len() >= 4 && positional_args[1].len() == 64 && hex::decode(&positional_args[1]).is_ok() && explicit_index.is_none() {
             // Legacy mode: second arg looks like a hex secret
             let reserves_id = positional_args[0].clone();
             let secret_hex = positional_args[1].clone();
@@ -2977,17 +2983,21 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             let blocks: u32 = positional_args[2].parse().map_err(|_| "Invalid lock_blocks")?;
             let req_op = positional_args.get(3).cloned();
 
-            // Look up key_index from wallet deposits.json for this ledger
-            let wallet_dir = config.data_dir.join("wallet");
-            let deposits_file = wallet_dir.join("deposits.json");
-            let key_index: u32 = if deposits_file.exists() {
-                let data = std::fs::read_to_string(&deposits_file)?;
-                let deposits: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
-                deposits.iter()
-                    .find(|d| d.get("ledger_id").and_then(|v| v.as_str()) == Some(&ledger_id))
-                    .and_then(|d| d.get("key_index").and_then(|v| v.as_u64()))
-                    .unwrap_or(0) as u32
-            } else { 0 };
+            // Use explicit --index if provided, otherwise look up from deposits.json
+            let key_index: u32 = if let Some(idx) = explicit_index {
+                idx
+            } else {
+                let wallet_dir = config.data_dir.join("wallet");
+                let deposits_file = wallet_dir.join("deposits.json");
+                if deposits_file.exists() {
+                    let data = std::fs::read_to_string(&deposits_file)?;
+                    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+                    deposits.iter()
+                        .find(|d| d.get("ledger_id").and_then(|v| v.as_str()) == Some(&ledger_id))
+                        .and_then(|d| d.get("key_index").and_then(|v| v.as_u64()))
+                        .unwrap_or(0) as u32
+                } else { 0 }
+            };
 
             let xpriv = Xpriv::new_master(config.network, &config.seed)?;
             let secp = Secp256k1::new();
@@ -2999,7 +3009,7 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
             (ledger_id, secret, amount, blocks, req_op)
         } else {
-            return Err("Usage: collateral lock <ledger_id> <amount_msats> <lock_blocks> [requesting_op]\n       collateral lock <reserves_id> <deposit_secret> <amount_msats> <lock_blocks> [requesting_op]".into());
+            return Err("Usage: collateral lock <ledger_id> <amount_msats> <lock_blocks> [requesting_op] [--index N]\n       collateral lock <reserves_id> <deposit_secret> <amount_msats> <lock_blocks> [requesting_op]".into());
         };
 
     // Derive the deposit pubkey from the secret and create descriptor
