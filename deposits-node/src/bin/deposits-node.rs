@@ -980,8 +980,10 @@ fn derive_deposit_key(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("Failed to derive deposit key: {}", e))?;
 
     let pubkey = PublicKey::from_secret_key(&secp, &deposit_xpriv.private_key);
-    eprintln!("pubkey: {}", pubkey);
-    println!("{}", hex::encode(deposit_xpriv.private_key.secret_bytes()));
+    // Output compressed pubkey on stdout (for use with deposit open)
+    // Secret key on stderr (for signing operations)
+    println!("{}", pubkey);
+    eprintln!("secret: {}", hex::encode(deposit_xpriv.private_key.secret_bytes()));
 
     Ok(())
 }
