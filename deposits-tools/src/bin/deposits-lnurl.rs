@@ -353,8 +353,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build HTTP routes
     let app = Router::new()
-        .route("/.well-known/lnurlp/{deposit_id}", get(lnurlp_metadata))
-        .route("/lnurl/callback/{deposit_id}", get(lnurlp_callback))
+        .route("/.well-known/lnurlp/:deposit_id", get(lnurlp_metadata))
+        .route("/lnurl/callback/:deposit_id", get(lnurlp_callback))
         .with_state(state);
 
     log::info!("Listening on {}", listen);
