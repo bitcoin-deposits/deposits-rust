@@ -6,10 +6,7 @@ This document specifies the on-chain transaction formats used by Bitcoin Deposit
 
 ## Reserves UTXO
 
-A ledger's reserves are held in a single UTXO with an amount greater than or equal to the sum of the ledger's obligations (total deposit balances + locked amounts). The UTXO is spendable by:
-
-1. **Quorum majority**: a threshold of quorum members can spend cooperatively (for rotation or recovery)
-2. **Operator fallback**: the operator can spend unilaterally after a lengthy timelock (for recovery when quorum members are unavailable)
+A ledger's reserves are held in a single UTXO with an amount greater than or equal to the sum of the ledger's obligations (total deposit balances + locked amounts). The UTXO is spendable by tiered script paths — quorum members first, operator later, with increasing timelocks.
 
 ## Tapscript Construction
 
@@ -17,15 +14,24 @@ The reserves UTXO uses a Taproot output with a tapscript tree containing tiered 
 
 ### Spending Tiers
 
-The `quorum_expiry` block (shortest member's `collateral_lock_until`) determines the timelock structure:
+For a quorum of n members:
 
-1. **Full quorum** (k-of-n): no timelock. Available immediately. This is the normal operating path for rotation and recovery.
+| Tier | Signers | Timelock | Purpose |
+|---|---|---|---|
+| 0 | Majority of quorum (no operator) | Immediate | Normal operations: rotation, co-signed settlements |
+| 1 | Minority of quorum (no operator) | 1008 blocks (~1 week) | Degraded quorum recovery when members disappear |
+| 2 | Operator only | 2016 blocks (~2 weeks) | Operator solo when quorum is unresponsive |
+| 3 | Any single party | 4032 blocks (~4 weeks) | Emergency last resort recovery |
 
-2. **Degraded quorum** (k-1 of n): available before `quorum_expiry`. This allows the remaining members to initiate a new `QuorumBegin` if one member disappears. The degraded window should be early enough that the new quorum can be established before collateral expires. Suggested: `quorum_expiry - 2016` (~2 weeks before expiry).
+The operator is deliberately excluded from Tier 0 and 1. The quorum can operate and recover reserves without operator participation. The operator's solo spending path (Tier 2) is only available after a significant timelock, ensuring the quorum has ample opportunity to act first.
 
-3. **Operator solo**: available well after `quorum_expiry`. This is the absolute last resort when the entire quorum is unresponsive. Suggested: `quorum_expiry + 8640` (~2 months after expiry).
+For the simple 2-party case (n ≤ 2):
 
-The degraded path predating `quorum_expiry` is critical: letting the quorum expire without rotation is non-conforming (see DEP-11), so the mechanism to prevent that must be available before expiry.
+| Tier | Signers | Timelock |
+|---|---|---|
+| 0 | Both quorum members | Immediate |
+| 1 | Operator only | 2016 blocks |
+| 2 | Any single party | 4032 blocks |
 
 ## QuorumBegin (disc 12)
 
