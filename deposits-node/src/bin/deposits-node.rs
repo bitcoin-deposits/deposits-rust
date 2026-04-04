@@ -3236,6 +3236,7 @@ async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         "list" => deposit_list(&args[1..]).await,
         "open" => deposit_open(&args[1..]).await,
         "ls" => deposit_ls(&args[1..]).await,
+        "address" => deposit_address(&args[1..]),
         "invoice" => deposit_invoice(&args[1..]).await,
         "pending" => deposit_pending(&args[1..]).await,
         "credit" => deposit_credit(&args[1..]).await,
@@ -3415,6 +3416,60 @@ async fn deposit_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 }
 
 /// Create a lightning invoice to fund a deposit
+/// Show the lightning address for a deposit (for use with LNURL gateway).
+/// Usage: deposit address <ledger_id> <deposit_pubkey> [--domain pay.example.com]
+fn deposit_address(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    const BECH32_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+    fn hex_to_bech32(hex_id: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let bytes = hex::decode(hex_id)?;
+        let mut result = Vec::new();
+        let mut acc: u32 = 0;
+        let mut bits: u32 = 0;
+        for &b in &bytes {
+            acc = (acc << 8) | b as u32;
+            bits += 8;
+            while bits >= 5 {
+                bits -= 5;
+                result.push(BECH32_CHARSET[((acc >> bits) & 0x1f) as usize]);
+            }
+        }
+        if bits > 0 {
+            result.push(BECH32_CHARSET[((acc << (5 - bits)) & 0x1f) as usize]);
+        }
+        Ok(String::from_utf8(result)?)
+    }
+
+    let mut positional = Vec::new();
+    let mut domain = "pay.example.com".to_string();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--domain" && i + 1 < args.len() {
+            domain = args[i + 1].clone();
+            i += 2;
+            continue;
+        }
+        if !args[i].starts_with("--") {
+            positional.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    if positional.len() < 2 {
+        eprintln!("Usage: deposits-node deposit address <ledger_id> <deposit_pubkey> [--domain pay.example.com]");
+        return Ok(());
+    }
+
+    let ledger_id = &positional[0];
+    let pubkey = &positional[1];
+    let subdomain = hex_to_bech32(ledger_id)?;
+
+    println!("{}@{}.{}", pubkey, subdomain, domain);
+
+    Ok(())
+}
+
 async fn deposit_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut positional: Vec<String> = Vec::new();
     let mut config_args = Vec::new();
