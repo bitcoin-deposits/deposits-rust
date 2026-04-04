@@ -150,28 +150,33 @@ pub struct ThresholdConfig {
 }
 
 impl ThresholdConfig {
-    /// Default configuration for n voters:
-    /// - Tier 0: Majority + tie-breaker (immediate) - normal operations
-    /// - Tier 1: 2-of-n quorum override (1008 blocks) - custody transfer when quorum agrees
-    /// - Tier 2: 1-of-n emergency (4032 blocks) - last resort recovery
-    ///
-    /// Note: Tier 1 allows quorum members to override the operator after ~1 week.
-    /// This is used for custody transfers when the quorum detects non-conformance.
+    /// Default configuration for n voters (quorum members, not counting operator):
+    /// - Tier 0: Majority of quorum, no operator (immediate) - normal co-signed operations
+    /// - Tier 1: Minority of quorum, no operator (1008 blocks) - degraded quorum recovery
+    /// - Tier 2: Operator only (2016 blocks) - operator solo after quorum timeout
+    /// - Tier 3: Any single party (4032 blocks) - emergency last resort
     pub fn default_for_voter_count(n: usize) -> Self {
         let tiers = if n <= 2 {
             // Simple 2-party case
             vec![
-                ThresholdTier::new(2, true, 0, "Both parties required"),
-                ThresholdTier::emergency_recovery(2016),
+                ThresholdTier::new(2, false, 0, "Both quorum members required"),
+                ThresholdTier::new(1, true, 2016, "Operator only after 2016 blocks"),
+                ThresholdTier::emergency_recovery(4032),
             ]
         } else {
-            // Multi-party case with quorum override
+            let majority = (n / 2) + 1;
+            let minority = (n / 3).max(1);
             vec![
-                ThresholdTier::majority_immediate(n),
-                // Quorum override: 2-of-n without operator (immediate)
-                // Used for custody transfer when quorum agrees on non-conformance
-                ThresholdTier::degraded(2, false, 0),
-                ThresholdTier::emergency_recovery(4032), // 1-of-n after 4 weeks
+                // Tier 0: majority of quorum (no operator) — immediate
+                ThresholdTier::new(majority, false, 0,
+                    &format!("{}-of-{} quorum (immediate)", majority, n)),
+                // Tier 1: minority of quorum (no operator) — after ~1 week
+                ThresholdTier::new(minority, false, 1008,
+                    &format!("{}-of-{} quorum (after 1008 blocks)", minority, n)),
+                // Tier 2: operator only — after ~2 weeks
+                ThresholdTier::new(1, true, 2016, "Operator only (after 2016 blocks)"),
+                // Tier 3: any single party — after ~4 weeks
+                ThresholdTier::emergency_recovery(4032),
             ]
         };
         Self { tiers }
