@@ -2729,15 +2729,18 @@ function renderDeposits() {
   }
   const fromSel = document.getElementById('transfer-from');
   if (fromSel) {
-    fromSel.innerHTML = state.deposits.map(d =>
-      `<option value="${esc(d.alias)}">${depositLabel(d)}</option>`
-    ).join('');
+    fromSel.innerHTML = state.deposits.map(d => {
+      const ledger = d.ledger_id ? ` [${d.ledger_id.slice(0, 8)}]` : '';
+      return `<option value="${esc(d.alias)}">${depositLabel(d)}${ledger}</option>`;
+    }).join('');
   }
   const toSel = document.getElementById('transfer-to');
   if (toSel) {
     const fromVal = fromSel ? fromSel.value : '';
+    const fromDep = state.deposits.find(d => d.alias === fromVal);
+    const fromLedger = fromDep?.ledger_id;
     const opts = state.deposits
-      .filter(d => d.alias !== fromVal)
+      .filter(d => d.alias !== fromVal && d.ledger_id === fromLedger)
       .map(d => `<option value="${esc(d.alias)}">${depositLabel(d)}</option>`)
       .join('');
     toSel.innerHTML = opts + '<option value="__other__">Other (enter ID)</option>';
@@ -3484,15 +3487,17 @@ window.showWalletSendTransfer = function() {
 
 function updateWalletTransferTo() {
   const fromAlias = (document.getElementById('wallet-send-deposit') || {}).value || '';
+  const fromDeposit = state.deposits.find(d => d.alias === fromAlias);
+  const fromLedger = fromDeposit?.ledger_id;
   const toSel = document.getElementById('wallet-send-transfer-to');
   if (!toSel) return;
   const opts = state.deposits
-    .filter(d => d.alias !== fromAlias)
+    .filter(d => d.alias !== fromAlias && d.ledger_id === fromLedger)
     .map(d => {
       const label = d.amount_sats != null ? `${esc(d.alias)} (₿${d.amount_sats})` : esc(d.alias);
       return `<option value="${esc(d.alias)}">${label}</option>`;
     }).join('');
-  toSel.innerHTML = opts;
+  toSel.innerHTML = opts || '<option disabled>No other deposits on this ledger</option>';
 }
 
 window.doWalletTransfer = async function() {
@@ -4524,12 +4529,13 @@ window.onTransferFromChange = async function() {
   const alias = document.getElementById('transfer-from').value;
   const deposit = state.deposits.find(d => d.alias === alias);
 
-  // Re-render "to" dropdown excluding the selected "from"
+  // Re-render "to" dropdown: same ledger only, excluding the selected "from"
   const toSel = document.getElementById('transfer-to');
   if (toSel) {
     const prevTo = toSel.value;
+    const fromLedger = deposit?.ledger_id;
     const opts = state.deposits
-      .filter(d => d.alias !== alias)
+      .filter(d => d.alias !== alias && d.ledger_id === fromLedger)
       .map(d => {
         const label = d.amount_sats != null ? `${esc(d.alias)} (₿${d.amount_sats})` : esc(d.alias);
         return `<option value="${esc(d.alias)}">${label}</option>`;
