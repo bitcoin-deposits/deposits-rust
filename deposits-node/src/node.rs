@@ -6218,23 +6218,32 @@ impl Node {
                     hex::encode(&payment_id[..8]));
             }
             Err(e) => {
-                tracing::warn!("LDK pay_invoice failed for {}...: {}, failing lock",
-                    hex::encode(&payment_id[..8]), e);
+                let err_str = e.to_string();
+                // "already initiated" means the invoice exists on the shared LDK node
+                // (created by another operator). This is cross-node self-pay — the payment
+                // will settle internally via LDK. Let auto_complete_outbound_payments handle it.
+                if err_str.contains("already been initiated") || err_str.contains("already initiated") {
+                    tracing::info!("Cross-node self-pay detected for {}... (shared LDK node), will complete in background",
+                        hex::encode(&payment_id[..8]));
+                } else {
+                    tracing::warn!("LDK pay_invoice failed for {}...: {}, failing lock",
+                        hex::encode(&payment_id[..8]), e);
 
-                let fail_sequence = {
-                    let ledger = ledger_arc.read().unwrap();
-                    ledger.next_sequence()
-                };
-                let fail_operation = LedgerOperation::InvoiceFail {
-                    deposit_id,
-                    amount: amount_msat,
-                    payment_id,
-                    sequence_number: fail_sequence,
-                };
-                if let Err(e2) = self.commit_operation(ledger_id, fail_operation).await {
-                    tracing::error!("Failed to commit fail: {}", e2);
+                    let fail_sequence = {
+                        let ledger = ledger_arc.read().unwrap();
+                        ledger.next_sequence()
+                    };
+                    let fail_operation = LedgerOperation::InvoiceFail {
+                        deposit_id,
+                        amount: amount_msat,
+                        payment_id,
+                        sequence_number: fail_sequence,
+                    };
+                    if let Err(e2) = self.commit_operation(ledger_id, fail_operation).await {
+                        tracing::error!("Failed to commit fail: {}", e2);
+                    }
+                    return (false, None, Some(format!("Payment failed: {}", e)));
                 }
-                return (false, None, Some(format!("Payment failed: {}", e)));
             }
         }
 
