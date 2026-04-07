@@ -106,10 +106,10 @@ impl ClaimAttempt {
     ) -> DepositsResult<Self> {
         // Determine which tier to use based on eligibility
         let tier_index = match &eligibility {
-            ClaimEligibility::SelectedPartnerOnly { .. } => 0,
-            ClaimEligibility::AnyThreePartners => 1,
-            ClaimEligibility::AnySinglePartner => 2,
-            ClaimEligibility::CommunityFallback => {
+            ClaimEligibility::SelectedPartnerOnly { .. } => 0, // majority
+            ClaimEligibility::AnyThreePartners => 1,           // minority
+            ClaimEligibility::AnySinglePartner => 2,           // single partner (operator tier)
+            ClaimEligibility::CommunityFallback => {           // emergency (last tier)
                 reserves.threshold_config.tiers.len().saturating_sub(1)
             }
         };
@@ -739,10 +739,11 @@ mod tests {
         let pk3 = generate_test_pubkey(3);
         let pk4 = generate_test_pubkey(4);
 
-        // Multi-party setup (4 voters -> 3 tiers with new tier structure)
-        // Tier 0: Majority + operator
-        // Tier 1: Quorum override (2-of-n without operator)
-        // Tier 2: Emergency (1-of-n)
+        // Multi-party setup (4 voters -> 4 tiers)
+        // Tier 0: Majority of quorum (no operator, immediate)
+        // Tier 1: Minority of quorum (no operator, 1008 blocks)
+        // Tier 2: Operator only (2016 blocks)
+        // Tier 3: Emergency (1-of-n, 4032 blocks)
         let voter_set = VoterSet::new(pk1, vec![pk2, pk3, pk4]);
         let reserves = create_test_reserves(voter_set);
 
@@ -750,10 +751,10 @@ mod tests {
 
         // Test tier mapping for different eligibilities
         let test_cases = vec![
-            (ClaimEligibility::SelectedPartnerOnly { partner: pk1 }, 0),
-            (ClaimEligibility::AnyThreePartners, 1),
-            (ClaimEligibility::AnySinglePartner, 2),
-            (ClaimEligibility::CommunityFallback, 2),  // Maps to last tier (emergency)
+            (ClaimEligibility::SelectedPartnerOnly { partner: pk1 }, 0), // majority
+            (ClaimEligibility::AnyThreePartners, 1),                    // minority
+            (ClaimEligibility::AnySinglePartner, 2),                    // single partner
+            (ClaimEligibility::CommunityFallback, 3),                   // emergency (last)
         ];
 
         for (eligibility, expected_tier) in test_cases {

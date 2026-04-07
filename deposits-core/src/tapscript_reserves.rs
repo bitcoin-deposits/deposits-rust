@@ -1116,20 +1116,31 @@ mod tests {
 
     #[test]
     fn test_default_threshold_config() {
+        // 2-party: both required, operator fallback, emergency
         let config_2 = ThresholdConfig::default_for_voter_count(2);
-        assert_eq!(config_2.tiers.len(), 2);
+        assert_eq!(config_2.tiers.len(), 3);
+        assert_eq!(config_2.tiers[0].threshold, 2);
+        assert!(!config_2.tiers[0].requires_tie_breaker);
+        assert_eq!(config_2.tiers[1].timelock_blocks, 2016); // operator solo
+        assert!(config_2.tiers[1].requires_tie_breaker);
 
+        // 5-party: majority, minority, operator, emergency
         let config_5 = ThresholdConfig::default_for_voter_count(5);
-        assert_eq!(config_5.tiers.len(), 3);
-        // Tier 0: majority (3-of-5) + tie-breaker
+        assert_eq!(config_5.tiers.len(), 4);
+        // Tier 0: majority (3-of-5) no operator, immediate
         assert_eq!(config_5.tiers[0].threshold, 3);
-        assert!(config_5.tiers[0].requires_tie_breaker);
-        // Tier 1: quorum override (2-of-n without tie-breaker, immediate)
-        assert_eq!(config_5.tiers[1].threshold, 2);
+        assert!(!config_5.tiers[0].requires_tie_breaker);
+        assert_eq!(config_5.tiers[0].timelock_blocks, 0);
+        // Tier 1: minority (1-of-5) no operator, 1008 blocks
+        assert_eq!(config_5.tiers[1].threshold, 1);
         assert!(!config_5.tiers[1].requires_tie_breaker);
-        assert_eq!(config_5.tiers[1].timelock_blocks, 0);
-        // Tier 2: emergency recovery (1-of-n)
-        assert_eq!(config_5.tiers[2].threshold, 1);
+        assert_eq!(config_5.tiers[1].timelock_blocks, 1008);
+        // Tier 2: operator only, 2016 blocks
+        assert!(config_5.tiers[2].requires_tie_breaker);
+        assert_eq!(config_5.tiers[2].timelock_blocks, 2016);
+        // Tier 3: emergency recovery (1-of-n), 4032 blocks
+        assert_eq!(config_5.tiers[3].threshold, 1);
+        assert_eq!(config_5.tiers[3].timelock_blocks, 4032);
     }
 
     fn test_ledger_hash() -> [u8; 32] {

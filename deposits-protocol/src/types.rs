@@ -1166,6 +1166,10 @@ pub struct LedgerState {
     /// removed by InvoiceFulfill or InvoiceFail.
     #[serde(with = "serde_transfer_id_map", default)]
     pub open_invoice_locks: HashMap<[u8; 32], OpenInvoiceLock>,
+    /// Payment hashes that have been credited (InvoiceCredit).
+    /// Prevents double-crediting the same lightning payment.
+    #[serde(default)]
+    pub credited_payments: std::collections::HashSet<String>,
     /// Current sequence number.
     pub sequence: u64,
     /// Hash chain tip — SHA256(prev_hash || update_message) for the latest update.
@@ -1230,6 +1234,7 @@ impl LedgerState {
             collateral_attestations: HashMap::new(),
             pending_transfers: HashMap::new(),
             open_invoice_locks: HashMap::new(),
+            credited_payments: std::collections::HashSet::new(),
             sequence: 0,
             chain_tip_hash: [0u8; 32],
             joined_quorums: Vec::new(),
@@ -1315,10 +1320,18 @@ impl LedgerState {
                     deposit.descriptor = new_descriptor.clone();
                 }
             }
-            LedgerOperation::InvoiceCredit { deposit_id, amount, .. } => {
+            LedgerOperation::InvoiceCredit { deposit_id, amount, payment_hash, .. } => {
+                let hash_hex = hex::encode(payment_hash);
+                if next.credited_payments.contains(&hash_hex) {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "duplicate_credit".to_string(),
+                        details: format!("Payment {} already credited", &hash_hex[..16]),
+                    });
+                }
                 let deposit = next.deposits.get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.credit(*amount);
+                next.credited_payments.insert(hash_hex);
             }
             LedgerOperation::InvoiceLock { deposit_id, amount, payment_id, sequence_number, .. } => {
                 let deposit = next.deposits.get_mut(deposit_id)

@@ -8851,8 +8851,9 @@ impl Node {
                                     "Deposit credited! New balance: {} msat",
                                     new_balance
                                 );
-                                // Remove from pending
+                                // Remove from pending and persist
                                 self.pending_invoices.lock().unwrap().remove(&payment_hash);
+                                self.save_pending_invoices();
                             }
                             Err(e) => {
                                 tracing::error!(
