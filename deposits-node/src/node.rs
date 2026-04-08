@@ -6918,17 +6918,6 @@ impl Node {
         // This avoids returning "stale" when the event store already has the events
         // but the ledger history hasn't been updated yet.
         {
-            // Refuse to cosign if we have filed a dispute fork for this ledger
-            if let Some(fork_key) = self.handler.find_our_fork(&request.ledger_id) {
-                tracing::info!("Refusing to cosign: we have dispute fork {} for ledger {}...",
-                    &fork_key[..32.min(fork_key.len())],
-                    &request.ledger_id[..16.min(request.ledger_id.len())]);
-                return (false, None, Some(format!(
-                    "Refusing to cosign: dispute fork exists for ledger {}...",
-                    &request.ledger_id[..16.min(request.ledger_id.len())]
-                )));
-            }
-
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
                 let ledger = ledger_arc.read().unwrap();
@@ -7191,8 +7180,31 @@ impl Node {
         // Validate the operation before signing.
         //
         // cosign_data = sequence_number (8 LE) || previous_hash (32) || message (TLV)
-        // Extract the message and validate it against the local copy of the operator's ledger.
+        // Extract seq, prev_hash, and message. Verify the update chains from our local
+        // tip — if it doesn't, we haven't validated the intervening updates and MUST
+        // refuse to sign.
         if cosign_data.len() > 40 {
+            // Extract prev_hash from cosign_data (bytes 8..40)
+            let mut cosign_prev_hash = [0u8; 32];
+            cosign_prev_hash.copy_from_slice(&cosign_data[8..40]);
+
+            // Check chain continuity: the update must build on our validated tip
+            if let Some(ref arc) = operator_ledger_arc {
+                let ledger = arc.read().unwrap();
+                let our_tip = ledger.tail_hash();
+                if sequence_number == ledger.next_sequence() && cosign_prev_hash != our_tip {
+                    tracing::warn!(
+                        "Cosign REFUSED: prev_hash mismatch at seq {} — update chains from {} but our tip is {}",
+                        sequence_number,
+                        &hex::encode(cosign_prev_hash)[..16],
+                        &hex::encode(our_tip)[..16],
+                    );
+                    return (false, None, Some(format!(
+                        "Chain mismatch: update prev_hash doesn't match our validated tip"
+                    )));
+                }
+            }
+
             let message_bytes = &cosign_data[40..]; // skip 8 (seq) + 32 (prev_hash)
             match LedgerOperation::tlv_decode(message_bytes) {
                 Ok(operation) => {
