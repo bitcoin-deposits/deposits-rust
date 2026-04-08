@@ -6918,6 +6918,17 @@ impl Node {
         // This avoids returning "stale" when the event store already has the events
         // but the ledger history hasn't been updated yet.
         {
+            // Refuse to cosign if we have filed a dispute fork for this ledger
+            if let Some(fork_key) = self.handler.find_our_fork(&request.ledger_id) {
+                tracing::info!("Refusing to cosign: we have dispute fork {} for ledger {}...",
+                    &fork_key[..32.min(fork_key.len())],
+                    &request.ledger_id[..16.min(request.ledger_id.len())]);
+                return (false, None, Some(format!(
+                    "Refusing to cosign: dispute fork exists for ledger {}...",
+                    &request.ledger_id[..16.min(request.ledger_id.len())]
+                )));
+            }
+
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
                 let ledger = ledger_arc.read().unwrap();
