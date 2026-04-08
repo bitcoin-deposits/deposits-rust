@@ -474,7 +474,7 @@ fn dedup_ledger_files(matches: Vec<LedgerMatch>, has_node_filter: bool) -> Vec<L
     results
 }
 
-fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbose: bool, until_hash: Option<&str>, decode_seq: Option<u64>, dump_seq: Option<u64>, browse: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbose: bool, until_hash: Option<&str>, decode_seq: Option<u64>, dump_seq: Option<u64>, browse: bool, graph: bool) -> Result<(), Box<dyn std::error::Error>> {
     let all_matches = find_ledger_files(data_root, prefix, node_filter);
     let matches = dedup_ledger_files(all_matches, node_filter.is_some());
 
@@ -518,6 +518,10 @@ fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbo
     }
 
     updates.sort_by_key(|u| u.sequence_number);
+
+    if graph {
+        return print_chain_graph(&updates);
+    }
 
     if browse {
         return browse_updates(&updates, decode_seq);
@@ -759,7 +763,7 @@ async fn fetch_updates_from_relay(relay_url: &str, ledger_id: &str) -> Result<Ve
     Ok(updates)
 }
 
-async fn run_nostr(relay_url: &str, ledger_id: &str, verbose: bool, until_hash: Option<&str>, decode_seq: Option<u64>, dump_seq: Option<u64>, browse: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_nostr(relay_url: &str, ledger_id: &str, verbose: bool, until_hash: Option<&str>, decode_seq: Option<u64>, dump_seq: Option<u64>, browse: bool, graph: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut updates = fetch_updates_from_relay(relay_url, ledger_id).await?;
 
     if updates.is_empty() {
@@ -767,9 +771,13 @@ async fn run_nostr(relay_url: &str, ledger_id: &str, verbose: bool, until_hash: 
         std::process::exit(1);
     }
 
-    // Sort by sequence, dedup
+    // Sort by sequence, dedup by content hash (keep different chains)
     updates.sort_by_key(|u| u.sequence_number);
     updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
+
+    if graph {
+        return print_chain_graph(&updates);
+    }
 
     if browse {
         return browse_updates(&updates, decode_seq);
@@ -1273,6 +1281,196 @@ fn dump_update_to_file(update: &SignedLedgerUpdate) -> Result<String, Box<dyn st
 }
 
 // =========================================================================
+// Chain Graph (git-log style)
+// =========================================================================
+
+fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::{HashMap, BTreeMap};
+
+    if updates.is_empty() {
+        println!("No updates.");
+        return Ok(());
+    }
+
+    // Assign colors to authors (operator pubkeys)
+    let colors = ["\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[31m", "\x1b[37m", "\x1b[91m"];
+    let reset = "\x1b[0m";
+    let dim = "\x1b[2m";
+    let bold = "\x1b[1m";
+
+    let mut author_colors: HashMap<String, usize> = HashMap::new();
+    let mut author_names: HashMap<String, String> = HashMap::new();
+    for u in updates {
+        let author = hex::encode(u.operator_id.serialize());
+        let next_idx = author_colors.len();
+        author_colors.entry(author.clone()).or_insert(next_idx);
+        author_names.entry(author).or_insert_with(|| {
+            let s = hex::encode(u.operator_id.serialize());
+            format!("{}..{}", &s[..6], &s[s.len()-4..])
+        });
+    }
+
+    // Group by chain_hash (prev_hash → children)
+    // Each update: prev_hash → (seq, current_hash, chain_hash, op, author)
+    let mut by_prev: BTreeMap<[u8; 32], Vec<usize>> = BTreeMap::new();
+    for (i, u) in updates.iter().enumerate() {
+        by_prev.entry(u.previous_hash).or_default().push(i);
+    }
+
+    // Identify distinct chains by following from genesis
+    // A "chain" is a maximal path through prev_hash → chain_hash links
+    let mut chains: Vec<Vec<usize>> = Vec::new(); // each chain is a list of update indices
+    let mut assigned: Vec<bool> = vec![false; updates.len()];
+
+    // Build chain_hash → index lookup
+    let mut by_chain_hash: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
+    for (i, u) in updates.iter().enumerate() {
+        by_chain_hash.entry(u.chain_hash()).or_default().push(i);
+    }
+
+    // Walk from each genesis (prev_hash = [0;32]) or any unassigned root
+    let genesis = [0u8; 32];
+    let mut roots: Vec<usize> = by_prev.get(&genesis).cloned().unwrap_or_default();
+
+    // Also find roots that are orphaned (prev_hash not matching any chain_hash)
+    let all_chain_hashes: std::collections::HashSet<[u8; 32]> = updates.iter().map(|u| u.chain_hash()).collect();
+    for (i, u) in updates.iter().enumerate() {
+        if u.previous_hash != genesis && !all_chain_hashes.contains(&u.previous_hash) {
+            roots.push(i);
+        }
+    }
+    roots.sort();
+    roots.dedup();
+
+    for &root in &roots {
+        if assigned[root] { continue; }
+        let mut chain = Vec::new();
+        let mut idx = root;
+        loop {
+            if assigned[idx] { break; }
+            assigned[idx] = true;
+            chain.push(idx);
+            // Follow chain_hash → next update's prev_hash
+            let ch = updates[idx].chain_hash();
+            match by_prev.get(&ch) {
+                Some(nexts) => {
+                    // Prefer same author, then lowest seq
+                    let author = hex::encode(updates[idx].operator_id.serialize());
+                    if let Some(&next) = nexts.iter()
+                        .filter(|&&n| !assigned[n])
+                        .find(|&&n| hex::encode(updates[n].operator_id.serialize()) == author)
+                    {
+                        idx = next;
+                    } else if let Some(&next) = nexts.iter().find(|&&n| !assigned[n]) {
+                        idx = next;
+                    } else {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        if !chain.is_empty() {
+            chains.push(chain);
+        }
+    }
+
+    // Collect any remaining unassigned (fork children)
+    for i in 0..updates.len() {
+        if !assigned[i] {
+            let mut chain = vec![i];
+            assigned[i] = true;
+            let mut idx = i;
+            loop {
+                let ch = updates[idx].chain_hash();
+                match by_prev.get(&ch) {
+                    Some(nexts) => {
+                        if let Some(&next) = nexts.iter().find(|&&n| !assigned[n]) {
+                            assigned[next] = true;
+                            chain.push(next);
+                            idx = next;
+                        } else { break; }
+                    }
+                    None => break,
+                }
+            }
+            chains.push(chain);
+        }
+    }
+
+    // Sort chains: longest first (main chain), then by starting seq
+    chains.sort_by(|a, b| {
+        b.len().cmp(&a.len())
+            .then_with(|| updates[a[0]].sequence_number.cmp(&updates[b[0]].sequence_number))
+    });
+
+    // Assign branch columns
+    let mut branch_col: HashMap<usize, usize> = HashMap::new(); // update_idx → column
+    for (col, chain) in chains.iter().enumerate() {
+        for &idx in chain {
+            branch_col.insert(idx, col);
+        }
+    }
+
+    let num_branches = chains.len();
+
+    // Print legend
+    println!("{}Chains: {}{}", bold, num_branches, reset);
+    for (col, chain) in chains.iter().enumerate() {
+        let first = &updates[chain[0]];
+        let author = hex::encode(first.operator_id.serialize());
+        let color = colors[author_colors[&author] % colors.len()];
+        let name = &author_names[&author];
+        let last = &updates[*chain.last().unwrap()];
+        println!("  {}│{} branch {} ({} updates, seq {}-{}, author {})",
+            color, reset, col, chain.len(),
+            first.sequence_number, last.sequence_number, name);
+    }
+    println!();
+
+    // Collect all updates sorted by seq, then by branch column
+    let mut all: Vec<(u64, usize, usize)> = Vec::new(); // (seq, col, update_idx)
+    for (idx, u) in updates.iter().enumerate() {
+        let col = branch_col.get(&idx).copied().unwrap_or(0);
+        all.push((u.sequence_number, col, idx));
+    }
+    all.sort();
+
+    // Print git-log style
+    for &(_, col, idx) in &all {
+        let u = &updates[idx];
+        let author = hex::encode(u.operator_id.serialize());
+        let color = colors[author_colors[&author] % colors.len()];
+        let op_name = LedgerOperation::tlv_decode(&u.message)
+            .map(|op| format_op(&op))
+            .unwrap_or_else(|_| "?".to_string());
+
+        // Build branch indicators
+        let mut prefix_chars: Vec<String> = (0..num_branches.min(8))
+            .map(|c| {
+                if c == col {
+                    format!("{}*{}", color, reset)
+                } else {
+                    // Check if this branch has activity at this seq
+                    format!("{}│{}", dim, reset)
+                }
+            })
+            .collect();
+
+        let prefix_str = prefix_chars.join("");
+        let hash_short = &hex::encode(u.chain_hash())[..8];
+
+        println!("{} {}{:3}{} {} {}{}{}",
+            prefix_str,
+            dim, u.sequence_number, reset,
+            hash_short,
+            color, op_name, reset);
+    }
+
+    Ok(())
+}
+
+// =========================================================================
 // TUI Browse Mode
 // =========================================================================
 
@@ -1691,6 +1889,7 @@ fn print_help() {
     eprintln!("  --until <hash_prefix>   Stop replay at this chain_hash");
     eprintln!("  --decode <seq>          Annotated TLV hexdump of a single update");
     eprintln!("  --dump <seq>            Dump a single update to update_seqN.json");
+    eprintln!("  --graph                 Git-log style chain visualization (branches = authors)");
     eprintln!("  --browse                TUI browser (up/down to navigate, d to dump, q to quit)");
     eprintln!("  --verbose, -v           Print each operation as it's applied");
     eprintln!("  --help, -h              Show this help");
@@ -1719,6 +1918,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut dump_seq: Option<u64> = None;
     let mut browse = false;
     let mut verbose = false;
+    let mut graph = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -1748,6 +1948,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 2;
             }
             "--browse" => { browse = true; i += 1; }
+            "--graph" => { graph = true; i += 1; }
             "--verbose" | "-v" => { verbose = true; i += 1; }
             "--help" | "-h" => { print_help(); return Ok(()); }
             other => {
@@ -1766,11 +1967,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if prefix.is_empty() || prefix.len() < 16 {
             let selected = rt.block_on(list_relay_ledgers(&url, &prefix))?;
             match selected {
-                Some(lid) => rt.block_on(run_nostr(&url, &lid, verbose, until_hash.as_deref(), decode_seq, dump_seq, browse)),
+                Some(lid) => rt.block_on(run_nostr(&url, &lid, verbose, until_hash.as_deref(), decode_seq, dump_seq, browse, graph)),
                 None => Ok(()),
             }
         } else {
-            rt.block_on(run_nostr(&url, &prefix, verbose, until_hash.as_deref(), decode_seq, dump_seq, browse))
+            rt.block_on(run_nostr(&url, &prefix, verbose, until_hash.as_deref(), decode_seq, dump_seq, browse, graph))
         }
     } else {
         // JSONL mode
@@ -1778,6 +1979,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("Data root not found: {}. Use --data-root or --relay.", data_root.display());
             std::process::exit(1);
         }
-        run_jsonl(&data_root, &prefix, node_filter.as_deref(), verbose, until_hash.as_deref(), decode_seq, dump_seq, browse)
+        run_jsonl(&data_root, &prefix, node_filter.as_deref(), verbose, until_hash.as_deref(), decode_seq, dump_seq, browse, graph)
     }
 }
