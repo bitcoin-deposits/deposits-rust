@@ -5530,6 +5530,16 @@ window.exploreLedger = async function() {
   }
   const numBranches = window._numBranches = nextBranch;
 
+  // Compute first/last seq for each branch (for rendering active columns)
+  const branchFirstSeq = {};
+  const branchLastSeq = {};
+  for (const u of vsUpdates) {
+    if (!(u.branch in branchFirstSeq) || u.seq < branchFirstSeq[u.branch]) branchFirstSeq[u.branch] = u.seq;
+    if (!(u.branch in branchLastSeq) || u.seq > branchLastSeq[u.branch]) branchLastSeq[u.branch] = u.seq;
+  }
+  window._branchFirstSeq = branchFirstSeq;
+  window._branchLastSeq = branchLastSeq;
+
   // Now reverse for display (newest first)
   vsUpdates.reverse();
 
@@ -5576,16 +5586,21 @@ function vsRender() {
     // Build git-line branch indicators
     const nBranches = window._numBranches || 0;
     const bColors = window._branchColors || [];
+    const bFirst = window._branchFirstSeq || {};
+    const bLast = window._branchLastSeq || {};
     const graphW = nBranches > 1 ? Math.min(nBranches, 8) * 14 + 4 : 0;
     let graphHtml = '';
     if (nBranches > 1) {
       graphHtml = '<span style="display:inline-flex; align-items:center; gap:0; margin-right:6px; flex-shrink:0;">';
       for (let b = 0; b < Math.min(nBranches, 8); b++) {
         const bColor = bColors[b % bColors.length];
+        const active = u.seq >= (bFirst[b] ?? Infinity) && u.seq <= (bLast[b] ?? -1);
         if (b === u.branch) {
           graphHtml += `<span style="width:12px; text-align:center; color:${bColor}; font-weight:900; font-size:13px;">*</span>`;
-        } else {
+        } else if (active) {
           graphHtml += `<span style="width:12px; text-align:center; color:${bColor}; opacity:0.3; font-size:13px;">|</span>`;
+        } else {
+          graphHtml += `<span style="width:12px; text-align:center; font-size:13px;">&nbsp;</span>`;
         }
       }
       graphHtml += '</span>';
