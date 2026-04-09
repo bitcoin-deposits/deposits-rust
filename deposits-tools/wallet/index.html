@@ -5514,26 +5514,18 @@ window.exploreLedger = async function() {
   }
   vsUpdates.sort((a, b) => a.seq - b.seq || (a.curHash || '').localeCompare(b.curHash || '')); // chronological for chain building
 
-  // Build branch assignments (git-line style)
-  // Walk forward: each update's prevHash links to a parent's curHash.
-  // Assign branches by following chains; new branch when prevHash has no parent in current branches.
+  // Build branch assignments by operator pubkey.
+  // Each distinct operator_id gets its own branch column.
   const BRANCH_COLORS = window._branchColors = ['#4a4', '#e8a', '#48f', '#fa0', '#f44', '#0cc', '#c8f', '#ff0'];
-  const hashToBranch = {}; // curHash → branchIdx
+  const operatorToBranch = {};
   let nextBranch = 0;
-  const activeBranches = new Set(); // currently active branch indices
 
   for (const u of vsUpdates) {
-    const parentBranch = hashToBranch[u.prevHash];
-    if (parentBranch !== undefined) {
-      u.branch = parentBranch;
-    } else if (u.seq === 0 && nextBranch === 0) {
-      u.branch = 0;
-      nextBranch = 1;
-    } else {
-      u.branch = nextBranch++;
+    const op = u.operatorHex || '';
+    if (!(op in operatorToBranch)) {
+      operatorToBranch[op] = nextBranch++;
     }
-    hashToBranch[u.curHash] = u.branch;
-    activeBranches.add(u.branch);
+    u.branch = operatorToBranch[op];
     u.branchColor = BRANCH_COLORS[u.branch % BRANCH_COLORS.length];
   }
   const numBranches = window._numBranches = nextBranch;
