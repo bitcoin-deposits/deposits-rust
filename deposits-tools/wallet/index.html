@@ -5512,7 +5512,34 @@ window.exploreLedger = async function() {
   for (const u of vsUpdates) {
     if (seqCount[u.seq] > 1) u.isFork = true;
   }
-  vsUpdates.sort((a, b) => b.seq - a.seq || (a.curHash || '').localeCompare(b.curHash || '')); // reverse chronological, forks grouped
+  vsUpdates.sort((a, b) => a.seq - b.seq || (a.curHash || '').localeCompare(b.curHash || '')); // chronological for chain building
+
+  // Build branch assignments (git-line style)
+  // Walk forward: each update's prevHash links to a parent's curHash.
+  // Assign branches by following chains; new branch when prevHash has no parent in current branches.
+  const BRANCH_COLORS = window._branchColors = ['#4a4', '#e8a', '#48f', '#fa0', '#f44', '#0cc', '#c8f', '#ff0'];
+  const hashToBranch = {}; // curHash → branchIdx
+  let nextBranch = 0;
+  const activeBranches = new Set(); // currently active branch indices
+
+  for (const u of vsUpdates) {
+    const parentBranch = hashToBranch[u.prevHash];
+    if (parentBranch !== undefined) {
+      u.branch = parentBranch;
+    } else if (u.seq === 0 && nextBranch === 0) {
+      u.branch = 0;
+      nextBranch = 1;
+    } else {
+      u.branch = nextBranch++;
+    }
+    hashToBranch[u.curHash] = u.branch;
+    activeBranches.add(u.branch);
+    u.branchColor = BRANCH_COLORS[u.branch % BRANCH_COLORS.length];
+  }
+  const numBranches = window._numBranches = nextBranch;
+
+  // Now reverse for display (newest first)
+  vsUpdates.reverse();
 
   empty.innerHTML = '';
   header.style.display = 'block';
@@ -5552,15 +5579,32 @@ function vsRender() {
 
     const border = isExpanded ? 'var(--accent)' : 'var(--border)';
 
-    const forkBg = u.isFork ? 'background:color-mix(in srgb, var(--red) 8%, var(--surface));' : 'background:var(--surface);';
     const forkTag = u.isFork ? '<span style="color:var(--red); font-size:9px; font-weight:700; margin-left:4px;">FORK</span>' : '';
 
-    html += `<div id="ledger-entry-${i}" style="position:absolute; top:${top}px; left:0; right:0; height:${VS_ROW_H}px; padding:6px 12px; border-bottom:1px solid var(--border); border-left:2px solid ${border}; cursor:pointer; ${forkBg}" onclick="vsToggle(${i})">
+    // Build git-line branch indicators
+    const nBranches = window._numBranches || 0;
+    const bColors = window._branchColors || [];
+    const graphW = nBranches > 1 ? Math.min(nBranches, 8) * 14 + 4 : 0;
+    let graphHtml = '';
+    if (nBranches > 1) {
+      graphHtml = '<span style="display:inline-flex; align-items:center; gap:0; margin-right:6px; flex-shrink:0;">';
+      for (let b = 0; b < Math.min(nBranches, 8); b++) {
+        const bColor = bColors[b % bColors.length];
+        if (b === u.branch) {
+          graphHtml += `<span style="width:12px; text-align:center; color:${bColor}; font-weight:900; font-size:13px;">*</span>`;
+        } else {
+          graphHtml += `<span style="width:12px; text-align:center; color:${bColor}; opacity:0.3; font-size:13px;">|</span>`;
+        }
+      }
+      graphHtml += '</span>';
+    }
+
+    html += `<div id="ledger-entry-${i}" style="position:absolute; top:${top}px; left:0; right:0; height:${VS_ROW_H}px; padding:6px 12px; border-bottom:1px solid var(--border); border-left:2px solid ${border}; cursor:pointer; background:var(--surface);" onclick="vsToggle(${i})">
       <div style="display:flex; justify-content:space-between; align-items:baseline;">
-        <span><span style="color:var(--muted); font-size:10px;">#${u.seq}</span> <span style="color:${color}; font-weight:600; font-size:12px;">${u.opName}</span>${forkTag}</span>
+        <span style="display:flex; align-items:baseline;">${graphHtml}<span style="color:var(--muted); font-size:10px;">#${u.seq}</span> <span style="color:${color}; font-weight:600; font-size:12px; margin-left:4px;">${u.opName}</span>${forkTag}</span>
         <span style="color:var(--muted); font-size:10px;">${time}</span>
       </div>
-      <div style="color:var(--muted); font-size:10px;">hash: ${hashShort}... block: ${u.blockHeight}</div>`;
+      <div style="color:var(--muted); font-size:10px;${graphW ? ' margin-left:' + graphW + 'px;' : ''}">hash: ${hashShort}... block: ${u.blockHeight}</div>`;
 
     html += `</div>`;
   }
