@@ -2215,6 +2215,7 @@ impl BinaryCodec for SignedLedgerUpdate {
             operator_signature,
             cosigner_pubkey,
             member_ledger_hash,
+            cosignatures: Vec::new(),
         };
         update.current_hash = update.compute_hash();
         Ok(update)
@@ -4716,6 +4717,7 @@ mod tests {
             operator_signature: [0xEE; 64],
             cosigner_pubkey: None,
             member_ledger_hash: None,
+            cosignatures: Vec::new(),
         };
         update.current_hash = update.compute_hash();
 

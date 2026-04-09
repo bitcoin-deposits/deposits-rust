@@ -399,6 +399,7 @@ fn compute_hash_changes_with_member_ledger_hash() {
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
+            cosignatures: Vec::new(),
     };
 
     let hash_without = update.compute_hash();
@@ -439,6 +440,7 @@ fn compute_hash_without_member_hash_is_backward_compatible() {
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
+            cosignatures: Vec::new(),
     };
 
     // Without member_ledger_hash, hash is just SHA256(seq || prev_hash || message)
@@ -477,6 +479,7 @@ fn compute_hash_includes_cosign_signature() {
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
+            cosignatures: Vec::new(),
     };
 
     let hash_no_sig = update.compute_hash();
@@ -517,6 +520,7 @@ fn chain_hash_includes_operator_signature() {
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
+            cosignatures: Vec::new(),
     };
     update.current_hash = update.compute_hash();
 
@@ -556,6 +560,7 @@ fn chain_hash_is_sha256_of_current_hash_and_operator_sig() {
         operator_signature: [0xBB; 64],
         cosigner_pubkey: None,
         member_ledger_hash: Some([0xCC; 32]),
+        cosignatures: Vec::new(),
     };
     update.current_hash = update.compute_hash();
 

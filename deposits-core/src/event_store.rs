@@ -470,6 +470,7 @@ mod tests {
             operator_signature: [0u8; 64],
             cosigner_pubkey: None,
             member_ledger_hash: None,
+            cosignatures: Vec::new(),
         }
     }
 
