@@ -5530,23 +5530,51 @@ window.exploreLedger = async function() {
   }
   const numBranches = window._numBranches = nextBranch;
 
-  // Compute first/last seq for each branch (for rendering active columns)
-  const branchFirstSeq = {};
-  const branchLastSeq = {};
+  // Detect fork points: where a non-main-branch operator's first seq diverges
+  // For each branch, find the seq where it forks from the main chain
+  window._forkPoints = {};
   for (const u of vsUpdates) {
-    if (!(u.branch in branchFirstSeq) || u.seq < branchFirstSeq[u.branch]) branchFirstSeq[u.branch] = u.seq;
-    if (!(u.branch in branchLastSeq) || u.seq > branchLastSeq[u.branch]) branchLastSeq[u.branch] = u.seq;
+    if (u.branch > 0 && !(u.branch in window._forkPoints)) {
+      // This branch's first update — the fork point is the prevHash's seq on the main chain
+      const mainParent = vsUpdates.find(m => m.branch === 0 && m.curHash === u.prevHash);
+      window._forkPoints[u.branch] = {
+        forkSeq: mainParent ? mainParent.seq : u.seq - 1,
+        branchSeq: u.seq,
+        operator: u.operatorHex,
+      };
+    }
   }
-  window._branchFirstSeq = branchFirstSeq;
-  window._branchLastSeq = branchLastSeq;
 
   // Now reverse for display (newest first)
   vsUpdates.reverse();
 
+  // Store per-branch views for tab filtering
+  window._vsBranch = 'all';
+  window._vsAllUpdates = vsUpdates;
+
   empty.innerHTML = '';
   header.style.display = 'block';
-  header.textContent = `${vsUpdates.length} update(s) for ${input.slice(0,16)}...`;
   viewport.style.display = 'block';
+
+  // Build branch tabs
+  const branchOps = {};
+  for (const [op, b] of Object.entries(operatorToBranch)) {
+    branchOps[b] = op;
+  }
+  let tabsHtml = `<div style="display:flex; gap:4px; flex-wrap:wrap; margin-bottom:6px;">`;
+  tabsHtml += `<button id="branch-tab-all" onclick="switchBranch('all')" style="font-size:10px; padding:2px 8px; font-weight:700;">All (${vsUpdates.length})</button>`;
+  for (let b = 0; b < numBranches; b++) {
+    const op = branchOps[b] || '';
+    const count = vsUpdates.filter(u => u.branch === b).length;
+    const label = b === 0 ? 'Operator' : `Fork ${b}`;
+    const color = BRANCH_COLORS[b % BRANCH_COLORS.length];
+    tabsHtml += `<button id="branch-tab-${b}" onclick="switchBranch(${b})" style="font-size:10px; padding:2px 8px; border-left:3px solid ${color};">${label} (${count}) <span style="color:var(--muted);">${op.slice(0,8)}...</span></button>`;
+  }
+  tabsHtml += `</div>`;
+  header.innerHTML = tabsHtml + `<div style="font-size:11px; color:var(--muted);">${vsUpdates.length} update(s) for ${input.slice(0,16)}...</div>`;
+
+  // Apply current filter
+  vsApplyFilter();
 
   // Set spacer height for scrollbar
   document.getElementById('ledger-explorer-spacer').style.height = (vsUpdates.length * VS_ROW_H) + 'px';
@@ -5555,6 +5583,27 @@ window.exploreLedger = async function() {
   viewport.onscroll = vsRender;
   vsRender();
   log(`Loaded ${vsUpdates.length} updates for ${input.slice(0,16)}...`, 'success');
+};
+
+function vsApplyFilter() {
+  const branch = window._vsBranch;
+  if (branch === 'all') {
+    vsUpdates = window._vsAllUpdates;
+  } else {
+    vsUpdates = window._vsAllUpdates.filter(u => u.branch === branch);
+  }
+  document.getElementById('ledger-explorer-spacer').style.height = (vsUpdates.length * VS_ROW_H) + 'px';
+  // Highlight active tab
+  const tabs = document.querySelectorAll('[id^="branch-tab-"]');
+  tabs.forEach(t => t.style.fontWeight = '');
+  const active = document.getElementById(branch === 'all' ? 'branch-tab-all' : `branch-tab-${branch}`);
+  if (active) active.style.fontWeight = '700';
+  vsRender();
+}
+
+window.switchBranch = function(branch) {
+  window._vsBranch = branch;
+  vsApplyFilter();
 };
 
 function vsRender() {
@@ -5583,35 +5632,23 @@ function vsRender() {
 
     const forkTag = u.isFork ? '<span style="color:var(--red); font-size:9px; font-weight:700; margin-left:4px;">FORK</span>' : '';
 
-    // Build git-line branch indicators
-    const nBranches = window._numBranches || 0;
-    const bColors = window._branchColors || [];
-    const bFirst = window._branchFirstSeq || {};
-    const bLast = window._branchLastSeq || {};
-    const graphW = nBranches > 1 ? Math.min(nBranches, 8) * 14 + 4 : 0;
-    let graphHtml = '';
-    if (nBranches > 1) {
-      graphHtml = '<span style="display:inline-flex; align-items:center; gap:0; margin-right:6px; flex-shrink:0;">';
-      for (let b = 0; b < Math.min(nBranches, 8); b++) {
-        const bColor = bColors[b % bColors.length];
-        const active = u.seq >= (bFirst[b] ?? Infinity) && u.seq <= (bLast[b] ?? -1);
-        if (b === u.branch) {
-          graphHtml += `<span style="width:12px; text-align:center; color:${bColor}; font-weight:900; font-size:13px;">*</span>`;
-        } else if (active) {
-          graphHtml += `<span style="width:12px; text-align:center; color:${bColor}; opacity:0.3; font-size:13px;">|</span>`;
-        } else {
-          graphHtml += `<span style="width:12px; text-align:center; font-size:13px;">&nbsp;</span>`;
-        }
-      }
-      graphHtml += '</span>';
+    const branchBorder = u.branchColor || 'var(--border)';
+    const opColor = u.branch === 0 ? 'var(--muted)' : u.branchColor;
+    const opLabel = (u.operatorHex || '').slice(0, 12);
+
+    // Check if this is a fork point (first entry of a non-main branch)
+    let forkLink = '';
+    const forkInfo = (window._forkPoints || {})[u.branch];
+    if (forkInfo && u.seq === forkInfo.branchSeq) {
+      forkLink = ` <a href="#" onclick="event.stopPropagation(); switchBranch(0); setTimeout(()=>highlightLedgerEntry(${forkInfo.forkSeq}),100); return false;" style="font-size:9px; color:${u.branchColor};">forked from #${forkInfo.forkSeq}</a>`;
     }
 
-    html += `<div id="ledger-entry-${i}" style="position:absolute; top:${top}px; left:0; right:0; height:${VS_ROW_H}px; padding:6px 12px; border-bottom:1px solid var(--border); border-left:2px solid ${border}; cursor:pointer; background:var(--surface);" onclick="vsToggle(${i})">
+    html += `<div id="ledger-entry-${i}" style="position:absolute; top:${top}px; left:0; right:0; height:${VS_ROW_H}px; padding:6px 12px; border-bottom:1px solid var(--border); border-left:3px solid ${branchBorder}; cursor:pointer; background:var(--surface);" onclick="vsToggle(${i})">
       <div style="display:flex; justify-content:space-between; align-items:baseline;">
-        <span style="display:flex; align-items:baseline;">${graphHtml}<span style="color:var(--muted); font-size:10px;">#${u.seq}</span> <span style="color:${color}; font-weight:600; font-size:12px; margin-left:4px;">${u.opName}</span>${forkTag}</span>
+        <span><span style="color:var(--muted); font-size:10px;">#${u.seq}</span> <span style="color:${color}; font-weight:600; font-size:12px;">${u.opName}</span>${forkTag}${forkLink}</span>
         <span style="color:var(--muted); font-size:10px;">${time}</span>
       </div>
-      <div style="color:var(--muted); font-size:10px;${graphW ? ' margin-left:' + graphW + 'px;' : ''}">hash: ${hashShort}... block: ${u.blockHeight} <span style="color:${u.branch === 0 ? 'var(--muted)' : u.branchColor};">op:${(u.operatorHex || '').slice(0, 12)}...</span></div>`;
+      <div style="color:var(--muted); font-size:10px;">hash: ${hashShort}... block: ${u.blockHeight} <span style="color:${opColor};">op:${opLabel}...</span></div>`;
 
     html += `</div>`;
   }
