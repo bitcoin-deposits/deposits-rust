@@ -5611,7 +5611,7 @@ function vsRender() {
         <span style="display:flex; align-items:baseline;">${graphHtml}<span style="color:var(--muted); font-size:10px;">#${u.seq}</span> <span style="color:${color}; font-weight:600; font-size:12px; margin-left:4px;">${u.opName}</span>${forkTag}</span>
         <span style="color:var(--muted); font-size:10px;">${time}</span>
       </div>
-      <div style="color:var(--muted); font-size:10px;${graphW ? ' margin-left:' + graphW + 'px;' : ''}">hash: ${hashShort}... block: ${u.blockHeight}</div>`;
+      <div style="color:var(--muted); font-size:10px;${graphW ? ' margin-left:' + graphW + 'px;' : ''}">hash: ${hashShort}... block: ${u.blockHeight} <span style="color:${u.branch === 0 ? 'var(--muted)' : u.branchColor};">op:${(u.operatorHex || '').slice(0, 12)}...</span></div>`;
 
     html += `</div>`;
   }
