@@ -776,9 +776,9 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let (fee_fixed, fee_bps, fee_frequency) = if cli_fee_bps.is_some() || cli_fee_fixed.is_some() {
         let bps = cli_fee_bps.unwrap_or(0);
         let period = cli_fee_period.unwrap_or(2016);
-        let fixed = cli_fee_fixed.unwrap_or(0);
-        let annualized_msats = fixed * (52560 / period);
-        println!("  Fees: {} bps/year + {} sats/year fixed (CLI override)", bps, annualized_msats);
+        let fixed_sats = cli_fee_fixed.unwrap_or(0);
+        let annualized_msats = fixed_sats * 1000 * (52560 / period);
+        println!("  Fees: {} bps/year + {} msats/year fixed (CLI override)", bps, annualized_msats);
         (annualized_msats, bps, period)
     } else if let Some(ref ad) = advertisement {
         let period = if ad.fee_period_blocks > 0 { ad.fee_period_blocks } else { 2016 };
