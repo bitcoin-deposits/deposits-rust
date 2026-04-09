@@ -5497,10 +5497,22 @@ window.exploreLedger = async function() {
       vsUpdates.push(u);
     } catch {}
   }
-  // Deduplicate by seq (in case of overlap between pages)
-  const seenSeq = new Set();
-  vsUpdates = vsUpdates.filter(u => { if (seenSeq.has(u.seq)) return false; seenSeq.add(u.seq); return true; });
-  vsUpdates.sort((a, b) => b.seq - a.seq); // reverse chronological
+  // Deduplicate by (seq + curHash) — keeps fork branches as separate entries.
+  // Mark duplicates at the same seq with a fork indicator.
+  const seenKey = new Set();
+  const seqCount = {};
+  vsUpdates = vsUpdates.filter(u => {
+    const key = u.seq + ':' + u.curHash;
+    if (seenKey.has(key)) return false;
+    seenKey.add(key);
+    seqCount[u.seq] = (seqCount[u.seq] || 0) + 1;
+    return true;
+  });
+  // Tag forked entries
+  for (const u of vsUpdates) {
+    if (seqCount[u.seq] > 1) u.isFork = true;
+  }
+  vsUpdates.sort((a, b) => b.seq - a.seq || (a.curHash || '').localeCompare(b.curHash || '')); // reverse chronological, forks grouped
 
   empty.innerHTML = '';
   header.style.display = 'block';
@@ -5531,7 +5543,7 @@ function vsRender() {
     const top = i * VS_ROW_H;
     const time = u.createdAt ? new Date(u.createdAt * 1000).toLocaleString() : '';
     const hashShort = u.curHash.slice(0, 12);
-    const isExpanded = vsExpanded === u.seq;
+    const isExpanded = vsExpanded === i;
 
     let color = 'var(--text)';
     if (u.opName.includes('Credit') || u.opName.includes('Increase')) color = 'var(--balance)';
@@ -5540,9 +5552,12 @@ function vsRender() {
 
     const border = isExpanded ? 'var(--accent)' : 'var(--border)';
 
-    html += `<div id="ledger-entry-${u.seq}" style="position:absolute; top:${top}px; left:0; right:0; height:${VS_ROW_H}px; padding:6px 12px; border-bottom:1px solid var(--border); border-left:2px solid ${border}; cursor:pointer; background:var(--surface);" onclick="vsToggle(${u.seq})">
+    const forkBg = u.isFork ? 'background:color-mix(in srgb, var(--red) 8%, var(--surface));' : 'background:var(--surface);';
+    const forkTag = u.isFork ? '<span style="color:var(--red); font-size:9px; font-weight:700; margin-left:4px;">FORK</span>' : '';
+
+    html += `<div id="ledger-entry-${i}" style="position:absolute; top:${top}px; left:0; right:0; height:${VS_ROW_H}px; padding:6px 12px; border-bottom:1px solid var(--border); border-left:2px solid ${border}; cursor:pointer; ${forkBg}" onclick="vsToggle(${i})">
       <div style="display:flex; justify-content:space-between; align-items:baseline;">
-        <span><span style="color:var(--muted); font-size:10px;">#${u.seq}</span> <span style="color:${color}; font-weight:600; font-size:12px;">${u.opName}</span></span>
+        <span><span style="color:var(--muted); font-size:10px;">#${u.seq}</span> <span style="color:${color}; font-weight:600; font-size:12px;">${u.opName}</span>${forkTag}</span>
         <span style="color:var(--muted); font-size:10px;">${time}</span>
       </div>
       <div style="color:var(--muted); font-size:10px;">hash: ${hashShort}... block: ${u.blockHeight}</div>`;
@@ -5552,18 +5567,18 @@ function vsRender() {
   rows.innerHTML = html;
 }
 
-window.vsToggle = function(seq) {
-  if (vsExpanded === seq) {
+window.vsToggle = function(idx) {
+  if (vsExpanded === idx) {
     closeLedgerDetail();
     return;
   }
-  vsExpanded = seq;
-  updateHash(`ledger/${vsLedgerId}/${seq}`);
+  vsExpanded = idx;
+  const u = vsUpdates[idx];
+  if (!u) return;
+  updateHash(`ledger/${vsLedgerId}/${u.seq}`);
 
   // Shrink viewport and show detail pane
   document.getElementById('ledger-explorer-viewport').style.height = '200px';
-
-  const u = vsUpdates.find(u => u.seq === seq);
   if (u) {
     const time = u.createdAt ? new Date(u.createdAt * 1000).toLocaleString() : '';
     let color = 'var(--text)';
@@ -5601,8 +5616,8 @@ function highlightLedgerEntry(seq) {
   if (idx >= 0) {
     const viewport = document.getElementById('ledger-explorer-viewport');
     viewport.scrollTop = idx * VS_ROW_H - viewport.clientHeight / 2 + VS_ROW_H;
+    vsToggle(idx);
   }
-  vsToggle(seq);
 }
 
 // ============================================================
