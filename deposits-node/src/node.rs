@@ -1436,7 +1436,13 @@ impl Node {
             if update.sequence_number == next_seq + appended
                 && update.previous_hash == tip_hash
             {
+                // Apply state changes so our state stays current with history
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    let _ = ledger.apply_state_changes(&op);
+                }
                 tip_hash = update.current_hash;
+                ledger.state.sequence = update.sequence_number;
+                ledger.state.chain_tip_hash = update.chain_hash();
                 ledger.history.push(update);
                 appended += 1;
             } else {
@@ -2406,6 +2412,11 @@ impl Node {
                     if update.update.sequence_number == expected
                         && update.update.previous_hash == tip_hash
                     {
+                        if let Ok(op) = LedgerOperation::tlv_decode(&update.update.message) {
+                            let _ = ledger.apply_state_changes(&op);
+                        }
+                        ledger.state.sequence = update.update.sequence_number;
+                        ledger.state.chain_tip_hash = update.update.chain_hash();
                         ledger.history.push(update.update);
                     }
                 }
@@ -2779,6 +2790,12 @@ impl Node {
                 if inbound.update.sequence_number == expected_seq
                     && inbound.update.previous_hash == tip_hash
                 {
+                    // Apply state changes so our state stays current with history
+                    if let Ok(op) = LedgerOperation::tlv_decode(&inbound.update.message) {
+                        let _ = ledger.apply_state_changes(&op);
+                    }
+                    ledger.state.sequence = inbound.update.sequence_number;
+                    ledger.state.chain_tip_hash = inbound.update.chain_hash();
                     ledger.history.push(inbound.update.clone());
                 }
             }
@@ -6942,6 +6959,12 @@ impl Node {
                                 if update.sequence_number == ledger.next_sequence()
                                     && update.previous_hash == ledger.tail_hash()
                                 {
+                                    // Apply state changes so our state stays current with history
+                                    if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                                        let _ = ledger.apply_state_changes(&op);
+                                    }
+                                    ledger.state.sequence = update.sequence_number;
+                                    ledger.state.chain_tip_hash = update.chain_hash();
                                     ledger.history.push(update);
                                     applied += 1;
                                 }
