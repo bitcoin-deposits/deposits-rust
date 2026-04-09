@@ -117,7 +117,7 @@ pub use tapscript_reserves::{
 };
 pub use types::{
     Deposit, FeeStructure, TransferFeeSchedule, PendingInvoice, ReservesOutput, Invoice,
-    LedgerState, LedgerUpdate, SignedLedgerUpdate, SignedLedgerUpdateLog,
+    LedgerState, LedgerUpdate, SignedLedgerUpdate, SignedLedgerUpdateLog, CosignEntry,
     // Deposit identifier types
     DepositId, DescriptorWitness, compute_deposit_id,
     // Quorum and dispute protocol types

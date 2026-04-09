@@ -1135,6 +1135,23 @@ impl Ledger {
         }
     }
 
+    /// Apply majority cosignatures to the last history entry and recompute hash.
+    /// Entries are sorted by pubkey for deterministic hashing.
+    /// Must be called BEFORE operator signing.
+    pub fn apply_cosignatures(&mut self, mut entries: Vec<crate::types::CosignEntry>) {
+        entries.sort_by(|a, b| a.cosigner_pubkey.serialize().cmp(&b.cosigner_pubkey.serialize()));
+        if let Some(update) = self.history.last_mut() {
+            update.cosignatures = entries;
+            // Clear deprecated single-cosig fields
+            update.cosigner_pubkey = None;
+            update.member_ledger_hash = None;
+            update.cosign_signature = [0u8; 64];
+            // Recompute current_hash to include all cosig entries
+            update.current_hash = update.compute_hash();
+            self.state.chain_tip_hash = update.current_hash;
+        }
+    }
+
     /// Finalize state.hash to chain_hash after operator signing.
     ///
     /// chain_hash = SHA256(current_hash || operator_signature)

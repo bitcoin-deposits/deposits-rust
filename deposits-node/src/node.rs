@@ -118,6 +118,53 @@ pub struct CoSignResult {
     pub t2_send_us: Option<u64>,
 }
 
+/// Collector for majority cosignatures.
+/// Accumulates responses from quorum members until threshold is reached.
+struct CosignCollector {
+    threshold: usize,
+    results: std::sync::Mutex<Vec<CoSignResult>>,
+    seen_pubkeys: std::sync::Mutex<std::collections::HashSet<[u8; 33]>>,
+    notify: tokio::sync::Notify,
+}
+
+impl CosignCollector {
+    fn new(threshold: usize) -> Self {
+        Self {
+            threshold,
+            results: std::sync::Mutex::new(Vec::new()),
+            seen_pubkeys: std::sync::Mutex::new(std::collections::HashSet::new()),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Add a cosign result. Returns true if threshold is now met.
+    fn add(&self, result: CoSignResult) -> bool {
+        let pk_bytes = result.cosigner_pubkey.serialize();
+        {
+            let mut seen = self.seen_pubkeys.lock().unwrap();
+            if !seen.insert(pk_bytes) {
+                return false; // duplicate pubkey
+            }
+        }
+        let count = {
+            let mut results = self.results.lock().unwrap();
+            results.push(result);
+            results.len()
+        };
+        if count >= self.threshold {
+            self.notify.notify_one();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Take collected results.
+    fn take_results(&self) -> Vec<CoSignResult> {
+        std::mem::take(&mut *self.results.lock().unwrap())
+    }
+}
+
 /// Result of a consent request from a quorum member
 #[derive(Debug, Clone)]
 pub struct ConsentResult {
@@ -227,7 +274,7 @@ pub struct Node {
 
     /// Pending co-sign requests: request_id -> (ledger_id, oneshot sender for co-sign result)
     /// The result includes the co-signer's signature and the member's ledger hash
-    pending_cosign_requests: Arc<Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<CoSignResult>)>>>,
+    pending_cosign_requests: Arc<Mutex<HashMap<String, (String, Arc<CosignCollector>)>>>,
 
     /// Pending consent requests: request_id -> oneshot sender for consent result
     /// Used by quorum_add to await the member's consent signature
@@ -510,14 +557,9 @@ impl Node {
         let mut ledger = ledger_arc.write().unwrap();
 
         if let Some(update) = ledger.history.last_mut() {
-            // Compute signature over update content
-            let mut sig_input = Vec::new();
-            sig_input.extend_from_slice(&update.sequence_number.to_le_bytes());
-            sig_input.extend_from_slice(&update.previous_hash);
-            sig_input.extend_from_slice(&update.current_hash);
-            sig_input.extend_from_slice(&update.message);
-
-            let hash = sha256::Hash::hash(&sig_input);
+            // Sign using operator_signing_data (cosign_data + all cosig_signatures)
+            let data = update.operator_signing_data();
+            let hash = sha256::Hash::hash(&data);
             let secp = &self.secp;
             let msg = Message::from_digest(*hash.as_byte_array());
             let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
@@ -9074,15 +9116,13 @@ impl Node {
             return;
         }
 
-        // Only remove pending request on success
-        let cosign_sender = {
-            let mut pending = self.pending_cosign_requests.lock().unwrap();
-            let result = pending.remove(&response.request_id);
-            metrics::set_pending_cosign_requests(pending.len());
-            result
+        // Accumulate in collector (don't remove — more responses may come)
+        let collector = {
+            let pending = self.pending_cosign_requests.lock().unwrap();
+            pending.get(&response.request_id).map(|(_, c)| c.clone())
         };
 
-        if let Some((_ledger_id, tx)) = cosign_sender {
+        if let Some(collector) = collector {
             // This is a successful co-sign response
 
             if let Some(result) = &response.result {
@@ -9118,7 +9158,7 @@ impl Node {
                                 t1_recv_us: result_obj.get("t1_recv_us").and_then(|v| v.as_u64()),
                                 t2_send_us: result_obj.get("t2_send_us").and_then(|v| v.as_u64()),
                             };
-                            let _ = tx.send(cosign_result);
+                            collector.add(cosign_result);
                             return;
                         } else {
                             tracing::warn!("Co-sign response has wrong signature/hash lengths");
@@ -9132,7 +9172,7 @@ impl Node {
             } else {
                 tracing::warn!("Co-sign response has no result");
             }
-            // tx dropped, receiver gets error
+            // Failed to parse — collector stays, awaiting other responses
         }
         // Non-cosign responses are not handled here - they'll be processed later by handle_ledger_response
     }
@@ -9158,18 +9198,15 @@ impl Node {
                 return;
             }
 
-            // Only remove on success
-            let cosign_sender = {
-                let mut pending = self.pending_cosign_requests.lock().unwrap();
-                let result = pending.remove(&response.request_id);
-                metrics::set_pending_cosign_requests(pending.len());
-                result
+            // Accumulate in collector (don't remove from map — more responses may come)
+            let collector = {
+                let pending = self.pending_cosign_requests.lock().unwrap();
+                pending.get(&response.request_id).map(|(_, c)| c.clone())
             };
 
-            if let Some((_ledger_id, tx)) = cosign_sender {
+            if let Some(collector) = collector {
                 // This is a successful co-sign response
                 if let Some(result) = &response.result {
-                    // The result might be a JSON object or a string containing JSON
                     let result_obj = if result.is_object() {
                         result.clone()
                     } else if let Some(s) = result.as_str() {
@@ -9210,7 +9247,7 @@ impl Node {
                                     t1_recv_us: None,
                                     t2_send_us: None,
                                 };
-                                let _ = tx.send(cosign_result);
+                                collector.add(cosign_result);
                                 tracing::debug!("Co-sign response received: sig + member_hash {}...",
                                     &hash_hex[..8.min(hash_hex.len())]);
                                 return;
@@ -9423,7 +9460,7 @@ impl Node {
         &self,
         ledger_id: &str,
         update: &deposits_core::SignedLedgerUpdate,
-    ) -> Result<CoSignResult, Error> {
+    ) -> Result<Vec<deposits_core::CosignEntry>, Error> {
         use tokio::time::Duration;
 
         // Acquire semaphore to serialize cosign requests. Multiple concurrent
@@ -9475,8 +9512,19 @@ impl Node {
             }
         }
 
-        // Create oneshot channel for response (first responder wins)
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        // Determine cosig threshold: floor(n/2) + 1
+        let threshold = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers.get(ledger_id)
+                .map(|arc| {
+                    let l = arc.read().unwrap();
+                    let n = l.state.quorum_members.len();
+                    if n == 0 { 1 } else { (n / 2) + 1 }
+                })
+                .unwrap_or(1)
+        };
+
+        let collector = Arc::new(CosignCollector::new(threshold));
 
         // Send the multicast request to the ledger
         let request_id = self.nostr.send_ledger_request(ledger_id, "cosign_update", params)
@@ -9484,82 +9532,69 @@ impl Node {
             .map_err(|e| Error::Protocol(format!("Failed to send co_sign request: {:?}", e)))?;
         self.track_sent_event(&request_id);
 
-        // Store in pending requests — the main run loop's handle_ledger_response()
-        // will route the cosign response to this oneshot when it arrives.
+        // Store collector in pending requests — handle_ledger_response() accumulates responses.
         {
             let mut pending = self.pending_cosign_requests.lock().unwrap();
-            pending.insert(request_id.clone(), (ledger_id.to_string(), tx));
+            pending.insert(request_id.clone(), (ledger_id.to_string(), Arc::clone(&collector)));
             metrics::set_pending_cosign_requests(pending.len());
         }
 
         let cosign_send_time = std::time::Instant::now();
         tracing::debug!(
-            "Sent multicast co_sign request {} for seq={} (waiting for first responder)",
+            "Sent multicast co_sign request {} for seq={} (need {}/{} cosigs)",
             &request_id[..16.min(request_id.len())],
             update.sequence_number,
+            threshold,
+            threshold, // will show quorum size once we have it
         );
 
-        // Wait for response via oneshot channel with timeout.
-        //
-        // The main run loop pumps process_events() and routes responses via
-        // drain_responses → handle_ledger_response → pending_cosign_requests oneshot.
-        // Since request_cosign always runs in a spawned task (per-ledger worker or
-        // spawned periodic task), the main loop is free to pump events concurrently.
-        // No polling or response draining needed here — just await the oneshot.
+        // Wait until threshold cosignatures collected or timeout.
         let deadline_ms: u64 = std::env::var("COSIGN_TIMEOUT_MS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(3000);
+            .unwrap_or(5000);
         let deadline = Duration::from_millis(deadline_ms);
 
         tokio::select! {
-            result = rx => {
-                let cosign_rtt = cosign_send_time.elapsed();
-                match result {
-                    Ok(cosign_result) => {
-                        let t3_us = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_micros() as u64)
-                            .unwrap_or(0);
-                        let member_hex = hex::encode(cosign_result.cosigner_pubkey.serialize());
-                        let member_short = &member_hex[..12.min(member_hex.len())];
-
-                        // Log distributed trace if timestamps available
-                        let t1 = cosign_result.t1_recv_us.unwrap_or(0);
-                        let t2 = cosign_result.t2_send_us.unwrap_or(0);
-                        if t0_us > 0 && t1 > 0 && t2 > 0 {
-                            let relay_out = t1.saturating_sub(t0_us);
-                            let process = t2.saturating_sub(t1);
-                            let relay_back = t3_us.saturating_sub(t2);
-                            tracing::info!(
-                                "[COSIGN-TRACE] seq={} member={} relay_out={}us process={}us relay_back={}us total={}us",
-                                update.sequence_number, member_short,
-                                relay_out, process, relay_back,
-                                t3_us.saturating_sub(t0_us)
-                            );
-                        } else {
-                            tracing::info!("[COSIGN] rtt={:.0}ms member={} seq={}",
-                                cosign_rtt.as_secs_f64() * 1000.0,
-                                member_short,
-                                update.sequence_number);
-                        }
-                        metrics::record_cosign_rtt(member_short, cosign_rtt);
-                        return Ok(cosign_result);
-                    }
-                    Err(_) => {
-                        return Err(Error::Protocol(
-                            "Co-sign response channel dropped".to_string()
-                        ));
-                    }
-                }
+            _ = collector.notify.notified() => {
+                // Threshold reached
             }
             _ = tokio::time::sleep(deadline) => {
-                let mut pending = self.pending_cosign_requests.lock().unwrap();
-                pending.remove(&request_id);
-                metrics::set_pending_cosign_requests(pending.len());
-                return Err(Error::Protocol(format!("Co-sign request timed out after {}ms", deadline_ms)));
+                // Timeout — check if we got enough anyway
             }
         }
+
+        // Clean up pending map
+        {
+            let mut pending = self.pending_cosign_requests.lock().unwrap();
+            pending.remove(&request_id);
+            metrics::set_pending_cosign_requests(pending.len());
+        }
+
+        let results = collector.take_results();
+        let cosign_rtt = cosign_send_time.elapsed();
+
+        if results.len() < threshold {
+            return Err(Error::Protocol(format!(
+                "Cosign timeout: got {}/{} cosigs in {}ms",
+                results.len(), threshold, cosign_rtt.as_millis()
+            )));
+        }
+
+        tracing::info!("[COSIGN] seq={} collected {}/{} cosigs in {:.0}ms",
+            update.sequence_number, results.len(), threshold,
+            cosign_rtt.as_secs_f64() * 1000.0);
+
+        // Convert to CosignEntries
+        let entries: Vec<deposits_core::CosignEntry> = results.into_iter().map(|r| {
+            deposits_core::CosignEntry {
+                cosigner_pubkey: r.cosigner_pubkey,
+                cosign_signature: r.cosign_signature,
+                member_ledger_hash: r.member_ledger_hash,
+            }
+        }).collect();
+
+        Ok(entries)
     }
 
     /// Request consent from a quorum member to join our quorum.
@@ -10048,26 +10083,25 @@ impl Node {
                 .map_err(|e| Error::Protocol(format!("Stage failed: {}", e)))?
         };
 
-        // 2. Cosign (if quorum active)
+        // 2. Cosign (if quorum active — collect majority cosignatures)
         let quorum_active = self.is_quorum_active(ledger_id);
         if quorum_active {
-            let cosign = self.request_cosign(ledger_id, &staged.update).await?;
-            staged.update.cosigner_pubkey = Some(cosign.cosigner_pubkey);
-            staged.update.member_ledger_hash = Some(cosign.member_ledger_hash);
-            staged.update.cosign_signature = cosign.cosign_signature;
-            // Recompute hash to include cosign data
+            let entries = self.request_cosign(ledger_id, &staged.update).await?;
+            // Sort by pubkey and set on update
+            let mut sorted = entries;
+            sorted.sort_by(|a, b| a.cosigner_pubkey.serialize().cmp(&b.cosigner_pubkey.serialize()));
+            staged.update.cosignatures = sorted;
+            staged.update.cosigner_pubkey = None;
+            staged.update.member_ledger_hash = None;
+            staged.update.cosign_signature = [0u8; 64];
             staged.update.current_hash = staged.update.compute_hash();
         }
 
-        // 3. Operator sign (covers everything including cosign data)
+        // 3. Operator sign using operator_signing_data() (covers content + all cosignatures)
         {
             let secp = &self.secp;
-            let mut sig_input = Vec::new();
-            sig_input.extend_from_slice(&staged.update.sequence_number.to_le_bytes());
-            sig_input.extend_from_slice(&staged.update.previous_hash);
-            sig_input.extend_from_slice(&staged.update.current_hash);
-            sig_input.extend_from_slice(&staged.update.message);
-            let hash = sha256::Hash::hash(&sig_input);
+            let data = staged.update.operator_signing_data();
+            let hash = sha256::Hash::hash(&data);
             let msg = bitcoin::secp256k1::Message::from_digest(*hash.as_byte_array());
             let keypair = Keypair::from_secret_key(secp, &self.wallet.operator_secret());
             let sig = secp.sign_schnorr(&msg, &keypair);
@@ -10166,27 +10200,20 @@ impl Node {
         for attempt in 1..=max_attempts {
             let attempt_start = std::time::Instant::now();
             match self.request_cosign(ledger_id, &update_clone).await {
-                Ok(result) => {
+                Ok(entries) => {
                     let label = format!("success_attempt_{}", attempt);
                     metrics::record_cosign_attempt(&label, attempt_start.elapsed());
-                    // Apply co-signer info and recompute hash for causal ordering,
-                    // then apply co-signer's signature
                     let ledgers = self.handler.ledgers.lock().unwrap();
                     let ledger_arc = ledgers
                         .get(ledger_id)
                         .ok_or_else(|| Error::Protocol("Ledger not found".to_string()))?;
                     let mut ledger = ledger_arc.write().unwrap();
 
-                    // Apply cosigner data + co-signer's signature, recompute current_hash
-                    ledger.apply_cosigner_hash(
-                        result.member_ledger_hash,
-                        result.cosigner_pubkey,
-                        result.cosign_signature,
-                    );
+                    // Apply majority cosignatures, recompute current_hash
+                    ledger.apply_cosignatures(entries);
 
-                    tracing::debug!("Applied co-sign from {}... (member_hash: {}..., new chain_hash: {}...)",
-                        &pubkey_hex(&result.cosigner_pubkey)[..8],
-                        &hex::encode(&result.member_ledger_hash[..4]),
+                    tracing::debug!("Applied {} cosigs (new chain_hash: {}...)",
+                        ledger.history.last().map(|u| u.cosignatures.len()).unwrap_or(0),
                         &hex::encode(&ledger.state.chain_tip_hash[..4]));
                     last_error = None;
                     break;
