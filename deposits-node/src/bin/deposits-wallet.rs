@@ -683,11 +683,11 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 cli_fee_bps = Some(args[i + 1].parse().unwrap_or(0));
                 i += 1;
             }
-            "--fee-fixed" if i + 1 < args.len() => {
+            "--fee-fixed-sats" | "--fee-fixed" if i + 1 < args.len() => {
                 cli_fee_fixed = Some(args[i + 1].parse().unwrap_or(0));
                 i += 1;
             }
-            "--fee-period" if i + 1 < args.len() => {
+            "--fee-period-blocks" | "--fee-period" if i + 1 < args.len() => {
                 cli_fee_period = Some(args[i + 1].parse().unwrap_or(2016));
                 i += 1;
             }

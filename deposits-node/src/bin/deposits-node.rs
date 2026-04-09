@@ -155,11 +155,11 @@ LEDGER SUBCOMMANDS:
     ledger open [fee options]
                     Open a ledger backed by your reserves UTXO.
                     Fee options set advertised minimums for deposit negotiation:
-                      --annual-fee-bps <N>        Annual custody fee in basis points
-                      --min-fee-sats <N>          Minimum fee per period in sats
-                      --fee-period <N>            Fee collection period in blocks (default: 2016)
-                      --transfer-fee-fixed <N>    Fixed per-transfer fee in msats
-                      --transfer-fee-rate-bps <N> Proportional per-transfer fee in basis points
+                      --annual-fee-bps <N>             Annual custody fee in basis points
+                      --min-fee-sats <N>               Minimum fee per period in sats
+                      --fee-period-blocks <N>          Fee collection period in blocks (default: 2016)
+                      --transfer-fee-fixed-msats <N>   Fixed per-transfer fee in msats
+                      --transfer-fee-rate-bps <N>      Proportional per-transfer fee in basis points
     ledger list     List all ledgers
     ledger history [reserves_id]
                     Show hash chain history for a ledger (default: primary ledger)
@@ -1408,8 +1408,8 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let mut advertise_relay: Option<String> = None;
 
     let fee_flags = [
-        "--annual-fee-bps", "--min-fee-sats", "--fee-period",
-        "--transfer-fee-fixed", "--transfer-fee-rate-bps",
+        "--annual-fee-bps", "--min-fee-sats", "--fee-period-blocks", "--fee-period",
+        "--transfer-fee-fixed-msats", "--transfer-fee-fixed", "--transfer-fee-rate-bps",
     ];
 
     let mut i = 0;
@@ -1424,11 +1424,11 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                     min_fee_sats = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
                     i += 1;
                 }
-                "--fee-period" if i + 1 < args.len() => {
+                "--fee-period-blocks" | "--fee-period" if i + 1 < args.len() => {
                     fee_period_blocks = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
                     i += 1;
                 }
-                "--transfer-fee-fixed" if i + 1 < args.len() => {
+                "--transfer-fee-fixed-msats" | "--transfer-fee-fixed" if i + 1 < args.len() => {
                     transfer_fee_fixed = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
                     i += 1;
                 }
@@ -2203,9 +2203,9 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 })?;
                 i += 1;
             }
-            "--fee-period" if i + 1 < args.len() => {
+            "--fee-period-blocks" | "--fee-period" if i + 1 < args.len() => {
                 fee_period_blocks = args[i + 1].parse().map_err(|e| {
-                    format!("Invalid --fee-period value '{}': {}", args[i + 1], e)
+                    format!("Invalid --fee-period-blocks value '{}': {}", args[i + 1], e)
                 })?;
                 i += 1;
             }

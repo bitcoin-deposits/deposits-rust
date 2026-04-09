@@ -258,8 +258,8 @@ open_ledgers() {
             local output=$(run_node_cmd "$op" ledger open "$enforcement_block" \
                 --annual-fee-bps "$ANNUAL_FEE_BPS" \
                 --min-fee-sats "$MIN_FEE_SATS" \
-                --fee-period "$FEE_PERIOD" \
-                --transfer-fee-fixed "$TRANSFER_FEE_FIXED" \
+                --fee-period-blocks "$FEE_PERIOD" \
+                --transfer-fee-fixed-msats "$TRANSFER_FEE_FIXED" \
                 --transfer-fee-rate-bps "$TRANSFER_FEE_RATE_BPS" \
                 --advertise-relay "$relay_url" 2>&1)
 
@@ -394,7 +394,7 @@ for depositor, owner in sorted(pairs):
         local open_output=$(RUST_LOG=error "$DEPOSITS_WALLET" open \
             "$owner_ledger_id" "$collateral_amount" \
             --alias "collateral-${depositor}-on-${owner}" --collateral --skip-cosign-verify \
-            --fee-bps "$ANNUAL_FEE_BPS" --fee-fixed "$MIN_FEE_SATS" --fee-period "$FEE_PERIOD" \
+            --fee-bps "$ANNUAL_FEE_BPS" --fee-fixed-sats "$MIN_FEE_SATS" --fee-period-blocks "$FEE_PERIOD" \
             --seed "$dep_seed" --network regtest \
             --relay "$owner_relay" \
             --data-dir "$dep_data_dir/wallet" 2>&1 || true)
