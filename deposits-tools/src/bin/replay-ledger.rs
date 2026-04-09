@@ -886,6 +886,7 @@ fn lookup_slu_field(tag: u64) -> (&'static str, Enc) {
         16 => ("member_ledger_hash", Enc::Hash),
         18 => ("cosign_signature", Enc::Sig),
         20 => ("operator_signature", Enc::Sig),
+        22 => ("cosignatures", Enc::Bytes),
         _  => ("unknown", Enc::Bytes),
     }
 }
@@ -1265,6 +1266,11 @@ fn dump_update_json(update: &SignedLedgerUpdate) -> String {
         "operator_signature": hex::encode(update.operator_signature),
         "cosigner_pubkey": update.cosigner_pubkey.map(|pk| hex::encode(pk.serialize())),
         "member_ledger_hash": update.member_ledger_hash.map(hex::encode),
+        "cosignatures": update.cosignatures.iter().map(|e| serde_json::json!({
+            "pubkey": hex::encode(e.cosigner_pubkey.serialize()),
+            "signature": hex::encode(e.cosign_signature),
+            "member_hash": hex::encode(e.member_ledger_hash),
+        })).collect::<Vec<_>>(),
         "operation": op_name,
         "content_base64": content_b64,
         "envelope_tlv": envelope_tlv,

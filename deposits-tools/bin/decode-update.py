@@ -235,6 +235,7 @@ else:
         10: ("block_height", "u32"), 12: ("block_hash", "hash"),
         14: ("cosigner_pubkey", "pubkey"), 16: ("member_ledger_hash", "hash"),
         18: ("cosign_signature", "sig"), 20: ("operator_signature", "sig"),
+        22: ("cosignatures", "bytes"),
     }
     MSG_TYPES = {}
     OP_DISCRIMINANTS = {}
@@ -404,10 +405,33 @@ class Decoder:
 
         seq_le = struct.pack("<Q", struct.unpack(">Q", seq_bytes)[0])
         h_input = seq_le + prev_hash + message
-        if member_hash:
-            h_input += member_hash
-        if cosign_sig and any(b != 0 for b in cosign_sig):
-            h_input += cosign_sig
+
+        # Multi-cosig (tag 22) or legacy single-cosig
+        cosignatures_raw = fields.get("cosignatures")
+        if cosignatures_raw and len(cosignatures_raw) >= 131:  # at least one entry (2 + 129)
+            off = 0
+            entries = []
+            while off + 2 <= len(cosignatures_raw):
+                entry_len = struct.unpack(">H", cosignatures_raw[off:off+2])[0]
+                off += 2
+                if off + entry_len > len(cosignatures_raw) or entry_len < 129:
+                    break
+                pk = cosignatures_raw[off:off+33]
+                sig = cosignatures_raw[off+33:off+97]
+                mh = cosignatures_raw[off+97:off+129]
+                entries.append((pk, sig, mh))
+                off += entry_len
+            # Sorted by pubkey (should already be sorted)
+            entries.sort(key=lambda e: e[0])
+            for pk, sig, mh in entries:
+                h_input += mh + sig
+        else:
+            member_hash = fields.get("member_ledger_hash")
+            cosign_sig = fields.get("cosign_signature")
+            if member_hash:
+                h_input += member_hash
+            if cosign_sig and any(b != 0 for b in cosign_sig):
+                h_input += cosign_sig
         current_hash = hashlib.sha256(h_input).digest()
 
         # Compute chain_hash

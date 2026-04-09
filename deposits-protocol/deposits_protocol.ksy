@@ -56,7 +56,10 @@ types:
     doc: |
       A signed ledger update, broadcast as Kind 9100 Nostr events.
 
-      current_hash = SHA256(seq || prev_hash || message [|| member_ledger_hash] [|| cosign_signature])
+      Multi-cosig format (tag 22 present):
+        current_hash = SHA256(seq || prev_hash || message || for each sorted entry: member_hash || cosig)
+      Legacy single-cosig format (tag 22 absent):
+        current_hash = SHA256(seq || prev_hash || message [|| member_ledger_hash] [|| cosign_signature])
       chain_hash   = SHA256(current_hash || operator_signature)
       next update's previous_hash = chain_hash
 
@@ -71,14 +74,19 @@ types:
         type 8  = message            (variable, inner LedgerOperation TLV)
         type 10 = block_height       (u32, optional)
         type 12 = block_hash         (32-byte hash, optional)
-        type 14 = cosigner_pubkey    (33-byte pubkey, optional)
-        type 16 = member_ledger_hash (32-byte hash, optional)
-        type 18 = cosign_signature   (64-byte sig, optional when zero)
+        type 14 = cosigner_pubkey    (33-byte pubkey, deprecated — legacy single-cosig)
+        type 16 = member_ledger_hash (32-byte hash, deprecated — legacy single-cosig)
+        type 18 = cosign_signature   (64-byte sig, deprecated — legacy single-cosig)
         type 20 = operator_signature (64-byte sig)
+        type 22 = cosignatures       (variable, length-prefixed entries — majority cosig)
+
+      Tag 22 contains N entries, each: u16_be(129) || pubkey(33) || sig(64) || hash(32).
+      Entries sorted by pubkey. After QuorumBegin, floor(n/2)+1 entries required.
 
       Co-signing: SHA256(tag || tag || cosign_data || member_ledger_hash)
       where tag = SHA256("deposits/cosign") and cosign_data =
       sequence || previous_hash || message.
+      Each quorum member signs independently with their own member_ledger_hash.
     seq:
       - id: records
         type: tlv_record
@@ -106,17 +114,20 @@ types:
         doc: "32-byte block hash at time of creation (type 12, optional)"
         value: "records[6].value"
       cosigner_pubkey:
-        doc: "33-byte compressed pubkey of the co-signing quorum member (type 14, optional)"
+        doc: "DEPRECATED: 33-byte pubkey of single co-signer (type 14). Use cosignatures (type 22) for majority cosig."
         value: "records[7].value"
       member_ledger_hash:
-        doc: "32-byte tip hash of the co-signer's own ledger (type 16, optional). Included in derived current_hash for causal ordering."
+        doc: "DEPRECATED: 32-byte tip hash of single co-signer's ledger (type 16). Use cosignatures (type 22)."
         value: "records[8].value"
       cosign_signature:
-        doc: "64-byte Schnorr co-signature from quorum member (type 18, optional when zero)"
+        doc: "DEPRECATED: 64-byte single co-signature (type 18). Use cosignatures (type 22)."
         value: "records[9].value"
       operator_signature:
         doc: "64-byte Schnorr signature from operator (type 20)"
         value: "records[10].value"
+      cosignatures:
+        doc: "Majority cosignature list (type 22). N entries: u16_be(129) || pubkey(33) || sig(64) || hash(32), sorted by pubkey."
+        value: "records[11].value"
 
   ledger_operation:
     doc: |

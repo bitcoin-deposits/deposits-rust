@@ -5295,18 +5295,40 @@ function decodeUpdate(base64Content) {
     }));
   }
 
-  // Compute current_hash: SHA256(seq_le || prev_hash || message [|| member_ledger_hash] [|| cosign_signature])
+  // Compute current_hash
   const seqBytes = new Uint8Array(8);
   new DataView(seqBytes.buffer).setUint32(0, seq & 0xFFFFFFFF, true);
   new DataView(seqBytes.buffer).setUint32(4, Math.floor(seq / 0x100000000), true);
   const prevHashBytes = get(6) || new Uint8Array(32);   // PREVIOUS_HASH (tag 6)
-  const cosignSig = get(18) || new Uint8Array(64);      // COSIGN_SIGNATURE (tag 18)
-  const memberHash = get(16);                            // MEMBER_LEDGER_HASH (tag 16)
   const hashParts = [seqBytes, prevHashBytes];
   if (msgBytes) hashParts.push(msgBytes);
-  if (memberHash) hashParts.push(memberHash);
-  const isNonZeroSig = cosignSig.some(b => b !== 0);
-  if (isNonZeroSig) hashParts.push(cosignSig);
+
+  // Multi-cosig (tag 22) or legacy single-cosig (tags 16/18)
+  const cosignaturesRaw = get(22);
+  if (cosignaturesRaw && cosignaturesRaw.length >= 131) {
+    // Parse length-prefixed entries, append member_hash || cosig_sig for each
+    const entries = [];
+    let cOff = 0;
+    while (cOff + 2 <= cosignaturesRaw.length) {
+      const entryLen = (cosignaturesRaw[cOff] << 8) | cosignaturesRaw[cOff + 1];
+      cOff += 2;
+      if (cOff + entryLen > cosignaturesRaw.length || entryLen < 129) break;
+      const pk = cosignaturesRaw.slice(cOff, cOff + 33);
+      const sig = cosignaturesRaw.slice(cOff + 33, cOff + 97);
+      const mh = cosignaturesRaw.slice(cOff + 97, cOff + 129);
+      entries.push({ pk, sig, mh });
+      cOff += entryLen;
+    }
+    // Already sorted by pubkey; append member_hash || cosig for each
+    for (const e of entries) { hashParts.push(e.mh); hashParts.push(e.sig); }
+  } else {
+    // Legacy single-cosig
+    const memberHash = get(16);
+    const cosignSig = get(18) || new Uint8Array(64);
+    if (memberHash) hashParts.push(memberHash);
+    if (cosignSig.some(b => b !== 0)) hashParts.push(cosignSig);
+  }
+
   const totalLen = hashParts.reduce((s, p) => s + p.length, 0);
   const hashInput = new Uint8Array(totalLen);
   let hOff = 0;
