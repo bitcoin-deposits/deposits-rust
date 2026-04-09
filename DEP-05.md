@@ -41,7 +41,7 @@ The strictest (smallest) values across all members apply to the quorum. The oper
 
 ### QuorumBegin (disc 12)
 
-Once members are added, the operator rotates reserves into a new Taproot multisig UTXO (see DEP-03). After `QuorumBegin`, co-signatures become required for all subsequent updates. `QuorumBegin` records the `quorum_expiry` (shortest collateral lock) and `total_collateral` (sum of all attestations).
+Once members are added, the operator rotates reserves into a new Taproot multisig UTXO (see DEP-03). After `QuorumBegin`, every subsequent update MUST carry co-signatures from a strict majority (`floor(n/2) + 1`) of quorum members. This prevents the operator from maintaining parallel chains — a majority of cosigners will have seen and validated the canonical chain before signing any new update. `QuorumBegin` records the `quorum_expiry` (shortest collateral lock) and `total_collateral` (sum of all attestations).
 
 ### Removing Members
 
@@ -93,11 +93,20 @@ The same collateral deposit on a member's ledger may back multiple ledgers of th
 
 ## Co-Signer Obligations
 
-Quorum members must maintain a full state replica of any ledger they co-sign for. Before co-signing an update, the member must verify:
+Quorum members must maintain a full state replica of any ledger they co-sign for. Before co-signing an update, the member MUST verify:
 
-1. The running total of obligations does not exceed the obligation limits above
-2. The update conforms to protocol rules (valid fees, correct balances, authorized operations)
-3. The hash chain is intact (previous_hash matches the last chain_hash)
+1. **Chain continuity**: the update's `previous_hash` matches the member's last validated `chain_hash`
+2. **State validity**: the operation can be applied to the member's local state replica without error (deposit exists, sufficient balance, valid fees, etc.)
+3. **Obligation limits**: the running total of obligations does not exceed limits
+4. **No dispute filed**: the member has not filed a dispute fork for this ledger
+
+If any check fails, the member MUST refuse to co-sign. The chain continuity check (1) is the primary defense against parallel chains — if the operator has published a non-conforming update that the member rejected, subsequent updates will have a different `previous_hash` and the member will refuse.
+
+### Majority Requirement
+
+After `QuorumBegin`, every update requires `floor(n/2) + 1` co-signatures from distinct quorum members. This ensures a majority of the quorum has validated every update. Since each cosigner verifies chain continuity from their own tip, the operator cannot obtain a majority for two different updates at the same sequence number — at least one member of any majority will have already signed the other version and will refuse.
+
+### Conformance
 
 Co-signing without state validation is non-conforming — a member who co-signs an update that violates obligation limits is complicit in the violation and may have their own collateral confiscated on other ledgers where they are operators.
 

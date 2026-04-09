@@ -44,28 +44,51 @@ The event content is a base64-encoded TLV stream:
 | 8 | message | variable | Inner operation (TLV-encoded) |
 | 10 | block_height | 4 | Block height at creation |
 | 12 | block_hash | 32 | Block hash at creation |
-| 14 | cosigner_pubkey | 33 | Co-signing quorum member's pubkey |
-| 16 | member_ledger_hash | 32 | Co-signer's ledger tip hash for causal ordering |
-| 18 | cosign_signature | 64 | Schnorr co-signature from quorum member |
+| 14 | cosigner_pubkey | 33 | *Deprecated*. Single co-signer pubkey (pre-majority format). |
+| 16 | member_ledger_hash | 32 | *Deprecated*. Single co-signer's ledger hash (pre-majority format). |
+| 18 | cosign_signature | 64 | *Deprecated*. Single co-signature (pre-majority format). |
 | 20 | operator_signature | 64 | Schnorr signature from operator |
+| 22 | cosignatures | variable | Majority cosignature list (see Cosignatures below) |
 
 `current_hash` is derived by the receiver (see Hash Chain).
 
+### Cosignatures (Tag 22)
+
+Tag 22 contains one or more cosignature entries concatenated as length-prefixed records. Each entry is:
+
+    [u16 BE: entry_length] [entry_length bytes: cosig_entry]
+
+Each `cosig_entry` is:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 33 | cosigner_pubkey (compressed secp256k1) |
+| 33 | 64 | cosign_signature (Schnorr BIP-340) |
+| 97 | 32 | member_ledger_hash (cosigner's ledger tip) |
+
+Total entry size: 129 bytes. Entries MUST be sorted by cosigner_pubkey (lexicographic on serialized bytes). This ensures deterministic hashing.
+
+After `QuorumBegin`, updates MUST include at least `floor(n/2) + 1` cosignatures from distinct quorum members (where n is the quorum size). Updates with fewer cosignatures are non-conforming.
+
+For backward compatibility, decoders SHOULD accept the deprecated single-cosig format (tags 14/16/18) from pre-quorum updates and upgrades in progress.
+
 ## Hash Chain
+
+    cosig_data = for each cosig entry (sorted by pubkey):
+        member_ledger_hash || cosign_signature
 
     current_hash = SHA256(
         sequence_number (8 bytes LE)
         || previous_hash (32 bytes)
         || message (variable)
-        [|| member_ledger_hash (32 bytes)]
-        [|| cosign_signature (64 bytes)]
+        || cosig_data (variable, all entries concatenated)
     )
 
     chain_hash = SHA256(current_hash (32 bytes) || operator_signature (64 bytes))
 
-The operator signs the content and co-signature (see Signing). Their signature is folded into `chain_hash`, which becomes the next update's `previous_hash`. Both signatures are committed to the chain without circularity.
+The operator signs the content and all co-signatures (see Signing). Their signature is folded into `chain_hash`, which becomes the next update's `previous_hash`. All signatures are committed to the chain without circularity.
 
-`member_ledger_hash` and `cosign_signature` are included in `current_hash` only when present and non-zero. After `QuorumBegin`, these fields are mandatory on all subsequent updates — omitting them is non-conforming. Before quorum establishment, they are always omitted. The first update (sequence 0) has `previous_hash` = `[0; 32]`.
+After `QuorumBegin`, the cosig entries are mandatory — omitting them is non-conforming. Before quorum establishment, they are always omitted. The first update (sequence 0) has `previous_hash` = `[0; 32]`.
 
 ## Signing
 
@@ -73,20 +96,25 @@ All protocol signatures use Schnorr (BIP-340). On-chain transaction signatures f
 
 ### Co-signing
 
-The quorum member signs a tagged hash over the update content and their ledger's tip:
+Each quorum member independently signs a tagged hash over the update content and their own ledger's tip:
 
     tag = SHA256("deposits/cosign")
     cosign_data = sequence_number (8 LE) || previous_hash || message
     digest = SHA256(tag || tag || cosign_data || member_ledger_hash)
 
-`current_hash` is not signed directly -- it incorporates the co-signature itself, so it cannot be known at signing time.
+`current_hash` is not signed directly — it incorporates the co-signatures themselves, so it cannot be known at signing time.
+
+The operator collects `floor(n/2) + 1` co-signatures before finalizing the update. Each cosigner independently validates the operation against their local state replica and verifies chain continuity from their validated tip before signing.
 
 ### Operator
 
-    operator_signing_data = cosign_data || cosign_signature
+    all_cosig_data = for each cosig entry (sorted by pubkey):
+        cosign_signature (64 bytes)
+
+    operator_signing_data = cosign_data || all_cosig_data
     sig_input = SHA256(operator_signing_data)
 
-The operator signs `SHA256(sequence_number || previous_hash || message || cosign_signature)`. This seals the bilateral agreement — both parties' signatures cover the same content.
+The operator signs after collecting the required majority of co-signatures. This seals the multilateral agreement — the operator's signature covers the content and all co-signatures.
 
 ## Operations
 
