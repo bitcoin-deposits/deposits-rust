@@ -251,7 +251,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 46 | quorum_member_sig | 64 | QuorumBegin |
 | 48 | operator_sig | 64 | QuorumBegin |
 | 76 | lock_until_block | 4 | CollateralLock, CollateralAttestation |
-| 114 | member_ledger_id | variable | QuorumAddMember, QuorumJoin |
+| 114 | member_ledger_id | variable | QuorumAddMember, QuorumJoin, CollateralLock (`for_ledger_id`) |
 | 124 | collateral_ledger_id | variable | CollateralAttestation |
 | 234 | min_fee_bps | 2 | QuorumAddMember |
 | 236 | min_fee_fixed | 8 | QuorumAddMember |

@@ -57,9 +57,15 @@ The operator:
 
 1. Opens a deposit on the member's ledger with `is_collateral: true` (see DEP-08)
 2. Funds it with their own capital via on-chain or lightning (see DEP-10)
-3. Locks it with `CollateralLock` (disc 45), specifying amount, lock_until_block, and the operator being backed
+3. Locks it with `CollateralLock` (disc 45), specifying amount, lock_until_block, the operator being backed, and `for_ledger_id` — the specific ledger this collateral secures
 
 The locked collateral cannot be withdrawn until the lock expires.
+
+### Per-Ledger Lock Cap
+
+A single collateral deposit can back at most **3 ledgers** simultaneously. Each `CollateralLock` specifies which ledger via `for_ledger_id`. Locking for a 4th distinct ledger is rejected. Updating an existing lock for the same ledger (e.g., to extend expiry or increase amount) replaces the previous lock without consuming an additional slot.
+
+This cap prevents a single collateral deposit from being thinly spread across many ledgers, which would reduce the effective backing per ledger. Operators who need to back more than 3 ledgers should open separate collateral deposits.
 
 ### Attestation
 
@@ -89,7 +95,7 @@ A coordinated theft yields at most 2C but costs 3C in confiscated collateral —
 
 ### Multi-Ledger Collateral
 
-The same collateral deposit on a member's ledger may back multiple ledgers of the same operator. Wallets should prefer operators with non-overlapping collateral sources, as shared collateral provides weaker per-ledger coverage. The mechanism for discovering and accounting for multi-ledger collateral reuse is an open design question.
+The same collateral deposit on a member's ledger may back up to 3 ledgers simultaneously (see Per-Ledger Lock Cap above). Each lock is tracked independently via `for_ledger_id` in the `CollateralLock` operation. Wallets should prefer operators with non-overlapping collateral sources, as shared collateral provides weaker per-ledger coverage. The `for_ledger_id` field allows wallets to discover which ledgers a given collateral deposit backs and compute effective per-ledger coverage.
 
 ## Co-Signer Obligations
 
