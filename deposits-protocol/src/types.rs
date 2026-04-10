@@ -600,6 +600,20 @@ impl PendingTransfer {
 // Deposit
 // ============================================================================
 
+/// A per-ledger collateral lock entry. Tracks amount and expiry for a specific ledger.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollateralLockEntry {
+    /// Ledger ID (hex) this lock is backing.
+    pub for_ledger_id: String,
+    /// Amount locked (millisatoshis).
+    pub amount: u64,
+    /// Block height when this lock expires.
+    pub lock_until_block: u32,
+}
+
+/// Maximum number of ledgers a single collateral deposit can back simultaneously.
+pub const MAX_COLLATERAL_LOCKS: usize = 3;
+
 /// A user deposit in the protocol.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deposit {
@@ -623,14 +637,15 @@ pub struct Deposit {
     pub fees: FeeStructure,
     /// Block height of last fee assessment.
     pub last_fee_assessment: u32,
-    /// Amount pledged as collateral backing for the operator (millisatoshis).
-    /// This amount cannot be withdrawn until the lock expires.
+    /// Legacy single collateral lock (deprecated — use collateral_locks).
     #[serde(default)]
     pub collateral_lock_amount: u64,
-    /// Block height when the collateral pledge lock expires.
-    /// After this block, the pledged funds can be withdrawn.
     #[serde(default)]
     pub collateral_lock_expires: u32,
+    /// Per-ledger collateral locks. Key is the ledger ID (hex) being backed.
+    /// A deposit can back at most 3 ledgers simultaneously.
+    #[serde(default)]
+    pub collateral_locks: Vec<CollateralLockEntry>,
     /// Per-transfer fee schedule (fixed + proportional).
     #[serde(default)]
     pub transfer_fees: TransferFeeSchedule,
@@ -673,6 +688,7 @@ impl Deposit {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
+            collateral_locks: Vec::new(),
             transfer_fees: TransferFeeSchedule::default(),
             is_collateral: false,
             receive_requires_sig: false,
@@ -1418,16 +1434,35 @@ impl LedgerState {
                 next.next_quorum_members.retain(|m| m.pubkey != *quorum_member);
                 next.collateral_attestations.remove(quorum_member);
             }
-            LedgerOperation::CollateralLock { deposit_id, amount, lock_until_block, .. } => {
-                if let Some(deposit) = next.deposits.get_mut(deposit_id) {
-                    if !deposit.is_collateral {
+            LedgerOperation::CollateralLock { deposit_id, amount, lock_until_block, for_ledger_id, .. } => {
+                let deposit = next.deposits.get_mut(deposit_id)
+                    .ok_or(crate::DepositsError::DepositNotFound)?;
+                if !deposit.is_collateral {
+                    return Err(crate::DepositsError::InvalidState(
+                        "CollateralLock can only be applied to collateral deposits".to_string()
+                    ));
+                }
+                // Update or insert per-ledger lock
+                if let Some(entry) = deposit.collateral_locks.iter_mut().find(|e| e.for_ledger_id == *for_ledger_id) {
+                    entry.amount = *amount;
+                    entry.lock_until_block = *lock_until_block;
+                } else {
+                    // Check cap before adding new ledger
+                    if deposit.collateral_locks.len() >= MAX_COLLATERAL_LOCKS {
                         return Err(crate::DepositsError::InvalidState(
-                            "CollateralLock can only be applied to collateral deposits".to_string()
+                            format!("Collateral deposit already backs {} ledgers (max {})",
+                                deposit.collateral_locks.len(), MAX_COLLATERAL_LOCKS)
                         ));
                     }
-                    deposit.collateral_lock_amount = *amount;
-                    deposit.collateral_lock_expires = *lock_until_block;
+                    deposit.collateral_locks.push(CollateralLockEntry {
+                        for_ledger_id: for_ledger_id.clone(),
+                        amount: *amount,
+                        lock_until_block: *lock_until_block,
+                    });
                 }
+                // Update legacy fields for backward compat (total across all locks)
+                deposit.collateral_lock_amount = deposit.collateral_locks.iter().map(|e| e.amount).sum();
+                deposit.collateral_lock_expires = deposit.collateral_locks.iter().map(|e| e.lock_until_block).max().unwrap_or(0);
             }
             LedgerOperation::LedgerClose => {
                 next.collateral_attestations.clear();
@@ -2561,6 +2596,7 @@ impl TlvDecode for Deposit {
             last_fee_assessment: reader.read_u32(deposit_fields::LAST_FEE_ASSESSMENT)?,
             collateral_lock_amount: reader.read_u64_opt(deposit_fields::COLLATERAL_PLEDGE_AMOUNT)?.unwrap_or(0),
             collateral_lock_expires: reader.read_u32_opt(deposit_fields::COLLATERAL_PLEDGE_EXPIRES)?.unwrap_or(0),
+            collateral_locks: Vec::new(), // rebuilt from history replay
             transfer_fees: reader.read_nested_opt(deposit_fields::TRANSFER_FEES)?.unwrap_or_default(),
             is_collateral: reader.read_u8(deposit_fields::IS_COLLATERAL).unwrap_or(0) != 0,
             receive_requires_sig: reader.read_u8(deposit_fields::RECEIVE_REQUIRES_SIG).unwrap_or(0) != 0,

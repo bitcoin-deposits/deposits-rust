@@ -1213,6 +1213,7 @@ impl Ledger {
                 amount,
                 lock_until_block,
                 operator_id,
+                for_ledger_id: _,
                 witness: _,
             } => {
                 // 1. Deposit must exist

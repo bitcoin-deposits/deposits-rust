@@ -745,6 +745,8 @@ pub enum LedgerOperation {
         lock_until_block: u32,
         /// Operator being backed
         operator_id: PublicKey,
+        /// Ledger this collateral is backing (64-char hex). A deposit can back at most 3 ledgers.
+        for_ledger_id: String,
         /// Witness satisfying the deposit descriptor to authorize the lock
         witness: DescriptorWitness,
     },
@@ -1750,7 +1752,7 @@ impl BinaryCodec for LedgerOperation {
                 write_pubkey(w, quorum_member)?;
                 write_64(w, operator_signature)?;
             }
-            Self::CollateralLock { deposit_id, amount, lock_until_block, operator_id, witness } => {
+            Self::CollateralLock { deposit_id, amount, lock_until_block, operator_id, for_ledger_id, witness } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1762,6 +1764,7 @@ impl BinaryCodec for LedgerOperation {
                     .and_then(|s| if s.len() >= 64 { s[..64].try_into().ok() } else { None })
                     .unwrap_or([0u8; 64]);
                 w.write_all(&sig_bytes)?;
+                write_string(w, for_ledger_id)?;
             }
             Self::QuorumJoin { operator_id, ledger_id, membership_expires } => {
                 write_pubkey(w, operator_id)?;
@@ -2086,11 +2089,13 @@ impl BinaryCodec for LedgerOperation {
                 let lock_until_block = read_u32(r)?;
                 let operator_id = read_pubkey(r)?;
                 let sig = read_64(r)?;
+                let for_ledger_id = read_string(r).unwrap_or_default();
                 Ok(Self::CollateralLock {
                     deposit_id,
                     amount,
                     lock_until_block,
                     operator_id,
+                    for_ledger_id,
                     witness: crate::types::DescriptorWitness { stack: vec![sig.to_vec()] },
                 })
             }
@@ -3091,12 +3096,13 @@ impl TlvEncode for LedgerOperation {
                     .pubkey_field(QUORUM_MEMBER, quorum_member)
                     .bytes_field(OPERATOR_SIG, operator_signature);
             }
-            Self::CollateralLock { deposit_id, amount, lock_until_block, operator_id, witness } => {
+            Self::CollateralLock { deposit_id, amount, lock_until_block, operator_id, for_ledger_id, witness } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .u64_field(AMOUNT, *amount)
                     .u32_field(LOCK_UNTIL_BLOCK, *lock_until_block)
                     .pubkey_field(OPERATOR_ID, operator_id)
+                    .string_field(MEMBER_LEDGER_ID, for_ledger_id)
                     .witness_field(WITNESS, witness);
             }
             Self::QuorumJoin { operator_id, ledger_id, membership_expires } => {
@@ -3315,6 +3321,7 @@ impl TlvDecode for LedgerOperation {
                 amount: reader.read_u64(AMOUNT)?,
                 lock_until_block: reader.read_u32(LOCK_UNTIL_BLOCK)?,
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,
+                for_ledger_id: reader.read_string_opt(MEMBER_LEDGER_ID)?.unwrap_or_default(),
                 witness: reader.read_witness(WITNESS)?,
             }),
             46 => Ok(Self::QuorumJoin {

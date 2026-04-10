@@ -10487,6 +10487,7 @@ impl Node {
                 amount: amount_msats,
                 lock_until_block,
                 operator_id: self.node_id,
+                for_ledger_id: ledger_id.to_string(),
                 witness,
             };
 
