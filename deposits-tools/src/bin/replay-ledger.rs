@@ -1441,6 +1441,7 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
         all.push((u.sequence_number, col, idx));
     }
     all.sort();
+    all.reverse(); // newest first
 
     // Print git-log style
     for &(_, col, idx) in &all {
