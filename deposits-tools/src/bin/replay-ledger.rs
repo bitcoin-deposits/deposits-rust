@@ -1847,6 +1847,11 @@ fn browse_updates(updates: &[SignedLedgerUpdate], start_seq: Option<u64>) -> Res
         std::process::exit(1);
     }
 
+    // Reverse for newest-first display
+    let mut reversed: Vec<SignedLedgerUpdate> = updates.to_vec();
+    reversed.reverse();
+    let updates = &reversed;
+
     let labels: Vec<String> = updates.iter().map(update_label).collect();
     let start_idx = start_seq
         .and_then(|seq| updates.iter().position(|u| u.sequence_number == seq))
