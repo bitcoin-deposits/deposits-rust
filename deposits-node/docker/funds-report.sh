@@ -56,6 +56,88 @@ fmt_msats() {
     fmt_sats "$sats"
 }
 
+# ── LDK Lightning helper ────────────────────────────────────────────────────
+
+ldk_cli() {
+    local network=$(docker exec lightning printenv NETWORK 2>/dev/null || echo "regtest")
+    local api_key=$(docker exec lightning sh -c "cat /ldk/${network}/api_key | od -A n -t x1 | tr -d ' \n'" 2>/dev/null)
+    docker exec lightning ldk-server-cli -b "localhost:3000" -a "$api_key" -t /ldk/tls.crt "$@" 2>/dev/null
+}
+
+report_lightning() {
+    echo -e "\n${B}══════════════════════════════════════════${R}"
+    echo -e "${B}  Lightning Node${R}  ${D}(container: lightning)${R}"
+    echo -e "${B}══════════════════════════════════════════${R}"
+
+    # Node info
+    local ln_info=$(ldk_cli get-node-info 2>/dev/null || echo "")
+    if [ -z "$ln_info" ]; then
+        echo -e "  ${Y}Lightning node not reachable${R}"
+        return
+    fi
+
+    local ln_pubkey=$(echo "$ln_info" | python3 -c "import json,sys; print(json.load(sys.stdin).get('node_id','?'))" 2>/dev/null || echo "?")
+    echo -e "  Node ID: ${D}${ln_pubkey:0:20}...${R}"
+
+    # Balances
+    local balances=$(ldk_cli get-balances 2>/dev/null || echo "{}")
+    local onchain=$(echo "$balances" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('total_onchain_balance_sats', d.get('spendable_onchain_balance_sats', 0)))" 2>/dev/null || echo 0)
+    local spendable=$(echo "$balances" | python3 -c "import json,sys; print(json.load(sys.stdin).get('spendable_onchain_balance_sats',0))" 2>/dev/null || echo 0)
+    local ln_total=$(echo "$balances" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('total_lightning_balance_sats',0))" 2>/dev/null || echo 0)
+    local ln_outbound=$(echo "$balances" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('outbound_capacity_msat',0)//1000)" 2>/dev/null || echo 0)
+    local ln_inbound=$(echo "$balances" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('inbound_capacity_msat',0)//1000)" 2>/dev/null || echo 0)
+
+    echo -e "\n  ${B}Balances:${R}"
+    echo -e "    On-chain total:    ${G}$(fmt_sats $onchain)${R}"
+    echo -e "    On-chain spendable:${G}$(fmt_sats $spendable)${R}"
+    echo -e "    Lightning total:   ${C}$(fmt_sats $ln_total)${R}"
+
+    # Channels
+    local channels=$(ldk_cli list-channels 2>/dev/null || echo "")
+    local chan_list=$(echo "$channels" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    chans = data if isinstance(data, list) else data.get('channels', data.get('list', []))
+    for c in chans:
+        cid = c.get('channel_id', c.get('id', '?'))[:16]
+        peer = c.get('counterparty_node_id', c.get('peer', '?'))[:16]
+        cap = c.get('channel_value_sats', c.get('channel_value_satoshis', 0))
+        bal = c.get('outbound_capacity_msat', c.get('balance_msat', 0)) // 1000
+        ready = c.get('is_channel_ready', c.get('is_usable', False))
+        status = 'ready' if ready else 'pending'
+        print(f'{cid}  peer={peer}...  capacity={cap} sat  balance={bal} sat  [{status}]')
+except:
+    pass
+" 2>/dev/null || echo "")
+
+    if [ -n "$chan_list" ]; then
+        echo -e "\n  ${B}Channels:${R}"
+        echo "$chan_list" | while IFS= read -r line; do
+            [ -n "$line" ] && echo -e "    ${line}"
+        done
+    else
+        echo -e "\n  ${D}  No channels${R}"
+    fi
+
+    # Payments summary
+    local payments=$(ldk_cli list-payments 2>/dev/null || echo "")
+    local pay_summary=$(echo "$payments" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    pays = data.get('payments', data.get('list', []))
+    ok = sum(1 for p in pays if p.get('status') in (1, 'SUCCEEDED'))
+    pending = sum(1 for p in pays if p.get('status') in (0, 'PENDING'))
+    failed = sum(1 for p in pays if p.get('status') in (2, 'FAILED'))
+    total_ok = sum(p.get('amount_msat', 0) for p in pays if p.get('status') in (1, 'SUCCEEDED')) // 1000
+    print(f'{len(pays)} total: {ok} succeeded ({total_ok} sat), {pending} pending, {failed} failed')
+except:
+    print('(unavailable)')
+" 2>/dev/null || echo "(unavailable)")
+    echo -e "\n  ${B}Payments:${R} ${pay_summary}"
+}
+
 # ── Per-node report ──────────────────────────────────────────────────────────
 
 report_node() {
@@ -195,6 +277,11 @@ fi
 for node in "${NODES[@]}"; do
     report_node "$node"
 done
+
+# Lightning node report (unless summary or json mode)
+if ! $SUMMARY_MODE && ! $JSON_MODE; then
+    report_lightning
+fi
 
 if ! $SUMMARY_MODE; then
     echo ""
