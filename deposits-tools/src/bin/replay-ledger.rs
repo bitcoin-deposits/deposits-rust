@@ -1378,9 +1378,9 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
         for &(seq, idx) in &per_branch[0] {
             if seq >= fork_start_seq { all.push((seq, 0, idx, vec![0])); }
         }
-        // Each fork branch, shortest first (longest last)
+        // Each fork branch, longest first (shortest last, closest to pre-fork)
         let mut fork_order: Vec<usize> = (1..num_branches).collect();
-        fork_order.sort_by_key(|b| per_branch[*b].len());
+        fork_order.sort_by_key(|b| std::cmp::Reverse(per_branch[*b].len()));
         for b in fork_order {
             for &(seq, idx) in &per_branch[b] {
                 // Show operator + this fork branch
