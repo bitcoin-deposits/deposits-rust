@@ -1096,6 +1096,57 @@ async function nip04Decrypt(secretKey, pubkeyHex, ciphertext) {
 }
 
 // ============================================================
+// Gift wrap (NIP-59 structure over ephemeral kinds)
+// ============================================================
+
+// Build a gift-wrapped event: rumor → seal (encrypted) → wrap (encrypted, throwaway key)
+async function giftWrap(senderKey, recipientPubkeyHex, kind, content, tags) {
+  const senderPubkey = getPublicKeyHex(senderKey);
+  // Recipient x-only pubkey (strip 02/03 prefix if compressed)
+  const recipientXonly = recipientPubkeyHex.length === 66 ? recipientPubkeyHex.slice(2) : recipientPubkeyHex;
+
+  // 1. Build rumor (unsigned)
+  const rumor = JSON.stringify({
+    kind, content, tags,
+    pubkey: senderPubkey,
+    created_at: Math.floor(Date.now() / 1000),
+  });
+
+  // 2. Seal: encrypt rumor to recipient, sign with sender
+  const sealContent = await nip04Encrypt(senderKey, recipientXonly, rumor);
+  const sealEvent = await createEvent(senderKey, 13, sealContent, []);
+  const sealJson = JSON.stringify({
+    id: sealEvent.id, pubkey: sealEvent.pubkey,
+    created_at: sealEvent.created_at, kind: 13,
+    content: sealEvent.content, sig: sealEvent.sig,
+  });
+
+  // 3. Wrap: encrypt seal to recipient, sign with throwaway key
+  const throwawayKey = crypto.getRandomValues(new Uint8Array(32));
+  const wrapContent = await nip04Encrypt(throwawayKey, recipientXonly, sealJson);
+  const wrapEvent = await createEvent(throwawayKey, kind, wrapContent, [['p', recipientXonly]]);
+
+  return wrapEvent;
+}
+
+// Unwrap a gift-wrapped event: decrypt wrap → verify seal → decrypt rumor
+async function giftUnwrap(recipientKey, wrapEvent) {
+  const recipientPubkey = getPublicKeyHex(recipientKey);
+
+  // 1. Decrypt wrap content (encrypted by throwaway key to us)
+  const wrapSenderPubkey = wrapEvent.pubkey;
+  const sealJson = await nip04Decrypt(recipientKey, wrapSenderPubkey, wrapEvent.content);
+  const seal = JSON.parse(sealJson);
+
+  // 2. Decrypt seal content (encrypted by real sender to us)
+  const senderPubkey = seal.pubkey;
+  const rumorJson = await nip04Decrypt(recipientKey, senderPubkey, seal.content);
+  const rumor = JSON.parse(rumorJson);
+
+  return { sender: rumor.pubkey, kind: rumor.kind, content: rumor.content, tags: rumor.tags || [] };
+}
+
+// ============================================================
 // Remote state sync (kind 30078, encrypted to self)
 // ============================================================
 
@@ -1585,26 +1636,39 @@ function handleRelayMessage(data, sock) {
   }
 }
 
-function handleEvent(event) {
+async function handleEvent(event) {
   if (event.kind === 9100) {
     // Ledger update — check for credits to our deposits
     handleLedgerUpdate(event);
     return;
   }
   if (event.kind === 20102 || event.kind === 25501) {
-    // Ledger response — match to pending request via #e tag
+    // Ledger response — try plaintext first, then gift-unwrap
     const eTag = (event.tags || []).find(t => t[0] === 'e');
-    if (!eTag) return;
-    const requestId = eTag[1];
-    const pending = pendingRequests.get(requestId);
-    if (pending) {
-      clearTimeout(pending.timeout);
-      pendingRequests.delete(requestId);
+    const pTag = (event.tags || []).find(t => t[0] === 'p');
+
+    // Try plaintext JSON (legacy/node-to-node)
+    let requestId = eTag ? eTag[1] : null;
+    let responseContent = null;
+    try {
+      responseContent = JSON.parse(event.content);
+    } catch {
+      // Not plaintext — try gift-unwrap
       try {
-        const response = JSON.parse(event.content);
-        pending.resolve(response);
-      } catch {
-        pending.reject(new Error('Invalid response JSON'));
+        const nostrKey = deriveSecretKey(state.seed, 0);
+        const unwrapped = await giftUnwrap(nostrKey, event);
+        responseContent = JSON.parse(unwrapped.content);
+        // The e tag on the outer event has the request id
+        if (!requestId && eTag) requestId = eTag[1];
+      } catch {}
+    }
+
+    if (requestId && responseContent) {
+      const pending = pendingRequests.get(requestId);
+      if (pending) {
+        clearTimeout(pending.timeout);
+        pendingRequests.delete(requestId);
+        pending.resolve(responseContent);
       }
     }
   }
@@ -1656,7 +1720,17 @@ async function sendRequest(ledgerId, action, params, timeoutMs = 30000) {
     ['l', ledgerId],
     ['action', action],
   ];
-  const event = await createEvent(nostrKey, 20101, content, tags);
+
+  // Gift-wrap the request if we know the operator's pubkey
+  const ad = (window._discoveredAds || {})[ledgerId];
+  const operatorPubkey = ad?.operator_pubkey;
+  let event;
+  if (operatorPubkey) {
+    event = await giftWrap(nostrKey, operatorPubkey, 20101, content, tags);
+  } else {
+    // Fallback to plaintext (pre-discovery or no ad)
+    event = await createEvent(nostrKey, 20101, content, tags);
+  }
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -1666,7 +1740,7 @@ async function sendRequest(ledgerId, action, params, timeoutMs = 30000) {
 
     pendingRequests.set(event.id, { resolve, reject, timeout });
     wsSendForLedger(['EVENT', event], ledgerId);
-    log(`Sent ${action} request (${event.id.slice(0, 12)}...)`);
+    log(`Sent ${action} request (${event.id.slice(0, 12)}...${operatorPubkey ? ' encrypted' : ''})`);
   });
 }
 
@@ -2380,14 +2454,9 @@ async function sendVerifyRequest(verifierPubkey, params, timeoutMs = 30000) {
   const pubkeyHex = decodeBech32ToHex(verifierPubkey);
   const tags = [['p', pubkeyHex]];
 
-  let event;
-  if (state.useNip07) {
-    try { event = await createEventNip07(25500, content, tags); } catch {}
-  }
-  if (!event) {
-    const nostrKey = deriveSecretKey(state.seed, 0);
-    event = await createEvent(nostrKey, 25500, content, tags);
-  }
+  // Gift-wrap to verifier
+  const nostrKey = deriveSecretKey(state.seed, 0);
+  const event = await giftWrap(nostrKey, pubkeyHex, 25500, content, tags);
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
