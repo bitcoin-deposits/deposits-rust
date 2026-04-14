@@ -1355,14 +1355,46 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
     }
     println!();
 
-    // Sort: by seq desc (newest first), within same seq: branch 0 first, then others
-    let mut all: Vec<(u64, usize, usize)> = Vec::new(); // (seq, branch, update_idx)
+    // Build entries per branch
+    let mut per_branch: Vec<Vec<(u64, usize)>> = vec![Vec::new(); num_branches]; // branch → [(seq, idx)]
     for (idx, u) in updates.iter().enumerate() {
         let author = hex::encode(u.operator_id.serialize());
         let branch = op_to_branch[&author];
-        all.push((u.sequence_number, branch, idx));
+        per_branch[branch].push((u.sequence_number, idx));
     }
-    all.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    // Sort each branch newest first
+    for v in &mut per_branch { v.sort_by(|a, b| b.0.cmp(&a.0)); }
+
+    // Layout: operator entries above fork point, then each fork branch, then operator below fork
+    let fork_start_seq = if num_branches > 1 {
+        (1..num_branches).filter_map(|b| branch_first.get(&b).copied()).min().unwrap_or(0)
+    } else { 0 };
+
+    let mut all: Vec<(u64, usize, usize)> = Vec::new(); // (seq, branch, update_idx)
+
+    if num_branches > 1 {
+        // Operator entries at/after fork point (newest first)
+        for &(seq, idx) in &per_branch[0] {
+            if seq >= fork_start_seq { all.push((seq, 0, idx)); }
+        }
+        // Each fork branch, shortest first (longest last)
+        let mut fork_order: Vec<usize> = (1..num_branches).collect();
+        fork_order.sort_by_key(|b| per_branch[*b].len());
+        for b in fork_order {
+            for &(seq, idx) in &per_branch[b] {
+                all.push((seq, b, idx));
+            }
+        }
+        // Operator entries before fork point (newest first)
+        for &(seq, idx) in &per_branch[0] {
+            if seq < fork_start_seq { all.push((seq, 0, idx)); }
+        }
+    } else {
+        // No forks — just newest first
+        for &(seq, idx) in &per_branch[0] {
+            all.push((seq, 0, idx));
+        }
+    }
 
     // Print
     for &(seq, branch, idx) in &all {
