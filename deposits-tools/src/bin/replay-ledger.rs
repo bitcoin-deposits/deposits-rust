@@ -1316,160 +1316,82 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
         });
     }
 
-    // Group by chain_hash (prev_hash → children)
-    // Each update: prev_hash → (seq, current_hash, chain_hash, op, author)
-    let mut by_prev: BTreeMap<[u8; 32], Vec<usize>> = BTreeMap::new();
-    for (i, u) in updates.iter().enumerate() {
-        by_prev.entry(u.previous_hash).or_default().push(i);
-    }
-
-    // Identify distinct chains by following from genesis
-    // A "chain" is a maximal path through prev_hash → chain_hash links
-    let mut chains: Vec<Vec<usize>> = Vec::new(); // each chain is a list of update indices
-    let mut assigned: Vec<bool> = vec![false; updates.len()];
-
-    // Build chain_hash → index lookup
-    let mut by_chain_hash: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
-    for (i, u) in updates.iter().enumerate() {
-        by_chain_hash.entry(u.chain_hash()).or_default().push(i);
-    }
-
-    // Walk from each genesis (prev_hash = [0;32]) or any unassigned root
-    let genesis = [0u8; 32];
-    let mut roots: Vec<usize> = by_prev.get(&genesis).cloned().unwrap_or_default();
-
-    // Also find roots that are orphaned (prev_hash not matching any chain_hash)
-    let all_chain_hashes: std::collections::HashSet<[u8; 32]> = updates.iter().map(|u| u.chain_hash()).collect();
-    for (i, u) in updates.iter().enumerate() {
-        if u.previous_hash != genesis && !all_chain_hashes.contains(&u.previous_hash) {
-            roots.push(i);
+    // Branch by operator pubkey (not chain traversal)
+    let mut op_to_branch: HashMap<String, usize> = HashMap::new();
+    let mut next_branch = 0usize;
+    for u in updates {
+        let author = hex::encode(u.operator_id.serialize());
+        if !op_to_branch.contains_key(&author) {
+            op_to_branch.insert(author, next_branch);
+            next_branch += 1;
         }
     }
-    roots.sort();
-    roots.dedup();
+    let num_branches = next_branch;
 
-    for &root in &roots {
-        if assigned[root] { continue; }
-        let mut chain = Vec::new();
-        let mut idx = root;
-        loop {
-            if assigned[idx] { break; }
-            assigned[idx] = true;
-            chain.push(idx);
-            // Follow chain_hash → next update's prev_hash
-            let ch = updates[idx].chain_hash();
-            match by_prev.get(&ch) {
-                Some(nexts) => {
-                    // Prefer same author, then lowest seq
-                    let author = hex::encode(updates[idx].operator_id.serialize());
-                    if let Some(&next) = nexts.iter()
-                        .filter(|&&n| !assigned[n])
-                        .find(|&&n| hex::encode(updates[n].operator_id.serialize()) == author)
-                    {
-                        idx = next;
-                    } else if let Some(&next) = nexts.iter().find(|&&n| !assigned[n]) {
-                        idx = next;
-                    } else {
-                        break;
-                    }
-                }
-                None => break,
-            }
-        }
-        if !chain.is_empty() {
-            chains.push(chain);
-        }
+    // Compute first/last seq per branch for active-range rendering
+    let mut branch_first: HashMap<usize, u64> = HashMap::new();
+    let mut branch_last: HashMap<usize, u64> = HashMap::new();
+    for u in updates {
+        let author = hex::encode(u.operator_id.serialize());
+        let b = op_to_branch[&author];
+        let seq = u.sequence_number;
+        branch_first.entry(b).and_modify(|v| *v = (*v).min(seq)).or_insert(seq);
+        branch_last.entry(b).and_modify(|v| *v = (*v).max(seq)).or_insert(seq);
     }
-
-    // Collect any remaining unassigned (fork children)
-    for i in 0..updates.len() {
-        if !assigned[i] {
-            let mut chain = vec![i];
-            assigned[i] = true;
-            let mut idx = i;
-            loop {
-                let ch = updates[idx].chain_hash();
-                match by_prev.get(&ch) {
-                    Some(nexts) => {
-                        if let Some(&next) = nexts.iter().find(|&&n| !assigned[n]) {
-                            assigned[next] = true;
-                            chain.push(next);
-                            idx = next;
-                        } else { break; }
-                    }
-                    None => break,
-                }
-            }
-            chains.push(chain);
-        }
-    }
-
-    // Sort chains: longest first (main chain), then by starting seq
-    chains.sort_by(|a, b| {
-        b.len().cmp(&a.len())
-            .then_with(|| updates[a[0]].sequence_number.cmp(&updates[b[0]].sequence_number))
-    });
-
-    // Assign branch columns
-    let mut branch_col: HashMap<usize, usize> = HashMap::new(); // update_idx → column
-    for (col, chain) in chains.iter().enumerate() {
-        for &idx in chain {
-            branch_col.insert(idx, col);
-        }
-    }
-
-    let num_branches = chains.len();
 
     // Print legend
-    println!("{}Chains: {}{}", bold, num_branches, reset);
-    for (col, chain) in chains.iter().enumerate() {
-        let first = &updates[chain[0]];
-        let author = hex::encode(first.operator_id.serialize());
-        let color = colors[author_colors[&author] % colors.len()];
-        let name = &author_names[&author];
-        let last = &updates[*chain.last().unwrap()];
-        println!("  {}│{} branch {} ({} updates, seq {}-{}, author {})",
-            color, reset, col, chain.len(),
-            first.sequence_number, last.sequence_number, name);
+    println!("{}Branches: {}{}", bold, num_branches, reset);
+    let mut branches_sorted: Vec<_> = op_to_branch.iter().collect();
+    branches_sorted.sort_by_key(|(_, b)| **b);
+    for (author, &branch) in &branches_sorted {
+        let color = colors[branch % colors.len()];
+        let name = &author_names[*author];
+        let count = updates.iter().filter(|u| hex::encode(u.operator_id.serialize()) == **author).count();
+        let first = branch_first.get(&branch).copied().unwrap_or(0);
+        let last = branch_last.get(&branch).copied().unwrap_or(0);
+        let label = if branch == 0 { "operator" } else { "fork" };
+        println!("  {}│{} {} {} ({} updates, seq {}-{}, {})",
+            color, reset, label, branch, count, first, last, name);
     }
     println!();
 
-    // Collect all updates sorted by seq, then by branch column
-    let mut all: Vec<(u64, usize, usize)> = Vec::new(); // (seq, col, update_idx)
+    // Sort: by seq desc (newest first), within same seq: branch 0 first, then others
+    let mut all: Vec<(u64, usize, usize)> = Vec::new(); // (seq, branch, update_idx)
     for (idx, u) in updates.iter().enumerate() {
-        let col = branch_col.get(&idx).copied().unwrap_or(0);
-        all.push((u.sequence_number, col, idx));
+        let author = hex::encode(u.operator_id.serialize());
+        let branch = op_to_branch[&author];
+        all.push((u.sequence_number, branch, idx));
     }
-    all.sort();
-    all.reverse(); // newest first
+    all.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
 
-    // Print git-log style
-    for &(_, col, idx) in &all {
+    // Print
+    for &(seq, branch, idx) in &all {
         let u = &updates[idx];
         let author = hex::encode(u.operator_id.serialize());
-        let color = colors[author_colors[&author] % colors.len()];
+        let color = colors[branch % colors.len()];
         let op_name = LedgerOperation::tlv_decode(&u.message)
             .map(|op| format_op(&op))
             .unwrap_or_else(|_| "?".to_string());
 
-        // Build branch indicators
-        let mut prefix_chars: Vec<String> = (0..num_branches.min(8))
-            .map(|c| {
-                if c == col {
+        // Build branch indicators: * for this branch, │ for active others, space for inactive
+        let prefix: String = (0..num_branches.min(8))
+            .map(|b| {
+                if b == branch {
                     format!("{}*{}", color, reset)
-                } else {
-                    // Check if this branch has activity at this seq
+                } else if seq >= branch_first.get(&b).copied().unwrap_or(u64::MAX)
+                       && seq <= branch_last.get(&b).copied().unwrap_or(0) {
                     format!("{}│{}", dim, reset)
+                } else {
+                    " ".to_string()
                 }
             })
-            .collect();
+            .collect::<Vec<_>>()
+            .join("");
 
-        let prefix_str = prefix_chars.join("");
         let hash_short = &hex::encode(u.chain_hash())[..8];
-
         println!("{} {}{:3}{} {} {}{}{}",
-            prefix_str,
-            dim, u.sequence_number, reset,
+            prefix,
+            dim, seq, reset,
             hash_short,
             color, op_name, reset);
     }
