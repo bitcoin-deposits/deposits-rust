@@ -998,6 +998,7 @@ async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
     match args[0].as_str() {
         "create" => reserves_create(&args[1..]).await,
         "list" => reserves_list(&args[1..]).await,
+        "spend" => reserves_spend(&args[1..]).await,
         arg if !arg.starts_with("--") && arg.parse::<u64>().is_ok() => {
             // Legacy: direct amount argument (backwards compatible)
             reserves_create(args).await
@@ -1392,6 +1393,197 @@ async fn auto_advertise_ledger(
         Ok(_) => println!("  Advertised ledger for wallet discovery"),
         Err(e) => eprintln!("  Warning: Failed to advertise ledger: {}", e),
     }
+}
+
+/// Emergency spend: move reserves UTXO to a destination address using quorum keys.
+///
+/// Usage: reserves spend <destination_address> --key <hex_secret> [--key <hex_secret> ...] [--tier <N>] [--fee-rate <sat/vb>]
+///
+/// Requires enough keys to satisfy the chosen spending tier (default: tier 0 = majority of quorum).
+/// The operator's key is required for tiers that include the operator (tie-breaker).
+async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
+    use deposits_core::tapscript_reserves::TapscriptReservesBuilder;
+
+    let mut config_args = Vec::new();
+    let mut destination: Option<String> = None;
+    let mut keys: Vec<String> = Vec::new();
+    let mut tier: usize = 0;
+    let mut fee_rate: u64 = 2; // sat/vb default
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--key" | "-k" if i + 1 < args.len() => {
+                keys.push(args[i + 1].clone());
+                i += 2;
+            }
+            "--tier" if i + 1 < args.len() => {
+                tier = args[i + 1].parse().map_err(|_| "Invalid --tier")?;
+                i += 2;
+            }
+            "--fee-rate" if i + 1 < args.len() => {
+                fee_rate = args[i + 1].parse().map_err(|_| "Invalid --fee-rate")?;
+                i += 2;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+                i += 1;
+            }
+            _ => {
+                if destination.is_none() {
+                    destination = Some(args[i].clone());
+                }
+                i += 1;
+            }
+        }
+    }
+
+    let destination = destination.ok_or(
+        "Usage: reserves spend <destination_address> --key <hex_secret> [--key ...] [--tier N] [--fee-rate N]"
+    )?;
+
+    if keys.is_empty() {
+        return Err("At least one --key required".into());
+    }
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config.clone()).await?;
+    node.sync_wallet()?;
+
+    let secp = Secp256k1::new();
+
+    // Parse destination address
+    let dest_addr = destination.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+        .map_err(|e| format!("Invalid destination address: {}", e))?
+        .require_network(config.network)
+        .map_err(|e| format!("Address network mismatch: {}", e))?;
+    let dest_script = dest_addr.script_pubkey();
+
+    // Parse secret keys
+    let secret_keys: Vec<SecretKey> = keys.iter().map(|hex| {
+        let bytes = hex::decode(hex).map_err(|e| format!("Invalid key hex: {}", e))?;
+        SecretKey::from_slice(&bytes).map_err(|e| format!("Invalid secret key: {}", e))
+    }).collect::<Result<Vec<_>, String>>()?;
+
+    // Find taproot reserves
+    let taproot_reserves = node.wallet.get_taproot_reserves();
+    if taproot_reserves.is_empty() {
+        return Err("No taproot reserves found. Use 'reserves list' to check.".into());
+    }
+
+    // Use first taproot reserve (or let user pick)
+    let reserves = &taproot_reserves[0];
+    let outpoint = reserves.outpoint;
+    let amount = reserves.amount;
+
+    println!("Emergency Reserves Spend");
+    println!("========================");
+    println!("  Outpoint:    {}", outpoint);
+    println!("  Amount:      {} sats", amount);
+    println!("  Destination: {}", destination);
+    println!("  Tier:        {} ({})", tier,
+        reserves.taproot_output.config.tiers.get(tier)
+            .map(|t| t.description.as_str()).unwrap_or("?"));
+    println!("  Fee rate:    {} sat/vb", fee_rate);
+    println!("  Keys:        {}", keys.len());
+    println!();
+
+    // Get tier info
+    let tier_info = reserves.taproot_output.config.tiers.get(tier)
+        .ok_or(format!("Tier {} does not exist (max: {})", tier, reserves.taproot_output.config.tiers.len() - 1))?;
+
+    // Build the leaf script for this tier
+    let builder = TapscriptReservesBuilder::new(
+        reserves.taproot_output.voter_set.clone(),
+        reserves.taproot_output.config.clone(),
+        config.network,
+        reserves.ledger_hash,
+    );
+    let leaf_script = builder.build_threshold_leaf(tier_info)
+        .map_err(|e| format!("Failed to build leaf script: {:?}", e))?;
+
+    // Get control block
+    let control_block = reserves.taproot_output.control_block_for_tier(tier)
+        .ok_or("Failed to get control block for tier")?;
+
+    // Build unsigned transaction
+    let reserves_script_pubkey = reserves.taproot_output.script_pubkey();
+    let params = deposits_core::tapscript_reserves::SpendTxParams {
+        reserves_outpoint: outpoint,
+        reserves_amount: amount,
+        destination_script: dest_script.clone(),
+        fee_rate_sat_vbyte: fee_rate,
+    };
+    let mut tx = deposits_core::tapscript_reserves::ReservesSpendBuilder::build_spend_transaction(&params, &reserves_script_pubkey)?;
+
+    // Compute sighash
+    let sighash = deposits_core::tapscript_reserves::ReservesSpendBuilder::compute_sighash(
+        &tx, 0, amount, &reserves_script_pubkey, &leaf_script,
+    )?;
+
+    let sighash_bytes: &[u8] = sighash.as_ref();
+    println!("  Sighash: {}", hex::encode(sighash_bytes));
+
+    // Sign with each provided key
+    // Get the voter set's sorted x-only pubkeys to know which slot each key fills
+    let voter_pubkeys = reserves.taproot_output.voter_set.sorted_x_only_pubkeys();
+
+    let mut signatures: Vec<Option<[u8; 64]>> = vec![None; voter_pubkeys.len()];
+    let msg = Message::from_digest(*sighash.as_ref());
+
+    for sk in &secret_keys {
+        let keypair = Keypair::from_secret_key(&secp, sk);
+        let xonly = keypair.x_only_public_key().0;
+
+        if let Some(slot) = voter_pubkeys.iter().position(|pk| *pk == xonly) {
+            let sig = secp.sign_schnorr(&msg, &keypair);
+            signatures[slot] = Some(sig.serialize());
+            println!("  Signed slot {} ({}...)", slot, &hex::encode(xonly.serialize())[..16]);
+        } else {
+            eprintln!("  WARNING: Key {}... is not in the voter set", &hex::encode(xonly.serialize())[..16]);
+        }
+    }
+
+    let signed_count = signatures.iter().filter(|s| s.is_some()).count();
+    println!("\n  Signed: {}/{} required", signed_count, tier_info.threshold);
+
+    if signed_count < tier_info.threshold {
+        return Err(format!(
+            "Not enough signatures: {} of {} required for tier {}",
+            signed_count, tier_info.threshold, tier
+        ).into());
+    }
+
+    // Build witness
+    let witness = deposits_core::tapscript_reserves::ReservesSpendBuilder::create_checksigadd_witness(
+        &signatures, &leaf_script, &control_block,
+    );
+    tx.input[0].witness = witness;
+
+    // Serialize and display
+    let tx_hex = bitcoin::consensus::encode::serialize_hex(&tx);
+    println!("\n  TxID:   {}", tx.compute_txid());
+    println!("  Size:   {} vbytes", tx.vsize());
+    println!("  Hex:    {}", &tx_hex[..80.min(tx_hex.len())]);
+    println!("          (full hex: {} chars)", tx_hex.len());
+
+    // Broadcast
+    println!("\nBroadcasting...");
+    match node.wallet.broadcast(&tx) {
+        Ok(txid) => println!("  SUCCESS: Transaction broadcast (txid: {})", txid),
+        Err(e) => {
+            eprintln!("  Broadcast failed: {}", e);
+            eprintln!("\n  Raw transaction (for manual broadcast):");
+            println!("{}", tx_hex);
+        }
+    }
+
+    Ok(())
 }
 
 /// Open a new ledger backed by our reserves UTXO
