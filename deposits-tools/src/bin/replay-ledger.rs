@@ -1373,20 +1373,30 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
             .map(|op| format_op(&op))
             .unwrap_or_else(|_| "?".to_string());
 
-        // Build branch indicators: * for this branch, │ for active others, space for inactive
-        let prefix: String = (0..num_branches.min(8))
-            .map(|b| {
-                if b == branch {
-                    format!("{}*{}", color, reset)
-                } else if seq >= branch_first.get(&b).copied().unwrap_or(u64::MAX)
-                       && seq <= branch_last.get(&b).copied().unwrap_or(0) {
-                    format!("{}│{}", dim, reset)
-                } else {
-                    " ".to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("");
+        // Count how many branches are active at this seq
+        let active_count = (0..num_branches)
+            .filter(|b| seq >= branch_first.get(b).copied().unwrap_or(u64::MAX)
+                      && seq <= branch_last.get(b).copied().unwrap_or(0))
+            .count();
+
+        // Only show multi-column indicators when multiple branches are active
+        let prefix = if active_count <= 1 {
+            format!("{}*{}", color, reset)
+        } else {
+            (0..num_branches.min(8))
+                .map(|b| {
+                    if b == branch {
+                        format!("{}*{}", color, reset)
+                    } else if seq >= branch_first.get(&b).copied().unwrap_or(u64::MAX)
+                           && seq <= branch_last.get(&b).copied().unwrap_or(0) {
+                        format!("{}│{}", dim, reset)
+                    } else {
+                        " ".to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        };
 
         let hash_short = &hex::encode(u.chain_hash())[..8];
         println!("{} {}{:3}{} {} {}{}{}",
