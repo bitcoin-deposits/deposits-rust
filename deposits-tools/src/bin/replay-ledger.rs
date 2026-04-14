@@ -1381,16 +1381,23 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
 
         // Only show branch indicators when forks exist
         let prefix = if num_branches <= 1 {
-            // No forks anywhere — no indicator needed
             String::new()
         } else {
             (0..num_branches.min(8))
                 .map(|b| {
-                    if b == branch {
+                    let b_first = branch_first.get(&b).copied().unwrap_or(u64::MAX);
+                    let b_last = branch_last.get(&b).copied().unwrap_or(0);
+                    let active = seq >= b_first && seq <= b_last;
+                    if b == branch && seq == b_first {
+                        // First entry of this branch: show *
                         format!("{}*{}", color, reset)
-                    } else if seq >= branch_first.get(&b).copied().unwrap_or(u64::MAX)
-                           && seq <= branch_last.get(&b).copied().unwrap_or(0) {
-                        format!("{}│{}", dim, reset)
+                    } else if b == branch {
+                        // Continuation of this branch: show │
+                        format!("{}│{}", color, reset)
+                    } else if active {
+                        // Other active branch: show dim │
+                        let other_color = colors[b % colors.len()];
+                        format!("{}│{}", other_color, reset)
                     } else {
                         " ".to_string()
                     }
