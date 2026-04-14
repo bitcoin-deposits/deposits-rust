@@ -1379,13 +1379,10 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
                       && seq <= branch_last.get(b).copied().unwrap_or(0))
             .count();
 
-        // Only show branch indicators when multiple branches are active at this seq
-        let prefix = if active_count <= 1 && num_branches <= 1 {
-            // Single branch, no forks anywhere — no indicator needed
+        // Only show branch indicators when forks exist
+        let prefix = if num_branches <= 1 {
+            // No forks anywhere — no indicator needed
             String::new()
-        } else if active_count <= 1 {
-            // Only one branch active here but forks exist elsewhere — pad to align
-            " ".to_string()
         } else {
             (0..num_branches.min(8))
                 .map(|b| {
