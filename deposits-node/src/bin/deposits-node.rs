@@ -1408,6 +1408,7 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let mut config_args = Vec::new();
     let mut destination: Option<String> = None;
     let mut keys: Vec<String> = Vec::new();
+    let mut seed_dir: Option<String> = None;
     let mut tier: usize = 0;
     let mut fee_rate: u64 = 2; // sat/vb default
 
@@ -1416,6 +1417,10 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         match args[i].as_str() {
             "--key" | "-k" if i + 1 < args.len() => {
                 keys.push(args[i + 1].clone());
+                i += 2;
+            }
+            "--seed-dir" if i + 1 < args.len() => {
+                seed_dir = Some(args[i + 1].clone());
                 i += 2;
             }
             "--tier" if i + 1 < args.len() => {
@@ -1444,11 +1449,11 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 
     let destination = destination.ok_or(
-        "Usage: reserves spend <destination_address> --key <hex_secret> [--key ...] [--tier N] [--fee-rate N]"
+        "Usage: reserves spend <dest_address> --seed-dir <path> [--key <hex>] [--tier N] [--fee-rate N]"
     )?;
 
-    if keys.is_empty() {
-        return Err("At least one --key required".into());
+    if keys.is_empty() && seed_dir.is_none() {
+        return Err("Provide --seed-dir <path> or at least one --key <hex>".into());
     }
 
     let config = parse_config(&config_args)?;
@@ -1464,11 +1469,43 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         .map_err(|e| format!("Address network mismatch: {}", e))?;
     let dest_script = dest_addr.script_pubkey();
 
-    // Parse secret keys
-    let secret_keys: Vec<SecretKey> = keys.iter().map(|hex| {
-        let bytes = hex::decode(hex).map_err(|e| format!("Invalid key hex: {}", e))?;
+    // Collect secret keys from --key flags
+    let mut secret_keys: Vec<SecretKey> = keys.iter().map(|hex_str| {
+        let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid key hex: {}", e))?;
         SecretKey::from_slice(&bytes).map_err(|e| format!("Invalid secret key: {}", e))
     }).collect::<Result<Vec<_>, String>>()?;
+
+    // Auto-discover keys from --seed-dir: scan */seed files, derive operator key, collect
+    if let Some(ref dir) = seed_dir {
+        let seed_path = std::path::Path::new(dir);
+        if !seed_path.is_dir() {
+            return Err(format!("Seed directory not found: {}", dir).into());
+        }
+        for entry in std::fs::read_dir(seed_path)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() { continue; }
+            let seed_file = entry.path().join("seed");
+            if !seed_file.exists() { continue; }
+            let seed_hex = std::fs::read_to_string(&seed_file)?.trim().to_string();
+            if seed_hex.len() != 64 { continue; }
+            if let Ok(seed_bytes) = hex::decode(&seed_hex) {
+                if seed_bytes.len() == 32 {
+                    let mut seed = [0u8; 32];
+                    seed.copy_from_slice(&seed_bytes);
+                    if let Ok(sk) = derive_operator_secret(&seed, config.network) {
+                        let node_name = entry.file_name().to_string_lossy().to_string();
+                        let pk = PublicKey::from_secret_key(&secp, &sk);
+                        println!("  Found seed: {} -> {}...", node_name, &hex::encode(pk.serialize())[..16]);
+                        secret_keys.push(sk);
+                    }
+                }
+            }
+        }
+    }
+
+    if secret_keys.is_empty() {
+        return Err("No keys found. Provide --seed-dir or --key.".into());
+    }
 
     // Find taproot reserves
     let taproot_reserves = node.wallet.get_taproot_reserves();
