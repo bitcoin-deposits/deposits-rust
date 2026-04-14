@@ -310,6 +310,10 @@ pub struct LedgerRequest {
     /// Timestamp
     #[serde(skip)]
     pub timestamp: u64,
+
+    /// If gift-wrapped: real sender pubkey (for encrypting response back)
+    #[serde(skip)]
+    pub gift_wrap_sender: Option<String>,
 }
 
 /// A ledger response (reply to a request)
@@ -1273,7 +1277,8 @@ impl NostrTransport {
         Ok(event_id)
     }
 
-    /// Send a ledger response (reply to a request)
+    /// Send a ledger response (reply to a request).
+    /// If `gift_wrap_to` is set, the response is gift-wrapped to that pubkey.
     pub async fn send_ledger_response(
         &self,
         request_id: &str,
@@ -1282,6 +1287,7 @@ impl NostrTransport {
         success: bool,
         result: Option<serde_json::Value>,
         error: Option<String>,
+        gift_wrap_to: Option<&str>,
     ) -> Result<String, Error> {
         let response = LedgerResponse {
             success,
@@ -1293,26 +1299,66 @@ impl NostrTransport {
             timestamp: 0,
         };
 
-        let content = serde_json::to_string(&response)
+        let plaintext_content = serde_json::to_string(&response)
             .map_err(|e| Error::Serialization(format!("Failed to serialize response: {}", e)))?;
 
         let status = if success { "ok" } else { "error" };
 
-        let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_RESPONSE), &content)
-            .tag(Tag::custom(
-                TagKind::SingleLetter(TAG_EVENT_REF),
-                [request_id],
-            ))
-            .tag(Tag::custom(
-                TagKind::SingleLetter(TAG_LEDGER_REQ),
-                [ledger_id],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("status"),
-                [status],
-            ))
-            .sign_with_keys(&self.keys)
-            .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
+        let event = if let Some(recipient_hex) = gift_wrap_to {
+            // Gift-wrap response: rumor → seal (encrypted) → wrap (throwaway key)
+            let recipient_pk = nostr_sdk::PublicKey::from_hex(recipient_hex)
+                .map_err(|e| Error::Nostr(format!("Invalid gift_wrap_to pubkey: {}", e)))?;
+
+            let rumor_json = serde_json::json!({
+                "kind": KIND_LEDGER_RESPONSE,
+                "content": plaintext_content,
+                "tags": [["e", request_id]],
+                "pubkey": self.keys.public_key().to_hex(),
+                "created_at": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs()).unwrap_or(0),
+            }).to_string();
+
+            let seal_content = nip04::encrypt(self.keys.secret_key(), &recipient_pk, &rumor_json)
+                .map_err(|e| Error::Nostr(format!("Gift wrap seal encrypt failed: {}", e)))?;
+            let seal_event = EventBuilder::new(Kind::Custom(13), &seal_content)
+                .sign_with_keys(&self.keys)
+                .map_err(|e| Error::Nostr(format!("Gift wrap seal sign failed: {}", e)))?;
+            let seal_json = serde_json::json!({
+                "id": seal_event.id.to_hex(),
+                "pubkey": seal_event.pubkey.to_hex(),
+                "created_at": seal_event.created_at.as_u64(),
+                "kind": 13,
+                "content": seal_event.content,
+                "sig": seal_event.sig.to_string(),
+            }).to_string();
+
+            let throwaway = Keys::generate();
+            let wrap_content = nip04::encrypt(throwaway.secret_key(), &recipient_pk, &seal_json)
+                .map_err(|e| Error::Nostr(format!("Gift wrap outer encrypt failed: {}", e)))?;
+            EventBuilder::new(Kind::Custom(KIND_LEDGER_RESPONSE), &wrap_content)
+                .tag(Tag::public_key(recipient_pk))
+                .tag(Tag::custom(TagKind::SingleLetter(TAG_EVENT_REF), [request_id]))
+                .sign_with_keys(&throwaway)
+                .map_err(|e| Error::Nostr(format!("Gift wrap sign failed: {}", e)))?
+        } else {
+            // Plaintext response (node-to-node)
+            EventBuilder::new(Kind::Custom(KIND_LEDGER_RESPONSE), &plaintext_content)
+                .tag(Tag::custom(
+                    TagKind::SingleLetter(TAG_EVENT_REF),
+                    [request_id],
+                ))
+                .tag(Tag::custom(
+                    TagKind::SingleLetter(TAG_LEDGER_REQ),
+                    [ledger_id],
+                ))
+                .tag(Tag::custom(
+                    TagKind::custom("status"),
+                    [status],
+                ))
+                .sign_with_keys(&self.keys)
+                .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?
+        };
 
         let event_id = event.id.to_hex();
 
@@ -2783,9 +2829,52 @@ impl NostrTransport {
 
     /// Process a ledger request event
     fn process_ledger_request(&self, event: &Event) -> Result<LedgerRequest, Error> {
+        // Try gift-unwrap first: if content isn't valid JSON, try to decrypt
+        let (tags, content_str, real_sender, is_wrapped) = match serde_json::from_str::<serde_json::Value>(&event.content) {
+            Ok(_) => {
+                // Plaintext — use event directly
+                (event.tags.clone(), event.content.clone(), event.pubkey.to_hex(), false)
+            }
+            Err(_) => {
+                // Not JSON — try gift-unwrap (NIP-59 structure)
+                let seal_json = nip04::decrypt(self.keys.secret_key(), &event.pubkey, &event.content)
+                    .map_err(|e| Error::Nostr(format!("Gift unwrap outer decrypt failed: {}", e)))?;
+                let seal: serde_json::Value = serde_json::from_str(&seal_json)
+                    .map_err(|e| Error::Nostr(format!("Gift unwrap seal parse failed: {}", e)))?;
+                let seal_pubkey_hex = seal["pubkey"].as_str()
+                    .ok_or_else(|| Error::Nostr("Gift unwrap: missing seal pubkey".to_string()))?;
+                let seal_pubkey = nostr_sdk::PublicKey::from_hex(seal_pubkey_hex)
+                    .map_err(|e| Error::Nostr(format!("Gift unwrap: invalid seal pubkey: {}", e)))?;
+                let rumor_json = nip04::decrypt(self.keys.secret_key(), &seal_pubkey, seal["content"].as_str().unwrap_or(""))
+                    .map_err(|e| Error::Nostr(format!("Gift unwrap seal decrypt failed: {}", e)))?;
+                let rumor: serde_json::Value = serde_json::from_str(&rumor_json)
+                    .map_err(|e| Error::Nostr(format!("Gift unwrap rumor parse failed: {}", e)))?;
+
+                // Extract tags from rumor
+                let mut rumor_tags = nostr_sdk::event::tag::Tags::new(vec![]);
+                if let Some(tags_arr) = rumor.get("tags").and_then(|t| t.as_array()) {
+                    for tag_arr in tags_arr {
+                        if let Some(strs) = tag_arr.as_array() {
+                            let parts: Vec<String> = strs.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                            if parts.len() >= 2 {
+                                rumor_tags = nostr_sdk::event::tag::Tags::new(
+                                    rumor_tags.iter().cloned()
+                                        .chain(std::iter::once(Tag::custom(TagKind::custom(&parts[0]), parts[1..].iter().map(|s| s.as_str()))))
+                                        .collect()
+                                );
+                            }
+                        }
+                    }
+                }
+                let real_sender = rumor["pubkey"].as_str().unwrap_or(seal_pubkey_hex).to_string();
+                let content = rumor["content"].as_str().unwrap_or("").to_string();
+                tracing::debug!("Gift-unwrapped request from {}...", &real_sender[..16.min(real_sender.len())]);
+                (rumor_tags, content, real_sender, true)
+            }
+        };
+
         // Extract ledger_id from the l tag
-        let ledger_id = event
-            .tags
+        let ledger_id = tags
             .iter()
             .find_map(|tag| {
                 if tag.kind() == TagKind::SingleLetter(TAG_LEDGER_REQ) {
@@ -2797,8 +2886,7 @@ impl NostrTransport {
             .ok_or_else(|| Error::Nostr("Missing l tag in ledger request".to_string()))?;
 
         // Extract action from the action tag
-        let action = event
-            .tags
+        let action = tags
             .iter()
             .find_map(|tag| {
                 if tag.kind() == TagKind::custom("action") {
@@ -2810,14 +2898,15 @@ impl NostrTransport {
             .ok_or_else(|| Error::Nostr("Missing action tag in ledger request".to_string()))?;
 
         // Parse params from content
-        let params: serde_json::Value = serde_json::from_str(&event.content)
+        let params: serde_json::Value = serde_json::from_str(&content_str)
             .unwrap_or(serde_json::Value::Null);
 
         tracing::trace!(
-            "Received ledger request: ledger={}, action={}, event={}",
+            "Received ledger request: ledger={}, action={}, event={} wrapped={}",
             ledger_id,
             action,
-            &event.id.to_hex()[..16]
+            &event.id.to_hex()[..16],
+            is_wrapped,
         );
 
         Ok(LedgerRequest {
@@ -2825,8 +2914,9 @@ impl NostrTransport {
             ledger_id,
             params,
             event_id: event.id.to_hex(),
-            sender: event.pubkey.to_hex(),
+            sender: real_sender.clone(),
             timestamp: event.created_at.as_u64(),
+            gift_wrap_sender: if is_wrapped { Some(real_sender) } else { None },
         })
     }
 

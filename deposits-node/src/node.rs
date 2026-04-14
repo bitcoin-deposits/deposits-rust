@@ -2552,6 +2552,7 @@ impl Node {
             success,
             result_json,
             error.clone(),
+            request.gift_wrap_sender.as_deref(),
         ).await {
             tracing::error!("Failed to send response: {}", e);
         } else if success {
@@ -9855,6 +9856,7 @@ impl Node {
                                     success,
                                     result_json,
                                     error,
+                                    request.gift_wrap_sender.as_deref(),
                                 ).await {
                                     tracing::debug!("Failed to send cosign_offer response: {}", e);
                                 }
