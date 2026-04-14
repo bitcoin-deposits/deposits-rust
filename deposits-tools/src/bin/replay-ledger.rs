@@ -1370,64 +1370,55 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
         (1..num_branches).filter_map(|b| branch_first.get(&b).copied()).min().unwrap_or(0)
     } else { 0 };
 
-    let mut all: Vec<(u64, usize, usize)> = Vec::new(); // (seq, branch, update_idx)
+    // Each entry: (seq, branch, update_idx, visible_branches)
+    let mut all: Vec<(u64, usize, usize, Vec<usize>)> = Vec::new();
 
     if num_branches > 1 {
-        // Operator entries at/after fork point (newest first)
+        // Operator entries at/after fork point — only operator visible
         for &(seq, idx) in &per_branch[0] {
-            if seq >= fork_start_seq { all.push((seq, 0, idx)); }
+            if seq >= fork_start_seq { all.push((seq, 0, idx, vec![0])); }
         }
         // Each fork branch, shortest first (longest last)
         let mut fork_order: Vec<usize> = (1..num_branches).collect();
         fork_order.sort_by_key(|b| per_branch[*b].len());
         for b in fork_order {
             for &(seq, idx) in &per_branch[b] {
-                all.push((seq, b, idx));
+                // Show operator + this fork branch
+                all.push((seq, b, idx, vec![0, b]));
             }
         }
-        // Operator entries before fork point (newest first)
+        // Operator entries before fork point — only operator visible
         for &(seq, idx) in &per_branch[0] {
-            if seq < fork_start_seq { all.push((seq, 0, idx)); }
+            if seq < fork_start_seq { all.push((seq, 0, idx, vec![0])); }
         }
     } else {
-        // No forks — just newest first
         for &(seq, idx) in &per_branch[0] {
-            all.push((seq, 0, idx));
+            all.push((seq, 0, idx, vec![0]));
         }
     }
 
     // Print
-    for &(seq, branch, idx) in &all {
+    for (seq, branch, idx, visible) in &all {
+        let (seq, branch, idx) = (*seq, *branch, *idx);
         let u = &updates[idx];
-        let author = hex::encode(u.operator_id.serialize());
         let color = colors[branch % colors.len()];
         let op_name = LedgerOperation::tlv_decode(&u.message)
             .map(|op| format_op(&op))
             .unwrap_or_else(|_| "?".to_string());
 
-        // Count how many branches are active at this seq
-        let active_count = (0..num_branches)
-            .filter(|b| seq >= branch_first.get(b).copied().unwrap_or(u64::MAX)
-                      && seq <= branch_last.get(b).copied().unwrap_or(0))
-            .count();
+        let b_first = branch_first.get(&branch).copied().unwrap_or(0);
 
-        // Only show branch indicators when forks exist
+        // Build prefix from visible branches
         let prefix = if num_branches <= 1 {
             String::new()
         } else {
             (0..num_branches.min(8))
                 .map(|b| {
-                    let b_first = branch_first.get(&b).copied().unwrap_or(u64::MAX);
-                    let b_last = branch_last.get(&b).copied().unwrap_or(0);
-                    let active = seq >= b_first && seq <= b_last;
                     if b == branch && seq == b_first {
-                        // First entry of this branch: show *
                         format!("{}*{}", color, reset)
                     } else if b == branch {
-                        // Continuation of this branch: show │
                         format!("{}│{}", color, reset)
-                    } else if active {
-                        // Other active branch: show dim │
+                    } else if visible.contains(&b) {
                         let other_color = colors[b % colors.len()];
                         format!("{}│{}", other_color, reset)
                     } else {
