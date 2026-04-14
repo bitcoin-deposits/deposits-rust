@@ -1475,27 +1475,44 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         SecretKey::from_slice(&bytes).map_err(|e| format!("Invalid secret key: {}", e))
     }).collect::<Result<Vec<_>, String>>()?;
 
-    // Auto-discover keys from --seed-dir: scan */seed files, derive operator key, collect
+    // Auto-discover keys from --seed-dir: find all files named "seed", derive operator key
     if let Some(ref dir) = seed_dir {
         let seed_path = std::path::Path::new(dir);
         if !seed_path.is_dir() {
             return Err(format!("Seed directory not found: {}", dir).into());
         }
-        for entry in std::fs::read_dir(seed_path)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() { continue; }
-            let seed_file = entry.path().join("seed");
-            if !seed_file.exists() { continue; }
-            let seed_hex = std::fs::read_to_string(&seed_file)?.trim().to_string();
+        fn find_seed_files(dir: &std::path::Path, results: &mut Vec<std::path::PathBuf>) {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        find_seed_files(&path, results);
+                    } else if path.file_name().and_then(|n| n.to_str()) == Some("seed") {
+                        results.push(path);
+                    }
+                }
+            }
+        }
+        let mut seed_files = Vec::new();
+        find_seed_files(seed_path, &mut seed_files);
+
+        for seed_file in &seed_files {
+            let seed_hex = match std::fs::read_to_string(seed_file) {
+                Ok(s) => s.trim().to_string(),
+                Err(_) => continue,
+            };
             if seed_hex.len() != 64 { continue; }
             if let Ok(seed_bytes) = hex::decode(&seed_hex) {
                 if seed_bytes.len() == 32 {
                     let mut seed = [0u8; 32];
                     seed.copy_from_slice(&seed_bytes);
                     if let Ok(sk) = derive_operator_secret(&seed, config.network) {
-                        let node_name = entry.file_name().to_string_lossy().to_string();
                         let pk = PublicKey::from_secret_key(&secp, &sk);
-                        println!("  Found seed: {} -> {}...", node_name, &hex::encode(pk.serialize())[..16]);
+                        let label = seed_file.parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("?");
+                        println!("  Found seed: {} -> {}...", label, &hex::encode(pk.serialize())[..16]);
                         secret_keys.push(sk);
                     }
                 }
