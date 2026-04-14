@@ -16,7 +16,7 @@ bdk_esplora = { version = "0.20", features = ["blocking"] }
 bdk_file_store = "0.18"
 
 # Nostr for peer messaging
-nostr-sdk = { version = "0.37", features = ["nip04", "nip47"] }
+nostr-sdk = { version = "0.37", features = ["nip04", "nip44", "nip47"] }
 
 # TLS crypto provider — required when the nostr-relay-pool patch is not used
 rustls = { version = "0.23", features = ["ring"] }
