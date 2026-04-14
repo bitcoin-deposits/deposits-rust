@@ -2070,7 +2070,7 @@ impl NostrTransport {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
             .custom_tag(
-                TAG_LEDGER_REQ,
+                TAG_LEDGER_ID,
                 [ledger_tag(ledger_id)],
             );
 
