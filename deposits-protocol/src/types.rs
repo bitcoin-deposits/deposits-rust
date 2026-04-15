@@ -2703,6 +2703,11 @@ impl TlvEncode for SignedLedgerUpdate {
                 builder = builder.bytes_field(signed_update_fields::COSIGN_SIGNATURE, &self.cosign_signature);
             }
         }
+        // Note: TLV is sorted by tag number, so operator_signature (tag 20) appears
+        // before cosignatures (tag 22) on wire. This is cosmetic — the operator signs
+        // over operator_signing_data() which includes cosignatures in the hash input,
+        // and current_hash also incorporates all cosignatures. The tag ordering doesn't
+        // affect signature validity.
         builder = builder
             .bytes_field(signed_update_fields::OPERATOR_SIGNATURE, &self.operator_signature);
         builder.build()
