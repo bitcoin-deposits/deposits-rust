@@ -34,8 +34,8 @@ RUN apt-get update && \
 
 COPY --from=builder /build/target/release/deposits-node /usr/local/bin/
 
-COPY deposits-node/docker/entrypoint.sh /entrypoint.sh
-COPY deposits-node/docker/strfry.conf.tmpl /etc/strfry.conf.tmpl
+COPY deposits-tools/docker/entrypoint.sh /entrypoint.sh
+COPY deposits-tools/docker/strfry.conf.tmpl /etc/strfry.conf.tmpl
 
 RUN mkdir -p /data /config
 
