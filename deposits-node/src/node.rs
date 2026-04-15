@@ -6892,6 +6892,23 @@ impl Node {
             quorum_member,
         ).await {
             Ok(attestation) => {
+                // Auto-record the attestation on our own ledger
+                let att_op = LedgerOperation::CollateralAttestation {
+                    collateral_operator: attestation.operator,
+                    quorum_member: attestation.quorum_member,
+                    collateral_ledger_id: attestation.collateral_ledger_id.clone(),
+                    amount: attestation.amount,
+                    block_height: attestation.block_height,
+                    lock_until_block: attestation.lock_until_block,
+                    signature: attestation.signature,
+                    ledger_hash: attestation.ledger_hash,
+                };
+                if let Err(e) = self.commit_operation(&ledger_id, att_op).await {
+                    tracing::warn!("Failed to auto-record attestation on {}: {}", &ledger_id[..16], e);
+                } else {
+                    tracing::info!("Auto-recorded attestation on ledger {}...", &ledger_id[..16]);
+                }
+
                 // Serialize attestation as JSON then base64 encode
                 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
                 let attestation_json = serde_json::to_string(&attestation).unwrap_or_default();
