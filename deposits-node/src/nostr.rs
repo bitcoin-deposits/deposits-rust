@@ -55,8 +55,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use tokio::sync::mpsc;
 
-use crate::Error;
 use crate::metrics;
+use crate::Error;
 
 /// A received fraud proof broadcast from a wallet.
 #[derive(Clone, Debug)]
@@ -237,7 +237,8 @@ pub struct NostrTransport {
     /// to avoid missing events between calls (broadcast::Receiver is
     /// per-instance — each notifications() call creates a new empty receiver).
     /// Wrapped in Mutex for &self access (take/put-back pattern, not held across await).
-    daemon_notification_rx: std::sync::Mutex<Option<tokio::sync::broadcast::Receiver<RelayPoolNotification>>>,
+    daemon_notification_rx:
+        std::sync::Mutex<Option<tokio::sync::broadcast::Receiver<RelayPoolNotification>>>,
 
     /// Two-generation dedup set for notification event IDs.
     /// Checked before any parsing to avoid expensive tag extraction / JSON decode
@@ -449,7 +450,6 @@ pub struct LedgerAdvertisement {
     pub description: Option<String>,
 
     // === Fee Structure (all in basis points, 100 bps = 1%) ===
-
     /// Annual custody fee (e.g., 50 = 0.5% per year)
     pub annual_fee_bps: u32,
 
@@ -479,7 +479,6 @@ pub struct LedgerAdvertisement {
     pub transfer_fee_rate_bps: u16,
 
     // === Deposit Limits ===
-
     /// Maximum single deposit size in msats
     pub max_deposit_msats: u64,
 
@@ -489,7 +488,6 @@ pub struct LedgerAdvertisement {
     // === Trust Info ===
 
     // === Capacity ===
-
     /// Current total obligations (deposit balances) in sats
     #[serde(default)]
     pub total_obligations_msats: u64,
@@ -500,7 +498,6 @@ pub struct LedgerAdvertisement {
     pub available_headroom_msats: u64,
 
     // === Trust Info ===
-
     /// Current total reserves backing the ledger (sats)
     pub reserves_amount_msats: u64,
 
@@ -518,7 +515,6 @@ pub struct LedgerAdvertisement {
     pub held_collateral_msats: u64,
 
     // === Connectivity ===
-
     /// Relay URL where this operator publishes responses
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_url: Option<String>,
@@ -533,7 +529,6 @@ pub struct LedgerAdvertisement {
     pub allowed_domains: Vec<String>,
 
     // === Metadata ===
-
     /// Network (bitcoin, testnet, signet, regtest)
     pub network: String,
 
@@ -550,7 +545,9 @@ pub struct LedgerAdvertisement {
     pub timestamp: u64,
 }
 
-fn default_version() -> u8 { 1 }
+fn default_version() -> u8 {
+    1
+}
 
 /// Agent service advertisement (Kind 39102)
 /// Published by HTLC routing agents with per-ledger directional fees.
@@ -642,9 +639,16 @@ impl LedgerAdvertisement {
     pub fn to_fee_structure(&self) -> deposits_core::types::FeeStructure {
         const BLOCKS_PER_YEAR: u64 = 52560;
         let frequency = self.fee_period_blocks;
-        let periods_per_year = if frequency > 0 { BLOCKS_PER_YEAR / frequency as u64 } else { 0 };
+        let periods_per_year = if frequency > 0 {
+            BLOCKS_PER_YEAR / frequency as u64
+        } else {
+            0
+        };
         deposits_core::types::FeeStructure {
-            annualized_msats: self.min_fee_sats.saturating_mul(periods_per_year).saturating_mul(1000),
+            annualized_msats: self
+                .min_fee_sats
+                .saturating_mul(periods_per_year)
+                .saturating_mul(1000),
             annualized_bps: self.annual_fee_bps as u16,
             frequency_blocks: frequency,
         }
@@ -656,7 +660,10 @@ impl LedgerAdvertisement {
     /// - min_annual_bps: minimum annual fee in basis points
     /// - min_fixed_per_period_msats: minimum fixed fee per collection period in msats
     pub fn minimum_fees(&self) -> (u16, u64) {
-        (self.annual_fee_bps as u16, self.min_fee_sats.saturating_mul(1000))
+        (
+            self.annual_fee_bps as u16,
+            self.min_fee_sats.saturating_mul(1000),
+        )
     }
 }
 
@@ -670,7 +677,12 @@ impl NostrTransport {
     }
 
     /// Create a new Nostr transport with explicit slow relay(s).
-    pub async fn new_with_slow(secret_key: SecretKey, relays: Vec<String>, slow_relays: Vec<String>, skip_nostr_verify: bool) -> Result<Self, Error> {
+    pub async fn new_with_slow(
+        secret_key: SecretKey,
+        relays: Vec<String>,
+        slow_relays: Vec<String>,
+        skip_nostr_verify: bool,
+    ) -> Result<Self, Error> {
         // Convert secp256k1 key to nostr keys
         let secret_bytes = secret_key.secret_bytes();
         let nostr_secret = nostr_sdk::SecretKey::from_slice(&secret_bytes)
@@ -682,13 +694,8 @@ impl NostrTransport {
         let our_pubkey = PublicKey::from_secret_key(&secp, &secret_key);
 
         // Create main nostr client (fast relay only) with explicit connection options
-        let opts = Options::default()
-            .connection_timeout(Some(std::time::Duration::from_secs(30)))
-            .notification_channel_size(65536);
-        let client = Client::builder()
-            .signer(keys.clone())
-            .opts(opts)
-            .build();
+        let opts = Options::default().notification_channel_size(65536);
+        let client = Client::builder().signer(keys.clone()).opts(opts).build();
 
         // Add fast relays only to main client
         let relay_list: Vec<String> = if relays.is_empty() {
@@ -706,11 +713,7 @@ impl NostrTransport {
         };
 
         let relay_opts = RelayOptions::default();
-        // skip_event_verification is only available in our patched nostr-relay-pool fork.
-        // When building against stock crates.io, verification is always enabled.
-        #[cfg(feature = "skip-verify")]
-        let relay_opts = relay_opts.skip_event_verification(skip_nostr_verify);
-        let _ = skip_nostr_verify; // suppress unused warning when feature is off
+        let _ = skip_nostr_verify; // reserved for future use
         for relay in &relay_list {
             client
                 .pool()
@@ -732,16 +735,18 @@ impl NostrTransport {
         }
 
         // Connect main client to relays with explicit timeout
-        client.connect_with_timeout(std::time::Duration::from_secs(30)).await;
+        client
+            .connect_with_timeout(std::time::Duration::from_secs(30))
+            .await;
 
         // Wait for at least one relay to be connected (max 10 seconds)
         let max_wait = std::time::Duration::from_secs(10);
         let start = std::time::Instant::now();
         loop {
             let relays = client.relays().await;
-            let connected = relays.values().any(|r| {
-                r.status() == nostr_sdk::RelayStatus::Connected
-            });
+            let connected = relays
+                .values()
+                .any(|r| r.status() == nostr_sdk::RelayStatus::Connected);
             if connected {
                 break;
             }
@@ -754,7 +759,8 @@ impl NostrTransport {
 
         // Record connection metrics
         let relays = client.relays().await;
-        let connected_count = relays.values()
+        let connected_count = relays
+            .values()
             .filter(|r| r.status() == nostr_sdk::RelayStatus::Connected)
             .count();
         metrics::set_active_connections(connected_count);
@@ -764,18 +770,18 @@ impl NostrTransport {
 
         // Create separate slow client for gap-fill (if slow relays configured)
         let slow_client = if !slow_relays.is_empty() {
-            let slow_opts = Options::default()
-                .connection_timeout(Some(std::time::Duration::from_secs(30)));
+            let slow_opts = Options::default();
             let sc = Client::builder()
                 .signer(keys.clone())
                 .opts(slow_opts)
                 .build();
             for relay in &slow_relays {
-                sc.add_relay(relay)
-                    .await
-                    .map_err(|e| Error::Nostr(format!("Failed to add slow relay {}: {}", relay, e)))?;
+                sc.add_relay(relay).await.map_err(|e| {
+                    Error::Nostr(format!("Failed to add slow relay {}: {}", relay, e))
+                })?;
             }
-            sc.connect_with_timeout(std::time::Duration::from_secs(30)).await;
+            sc.connect_with_timeout(std::time::Duration::from_secs(30))
+                .await;
             tracing::info!("Slow relay client connected: {:?}", slow_relays);
             Some(sc)
         } else {
@@ -796,7 +802,9 @@ impl NostrTransport {
             let sc = sc.clone();
             tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
-                    let seq_tag = event.tags.iter()
+                    let seq_tag = event
+                        .tags
+                        .iter()
                         .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("n"))
                         .and_then(|t| t.as_slice().get(1))
                         .map(|s| s.to_string())
@@ -804,10 +812,14 @@ impl NostrTransport {
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(5),
                         sc.send_event(event),
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(Ok(_)) => tracing::debug!("Mirrored seq {} to durable relay", seq_tag),
                         Ok(Err(e)) => tracing::warn!("Mirror to durable relay failed: {}", e),
-                        Err(_) => tracing::warn!("Mirror to durable relay timed out (seq {})", seq_tag),
+                        Err(_) => {
+                            tracing::warn!("Mirror to durable relay timed out (seq {})", seq_tag)
+                        }
                     }
                 }
             });
@@ -865,7 +877,11 @@ impl NostrTransport {
     pub fn set_request_ledger_filter(&self, ledger_ids: Vec<String>) {
         let old_len = self.request_ledger_filter.read().unwrap().len();
         if ledger_ids.len() != old_len {
-            tracing::info!("Request poll filter set for {} ledgers (was {})", ledger_ids.len(), old_len);
+            tracing::info!(
+                "Request poll filter set for {} ledgers (was {})",
+                ledger_ids.len(),
+                old_len
+            );
         }
         *self.request_ledger_filter.write().unwrap() = ledger_ids;
     }
@@ -873,7 +889,10 @@ impl NostrTransport {
     /// Clear the response subscription tracking flag so the next subscribe_to_response
     /// call will create a new subscription (e.g. with updated ledger filter).
     pub fn clear_response_subscription(&self) {
-        self.active_subscriptions.write().unwrap().remove("responses:all");
+        self.active_subscriptions
+            .write()
+            .unwrap()
+            .remove("responses:all");
     }
 
     /// Get a reference to the underlying Nostr client (fast relay)
@@ -890,12 +909,18 @@ impl NostrTransport {
     /// Add a single ledger ID to the interested set.
     /// Stores the truncated prefix to match against tag values.
     pub fn add_interested_ledger(&self, ledger_id: String) {
-        self.interested_ledgers.write().unwrap().insert(ledger_tag(&ledger_id).to_string());
+        self.interested_ledgers
+            .write()
+            .unwrap()
+            .insert(ledger_tag(&ledger_id).to_string());
     }
 
     /// Remove a ledger ID from the interested set.
     pub fn remove_interested_ledger(&self, ledger_id: &str) {
-        self.interested_ledgers.write().unwrap().remove(ledger_tag(ledger_id));
+        self.interested_ledgers
+            .write()
+            .unwrap()
+            .remove(ledger_tag(ledger_id));
     }
 
     /// Set the ledger IDs we're interested in receiving events for.
@@ -903,7 +928,8 @@ impl NostrTransport {
     /// Empty set = accept all (the default).
     /// Stores truncated prefixes to match against tag values.
     pub fn set_interested_ledgers(&self, ledger_ids: impl IntoIterator<Item = String>) {
-        let new_set: std::collections::HashSet<String> = ledger_ids.into_iter()
+        let new_set: std::collections::HashSet<String> = ledger_ids
+            .into_iter()
             .map(|id| ledger_tag(&id).to_string())
             .collect();
         let count = new_set.len();
@@ -954,7 +980,9 @@ impl NostrTransport {
             .map_err(|e| Error::Nostr(format!("Failed to subscribe (global): {}", e)))?;
 
         self.active_subscriptions.write().unwrap().insert(sub_key);
-        tracing::info!("Subscribed with 4 global compacted filters (requests, responses, updates, disputes)");
+        tracing::info!(
+            "Subscribed with 4 global compacted filters (requests, responses, updates, disputes)"
+        );
         Ok(())
     }
 
@@ -1001,12 +1029,13 @@ impl NostrTransport {
 
         // Send using batch_msg which doesn't wait for OK
         let publish_start = std::time::Instant::now();
-        tokio::time::timeout(Self::SEND_TIMEOUT,
-            self.client.send_msg_to(urls, ClientMessage::event(event))
+        tokio::time::timeout(
+            Self::SEND_TIMEOUT,
+            self.client.send_msg_to(urls, ClientMessage::event(event)),
         )
-            .await
-            .map_err(|_| Error::Nostr("send_event_nowait timed out".to_string()))?
-            .map_err(|e| Error::Nostr(format!("Failed to send event: {}", e)))?;
+        .await
+        .map_err(|_| Error::Nostr("send_event_nowait timed out".to_string()))?
+        .map_err(|e| Error::Nostr(format!("Failed to send event: {}", e)))?;
         crate::metrics::record_nostr_publish(publish_start.elapsed());
 
         Ok(())
@@ -1016,15 +1045,15 @@ impl NostrTransport {
     async fn send_event_with_timeout(&self, event: Event) -> Result<(), Error> {
         let relays = self.client.relays().await;
         let urls: Vec<RelayUrl> = relays.keys().cloned().collect();
-        tokio::time::timeout(Self::SEND_TIMEOUT,
-            self.client.send_msg_to(urls, ClientMessage::event(event))
+        tokio::time::timeout(
+            Self::SEND_TIMEOUT,
+            self.client.send_msg_to(urls, ClientMessage::event(event)),
         )
-            .await
-            .map_err(|_| Error::Nostr("send_event timed out (relay may be stuck)".to_string()))?
-            .map_err(|e| Error::Nostr(format!("Failed to send event: {}", e)))?;
+        .await
+        .map_err(|_| Error::Nostr("send_event timed out (relay may be stuck)".to_string()))?
+        .map_err(|e| Error::Nostr(format!("Failed to send event: {}", e)))?;
         Ok(())
     }
-
 
     /// Send a message to a peer via encrypted DM (NIP-04)
     pub async fn send_message(&self, peer: PublicKey, msg: DepositsMessage) -> Result<(), Error> {
@@ -1060,7 +1089,10 @@ impl NostrTransport {
     ///
     /// Creates a parameterized replaceable event (Kind 30100) that can be
     /// subscribed to by anyone interested in this ledger.
-    pub async fn broadcast_ledger_update(&self, update: &SignedLedgerUpdate) -> Result<String, Error> {
+    pub async fn broadcast_ledger_update(
+        &self,
+        update: &SignedLedgerUpdate,
+    ) -> Result<String, Error> {
         // Use the hashed ledger_id as the identifier
         let ledger_id = update.ledger_id_hex();
 
@@ -1110,12 +1142,14 @@ impl NostrTransport {
         {
             let relays = self.client.relays().await;
             let urls: Vec<RelayUrl> = relays.keys().cloned().collect();
-            tokio::time::timeout(Self::SEND_TIMEOUT,
-                self.client.send_msg_to(urls, ClientMessage::event(event.clone()))
+            tokio::time::timeout(
+                Self::SEND_TIMEOUT,
+                self.client
+                    .send_msg_to(urls, ClientMessage::event(event.clone())),
             )
-                .await
-                .map_err(|_| Error::Nostr("broadcast ledger update timed out".to_string()))?
-                .map_err(|e| Error::Nostr(format!("Failed to broadcast ledger update: {}", e)))?;
+            .await
+            .map_err(|_| Error::Nostr("broadcast ledger update timed out".to_string()))?
+            .map_err(|e| Error::Nostr(format!("Failed to broadcast ledger update: {}", e)))?;
         }
 
         // Also enqueue mirror to durable relay (for relay-specific mirroring)
@@ -1149,10 +1183,7 @@ impl NostrTransport {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(
-                TAG_LEDGER_ID,
-                [ledger_tag(ledger_id)],
-            );
+            .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id)]);
 
         self.client
             .subscribe(vec![filter], None)
@@ -1182,8 +1213,7 @@ impl NostrTransport {
 
         // We can't do prefix matching in Nostr filters, so we subscribe to all
         // ledger update events and filter locally. For now, subscribe to all.
-        let filter = Filter::new()
-            .kind(Kind::Custom(KIND_LEDGER_UPDATE));
+        let filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_UPDATE));
 
         self.client
             .subscribe(vec![filter], None)
@@ -1193,7 +1223,10 @@ impl NostrTransport {
         // Mark as subscribed
         self.active_subscriptions.write().unwrap().insert(sub_key);
 
-        tracing::debug!("Subscribed to ledger updates from operator: {}", operator_pubkey);
+        tracing::debug!(
+            "Subscribed to ledger updates from operator: {}",
+            operator_pubkey
+        );
         Ok(())
     }
 
@@ -1214,10 +1247,7 @@ impl NostrTransport {
                 TagKind::SingleLetter(TAG_LEDGER_REQ),
                 [ledger_id],
             ))
-            .tag(Tag::custom(
-                TagKind::custom("action"),
-                [action],
-            ))
+            .tag(Tag::custom(TagKind::custom("action"), [action]))
             .sign_with_keys(&self.keys)
             .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
 
@@ -1240,9 +1270,13 @@ impl NostrTransport {
 
     /// Add a relay and connect to it
     pub async fn add_relay(&self, url: &str) -> Result<(), Error> {
-        self.client.add_relay(url).await
+        self.client
+            .add_relay(url)
+            .await
             .map_err(|e| Error::Nostr(format!("Failed to add relay {}: {}", url, e)))?;
-        self.client.connect_with_timeout(std::time::Duration::from_secs(5)).await;
+        self.client
+            .connect_with_timeout(std::time::Duration::from_secs(5))
+            .await;
         Ok(())
     }
 
@@ -1261,10 +1295,7 @@ impl NostrTransport {
                 TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P)),
                 [agent_pubkey],
             ))
-            .tag(Tag::custom(
-                TagKind::custom("action"),
-                [action],
-            ))
+            .tag(Tag::custom(TagKind::custom("action"), [action]))
             .sign_with_keys(&self.keys)
             .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
 
@@ -1317,10 +1348,12 @@ impl NostrTransport {
                 "created_at": std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs()).unwrap_or(0),
-            }).to_string();
+            })
+            .to_string();
 
-            let seal_content = nip04::encrypt(self.keys.secret_key(), &recipient_pk, &rumor_json)
-                .map_err(|e| Error::Nostr(format!("Gift wrap seal encrypt failed: {}", e)))?;
+            let seal_content =
+                nip04::encrypt(self.keys.secret_key(), &recipient_pk, &rumor_json)
+                    .map_err(|e| Error::Nostr(format!("Gift wrap seal encrypt failed: {}", e)))?;
             let seal_event = EventBuilder::new(Kind::Custom(13), &seal_content)
                 .sign_with_keys(&self.keys)
                 .map_err(|e| Error::Nostr(format!("Gift wrap seal sign failed: {}", e)))?;
@@ -1331,14 +1364,18 @@ impl NostrTransport {
                 "kind": 13,
                 "content": seal_event.content,
                 "sig": seal_event.sig.to_string(),
-            }).to_string();
+            })
+            .to_string();
 
             let throwaway = Keys::generate();
             let wrap_content = nip04::encrypt(throwaway.secret_key(), &recipient_pk, &seal_json)
                 .map_err(|e| Error::Nostr(format!("Gift wrap outer encrypt failed: {}", e)))?;
             EventBuilder::new(Kind::Custom(KIND_LEDGER_RESPONSE), &wrap_content)
                 .tag(Tag::public_key(recipient_pk))
-                .tag(Tag::custom(TagKind::SingleLetter(TAG_EVENT_REF), [request_id]))
+                .tag(Tag::custom(
+                    TagKind::SingleLetter(TAG_EVENT_REF),
+                    [request_id],
+                ))
                 .sign_with_keys(&throwaway)
                 .map_err(|e| Error::Nostr(format!("Gift wrap sign failed: {}", e)))?
         } else {
@@ -1352,10 +1389,7 @@ impl NostrTransport {
                     TagKind::SingleLetter(TAG_LEDGER_REQ),
                     [ledger_id],
                 ))
-                .tag(Tag::custom(
-                    TagKind::custom("status"),
-                    [status],
-                ))
+                .tag(Tag::custom(TagKind::custom("status"), [status]))
                 .sign_with_keys(&self.keys)
                 .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?
         };
@@ -1367,12 +1401,13 @@ impl NostrTransport {
         {
             let relays = self.client.relays().await;
             let urls: Vec<RelayUrl> = relays.keys().cloned().collect();
-            tokio::time::timeout(Self::SEND_TIMEOUT,
-                self.client.send_msg_to(urls, ClientMessage::event(event))
+            tokio::time::timeout(
+                Self::SEND_TIMEOUT,
+                self.client.send_msg_to(urls, ClientMessage::event(event)),
             )
-                .await
-                .map_err(|_| Error::Nostr("send response timed out".to_string()))?
-                .map_err(|e| Error::Nostr(format!("Failed to send response: {}", e)))?;
+            .await
+            .map_err(|_| Error::Nostr("send response timed out".to_string()))?
+            .map_err(|e| Error::Nostr(format!("Failed to send response: {}", e)))?;
         }
 
         tracing::debug!(
@@ -1401,8 +1436,8 @@ impl NostrTransport {
         violation_sequence: Option<u64>,
         keypair: &bitcoin::secp256k1::Keypair,
     ) -> Result<String, Error> {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message};
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{Message, Secp256k1};
 
         // Build the message to sign
         let mut preimage = Vec::new();
@@ -1446,14 +1481,8 @@ impl NostrTransport {
                 TagKind::SingleLetter(TAG_LEDGER_REQ),
                 [ledger_id],
             ))
-            .tag(Tag::custom(
-                TagKind::custom("reason"),
-                [reason],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("disputer"),
-                [&disputer_pubkey],
-            ))
+            .tag(Tag::custom(TagKind::custom("reason"), [reason]))
+            .tag(Tag::custom(TagKind::custom("disputer"), [&disputer_pubkey]))
             .sign_with_keys(&self.keys)
             .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
 
@@ -1489,10 +1518,7 @@ impl NostrTransport {
         let since = nostr_sdk::Timestamp::now() - 30;
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
-            .custom_tag(
-                TAG_LEDGER_REQ,
-                [ledger_id],
-            )
+            .custom_tag(TAG_LEDGER_REQ, [ledger_id])
             .since(since);
 
         self.client
@@ -1533,7 +1559,10 @@ impl NostrTransport {
         // Mark as subscribed
         self.active_subscriptions.write().unwrap().insert(sub_key);
 
-        tracing::debug!("Subscribed to all ledger disputes (kind {})", KIND_LEDGER_DISPUTE);
+        tracing::debug!(
+            "Subscribed to all ledger disputes (kind {})",
+            KIND_LEDGER_DISPUTE
+        );
         Ok(())
     }
 
@@ -1569,7 +1598,10 @@ impl NostrTransport {
             }
         }
 
-        if new_request_ledgers.is_empty() && new_dispute_ledgers.is_empty() && new_update_ledgers.is_empty() {
+        if new_request_ledgers.is_empty()
+            && new_dispute_ledgers.is_empty()
+            && new_update_ledgers.is_empty()
+        {
             tracing::debug!("All {} ledgers already subscribed", ledger_ids.len());
             return Ok(());
         }
@@ -1584,11 +1616,8 @@ impl NostrTransport {
             filters.push(
                 Filter::new()
                     .kind(Kind::Custom(KIND_LEDGER_REQUEST))
-                    .custom_tag(
-                        TAG_LEDGER_REQ,
-                        [lid.as_str()],
-                    )
-                    .since(since)
+                    .custom_tag(TAG_LEDGER_REQ, [lid.as_str()])
+                    .since(since),
             );
         }
 
@@ -1597,11 +1626,8 @@ impl NostrTransport {
             filters.push(
                 Filter::new()
                     .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
-                    .custom_tag(
-                        TAG_LEDGER_REQ,
-                        [lid.as_str()],
-                    )
-                    .since(since)
+                    .custom_tag(TAG_LEDGER_REQ, [lid.as_str()])
+                    .since(since),
             );
         }
 
@@ -1610,11 +1636,8 @@ impl NostrTransport {
             filters.push(
                 Filter::new()
                     .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-                    .custom_tag(
-                        TAG_LEDGER_ID,
-                        [ledger_tag(lid)],
-                    )
-                    .since(since)
+                    .custom_tag(TAG_LEDGER_ID, [ledger_tag(lid)])
+                    .since(since),
             );
         }
 
@@ -1645,8 +1668,13 @@ impl NostrTransport {
             }
         }
 
-        tracing::info!("Batch subscribed: {} request + {} dispute + {} update filters ({} total)",
-            new_request_ledgers.len(), new_dispute_ledgers.len(), new_update_ledgers.len(), filter_count);
+        tracing::info!(
+            "Batch subscribed: {} request + {} dispute + {} update filters ({} total)",
+            new_request_ledgers.len(),
+            new_dispute_ledgers.len(),
+            new_update_ledgers.len(),
+            filter_count
+        );
         Ok(())
     }
 
@@ -1659,8 +1687,8 @@ impl NostrTransport {
         last_valid_hash: [u8; 32],
         keypair: &bitcoin::secp256k1::Keypair,
     ) -> Result<String, Error> {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message};
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{Message, Secp256k1};
 
         // Build the message to sign
         let mut preimage = Vec::new();
@@ -1703,10 +1731,7 @@ impl NostrTransport {
                 TagKind::SingleLetter(TAG_EVENT_REF),
                 [dispute_event_id],
             ))
-            .tag(Tag::custom(
-                TagKind::custom("member"),
-                [&member_pubkey],
-            ))
+            .tag(Tag::custom(TagKind::custom("member"), [&member_pubkey]))
             .sign_with_keys(&self.keys)
             .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
 
@@ -1733,12 +1758,10 @@ impl NostrTransport {
     ) -> Result<Vec<RecoveryAgreement>, Error> {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_RECOVERY_AGREE))
-            .custom_tag(
-                TAG_EVENT_REF,
-                [dispute_event_id],
-            );
+            .custom_tag(TAG_EVENT_REF, [dispute_event_id]);
 
-        let events = self.client
+        let events = self
+            .client
             .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch agreements: {}", e)))?;
@@ -1766,13 +1789,20 @@ impl NostrTransport {
         ad: &LedgerAdvertisement,
     ) -> Result<String, Error> {
         // Cache locally so we don't need relay round-trips to read our own ads
-        self.ad_cache.write().unwrap().insert(ad.ledger_id.clone(), ad.clone());
+        self.ad_cache
+            .write()
+            .unwrap()
+            .insert(ad.ledger_id.clone(), ad.clone());
 
-        let content = serde_json::to_string(ad)
-            .map_err(|e| Error::Serialization(format!("Failed to serialize advertisement: {}", e)))?;
+        let content = serde_json::to_string(ad).map_err(|e| {
+            Error::Serialization(format!("Failed to serialize advertisement: {}", e))
+        })?;
 
         // Query relay for existing advertisement's timestamp
-        let existing_timestamp = self.get_advertisement_timestamp(&ad.ledger_id).await.unwrap_or(0);
+        let existing_timestamp = self
+            .get_advertisement_timestamp(&ad.ledger_id)
+            .await
+            .unwrap_or(0);
 
         // Ensure new timestamp is strictly greater than existing
         let now = std::time::SystemTime::now()
@@ -1808,7 +1838,8 @@ impl NostrTransport {
         // connection drops.  nostr-sdk's send_event is fire-and-forget at the
         // WebSocket level, so a short-lived CLI process may disconnect before
         // strfry flushes the write.  The brief sleep is a pragmatic workaround.
-        self.send_event_with_timeout(event.clone()).await
+        self.send_event_with_timeout(event.clone())
+            .await
             .map_err(|e| Error::Nostr(format!("Failed to send advertisement: {}", e)))?;
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
@@ -1837,7 +1868,8 @@ impl NostrTransport {
             "pair": "BTCUSD",
             "price": price_usd,
             "timestamp": now,
-        }).to_string();
+        })
+        .to_string();
 
         let event = EventBuilder::new(Kind::Custom(KIND_PRICE_ORACLE), &content)
             .tag(Tag::custom(
@@ -1849,7 +1881,8 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
-        self.send_event_with_timeout(event.clone()).await
+        self.send_event_with_timeout(event.clone())
+            .await
             .map_err(|e| Error::Nostr(format!("Failed to publish price: {}", e)))?;
 
         // Mirror to durable relay
@@ -1865,24 +1898,17 @@ impl NostrTransport {
     async fn get_advertisement_timestamp(&self, ledger_id: &str) -> Option<u64> {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
-            .custom_tag(
-                TAG_LEDGER_ID,
-                [ledger_id],
-            )
+            .custom_tag(TAG_LEDGER_ID, [ledger_id])
             .limit(1);
 
-        let events = self.client
+        let events = self
+            .client
             .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
             .await
             .ok()?;
 
         // Extract timestamp from first event
-        let mut timestamp = None;
-        for event in events.iter() {
-            timestamp = Some(event.created_at.as_u64());
-            break;
-        }
-        timestamp
+        events.first().map(|event| event.created_at.as_u64())
     }
 
     /// Fetch all ledger advertisements for a network
@@ -1892,12 +1918,10 @@ impl NostrTransport {
     ) -> Result<Vec<LedgerAdvertisement>, Error> {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
-            .custom_tag(
-                TAG_SEQUENCE,
-                [network],
-            );
+            .custom_tag(TAG_SEQUENCE, [network]);
 
-        let events = self.client
+        let events = self
+            .client
             .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch advertisements: {}", e)))?;
@@ -1922,10 +1946,10 @@ impl NostrTransport {
         &self,
         network: &str,
     ) -> Result<Vec<AgentAdvertisement>, Error> {
-        let filter = Filter::new()
-            .kind(Kind::Custom(KIND_AGENT_ADVERTISE));
+        let filter = Filter::new().kind(Kind::Custom(KIND_AGENT_ADVERTISE));
 
-        let events = self.client
+        let events = self
+            .client
             .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch agent advertisements: {}", e)))?;
@@ -1962,7 +1986,8 @@ impl NostrTransport {
             .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
             .author(self.keys.public_key());
 
-        let events = match self.client
+        let events = match self
+            .client
             .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
             .await
         {
@@ -1975,10 +2000,9 @@ impl NostrTransport {
 
         let mut mirrored = 0usize;
         for event in events.into_iter() {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                slow.send_event(event),
-            ).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), slow.send_event(event))
+                .await
+            {
                 Ok(Ok(_)) => mirrored += 1,
                 Ok(Err(e)) => tracing::debug!("remirror ad failed: {}", e),
                 Err(_) => tracing::debug!("remirror ad timed out"),
@@ -2004,13 +2028,11 @@ impl NostrTransport {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
-            .custom_tag(
-                TAG_LEDGER_ID,
-                [ledger_id],
-            )
+            .custom_tag(TAG_LEDGER_ID, [ledger_id])
             .limit(1);
 
-        let events = self.client
+        let events = self
+            .client
             .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch advertisement: {}", e)))?;
@@ -2027,18 +2049,13 @@ impl NostrTransport {
     }
 
     /// Fetch disputes for a ledger
-    pub async fn fetch_disputes(
-        &self,
-        ledger_id: &str,
-    ) -> Result<Vec<LedgerDispute>, Error> {
+    pub async fn fetch_disputes(&self, ledger_id: &str) -> Result<Vec<LedgerDispute>, Error> {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
-            .custom_tag(
-                TAG_LEDGER_REQ,
-                [ledger_id],
-            );
+            .custom_tag(TAG_LEDGER_REQ, [ledger_id]);
 
-        let events = self.client
+        let events = self
+            .client
             .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch disputes: {}", e)))?;
@@ -2069,12 +2086,10 @@ impl NostrTransport {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(
-                TAG_LEDGER_ID,
-                [ledger_tag(ledger_id)],
-            );
+            .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id)]);
 
-        let events = self.client
+        let events = self
+            .client
             .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch ledger updates: {}", e)))?;
@@ -2106,12 +2121,10 @@ impl NostrTransport {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(
-                TAG_LEDGER_ID,
-                [ledger_tag(ledger_id)],
-            );
+            .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id)]);
 
-        let events = self.client
+        let events = self
+            .client
             .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch update seq {}: {}", seq, e)))?;
@@ -2141,12 +2154,10 @@ impl NostrTransport {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(
-                TAG_LEDGER_ID,
-                [ledger_tag(ledger_id)],
-            );
+            .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id)]);
 
-        let events = self.client
+        let events = self
+            .client
             .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch updates range: {}", e)))?;
@@ -2175,7 +2186,10 @@ impl NostrTransport {
         {
             let subs = self.active_subscriptions.read().unwrap();
             if subs.contains(&sub_key) {
-                tracing::debug!("Already subscribed to requests for ledger {}", &ledger_id[..16.min(ledger_id.len())]);
+                tracing::debug!(
+                    "Already subscribed to requests for ledger {}",
+                    &ledger_id[..16.min(ledger_id.len())]
+                );
                 return Ok(());
             }
         }
@@ -2195,31 +2209,42 @@ impl NostrTransport {
         // Mark as subscribed
         self.active_subscriptions.write().unwrap().insert(sub_key);
 
-        tracing::debug!("Subscribed to ledger requests (kind {}) for ledger: {}", KIND_LEDGER_REQUEST, &ledger_id[..16.min(ledger_id.len())]);
+        tracing::debug!(
+            "Subscribed to ledger requests (kind {}) for ledger: {}",
+            KIND_LEDGER_REQUEST,
+            &ledger_id[..16.min(ledger_id.len())]
+        );
         Ok(())
     }
 
     /// Fetch recent ledger requests (polling fallback).
     /// Uses per-ledger #l tag filtering when request_ledger_filter is set.
-    pub async fn fetch_recent_requests(&self, since_secs: u64) -> Result<Vec<LedgerRequest>, Error> {
+    pub async fn fetch_recent_requests(
+        &self,
+        since_secs: u64,
+    ) -> Result<Vec<LedgerRequest>, Error> {
         use nostr_sdk::Timestamp;
 
         let since = Timestamp::now() - since_secs;
         let ledger_ids = self.request_ledger_filter.read().unwrap().clone();
         let filters = if !ledger_ids.is_empty() {
-            ledger_ids.iter().map(|lid| {
-                Filter::new()
-                    .kind(Kind::Custom(KIND_LEDGER_REQUEST))
-                    .custom_tag(TAG_LEDGER_REQ, [lid.as_str()])
-                    .since(since)
-            }).collect::<Vec<_>>()
+            ledger_ids
+                .iter()
+                .map(|lid| {
+                    Filter::new()
+                        .kind(Kind::Custom(KIND_LEDGER_REQUEST))
+                        .custom_tag(TAG_LEDGER_REQ, [lid.as_str()])
+                        .since(since)
+                })
+                .collect::<Vec<_>>()
         } else {
             vec![Filter::new()
                 .kind(Kind::Custom(KIND_LEDGER_REQUEST))
                 .since(since)]
         };
 
-        let events = self.client
+        let events = self
+            .client
             .fetch_events(filters, Some(tokio::time::Duration::from_secs(5)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
@@ -2258,12 +2283,15 @@ impl NostrTransport {
 
         let filters = if !ledger_ids.is_empty() {
             // Per-ledger response filters for relay-side filtering
-            ledger_ids.iter().map(|lid| {
-                Filter::new()
-                    .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
-                    .custom_tag(TAG_LEDGER_REQ, [lid.as_str()])
-                    .since(since)
-            }).collect::<Vec<_>>()
+            ledger_ids
+                .iter()
+                .map(|lid| {
+                    Filter::new()
+                        .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
+                        .custom_tag(TAG_LEDGER_REQ, [lid.as_str()])
+                        .since(since)
+                })
+                .collect::<Vec<_>>()
         } else {
             // Global fallback (no filter configured)
             vec![Filter::new()
@@ -2281,9 +2309,16 @@ impl NostrTransport {
         self.active_subscriptions.write().unwrap().insert(sub_key);
 
         if !ledger_ids.is_empty() {
-            tracing::info!("Subscribed to ledger responses (kind {}) for {} ledgers", KIND_LEDGER_RESPONSE, filter_count);
+            tracing::info!(
+                "Subscribed to ledger responses (kind {}) for {} ledgers",
+                KIND_LEDGER_RESPONSE,
+                filter_count
+            );
         } else {
-            tracing::info!("Subscribed to all ledger responses (kind {}) - no filter", KIND_LEDGER_RESPONSE);
+            tracing::info!(
+                "Subscribed to all ledger responses (kind {}) - no filter",
+                KIND_LEDGER_RESPONSE
+            );
         }
         Ok(())
     }
@@ -2301,7 +2336,8 @@ impl NostrTransport {
             .since(since);
 
         // Use shorter timeout (1s) to allow more polling attempts within outer timeout
-        let events = match self.client
+        let events = match self
+            .client
             .fetch_events(vec![filter], Some(tokio::time::Duration::from_secs(1)))
             .await
         {
@@ -2312,14 +2348,19 @@ impl NostrTransport {
             }
         };
 
-        tracing::debug!("Fetched {} response events, looking for request {}",
-            events.len(), &request_id[..16]);
+        tracing::debug!(
+            "Fetched {} response events, looking for request {}",
+            events.len(),
+            &request_id[..16]
+        );
 
         for event in events.into_iter() {
             if let Ok(response) = self.process_ledger_response(&event) {
-                tracing::debug!("Found response for request {}, comparing with {}",
+                tracing::debug!(
+                    "Found response for request {}, comparing with {}",
                     &response.request_id[..16.min(response.request_id.len())],
-                    &request_id[..16]);
+                    &request_id[..16]
+                );
                 if response.request_id == request_id {
                     tracing::info!("Matched response for request: {}", &request_id[..16]);
                     return Ok(Some(response));
@@ -2361,7 +2402,9 @@ impl NostrTransport {
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return Err(Error::Nostr("Timeout waiting for valid response".to_string()));
+                return Err(Error::Nostr(
+                    "Timeout waiting for valid response".to_string(),
+                ));
             }
 
             match tokio::time::timeout(remaining, notification_rx.recv()).await {
@@ -2386,7 +2429,9 @@ impl NostrTransport {
                     return Err(Error::Nostr("Notification channel closed".to_string()));
                 }
                 Err(_) => {
-                    return Err(Error::Nostr("Timeout waiting for valid response".to_string()));
+                    return Err(Error::Nostr(
+                        "Timeout waiting for valid response".to_string(),
+                    ));
                 }
             }
         }
@@ -2394,7 +2439,11 @@ impl NostrTransport {
 
     /// Wait for a specific response using real-time subscription (low latency)
     /// This is much faster than polling - typically <5ms vs 100-200ms
-    pub async fn wait_for_response(&self, request_id: &str, timeout_ms: u64) -> Result<LedgerResponse, Error> {
+    pub async fn wait_for_response(
+        &self,
+        request_id: &str,
+        timeout_ms: u64,
+    ) -> Result<LedgerResponse, Error> {
         // Subscribe to responses if not already
         self.subscribe_to_response(request_id).await?;
 
@@ -2450,7 +2499,10 @@ impl NostrTransport {
     }
 
     /// Fetch all responses since a timestamp
-    pub async fn fetch_responses_since(&self, _since: nostr_sdk::Timestamp) -> Result<Vec<LedgerResponse>, Error> {
+    pub async fn fetch_responses_since(
+        &self,
+        _since: nostr_sdk::Timestamp,
+    ) -> Result<Vec<LedgerResponse>, Error> {
         // Ignore 'since' and use a fixed 5-minute lookback to avoid timestamp sync issues
         // The strfry relay may have clock drift or event ordering issues with recent events
         let since = nostr_sdk::Timestamp::now() - 300;
@@ -2459,17 +2511,24 @@ impl NostrTransport {
             .since(since);
 
         // Use 200ms timeout - relay should respond almost instantly with stored events
-        let events = self.client
+        let events = self
+            .client
             .fetch_events(vec![filter], Some(tokio::time::Duration::from_millis(200)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
 
-        tracing::debug!("fetch_responses_since: fetched {} KIND_LEDGER_RESPONSE events (5 min lookback)", events.len());
+        tracing::debug!(
+            "fetch_responses_since: fetched {} KIND_LEDGER_RESPONSE events (5 min lookback)",
+            events.len()
+        );
 
         let mut responses = Vec::new();
         for event in events.into_iter() {
             if let Ok(response) = self.process_ledger_response(&event) {
-                tracing::debug!("  -> response for request: {}...", &response.request_id[..16.min(response.request_id.len())]);
+                tracing::debug!(
+                    "  -> response for request: {}...",
+                    &response.request_id[..16.min(response.request_id.len())]
+                );
                 responses.push(response);
             }
         }
@@ -2512,9 +2571,8 @@ impl NostrTransport {
                 // Fallback: create ephemeral receiver (for non-daemon callers)
                 let timeout = tokio::time::Duration::from_millis(timeout_ms);
                 let mut rx = self.client.notifications();
-                match tokio::time::timeout(timeout, rx.recv()).await {
-                    Ok(Ok(notification)) => { self.handle_notification(notification); },
-                    _ => {}
+                if let Ok(Ok(notification)) = tokio::time::timeout(timeout, rx.recv()).await {
+                    self.handle_notification(notification);
                 }
                 return Ok(());
             }
@@ -2535,7 +2593,11 @@ impl NostrTransport {
         let timeout = tokio::time::Duration::from_millis(timeout_ms);
         match tokio::time::timeout(timeout, rx.recv()).await {
             Ok(Ok(notification)) => {
-                if self.handle_notification(notification) { drain_count += 1; } else { dedup_count += 1; }
+                if self.handle_notification(notification) {
+                    drain_count += 1;
+                } else {
+                    dedup_count += 1;
+                }
                 // Drain pending notifications with time budget
                 loop {
                     if drain_start.elapsed() >= drain_budget {
@@ -2543,7 +2605,11 @@ impl NostrTransport {
                     }
                     match rx.try_recv() {
                         Ok(notification) => {
-                            if self.handle_notification(notification) { drain_count += 1; } else { dedup_count += 1; }
+                            if self.handle_notification(notification) {
+                                drain_count += 1;
+                            } else {
+                                dedup_count += 1;
+                            }
                         }
                         Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
                             crate::metrics::record_broadcast_lag("daemon_drain", n);
@@ -2555,7 +2621,10 @@ impl NostrTransport {
             }
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
                 crate::metrics::record_broadcast_lag("daemon_recv", n);
-                tracing::warn!("Daemon notification receiver lagged by {} events, re-syncing", n);
+                tracing::warn!(
+                    "Daemon notification receiver lagged by {} events, re-syncing",
+                    n
+                );
                 // After lag, drain what we can (with budget)
                 loop {
                     if drain_start.elapsed() >= drain_budget {
@@ -2563,7 +2632,11 @@ impl NostrTransport {
                     }
                     match rx.try_recv() {
                         Ok(notification) => {
-                            if self.handle_notification(notification) { drain_count += 1; } else { dedup_count += 1; }
+                            if self.handle_notification(notification) {
+                                drain_count += 1;
+                            } else {
+                                dedup_count += 1;
+                            }
                         }
                         Err(_) => break,
                     }
@@ -2611,7 +2684,8 @@ impl NostrTransport {
             .since(since);
 
         // Use short timeout to avoid blocking
-        if let Ok(events) = self.client
+        if let Ok(events) = self
+            .client
             .fetch_events(vec![filter], Some(std::time::Duration::from_millis(500)))
             .await
         {
@@ -2634,7 +2708,9 @@ impl NostrTransport {
     /// Call this BEFORE sending a request to ensure events aren't missed.
     /// Each call to client.notifications() creates a new receiver that only
     /// sees events from that point forward — so create once and reuse.
-    pub fn create_notification_receiver(&self) -> tokio::sync::broadcast::Receiver<RelayPoolNotification> {
+    pub fn create_notification_receiver(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<RelayPoolNotification> {
         self.client.notifications()
     }
 
@@ -2653,7 +2729,11 @@ impl NostrTransport {
     /// This lets cosign mini loops handle requests inline from the notification
     /// stream, eliminating the re-queue amplification problem where cosign
     /// requests get buried behind non-cosign requests in request_rx.
-    pub fn dispatch_or_extract_request(&self, notification: RelayPoolNotification, extract_action: &str) -> Option<LedgerRequest> {
+    pub fn dispatch_or_extract_request(
+        &self,
+        notification: RelayPoolNotification,
+        extract_action: &str,
+    ) -> Option<LedgerRequest> {
         if let RelayPoolNotification::Event { ref event, .. } = &notification {
             let kind_num = event.kind.as_u16();
             if kind_num == KIND_LEDGER_REQUEST {
@@ -2683,7 +2763,13 @@ impl NostrTransport {
             let event_id_bytes = event.id.to_bytes();
             {
                 let seen = self.seen_events.lock().unwrap();
-                if seen.contains(&event_id_bytes) || self.seen_events_prev.lock().unwrap().contains(&event_id_bytes) {
+                if seen.contains(&event_id_bytes)
+                    || self
+                        .seen_events_prev
+                        .lock()
+                        .unwrap()
+                        .contains(&event_id_bytes)
+                {
                     return false;
                 }
             }
@@ -2696,7 +2782,9 @@ impl NostrTransport {
             // Per-ledger interest filter: extract ledger ID from tags and check
             // against the interested set. Empty set = accept all.
             let interested = self.interested_ledgers.read().unwrap();
-            if !interested.is_empty() && kind_num != 4 /* EncryptedDirectMessage */ {
+            if !interested.is_empty() && kind_num != 4
+            /* EncryptedDirectMessage */
+            {
                 let ledger_id = Self::extract_ledger_id_from_event(&event, kind_num);
                 if let Some(lid) = &ledger_id {
                     if !interested.contains(lid) {
@@ -2807,8 +2895,9 @@ impl NostrTransport {
             .map_err(|e| Error::Serialization(format!("Invalid base64 in ledger update: {}", e)))?;
 
         // Decode TLV to SignedLedgerUpdate — full ledger_id is in the TLV content
-        let update = SignedLedgerUpdate::tlv_decode(&tlv_bytes)
-            .map_err(|e| Error::Serialization(format!("Failed to decode ledger update: {:?}", e)))?;
+        let update = SignedLedgerUpdate::tlv_decode(&tlv_bytes).map_err(|e| {
+            Error::Serialization(format!("Failed to decode ledger update: {:?}", e))
+        })?;
 
         let ledger_id = update.ledger_id_hex();
 
@@ -2830,23 +2919,39 @@ impl NostrTransport {
     /// Process a ledger request event
     fn process_ledger_request(&self, event: &Event) -> Result<LedgerRequest, Error> {
         // Try gift-unwrap first: if content isn't valid JSON, try to decrypt
-        let (tags, content_str, real_sender, is_wrapped) = match serde_json::from_str::<serde_json::Value>(&event.content) {
+        let (tags, content_str, real_sender, is_wrapped) = match serde_json::from_str::<
+            serde_json::Value,
+        >(&event.content)
+        {
             Ok(_) => {
                 // Plaintext — use event directly
-                (event.tags.clone(), event.content.clone(), event.pubkey.to_hex(), false)
+                (
+                    event.tags.clone(),
+                    event.content.clone(),
+                    event.pubkey.to_hex(),
+                    false,
+                )
             }
             Err(_) => {
                 // Not JSON — try gift-unwrap (NIP-59 structure)
-                let seal_json = nip04::decrypt(self.keys.secret_key(), &event.pubkey, &event.content)
-                    .map_err(|e| Error::Nostr(format!("Gift unwrap outer decrypt failed: {}", e)))?;
+                let seal_json =
+                    nip04::decrypt(self.keys.secret_key(), &event.pubkey, &event.content).map_err(
+                        |e| Error::Nostr(format!("Gift unwrap outer decrypt failed: {}", e)),
+                    )?;
                 let seal: serde_json::Value = serde_json::from_str(&seal_json)
                     .map_err(|e| Error::Nostr(format!("Gift unwrap seal parse failed: {}", e)))?;
-                let seal_pubkey_hex = seal["pubkey"].as_str()
+                let seal_pubkey_hex = seal["pubkey"]
+                    .as_str()
                     .ok_or_else(|| Error::Nostr("Gift unwrap: missing seal pubkey".to_string()))?;
-                let seal_pubkey = nostr_sdk::PublicKey::from_hex(seal_pubkey_hex)
-                    .map_err(|e| Error::Nostr(format!("Gift unwrap: invalid seal pubkey: {}", e)))?;
-                let rumor_json = nip04::decrypt(self.keys.secret_key(), &seal_pubkey, seal["content"].as_str().unwrap_or(""))
-                    .map_err(|e| Error::Nostr(format!("Gift unwrap seal decrypt failed: {}", e)))?;
+                let seal_pubkey = nostr_sdk::PublicKey::from_hex(seal_pubkey_hex).map_err(|e| {
+                    Error::Nostr(format!("Gift unwrap: invalid seal pubkey: {}", e))
+                })?;
+                let rumor_json = nip04::decrypt(
+                    self.keys.secret_key(),
+                    &seal_pubkey,
+                    seal["content"].as_str().unwrap_or(""),
+                )
+                .map_err(|e| Error::Nostr(format!("Gift unwrap seal decrypt failed: {}", e)))?;
                 let rumor: serde_json::Value = serde_json::from_str(&rumor_json)
                     .map_err(|e| Error::Nostr(format!("Gift unwrap rumor parse failed: {}", e)))?;
 
@@ -2855,20 +2960,34 @@ impl NostrTransport {
                 if let Some(tags_arr) = rumor.get("tags").and_then(|t| t.as_array()) {
                     for tag_arr in tags_arr {
                         if let Some(strs) = tag_arr.as_array() {
-                            let parts: Vec<String> = strs.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                            let parts: Vec<String> = strs
+                                .iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect();
                             if parts.len() >= 2 {
                                 rumor_tags = nostr_sdk::event::tag::Tags::new(
-                                    rumor_tags.iter().cloned()
-                                        .chain(std::iter::once(Tag::custom(TagKind::custom(&parts[0]), parts[1..].iter().map(|s| s.as_str()))))
-                                        .collect()
+                                    rumor_tags
+                                        .iter()
+                                        .cloned()
+                                        .chain(std::iter::once(Tag::custom(
+                                            TagKind::custom(&parts[0]),
+                                            parts[1..].iter().map(|s| s.as_str()),
+                                        )))
+                                        .collect(),
                                 );
                             }
                         }
                     }
                 }
-                let real_sender = rumor["pubkey"].as_str().unwrap_or(seal_pubkey_hex).to_string();
+                let real_sender = rumor["pubkey"]
+                    .as_str()
+                    .unwrap_or(seal_pubkey_hex)
+                    .to_string();
                 let content = rumor["content"].as_str().unwrap_or("").to_string();
-                tracing::debug!("Gift-unwrapped request from {}...", &real_sender[..16.min(real_sender.len())]);
+                tracing::debug!(
+                    "Gift-unwrapped request from {}...",
+                    &real_sender[..16.min(real_sender.len())]
+                );
                 (rumor_tags, content, real_sender, true)
             }
         };
@@ -2898,8 +3017,8 @@ impl NostrTransport {
             .ok_or_else(|| Error::Nostr("Missing action tag in ledger request".to_string()))?;
 
         // Parse params from content
-        let params: serde_json::Value = serde_json::from_str(&content_str)
-            .unwrap_or(serde_json::Value::Null);
+        let params: serde_json::Value =
+            serde_json::from_str(&content_str).unwrap_or(serde_json::Value::Null);
 
         tracing::trace!(
             "Received ledger request: ledger={}, action={}, event={} wrapped={}",
@@ -2962,8 +3081,8 @@ impl NostrTransport {
             .unwrap_or_else(|| "unknown".to_string());
 
         // Parse response from content
-        let mut response: LedgerResponse = serde_json::from_str(&event.content)
-            .unwrap_or(LedgerResponse {
+        let mut response: LedgerResponse =
+            serde_json::from_str(&event.content).unwrap_or(LedgerResponse {
                 success: status == "ok",
                 result: None,
                 error: Some("Failed to parse response".to_string()),
@@ -3077,10 +3196,12 @@ impl NostrTransport {
     pub async fn relay_status(&self) -> (usize, usize, Vec<(String, String)>) {
         let relays = self.client.relays().await;
         let total = relays.len();
-        let connected = relays.values()
+        let connected = relays
+            .values()
             .filter(|r| r.status() == nostr_sdk::RelayStatus::Connected)
             .count();
-        let details: Vec<_> = relays.iter()
+        let details: Vec<_> = relays
+            .iter()
             .map(|(url, r)| (url.to_string(), format!("{:?}", r.status())))
             .collect();
         (connected, total, details)
@@ -3126,6 +3247,12 @@ impl NostrTransportBuilder {
     }
 
     pub async fn build(self) -> Result<NostrTransport, Error> {
-        NostrTransport::new_with_slow(self.secret_key, self.relays, self.slow_relays, self.skip_nostr_verify).await
+        NostrTransport::new_with_slow(
+            self.secret_key,
+            self.relays,
+            self.slow_relays,
+            self.skip_nostr_verify,
+        )
+        .await
     }
 }

@@ -127,10 +127,7 @@ impl EventStore {
             self.unknown_count += 1;
         }
 
-        self.events.insert(hash, StoredEvent {
-            update,
-            validity,
-        });
+        self.events.insert(hash, StoredEvent { update, validity });
         self.by_seq.insert(seq_key, hash);
         self.by_parent.entry(parent_hash).or_default().push(hash);
         self.insertion_order.push_back(hash);
@@ -166,17 +163,11 @@ impl EventStore {
         seq: u64,
     ) -> Option<&StoredEvent> {
         let key = (*ledger_id, operator_id.serialize(), seq);
-        self.by_seq
-            .get(&key)
-            .and_then(|hash| self.events.get(hash))
+        self.by_seq.get(&key).and_then(|hash| self.events.get(hash))
     }
 
     /// Highest validated sequence number for (ledger, operator).
-    pub fn validated_tip(
-        &self,
-        ledger_id: &[u8; 32],
-        operator_id: &PublicKey,
-    ) -> Option<u64> {
+    pub fn validated_tip(&self, ledger_id: &[u8; 32], operator_id: &PublicKey) -> Option<u64> {
         let key = (*ledger_id, operator_id.serialize());
         self.validated_tips.get(&key).copied()
     }
@@ -296,7 +287,11 @@ impl EventStore {
 
     /// Build the secondary index key from an update.
     fn seq_key(update: &SignedLedgerUpdate) -> SeqKey {
-        (update.ledger_id, update.operator_id.serialize(), update.sequence_number)
+        (
+            update.ledger_id,
+            update.operator_id.serialize(),
+            update.sequence_number,
+        )
     }
 
     /// Determine validity of a new event based on its parent.
@@ -339,7 +334,10 @@ impl EventStore {
             Some(s) => s,
             None => return,
         };
-        let key = (stored.update.ledger_id, stored.update.operator_id.serialize());
+        let key = (
+            stored.update.ledger_id,
+            stored.update.operator_id.serialize(),
+        );
         let seq = stored.update.sequence_number;
         let entry = self.validated_tips.entry(key).or_insert(0);
         // Tip is the highest seq with a complete valid chain from 0.
@@ -380,9 +378,11 @@ impl EventStore {
     fn propagate_forward(&mut self, parent_hash: [u8; 32]) {
         // O(1) child lookup via reverse index instead of O(N) full scan
         let children: Vec<[u8; 32]> = match self.by_parent.get(&parent_hash) {
-            Some(kids) => kids.iter()
+            Some(kids) => kids
+                .iter()
                 .filter(|hash| {
-                    self.events.get(*hash)
+                    self.events
+                        .get(*hash)
                         .map(|s| s.validity == Validity::Unknown)
                         .unwrap_or(false)
                 })
@@ -398,7 +398,11 @@ impl EventStore {
                 child.update.compute_hash() == child.update.current_hash
             };
 
-            let new_validity = if valid { Validity::Valid } else { Validity::Invalid };
+            let new_validity = if valid {
+                Validity::Valid
+            } else {
+                Validity::Invalid
+            };
 
             if let Some(stored) = self.events.get_mut(&child_hash) {
                 stored.validity = new_validity;
@@ -538,7 +542,12 @@ mod tests {
         // All should be Valid
         for u in &chain {
             let stored = store.get(&u.current_hash).unwrap();
-            assert_eq!(stored.validity, Validity::Valid, "seq {} should be valid", u.sequence_number);
+            assert_eq!(
+                stored.validity,
+                Validity::Valid,
+                "seq {} should be valid",
+                u.sequence_number
+            );
         }
 
         // Tip should be 4
@@ -556,21 +565,42 @@ mod tests {
         // Insert seq 2, 3 first (out of order, parent missing)
         store.insert(chain[2].clone());
         store.insert(chain[3].clone());
-        assert_eq!(store.get(&chain[2].current_hash).unwrap().validity, Validity::Unknown);
-        assert_eq!(store.get(&chain[3].current_hash).unwrap().validity, Validity::Unknown);
+        assert_eq!(
+            store.get(&chain[2].current_hash).unwrap().validity,
+            Validity::Unknown
+        );
+        assert_eq!(
+            store.get(&chain[3].current_hash).unwrap().validity,
+            Validity::Unknown
+        );
 
         // Insert seq 0 — valid (root)
         store.insert(chain[0].clone());
-        assert_eq!(store.get(&chain[0].current_hash).unwrap().validity, Validity::Valid);
+        assert_eq!(
+            store.get(&chain[0].current_hash).unwrap().validity,
+            Validity::Valid
+        );
 
         // seq 1 still missing, so 2 and 3 remain Unknown
-        assert_eq!(store.get(&chain[2].current_hash).unwrap().validity, Validity::Unknown);
+        assert_eq!(
+            store.get(&chain[2].current_hash).unwrap().validity,
+            Validity::Unknown
+        );
 
         // Insert seq 1 — should trigger forward propagation to 2 and 3
         store.insert(chain[1].clone());
-        assert_eq!(store.get(&chain[1].current_hash).unwrap().validity, Validity::Valid);
-        assert_eq!(store.get(&chain[2].current_hash).unwrap().validity, Validity::Valid);
-        assert_eq!(store.get(&chain[3].current_hash).unwrap().validity, Validity::Valid);
+        assert_eq!(
+            store.get(&chain[1].current_hash).unwrap().validity,
+            Validity::Valid
+        );
+        assert_eq!(
+            store.get(&chain[2].current_hash).unwrap().validity,
+            Validity::Valid
+        );
+        assert_eq!(
+            store.get(&chain[3].current_hash).unwrap().validity,
+            Validity::Valid
+        );
 
         assert_eq!(store.validated_tip(&lid, &pk), Some(3));
     }
@@ -589,7 +619,10 @@ mod tests {
         bad.current_hash = [0xFF; 32]; // wrong hash
         store.insert(bad.clone());
 
-        assert_eq!(store.get(&bad.current_hash).unwrap().validity, Validity::Invalid);
+        assert_eq!(
+            store.get(&bad.current_hash).unwrap().validity,
+            Validity::Invalid
+        );
         assert_eq!(store.validated_tip(&lid, &pk), Some(0)); // only seq 0
     }
 
@@ -613,8 +646,14 @@ mod tests {
         let bad_child = make_update(lid, pk, 2, bad1.current_hash, b"child-of-bad");
         store.insert(bad_child.clone());
 
-        assert_eq!(store.get(&bad1.current_hash).unwrap().validity, Validity::Invalid);
-        assert_eq!(store.get(&bad_child.current_hash).unwrap().validity, Validity::Invalid);
+        assert_eq!(
+            store.get(&bad1.current_hash).unwrap().validity,
+            Validity::Invalid
+        );
+        assert_eq!(
+            store.get(&bad_child.current_hash).unwrap().validity,
+            Validity::Invalid
+        );
     }
 
     #[test]
@@ -703,7 +742,10 @@ mod tests {
 
         let mut store = EventStore::new();
         store.insert(update.clone());
-        assert_eq!(store.get(&update.current_hash).unwrap().validity, Validity::Invalid);
+        assert_eq!(
+            store.get(&update.current_hash).unwrap().validity,
+            Validity::Invalid
+        );
     }
 
     #[test]

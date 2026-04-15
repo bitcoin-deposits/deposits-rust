@@ -67,15 +67,23 @@ impl PaymentTracking for DepositInvoiceIndex {
         bolt11: String,
     ) {
         let mut payments = self.payments.lock().unwrap();
-        payments.insert(payment_hash, (reserves_id, deposit_pubkey, invoice_id, bolt11));
+        payments.insert(
+            payment_hash,
+            (reserves_id, deposit_pubkey, invoice_id, bolt11),
+        );
     }
 
     fn get_deposit_invoice_bolt11(&self, payment_hash: &[u8; 32]) -> Option<String> {
         let payments = self.payments.lock().unwrap();
-        payments.get(payment_hash).map(|(_, _, _, bolt11)| bolt11.clone())
+        payments
+            .get(payment_hash)
+            .map(|(_, _, _, bolt11)| bolt11.clone())
     }
 
-    fn get_deposit_for_payment(&self, payment_hash: &[u8; 32]) -> Option<(PublicKey, PublicKey, String, String)> {
+    fn get_deposit_for_payment(
+        &self,
+        payment_hash: &[u8; 32],
+    ) -> Option<(PublicKey, PublicKey, String, String)> {
         let payments = self.payments.lock().unwrap();
         payments.get(payment_hash).cloned()
     }
@@ -99,7 +107,9 @@ mod tests {
     fn create_test_pubkey(seed: u8) -> PublicKey {
         let secp = Secp256k1::new();
         let mut bytes = [seed; 32];
-        if seed == 0 { bytes[0] = 1; }
+        if seed == 0 {
+            bytes[0] = 1;
+        }
         let secret = SecretKey::from_slice(&bytes).unwrap();
         PublicKey::from_secret_key(&secp, &secret)
     }
@@ -205,9 +215,27 @@ mod tests {
         let hash2 = [0x22; 32];
         let hash3 = [0x23; 32];
 
-        tracker.register_deposit_invoice(hash1, partner1, deposit1, "inv1".to_string(), "bolt1".to_string());
-        tracker.register_deposit_invoice(hash2, partner1, deposit1, "inv2".to_string(), "bolt2".to_string());
-        tracker.register_deposit_invoice(hash3, partner2, deposit2, "inv3".to_string(), "bolt3".to_string());
+        tracker.register_deposit_invoice(
+            hash1,
+            partner1,
+            deposit1,
+            "inv1".to_string(),
+            "bolt1".to_string(),
+        );
+        tracker.register_deposit_invoice(
+            hash2,
+            partner1,
+            deposit1,
+            "inv2".to_string(),
+            "bolt2".to_string(),
+        );
+        tracker.register_deposit_invoice(
+            hash3,
+            partner2,
+            deposit2,
+            "inv3".to_string(),
+            "bolt3".to_string(),
+        );
 
         assert_eq!(tracker.len(), 3);
 

@@ -6,11 +6,7 @@ RUN apt-get update && \
 
 WORKDIR /build
 
-# Copy workspace Cargo.toml (keep the [patch] section)
 COPY Cargo.toml ./
-
-# Copy the nostr-sdk performance fork
-COPY nostr-sdk-performance/ nostr-sdk-performance/
 
 # Copy crates needed for deposits-tools
 COPY deposits-protocol/ deposits-protocol/

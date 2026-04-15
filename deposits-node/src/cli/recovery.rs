@@ -5,22 +5,22 @@
 use std::str::FromStr;
 use std::sync::OnceLock;
 
-use bitcoin::hashes::{Hash, sha256, hash160};
-use bitcoin::secp256k1::{Keypair, Secp256k1, PublicKey, Message};
 use bitcoin::bip32::{DerivationPath, Xpriv};
+use bitcoin::hashes::{hash160, sha256, Hash};
+use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1};
 
-use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate, CollateralAttestationMsg};
 use deposits_core::messages::LedgerOperation;
 use deposits_core::types::select_entropy_winner;
+use deposits_core::{CollateralAttestationMsg, SignedLedgerUpdate, TlvDecode, TlvEncode};
 
-use crate::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE, KIND_LEDGER_DISPUTE};
+use crate::nostr::{NostrTransportBuilder, KIND_LEDGER_DISPUTE, KIND_LEDGER_UPDATE};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use nostr_sdk::prelude::*;
 use bdk_esplora::esplora_client::Builder as EsploraBuilder;
+use nostr_sdk::prelude::*;
 use tokio::sync::Mutex;
 
-use super::common::{parse_config, derive_operator_secret};
+use super::common::{derive_operator_secret, parse_config};
 
 /// Cached nostr client for recovery commands
 static RECOVERY_NOSTR_CLIENT: OnceLock<Mutex<Option<(String, Client)>>> = OnceLock::new();
@@ -40,7 +40,9 @@ async fn get_or_create_client(relay_url: &str) -> Result<Client, Box<dyn std::er
     // Create new client
     let keys = Keys::generate();
     let client = Client::new(keys);
-    client.add_relay(relay_url).await
+    client
+        .add_relay(relay_url)
+        .await
         .map_err(|e| format!("Failed to add relay: {}", e))?;
     client.connect().await;
 
@@ -56,9 +58,13 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         eprintln!("Usage: deposits-node recovery <dispute|rebuild|arm|claim|continue|spend|status> [args...]");
         eprintln!();
         eprintln!("Subcommands (Dispute Protocol):");
-        eprintln!("  dispute <ledger_id> [--reason <text>]  Open dispute: publish DisputeEnter operation");
+        eprintln!(
+            "  dispute <ledger_id> [--reason <text>]  Open dispute: publish DisputeEnter operation"
+        );
         eprintln!("  rebuild <ledger_id>                    Rebuild quorum: add members + get attestations");
-        eprintln!("  arm <ledger_id>                        Pre-commit: publish DisputeArmed operation");
+        eprintln!(
+            "  arm <ledger_id>                        Pre-commit: publish DisputeArmed operation"
+        );
         eprintln!("  claim <ledger_id>                      After entropy: DisputeAcquire (win) or DisputeYield (lose)");
         eprintln!("  continue <ledger_id> [--count N]       Winner: add operations to continue the ledger");
         eprintln!("  spend <ledger_id>                      Execute on-chain spend (winner only)");
@@ -85,7 +91,9 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         eprintln!("  6. lottery-claim - Winner (determined by preimage sizes) claims lottery");
         eprintln!("  7. continue   - Winner adds operations to resume normal operation");
         eprintln!();
-        eprintln!("State machine: NORMAL -> DISPUTED -> ARMED -> NORMAL (winner) / TOMBSTONED (losers)");
+        eprintln!(
+            "State machine: NORMAL -> DISPUTED -> ARMED -> NORMAL (winner) / TOMBSTONED (losers)"
+        );
         return Ok(());
     }
 
@@ -112,7 +120,9 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         "publish-transfer" => recovery_publish_transfer(&args[1..]).await,
         cmd => {
             eprintln!("Unknown recovery subcommand: {}", cmd);
-            eprintln!("Usage: deposits-node recovery <dispute|rebuild|arm|claim|spend|status> [args...]");
+            eprintln!(
+                "Usage: deposits-node recovery <dispute|rebuild|arm|claim|spend|status> [args...]"
+            );
             Ok(())
         }
     }
@@ -154,7 +164,9 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
     let reason = reason.unwrap_or_else(|| "Non-conforming ledger detected".to_string());
 
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -163,7 +175,10 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
     let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
 
-    println!("Starting recovery for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "Starting recovery for ledger: {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
     println!("  Reason: {}", reason);
     println!();
 
@@ -173,14 +188,16 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
         .limit(500);
 
     let events = client
         .fetch_events(vec![filter], None)
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
-
 
     // Decode and sort updates
     let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
@@ -192,7 +209,11 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
         }
     }
     updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
+    updates.dedup_by(|a, b| {
+        a.sequence_number == b.sequence_number
+            && a.operator_id == b.operator_id
+            && a.current_hash == b.current_hash
+    });
 
     println!("  Found {} updates", updates.len());
 
@@ -263,7 +284,10 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
     println!("Violation detected!");
     println!("  {}", violation_details);
     println!("  Last valid sequence: {}", last_valid_sequence_u64);
-    println!("  Last valid hash: {}...", hex::encode(&last_valid_hash[..8]));
+    println!(
+        "  Last valid hash: {}...",
+        hex::encode(&last_valid_hash[..8])
+    );
     println!();
 
     // Publish dispute to Nostr
@@ -273,23 +297,31 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
         .build()
         .await?;
 
-    let dispute_id = transport.publish_dispute(
-        &ledger_id,
-        &reason,
-        &violation_details,
-        last_valid_hash,
-        last_valid_sequence_u64,
-        violation_sequence,
-        &keypair,
-    ).await?;
+    let dispute_id = transport
+        .publish_dispute(
+            &ledger_id,
+            &reason,
+            &violation_details,
+            last_valid_hash,
+            last_valid_sequence_u64,
+            violation_sequence,
+            &keypair,
+        )
+        .await?;
 
     transport.disconnect().await;
 
     println!("  Dispute published: {}", &dispute_id[..16]);
     println!();
     println!("Next steps:");
-    println!("  1. Other quorum members run: deposits-node recovery agree {}", &ledger_id[..16]);
-    println!("  2. Once enough agree, run: deposits-node recovery complete {}", &ledger_id[..16]);
+    println!(
+        "  1. Other quorum members run: deposits-node recovery agree {}",
+        &ledger_id[..16]
+    );
+    println!(
+        "  2. Once enough agree, run: deposits-node recovery complete {}",
+        &ledger_id[..16]
+    );
 
     Ok(())
 }
@@ -317,7 +349,9 @@ pub async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::E
     let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
 
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -325,9 +359,12 @@ pub async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::E
     let secp = Secp256k1::new();
     let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
-    let our_pubkey = PublicKey::from(keypair.public_key());
+    let our_pubkey = keypair.public_key();
 
-    println!("Checking for disputes on ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "Checking for disputes on ledger: {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
     println!("  Our key: {}...", &our_pubkey.to_string()[..16]);
     println!();
 
@@ -349,7 +386,10 @@ pub async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::E
     // Use the most recent dispute
     let dispute = disputes.last().unwrap();
     println!("Found dispute:");
-    println!("  From: {}...", &dispute.disputer_pubkey[..16.min(dispute.disputer_pubkey.len())]);
+    println!(
+        "  From: {}...",
+        &dispute.disputer_pubkey[..16.min(dispute.disputer_pubkey.len())]
+    );
     println!("  Reason: {}", dispute.reason);
     println!("  Details: {}", dispute.details);
     println!("  Last valid seq: {}", dispute.last_valid_sequence);
@@ -363,14 +403,16 @@ pub async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::E
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
         .limit(500);
 
     let events = client
         .fetch_events(vec![filter], None)
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
-
 
     // Decode and sort updates
     let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
@@ -382,7 +424,11 @@ pub async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::E
         }
     }
     updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
+    updates.dedup_by(|a, b| {
+        a.sequence_number == b.sequence_number
+            && a.operator_id == b.operator_id
+            && a.current_hash == b.current_hash
+    });
 
     println!("  Found {} updates", updates.len());
 
@@ -435,26 +481,34 @@ pub async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::E
 
     println!("  Violation confirmed!");
     println!("  Our last valid sequence: {}", our_last_valid);
-    println!("  Our last valid hash: {}...", hex::encode(&last_valid_hash[..8]));
+    println!(
+        "  Our last valid hash: {}...",
+        hex::encode(&last_valid_hash[..8])
+    );
     println!();
 
     // Publish agreement
     println!("Publishing recovery agreement...");
 
-    let agreement_id = transport.publish_recovery_agreement(
-        &ledger_id,
-        &dispute.event_id,
-        our_last_valid,
-        last_valid_hash,
-        &keypair,
-    ).await?;
+    let agreement_id = transport
+        .publish_recovery_agreement(
+            &ledger_id,
+            &dispute.event_id,
+            our_last_valid,
+            last_valid_hash,
+            &keypair,
+        )
+        .await?;
 
     transport.disconnect().await;
 
     println!("  Agreement published: {}", &agreement_id[..16]);
     println!();
     println!("Next step:");
-    println!("  Once enough quorum members agree, run: deposits-node recovery complete {}", &ledger_id[..16]);
+    println!(
+        "  Once enough quorum members agree, run: deposits-node recovery complete {}",
+        &ledger_id[..16]
+    );
 
     Ok(())
 }
@@ -486,10 +540,19 @@ pub async fn recovery_status(args: &[String]) -> Result<(), Box<dyn std::error::
     println!("In a production implementation, recovery state would be persisted.");
     println!();
     println!("To participate in recovery:");
-    println!("  1. Validate the ledger: deposits-node nostr validate {}", ledger_id);
+    println!(
+        "  1. Validate the ledger: deposits-node nostr validate {}",
+        ledger_id
+    );
     println!("  2. If invalid, publish dispute: deposits-node nostr dispute publish {} <reason> <details>", ledger_id);
-    println!("  3. Submit vote: deposits-node recovery vote {} non-conforming", ledger_id);
-    println!("  4. Claim if eligible: deposits-node recovery claim {}", ledger_id);
+    println!(
+        "  3. Submit vote: deposits-node recovery vote {} non-conforming",
+        ledger_id
+    );
+    println!(
+        "  4. Claim if eligible: deposits-node recovery claim {}",
+        ledger_id
+    );
 
     Ok(())
 }
@@ -509,7 +572,10 @@ pub async fn recovery_complete(args: &[String]) -> Result<(), Box<dyn std::error
     eprintln!();
 
     let ledger_id = args.first().ok_or("Missing ledger_id")?;
-    println!("To complete recovery for ledger {}..., use the new dispute protocol:", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "To complete recovery for ledger {}..., use the new dispute protocol:",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
     println!("  deposits-node recovery dispute {}", ledger_id);
 
     Ok(())
@@ -527,7 +593,10 @@ pub async fn recovery_publish_transfer(args: &[String]) -> Result<(), Box<dyn st
     eprintln!();
 
     let ledger_id = args.first().ok_or("Missing ledger_id")?;
-    println!("To publish transfer for ledger {}..., use the new dispute protocol:", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "To publish transfer for ledger {}..., use the new dispute protocol:",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
 
     Ok(())
 }
@@ -559,9 +628,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     let ledger_id = ledger_id.ok_or("Ledger ID required")?;
     let config = parse_config(&config_args)?;
 
-    let relay_url = config.relays.first()
-        .ok_or("No relay configured")?
-        .clone();
+    let relay_url = config.relays.first().ok_or("No relay configured")?.clone();
 
     println!("Preparing as custody acquisition candidate...");
     println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
@@ -580,14 +647,20 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
-    println!("Our pubkey (candidate): {}...", &our_pubkey.to_string()[..16]);
+    println!(
+        "Our pubkey (candidate): {}...",
+        &our_pubkey.to_string()[..16]
+    );
 
     println!("Fetching ledger from Nostr...");
     let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
         .limit(500);
 
     let events = client
@@ -605,12 +678,16 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     }
 
     updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
+    updates.dedup_by(|a, b| {
+        a.sequence_number == b.sequence_number
+            && a.operator_id == b.operator_id
+            && a.current_hash == b.current_hash
+    });
 
     println!("  Found {} updates", updates.len());
 
     if updates.is_empty() {
-            return Err("No ledger updates found".into());
+        return Err("No ledger updates found".into());
     }
 
     let mut last_valid_sequence = 0u64;
@@ -647,7 +724,9 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
             .map_err(|e| format!("Failed to fetch disputes: {}", e))?;
 
         if disputes.is_empty() {
-                    return Err("No violation found and no dispute published. Run 'recovery start' first.".into());
+            return Err(
+                "No violation found and no dispute published. Run 'recovery start' first.".into(),
+            );
         }
 
         violation_details = "Dispute published - preparing candidate branch".to_string();
@@ -657,11 +736,14 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     println!("  Violation: {}", violation_details);
 
     let original_operator = original_operator.ok_or("Could not determine original operator")?;
-    println!("  Original operator: {}...", &original_operator.to_string()[..16]);
-
+    println!(
+        "  Original operator: {}...",
+        &original_operator.to_string()[..16]
+    );
 
     let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora.get_height()
+    let current_block_height = esplora
+        .get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     let initiation_block = current_block_height;
@@ -689,19 +771,18 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
         "deposits:ledger:{}:{}:{}",
         hex::encode(last_valid_hash),
         sequence,
-        hex::encode(&new_hash)
+        hex::encode(new_hash)
     );
     let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let signature = secp.sign_schnorr(
-        &Message::from_digest(*msg_hash.as_ref()),
-        &keypair
-    );
+    let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
     let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     let ledger_id_bytes: [u8; 32] = {
-        let decoded = hex::decode(&ledger_id)
-            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
-        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+        let decoded =
+            hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded
+            .try_into()
+            .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
     let signed_update = SignedLedgerUpdate {
@@ -710,7 +791,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
         operator_signature: operator_sig_bytes,
         cosigner_pubkey: None,
         member_ledger_hash: None,
-            cosignatures: Vec::new(),
+        cosignatures: Vec::new(),
         cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
@@ -729,12 +810,17 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
         .build()
         .await?;
 
-    publish_transport.broadcast_ledger_update(&signed_update).await?;
+    publish_transport
+        .broadcast_ledger_update(&signed_update)
+        .await?;
 
     println!();
     println!("DisputeEnter published successfully!");
     println!("  Disputer: {}...", &our_pubkey.to_string()[..16]);
-    println!("  Sequence: {} (forked from {})", sequence, last_valid_sequence);
+    println!(
+        "  Sequence: {} (forked from {})",
+        sequence, last_valid_sequence
+    );
     println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
     println!("  Reason: {}", violation_details);
     println!();
@@ -781,9 +867,7 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
     let ledger_id = ledger_id.ok_or("Ledger ID required")?;
     let config = parse_config(&config_args)?;
 
-    let relay_url = config.relays.first()
-        .ok_or("No relay configured")?
-        .clone();
+    let relay_url = config.relays.first().ok_or("No relay configured")?.clone();
 
     println!("Publishing DisputeYield (closing candidate branch)...");
     println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
@@ -809,7 +893,10 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
         .limit(500);
 
     let events = client
@@ -833,15 +920,17 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
         }
     }
 
+    let our_armed =
+        our_armed.ok_or("Could not find our DisputeArmed. Did you run 'recovery arm' first?")?;
 
-    let our_armed = our_armed.ok_or(
-        "Could not find our DisputeArmed. Did you run 'recovery arm' first?"
-    )?;
-
-    println!("  Found our DisputeArmed at sequence {}", our_armed.sequence_number);
+    println!(
+        "  Found our DisputeArmed at sequence {}",
+        our_armed.sequence_number
+    );
 
     let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora.get_height()
+    let current_block_height = esplora
+        .get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     let custody_release = LedgerOperation::DisputeYield;
@@ -858,19 +947,18 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
         "deposits:ledger:{}:{}:{}",
         hex::encode(our_armed.current_hash),
         sequence,
-        hex::encode(&new_hash)
+        hex::encode(new_hash)
     );
     let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let signature = secp.sign_schnorr(
-        &Message::from_digest(*msg_hash.as_ref()),
-        &keypair
-    );
+    let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
     let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     let ledger_id_bytes: [u8; 32] = {
-        let decoded = hex::decode(&ledger_id)
-            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
-        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+        let decoded =
+            hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded
+            .try_into()
+            .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
     let signed_update = SignedLedgerUpdate {
@@ -879,7 +967,7 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
         operator_signature: operator_sig_bytes,
         cosigner_pubkey: None,
         member_ledger_hash: None,
-            cosignatures: Vec::new(),
+        cosignatures: Vec::new(),
         cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
@@ -898,7 +986,9 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
         .build()
         .await?;
 
-    publish_transport.broadcast_ledger_update(&signed_update).await?;
+    publish_transport
+        .broadcast_ledger_update(&signed_update)
+        .await?;
 
     println!();
     println!("DisputeYield published successfully!");
@@ -950,7 +1040,9 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
     let reason = reason.unwrap_or_else(|| "Non-conforming ledger detected".to_string());
 
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -959,7 +1051,10 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
-    println!("Opening custody dispute for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "Opening custody dispute for ledger: {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
     println!("  Reason: {}", reason);
     println!("  Our pubkey: {}", our_pubkey);
     println!();
@@ -970,14 +1065,16 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
         .limit(500);
 
     let events = client
         .fetch_events(vec![filter], None)
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
-
 
     // Decode all updates
     let mut all_updates: Vec<SignedLedgerUpdate> = Vec::new();
@@ -992,15 +1089,20 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
     println!("  Found {} total updates", all_updates.len());
 
     // Find the original operator
-    let original_operator = all_updates.iter()
+    let original_operator = all_updates
+        .iter()
         .find(|u| u.sequence_number == 0)
         .map(|u| u.operator_id)
         .ok_or("No LedgerOpen found (seq 0)")?;
 
-    println!("  Original operator: {}...", &original_operator.to_string()[..16]);
+    println!(
+        "  Original operator: {}...",
+        &original_operator.to_string()[..16]
+    );
 
     // Filter to only the original operator's updates
-    let mut updates: Vec<&SignedLedgerUpdate> = all_updates.iter()
+    let mut updates: Vec<&SignedLedgerUpdate> = all_updates
+        .iter()
         .filter(|u| u.operator_id == original_operator)
         .collect();
     updates.sort_by_key(|u| u.sequence_number);
@@ -1075,7 +1177,10 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
     println!("Violation detected!");
     println!("  {}", violation_details);
     println!("  Last valid sequence: {}", last_valid_sequence_u64);
-    println!("  Last valid hash: {}...", hex::encode(&last_valid_hash[..8]));
+    println!(
+        "  Last valid hash: {}...",
+        hex::encode(&last_valid_hash[..8])
+    );
 
     // Create DisputeEnter operation
     let dispute_reason = if let Some(hash) = invalid_update_hash {
@@ -1098,26 +1203,26 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
     let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
     let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora.get_height()
+    let current_block_height = esplora
+        .get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     let update_msg = format!(
         "deposits:ledger:{}:{}:{}",
         hex::encode(last_valid_hash),
         sequence,
-        hex::encode(&new_hash)
+        hex::encode(new_hash)
     );
     let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let signature = secp.sign_schnorr(
-        &Message::from_digest(*msg_hash.as_ref()),
-        &keypair
-    );
+    let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
     let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     let ledger_id_bytes: [u8; 32] = {
-        let decoded = hex::decode(&ledger_id)
-            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
-        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+        let decoded =
+            hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded
+            .try_into()
+            .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
     let signed_update = SignedLedgerUpdate {
@@ -1126,7 +1231,7 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
         operator_signature: operator_sig_bytes,
         cosigner_pubkey: None,
         member_ledger_hash: None,
-            cosignatures: Vec::new(),
+        cosignatures: Vec::new(),
         cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
@@ -1145,12 +1250,17 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
         .build()
         .await?;
 
-    publish_transport.broadcast_ledger_update(&signed_update).await?;
+    publish_transport
+        .broadcast_ledger_update(&signed_update)
+        .await?;
 
     println!();
     println!("DisputeEnter published successfully!");
     println!("  Dispute opener: {}...", &our_pubkey.to_string()[..16]);
-    println!("  Sequence: {} (forked from {})", sequence, last_valid_sequence_u64);
+    println!(
+        "  Sequence: {} (forked from {})",
+        sequence, last_valid_sequence_u64
+    );
     println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
     println!();
     println!("Ledger is now in DISPUTED state. Quorum has been disbanded.");
@@ -1170,7 +1280,9 @@ pub async fn recovery_rebuild(args: &[String]) -> Result<(), Box<dyn std::error:
         eprintln!();
         eprintln!("Subcommands:");
         eprintln!("  quorum-add <member_pubkey>     Add a quorum member to your dispute branch");
-        eprintln!("  attestation <attestation_json> Record a collateral attestation on your branch");
+        eprintln!(
+            "  attestation <attestation_json> Record a collateral attestation on your branch"
+        );
         eprintln!("  status                         Show current quorum/attestation state");
         return Ok(());
     }
@@ -1196,7 +1308,10 @@ pub async fn recovery_rebuild(args: &[String]) -> Result<(), Box<dyn std::error:
 
 /// Add a quorum member to our dispute branch.
 /// Usage: recovery rebuild <ledger_id> quorum-add <member_pubkey> <member_ledger_id>
-pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn recovery_rebuild_quorum_add(
+    ledger_id: &str,
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut member_pubkey_str: Option<String> = None;
     let mut member_ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
@@ -1220,7 +1335,9 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
         .map_err(|e| format!("Invalid member pubkey: {}", e))?;
 
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -1231,14 +1348,20 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
 
     println!("Adding quorum member to dispute branch...");
     println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
-    println!("  Member: {}...", &member_pubkey_str[..16.min(member_pubkey_str.len())]);
+    println!(
+        "  Member: {}...",
+        &member_pubkey_str[..16.min(member_pubkey_str.len())]
+    );
 
     println!("Fetching ledger from Nostr...");
     let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id)],
+        )
         .limit(500);
 
     let events = client
@@ -1263,10 +1386,15 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
 
     our_updates.sort_by_key(|u| u.sequence_number);
     let our_latest = our_updates.last().unwrap().clone();
-    println!("  Found {} updates from you, latest at sequence {}", our_updates.len(), our_latest.sequence_number);
+    println!(
+        "  Found {} updates from you, latest at sequence {}",
+        our_updates.len(),
+        our_latest.sequence_number
+    );
 
     let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora.get_height()
+    let current_block_height = esplora
+        .get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     let operation = LedgerOperation::QuorumAddMember {
@@ -1298,19 +1426,18 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
         "deposits:ledger:{}:{}:{}",
         hex::encode(our_latest.current_hash),
         sequence,
-        hex::encode(&new_hash)
+        hex::encode(new_hash)
     );
     let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let signature = secp.sign_schnorr(
-        &Message::from_digest(*msg_hash.as_ref()),
-        &keypair
-    );
+    let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
     let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     let ledger_id_bytes: [u8; 32] = {
-        let decoded = hex::decode(ledger_id)
-            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
-        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+        let decoded =
+            hex::decode(ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded
+            .try_into()
+            .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
     let signed_update = SignedLedgerUpdate {
@@ -1319,7 +1446,7 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
         operator_signature: operator_sig_bytes,
         cosigner_pubkey: None,
         member_ledger_hash: None,
-            cosignatures: Vec::new(),
+        cosignatures: Vec::new(),
         cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
@@ -1331,10 +1458,14 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
     };
 
     println!("Publishing QuorumAddMember to Nostr...");
-    let publishing_keys = Keys::new(nostr_sdk::SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid key: {}", e))?);
+    let publishing_keys = Keys::new(
+        nostr_sdk::SecretKey::from_slice(&config.seed)
+            .map_err(|e| format!("Invalid key: {}", e))?,
+    );
     let publishing_client = Client::new(publishing_keys.clone());
-    publishing_client.add_relay(&relay_url).await
+    publishing_client
+        .add_relay(&relay_url)
+        .await
         .map_err(|e| format!("Failed to add relay: {}", e))?;
     publishing_client.connect().await;
 
@@ -1342,11 +1473,16 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
     let content = BASE64.encode(&update_bytes);
 
     let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_UPDATE), content)
-        .tags(vec![Tag::custom(TagKind::SingleLetter(crate::nostr::TAG_LEDGER_ID), [ledger_id])])
+        .tags(vec![Tag::custom(
+            TagKind::SingleLetter(crate::nostr::TAG_LEDGER_ID),
+            [ledger_id],
+        )])
         .sign_with_keys(&publishing_keys)
         .map_err(|e| format!("Failed to sign event: {}", e))?;
 
-    publishing_client.send_event(event).await
+    publishing_client
+        .send_event(event)
+        .await
         .map_err(|e| format!("Failed to publish: {}", e))?;
 
     publishing_client.disconnect().await.ok();
@@ -1354,13 +1490,19 @@ pub async fn recovery_rebuild_quorum_add(ledger_id: &str, args: &[String]) -> Re
     println!();
     println!("QuorumAddMember published!");
     println!("  Sequence: {}", sequence);
-    println!("  Member: {}...", &member_pubkey_str[..16.min(member_pubkey_str.len())]);
+    println!(
+        "  Member: {}...",
+        &member_pubkey_str[..16.min(member_pubkey_str.len())]
+    );
 
     Ok(())
 }
 
 /// Record a collateral attestation on our dispute branch.
-pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn recovery_rebuild_attestation(
+    ledger_id: &str,
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut attestation_json: Option<String> = None;
     let mut config_args = Vec::new();
 
@@ -1380,7 +1522,9 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
         .map_err(|e| format!("Invalid attestation JSON: {}", e))?;
 
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -1400,7 +1544,10 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id)],
+        )
         .limit(500);
 
     let events = client
@@ -1425,10 +1572,15 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
 
     our_updates.sort_by_key(|u| u.sequence_number);
     let our_latest = our_updates.last().unwrap().clone();
-    println!("  Found {} updates from you, latest at sequence {}", our_updates.len(), our_latest.sequence_number);
+    println!(
+        "  Found {} updates from you, latest at sequence {}",
+        our_updates.len(),
+        our_latest.sequence_number
+    );
 
     let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora.get_height()
+    let current_block_height = esplora
+        .get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     let operation = LedgerOperation::CollateralAttestation {
@@ -1455,19 +1607,18 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
         "deposits:ledger:{}:{}:{}",
         hex::encode(our_latest.current_hash),
         sequence,
-        hex::encode(&new_hash)
+        hex::encode(new_hash)
     );
     let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let signature = secp.sign_schnorr(
-        &Message::from_digest(*msg_hash.as_ref()),
-        &keypair
-    );
+    let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
     let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     let ledger_id_bytes: [u8; 32] = {
-        let decoded = hex::decode(ledger_id)
-            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
-        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+        let decoded =
+            hex::decode(ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded
+            .try_into()
+            .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
     let signed_update = SignedLedgerUpdate {
@@ -1476,7 +1627,7 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
         operator_signature: operator_sig_bytes,
         cosigner_pubkey: None,
         member_ledger_hash: None,
-            cosignatures: Vec::new(),
+        cosignatures: Vec::new(),
         cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
@@ -1488,10 +1639,14 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
     };
 
     println!("Publishing CollateralAttestation to Nostr...");
-    let publishing_keys = Keys::new(nostr_sdk::SecretKey::from_slice(&config.seed)
-        .map_err(|e| format!("Invalid key: {}", e))?);
+    let publishing_keys = Keys::new(
+        nostr_sdk::SecretKey::from_slice(&config.seed)
+            .map_err(|e| format!("Invalid key: {}", e))?,
+    );
     let publishing_client = Client::new(publishing_keys.clone());
-    publishing_client.add_relay(&relay_url).await
+    publishing_client
+        .add_relay(&relay_url)
+        .await
         .map_err(|e| format!("Failed to add relay: {}", e))?;
     publishing_client.connect().await;
 
@@ -1499,11 +1654,16 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
     let content = BASE64.encode(&update_bytes);
 
     let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_UPDATE), content)
-        .tags(vec![Tag::custom(TagKind::SingleLetter(crate::nostr::TAG_LEDGER_ID), [ledger_id])])
+        .tags(vec![Tag::custom(
+            TagKind::SingleLetter(crate::nostr::TAG_LEDGER_ID),
+            [ledger_id],
+        )])
         .sign_with_keys(&publishing_keys)
         .map_err(|e| format!("Failed to sign event: {}", e))?;
 
-    publishing_client.send_event(event).await
+    publishing_client
+        .send_event(event)
+        .await
         .map_err(|e| format!("Failed to publish: {}", e))?;
 
     publishing_client.disconnect().await.ok();
@@ -1515,15 +1675,23 @@ pub async fn recovery_rebuild_attestation(ledger_id: &str, args: &[String]) -> R
     println!("  Amount: {} msats", attestation.amount);
     println!();
     println!("Once you have enough attestations, run:");
-    println!("  recovery arm {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "  recovery arm {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
 
     Ok(())
 }
 
 /// Show the current quorum/attestation status on our dispute branch.
-pub async fn recovery_rebuild_status(ledger_id: &str, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn recovery_rebuild_status(
+    ledger_id: &str,
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_config(args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -1531,20 +1699,25 @@ pub async fn recovery_rebuild_status(ledger_id: &str, args: &[String]) -> Result
     let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let our_pubkey = PublicKey::from_secret_key(&secp, &secret_key);
 
-    println!("Checking dispute branch status for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "Checking dispute branch status for ledger: {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
 
     let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id)],
+        )
         .limit(500);
 
     let events = client
         .fetch_events(vec![filter], None)
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
-
 
     let mut our_updates: Vec<SignedLedgerUpdate> = Vec::new();
     let mut quorum_members: Vec<PublicKey> = Vec::new();
@@ -1565,7 +1738,12 @@ pub async fn recovery_rebuild_status(ledger_id: &str, args: &[String]) -> Result
                                     quorum_members.push(quorum_member);
                                 }
                             }
-                            LedgerOperation::CollateralAttestation { collateral_operator, amount, lock_until_block, .. } => {
+                            LedgerOperation::CollateralAttestation {
+                                collateral_operator,
+                                amount,
+                                lock_until_block,
+                                ..
+                            } => {
                                 attestations.push((collateral_operator, amount, lock_until_block));
                             }
                             _ => {}
@@ -1586,8 +1764,18 @@ pub async fn recovery_rebuild_status(ledger_id: &str, args: &[String]) -> Result
 
     println!("Your dispute branch status:");
     println!("  Updates: {}", our_updates.len());
-    println!("  Has DisputeEnter: {}", if has_dispute { "yes" } else { "NO - run 'recovery dispute' first" });
-    println!("  Has DisputeArmed: {}", if has_armed { "yes (locked in)" } else { "no" });
+    println!(
+        "  Has DisputeEnter: {}",
+        if has_dispute {
+            "yes"
+        } else {
+            "NO - run 'recovery dispute' first"
+        }
+    );
+    println!(
+        "  Has DisputeArmed: {}",
+        if has_armed { "yes (locked in)" } else { "no" }
+    );
     println!();
     println!("Quorum members: {}", quorum_members.len());
     for member in &quorum_members {
@@ -1596,20 +1784,29 @@ pub async fn recovery_rebuild_status(ledger_id: &str, args: &[String]) -> Result
     println!();
     println!("Collateral attestations: {}", attestations.len());
     for (op, amount, until) in &attestations {
-        println!("  - {}... {} msats until block {}", &op.to_string()[..16], amount, until);
+        println!(
+            "  - {}... {} msats until block {}",
+            &op.to_string()[..16],
+            amount,
+            until
+        );
     }
     println!();
 
     if !has_dispute {
         println!("Next: Run 'recovery dispute <ledger_id>' to open a dispute.");
     } else if quorum_members.is_empty() {
-        println!("Next: Add quorum members with 'recovery rebuild <ledger_id> quorum-add <pubkey>'");
+        println!(
+            "Next: Add quorum members with 'recovery rebuild <ledger_id> quorum-add <pubkey>'"
+        );
     } else if attestations.is_empty() {
         println!("Next: Get attestations and record with 'recovery rebuild <ledger_id> attestation <json>'");
     } else if !has_armed {
         println!("Ready to arm! Run 'recovery arm <ledger_id>'");
     } else {
-        println!("You are armed. Wait for the entropy block, then run 'recovery claim <ledger_id>'");
+        println!(
+            "You are armed. Wait for the entropy block, then run 'recovery claim <ledger_id>'"
+        );
     }
 
     Ok(())
@@ -1650,7 +1847,9 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -1659,21 +1858,26 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
-    println!("Arming (pre-committing) for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "Arming (pre-committing) for ledger: {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
 
     println!("Fetching ledger from Nostr...");
     let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
         .limit(500);
 
     let events = client
         .fetch_events(vec![filter], None)
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
-
 
     let mut our_updates: Vec<SignedLedgerUpdate> = Vec::new();
     for event in events.iter() {
@@ -1696,7 +1900,8 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("  Latest sequence: {}", latest.sequence_number);
 
     let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora.get_height()
+    let current_block_height = esplora
+        .get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     // Generate random preimage (17-20 bytes for lottery entropy)
@@ -1720,9 +1925,11 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     };
 
     // Store preimage for later reveal
-    let preimage_file = format!("{}/lottery_preimage_{}.hex",
+    let preimage_file = format!(
+        "{}/lottery_preimage_{}.hex",
         config.data_dir.display(),
-        &ledger_id[..16.min(ledger_id.len())]);
+        &ledger_id[..16.min(ledger_id.len())]
+    );
     std::fs::write(&preimage_file, hex::encode(&preimage))
         .map_err(|e| format!("Failed to store preimage: {}", e))?;
     println!("  Stored lottery preimage in: {}", preimage_file);
@@ -1746,19 +1953,18 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
         "deposits:ledger:{}:{}:{}",
         hex::encode(latest.current_hash),
         sequence,
-        hex::encode(&new_hash)
+        hex::encode(new_hash)
     );
     let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let signature = secp.sign_schnorr(
-        &Message::from_digest(*msg_hash.as_ref()),
-        &keypair
-    );
+    let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
     let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     let ledger_id_bytes: [u8; 32] = {
-        let decoded = hex::decode(&ledger_id)
-            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
-        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+        let decoded =
+            hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded
+            .try_into()
+            .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
     let signed_update = SignedLedgerUpdate {
@@ -1767,7 +1973,7 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
         operator_signature: operator_sig_bytes,
         cosigner_pubkey: None,
         member_ledger_hash: None,
-            cosignatures: Vec::new(),
+        cosignatures: Vec::new(),
         cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
@@ -1786,7 +1992,9 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .build()
         .await?;
 
-    publish_transport.broadcast_ledger_update(&signed_update).await?;
+    publish_transport
+        .broadcast_ledger_update(&signed_update)
+        .await?;
 
     let entropy_block = current_block_height + 6;
 
@@ -1799,8 +2007,14 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("Ledger is now in ARMED state. Quorum is locked.");
     println!();
     println!("Next steps:");
-    println!("  1. Wait for entropy block: {} (current: {})", entropy_block, current_block_height);
-    println!("  2. After entropy block: recovery claim {}", &ledger_id[..16]);
+    println!(
+        "  1. Wait for entropy block: {} (current: {})",
+        entropy_block, current_block_height
+    );
+    println!(
+        "  2. After entropy block: recovery claim {}",
+        &ledger_id[..16]
+    );
 
     Ok(())
 }
@@ -1831,7 +2045,9 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
 
     let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -1840,21 +2056,26 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
-    println!("Claiming custody for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "Claiming custody for ledger: {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
 
     println!("Fetching ledger from Nostr...");
     let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
         .limit(500);
 
     let events = client
         .fetch_events(vec![filter], None)
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
-
 
     // Find all DisputeArmed candidates
     let mut candidates: Vec<(PublicKey, u32, SignedLedgerUpdate)> = Vec::new();
@@ -1873,10 +2094,11 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
                     }
                 }
 
-                if update.operator_id == our_pubkey {
-                    if our_latest.is_none() || update.sequence_number > our_latest.as_ref().unwrap().sequence_number {
-                        our_latest = Some(update);
-                    }
+                if update.operator_id == our_pubkey
+                    && (our_latest.is_none()
+                        || update.sequence_number > our_latest.as_ref().unwrap().sequence_number)
+                {
+                    our_latest = Some(update);
                 }
             }
         }
@@ -1894,11 +2116,17 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
     println!("  Found {} armed candidates", candidates.len());
     for (pk, block, _) in &candidates {
         let marker = if *pk == our_pubkey { " (you)" } else { "" };
-        println!("    - {}... armed at block {}{}", &pk.to_string()[..16], block, marker);
+        println!(
+            "    - {}... armed at block {}{}",
+            &pk.to_string()[..16],
+            block,
+            marker
+        );
     }
 
     let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora.get_height()
+    let current_block_height = esplora
+        .get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     let earliest_armed = candidates.iter().map(|(_, b, _)| *b).min().unwrap();
@@ -1908,13 +2136,18 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         println!();
         println!("Entropy block not yet mined!");
         println!("  Current block: {}", current_block_height);
-        println!("  Entropy block: {} (need {} more blocks)", entropy_block_height, entropy_block_height - current_block_height);
+        println!(
+            "  Entropy block: {} (need {} more blocks)",
+            entropy_block_height,
+            entropy_block_height - current_block_height
+        );
         println!();
         println!("Please wait for the entropy block to be mined, then run this command again.");
         return Ok(());
     }
 
-    let entropy_block_hash_hex = esplora.get_block_hash(entropy_block_height)
+    let entropy_block_hash_hex = esplora
+        .get_block_hash(entropy_block_height)
         .map_err(|e| format!("Failed to get entropy block hash: {:?}", e))?;
     let entropy_block_hash: [u8; 32] = {
         let hash_bytes = entropy_block_hash_hex.to_byte_array();
@@ -1924,9 +2157,14 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
     };
 
     println!();
-    println!("Entropy block: {} (hash: {}...)", entropy_block_height, hex::encode(&entropy_block_hash[..8]));
+    println!(
+        "Entropy block: {} (hash: {}...)",
+        entropy_block_height,
+        hex::encode(&entropy_block_hash[..8])
+    );
 
-    let eligible_candidates: Vec<PublicKey> = candidates.iter()
+    let eligible_candidates: Vec<PublicKey> = candidates
+        .iter()
         .filter(|(_, armed_block, _)| *armed_block < entropy_block_height)
         .map(|(pk, _, _)| *pk)
         .collect();
@@ -1969,19 +2207,18 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             "deposits:ledger:{}:{}:{}",
             hex::encode(our_latest.current_hash),
             sequence,
-            hex::encode(&new_hash)
+            hex::encode(new_hash)
         );
         let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-        let signature = secp.sign_schnorr(
-            &Message::from_digest(*msg_hash.as_ref()),
-            &keypair
-        );
+        let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
         let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
         let ledger_id_bytes: [u8; 32] = {
-            let decoded = hex::decode(&ledger_id)
-                .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
-            decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+            let decoded =
+                hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+            decoded
+                .try_into()
+                .map_err(|_| "Ledger ID must be 32 bytes")?
         };
 
         let signed_update = SignedLedgerUpdate {
@@ -1997,7 +2234,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             sequence_number: sequence,
             previous_hash: our_latest.current_hash,
             current_hash: new_hash,
-                block_height: current_block_height,
+            block_height: current_block_height,
             block_hash: entropy_block_hash,
         };
 
@@ -2006,7 +2243,9 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             .build()
             .await?;
 
-        publish_transport.broadcast_ledger_update(&signed_update).await?;
+        publish_transport
+            .broadcast_ledger_update(&signed_update)
+            .await?;
 
         println!();
         println!("DisputeAcquire published successfully!");
@@ -2029,19 +2268,18 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             "deposits:ledger:{}:{}:{}",
             hex::encode(our_latest.current_hash),
             sequence,
-            hex::encode(&new_hash)
+            hex::encode(new_hash)
         );
         let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-        let signature = secp.sign_schnorr(
-            &Message::from_digest(*msg_hash.as_ref()),
-            &keypair
-        );
+        let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
         let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
         let ledger_id_bytes: [u8; 32] = {
-            let decoded = hex::decode(&ledger_id)
-                .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
-            decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+            let decoded =
+                hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+            decoded
+                .try_into()
+                .map_err(|_| "Ledger ID must be 32 bytes")?
         };
 
         let signed_update = SignedLedgerUpdate {
@@ -2057,7 +2295,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             sequence_number: sequence,
             previous_hash: our_latest.current_hash,
             current_hash: new_hash,
-                block_height: current_block_height,
+            block_height: current_block_height,
             block_hash: entropy_block_hash,
         };
 
@@ -2066,7 +2304,9 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             .build()
             .await?;
 
-        publish_transport.broadcast_ledger_update(&signed_update).await?;
+        publish_transport
+            .broadcast_ledger_update(&signed_update)
+            .await?;
 
         println!();
         println!("DisputeYield published successfully!");
@@ -2112,7 +2352,9 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
 
     let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -2121,21 +2363,27 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
-    println!("Continuing ledger: {}... (adding {} operations)", &ledger_id[..16.min(ledger_id.len())], count);
+    println!(
+        "Continuing ledger: {}... (adding {} operations)",
+        &ledger_id[..16.min(ledger_id.len())],
+        count
+    );
 
     println!("Fetching ledger from Nostr...");
     let client = get_or_create_client(&relay_url).await?;
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
         .limit(500);
 
     let events = client
         .fetch_events(vec![filter], None)
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
-
 
     let mut our_latest: Option<SignedLedgerUpdate> = None;
     let mut has_custody_acquire = false;
@@ -2158,7 +2406,9 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
                             has_custody_acquire = true;
                         }
                     }
-                    if our_latest.is_none() || update.sequence_number > our_latest.as_ref().unwrap().sequence_number {
+                    if our_latest.is_none()
+                        || update.sequence_number > our_latest.as_ref().unwrap().sequence_number
+                    {
                         our_latest = Some(update);
                     }
                 }
@@ -2169,10 +2419,16 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
     let mut latest = our_latest.ok_or("No updates found from you. Did you win custody?")?;
 
     if !has_custody_acquire {
-        return Err("You don't have DisputeAcquire. You must win custody first (recovery claim).".into());
+        return Err(
+            "You don't have DisputeAcquire. You must win custody first (recovery claim).".into(),
+        );
     }
 
-    println!("  Your latest: seq {} (hash: {}...)", latest.sequence_number, hex::encode(&latest.current_hash[..8]));
+    println!(
+        "  Your latest: seq {} (hash: {}...)",
+        latest.sequence_number,
+        hex::encode(&latest.current_hash[..8])
+    );
 
     // Use first deposit_id or derive from our pubkey
     let deposit_id = original_deposit_ids.first().copied().unwrap_or_else(|| {
@@ -2181,9 +2437,11 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
     });
 
     let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora.get_height()
+    let current_block_height = esplora
+        .get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
-    let block_hash_hex = esplora.get_block_hash(current_block_height)
+    let block_hash_hex = esplora
+        .get_block_hash(current_block_height)
         .map_err(|e| format!("Failed to get block hash: {:?}", e))?;
     let block_hash: [u8; 32] = {
         let hash_bytes = block_hash_hex.to_byte_array();
@@ -2193,9 +2451,11 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
     };
 
     let ledger_id_bytes: [u8; 32] = {
-        let decoded = hex::decode(&ledger_id)
-            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
-        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+        let decoded =
+            hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded
+            .try_into()
+            .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
     let publish_transport = NostrTransportBuilder::new(secret_key)
@@ -2232,13 +2492,10 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
             "deposits:ledger:{}:{}:{}",
             hex::encode(latest.current_hash),
             sequence,
-            hex::encode(&new_hash)
+            hex::encode(new_hash)
         );
         let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-        let signature = secp.sign_schnorr(
-            &Message::from_digest(*msg_hash.as_ref()),
-            &keypair
-        );
+        let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
         let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
         let signed_update = SignedLedgerUpdate {
@@ -2254,20 +2511,32 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
             sequence_number: sequence,
             previous_hash: latest.current_hash,
             current_hash: new_hash,
-                block_height: current_block_height,
+            block_height: current_block_height,
             block_hash,
         };
 
-        publish_transport.broadcast_ledger_update(&signed_update).await?;
+        publish_transport
+            .broadcast_ledger_update(&signed_update)
+            .await?;
 
-        println!("  [{}/{}] seq {} - InvoiceCredit {} msat", op_num + 1, count, sequence, 50000 + (op_num as u64 * 10000));
+        println!(
+            "  [{}/{}] seq {} - InvoiceCredit {} msat",
+            op_num + 1,
+            count,
+            sequence,
+            50000 + (op_num as u64 * 10000)
+        );
 
         latest = signed_update;
     }
 
     println!();
     println!("Ledger continued successfully!");
-    println!("  New latest: seq {} (hash: {}...)", latest.sequence_number, hex::encode(&latest.current_hash[..8]));
+    println!(
+        "  New latest: seq {} (hash: {}...)",
+        latest.sequence_number,
+        hex::encode(&latest.current_hash[..8])
+    );
 
     Ok(())
 }
@@ -2278,12 +2547,12 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
 
 /// Build and broadcast the confiscation transaction (reserves -> lottery output).
 pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use bitcoin::secp256k1::{Keypair, Secp256k1, PublicKey, XOnlyPublicKey};
-    use deposits_core::{TlvDecode, SignedLedgerUpdate};
-    use deposits_core::messages::LedgerOperation;
-    use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant};
     use crate::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE};
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use bitcoin::secp256k1::{Keypair, PublicKey, Secp256k1, XOnlyPublicKey};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tapscript_reserves::{LotteryParticipant, LotteryScriptBuilder};
+    use deposits_core::{SignedLedgerUpdate, TlvDecode};
     use nostr_sdk::prelude::*;
 
     let mut ledger_id: Option<String> = None;
@@ -2310,7 +2579,9 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
 
     let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -2319,7 +2590,10 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
-    println!("Building confiscation transaction for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "Building confiscation transaction for ledger: {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
 
     // Fetch all updates from Nostr
     println!("Fetching ledger from Nostr...");
@@ -2327,14 +2601,16 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
         .limit(500);
 
     let events = client
         .fetch_events(vec![filter], None)
         .await
         .map_err(|e| format!("Failed to fetch events: {}", e))?;
-
 
     // Extract DisputeArmed data and quorum info
     let mut participants: Vec<LotteryParticipant> = Vec::new();
@@ -2356,11 +2632,19 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
                                 quorum_members.push(quorum_member);
                             }
                         }
-                        LedgerOperation::QuorumBegin { reserves_id, ledger_hash: lh, .. } => {
+                        LedgerOperation::QuorumBegin {
+                            reserves_id,
+                            ledger_hash: lh,
+                            ..
+                        } => {
                             reserves_address = Some(reserves_id);
                             ledger_hash = Some(lh);
                         }
-                        LedgerOperation::DisputeArmed { commitment_hash, target_reserves, .. } => {
+                        LedgerOperation::DisputeArmed {
+                            commitment_hash,
+                            target_reserves,
+                            ..
+                        } => {
                             let x_only = update.operator_id.x_only_public_key().0;
                             participants.push(LotteryParticipant::new(
                                 x_only,
@@ -2376,7 +2660,11 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     }
 
     if participants.len() < 2 {
-        return Err(format!("Need at least 2 DisputeArmed participants, found {}", participants.len()).into());
+        return Err(format!(
+            "Need at least 2 DisputeArmed participants, found {}",
+            participants.len()
+        )
+        .into());
     }
 
     // Sort participants by pubkey for deterministic order
@@ -2393,10 +2681,14 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     let _ledger_hash = ledger_hash.ok_or("Could not find ledger_hash")?;
 
     println!("  Found {} lottery participants", participants.len());
-    println!("  Reserves address: {}...", &reserves_address_str[..20.min(reserves_address_str.len())]);
+    println!(
+        "  Reserves address: {}...",
+        &reserves_address_str[..20.min(reserves_address_str.len())]
+    );
 
     // Build recovery voters (quorum minus original operator)
-    let recovery_voters: Vec<XOnlyPublicKey> = quorum_members.iter()
+    let recovery_voters: Vec<XOnlyPublicKey> = quorum_members
+        .iter()
         .filter(|pk| **pk != original_operator)
         .map(|pk| pk.x_only_public_key().0)
         .collect();
@@ -2411,7 +2703,8 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         config.network,
     );
 
-    let lottery_output = lottery_builder.build()
+    let lottery_output = lottery_builder
+        .build()
         .map_err(|e| format!("Failed to build lottery output: {:?}", e))?;
 
     println!("  Lottery address: {}", lottery_output.address);
@@ -2420,13 +2713,16 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     use bdk_esplora::esplora_client::Builder as EsploraBuilder;
     let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
 
-    let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = reserves_address_str.parse()
+    let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = reserves_address_str
+        .parse()
         .map_err(|e| format!("Invalid reserves address: {}", e))?;
-    let reserves_addr = reserves_addr.require_network(config.network)
+    let reserves_addr = reserves_addr
+        .require_network(config.network)
         .map_err(|e| format!("Address network mismatch: {}", e))?;
 
     let script_pubkey = reserves_addr.script_pubkey();
-    let utxos = esplora.scripthash_txs(&script_pubkey, None)
+    let utxos = esplora
+        .scripthash_txs(&script_pubkey, None)
         .map_err(|e| format!("Failed to query Esplora: {:?}", e))?;
 
     // Find unspent output
@@ -2435,7 +2731,8 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         for (vout, output) in tx.vout.iter().enumerate() {
             if output.scriptpubkey == script_pubkey {
                 let outpoint = bitcoin::OutPoint::new(tx.txid, vout as u32);
-                let status = esplora.get_output_status(&tx.txid, vout as u64)
+                let status = esplora
+                    .get_output_status(&tx.txid, vout as u64)
                     .map_err(|e| format!("Failed to check output status: {:?}", e))?;
                 if status.map(|s| !s.spent).unwrap_or(true) {
                     reserves_utxo = Some((outpoint, output.value));
@@ -2443,16 +2740,20 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
                 }
             }
         }
-        if reserves_utxo.is_some() { break; }
+        if reserves_utxo.is_some() {
+            break;
+        }
     }
 
-    let (reserves_outpoint, reserves_amount) = reserves_utxo
-        .ok_or("No unspent reserves found")?;
+    let (reserves_outpoint, reserves_amount) = reserves_utxo.ok_or("No unspent reserves found")?;
 
-    println!("  Found reserves: {} sats at {}", reserves_amount, reserves_outpoint);
+    println!(
+        "  Found reserves: {} sats at {}",
+        reserves_amount, reserves_outpoint
+    );
 
     // Build confiscation transaction
-    use bitcoin::{Transaction, TxIn, TxOut, Sequence, Witness, Amount};
+    use bitcoin::{Amount, Sequence, Transaction, TxIn, TxOut, Witness};
 
     let fee_rate = 2u64;
     let estimated_vsize = 200u64;
@@ -2475,8 +2776,8 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     };
 
     // Build the Taproot reserves structure for signing
-    use deposits_core::{VoterSet, ThresholdConfig, TapscriptReservesBuilder};
     use bitcoin::sighash::{SighashCache, TapSighashType};
+    use deposits_core::{TapscriptReservesBuilder, ThresholdConfig, VoterSet};
 
     let ledger_hash_val = ledger_hash.ok_or("Could not find ledger_hash")?;
     let voter_set = VoterSet::new(original_operator, quorum_members.clone());
@@ -2490,23 +2791,32 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         ledger_hash_val,
     );
 
-    let taproot_output = taproot_builder.build()
+    let taproot_output = taproot_builder
+        .build()
         .map_err(|e| format!("Failed to build Taproot output: {:?}", e))?;
 
     // Use quorum-override tier (threshold without tie-breaker)
-    let (tier_index, tier) = threshold_config.tiers.iter()
+    let (tier_index, tier) = threshold_config
+        .tiers
+        .iter()
         .enumerate()
         .find(|(_, t)| !t.requires_tie_breaker && t.threshold > 1)
         .ok_or("No quorum-override tier found")?;
 
-    println!("  Using Tier {} for confiscation (threshold={}/{})",
-        tier_index, tier.threshold, voter_count);
+    println!(
+        "  Using Tier {} for confiscation (threshold={}/{})",
+        tier_index, tier.threshold, voter_count
+    );
 
     // Build leaf script and compute sighash
-    let leaf_script = taproot_builder.build_threshold_leaf(tier)
+    let leaf_script = taproot_builder
+        .build_threshold_leaf(tier)
         .map_err(|e| format!("Failed to build leaf script: {:?}", e))?;
 
-    let leaf_hash = bitcoin::taproot::TapLeafHash::from_script(&leaf_script, bitcoin::taproot::LeafVersion::TapScript);
+    let leaf_hash = bitcoin::taproot::TapLeafHash::from_script(
+        &leaf_script,
+        bitcoin::taproot::LeafVersion::TapScript,
+    );
 
     let prevouts = vec![TxOut {
         value: Amount::from_sat(reserves_amount),
@@ -2515,12 +2825,14 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
 
     let mut confiscation_tx = confiscation_tx; // Make mutable
     let mut sighash_cache = SighashCache::new(&confiscation_tx);
-    let sighash = sighash_cache.taproot_script_spend_signature_hash(
-        0,
-        &bitcoin::sighash::Prevouts::All(&prevouts),
-        leaf_hash,
-        TapSighashType::Default,
-    ).map_err(|e| format!("Failed to compute sighash: {}", e))?;
+    let sighash = sighash_cache
+        .taproot_script_spend_signature_hash(
+            0,
+            &bitcoin::sighash::Prevouts::All(&prevouts),
+            leaf_hash,
+            TapSighashType::Default,
+        )
+        .map_err(|e| format!("Failed to compute sighash: {}", e))?;
 
     let sighash_bytes: [u8; 32] = *sighash.as_ref();
 
@@ -2560,11 +2872,10 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
             "last_valid_sequence": 0,
         });
 
-        let request_id = publish_transport.send_ledger_request(
-            &ledger_id,
-            "confiscation_sign",
-            request_params,
-        ).await.map_err(|e| format!("Failed to send sign request: {:?}", e))?;
+        let request_id = publish_transport
+            .send_ledger_request(&ledger_id, "confiscation_sign", request_params)
+            .await
+            .map_err(|e| format!("Failed to send sign request: {:?}", e))?;
 
         println!("  Request ID: {}...", &request_id[..16]);
 
@@ -2579,7 +2890,8 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
                 .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
                 .since(since);
 
-            let response_events = publish_transport.client()
+            let response_events = publish_transport
+                .client()
                 .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
                 .await
                 .map_err(|e| format!("Failed to fetch responses: {:?}", e))?;
@@ -2597,24 +2909,30 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
                     }
                 }
 
-                if !is_our_request { continue; }
+                if !is_our_request {
+                    continue;
+                }
 
-                if let Ok(response) = serde_json::from_str::<crate::nostr::LedgerResponse>(&event.content) {
+                if let Ok(response) =
+                    serde_json::from_str::<crate::nostr::LedgerResponse>(&event.content)
+                {
                     if response.success {
                         if let Some(result) = &response.result {
                             if let (Some(signer_hex), Some(sig_hex)) = (
                                 result.get("signer").and_then(|v| v.as_str()),
-                                result.get("signature").and_then(|v| v.as_str())
+                                result.get("signature").and_then(|v| v.as_str()),
                             ) {
-                                if let (Ok(signer), Ok(sig_bytes)) = (
-                                    signer_hex.parse::<PublicKey>(),
-                                    hex::decode(sig_hex)
-                                ) {
+                                if let (Ok(signer), Ok(sig_bytes)) =
+                                    (signer_hex.parse::<PublicKey>(), hex::decode(sig_hex))
+                                {
                                     if sig_bytes.len() == 64 && !signatures.contains_key(&signer) {
                                         let mut sig_arr = [0u8; 64];
                                         sig_arr.copy_from_slice(&sig_bytes);
                                         signatures.insert(signer, sig_arr);
-                                        println!("    Received signature from {}...", &signer.to_string()[..16]);
+                                        println!(
+                                            "    Received signature from {}...",
+                                            &signer.to_string()[..16]
+                                        );
                                     }
                                 }
                             }
@@ -2623,24 +2941,35 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
                 }
             }
 
-            println!("    Poll {}/{}: {}/{} signatures", attempt, max_attempts, signatures.len(), required_sigs);
+            println!(
+                "    Poll {}/{}: {}/{} signatures",
+                attempt,
+                max_attempts,
+                signatures.len(),
+                required_sigs
+            );
 
-            if signatures.len() >= required_sigs { break; }
+            if signatures.len() >= required_sigs {
+                break;
+            }
         }
     }
 
     if signatures.len() < required_sigs {
         return Err(format!(
             "Could not collect enough signatures ({}/{}). Confiscation failed.",
-            signatures.len(), required_sigs
-        ).into());
+            signatures.len(),
+            required_sigs
+        )
+        .into());
     }
 
     // Build witness
     println!();
     println!("  Building witness with {} signatures...", signatures.len());
 
-    let control_block = taproot_output.control_block_for_tier(tier_index)
+    let control_block = taproot_output
+        .control_block_for_tier(tier_index)
         .ok_or("Failed to get control block for tier")?;
 
     let mut witness = Witness::new();
@@ -2684,8 +3013,14 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     println!();
     println!("Next steps:");
     println!("  1. Wait for confirmation");
-    println!("  2. All participants run: recovery reveal {}...", &ledger_id[..16.min(ledger_id.len())]);
-    println!("  3. Winner runs: recovery lottery-claim {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "  2. All participants run: recovery reveal {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
+    println!(
+        "  3. Winner runs: recovery lottery-claim {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
 
     Ok(())
 }
@@ -2716,26 +3051,37 @@ pub async fn recovery_reveal(args: &[String]) -> Result<(), Box<dyn std::error::
 
     let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
     let secret_key = derive_operator_secret(&config.seed, config.network)?;
 
-    println!("Revealing lottery preimage for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "Revealing lottery preimage for ledger: {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
 
     // Load preimage from file
-    let preimage_file = format!("{}/lottery_preimage_{}.hex",
+    let preimage_file = format!(
+        "{}/lottery_preimage_{}.hex",
         config.data_dir.display(),
-        &ledger_id[..16.min(ledger_id.len())]);
+        &ledger_id[..16.min(ledger_id.len())]
+    );
 
     let preimage_hex = std::fs::read_to_string(&preimage_file)
         .map_err(|e| format!("Failed to read preimage file {}: {}", preimage_file, e))?;
 
-    let preimage = hex::decode(preimage_hex.trim())
-        .map_err(|e| format!("Invalid preimage hex: {}", e))?;
+    let preimage =
+        hex::decode(preimage_hex.trim()).map_err(|e| format!("Invalid preimage hex: {}", e))?;
 
-    println!("  Preimage length: {} bytes (contribution: {})", preimage.len(), preimage.len() - 16);
+    println!(
+        "  Preimage length: {} bytes (contribution: {})",
+        preimage.len(),
+        preimage.len() - 16
+    );
 
     let transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
@@ -2747,30 +3093,34 @@ pub async fn recovery_reveal(args: &[String]) -> Result<(), Box<dyn std::error::
         "preimage": hex::encode(&preimage),
     });
 
-    let request_id = transport.send_ledger_request(
-        &ledger_id,
-        "lottery_reveal",
-        reveal_params,
-    ).await.map_err(|e| format!("Failed to send reveal: {:?}", e))?;
+    let request_id = transport
+        .send_ledger_request(&ledger_id, "lottery_reveal", reveal_params)
+        .await
+        .map_err(|e| format!("Failed to send reveal: {:?}", e))?;
 
     println!();
     println!("Lottery preimage revealed!");
     println!("  Request ID: {}...", &request_id[..16]);
     println!();
     println!("Wait for all participants to reveal, then run:");
-    println!("  recovery lottery-claim {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "  recovery lottery-claim {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
 
     Ok(())
 }
 
 /// Claim the lottery output if we are the winner.
 pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use bitcoin::secp256k1::{Keypair, Secp256k1, PublicKey};
-    use deposits_core::{TlvDecode, SignedLedgerUpdate};
-    use deposits_core::messages::LedgerOperation;
-    use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant, LotteryOutput};
-    use crate::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE, KIND_LEDGER_REQUEST};
+    use crate::nostr::{NostrTransportBuilder, KIND_LEDGER_REQUEST, KIND_LEDGER_UPDATE};
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use bitcoin::secp256k1::{Keypair, PublicKey, Secp256k1};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tapscript_reserves::{
+        LotteryOutput, LotteryParticipant, LotteryScriptBuilder,
+    };
+    use deposits_core::{SignedLedgerUpdate, TlvDecode};
     use nostr_sdk::prelude::*;
 
     let mut ledger_id: Option<String> = None;
@@ -2797,7 +3147,9 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
 
     let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -2806,7 +3158,10 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
-    println!("Checking lottery result for ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "Checking lottery result for ledger: {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
 
     // Fetch updates and reveals from Nostr
     let client = get_or_create_client(&relay_url).await?;
@@ -2814,7 +3169,10 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     // Fetch ledger updates
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
         .limit(500);
 
     let update_events = client
@@ -2833,7 +3191,6 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         .await
         .map_err(|e| format!("Failed to fetch reveals: {}", e))?;
 
-
     // Extract DisputeArmed participants
     let mut participants: Vec<(PublicKey, LotteryParticipant)> = Vec::new();
 
@@ -2841,13 +3198,17 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
             if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                    if let LedgerOperation::DisputeArmed { commitment_hash, target_reserves, .. } = op {
+                    if let LedgerOperation::DisputeArmed {
+                        commitment_hash,
+                        target_reserves,
+                        ..
+                    } = op
+                    {
                         let x_only = update.operator_id.x_only_public_key().0;
-                        participants.push((update.operator_id, LotteryParticipant::new(
-                            x_only,
-                            commitment_hash,
-                            target_reserves,
-                        )));
+                        participants.push((
+                            update.operator_id,
+                            LotteryParticipant::new(x_only, commitment_hash, target_reserves),
+                        ));
                     }
                 }
             }
@@ -2871,21 +3232,28 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         } else {
             p.target_reserves.clone()
         };
-        println!("    {}: x-only={} op_id={} target={}", i, xonly_hex, op_hex, target_short);
+        println!(
+            "    {}: x-only={} op_id={} target={}",
+            i, xonly_hex, op_hex, target_short
+        );
     }
 
     println!("  Found {} participants", participants.len());
 
     // Collect revealed preimages (keyed by x-only pubkey to match Bitcoin pubkeys)
-    let mut preimages: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    let mut preimages: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
 
     println!("  Checking {} reveal events...", reveal_events.len());
 
     for event in reveal_events.iter() {
         // Check if this is a lottery_reveal action (action is in a tag, not content)
         let is_lottery_reveal = event.tags.iter().any(|tag| {
-            tag.kind() == TagKind::custom("action") &&
-            tag.content().map(|c| c == "lottery_reveal").unwrap_or(false)
+            tag.kind() == TagKind::custom("action")
+                && tag
+                    .content()
+                    .map(|c| c == "lottery_reveal")
+                    .unwrap_or(false)
         });
 
         if is_lottery_reveal {
@@ -2894,7 +3262,10 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
                 if let Some(preimage_hex) = content.get("preimage").and_then(|v| v.as_str()) {
                     if let Ok(preimage) = hex::decode(preimage_hex) {
                         // Use event pubkey (x-only) to identify revealer
-                        println!("    Found reveal from: {}...", &event.pubkey.to_string()[..16]);
+                        println!(
+                            "    Found reveal from: {}...",
+                            &event.pubkey.to_string()[..16]
+                        );
                         preimages.insert(event.pubkey.to_string(), preimage);
                     }
                 }
@@ -2922,13 +3293,17 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         let pubkey_str = x_only.to_string();
         if let Some(preimage) = preimages.get(&pubkey_str) {
             // Debug: verify hash matches commitment
-            let computed_hash: [u8; 20] = *bitcoin::hashes::hash160::Hash::hash(preimage).as_byte_array();
+            let computed_hash: [u8; 20] =
+                *bitcoin::hashes::hash160::Hash::hash(preimage).as_byte_array();
             let expected_hash = participant.commitment_hash;
             if computed_hash != expected_hash {
                 println!("  WARNING: Hash mismatch for {}...", &pubkey_str[..16]);
-                println!("    Preimage: {}...", &hex::encode(preimage)[..32.min(preimage.len()*2)]);
-                println!("    Computed HASH160:  {}", hex::encode(&computed_hash));
-                println!("    Expected (commit): {}", hex::encode(&expected_hash));
+                println!(
+                    "    Preimage: {}...",
+                    &hex::encode(preimage)[..32.min(preimage.len() * 2)]
+                );
+                println!("    Computed HASH160:  {}", hex::encode(computed_hash));
+                println!("    Expected (commit): {}", hex::encode(expected_hash));
             } else {
                 println!("  Hash OK for {}...", &pubkey_str[..16]);
             }
@@ -2947,11 +3322,20 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     println!("Lottery result:");
     for (i, preimage) in ordered_preimages.iter().enumerate() {
         let marker = if i == winner_index { " <-- WINNER" } else { "" };
-        println!("  Participant {}: {} bytes (contribution {}){}", i, preimage.len(), preimage.len() - 16, marker);
+        println!(
+            "  Participant {}: {} bytes (contribution {}){}",
+            i,
+            preimage.len(),
+            preimage.len() - 16,
+            marker
+        );
     }
     println!();
     println!("Winner: {}...", &winner_pubkey.to_string()[..16]);
-    println!("Target reserves: {}...", &winner_participant.target_reserves[..20.min(winner_participant.target_reserves.len())]);
+    println!(
+        "Target reserves: {}...",
+        &winner_participant.target_reserves[..20.min(winner_participant.target_reserves.len())]
+    );
 
     if *winner_pubkey != our_pubkey {
         println!();
@@ -2987,22 +3371,25 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     let original_operator = original_operator.ok_or("Could not find original operator")?;
 
     // Build the recovery voters list (quorum members minus original operator)
-    let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = quorum_members.iter()
+    let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = quorum_members
+        .iter()
         .filter(|pk| **pk != original_operator)
         .map(|pk| pk.x_only_public_key().0)
         .collect();
 
-    println!("  Original operator: {}...", &original_operator.to_string()[..16]);
+    println!(
+        "  Original operator: {}...",
+        &original_operator.to_string()[..16]
+    );
     println!("  Quorum members: {}", quorum_members.len());
     println!("  Recovery voters: {}", recovery_voters.len());
 
     // Build lottery participants (just the LotteryParticipant part)
-    let lottery_participants: Vec<LotteryParticipant> = participants.iter()
-        .map(|(_, p)| p.clone())
-        .collect();
+    let lottery_participants: Vec<LotteryParticipant> =
+        participants.iter().map(|(_, p)| p.clone()).collect();
 
     // Calculate recovery threshold (majority of recovery voters)
-    let recovery_threshold = (recovery_voters.len() + 1) / 2;
+    let recovery_threshold = recovery_voters.len().div_ceil(2);
     if recovery_threshold == 0 {
         return Err("Not enough recovery voters".into());
     }
@@ -3015,10 +3402,14 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         config.network,
     );
 
-    let lottery_output = lottery_builder.build()
+    let lottery_output = lottery_builder
+        .build()
         .map_err(|e| format!("Failed to build lottery output: {:?}", e))?;
 
-    println!("  Lottery address: {}...", &lottery_output.address.to_string()[..20]);
+    println!(
+        "  Lottery address: {}...",
+        &lottery_output.address.to_string()[..20]
+    );
 
     // Find the lottery UTXO on-chain
     use bdk_esplora::esplora_client::Builder as EsploraBuilder;
@@ -3027,7 +3418,8 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     let lottery_script = lottery_output.address.script_pubkey();
 
     // Query for transactions at the lottery address
-    let txs = esplora.scripthash_txs(&lottery_script, None)
+    let txs = esplora
+        .scripthash_txs(&lottery_script, None)
         .map_err(|e| format!("Failed to query lottery address: {:?}", e))?;
 
     // Find unspent output
@@ -3036,7 +3428,8 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         for (vout, output) in tx.vout.iter().enumerate() {
             if output.scriptpubkey == lottery_script {
                 let outpoint = bitcoin::OutPoint::new(tx.txid, vout as u32);
-                let status = esplora.get_output_status(&tx.txid, vout as u64)
+                let status = esplora
+                    .get_output_status(&tx.txid, vout as u64)
                     .map_err(|e| format!("Failed to check output status: {:?}", e))?;
                 if status.map(|s| !s.spent).unwrap_or(true) {
                     lottery_utxo = Some((outpoint, output.value));
@@ -3044,22 +3437,31 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
                 }
             }
         }
-        if lottery_utxo.is_some() { break; }
+        if lottery_utxo.is_some() {
+            break;
+        }
     }
 
-    let (lottery_outpoint, lottery_amount) = lottery_utxo
-        .ok_or("No unspent UTXO found at lottery address. Was confiscation transaction confirmed?")?;
+    let (lottery_outpoint, lottery_amount) = lottery_utxo.ok_or(
+        "No unspent UTXO found at lottery address. Was confiscation transaction confirmed?",
+    )?;
 
-    println!("  Found lottery UTXO: {} ({} sats)", lottery_outpoint, lottery_amount);
+    println!(
+        "  Found lottery UTXO: {} ({} sats)",
+        lottery_outpoint, lottery_amount
+    );
 
     // Parse the winner's target_reserves address
-    let target_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> = winner_participant.target_reserves.parse()
+    let target_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> = winner_participant
+        .target_reserves
+        .parse()
         .map_err(|e| format!("Invalid target_reserves address: {}", e))?;
-    let target_address = target_address.require_network(config.network)
+    let target_address = target_address
+        .require_network(config.network)
         .map_err(|e| format!("Address network mismatch: {}", e))?;
 
     // Build claim transaction
-    use bitcoin::{ScriptBuf, Witness, Amount, TxIn, TxOut};
+    use bitcoin::{Amount, ScriptBuf, TxIn, TxOut, Witness};
 
     let claim_fee = 400u64; // Reasonable fee for single-input tx
     let output_amount = lottery_amount.saturating_sub(claim_fee);
@@ -3088,15 +3490,20 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         script_pubkey: lottery_script.clone(),
     }];
 
-    let leaf_hash = TapLeafHash::from_script(&lottery_output.lottery_script, bitcoin::taproot::LeafVersion::TapScript);
+    let leaf_hash = TapLeafHash::from_script(
+        &lottery_output.lottery_script,
+        bitcoin::taproot::LeafVersion::TapScript,
+    );
 
     let mut sighash_cache = SighashCache::new(&claim_tx);
-    let sighash = sighash_cache.taproot_script_spend_signature_hash(
-        0,
-        &bitcoin::sighash::Prevouts::All(&prevouts),
-        leaf_hash,
-        TapSighashType::Default,
-    ).map_err(|e| format!("Failed to compute sighash: {}", e))?;
+    let sighash = sighash_cache
+        .taproot_script_spend_signature_hash(
+            0,
+            &bitcoin::sighash::Prevouts::All(&prevouts),
+            leaf_hash,
+            TapSighashType::Default,
+        )
+        .map_err(|e| format!("Failed to compute sighash: {}", e))?;
 
     let sighash_bytes: [u8; 32] = *sighash.as_ref();
 
@@ -3108,7 +3515,8 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     println!("  Signed claim transaction");
 
     // Create witness
-    let witness = lottery_output.create_claim_witness(&sig_bytes, &ordered_preimages)
+    let witness = lottery_output
+        .create_claim_witness(&sig_bytes, &ordered_preimages)
         .map_err(|e| format!("Failed to create witness: {:?}", e))?;
 
     let mut claim_tx = claim_tx;
@@ -3130,7 +3538,10 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     println!();
     println!("Claim transaction broadcast!");
     println!("  Txid: {}", claim_txid);
-    println!("  Output: {} sats to {}", output_amount, winner_participant.target_reserves);
+    println!(
+        "  Output: {} sats to {}",
+        output_amount, winner_participant.target_reserves
+    );
 
     // Publish DisputeAcquire to Nostr
     println!();
@@ -3158,9 +3569,11 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     let our_armed = our_armed.ok_or("Could not find our DisputeArmed update")?;
 
     // Get current block for entropy reference
-    let current_block_height = esplora.get_height()
+    let current_block_height = esplora
+        .get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
-    let current_block_hash = esplora.get_block_hash(current_block_height)
+    let current_block_hash = esplora
+        .get_block_hash(current_block_height)
         .map_err(|e| format!("Failed to get block hash: {:?}", e))?;
     let current_block_hash: [u8; 32] = *current_block_hash.as_ref();
 
@@ -3190,7 +3603,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         "deposits:ledger:{}:{}:{}",
         hex::encode(our_armed.current_hash),
         sequence,
-        hex::encode(&new_hash)
+        hex::encode(new_hash)
     );
     let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
     let msg = bitcoin::secp256k1::Message::from_digest(*msg_hash.as_ref());
@@ -3199,9 +3612,11 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
 
     // Parse ledger_id into bytes
     let ledger_id_bytes: [u8; 32] = {
-        let decoded = hex::decode(&ledger_id)
-            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
-        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+        let decoded =
+            hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded
+            .try_into()
+            .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
     let signed_update = SignedLedgerUpdate {
@@ -3210,7 +3625,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         operator_signature: operator_sig_bytes,
         cosigner_pubkey: None,
         member_ledger_hash: None,
-            cosignatures: Vec::new(),
+        cosignatures: Vec::new(),
         cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
@@ -3227,14 +3642,19 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         .build()
         .await?;
 
-    publish_transport.broadcast_ledger_update(&signed_update).await?;
+    publish_transport
+        .broadcast_ledger_update(&signed_update)
+        .await?;
 
     println!();
     println!("DisputeAcquire published successfully!");
     println!("  Sequence: {}", sequence);
     println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
     println!("  Spend txid: {}...", &hex::encode(spend_txid_bytes)[..16]);
-    println!("  New reserves: {}...", &winner_participant.target_reserves[..20.min(winner_participant.target_reserves.len())]);
+    println!(
+        "  New reserves: {}...",
+        &winner_participant.target_reserves[..20.min(winner_participant.target_reserves.len())]
+    );
     println!();
     println!("Custody transfer complete. You are now the operator.");
     println!();
@@ -3245,15 +3665,18 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
 
 /// Rotate lottery winnings to a quorum-controlled Taproot address.
 pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use bitcoin::hashes::{sha256, Hash};
-    use bitcoin::secp256k1::{Keypair, Secp256k1, PublicKey};
-    use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate, VoterSet, ThresholdConfig, TapscriptReservesBuilder};
-    use deposits_core::messages::LedgerOperation;
     use crate::nostr::NostrTransportBuilder;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-    use nostr_sdk::prelude::*;
     use bdk_esplora::esplora_client::Builder as EsploraBuilder;
-    use bitcoin::{Transaction, TxIn, TxOut, Witness, Amount, ScriptBuf};
+    use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::secp256k1::{Keypair, PublicKey, Secp256k1};
+    use bitcoin::{Amount, ScriptBuf, Transaction, TxIn, TxOut, Witness};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::{
+        SignedLedgerUpdate, TapscriptReservesBuilder, ThresholdConfig, TlvDecode, TlvEncode,
+        VoterSet,
+    };
+    use nostr_sdk::prelude::*;
 
     let mut ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
@@ -3279,7 +3702,9 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
 
     let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -3296,14 +3721,16 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
 
     let filter = Filter::new()
         .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
         .limit(500);
 
     let events = client
         .fetch_events(vec![filter], None)
         .await
         .map_err(|e| format!("Failed to fetch updates: {}", e))?;
-
 
     // Decode updates and find our branch
     let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
@@ -3316,10 +3743,15 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     }
 
     updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
+    updates.dedup_by(|a, b| {
+        a.sequence_number == b.sequence_number
+            && a.operator_id == b.operator_id
+            && a.current_hash == b.current_hash
+    });
 
     // Find our updates (we're the new operator after DisputeAcquire)
-    let our_updates: Vec<&SignedLedgerUpdate> = updates.iter()
+    let our_updates: Vec<&SignedLedgerUpdate> = updates
+        .iter()
         .filter(|u| u.operator_id == our_pubkey)
         .collect();
 
@@ -3333,7 +3765,11 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
 
     for update in &our_updates {
         if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-            if let LedgerOperation::DisputeAcquire { new_reserves_address, .. } = op {
+            if let LedgerOperation::DisputeAcquire {
+                new_reserves_address,
+                ..
+            } = op
+            {
                 current_reserves_address = Some(new_reserves_address);
             }
         }
@@ -3342,11 +3778,14 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         }
     }
 
-    let current_reserves_address = current_reserves_address
-        .ok_or("Could not find DisputeAcquire with reserves address")?;
+    let current_reserves_address =
+        current_reserves_address.ok_or("Could not find DisputeAcquire with reserves address")?;
     let our_latest = our_latest.ok_or("Could not find latest update")?;
 
-    println!("  Current reserves: {}...", &current_reserves_address[..20.min(current_reserves_address.len())]);
+    println!(
+        "  Current reserves: {}...",
+        &current_reserves_address[..20.min(current_reserves_address.len())]
+    );
     println!("  Latest sequence: {}", our_latest.sequence_number);
 
     // Get quorum members from our branch (rebuilt during dispute)
@@ -3370,13 +3809,17 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     // Find the UTXO at current_reserves_address
     let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
 
-    let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = current_reserves_address.parse()
-        .map_err(|e| format!("Invalid reserves address: {}", e))?;
-    let reserves_addr = reserves_addr.require_network(config.network)
+    let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+        current_reserves_address
+            .parse()
+            .map_err(|e| format!("Invalid reserves address: {}", e))?;
+    let reserves_addr = reserves_addr
+        .require_network(config.network)
         .map_err(|e| format!("Address network mismatch: {}", e))?;
 
     let script_pubkey = reserves_addr.script_pubkey();
-    let txs = esplora.scripthash_txs(&script_pubkey, None)
+    let txs = esplora
+        .scripthash_txs(&script_pubkey, None)
         .map_err(|e| format!("Failed to query address: {:?}", e))?;
 
     // Find unspent output
@@ -3385,7 +3828,8 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         for (vout, output) in tx.vout.iter().enumerate() {
             if output.scriptpubkey == script_pubkey {
                 let outpoint = bitcoin::OutPoint::new(tx.txid, vout as u32);
-                let status = esplora.get_output_status(&tx.txid, vout as u64)
+                let status = esplora
+                    .get_output_status(&tx.txid, vout as u64)
                     .map_err(|e| format!("Failed to check output status: {:?}", e))?;
                 if status.map(|s| !s.spent).unwrap_or(true) {
                     reserves_utxo = Some((outpoint, output.value));
@@ -3393,13 +3837,18 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
                 }
             }
         }
-        if reserves_utxo.is_some() { break; }
+        if reserves_utxo.is_some() {
+            break;
+        }
     }
 
-    let (reserves_outpoint, reserves_amount) = reserves_utxo
-        .ok_or("No unspent UTXO found at reserves address")?;
+    let (reserves_outpoint, reserves_amount) =
+        reserves_utxo.ok_or("No unspent UTXO found at reserves address")?;
 
-    println!("  Found UTXO: {} ({} sats)", reserves_outpoint, reserves_amount);
+    println!(
+        "  Found UTXO: {} ({} sats)",
+        reserves_outpoint, reserves_amount
+    );
 
     // Compute ledger hash for Taproot address derivation
     let ledger_hash: [u8; 32] = our_latest.current_hash;
@@ -3409,18 +3858,18 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     let voter_count = voter_set.all_voters().len();
     let threshold_config = ThresholdConfig::default_for_voter_count(voter_count);
 
-    let taproot_builder = TapscriptReservesBuilder::new(
-        voter_set,
-        threshold_config,
-        config.network,
-        ledger_hash,
-    );
+    let taproot_builder =
+        TapscriptReservesBuilder::new(voter_set, threshold_config, config.network, ledger_hash);
 
-    let taproot_output = taproot_builder.build()
+    let taproot_output = taproot_builder
+        .build()
         .map_err(|e| format!("Failed to build Taproot output: {:?}", e))?;
 
     let new_reserves_address = &taproot_output.address;
-    println!("  New Taproot address: {}...", &new_reserves_address.to_string()[..20]);
+    println!(
+        "  New Taproot address: {}...",
+        &new_reserves_address.to_string()[..20]
+    );
 
     // Build rotation transaction
     let fee = 200u64;
@@ -3442,15 +3891,17 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     };
 
     // Sign the transaction (P2WPKH input)
-    use bitcoin::sighash::{SighashCache, EcdsaSighashType};
+    use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 
     let mut sighash_cache = SighashCache::new(&rotation_tx);
-    let sighash = sighash_cache.p2wpkh_signature_hash(
-        0,
-        &script_pubkey,
-        Amount::from_sat(reserves_amount),
-        EcdsaSighashType::All,
-    ).map_err(|e| format!("Failed to compute sighash: {}", e))?;
+    let sighash = sighash_cache
+        .p2wpkh_signature_hash(
+            0,
+            &script_pubkey,
+            Amount::from_sat(reserves_amount),
+            EcdsaSighashType::All,
+        )
+        .map_err(|e| format!("Failed to compute sighash: {}", e))?;
 
     let msg = bitcoin::secp256k1::Message::from_digest(*sighash.as_ref());
     let ecdsa_sig = secp.sign_ecdsa(&msg, &secret_key);
@@ -3484,14 +3935,16 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     let txid_bytes: [u8; 32] = *rotation_txid.as_ref();
 
     // Get current block height for quorum_expiry calculation
-    let current_block_height = esplora.get_height()
+    let current_block_height = esplora
+        .get_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
-    let current_block_hash = esplora.get_block_hash(current_block_height)
+    let current_block_hash = esplora
+        .get_block_hash(current_block_height)
         .map_err(|e| format!("Failed to get block hash: {:?}", e))?;
     let block_hash: [u8; 32] = *current_block_hash.as_ref();
 
     let quorum_size = (quorum_members.len() + 1) as u8;
-    let quorum_threshold = (quorum_size / 2) + 1;
+    let _quorum_threshold = (quorum_size / 2) + 1;
     let quorum_expiry = current_block_height + 144; // ~1 day for degraded spending
 
     let operation = LedgerOperation::QuorumBegin {
@@ -3519,7 +3972,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         "deposits:ledger:{}:{}:{}",
         hex::encode(our_latest.current_hash),
         sequence,
-        hex::encode(&new_hash)
+        hex::encode(new_hash)
     );
     let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
     let msg = bitcoin::secp256k1::Message::from_digest(*msg_hash.as_ref());
@@ -3527,9 +3980,11 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     let ledger_id_bytes: [u8; 32] = {
-        let decoded = hex::decode(&ledger_id)
-            .map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
-        decoded.try_into().map_err(|_| "Ledger ID must be 32 bytes")?
+        let decoded =
+            hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
+        decoded
+            .try_into()
+            .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
     let signed_update = SignedLedgerUpdate {
@@ -3538,7 +3993,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         operator_signature: operator_sig_bytes,
         cosigner_pubkey: None,
         member_ledger_hash: None,
-            cosignatures: Vec::new(),
+        cosignatures: Vec::new(),
         cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
@@ -3554,13 +4009,19 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         .build()
         .await?;
 
-    publish_transport.broadcast_ledger_update(&signed_update).await?;
+    publish_transport
+        .broadcast_ledger_update(&signed_update)
+        .await?;
 
     println!();
     println!("Reserves rotated to quorum-controlled Taproot!");
     println!("  New address: {}", new_reserves_address);
     println!("  Amount: {} sats", output_amount);
-    println!("  Quorum: {}-of-{}", (quorum_members.len() + 1) / 2 + 1, quorum_members.len() + 1);
+    println!(
+        "  Quorum: {}-of-{}",
+        quorum_members.len().div_ceil(2) + 1,
+        quorum_members.len() + 1
+    );
     println!("  Sequence: {}", sequence);
 
     Ok(())

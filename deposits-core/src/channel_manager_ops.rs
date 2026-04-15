@@ -14,8 +14,8 @@
 //! while still being able to use its functionality when wired up through
 //! an adapter in deposits-ldk.
 
-use bitcoin::secp256k1::PublicKey;
 use crate::types::{ChannelId, CommitmentExtraOutput};
+use bitcoin::secp256k1::PublicKey;
 
 /// Channel details for reserves operations
 #[derive(Clone, Debug)]

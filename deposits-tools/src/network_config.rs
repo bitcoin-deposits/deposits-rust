@@ -70,28 +70,32 @@ impl NetworkConfig {
         ];
 
         // Development nodes
-        let dev_nodes = [
-            ("grace", "Grace", 3017, 9741, 30),
-        ];
+        let dev_nodes = [("grace", "Grace", 3017, 9741, 30)];
 
         for (id, name, api_port, p2p_port, last_octet) in production_nodes {
-            nodes.insert(id.to_string(), NodeConfig {
-                name: name.to_string(),
-                api_port,
-                p2p_port,
-                ip: format!("{}.{}", subnet, last_octet),
-                role: "production".to_string(),
-            });
+            nodes.insert(
+                id.to_string(),
+                NodeConfig {
+                    name: name.to_string(),
+                    api_port,
+                    p2p_port,
+                    ip: format!("{}.{}", subnet, last_octet),
+                    role: "production".to_string(),
+                },
+            );
         }
 
         for (id, name, api_port, p2p_port, last_octet) in dev_nodes {
-            nodes.insert(id.to_string(), NodeConfig {
-                name: name.to_string(),
-                api_port,
-                p2p_port,
-                ip: format!("{}.{}", subnet, last_octet),
-                role: "development".to_string(),
-            });
+            nodes.insert(
+                id.to_string(),
+                NodeConfig {
+                    name: name.to_string(),
+                    api_port,
+                    p2p_port,
+                    ip: format!("{}.{}", subnet, last_octet),
+                    role: "development".to_string(),
+                },
+            );
         }
 
         nodes

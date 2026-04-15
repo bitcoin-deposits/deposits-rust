@@ -2,24 +2,5 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/external/negentropy" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/external/negentropy/test/cpp/hoytech-cpp" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/external/negentropy/test/cpp/lmdbxx" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/PEGTL" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/config" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/config/external/json" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/config/external/json/external/PEGTL" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/docopt.cpp" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/hoytech-cpp" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/json" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/json/external/PEGTL" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/lmdbxx" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/loguru" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/parallel-hashmap" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/rasgueadb" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/templar" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/strfry-performance/golpe/external/uWebSockets" vcs="Git" />
   </component>
 </project>

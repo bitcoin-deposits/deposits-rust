@@ -17,7 +17,7 @@
 //! metrics::record_response_received(true);
 //! ```
 
-use metrics::{counter, gauge, histogram, describe_counter, describe_gauge, describe_histogram};
+use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -30,14 +30,15 @@ pub fn init_metrics(port: u16) -> Result<SocketAddr, Box<dyn std::error::Error>>
     let builder = PrometheusBuilder::new();
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
 
-    let handle = builder
-        .with_http_listener(addr)
-        .install()?;
+    builder.with_http_listener(addr).install()?;
 
     // Describe all metrics
     describe_metrics();
 
-    tracing::info!("Prometheus metrics available at http://0.0.0.0:{}/metrics", port);
+    tracing::info!(
+        "Prometheus metrics available at http://0.0.0.0:{}/metrics",
+        port
+    );
 
     Ok(addr)
 }
@@ -104,10 +105,7 @@ fn describe_metrics() {
         "pending_collateral_requests",
         "Number of pending collateral lock requests"
     );
-    describe_gauge!(
-        "pending_deposit_offers",
-        "Number of pending deposit offers"
-    );
+    describe_gauge!("pending_deposit_offers", "Number of pending deposit offers");
 
     // Latency metrics
     describe_histogram!(
@@ -128,10 +126,7 @@ fn describe_metrics() {
     );
 
     // Ledger metrics
-    describe_gauge!(
-        "ledger_count",
-        "Number of ledgers managed by this node"
-    );
+    describe_gauge!("ledger_count", "Number of ledgers managed by this node");
     describe_counter!(
         "ledger_operations_total",
         "Total ledger operations performed, labeled by type"
@@ -320,10 +315,7 @@ fn describe_metrics() {
         "insert_event_seconds",
         "Time to insert an event into the event store (includes clone + hash verify)"
     );
-    describe_histogram!(
-        "persist_ledger_seconds",
-        "Time to persist a ledger to disk"
-    );
+    describe_histogram!("persist_ledger_seconds", "Time to persist a ledger to disk");
 
     // Process metrics (Linux /proc)
     describe_gauge!(
@@ -342,10 +334,7 @@ fn describe_metrics() {
         "process_resident_memory_bytes",
         "Resident set size (RSS) in bytes"
     );
-    describe_gauge!(
-        "process_threads",
-        "Number of threads in this process"
-    );
+    describe_gauge!("process_threads", "Number of threads in this process");
     describe_gauge!(
         "process_io_write_bytes_total",
         "Total bytes written to disk (from /proc/self/io)"
@@ -398,23 +387,30 @@ pub fn record_request_received(action: &str) {
 /// Record a response sent via Nostr.
 pub fn record_response_sent(action: &str, success: bool) {
     let status = if success { "success" } else { "error" };
-    counter!("nostr_responses_sent_total", "action" => action.to_string(), "status" => status).increment(1);
+    counter!("nostr_responses_sent_total", "action" => action.to_string(), "status" => status)
+        .increment(1);
 }
 
 /// Record a response sent via Nostr, tagged by ledger.
 pub fn record_response_sent_for_ledger(action: &str, ledger_id: &str, success: bool) {
     let status = if success { "success" } else { "error" };
-    let short_id = if ledger_id.len() > 8 { &ledger_id[..8] } else { ledger_id };
+    let short_id = if ledger_id.len() > 8 {
+        &ledger_id[..8]
+    } else {
+        ledger_id
+    };
     counter!("nostr_responses_by_ledger_total",
         "action" => action.to_string(),
         "ledger_id" => short_id.to_string(),
-        "status" => status).increment(1);
+        "status" => status)
+    .increment(1);
 }
 
 /// Record a response received via Nostr.
 pub fn record_response_received(action: &str, success: bool) {
     let status = if success { "success" } else { "error" };
-    counter!("nostr_responses_received_total", "action" => action.to_string(), "status" => status).increment(1);
+    counter!("nostr_responses_received_total", "action" => action.to_string(), "status" => status)
+        .increment(1);
 }
 
 // ============================================================================
@@ -425,8 +421,13 @@ pub fn record_response_received(action: &str, success: bool) {
 /// This is the definitive "transfer throughput" metric — one increment per
 /// completed transfer on this operator's ledger.
 pub fn record_transfer_completed(ledger_id: &str) {
-    let short_id = if ledger_id.len() > 8 { &ledger_id[..8] } else { ledger_id };
-    counter!("deposits_transfers_completed_total", "ledger_id" => short_id.to_string()).increment(1);
+    let short_id = if ledger_id.len() > 8 {
+        &ledger_id[..8]
+    } else {
+        ledger_id
+    };
+    counter!("deposits_transfers_completed_total", "ledger_id" => short_id.to_string())
+        .increment(1);
 }
 
 // ============================================================================
@@ -461,12 +462,16 @@ pub fn record_request_duration(action: &str, duration: Duration) {
 /// Record request processing time (node-side time to handle a request).
 pub fn record_request_processing(action: &str, ledger_id: &str, success: bool, duration: Duration) {
     let status = if success { "success" } else { "error" };
-    let short_id = if ledger_id.len() > 8 { &ledger_id[..8] } else { ledger_id };
+    let short_id = if ledger_id.len() > 8 {
+        &ledger_id[..8]
+    } else {
+        ledger_id
+    };
     histogram!("nostr_request_processing_seconds",
         "action" => action.to_string(),
         "ledger_id" => short_id.to_string(),
         "status" => status)
-        .record(duration.as_secs_f64());
+    .record(duration.as_secs_f64());
 }
 
 /// Record co-sign request duration.
@@ -497,7 +502,11 @@ pub fn record_ledger_operation(op_type: &str) {
 /// Set the history length (sequence number) for a ledger.
 pub fn set_ledger_history_length(ledger_id: &str, length: usize) {
     // Use first 16 chars of ledger_id as label to keep cardinality reasonable
-    let short_id = if ledger_id.len() > 8 { &ledger_id[..8] } else { ledger_id };
+    let short_id = if ledger_id.len() > 8 {
+        &ledger_id[..8]
+    } else {
+        ledger_id
+    };
     gauge!("ledger_history_length", "ledger_id" => short_id.to_string()).set(length as f64);
 }
 
@@ -523,14 +532,22 @@ pub fn set_total_deposit_balance_sats(amount: u64) {
 /// Set the balance for a specific ledger in satoshis.
 pub fn set_ledger_deposit_balance_sats(ledger_id: &str, amount: u64) {
     // Use first 16 chars of ledger_id as label to keep cardinality reasonable
-    let short_id = if ledger_id.len() > 8 { &ledger_id[..8] } else { ledger_id };
+    let short_id = if ledger_id.len() > 8 {
+        &ledger_id[..8]
+    } else {
+        ledger_id
+    };
     gauge!("deposit_ledger_balance_sats", "ledger_id" => short_id.to_string()).set(amount as f64);
 }
 
 /// Set the balance for a specific deposit in satoshis.
 pub fn set_deposit_balance_sats(deposit_id: &str, amount: u64) {
     // Use first 16 chars of deposit_id as label to keep cardinality reasonable
-    let short_id = if deposit_id.len() > 8 { &deposit_id[..8] } else { deposit_id };
+    let short_id = if deposit_id.len() > 8 {
+        &deposit_id[..8]
+    } else {
+        deposit_id
+    };
     gauge!("deposit_balance_sats", "deposit_id" => short_id.to_string()).set(amount as f64);
 }
 
@@ -585,7 +602,11 @@ pub fn record_cosign_freshness_recovery(outcome: &str) {
 
 /// Set the validated tip (highest validated seq) for a ledger in the event store.
 pub fn set_event_store_validated_tip(ledger_id: &str, tip: u64) {
-    let short_id = if ledger_id.len() > 8 { &ledger_id[..8] } else { ledger_id };
+    let short_id = if ledger_id.len() > 8 {
+        &ledger_id[..8]
+    } else {
+        ledger_id
+    };
     gauge!("event_store_validated_tip", "ledger_id" => short_id.to_string()).set(tip as f64);
 }
 
@@ -642,12 +663,15 @@ pub fn record_cosign_attempt(outcome: &str, duration: Duration) {
 
 /// Record per-member co-sign round-trip time.
 pub fn record_cosign_rtt(member: &str, duration: Duration) {
-    histogram!("cosign_rtt_seconds", "member" => member.to_string())
-        .record(duration.as_secs_f64());
+    histogram!("cosign_rtt_seconds", "member" => member.to_string()).record(duration.as_secs_f64());
 }
 
 /// Record events processed inside the cosign mini loop per attempt.
-pub fn record_mini_loop_activity(updates_drained: usize, cosign_requests_handled: usize, deferred_requests: usize) {
+pub fn record_mini_loop_activity(
+    updates_drained: usize,
+    cosign_requests_handled: usize,
+    deferred_requests: usize,
+) {
     counter!("mini_loop_updates_drained_total").increment(updates_drained as u64);
     counter!("mini_loop_cosign_requests_handled_total").increment(cosign_requests_handled as u64);
     counter!("mini_loop_deferred_requests_total").increment(deferred_requests as u64);
@@ -656,7 +680,8 @@ pub fn record_mini_loop_activity(updates_drained: usize, cosign_requests_handled
 /// Record a broadcast channel lag event.
 pub fn record_broadcast_lag(receiver: &str, dropped: u64) {
     counter!("broadcast_channel_lag_total", "receiver" => receiver.to_string()).increment(1);
-    counter!("broadcast_channel_lag_events_total", "receiver" => receiver.to_string()).increment(dropped);
+    counter!("broadcast_channel_lag_events_total", "receiver" => receiver.to_string())
+        .increment(dropped);
 }
 
 /// Record pre-cosign drain results.
@@ -738,14 +763,16 @@ pub fn emit_thread_cpu_metrics() {
                             "thread" => thread_name.clone(),
                             "tid" => tid_str.to_string(),
                             "mode" => "user"
-                        ).set(utime as f64 / clk_tck);
+                        )
+                        .set(utime as f64 / clk_tck);
                     }
                     if let Ok(stime) = fields[12].parse::<u64>() {
                         gauge!("thread_cpu_seconds",
                             "thread" => thread_name.clone(),
                             "tid" => tid_str.to_string(),
                             "mode" => "system"
-                        ).set(stime as f64 / clk_tck);
+                        )
+                        .set(stime as f64 / clk_tck);
                     }
                 }
             }
@@ -800,7 +827,7 @@ pub fn emit_process_metrics() {
         // CPU time from /proc/self/stat
         // Fields: pid comm state ppid ... utime(14) stime(15) ... num_threads(20) ...
         if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
-            let fields: Vec<&str> = stat.split_whitespace().collect();
+            let _fields: Vec<&str> = stat.split_whitespace().collect();
             // Find end of comm field (enclosed in parens) to handle spaces in process name
             if let Some(comm_end) = stat.find(')') {
                 let after_comm = &stat[comm_end + 2..]; // skip ") "
@@ -816,7 +843,9 @@ pub fn emit_process_metrics() {
                         let sys_secs = stime as f64 / clk_tck;
                         gauge!("process_cpu_system_seconds").set(sys_secs);
                     }
-                    if let (Ok(utime), Ok(stime)) = (fields[11].parse::<u64>(), fields[12].parse::<u64>()) {
+                    if let (Ok(utime), Ok(stime)) =
+                        (fields[11].parse::<u64>(), fields[12].parse::<u64>())
+                    {
                         let total_secs = (utime + stime) as f64 / clk_tck;
                         gauge!("process_cpu_seconds_total").set(total_secs);
                     }

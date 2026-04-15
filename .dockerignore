@@ -5,8 +5,5 @@ deposits-tools/log/
 deposits-tools/certs/
 deposits-tools/secrets/
 deposits-tools/wallet-localhost/
-nostr-sdk-performance/nostr-relay-pool/target/
-nostr-sdk-performance/nostr-database/target/
-strfry-performance/.git/
 __pycache__/
 *.log

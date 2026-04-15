@@ -7,44 +7,40 @@
 
 pub mod constants;
 pub mod error;
-pub mod tlv;
-pub mod types;
+pub mod fraud;
 pub mod messages;
 pub mod signature_utils;
+pub mod tlv;
+pub mod types;
 pub mod wire_messages;
-pub mod fraud;
 
 /// Kaitai Struct generated parser (for reading raw TLV bytes)
 #[cfg(feature = "kaitai-parser")]
+#[allow(clippy::all, unused_parens)]
 #[path = "../generated/deposits_protocol.rs"]
 pub mod kaitai_parser;
 
 // Re-exports
 pub use constants::{
-    MIN_RESERVES_OUTPUT_SATS, MAX_RESERVES_OUTPUT_SATS, DEFAULT_EMERGENCY_TIMEOUT_BLOCKS,
-    MIN_EMERGENCY_TIMEOUT_BLOCKS, MAX_EMERGENCY_TIMEOUT_BLOCKS, MIN_RESERVES_RATIO_PERCENT,
-    COLLATERAL_REPORTING_PERIOD_BLOCKS, DEPOSITS_PROTOCOL_VERSION,
+    COLLATERAL_REPORTING_PERIOD_BLOCKS, DEFAULT_EMERGENCY_TIMEOUT_BLOCKS,
+    DEPOSITS_PROTOCOL_VERSION, MAX_EMERGENCY_TIMEOUT_BLOCKS, MAX_RESERVES_OUTPUT_SATS,
+    MIN_EMERGENCY_TIMEOUT_BLOCKS, MIN_RESERVES_OUTPUT_SATS, MIN_RESERVES_RATIO_PERCENT,
 };
 pub use error::{DepositsError, DepositsResult, HandlerError};
-pub use messages::{DepositsMessage, LedgerOperation, HashStrategy};
-pub use tlv::{TlvEncode, TlvDecode, TlvStream, TlvBuilder, TlvReader, TlvError, TlvResult};
-pub use types::{
-    Deposit, FeeStructure, TransferFeeSchedule, PendingInvoice, ReservesOutput, Invoice,
-    LedgerState, LedgerUpdate, SignedLedgerUpdate, SignedLedgerUpdateLog,
-    DepositId, DescriptorWitness, compute_deposit_id,
-    QuorumState, DisputeState, entropy_selection_score, select_entropy_winner, is_entropy_winner,
-    DepositInfo, InvoiceInfo, ReservesStatus, CollateralAttestation,
-    AuditResult, Violation, CrossLedgerViolation, LedgerStateUpdate,
-    QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumVoteMsg,
-    DepositOffer, DepositOfferStatus,
-    OnChainWithdrawal, OnChainWithdrawalStatus,
-    WithdrawalLockResult, WithdrawalCompleteResult,
-    CommitmentExtraOutput, ChannelId,
-    serde_pubkey, serde_32, serde_64, serde_opt_64, serde_pubkey_map, serde_pubkey_vec,
-    PendingTransfer,
-};
+pub use messages::{DepositsMessage, HashStrategy, LedgerOperation};
 pub use signature_utils::{
-    withdrawal_signing_message, collateral_lock_signing_message,
-    invoice_lock_signing_message, transfer_lock_signing_message,
-    compute_transfer_id,
+    collateral_lock_signing_message, compute_transfer_id, invoice_lock_signing_message,
+    transfer_lock_signing_message, withdrawal_signing_message,
+};
+pub use tlv::{TlvBuilder, TlvDecode, TlvEncode, TlvError, TlvReader, TlvResult, TlvStream};
+pub use types::{
+    compute_deposit_id, entropy_selection_score, is_entropy_winner, select_entropy_winner,
+    serde_32, serde_64, serde_opt_64, serde_pubkey, serde_pubkey_map, serde_pubkey_vec,
+    AuditResult, ChannelId, CollateralAttestation, CommitmentExtraOutput, CrossLedgerViolation,
+    Deposit, DepositId, DepositInfo, DepositOffer, DepositOfferStatus, DescriptorWitness,
+    DisputeState, FeeStructure, Invoice, InvoiceInfo, LedgerState, LedgerStateUpdate, LedgerUpdate,
+    OnChainWithdrawal, OnChainWithdrawalStatus, PendingInvoice, PendingTransfer,
+    QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumState, QuorumVoteMsg, ReservesOutput,
+    ReservesStatus, SignedLedgerUpdate, SignedLedgerUpdateLog, TransferFeeSchedule, Violation,
+    WithdrawalCompleteResult, WithdrawalLockResult,
 };

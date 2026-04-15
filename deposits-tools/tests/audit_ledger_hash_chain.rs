@@ -43,11 +43,33 @@ fn validate_hash_chain(updates: &[([u8; 32], [u8; 32])]) -> Result<(), String> {
 fn test_valid_hash_chain() {
     // A valid chain: each prev_hash equals previous new_hash
     let updates = vec![
-        ([0u8; 32], [0xcd, 0xfd, 0xf7, 0xd0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-        ([0xcd, 0xfd, 0xf7, 0xd0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-         [0x78, 0x6e, 0x8e, 0x7e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-        ([0x78, 0x6e, 0x8e, 0x7e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-         [0xc5, 0xea, 0xa7, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        (
+            [0u8; 32],
+            [
+                0xcd, 0xfd, 0xf7, 0xd0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        ),
+        (
+            [
+                0xcd, 0xfd, 0xf7, 0xd0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            [
+                0x78, 0x6e, 0x8e, 0x7e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        ),
+        (
+            [
+                0x78, 0x6e, 0x8e, 0x7e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            [
+                0xc5, 0xea, 0xa7, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        ),
     ];
 
     assert!(validate_hash_chain(&updates).is_ok());
@@ -56,10 +78,16 @@ fn test_valid_hash_chain() {
 #[test]
 fn test_chain_not_starting_from_genesis() {
     // Chain starts from non-zero hash - should fail
-    let updates = vec![
-        ([0x6f, 0xea, 0xda, 0xbe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-         [0xc5, 0xea, 0xa7, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-    ];
+    let updates = vec![(
+        [
+            0x6f, 0xea, 0xda, 0xbe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0,
+        ],
+        [
+            0xc5, 0xea, 0xa7, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0,
+        ],
+    )];
 
     let result = validate_hash_chain(&updates);
     assert!(result.is_err());
@@ -72,10 +100,24 @@ fn test_chain_with_gap() {
     // This simulates the bug: missing intermediate updates
     let updates = vec![
         // Update 0: [00000000 → cdfdf7d0]
-        ([0u8; 32], [0xcd, 0xfd, 0xf7, 0xd0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        (
+            [0u8; 32],
+            [
+                0xcd, 0xfd, 0xf7, 0xd0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        ),
         // Update 1: [6feadabe → c5eaa702] - WRONG! Should start from cdfdf7d0
-        ([0x6f, 0xea, 0xda, 0xbe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-         [0xc5, 0xea, 0xa7, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        (
+            [
+                0x6f, 0xea, 0xda, 0xbe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            [
+                0xc5, 0xea, 0xa7, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        ),
     ];
 
     let result = validate_hash_chain(&updates);
@@ -100,15 +142,30 @@ fn test_real_world_broken_audit_chain() {
 
     let broken_audit_updates = vec![
         // Only one update, starting from wrong hash (should be b296c726, not 6feadabe)
-        ([0x6f, 0xea, 0xda, 0xbe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-         [0xc5, 0xea, 0xa7, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        (
+            [
+                0x6f, 0xea, 0xda, 0xbe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            [
+                0xc5, 0xea, 0xa7, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        ),
     ];
 
     let result = validate_hash_chain(&broken_audit_updates);
-    assert!(result.is_err(), "Broken audit chain should be detected as invalid");
+    assert!(
+        result.is_err(),
+        "Broken audit chain should be detected as invalid"
+    );
 
     let error = result.unwrap_err();
-    assert!(error.contains("genesis"), "Error should mention genesis hash: {}", error);
+    assert!(
+        error.contains("genesis"),
+        "Error should mention genesis hash: {}",
+        error
+    );
 }
 
 #[test]
@@ -119,9 +176,13 @@ fn test_empty_chain_is_valid() {
 
 #[test]
 fn test_single_update_from_genesis() {
-    let updates = vec![
-        ([0u8; 32], [0xab, 0xcd, 0xef, 0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-    ];
+    let updates = vec![(
+        [0u8; 32],
+        [
+            0xab, 0xcd, 0xef, 0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0,
+        ],
+    )];
     assert!(validate_hash_chain(&updates).is_ok());
 }
 
@@ -181,7 +242,7 @@ fn test_compare_mismatched_final_hash() {
     // Audit has different final hash
     let audit = vec![
         ([0u8; 32], [0xaa; 32], "LedgerOpen"),
-        ([0xaa; 32], [0xff; 32], "AddDeposit"),  // Different!
+        ([0xaa; 32], [0xff; 32], "AddDeposit"), // Different!
     ];
 
     let result = compare_ledgers(&direct, &audit);

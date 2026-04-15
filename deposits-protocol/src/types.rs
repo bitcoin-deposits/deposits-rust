@@ -385,9 +385,9 @@ impl Default for DescriptorWitness {
 pub fn default_parent_pubkey() -> PublicKey {
     // Use generator point G as default pubkey (well-known, deterministic)
     let generator_bytes = [
-        0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62,
-        0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28,
-        0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
+        0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+        0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16,
+        0xf8, 0x17, 0x98,
     ];
     PublicKey::from_slice(&generator_bytes).expect("Generator point is a valid pubkey")
 }
@@ -472,7 +472,10 @@ impl Default for TransferFeeSchedule {
 
 impl TransferFeeSchedule {
     pub fn new(fixed_msats: u64, rate_bps: u16) -> Self {
-        Self { fixed_msats, rate_bps }
+        Self {
+            fixed_msats,
+            rate_bps,
+        }
     }
 
     /// Calculate the transfer fee for a given amount in msats.
@@ -813,9 +816,9 @@ impl Default for ReservesOutput {
     fn default() -> Self {
         // Use generator point G as default pubkey (well-known, deterministic)
         let generator_bytes = [
-            0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62,
-            0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28,
-            0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
+            0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce,
+            0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81,
+            0x5b, 0x16, 0xf8, 0x17, 0x98,
         ];
         Self {
             channel_id: [0u8; 32],
@@ -1054,7 +1057,7 @@ impl DisputeState {
             DisputeState::Normal => {
                 // Normal state allows all operations except DisputeArmed, DisputeAcquire, DisputeYield
                 // DisputeEnter is the only way to transition out
-                !matches!(operation_discriminant, 57 | 55 | 56) // DisputeArmed, DisputeAcquire, DisputeYield
+                !matches!(operation_discriminant, 55..=57) // DisputeArmed, DisputeAcquire, DisputeYield
             }
             DisputeState::Disputed => {
                 // Only QuorumAddMember, CollateralAttestation, and DisputeArmed allowed
@@ -1077,7 +1080,7 @@ impl DisputeState {
 /// The score is computed as: SHA256(entropy_block_hash || candidate_pubkey)
 /// Lower scores win (sorted ascending).
 pub fn entropy_selection_score(entropy_block_hash: &[u8; 32], candidate: &PublicKey) -> [u8; 32] {
-    use bitcoin::hashes::{Hash, sha256};
+    use bitcoin::hashes::{sha256, Hash};
 
     let mut input = Vec::with_capacity(32 + 33);
     input.extend_from_slice(entropy_block_hash);
@@ -1223,8 +1226,12 @@ impl LedgerState {
     ///
     /// The ledger_id is SHA256(operator_key || reserves_key || genesis_block).
     /// This is fixed at genesis and survives operator changes during recovery.
-    pub fn compute_ledger_id(operator_key: &PublicKey, reserves_key: &str, genesis_block: u32) -> [u8; 32] {
-        use bitcoin::hashes::{Hash, sha256};
+    pub fn compute_ledger_id(
+        operator_key: &PublicKey,
+        reserves_key: &str,
+        genesis_block: u32,
+    ) -> [u8; 32] {
+        use bitcoin::hashes::{sha256, Hash};
         let mut preimage = Vec::new();
         preimage.extend_from_slice(&operator_key.serialize());
         preimage.extend_from_slice(reserves_key.as_bytes());
@@ -1278,7 +1285,10 @@ impl LedgerState {
     /// ```ignore
     /// self.state = self.state.apply(&operation)?;
     /// ```
-    pub fn apply(&self, operation: &crate::messages::LedgerOperation) -> crate::DepositsResult<Self> {
+    pub fn apply(
+        &self,
+        operation: &crate::messages::LedgerOperation,
+    ) -> crate::DepositsResult<Self> {
         use crate::messages::LedgerOperation;
 
         let mut next = self.clone();
@@ -1295,7 +1305,13 @@ impl LedgerState {
                 next.ledger_id = Self::compute_ledger_id(operator_id, reserves_id, *genesis_block);
                 next.reserves_amount = *reserves_amount;
             }
-            LedgerOperation::QuorumBegin { reserves_id, amount, total_collateral, quorum_expiry, .. } => {
+            LedgerOperation::QuorumBegin {
+                reserves_id,
+                amount,
+                total_collateral: _,
+                quorum_expiry,
+                ..
+            } => {
                 next.reserves_key = reserves_id.clone();
                 next.reserves_amount = *amount;
                 next.quorum_expiry = Some(*quorum_expiry);
@@ -1303,7 +1319,18 @@ impl LedgerState {
                 next.quorum_members = std::mem::take(&mut next.next_quorum_members);
                 next.quorum_state = QuorumState::Active;
             }
-            LedgerOperation::DepositOpen { deposit_id, descriptor, fees, transfer_fees, is_collateral, receive_requires_sig, fee_change_after_blocks, fee_change_notice_blocks, fee_change_limit_bps, .. } => {
+            LedgerOperation::DepositOpen {
+                deposit_id,
+                descriptor,
+                fees,
+                transfer_fees,
+                is_collateral,
+                receive_requires_sig,
+                fee_change_after_blocks,
+                fee_change_notice_blocks,
+                fee_change_limit_bps,
+                ..
+            } => {
                 if next.deposits.contains_key(deposit_id) {
                     return Err(crate::DepositsError::DepositAlreadyExists);
                 }
@@ -1319,24 +1346,41 @@ impl LedgerState {
                 next.deposits.insert(*deposit_id, deposit);
             }
             LedgerOperation::DepositClose { deposit_id } => {
-                let deposit = next.deposits.get(deposit_id)
+                let deposit = next
+                    .deposits
+                    .get(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 if deposit.balance > 0 {
-                    return Err(crate::DepositsError::NonZeroBalance { balance: deposit.balance });
+                    return Err(crate::DepositsError::NonZeroBalance {
+                        balance: deposit.balance,
+                    });
                 }
                 next.deposits.remove(deposit_id);
             }
-            LedgerOperation::FeeChange { deposit_id, new_fees, effective_block } => {
+            LedgerOperation::FeeChange {
+                deposit_id,
+                new_fees,
+                effective_block,
+            } => {
                 if let Some(deposit) = next.deposits.get_mut(deposit_id) {
                     deposit.pending_fee_change = Some((new_fees.clone(), *effective_block));
                 }
             }
-            LedgerOperation::DepositKeyRotate { deposit_id, new_descriptor, .. } => {
+            LedgerOperation::DepositKeyRotate {
+                deposit_id,
+                new_descriptor,
+                ..
+            } => {
                 if let Some(deposit) = next.deposits.get_mut(deposit_id) {
                     deposit.descriptor = new_descriptor.clone();
                 }
             }
-            LedgerOperation::InvoiceCredit { deposit_id, amount, payment_hash, .. } => {
+            LedgerOperation::InvoiceCredit {
+                deposit_id,
+                amount,
+                payment_hash,
+                ..
+            } => {
                 let hash_hex = hex::encode(payment_hash);
                 if next.credited_payments.contains(&hash_hex) {
                     return Err(crate::DepositsError::ProtocolViolation {
@@ -1344,54 +1388,99 @@ impl LedgerState {
                         details: format!("Payment {} already credited", &hash_hex[..16]),
                     });
                 }
-                let deposit = next.deposits.get_mut(deposit_id)
+                let deposit = next
+                    .deposits
+                    .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.credit(*amount);
                 next.credited_payments.insert(hash_hex);
             }
-            LedgerOperation::InvoiceLock { deposit_id, amount, payment_id, sequence_number, .. } => {
-                let deposit = next.deposits.get_mut(deposit_id)
+            LedgerOperation::InvoiceLock {
+                deposit_id,
+                amount,
+                payment_id,
+                sequence_number,
+                ..
+            } => {
+                let deposit = next
+                    .deposits
+                    .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.lock(*amount)?;
-                next.open_invoice_locks.insert(*payment_id, OpenInvoiceLock {
-                    deposit_id: *deposit_id,
-                    amount: *amount,
-                    lock_sequence: *sequence_number,
-                });
+                next.open_invoice_locks.insert(
+                    *payment_id,
+                    OpenInvoiceLock {
+                        deposit_id: *deposit_id,
+                        amount: *amount,
+                        lock_sequence: *sequence_number,
+                    },
+                );
             }
-            LedgerOperation::InvoiceFail { payment_id, deposit_id, amount, .. } => {
-                let deposit = next.deposits.get_mut(deposit_id)
+            LedgerOperation::InvoiceFail {
+                payment_id,
+                deposit_id,
+                amount,
+                ..
+            } => {
+                let deposit = next
+                    .deposits
+                    .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.unlock(*amount);
                 next.open_invoice_locks.remove(payment_id);
             }
-            LedgerOperation::InvoiceFulfill { payment_id, deposit_id, amount, .. } => {
-                let deposit = next.deposits.get_mut(deposit_id)
+            LedgerOperation::InvoiceFulfill {
+                payment_id,
+                deposit_id,
+                amount,
+                ..
+            } => {
+                let deposit = next
+                    .deposits
+                    .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.fulfill(*amount);
                 next.open_invoice_locks.remove(payment_id);
             }
-            LedgerOperation::OnchainCredit { deposit_id, amount, .. } => {
-                let deposit = next.deposits.get_mut(deposit_id)
+            LedgerOperation::OnchainCredit {
+                deposit_id, amount, ..
+            } => {
+                let deposit = next
+                    .deposits
+                    .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.credit(*amount);
             }
-            LedgerOperation::OnchainLock { deposit_id, amount, .. } => {
-                let deposit = next.deposits.get_mut(deposit_id)
+            LedgerOperation::OnchainLock {
+                deposit_id, amount, ..
+            } => {
+                let deposit = next
+                    .deposits
+                    .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.lock(*amount)?;
             }
             LedgerOperation::OnchainFail { deposit_id, .. } => {
-                let _deposit = next.deposits.get_mut(deposit_id)
+                let _deposit = next
+                    .deposits
+                    .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 // TODO: Need to look up the withdrawal amount from withdrawal_id
             }
-            LedgerOperation::OnchainFulfill { deposit_id, amount, .. } => {
-                let deposit = next.deposits.get_mut(deposit_id)
+            LedgerOperation::OnchainFulfill {
+                deposit_id, amount, ..
+            } => {
+                let deposit = next
+                    .deposits
+                    .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.fulfill(*amount);
             }
-            LedgerOperation::FeeCollect { deposit_id, amount, block_height } => {
+            LedgerOperation::FeeCollect {
+                deposit_id,
+                amount,
+                block_height,
+            } => {
                 if let Some(deposit) = next.deposits.get_mut(deposit_id) {
                     if let Some((new_fees, effective)) = deposit.pending_fee_change.take() {
                         if *block_height >= effective {
@@ -1405,13 +1494,28 @@ impl LedgerState {
                 }
             }
             LedgerOperation::QuorumAddMember {
-                quorum_member, member_ledger_id, min_fee_bps, min_fee_fixed, max_fee_period,
-                collateral_lock_amount, collateral_lock_until,
-                dispute_response_blocks, dispute_arm_blocks, service_response_blocks,
-                max_transfer_timeout_blocks, max_descriptor_bytes, ..
+                quorum_member,
+                member_ledger_id,
+                min_fee_bps,
+                min_fee_fixed,
+                max_fee_period,
+                collateral_lock_amount,
+                collateral_lock_until,
+                dispute_response_blocks,
+                dispute_arm_blocks,
+                service_response_blocks,
+                max_transfer_timeout_blocks,
+                max_descriptor_bytes,
+                ..
             } => {
-                let already_active = next.quorum_members.iter().any(|m| m.pubkey == *quorum_member);
-                let already_pending = next.next_quorum_members.iter().any(|m| m.pubkey == *quorum_member);
+                let already_active = next
+                    .quorum_members
+                    .iter()
+                    .any(|m| m.pubkey == *quorum_member);
+                let already_pending = next
+                    .next_quorum_members
+                    .iter()
+                    .any(|m| m.pubkey == *quorum_member);
                 if !already_active && !already_pending {
                     next.next_quorum_members.push(QuorumMember {
                         pubkey: *quorum_member,
@@ -1431,28 +1535,42 @@ impl LedgerState {
             }
             LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
                 next.quorum_members.retain(|m| m.pubkey != *quorum_member);
-                next.next_quorum_members.retain(|m| m.pubkey != *quorum_member);
+                next.next_quorum_members
+                    .retain(|m| m.pubkey != *quorum_member);
                 next.collateral_attestations.remove(quorum_member);
             }
-            LedgerOperation::CollateralLock { deposit_id, amount, lock_until_block, for_ledger_id, .. } => {
-                let deposit = next.deposits.get_mut(deposit_id)
+            LedgerOperation::CollateralLock {
+                deposit_id,
+                amount,
+                lock_until_block,
+                for_ledger_id,
+                ..
+            } => {
+                let deposit = next
+                    .deposits
+                    .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 if !deposit.is_collateral {
                     return Err(crate::DepositsError::InvalidState(
-                        "CollateralLock can only be applied to collateral deposits".to_string()
+                        "CollateralLock can only be applied to collateral deposits".to_string(),
                     ));
                 }
                 // Update or insert per-ledger lock
-                if let Some(entry) = deposit.collateral_locks.iter_mut().find(|e| e.for_ledger_id == *for_ledger_id) {
+                if let Some(entry) = deposit
+                    .collateral_locks
+                    .iter_mut()
+                    .find(|e| e.for_ledger_id == *for_ledger_id)
+                {
                     entry.amount = *amount;
                     entry.lock_until_block = *lock_until_block;
                 } else {
                     // Check cap before adding new ledger
                     if deposit.collateral_locks.len() >= MAX_COLLATERAL_LOCKS {
-                        return Err(crate::DepositsError::InvalidState(
-                            format!("Collateral deposit already backs {} ledgers (max {})",
-                                deposit.collateral_locks.len(), MAX_COLLATERAL_LOCKS)
-                        ));
+                        return Err(crate::DepositsError::InvalidState(format!(
+                            "Collateral deposit already backs {} ledgers (max {})",
+                            deposit.collateral_locks.len(),
+                            MAX_COLLATERAL_LOCKS
+                        )));
                     }
                     deposit.collateral_locks.push(CollateralLockEntry {
                         for_ledger_id: for_ledger_id.clone(),
@@ -1461,15 +1579,27 @@ impl LedgerState {
                     });
                 }
                 // Update legacy fields for backward compat (total across all locks)
-                deposit.collateral_lock_amount = deposit.collateral_locks.iter().map(|e| e.amount).sum();
-                deposit.collateral_lock_expires = deposit.collateral_locks.iter().map(|e| e.lock_until_block).max().unwrap_or(0);
+                deposit.collateral_lock_amount =
+                    deposit.collateral_locks.iter().map(|e| e.amount).sum();
+                deposit.collateral_lock_expires = deposit
+                    .collateral_locks
+                    .iter()
+                    .map(|e| e.lock_until_block)
+                    .max()
+                    .unwrap_or(0);
             }
             LedgerOperation::LedgerClose => {
                 next.collateral_attestations.clear();
             }
             LedgerOperation::CollateralAttestation {
-                collateral_operator, quorum_member, collateral_ledger_id,
-                amount, block_height, lock_until_block, signature, ledger_hash,
+                collateral_operator,
+                quorum_member,
+                collateral_ledger_id,
+                amount,
+                block_height,
+                lock_until_block,
+                signature,
+                ledger_hash,
             } => {
                 let attestation = CollateralAttestation::new(
                     *collateral_operator,
@@ -1481,12 +1611,19 @@ impl LedgerState {
                     *signature,
                     *ledger_hash,
                 );
-                next.collateral_attestations.insert(*collateral_operator, attestation);
+                next.collateral_attestations
+                    .insert(*collateral_operator, attestation);
             }
-            LedgerOperation::QuorumJoin { operator_id, ledger_id, membership_expires } => {
-                if let Some(existing) = next.joined_quorums.iter_mut().find(|m|
-                    m.operator_id == *operator_id && m.ledger_id == *ledger_id
-                ) {
+            LedgerOperation::QuorumJoin {
+                operator_id,
+                ledger_id,
+                membership_expires,
+            } => {
+                if let Some(existing) = next
+                    .joined_quorums
+                    .iter_mut()
+                    .find(|m| m.operator_id == *operator_id && m.ledger_id == *ledger_id)
+                {
                     existing.membership_expires = *membership_expires;
                 } else {
                     next.joined_quorums.push(QuorumMembership {
@@ -1497,7 +1634,10 @@ impl LedgerState {
                     });
                 }
             }
-            LedgerOperation::DisputeEnter { last_valid_sequence, .. } => {
+            LedgerOperation::DisputeEnter {
+                last_valid_sequence,
+                ..
+            } => {
                 next.quorum_at_fork = next.quorum_members.clone();
                 next.dispute_fork_sequence = *last_valid_sequence;
                 next.collateral_attestations.clear();
@@ -1517,10 +1657,19 @@ impl LedgerState {
                 next.dispute_state = DisputeState::Tombstoned;
             }
             LedgerOperation::TransferLock {
-                nonce, source_deposit_id, destination_deposit_id, amount, fee,
-                completion_script, timeout_height, transfer_id, ..
+                nonce,
+                source_deposit_id,
+                destination_deposit_id,
+                amount,
+                fee,
+                completion_script,
+                timeout_height,
+                transfer_id,
+                ..
             } => {
-                let deposit = next.deposits.get_mut(source_deposit_id)
+                let deposit = next
+                    .deposits
+                    .get_mut(source_deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 let total = amount + fee;
                 if deposit.available_balance() < total {
@@ -1531,16 +1680,19 @@ impl LedgerState {
                 }
                 deposit.balance = deposit.balance.saturating_sub(total);
                 deposit.locked_balance = deposit.locked_balance.saturating_add(total);
-                next.pending_transfers.insert(*transfer_id, PendingTransfer {
-                    transfer_id: *transfer_id,
-                    nonce: *nonce,
-                    source_deposit_id: *source_deposit_id,
-                    destination_deposit_id: *destination_deposit_id,
-                    amount: *amount,
-                    fee: *fee,
-                    completion_script: completion_script.clone(),
-                    timeout_height: *timeout_height,
-                });
+                next.pending_transfers.insert(
+                    *transfer_id,
+                    PendingTransfer {
+                        transfer_id: *transfer_id,
+                        nonce: *nonce,
+                        source_deposit_id: *source_deposit_id,
+                        destination_deposit_id: *destination_deposit_id,
+                        amount: *amount,
+                        fee: *fee,
+                        completion_script: completion_script.clone(),
+                        timeout_height: *timeout_height,
+                    },
+                );
             }
             LedgerOperation::TransferComplete { transfer_id, .. } => {
                 if let Some(pending) = next.pending_transfers.remove(transfer_id) {
@@ -1576,7 +1728,11 @@ impl LedgerState {
 
     /// Get total balance of collateral deposits held by other operators on this ledger (msats).
     pub fn total_held_collateral(&self) -> u64 {
-        self.deposits.values().filter(|d| d.is_collateral).map(|d| d.balance).sum()
+        self.deposits
+            .values()
+            .filter(|d| d.is_collateral)
+            .map(|d| d.balance)
+            .sum()
     }
 
     /// Get total locked balance across all deposits.
@@ -1592,7 +1748,8 @@ impl LedgerState {
     /// Total attested collateral from all quorum members (millisatoshis).
     /// Computed from the collateral_attestations HashMap.
     pub fn total_collateral(&self) -> u64 {
-        self.collateral_attestations.values()
+        self.collateral_attestations
+            .values()
             .map(|a| a.available_collateral())
             .sum()
     }
@@ -1643,12 +1800,12 @@ impl LedgerState {
     pub fn missing_attestations(&self, current_block: u32, max_age_blocks: u32) -> Vec<PublicKey> {
         self.quorum_members
             .iter()
-            .filter(|member| {
-                match self.collateral_attestations.get(&member.pubkey) {
+            .filter(
+                |member| match self.collateral_attestations.get(&member.pubkey) {
                     None => true,
                     Some(a) => !a.is_recent(current_block, max_age_blocks),
-                }
-            })
+                },
+            )
             .map(|m| m.pubkey)
             .collect()
     }
@@ -1662,7 +1819,8 @@ impl LedgerState {
     ///
     /// Returns references to memberships where `membership_expires > current_block`.
     pub fn active_quorum_memberships(&self, current_block: u32) -> Vec<&QuorumMembership> {
-        self.joined_quorums.iter()
+        self.joined_quorums
+            .iter()
             .filter(|m| m.membership_expires > current_block)
             .collect()
     }
@@ -1745,15 +1903,15 @@ impl SignedLedgerUpdate {
         use sha2::{Digest, Sha256};
 
         let mut hasher = Sha256::new();
-        hasher.update(&self.sequence_number.to_le_bytes());
-        hasher.update(&self.previous_hash);
+        hasher.update(self.sequence_number.to_le_bytes());
+        hasher.update(self.previous_hash);
         hasher.update(&self.message);
 
         if !self.cosignatures.is_empty() {
             // Multi-cosig: include all entries sorted by pubkey
             for entry in &self.cosignatures {
-                hasher.update(&entry.member_ledger_hash);
-                hasher.update(&entry.cosign_signature);
+                hasher.update(entry.member_ledger_hash);
+                hasher.update(entry.cosign_signature);
             }
         } else {
             // Legacy single-cosig
@@ -1761,7 +1919,7 @@ impl SignedLedgerUpdate {
                 hasher.update(mlh);
             }
             if self.cosign_signature != [0u8; 64] {
-                hasher.update(&self.cosign_signature);
+                hasher.update(self.cosign_signature);
             }
         }
 
@@ -1781,8 +1939,8 @@ impl SignedLedgerUpdate {
         use sha2::{Digest, Sha256};
 
         let mut hasher = Sha256::new();
-        hasher.update(&self.current_hash);
-        hasher.update(&self.operator_signature);
+        hasher.update(self.current_hash);
+        hasher.update(self.operator_signature);
 
         let result = hasher.finalize();
         let mut hash = [0u8; 32];
@@ -1843,9 +2001,12 @@ impl SignedLedgerUpdate {
     ///
     /// The co-signer pubkey must be provided by the caller (from the Ledger).
     /// For BDK ledgers without a co-signer, pass None and this returns Ok.
-    pub fn verify_cosign_signature(&self, partner_pubkey: Option<&PublicKey>) -> Result<(), String> {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message, schnorr::Signature};
+    pub fn verify_cosign_signature(
+        &self,
+        partner_pubkey: Option<&PublicKey>,
+    ) -> Result<(), String> {
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
 
         // If no co-signer pubkey provided (BDK ledger), skip verification
         let partner_pubkey = match partner_pubkey {
@@ -1884,8 +2045,8 @@ impl SignedLedgerUpdate {
 
     /// Verify the operator's signature over content + co-signer's signature.
     pub fn verify_operator_signature(&self) -> Result<(), String> {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message, schnorr::Signature};
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
 
         let secp = Secp256k1::new();
         let data = self.operator_signing_data();
@@ -1909,8 +2070,8 @@ impl SignedLedgerUpdate {
         quorum_members: &[PublicKey],
         threshold: usize,
     ) -> Result<(), String> {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message, schnorr::Signature};
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
 
         if self.cosignatures.is_empty() {
             return Err("No cosignatures present".to_string());
@@ -1918,7 +2079,8 @@ impl SignedLedgerUpdate {
         if self.cosignatures.len() < threshold {
             return Err(format!(
                 "Insufficient cosignatures: {} of {} required",
-                self.cosignatures.len(), threshold
+                self.cosignatures.len(),
+                threshold
             ));
         }
 
@@ -1932,7 +2094,10 @@ impl SignedLedgerUpdate {
             // Check for duplicate pubkeys
             let pk_bytes = entry.cosigner_pubkey.serialize();
             if !seen.insert(pk_bytes) {
-                return Err(format!("Duplicate cosigner: {}", hex::encode(&pk_bytes[..8])));
+                return Err(format!(
+                    "Duplicate cosigner: {}",
+                    hex::encode(&pk_bytes[..8])
+                ));
             }
 
             // Check member is in quorum
@@ -1953,12 +2118,22 @@ impl SignedLedgerUpdate {
             let hash = sha256::Hash::hash(&tagged_input);
             let msg = Message::from_digest(hash.to_byte_array());
 
-            let sig = Signature::from_slice(&entry.cosign_signature)
-                .map_err(|e| format!("Invalid cosig format from {}: {}", hex::encode(&pk_bytes[..8]), e))?;
+            let sig = Signature::from_slice(&entry.cosign_signature).map_err(|e| {
+                format!(
+                    "Invalid cosig format from {}: {}",
+                    hex::encode(&pk_bytes[..8]),
+                    e
+                )
+            })?;
 
             let (xonly, _) = entry.cosigner_pubkey.x_only_public_key();
-            secp.verify_schnorr(&sig, &msg, &xonly)
-                .map_err(|e| format!("Cosig verification failed for {}: {}", hex::encode(&pk_bytes[..8]), e))?;
+            secp.verify_schnorr(&sig, &msg, &xonly).map_err(|e| {
+                format!(
+                    "Cosig verification failed for {}: {}",
+                    hex::encode(&pk_bytes[..8]),
+                    e
+                )
+            })?;
         }
 
         Ok(())
@@ -2123,8 +2298,8 @@ impl LedgerUpdate {
         use sha2::{Digest, Sha256};
 
         let mut hasher = Sha256::new();
-        hasher.update(&self.sequence_number.to_le_bytes());
-        hasher.update(&self.previous_hash);
+        hasher.update(self.sequence_number.to_le_bytes());
+        hasher.update(self.previous_hash);
         hasher.update(&self.message);
 
         let result = hasher.finalize();
@@ -2218,9 +2393,10 @@ impl SignedLedgerUpdateLog {
     pub fn add_update(&mut self, update: SignedLedgerUpdate) -> Result<(), crate::DepositsError> {
         // Verify sequence number
         if update.sequence_number != self.next_sequence {
-            return Err(crate::DepositsError::InvalidState(
-                format!("Sequence mismatch: expected {}, got {}", self.next_sequence, update.sequence_number)
-            ));
+            return Err(crate::DepositsError::InvalidState(format!(
+                "Sequence mismatch: expected {}, got {}",
+                self.next_sequence, update.sequence_number
+            )));
         }
 
         // Verify chain continuity (previous hash should match last update's hash)
@@ -2230,10 +2406,11 @@ impl SignedLedgerUpdateLog {
             [0u8; 32]
         };
         if update.previous_hash != expected_prev {
-            return Err(crate::DepositsError::InvalidState(
-                format!("Hash chain broken: expected {}, got {}",
-                    hex::encode(expected_prev), hex::encode(update.previous_hash))
-            ));
+            return Err(crate::DepositsError::InvalidState(format!(
+                "Hash chain broken: expected {}, got {}",
+                hex::encode(expected_prev),
+                hex::encode(update.previous_hash)
+            )));
         }
 
         // Add to log
@@ -2251,14 +2428,16 @@ impl SignedLedgerUpdateLog {
         let mut expected_prev = [0u8; 32];
         for (i, update) in self.updates.iter().enumerate() {
             if update.sequence_number != i as u64 {
-                return Err(crate::DepositsError::InvalidState(
-                    format!("Sequence mismatch at index {}: expected {}, got {}", i, i, update.sequence_number)
-                ));
+                return Err(crate::DepositsError::InvalidState(format!(
+                    "Sequence mismatch at index {}: expected {}, got {}",
+                    i, i, update.sequence_number
+                )));
             }
             if update.previous_hash != expected_prev {
-                return Err(crate::DepositsError::InvalidState(
-                    format!("Hash chain broken at index {}", i)
-                ));
+                return Err(crate::DepositsError::InvalidState(format!(
+                    "Hash chain broken at index {}",
+                    i
+                )));
             }
             expected_prev = update.current_hash;
         }
@@ -2278,7 +2457,8 @@ impl SignedLedgerUpdateLog {
     ///
     /// Returns zeros if there are no updates yet.
     pub fn tail_hash(&self) -> [u8; 32] {
-        self.updates.last()
+        self.updates
+            .last()
             .map(|u| u.current_hash)
             .unwrap_or([0u8; 32])
     }
@@ -2315,9 +2495,16 @@ pub struct AuditResult {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Violation {
     /// Insufficient reserves for operation.
-    InsufficientReserves { required: u64, actual: u64, timestamp: u64 },
+    InsufficientReserves {
+        required: u64,
+        actual: u64,
+        timestamp: u64,
+    },
     /// Unauthorized operation without proper signatures.
-    UnauthorizedOperation { operation_type: String, timestamp: u64 },
+    UnauthorizedOperation {
+        operation_type: String,
+        timestamp: u64,
+    },
     /// Payment received but not credited to deposit.
     PaymentNotCredited {
         #[serde(with = "serde_32")]
@@ -2326,7 +2513,11 @@ pub enum Violation {
         timestamp: u64,
     },
     /// Invalid reserve calculation.
-    InvalidReserveCalculation { expected: u64, actual: u64, timestamp: u64 },
+    InvalidReserveCalculation {
+        expected: u64,
+        actual: u64,
+        timestamp: u64,
+    },
     /// Fee assessment violation.
     InvalidFeeAssessment {
         #[serde(with = "serde_deposit_id")]
@@ -2404,7 +2595,7 @@ pub enum LedgerStateUpdate {
 // TLV Encoding Implementations
 // ============================================================================
 
-use crate::tlv::{TlvEncode, TlvDecode, TlvBuilder, TlvReader, TlvResult};
+use crate::tlv::{TlvBuilder, TlvDecode, TlvEncode, TlvReader, TlvResult};
 
 // Field type constants for FeeStructure
 mod fee_structure_fields {
@@ -2416,9 +2607,15 @@ mod fee_structure_fields {
 impl TlvEncode for FeeStructure {
     fn tlv_encode(&self) -> Vec<u8> {
         TlvBuilder::new()
-            .u64_field(fee_structure_fields::ANNUALIZED_MSATS, self.annualized_msats)
+            .u64_field(
+                fee_structure_fields::ANNUALIZED_MSATS,
+                self.annualized_msats,
+            )
             .u16_field(fee_structure_fields::ANNUALIZED_BPS, self.annualized_bps)
-            .u32_field(fee_structure_fields::FREQUENCY_BLOCKS, self.frequency_blocks)
+            .u32_field(
+                fee_structure_fields::FREQUENCY_BLOCKS,
+                self.frequency_blocks,
+            )
             .build()
     }
 }
@@ -2512,7 +2709,10 @@ impl TlvEncode for PendingInvoice {
             .u64_field(pending_invoice_fields::AMOUNT, self.amount)
             .bytes_field(pending_invoice_fields::PAYMENT_HASH, &self.payment_hash)
             .u64_field(pending_invoice_fields::EXPIRES, self.expires)
-            .deposit_id_field(pending_invoice_fields::ASSIGNED_DEPOSIT, &self.assigned_deposit)
+            .deposit_id_field(
+                pending_invoice_fields::ASSIGNED_DEPOSIT,
+                &self.assigned_deposit,
+            )
             .string_field(pending_invoice_fields::INVOICE_ID, &self.invoice_id)
             .string_field(pending_invoice_fields::BOLT11, &self.bolt11)
             .build()
@@ -2563,12 +2763,27 @@ impl TlvEncode for Deposit {
             .u64_field(deposit_fields::LOCKED_BALANCE, self.locked_balance)
             .vec_field(deposit_fields::INVOICES, &self.invoices)
             .nested(deposit_fields::FEES, &self.fees)
-            .u32_field(deposit_fields::LAST_FEE_ASSESSMENT, self.last_fee_assessment)
-            .u64_field(deposit_fields::COLLATERAL_PLEDGE_AMOUNT, self.collateral_lock_amount)
-            .u32_field(deposit_fields::COLLATERAL_PLEDGE_EXPIRES, self.collateral_lock_expires)
+            .u32_field(
+                deposit_fields::LAST_FEE_ASSESSMENT,
+                self.last_fee_assessment,
+            )
+            .u64_field(
+                deposit_fields::COLLATERAL_PLEDGE_AMOUNT,
+                self.collateral_lock_amount,
+            )
+            .u32_field(
+                deposit_fields::COLLATERAL_PLEDGE_EXPIRES,
+                self.collateral_lock_expires,
+            )
             .nested(deposit_fields::TRANSFER_FEES, &self.transfer_fees)
-            .u8_field(deposit_fields::IS_COLLATERAL, if self.is_collateral { 1 } else { 0 })
-            .u8_field(deposit_fields::RECEIVE_REQUIRES_SIG, if self.receive_requires_sig { 1 } else { 0 })
+            .u8_field(
+                deposit_fields::IS_COLLATERAL,
+                if self.is_collateral { 1 } else { 0 },
+            )
+            .u8_field(
+                deposit_fields::RECEIVE_REQUIRES_SIG,
+                if self.receive_requires_sig { 1 } else { 0 },
+            )
             .u32_field(deposit_fields::OPENED_AT_BLOCK, self.opened_at_block);
         if let Some(v) = self.fee_change_after_blocks {
             builder = builder.u32_field(deposit_fields::FEE_CHANGE_AFTER, v);
@@ -2594,16 +2809,27 @@ impl TlvDecode for Deposit {
             invoices: reader.read_vec(deposit_fields::INVOICES)?,
             fees: reader.read_nested(deposit_fields::FEES)?,
             last_fee_assessment: reader.read_u32(deposit_fields::LAST_FEE_ASSESSMENT)?,
-            collateral_lock_amount: reader.read_u64_opt(deposit_fields::COLLATERAL_PLEDGE_AMOUNT)?.unwrap_or(0),
-            collateral_lock_expires: reader.read_u32_opt(deposit_fields::COLLATERAL_PLEDGE_EXPIRES)?.unwrap_or(0),
+            collateral_lock_amount: reader
+                .read_u64_opt(deposit_fields::COLLATERAL_PLEDGE_AMOUNT)?
+                .unwrap_or(0),
+            collateral_lock_expires: reader
+                .read_u32_opt(deposit_fields::COLLATERAL_PLEDGE_EXPIRES)?
+                .unwrap_or(0),
             collateral_locks: Vec::new(), // rebuilt from history replay
-            transfer_fees: reader.read_nested_opt(deposit_fields::TRANSFER_FEES)?.unwrap_or_default(),
+            transfer_fees: reader
+                .read_nested_opt(deposit_fields::TRANSFER_FEES)?
+                .unwrap_or_default(),
             is_collateral: reader.read_u8(deposit_fields::IS_COLLATERAL).unwrap_or(0) != 0,
-            receive_requires_sig: reader.read_u8(deposit_fields::RECEIVE_REQUIRES_SIG).unwrap_or(0) != 0,
+            receive_requires_sig: reader
+                .read_u8(deposit_fields::RECEIVE_REQUIRES_SIG)
+                .unwrap_or(0)
+                != 0,
             fee_change_after_blocks: reader.read_u32_opt(deposit_fields::FEE_CHANGE_AFTER)?,
             fee_change_notice_blocks: reader.read_u32_opt(deposit_fields::FEE_CHANGE_NOTICE)?,
             fee_change_limit_bps: reader.read_u16_opt(deposit_fields::FEE_CHANGE_LIMIT_BPS)?,
-            opened_at_block: reader.read_u32_opt(deposit_fields::OPENED_AT_BLOCK)?.unwrap_or(0),
+            opened_at_block: reader
+                .read_u32_opt(deposit_fields::OPENED_AT_BLOCK)?
+                .unwrap_or(0),
             pending_fee_change: None, // transient state, not serialized in TLV
         })
     }
@@ -2700,7 +2926,10 @@ impl TlvEncode for SignedLedgerUpdate {
                 builder = builder.bytes_field(signed_update_fields::MEMBER_LEDGER_HASH, hash);
             }
             if self.cosign_signature != [0u8; 64] {
-                builder = builder.bytes_field(signed_update_fields::COSIGN_SIGNATURE, &self.cosign_signature);
+                builder = builder.bytes_field(
+                    signed_update_fields::COSIGN_SIGNATURE,
+                    &self.cosign_signature,
+                );
             }
         }
         // Note: TLV is sorted by tag number, so operator_signature (tag 20) appears
@@ -2708,8 +2937,10 @@ impl TlvEncode for SignedLedgerUpdate {
         // over operator_signing_data() which includes cosignatures in the hash input,
         // and current_hash also incorporates all cosignatures. The tag ordering doesn't
         // affect signature validity.
-        builder = builder
-            .bytes_field(signed_update_fields::OPERATOR_SIGNATURE, &self.operator_signature);
+        builder = builder.bytes_field(
+            signed_update_fields::OPERATOR_SIGNATURE,
+            &self.operator_signature,
+        );
         builder.build()
     }
 }
@@ -2727,17 +2958,24 @@ impl TlvDecode for SignedLedgerUpdate {
             while off + 2 <= raw.len() {
                 let entry_len = u16::from_be_bytes([raw[off], raw[off + 1]]) as usize;
                 off += 2;
-                if off + entry_len > raw.len() || entry_len < 129 { break; }
-                let pk = PublicKey::from_slice(&raw[off..off + 33])
-                    .map_err(|e| crate::tlv::TlvError::InvalidFieldValue {
+                if off + entry_len > raw.len() || entry_len < 129 {
+                    break;
+                }
+                let pk = PublicKey::from_slice(&raw[off..off + 33]).map_err(|e| {
+                    crate::tlv::TlvError::InvalidFieldValue {
                         field_type: signed_update_fields::COSIGNATURES,
                         reason: format!("cosig pubkey: {}", e),
-                    })?;
+                    }
+                })?;
                 let mut sig = [0u8; 64];
                 sig.copy_from_slice(&raw[off + 33..off + 97]);
                 let mut hash = [0u8; 32];
                 hash.copy_from_slice(&raw[off + 97..off + 129]);
-                entries.push(CosignEntry { cosigner_pubkey: pk, cosign_signature: sig, member_ledger_hash: hash });
+                entries.push(CosignEntry {
+                    cosigner_pubkey: pk,
+                    cosign_signature: sig,
+                    member_ledger_hash: hash,
+                });
                 off += entry_len;
             }
             entries
@@ -2753,9 +2991,15 @@ impl TlvDecode for SignedLedgerUpdate {
             sequence_number: reader.read_u64(signed_update_fields::SEQUENCE_NUMBER)?,
             previous_hash: reader.read_bytes(signed_update_fields::PREVIOUS_HASH)?,
             current_hash: [0u8; 32],
-            block_height: reader.read_u32_opt(signed_update_fields::BLOCK_HEIGHT)?.unwrap_or(0),
-            block_hash: reader.read_bytes_opt(signed_update_fields::BLOCK_HASH)?.unwrap_or([0u8; 32]),
-            cosign_signature: reader.read_bytes_opt(signed_update_fields::COSIGN_SIGNATURE)?.unwrap_or([0u8; 64]),
+            block_height: reader
+                .read_u32_opt(signed_update_fields::BLOCK_HEIGHT)?
+                .unwrap_or(0),
+            block_hash: reader
+                .read_bytes_opt(signed_update_fields::BLOCK_HASH)?
+                .unwrap_or([0u8; 32]),
+            cosign_signature: reader
+                .read_bytes_opt(signed_update_fields::COSIGN_SIGNATURE)?
+                .unwrap_or([0u8; 64]),
             operator_signature: reader.read_bytes(signed_update_fields::OPERATOR_SIGNATURE)?,
             cosigner_pubkey: reader.read_pubkey_opt(signed_update_fields::COSIGNER_PUBKEY)?,
             member_ledger_hash: reader.read_bytes_opt(signed_update_fields::MEMBER_LEDGER_HASH)?,
@@ -2782,14 +3026,32 @@ mod collateral_attestation_fields {
 impl TlvEncode for CollateralAttestation {
     fn tlv_encode(&self) -> Vec<u8> {
         TlvBuilder::new()
-            .pubkey_field(collateral_attestation_fields::OPERATOR_ID, &self.operator_id)
-            .pubkey_field(collateral_attestation_fields::QUORUM_MEMBER, &self.quorum_member)
-            .string_field(collateral_attestation_fields::COLLATERAL_LEDGER_ID, &self.collateral_ledger_id)
+            .pubkey_field(
+                collateral_attestation_fields::OPERATOR_ID,
+                &self.operator_id,
+            )
+            .pubkey_field(
+                collateral_attestation_fields::QUORUM_MEMBER,
+                &self.quorum_member,
+            )
+            .string_field(
+                collateral_attestation_fields::COLLATERAL_LEDGER_ID,
+                &self.collateral_ledger_id,
+            )
             .u64_field(collateral_attestation_fields::AMOUNT, self.amount)
-            .u32_field(collateral_attestation_fields::BLOCK_HEIGHT, self.block_height)
-            .u32_field(collateral_attestation_fields::LOCK_UNTIL_BLOCK, self.lock_until_block)
+            .u32_field(
+                collateral_attestation_fields::BLOCK_HEIGHT,
+                self.block_height,
+            )
+            .u32_field(
+                collateral_attestation_fields::LOCK_UNTIL_BLOCK,
+                self.lock_until_block,
+            )
             .bytes_field(collateral_attestation_fields::SIGNATURE, &self.signature)
-            .bytes_field(collateral_attestation_fields::LEDGER_HASH, &self.ledger_hash)
+            .bytes_field(
+                collateral_attestation_fields::LEDGER_HASH,
+                &self.ledger_hash,
+            )
             .build()
     }
 }
@@ -2800,10 +3062,14 @@ impl TlvDecode for CollateralAttestation {
         Ok(Self {
             operator_id: reader.read_pubkey(collateral_attestation_fields::OPERATOR_ID)?,
             quorum_member: reader.read_pubkey(collateral_attestation_fields::QUORUM_MEMBER)?,
-            collateral_ledger_id: reader.read_string_opt(collateral_attestation_fields::COLLATERAL_LEDGER_ID)?.unwrap_or_default(),
+            collateral_ledger_id: reader
+                .read_string_opt(collateral_attestation_fields::COLLATERAL_LEDGER_ID)?
+                .unwrap_or_default(),
             amount: reader.read_u64(collateral_attestation_fields::AMOUNT)?,
             block_height: reader.read_u32(collateral_attestation_fields::BLOCK_HEIGHT)?,
-            lock_until_block: reader.read_u32_opt(collateral_attestation_fields::LOCK_UNTIL_BLOCK)?.unwrap_or(0),
+            lock_until_block: reader
+                .read_u32_opt(collateral_attestation_fields::LOCK_UNTIL_BLOCK)?
+                .unwrap_or(0),
             signature: reader.read_bytes(collateral_attestation_fields::SIGNATURE)?,
             ledger_hash: reader.read_bytes(collateral_attestation_fields::LEDGER_HASH)?,
         })
@@ -3394,16 +3660,14 @@ mod tests {
             descriptor,
             balance: 1_000_000,
             locked_balance: 50_000,
-            invoices: vec![
-                Invoice {
-                    id: "inv1".to_string(),
-                    payment_hash: [0x11; 32],
-                    amount: 10_000,
-                    expires: 1700000000,
-                    assigned_deposit: deposit_id,
-                    bolt11: "lnbc10n1...".to_string(),
-                },
-            ],
+            invoices: vec![Invoice {
+                id: "inv1".to_string(),
+                payment_hash: [0x11; 32],
+                amount: 10_000,
+                expires: 1700000000,
+                assigned_deposit: deposit_id,
+                bolt11: "lnbc10n1...".to_string(),
+            }],
             fees: FeeStructure::new(100, 25, 2016),
             last_fee_assessment: 800_000,
             collateral_lock_amount: 500_000,
@@ -3416,6 +3680,7 @@ mod tests {
             fee_change_limit_bps: Some(1000),
             opened_at_block: 100,
             pending_fee_change: None,
+            collateral_locks: Vec::new(),
         };
         let encoded = original.tlv_encode();
         let decoded = Deposit::tlv_decode(&encoded).unwrap();
@@ -3493,8 +3758,34 @@ mod tests {
         let collateral1 = test_pubkey_2();
         let collateral2 = test_pubkey_3();
         state.quorum_members = vec![
-            QuorumMember { pubkey: collateral1, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None, dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None, max_transfer_timeout_blocks: None, max_descriptor_bytes: None },
-            QuorumMember { pubkey: collateral2, ledger_id: String::new(), min_fee_bps: None, min_fee_fixed: None, max_fee_period: None, collateral_lock_amount: None, collateral_lock_until: None, dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None, max_transfer_timeout_blocks: None, max_descriptor_bytes: None },
+            QuorumMember {
+                pubkey: collateral1,
+                ledger_id: String::new(),
+                min_fee_bps: None,
+                min_fee_fixed: None,
+                max_fee_period: None,
+                collateral_lock_amount: None,
+                collateral_lock_until: None,
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
+            },
+            QuorumMember {
+                pubkey: collateral2,
+                ledger_id: String::new(),
+                min_fee_bps: None,
+                min_fee_fixed: None,
+                max_fee_period: None,
+                collateral_lock_amount: None,
+                collateral_lock_until: None,
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
+            },
         ];
 
         // Add attestation for collateral1
@@ -3508,11 +3799,16 @@ mod tests {
             [0u8; 64],
             [0u8; 32],
         );
-        state.update_collateral_attestation(collateral1, attestation1).unwrap();
+        state
+            .update_collateral_attestation(collateral1, attestation1)
+            .unwrap();
 
         // Check available collateral
         assert_eq!(state.total_available_collateral(800_100, 200), 50_000);
-        assert_eq!(state.partner_available_collateral(&collateral1), Some(50_000));
+        assert_eq!(
+            state.partner_available_collateral(&collateral1),
+            Some(50_000)
+        );
         assert_eq!(state.partner_available_collateral(&collateral2), None);
 
         // Check missing attestations
@@ -3531,7 +3827,9 @@ mod tests {
             [0u8; 64],
             [0u8; 32],
         );
-        state.update_collateral_attestation(collateral2, attestation2).unwrap();
+        state
+            .update_collateral_attestation(collateral2, attestation2)
+            .unwrap();
 
         // Now both have attestations
         assert_eq!(state.total_available_collateral(800_100, 200), 80_000);
@@ -3581,9 +3879,18 @@ mod tests {
         let entropy_hash = [0x42u8; 32];
 
         let secp = bitcoin::secp256k1::Secp256k1::new();
-        let pk1 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap());
-        let pk2 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap());
-        let pk3 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[3u8; 32]).unwrap());
+        let pk1 = PublicKey::from_secret_key(
+            &secp,
+            &bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap(),
+        );
+        let pk2 = PublicKey::from_secret_key(
+            &secp,
+            &bitcoin::secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap(),
+        );
+        let pk3 = PublicKey::from_secret_key(
+            &secp,
+            &bitcoin::secp256k1::SecretKey::from_slice(&[3u8; 32]).unwrap(),
+        );
 
         let candidates = vec![pk1, pk2, pk3];
 
@@ -3601,8 +3908,14 @@ mod tests {
     #[test]
     fn test_entropy_selection_different_hashes() {
         let secp = bitcoin::secp256k1::Secp256k1::new();
-        let pk1 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap());
-        let pk2 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap());
+        let pk1 = PublicKey::from_secret_key(
+            &secp,
+            &bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap(),
+        );
+        let pk2 = PublicKey::from_secret_key(
+            &secp,
+            &bitcoin::secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap(),
+        );
 
         let candidates = vec![pk1, pk2];
 
@@ -3621,8 +3934,14 @@ mod tests {
         let entropy_hash = [0x42u8; 32];
 
         let secp = bitcoin::secp256k1::Secp256k1::new();
-        let pk1 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap());
-        let pk2 = PublicKey::from_secret_key(&secp, &bitcoin::secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap());
+        let pk1 = PublicKey::from_secret_key(
+            &secp,
+            &bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap(),
+        );
+        let pk2 = PublicKey::from_secret_key(
+            &secp,
+            &bitcoin::secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap(),
+        );
 
         let candidates = vec![pk1, pk2];
         let winner = select_entropy_winner(&entropy_hash, &candidates).unwrap();

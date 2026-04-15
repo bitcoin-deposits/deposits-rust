@@ -21,10 +21,10 @@
 
 use std::io::{self, BufRead, Read};
 // Use library types directly
-use deposits_core::{SignedLedgerUpdate, SignedLedgerUpdateLog};
-use deposits_core::messages::{DepositsMessage, type_id_to_const_name};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bitcoin::secp256k1::PublicKey;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use deposits_core::messages::{type_id_to_const_name, DepositsMessage};
+use deposits_core::{SignedLedgerUpdate, SignedLedgerUpdateLog};
 
 fn format_pubkey(pubkey: &PublicKey) -> String {
     let s = pubkey.to_string();
@@ -36,7 +36,10 @@ fn format_pubkey(pubkey: &PublicKey) -> String {
 }
 
 fn format_hash(hash: &[u8; 32]) -> String {
-    format!("{:02x}{:02x}{:02x}{:02x}...", hash[0], hash[1], hash[2], hash[3])
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}...",
+        hash[0], hash[1], hash[2], hash[3]
+    )
 }
 
 /// Decode message bytes using DepositsMessage::read (same as SignedLedgerUpdate::get_message)
@@ -51,20 +54,23 @@ fn decode_message_content(_message_type: u16, message_bytes: &[u8]) -> String {
 fn print_update(idx: usize, update: &SignedLedgerUpdate) {
     let msg_type_name = type_id_to_const_name(update.message_type);
 
-    println!("  [{}] seq={} type=0x{:04x} ({})",
-        idx,
-        update.sequence_number,
-        update.message_type,
-        msg_type_name
+    println!(
+        "  [{}] seq={} type=0x{:04x} ({})",
+        idx, update.sequence_number, update.message_type, msg_type_name
     );
     println!("      operator: {}", format_pubkey(&update.operator_id));
     println!("      ledger_id: {}", hex::encode(update.ledger_id));
     println!("      prev_hash: {}", format_hash(&update.previous_hash));
     println!("      curr_hash: {}", format_hash(&update.current_hash));
     if update.block_height != 0 {
-        println!("      block: {} ({})", update.block_height, format_hash(&update.block_hash));
+        println!(
+            "      block: {} ({})",
+            update.block_height,
+            format_hash(&update.block_hash)
+        );
     }
-    println!("      signature: {:02x}{:02x}{:02x}{:02x}...",
+    println!(
+        "      signature: {:02x}{:02x}{:02x}{:02x}...",
         update.operator_signature[0],
         update.operator_signature[1],
         update.operator_signature[2],
@@ -78,7 +84,9 @@ fn print_update(idx: usize, update: &SignedLedgerUpdate) {
 fn decode_and_print(data: &[u8], record_num: usize) {
     if record_num > 0 {
         println!();
-        println!("================================================================================");
+        println!(
+            "================================================================================"
+        );
     }
     println!("Record #{} ({} bytes)", record_num + 1, data.len());
     println!();
@@ -117,12 +125,21 @@ fn decode_and_print(data: &[u8], record_num: usize) {
                 println!("--- Hash Chain Summary ---");
                 for (idx, update) in log.updates.iter().enumerate() {
                     if idx == 0 {
-                        println!("  {} -> {}", format_hash(&update.previous_hash), format_hash(&update.current_hash));
+                        println!(
+                            "  {} -> {}",
+                            format_hash(&update.previous_hash),
+                            format_hash(&update.current_hash)
+                        );
                     } else {
                         let prev = &log.updates[idx - 1];
                         let chain_ok = update.previous_hash == prev.current_hash;
                         let status = if chain_ok { "OK" } else { "BROKEN!" };
-                        println!("  {} -> {} [{}]", format_hash(&update.previous_hash), format_hash(&update.current_hash), status);
+                        println!(
+                            "  {} -> {} [{}]",
+                            format_hash(&update.previous_hash),
+                            format_hash(&update.current_hash),
+                            status
+                        );
                     }
                 }
             }
@@ -130,7 +147,10 @@ fn decode_and_print(data: &[u8], record_num: usize) {
         Err(e) => {
             eprintln!("Failed to deserialize as SignedLedgerUpdateLog: {}", e);
             eprintln!();
-            eprintln!("First 64 bytes (hex): {}", hex::encode(&data[..std::cmp::min(64, data.len())]));
+            eprintln!(
+                "First 64 bytes (hex): {}",
+                hex::encode(&data[..std::cmp::min(64, data.len())])
+            );
         }
     }
 }
@@ -155,7 +175,9 @@ fn print_help() {
     eprintln!();
     eprintln!("  # Decode all signed_ledger_updates (base64)");
     eprintln!("  sqlite3 db.sqlite \"select base64(value) from ldk_node_data \\");
-    eprintln!("    where secondary_namespace = 'signed_ledger_updates'\" | decode-updates --base64");
+    eprintln!(
+        "    where secondary_namespace = 'signed_ledger_updates'\" | decode-updates --base64"
+    );
     eprintln!();
     eprintln!("  # Decode single hex string");
     eprintln!("  decode-updates --hex <hex_string>");
@@ -194,7 +216,9 @@ fn main() {
     // Check for --raw (raw binary from stdin)
     if args.iter().any(|a| a == "--raw") {
         let mut buffer = Vec::new();
-        io::stdin().read_to_end(&mut buffer).expect("Failed to read from stdin");
+        io::stdin()
+            .read_to_end(&mut buffer)
+            .expect("Failed to read from stdin");
         if buffer.is_empty() {
             eprintln!("Error: No data provided");
             std::process::exit(1);

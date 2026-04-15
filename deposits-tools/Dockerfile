@@ -16,13 +16,17 @@ WORKDIR /app
 COPY deposits-protocol ./deposits-protocol
 COPY deposits-core ./deposits-core
 COPY deposits-node ./deposits-node
-COPY nostr-sdk-performance ./nostr-sdk-performance
+COPY Cargo.toml ./Cargo.toml
 COPY Cargo.lock ./Cargo.lock
 
-# Create a minimal workspace Cargo.toml for Docker build
-# Patch native-tls to 0.2.17 to fix Rust 1.85 compatibility
-# Patch nostr-relay-pool with our performance fork (skip event verification)
-RUN echo '[workspace]\nmembers = ["deposits-protocol", "deposits-core", "deposits-node"]\nresolver = "2"\n\n[profile.release]\ndebug = true\n\n[patch.crates-io]\nnative-tls = { git = "https://github.com/sfackler/rust-native-tls", tag = "v0.2.17" }\nnostr-relay-pool = { path = "nostr-sdk-performance/nostr-relay-pool" }' > Cargo.toml
+# Stub out deposits-tools so workspace resolves (not built)
+COPY deposits-tools/Cargo.toml deposits-tools/Cargo.toml
+RUN mkdir -p deposits-tools/src && echo "" > deposits-tools/src/lib.rs && \
+    mkdir -p deposits-tools/src/bin && \
+    for bin in deposits-admin network-init status decode-updates treasury-address \
+               treasury-send standalone_reserves_demo discover replay-ledger deposits-lnurl; do \
+        echo "fn main() {}" > deposits-tools/src/bin/$bin.rs; \
+    done
 
 # Build deposits-node and deposits-wallet with dangerous-testing for test environments
 # WARNING: Do not use this image in production

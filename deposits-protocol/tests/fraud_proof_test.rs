@@ -2,8 +2,12 @@
 
 use deposits_protocol::fraud::*;
 
-fn make_accused() -> String { "02".to_string() + &"ab".repeat(32) }
-fn make_ledger_id() -> String { "aa".repeat(32) }
+fn make_accused() -> String {
+    "02".to_string() + &"ab".repeat(32)
+}
+fn make_ledger_id() -> String {
+    "aa".repeat(32)
+}
 
 fn make_onchain_proof() -> FraudProof {
     FraudProof {
@@ -114,8 +118,11 @@ fn each_proof_type_has_distinct_hash() {
     // All pairwise distinct
     for i in 0..hashes.len() {
         for j in (i + 1)..hashes.len() {
-            assert_ne!(hashes[i], hashes[j],
-                "proof types {} and {} have same hash", i, j);
+            assert_ne!(
+                hashes[i], hashes[j],
+                "proof types {} and {} have same hash",
+                i, j
+            );
         }
     }
 }
@@ -140,7 +147,11 @@ fn changing_ledger_id_changes_hash() {
 fn changing_evidence_amount_changes_hash() {
     let mut p = make_onchain_proof();
     let h1 = p.proof_hash();
-    if let FraudEvidence::UncreditedOnchain { ref mut amount_sats, .. } = p.evidence {
+    if let FraudEvidence::UncreditedOnchain {
+        ref mut amount_sats,
+        ..
+    } = p.evidence
+    {
         *amount_sats = 200_000;
     }
     assert_ne!(p.proof_hash(), h1);
@@ -160,7 +171,10 @@ fn changing_evidence_txid_changes_hash() {
 fn changing_preimage_changes_hash() {
     let mut p = make_lightning_proof();
     let h1 = p.proof_hash();
-    if let FraudEvidence::UncreditedLightning { ref mut preimage, .. } = p.evidence {
+    if let FraudEvidence::UncreditedLightning {
+        ref mut preimage, ..
+    } = p.evidence
+    {
         *preimage = "22".repeat(32);
     }
     assert_ne!(p.proof_hash(), h1);
@@ -205,7 +219,8 @@ fn direct_embedding_valid() {
     let b = FraudBroadcast {
         embedding: ProofEmbedding {
             ledger_id: proof.ledger_id.clone(),
-            sequence: 50, update_hash: "ff".repeat(32),
+            sequence: 50,
+            update_hash: "ff".repeat(32),
             field: "transfer_nonce".to_string(),
         },
         causal_chain: vec![],
@@ -220,12 +235,14 @@ fn direct_embedding_with_chain_rejected() {
     let b = FraudBroadcast {
         embedding: ProofEmbedding {
             ledger_id: proof.ledger_id.clone(),
-            sequence: 50, update_hash: "ff".repeat(32),
+            sequence: 50,
+            update_hash: "ff".repeat(32),
             field: "transfer_nonce".to_string(),
         },
         causal_chain: vec![CausalLink {
             ledger_id: proof.ledger_id.clone(),
-            sequence: 55, update_hash: "ee".repeat(32),
+            sequence: 55,
+            update_hash: "ee".repeat(32),
             member_ledger_hash: "dd".repeat(32),
             source_ledger_id: "11".repeat(32),
         }],
@@ -240,7 +257,8 @@ fn indirect_missing_chain_rejected() {
     let b = FraudBroadcast {
         embedding: ProofEmbedding {
             ledger_id: "11".repeat(32), // different from accused
-            sequence: 10, update_hash: "22".repeat(32),
+            sequence: 10,
+            update_hash: "22".repeat(32),
             field: "transfer_nonce".to_string(),
         },
         causal_chain: vec![],
@@ -256,12 +274,14 @@ fn one_hop_valid() {
     let b = FraudBroadcast {
         embedding: ProofEmbedding {
             ledger_id: member.clone(),
-            sequence: 10, update_hash: "22".repeat(32),
+            sequence: 10,
+            update_hash: "22".repeat(32),
             field: "transfer_nonce".to_string(),
         },
         causal_chain: vec![CausalLink {
             ledger_id: proof.ledger_id.clone(),
-            sequence: 55, update_hash: "33".repeat(32),
+            sequence: 55,
+            update_hash: "33".repeat(32),
             member_ledger_hash: "44".repeat(32),
             source_ledger_id: member,
         }],
@@ -276,12 +296,14 @@ fn one_hop_wrong_source_rejected() {
     let b = FraudBroadcast {
         embedding: ProofEmbedding {
             ledger_id: "11".repeat(32),
-            sequence: 10, update_hash: "22".repeat(32),
+            sequence: 10,
+            update_hash: "22".repeat(32),
             field: "transfer_nonce".to_string(),
         },
         causal_chain: vec![CausalLink {
             ledger_id: proof.ledger_id.clone(),
-            sequence: 55, update_hash: "33".repeat(32),
+            sequence: 55,
+            update_hash: "33".repeat(32),
             member_ledger_hash: "44".repeat(32),
             source_ledger_id: "99".repeat(32), // wrong — doesn't match embedding
         }],
@@ -298,19 +320,22 @@ fn two_hop_valid() {
     let b = FraudBroadcast {
         embedding: ProofEmbedding {
             ledger_id: a.clone(),
-            sequence: 10, update_hash: "ff".repeat(32),
+            sequence: 10,
+            update_hash: "ff".repeat(32),
             field: "transfer_nonce".to_string(),
         },
         causal_chain: vec![
             CausalLink {
                 ledger_id: b_ledger.clone(),
-                sequence: 20, update_hash: "ee".repeat(32),
+                sequence: 20,
+                update_hash: "ee".repeat(32),
                 member_ledger_hash: "dd".repeat(32),
                 source_ledger_id: a,
             },
             CausalLink {
                 ledger_id: proof.ledger_id.clone(),
-                sequence: 30, update_hash: "cc".repeat(32),
+                sequence: 30,
+                update_hash: "cc".repeat(32),
                 member_ledger_hash: "bb".repeat(32),
                 source_ledger_id: b_ledger,
             },
@@ -328,19 +353,22 @@ fn two_hop_broken_middle_rejected() {
     let b = FraudBroadcast {
         embedding: ProofEmbedding {
             ledger_id: a.clone(),
-            sequence: 10, update_hash: "ff".repeat(32),
+            sequence: 10,
+            update_hash: "ff".repeat(32),
             field: "transfer_nonce".to_string(),
         },
         causal_chain: vec![
             CausalLink {
                 ledger_id: b_ledger.clone(),
-                sequence: 20, update_hash: "ee".repeat(32),
+                sequence: 20,
+                update_hash: "ee".repeat(32),
                 member_ledger_hash: "dd".repeat(32),
                 source_ledger_id: a,
             },
             CausalLink {
                 ledger_id: proof.ledger_id.clone(),
-                sequence: 30, update_hash: "cc".repeat(32),
+                sequence: 30,
+                update_hash: "cc".repeat(32),
                 member_ledger_hash: "bb".repeat(32),
                 source_ledger_id: "99".repeat(32), // broken — doesn't match b_ledger
             },
@@ -356,12 +384,14 @@ fn chain_not_reaching_accused_rejected() {
     let b = FraudBroadcast {
         embedding: ProofEmbedding {
             ledger_id: "11".repeat(32),
-            sequence: 10, update_hash: "22".repeat(32),
+            sequence: 10,
+            update_hash: "22".repeat(32),
             field: "transfer_nonce".to_string(),
         },
         causal_chain: vec![CausalLink {
             ledger_id: "99".repeat(32), // wrong destination
-            sequence: 55, update_hash: "33".repeat(32),
+            sequence: 55,
+            update_hash: "33".repeat(32),
             member_ledger_hash: "44".repeat(32),
             source_ledger_id: "11".repeat(32),
         }],
@@ -381,8 +411,9 @@ fn compute_hash_changes_with_member_ledger_hash() {
     let pk = {
         use std::str::FromStr;
         bitcoin::secp256k1::PublicKey::from_str(
-            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-        ).unwrap()
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap()
     };
 
     let mut update = SignedLedgerUpdate {
@@ -399,7 +430,7 @@ fn compute_hash_changes_with_member_ledger_hash() {
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
-            cosignatures: Vec::new(),
+        cosignatures: Vec::new(),
     };
 
     let hash_without = update.compute_hash();
@@ -407,12 +438,18 @@ fn compute_hash_changes_with_member_ledger_hash() {
     update.member_ledger_hash = Some([0xAA; 32]);
     let hash_with = update.compute_hash();
 
-    assert_ne!(hash_without, hash_with, "member_ledger_hash should change the hash");
+    assert_ne!(
+        hash_without, hash_with,
+        "member_ledger_hash should change the hash"
+    );
 
     update.member_ledger_hash = Some([0xBB; 32]);
     let hash_with_different = update.compute_hash();
 
-    assert_ne!(hash_with, hash_with_different, "different member_ledger_hash should produce different hash");
+    assert_ne!(
+        hash_with, hash_with_different,
+        "different member_ledger_hash should produce different hash"
+    );
 }
 
 #[test]
@@ -422,8 +459,9 @@ fn compute_hash_without_member_hash_is_backward_compatible() {
     let pk = {
         use std::str::FromStr;
         bitcoin::secp256k1::PublicKey::from_str(
-            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-        ).unwrap()
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap()
     };
 
     let update = SignedLedgerUpdate {
@@ -440,7 +478,7 @@ fn compute_hash_without_member_hash_is_backward_compatible() {
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
-            cosignatures: Vec::new(),
+        cosignatures: Vec::new(),
     };
 
     // Without member_ledger_hash, hash is just SHA256(seq || prev_hash || message)
@@ -461,8 +499,9 @@ fn compute_hash_includes_cosign_signature() {
     let pk = {
         use std::str::FromStr;
         bitcoin::secp256k1::PublicKey::from_str(
-            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-        ).unwrap()
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap()
     };
 
     let mut update = SignedLedgerUpdate {
@@ -479,7 +518,7 @@ fn compute_hash_includes_cosign_signature() {
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
-            cosignatures: Vec::new(),
+        cosignatures: Vec::new(),
     };
 
     let hash_no_sig = update.compute_hash();
@@ -487,12 +526,18 @@ fn compute_hash_includes_cosign_signature() {
     update.cosign_signature = [0xAA; 64];
     let hash_with_sig = update.compute_hash();
 
-    assert_ne!(hash_no_sig, hash_with_sig, "cosign_signature should change compute_hash");
+    assert_ne!(
+        hash_no_sig, hash_with_sig,
+        "cosign_signature should change compute_hash"
+    );
 
     update.cosign_signature = [0xBB; 64];
     let hash_different_sig = update.compute_hash();
 
-    assert_ne!(hash_with_sig, hash_different_sig, "different cosign_signature = different hash");
+    assert_ne!(
+        hash_with_sig, hash_different_sig,
+        "different cosign_signature = different hash"
+    );
 }
 
 #[test]
@@ -502,8 +547,9 @@ fn chain_hash_includes_operator_signature() {
     let pk = {
         use std::str::FromStr;
         bitcoin::secp256k1::PublicKey::from_str(
-            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-        ).unwrap()
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap()
     };
 
     let mut update = SignedLedgerUpdate {
@@ -520,7 +566,7 @@ fn chain_hash_includes_operator_signature() {
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
-            cosignatures: Vec::new(),
+        cosignatures: Vec::new(),
     };
     update.current_hash = update.compute_hash();
 
@@ -529,9 +575,16 @@ fn chain_hash_includes_operator_signature() {
     update.operator_signature = [0xCC; 64];
     let chain_with_sig = update.chain_hash();
 
-    assert_ne!(chain_no_sig, chain_with_sig, "operator_signature should change chain_hash");
+    assert_ne!(
+        chain_no_sig, chain_with_sig,
+        "operator_signature should change chain_hash"
+    );
     // chain_hash != current_hash
-    assert_ne!(update.chain_hash(), update.current_hash, "chain_hash should differ from current_hash");
+    assert_ne!(
+        update.chain_hash(),
+        update.current_hash,
+        "chain_hash should differ from current_hash"
+    );
 }
 
 #[test]
@@ -542,8 +595,9 @@ fn chain_hash_is_sha256_of_current_hash_and_operator_sig() {
     let pk = {
         use std::str::FromStr;
         bitcoin::secp256k1::PublicKey::from_str(
-            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-        ).unwrap()
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap()
     };
 
     let mut update = SignedLedgerUpdate {

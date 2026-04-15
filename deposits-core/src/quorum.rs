@@ -44,7 +44,10 @@ pub struct LedgerId {
 
 impl LedgerId {
     pub fn new(operator_id: PublicKey, reserves_id: String) -> Self {
-        Self { operator_id, reserves_id }
+        Self {
+            operator_id,
+            reserves_id,
+        }
     }
 }
 
@@ -124,9 +127,9 @@ pub struct QuorumConfig {
 impl Default for QuorumConfig {
     fn default() -> Self {
         Self {
-            threshold: 2,          // At least 2 votes needed
-            max_members: 10,       // Maximum 10 quorum members
-            vote_timeout_secs: 60, // 1 minute to collect votes
+            threshold: 2,                    // At least 2 votes needed
+            max_members: 10,                 // Maximum 10 quorum members
+            vote_timeout_secs: 60,           // 1 minute to collect votes
             health_check_interval_secs: 300, // Check health every 5 minutes
         }
     }
@@ -156,22 +159,10 @@ impl QuorumState {
         let mut members = HashMap::new();
 
         // Add operator as initial member
-        members.insert(operator_id, QuorumMember {
-            pubkey: operator_id,
-            status: MemberStatus::Active,
-            last_sequence: 0,
-            last_state_hash: [0u8; 32],
-            last_activity: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        });
-
-        // Add partner as initial member only if reserves_id is a valid pubkey (LDK case)
-        // For BDK, reserves_id is an address, not a pubkey, so we skip adding it
-        if let Ok(partner_pubkey) = PublicKey::from_str(&reserves_id) {
-            members.insert(partner_pubkey, QuorumMember {
-                pubkey: partner_pubkey,
+        members.insert(
+            operator_id,
+            QuorumMember {
+                pubkey: operator_id,
                 status: MemberStatus::Active,
                 last_sequence: 0,
                 last_state_hash: [0u8; 32],
@@ -179,7 +170,25 @@ impl QuorumState {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
-            });
+            },
+        );
+
+        // Add partner as initial member only if reserves_id is a valid pubkey (LDK case)
+        // For BDK, reserves_id is an address, not a pubkey, so we skip adding it
+        if let Ok(partner_pubkey) = PublicKey::from_str(&reserves_id) {
+            members.insert(
+                partner_pubkey,
+                QuorumMember {
+                    pubkey: partner_pubkey,
+                    status: MemberStatus::Active,
+                    last_sequence: 0,
+                    last_state_hash: [0u8; 32],
+                    last_activity: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                },
+            );
         }
 
         Self {
@@ -198,7 +207,8 @@ impl QuorumState {
 
     /// Get active member count
     pub fn active_member_count(&self) -> usize {
-        self.members.values()
+        self.members
+            .values()
             .filter(|m| m.status == MemberStatus::Active)
             .count()
     }
@@ -243,7 +253,7 @@ impl QuorumManager {
         let mut quorums = self.quorums.write().unwrap();
         if quorums.contains_key(&ledger_id) {
             return Err(DepositsError::InvalidState(
-                "Quorum already exists for this ledger".to_string()
+                "Quorum already exists for this ledger".to_string(),
             ));
         }
         quorums.insert(ledger_id, quorum);
@@ -288,19 +298,22 @@ impl QuorumManager {
 
         // Accept the join request
         quorum.pending_joins.insert(msg.requester_pubkey);
-        quorum.members.insert(msg.requester_pubkey, QuorumMember {
-            pubkey: msg.requester_pubkey,
-            status: MemberStatus::Syncing,
-            last_sequence: 0,
-            last_state_hash: [0u8; 32],
-            last_activity: msg.timestamp,
-        });
+        quorum.members.insert(
+            msg.requester_pubkey,
+            QuorumMember {
+                pubkey: msg.requester_pubkey,
+                status: MemberStatus::Syncing,
+                last_sequence: 0,
+                last_state_hash: [0u8; 32],
+                last_activity: msg.timestamp,
+            },
+        );
 
         Ok(QuorumJoinResponseMsg {
             accepted: true,
             members: quorum.member_pubkeys(),
             threshold: quorum.config.threshold,
-            last_sequence: 0, // TODO: Get from ledger
+            last_sequence: 0,        // TODO: Get from ledger
             current_hash: [0u8; 32], // TODO: Get from ledger
             rejection_reason: None,
         })
@@ -320,12 +333,13 @@ impl QuorumManager {
         // Verify voter is a member
         if !quorum.is_member(&msg.voter_pubkey) {
             return Err(DepositsError::InvalidState(
-                "Voter is not a quorum member".to_string()
+                "Voter is not a quorum member".to_string(),
             ));
         }
 
         // Get or create vote result for this round
-        let result = quorum.pending_votes
+        let result = quorum
+            .pending_votes
             .entry(msg.vote_round_id)
             .or_insert_with(|| VoteResult {
                 round_id: msg.vote_round_id,
@@ -385,22 +399,23 @@ impl QuorumManager {
 
         // Check if quorum is full
         if quorum.member_count() >= quorum.config.max_members {
-            return Err(DepositsError::InvalidState(
-                "Quorum is full".to_string()
-            ));
+            return Err(DepositsError::InvalidState("Quorum is full".to_string()));
         }
 
         // Add as active member (quorum members are trusted, no syncing needed)
-        quorum.members.insert(member_pubkey, QuorumMember {
-            pubkey: member_pubkey,
-            status: MemberStatus::Active,
-            last_sequence: 0,
-            last_state_hash: [0u8; 32],
-            last_activity: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        });
+        quorum.members.insert(
+            member_pubkey,
+            QuorumMember {
+                pubkey: member_pubkey,
+                status: MemberStatus::Active,
+                last_sequence: 0,
+                last_state_hash: [0u8; 32],
+                last_activity: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            },
+        );
 
         Ok(())
     }
@@ -417,9 +432,11 @@ impl QuorumManager {
         })?;
 
         // Don't allow removing operator or reserves (they're always members)
-        if *member_pubkey == quorum.ledger_id.operator_id || member_pubkey.to_string() == quorum.ledger_id.reserves_id {
+        if *member_pubkey == quorum.ledger_id.operator_id
+            || member_pubkey.to_string() == quorum.ledger_id.reserves_id
+        {
             return Err(DepositsError::InvalidState(
-                "Cannot remove operator or reserves from quorum".to_string()
+                "Cannot remove operator or reserves from quorum".to_string(),
             ));
         }
 
@@ -447,7 +464,7 @@ impl QuorumManager {
         // Verify voter is a member
         if !quorum.is_member(&voter) {
             return Err(DepositsError::InvalidState(
-                "Voter is not a quorum member".to_string()
+                "Voter is not a quorum member".to_string(),
             ));
         }
 
@@ -456,7 +473,8 @@ impl QuorumManager {
         round_id[0..8].copy_from_slice(&sequence.to_be_bytes());
 
         // Get or create vote result for this round
-        let result = quorum.pending_votes
+        let result = quorum
+            .pending_votes
             .entry(round_id)
             .or_insert_with(|| VoteResult {
                 round_id,
@@ -530,7 +548,7 @@ impl QuorumManager {
             Ok(())
         } else {
             Err(DepositsError::InvalidState(
-                "Member not found in quorum".to_string()
+                "Member not found in quorum".to_string(),
             ))
         }
     }
@@ -553,7 +571,9 @@ mod tests {
         let partner = generate_test_pubkey(2);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
         let members = manager.get_quorum(&ledger_id).unwrap();
@@ -570,7 +590,9 @@ mod tests {
         let auditor = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         let join_request = QuorumJoinRequestMsg {
             requester_pubkey: auditor,
@@ -593,7 +615,9 @@ mod tests {
         let partner = generate_test_pubkey(2);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         // Try to join as operator (already a member)
         let join_request = QuorumJoinRequestMsg {
@@ -607,7 +631,10 @@ mod tests {
 
         let response = manager.handle_join_request(&join_request).unwrap();
         assert!(!response.accepted);
-        assert_eq!(response.rejection_reason, Some("Already a member".to_string()));
+        assert_eq!(
+            response.rejection_reason,
+            Some("Already a member".to_string())
+        );
     }
 
     #[test]
@@ -619,7 +646,9 @@ mod tests {
         let auditor3 = generate_test_pubkey(5);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         // First auditor joins
         let join_request1 = QuorumJoinRequestMsg {
@@ -677,7 +706,9 @@ mod tests {
         let auditor = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         // Auditor joins
         let join_request = QuorumJoinRequestMsg {
@@ -708,7 +739,9 @@ mod tests {
         let auditor = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         // Auditor joins
         let join_request = QuorumJoinRequestMsg {
@@ -772,7 +805,9 @@ mod tests {
         let non_member = generate_test_pubkey(99);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
         let vote = QuorumVoteMsg {
@@ -812,7 +847,9 @@ mod tests {
         let partner = generate_test_pubkey(2);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         // Fill up the quorum (default max is 10, we have 2 already)
         for i in 3..=10 {
@@ -841,7 +878,10 @@ mod tests {
         };
         let response = manager.handle_join_request(&join_request).unwrap();
         assert!(!response.accepted);
-        assert_eq!(response.rejection_reason, Some("Quorum is full".to_string()));
+        assert_eq!(
+            response.rejection_reason,
+            Some("Quorum is full".to_string())
+        );
     }
 
     #[test]
@@ -851,7 +891,9 @@ mod tests {
         let non_member = generate_test_pubkey(99);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
         let result = manager.update_member_state(&ledger_id, &non_member, 100, [42u8; 32]);
@@ -882,7 +924,9 @@ mod tests {
         let quorum_member = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
 
@@ -908,7 +952,9 @@ mod tests {
         let quorum_member = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
 
@@ -942,7 +988,9 @@ mod tests {
         let quorum_member = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
 
@@ -967,7 +1015,9 @@ mod tests {
         let quorum_member = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
 
@@ -986,7 +1036,9 @@ mod tests {
         let partner = generate_test_pubkey(2);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
 
@@ -1005,7 +1057,9 @@ mod tests {
         let partner = generate_test_pubkey(2);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
 
@@ -1027,7 +1081,9 @@ mod tests {
         let collateral3 = generate_test_pubkey(5);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
 
@@ -1049,7 +1105,9 @@ mod tests {
         let partner = generate_test_pubkey(2);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
 
@@ -1077,7 +1135,9 @@ mod tests {
         let collateral = generate_test_pubkey(3);
 
         let manager = QuorumManager::new(operator);
-        manager.create_quorum(operator, partner.to_string()).unwrap();
+        manager
+            .create_quorum(operator, partner.to_string())
+            .unwrap();
 
         let ledger_id = LedgerId::new(operator, partner.to_string());
         manager.add_member(&ledger_id, collateral).unwrap();

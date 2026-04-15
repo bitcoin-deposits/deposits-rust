@@ -8,9 +8,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use bdk_wallet::bitcoin::bip32::{DerivationPath, Xpriv};
-use bdk_wallet::bitcoin::secp256k1::Secp256k1;
-use bdk_wallet::bitcoin::{Address, CompressedPublicKey, Network, PrivateKey};
+use bitcoin::bip32::{DerivationPath, Xpriv};
+use bitcoin::secp256k1::Secp256k1;
+use bitcoin::{Address, CompressedPublicKey, Network, PrivateKey};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seed_path = std::env::args()
@@ -24,12 +24,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    let seed_hex = fs::read_to_string(&seed_path)?
-        .trim()
-        .to_string();
+    let seed_hex = fs::read_to_string(&seed_path)?.trim().to_string();
 
     if seed_hex.len() != 64 {
-        eprintln!("Invalid seed length: expected 64 hex chars, got {}", seed_hex.len());
+        eprintln!(
+            "Invalid seed length: expected 64 hex chars, got {}",
+            seed_hex.len()
+        );
         std::process::exit(1);
     }
 
@@ -41,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut extended_seed = [0u8; 64];
     extended_seed[..32].copy_from_slice(&seed_bytes);
     // Use SHA256 of seed for chain code
-    use bdk_wallet::bitcoin::hashes::{sha256, Hash};
+    use bitcoin::hashes::{sha256, Hash};
     let chain_code = sha256::Hash::hash(&seed_bytes);
     extended_seed[32..].copy_from_slice(chain_code.as_ref());
 

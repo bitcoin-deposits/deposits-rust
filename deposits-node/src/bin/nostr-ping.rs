@@ -75,11 +75,17 @@ impl PingStats {
     }
 
     fn avg_ms(&self) -> f64 {
-        if self.received == 0 { 0.0 } else { self.total_ms / self.received as f64 }
+        if self.received == 0 {
+            0.0
+        } else {
+            self.total_ms / self.received as f64
+        }
     }
 
     fn percentile(&self, p: usize) -> f64 {
-        if self.latencies.is_empty() { return 0.0; }
+        if self.latencies.is_empty() {
+            return 0.0;
+        }
         let mut sorted = self.latencies.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let idx = (p * sorted.len() / 100).min(sorted.len() - 1);
@@ -102,7 +108,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--relay" => { relay = args.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+            "--relay" => {
+                relay = args.get(i + 1).cloned().unwrap_or_default();
+                i += 2;
+            }
             "--mode" => {
                 mode = match args.get(i + 1).map(|s| s.as_str()) {
                     Some("requester") | Some("sender") => Mode::Requester,
@@ -111,12 +120,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 i += 2;
             }
-            "--peer" => { peer_pubkey = args.get(i + 1).cloned(); i += 2; }
-            "--count" => { count = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(10); i += 2; }
-            "--interval" => { interval_ms = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(100); i += 2; }
-            "--seed" => { seed = args.get(i + 1).cloned(); i += 2; }
-            "--ledger" => { ledger_id = args.get(i + 1).cloned().unwrap_or_default(); i += 2; }
-            "--help" | "-h" => { print_help(); return Ok(()); }
+            "--peer" => {
+                peer_pubkey = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--count" => {
+                count = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(10);
+                i += 2;
+            }
+            "--interval" => {
+                interval_ms = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(100);
+                i += 2;
+            }
+            "--seed" => {
+                seed = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--ledger" => {
+                ledger_id = args.get(i + 1).cloned().unwrap_or_default();
+                i += 2;
+            }
+            "--help" | "-h" => {
+                print_help();
+                return Ok(());
+            }
             _ => i += 1,
         }
     }
@@ -183,8 +210,7 @@ async fn run_responder(
     println!();
 
     // Subscribe to all ledger requests (like a real operator)
-    let filter = Filter::new()
-        .kind(Kind::Custom(KIND_LEDGER_REQUEST));
+    let filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_REQUEST));
     client.subscribe(vec![filter], None).await?;
 
     let mut notifications = client.notifications();
@@ -238,20 +264,25 @@ async fn run_responder(
                 let response_json = serde_json::to_string(&response)?;
 
                 // Send response event
-                let response_event = EventBuilder::new(
-                    Kind::Custom(KIND_LEDGER_RESPONSE),
-                    &response_json,
-                )
-                .tag(Tag::event(event.id))  // Reference request
-                .tag(Tag::public_key(event.pubkey));  // Tag requester
+                let response_event =
+                    EventBuilder::new(Kind::Custom(KIND_LEDGER_RESPONSE), &response_json)
+                        .tag(Tag::event(event.id)) // Reference request
+                        .tag(Tag::public_key(event.pubkey)); // Tag requester
                 let build_time = build_start.elapsed();
 
                 let send_start = Instant::now();
                 client.send_event_builder(response_event).await?;
                 let send_time = send_start.elapsed();
 
-                println!("[{}] REQ {} -> RESP (recv:{:?} parse:{:?} build:{:?} send:{:?})",
-                    response_count, &request_id[..16], recv_time, parse_time, build_time, send_time);
+                println!(
+                    "[{}] REQ {} -> RESP (recv:{:?} parse:{:?} build:{:?} send:{:?})",
+                    response_count,
+                    &request_id[..16],
+                    recv_time,
+                    parse_time,
+                    build_time,
+                    send_time
+                );
             }
             Ok(_) => {}
             Err(e) => {
@@ -285,8 +316,7 @@ async fn run_requester(
     client.subscribe(vec![filter], None).await?;
 
     // Also subscribe to all responses (in case tag filtering doesn't work)
-    let filter_all = Filter::new()
-        .kind(Kind::Custom(KIND_LEDGER_RESPONSE));
+    let filter_all = Filter::new().kind(Kind::Custom(KIND_LEDGER_RESPONSE));
     client.subscribe(vec![filter_all], None).await?;
 
     let pending: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -308,7 +338,8 @@ async fn run_requester(
 
                     // Check if tagged to us
                     let for_us = event.tags.iter().any(|t| {
-                        if let Some(TagStandard::PublicKey { public_key, .. }) = t.as_standardized() {
+                        if let Some(TagStandard::PublicKey { public_key, .. }) = t.as_standardized()
+                        {
                             *public_key == my_pubkey
                         } else {
                             false
@@ -328,7 +359,9 @@ async fn run_requester(
                     // Look up request ID in pending
                     let latency = {
                         let mut pending = pending_clone.lock().unwrap();
-                        pending.remove(&response.request_id).map(|start| start.elapsed())
+                        pending
+                            .remove(&response.request_id)
+                            .map(|start| start.elapsed())
                     };
 
                     if let Some(lat) = latency {
@@ -368,14 +401,11 @@ async fn run_requester(
         let request_json = serde_json::to_string(&request)?;
 
         // Build request event
-        let request_event = EventBuilder::new(
-            Kind::Custom(KIND_LEDGER_REQUEST),
-            &request_json,
-        )
-        .tag(Tag::custom(
-            TagKind::SingleLetter(TAG_LEDGER_REQ),
-            vec![ledger_id.to_string()],
-        ));
+        let request_event = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &request_json)
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
+                vec![ledger_id.to_string()],
+            ));
 
         // Send and get event ID
         let output = client.send_event_builder(request_event).await?;
@@ -409,7 +439,11 @@ async fn run_requester(
     println!();
     println!("=== Results (KIND_LEDGER_REQUEST/RESPONSE) ===");
     println!("Sent:     {}", stats.sent);
-    println!("Received: {} ({:.1}%)", stats.received, 100.0 * stats.received as f64 / stats.sent.max(1) as f64);
+    println!(
+        "Received: {} ({:.1}%)",
+        stats.received,
+        100.0 * stats.received as f64 / stats.sent.max(1) as f64
+    );
     println!("Lost:     {}", stats.sent - stats.received);
     println!();
     if stats.received > 0 {

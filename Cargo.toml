@@ -7,10 +7,26 @@ members = [
 ]
 resolver = "2"
 
+[workspace.lints.clippy]
+# === Deferred refactors (fix in a dedicated pass) ===
+result_large_err = "allow"       # Boxing error variants is a larger refactor
+too_many_arguments = "allow"     # Refactoring function signatures risks breaking changes
+type_complexity = "allow"        # Type aliases for complex generics is a separate task
+ptr_arg = "allow"                # &PathBuf → &Path, &Vec → &[] changes touch many call sites
+collapsible_if = "allow"         # Nested ifs are sometimes clearer for protocol logic
+collapsible_match = "allow"      # Collapsing if-let chains risks readability in match-heavy code
+large_enum_variant = "allow"     # Boxing enum variants is a larger refactor
+await_holding_lock = "allow"     # MutexGuard across await needs async lock refactor
+should_implement_trait = "allow" # from_str methods that predate FromStr impl
+unnecessary_unwrap = "allow"     # Legitimate pattern in some match arms
+
+[workspace.lints.rust]
+# Pre-release: unused code is expected as features are built incrementally
+dead_code = "allow"
+unused_imports = "allow"
+unused_variables = "allow"
+unused_mut = "allow"
+
 # Release profile with debug info for flamegraphs
 [profile.release]
 debug = 1              # line tables only (minimal size increase, good flamegraph symbols)
-
-# Use nostr-sdk-performance fork with skip-verification and skip-database by default
-[patch.crates-io]
-nostr-relay-pool = { path = "nostr-sdk-performance/nostr-relay-pool" }

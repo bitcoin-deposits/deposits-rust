@@ -17,16 +17,26 @@ pub async fn process_deposit_open_request(
 ) -> (bool, Option<serde_json::Value>, Option<String>) {
     // Verify ledger exists - we use ledger_id directly now
     if node.get_ledger(ledger_id).is_none() {
-        return (false, None, Some(format!("Ledger not found: {}", ledger_id)));
+        return (
+            false,
+            None,
+            Some(format!("Ledger not found: {}", ledger_id)),
+        );
     }
 
     // Extract deposit_pubkey from params
     let deposit_pubkey_str = match request.params.get("deposit_pubkey") {
         Some(serde_json::Value::String(s)) => s.clone(),
-        _ => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+        _ => {
+            return (
+                false,
+                None,
+                Some("Missing deposit_pubkey parameter".to_string()),
+            )
+        }
     };
 
-    let deposit_pubkey = match PublicKey::from_str(&deposit_pubkey_str) {
+    let _deposit_pubkey = match PublicKey::from_str(&deposit_pubkey_str) {
         Ok(pk) => pk,
         Err(e) => return (false, None, Some(format!("Invalid deposit_pubkey: {}", e))),
     };
@@ -35,7 +45,10 @@ pub async fn process_deposit_open_request(
     let advertisement = match transport.fetch_ledger_advertisement(ledger_id).await {
         Ok(Some(ad)) => ad,
         Ok(None) => {
-            tracing::warn!("No advertisement found for ledger {}, using zero fee minimums", ledger_id);
+            tracing::warn!(
+                "No advertisement found for ledger {}, using zero fee minimums",
+                ledger_id
+            );
             LedgerAdvertisement::new(
                 ledger_id.to_string(),
                 String::new(),
@@ -44,7 +57,10 @@ pub async fn process_deposit_open_request(
             )
         }
         Err(e) => {
-            tracing::warn!("Failed to fetch advertisement: {}, using zero fee minimums", e);
+            tracing::warn!(
+                "Failed to fetch advertisement: {}, using zero fee minimums",
+                e
+            );
             LedgerAdvertisement::new(
                 ledger_id.to_string(),
                 String::new(),
@@ -59,28 +75,37 @@ pub async fn process_deposit_open_request(
     // Extract fee parameters from request OR use advertisement defaults
     // Use advertisement's fee_period_blocks unless client overrides
     // If fee_period_blocks is 0 (not set), use default of 2016 blocks (~2 weeks)
-    let ad_period = if advertisement.fee_period_blocks > 0 { advertisement.fee_period_blocks } else { 2016 };
-    let frequency_blocks = request.params.get("fee_frequency")
+    let ad_period = if advertisement.fee_period_blocks > 0 {
+        advertisement.fee_period_blocks
+    } else {
+        2016
+    };
+    let frequency_blocks = request
+        .params
+        .get("fee_frequency")
         .and_then(|v| v.as_u64())
         .map(|v| if v > 0 { v as u32 } else { 2016 })
         .unwrap_or(ad_period);
 
-    let fees = if request.params.get("fee_fixed").is_some()
-        || request.params.get("fee_bps").is_some()
-    {
-        deposits_core::FeeStructure {
-            annualized_msats: request.params.get("fee_fixed")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
-            annualized_bps: request.params.get("fee_bps")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u16,
-            frequency_blocks,
-        }
-    } else {
-        // Use advertisement defaults if no fees specified
-        advertisement.to_fee_structure()
-    };
+    let fees =
+        if request.params.get("fee_fixed").is_some() || request.params.get("fee_bps").is_some() {
+            deposits_core::FeeStructure {
+                annualized_msats: request
+                    .params
+                    .get("fee_fixed")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                annualized_bps: request
+                    .params
+                    .get("fee_bps")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u16,
+                frequency_blocks,
+            }
+        } else {
+            // Use advertisement defaults if no fees specified
+            advertisement.to_fee_structure()
+        };
 
     // Validate proposed fees meet operator minimums
     if let Err(e) = deposits_core::operation_validation::validate_fee_minimum(
@@ -95,7 +120,10 @@ pub async fn process_deposit_open_request(
     let descriptor = format!("pk({})", deposit_pubkey_str);
 
     // Open the deposit with co-signing
-    match node.open_deposit(ledger_id, &descriptor, Some(fees), None, false, false).await {
+    match node
+        .open_deposit(ledger_id, &descriptor, Some(fees), None, false, false)
+        .await
+    {
         Ok(deposit) => {
             let result = serde_json::json!({
                 "deposit_pubkey": deposit_pubkey_str,
@@ -109,9 +137,7 @@ pub async fn process_deposit_open_request(
             });
             (true, Some(result), None)
         }
-        Err(e) => {
-            (false, None, Some(e.to_string()))
-        }
+        Err(e) => (false, None, Some(e.to_string())),
     }
 }
 
@@ -124,21 +150,34 @@ pub async fn process_make_offer_request(
 ) -> (bool, Option<serde_json::Value>, Option<String>) {
     // Verify the ledger exists (ledger_id may be a hash or reserves_id)
     // We use ledger_id directly for the offer since it's stable across custody transfers
-    let resolved_ledger_id = if ledger_id.len() == 64 && ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        // Already a 64-char hex ledger_id hash
-        ledger_id.to_string()
-    } else {
-        // It's a reserves_id, look up the ledger to get its ledger_id
-        match node.get_ledger_by_reserves_key(ledger_id) {
-            Some((_, ledger)) => ledger.ledger_id_hex(),
-            None => return (false, None, Some(format!("Ledger not found: {}", ledger_id))),
-        }
-    };
+    let resolved_ledger_id =
+        if ledger_id.len() == 64 && ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            // Already a 64-char hex ledger_id hash
+            ledger_id.to_string()
+        } else {
+            // It's a reserves_id, look up the ledger to get its ledger_id
+            match node.get_ledger_by_reserves_key(ledger_id) {
+                Some((_, ledger)) => ledger.ledger_id_hex(),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Ledger not found: {}", ledger_id)),
+                    )
+                }
+            }
+        };
 
     // Extract deposit_pubkey from params
     let deposit_pubkey_str = match request.params.get("deposit_pubkey") {
         Some(serde_json::Value::String(s)) => s.clone(),
-        _ => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+        _ => {
+            return (
+                false,
+                None,
+                Some("Missing deposit_pubkey parameter".to_string()),
+            )
+        }
     };
 
     let deposit_pubkey = match PublicKey::from_str(&deposit_pubkey_str) {
@@ -159,18 +198,34 @@ pub async fn process_make_offer_request(
 
     let blocks_valid = match request.params.get("blocks_valid").and_then(|v| v.as_u64()) {
         Some(v) => v as u32,
-        None => return (false, None, Some("Missing blocks_valid parameter".to_string())),
+        None => {
+            return (
+                false,
+                None,
+                Some("Missing blocks_valid parameter".to_string()),
+            )
+        }
     };
 
     if min_sats >= max_sats {
-        return (false, None, Some("min_sats must be less than max_sats".to_string()));
+        return (
+            false,
+            None,
+            Some("min_sats must be less than max_sats".to_string()),
+        );
     }
 
     // Fetch the advertisement to get fee minimums
-    let advertisement = match transport.fetch_ledger_advertisement(&resolved_ledger_id).await {
+    let advertisement = match transport
+        .fetch_ledger_advertisement(&resolved_ledger_id)
+        .await
+    {
         Ok(Some(ad)) => ad,
         Ok(None) => {
-            tracing::warn!("No advertisement found for ledger {}, using zero fee minimums", resolved_ledger_id);
+            tracing::warn!(
+                "No advertisement found for ledger {}, using zero fee minimums",
+                resolved_ledger_id
+            );
             LedgerAdvertisement::new(
                 resolved_ledger_id.clone(),
                 String::new(),
@@ -179,7 +234,10 @@ pub async fn process_make_offer_request(
             )
         }
         Err(e) => {
-            tracing::warn!("Failed to fetch advertisement: {}, using zero fee minimums", e);
+            tracing::warn!(
+                "Failed to fetch advertisement: {}, using zero fee minimums",
+                e
+            );
             LedgerAdvertisement::new(
                 resolved_ledger_id.clone(),
                 String::new(),
@@ -190,23 +248,33 @@ pub async fn process_make_offer_request(
     };
 
     let (min_annual_bps, min_fixed_per_period) = advertisement.minimum_fees();
-    let ad_period = if advertisement.fee_period_blocks > 0 { advertisement.fee_period_blocks } else { 2016 };
+    let ad_period = if advertisement.fee_period_blocks > 0 {
+        advertisement.fee_period_blocks
+    } else {
+        2016
+    };
 
     // Extract fee parameters from request if provided, or use advertisement defaults
     let fees = if request.params.get("fee_fixed").is_some()
         || request.params.get("fee_bps").is_some()
         || request.params.get("fee_frequency").is_some()
     {
-        let frequency_blocks = request.params.get("fee_frequency")
+        let frequency_blocks = request
+            .params
+            .get("fee_frequency")
             .and_then(|v| v.as_u64())
             .map(|v| if v > 0 { v as u32 } else { ad_period })
             .unwrap_or(ad_period);
 
         deposits_core::FeeStructure {
-            annualized_msats: request.params.get("fee_fixed")
+            annualized_msats: request
+                .params
+                .get("fee_fixed")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
-            annualized_bps: request.params.get("fee_bps")
+            annualized_bps: request
+                .params
+                .get("fee_bps")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u16,
             frequency_blocks,
@@ -232,7 +300,14 @@ pub async fn process_make_offer_request(
 
     // Create the offer using ledger_id (stable across custody transfers)
     // Include fees so they're stored with the offer and applied when deposit is completed
-    match node.create_deposit_offer(&resolved_ledger_id, deposit_pubkey, max_sats, min_sats, blocks_valid, Some(fees)) {
+    match node.create_deposit_offer(
+        &resolved_ledger_id,
+        deposit_pubkey,
+        max_sats,
+        min_sats,
+        blocks_valid,
+        Some(fees),
+    ) {
         Ok(offer) => {
             // Check if we need a co-signature (post-rotation)
             // Note: CLI handlers use their own transport, but can still check has_quorum_reserves
@@ -241,7 +316,7 @@ pub async fn process_make_offer_request(
             // The daemon (Node) handles make_offer requests and will add co-signatures.
             // CLI handlers are for development/testing where co-signing may not be needed.
             let result = serde_json::json!({
-                "offer_id": hex::encode(&offer.offer_id),
+                "offer_id": hex::encode(offer.offer_id),
                 "operator_id": offer.operator_id.to_string(),
                 "funding_address": offer.funding_address,
                 "deadline_block": offer.deadline_block,
@@ -252,9 +327,7 @@ pub async fn process_make_offer_request(
             });
             (true, Some(result), None)
         }
-        Err(e) => {
-            (false, None, Some(e.to_string()))
-        }
+        Err(e) => (false, None, Some(e.to_string())),
     }
 }
 
@@ -268,18 +341,34 @@ pub async fn process_collateral_lock_request(
 
     // Verify ledger exists - we use ledger_id directly now
     if node.get_ledger(ledger_id).is_none() {
-        return (false, None, Some(format!("Ledger not found: {}", ledger_id)));
+        return (
+            false,
+            None,
+            Some(format!("Ledger not found: {}", ledger_id)),
+        );
     }
 
     // Extract deposit_secret from params
     let deposit_secret_hex = match request.params.get("deposit_secret") {
         Some(serde_json::Value::String(s)) => s.clone(),
-        _ => return (false, None, Some("Missing deposit_secret parameter".to_string())),
+        _ => {
+            return (
+                false,
+                None,
+                Some("Missing deposit_secret parameter".to_string()),
+            )
+        }
     };
 
     let secret_bytes = match hex::decode(&deposit_secret_hex) {
         Ok(b) => b,
-        Err(e) => return (false, None, Some(format!("Invalid deposit_secret hex: {}", e))),
+        Err(e) => {
+            return (
+                false,
+                None,
+                Some(format!("Invalid deposit_secret hex: {}", e)),
+            )
+        }
     };
 
     let deposit_secret = match bitcoin::secp256k1::SecretKey::from_slice(&secret_bytes) {
@@ -295,43 +384,71 @@ pub async fn process_collateral_lock_request(
     // Extract required parameters
     let amount_msats = match request.params.get("amount_msats").and_then(|v| v.as_u64()) {
         Some(v) => v,
-        None => return (false, None, Some("Missing amount_msats parameter".to_string())),
+        None => {
+            return (
+                false,
+                None,
+                Some("Missing amount_msats parameter".to_string()),
+            )
+        }
     };
 
     let lock_blocks = match request.params.get("lock_blocks").and_then(|v| v.as_u64()) {
         Some(v) => v as u32,
-        None => return (false, None, Some("Missing lock_blocks parameter".to_string())),
+        None => {
+            return (
+                false,
+                None,
+                Some("Missing lock_blocks parameter".to_string()),
+            )
+        }
     };
 
     // Get current block height and compute lock_until_block
     let current_block = match node.wallet.get_block_height() {
         Ok(h) => h,
-        Err(e) => return (false, None, Some(format!("Failed to get block height: {}", e))),
+        Err(e) => {
+            return (
+                false,
+                None,
+                Some(format!("Failed to get block height: {}", e)),
+            )
+        }
     };
     let lock_until_block = current_block + lock_blocks;
 
     // Parse requesting operator (defaults to sender's node_id derived from event)
-    let requesting_operator = if let Some(serde_json::Value::String(hex)) = request.params.get("requesting_operator") {
-        match PublicKey::from_str(hex) {
-            Ok(pk) => pk,
-            Err(e) => return (false, None, Some(format!("Invalid requesting_operator: {}", e))),
-        }
-    } else {
-        // Default to the operator's own node_id (self-request)
-        node.node_id
-    };
+    let requesting_operator =
+        if let Some(serde_json::Value::String(hex)) = request.params.get("requesting_operator") {
+            match PublicKey::from_str(hex) {
+                Ok(pk) => pk,
+                Err(e) => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Invalid requesting_operator: {}", e)),
+                    )
+                }
+            }
+        } else {
+            // Default to the operator's own node_id (self-request)
+            node.node_id
+        };
 
     // Lock the collateral (now includes co-signing and broadcast)
     // In direct CLI mode, the node itself is the quorum member pledging collateral
-    match node.lock_collateral(
-        ledger_id,
-        &descriptor,
-        &deposit_secret,
-        amount_msats,
-        lock_until_block,
-        requesting_operator,
-        node.node_id,
-    ).await {
+    match node
+        .lock_collateral(
+            ledger_id,
+            &descriptor,
+            &deposit_secret,
+            amount_msats,
+            lock_until_block,
+            requesting_operator,
+            node.node_id,
+        )
+        .await
+    {
         Ok(attestation) => {
             // Serialize attestation as JSON then base64 encode for easy shell parsing
             // (base64 avoids escaping issues with nested JSON)
@@ -346,9 +463,7 @@ pub async fn process_collateral_lock_request(
             });
             (true, Some(result), None)
         }
-        Err(e) => {
-            (false, None, Some(e.to_string()))
-        }
+        Err(e) => (false, None, Some(e.to_string())),
     }
 }
 
@@ -365,20 +480,42 @@ pub async fn process_deposit_withdraw_request(
 
     // Verify ledger exists - we use ledger_id directly now
     if node.get_ledger(ledger_id).is_none() {
-        return (false, None, Some(format!("Ledger not found: {}", ledger_id)));
+        return (
+            false,
+            None,
+            Some(format!("Ledger not found: {}", ledger_id)),
+        );
     }
 
     // Extract deposit_secret from params
     let deposit_secret_hex = match request.params.get("deposit_secret") {
         Some(serde_json::Value::String(s)) => s.clone(),
-        _ => return (false, None, Some("Missing deposit_secret parameter".to_string())),
+        _ => {
+            return (
+                false,
+                None,
+                Some("Missing deposit_secret parameter".to_string()),
+            )
+        }
     };
 
     // Parse the secret and derive the pubkey
     let secret_bytes = match hex::decode(&deposit_secret_hex) {
         Ok(b) if b.len() == 32 => b,
-        Ok(_) => return (false, None, Some("deposit_secret must be 32 bytes".to_string())),
-        Err(e) => return (false, None, Some(format!("Invalid deposit_secret hex: {}", e))),
+        Ok(_) => {
+            return (
+                false,
+                None,
+                Some("deposit_secret must be 32 bytes".to_string()),
+            )
+        }
+        Err(e) => {
+            return (
+                false,
+                None,
+                Some(format!("Invalid deposit_secret hex: {}", e)),
+            )
+        }
     };
 
     let secp = Secp256k1::new();
@@ -391,13 +528,25 @@ pub async fn process_deposit_withdraw_request(
     // Extract destination address
     let destination_address = match request.params.get("destination_address") {
         Some(serde_json::Value::String(s)) => s.clone(),
-        _ => return (false, None, Some("Missing destination_address parameter".to_string())),
+        _ => {
+            return (
+                false,
+                None,
+                Some("Missing destination_address parameter".to_string()),
+            )
+        }
     };
 
     // Extract amount_sats
     let amount_sats = match request.params.get("amount_sats").and_then(|v| v.as_u64()) {
         Some(v) => v,
-        None => return (false, None, Some("Missing amount_sats parameter".to_string())),
+        None => {
+            return (
+                false,
+                None,
+                Some("Missing amount_sats parameter".to_string()),
+            )
+        }
     };
 
     // Use a fixed fee for now (1000 sats)
@@ -410,16 +559,18 @@ pub async fn process_deposit_withdraw_request(
 
     // Generate nonce and create withdrawal signature
     let nonce: [u8; 32] = {
-        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::hashes::{sha256, Hash};
         let mut data = Vec::new();
         data.extend_from_slice(&secret_bytes);
         data.extend_from_slice(destination_address.as_bytes());
         data.extend_from_slice(&amount_sats.to_le_bytes());
-        data.extend_from_slice(&std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-            .to_le_bytes());
+        data.extend_from_slice(
+            &std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_le_bytes(),
+        );
         *sha256::Hash::hash(&data).as_byte_array()
     };
 
@@ -428,8 +579,8 @@ pub async fn process_deposit_withdraw_request(
     let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
 
     // Create the withdrawal signature
-    use bitcoin::secp256k1::Message;
     use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::secp256k1::Message;
     let signing_message = deposits_core::types::OnChainWithdrawal::signing_message(
         &nonce,
         &deposit_id,
@@ -445,22 +596,27 @@ pub async fn process_deposit_withdraw_request(
     let signature: [u8; 64] = sig.serialize();
 
     // Create witness from signature
-    let depositor_witness = deposits_core::types::DescriptorWitness { stack: vec![signature.to_vec()] };
+    let depositor_witness = deposits_core::types::DescriptorWitness {
+        stack: vec![signature.to_vec()],
+    };
 
     // Lock the withdrawal with co-signing
-    match node.lock_withdrawal(
-        ledger_id,
-        deposit_id,
-        destination_address.clone(),
-        amount_sats,
-        fee_sats,
-        nonce,
-        depositor_witness,
-        None, // memo
-    ).await {
+    match node
+        .lock_withdrawal(
+            ledger_id,
+            deposit_id,
+            destination_address.clone(),
+            amount_sats,
+            fee_sats,
+            nonce,
+            depositor_witness,
+            None, // memo
+        )
+        .await
+    {
         Ok(result) => {
             let result_json = serde_json::json!({
-                "withdrawal_id": hex::encode(&result.withdrawal.withdrawal_id),
+                "withdrawal_id": hex::encode(result.withdrawal.withdrawal_id),
                 "amount_sats": amount_sats,
                 "fee_sats": fee_sats,
                 "destination_address": destination_address,
@@ -468,9 +624,7 @@ pub async fn process_deposit_withdraw_request(
             });
             (true, Some(result_json), None)
         }
-        Err(e) => {
-            (false, None, Some(e.to_string()))
-        }
+        Err(e) => (false, None, Some(e.to_string())),
     }
 }
 
@@ -480,15 +634,15 @@ pub async fn process_deposit_withdraw_request(
 /// We validate the violation, verify the spending transaction, sign the sighash, and respond.
 pub async fn process_custody_transfer_sign_request(
     node: &Node,
-    config: &NodeConfig,
+    _config: &NodeConfig,
     request: &LedgerRequest,
 ) -> (bool, Option<serde_json::Value>, Option<String>) {
+    use crate::nostr::{ledger_tag, KIND_LEDGER_UPDATE};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use bitcoin::secp256k1::{Keypair, Secp256k1};
     use deposits_core::messages::LedgerOperation;
-    use deposits_core::{TlvDecode, SignedLedgerUpdate};
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use deposits_core::{SignedLedgerUpdate, TlvDecode};
     use nostr_sdk::prelude::*;
-    use crate::nostr::{KIND_LEDGER_UPDATE, ledger_tag};
 
     // Unused: node (we don't need the node for this handler, we fetch ledger from Nostr directly)
     let _ = node;
@@ -509,22 +663,54 @@ pub async fn process_custody_transfer_sign_request(
     // TODO: Verify unsigned_tx actually spends to new_custodian's address
     let _unsigned_tx_hex = match request.params.get("unsigned_tx").and_then(|v| v.as_str()) {
         Some(tx) => tx.to_string(),
-        None => return (false, None, Some("Missing unsigned_tx parameter".to_string())),
+        None => {
+            return (
+                false,
+                None,
+                Some("Missing unsigned_tx parameter".to_string()),
+            )
+        }
     };
 
     let new_custodian_hex = match request.params.get("new_custodian").and_then(|v| v.as_str()) {
         Some(c) => c.to_string(),
-        None => return (false, None, Some("Missing new_custodian parameter".to_string())),
+        None => {
+            return (
+                false,
+                None,
+                Some("Missing new_custodian parameter".to_string()),
+            )
+        }
     };
 
-    let violation_details = match request.params.get("violation_details").and_then(|v| v.as_str()) {
+    let violation_details = match request
+        .params
+        .get("violation_details")
+        .and_then(|v| v.as_str())
+    {
         Some(d) => d.to_string(),
-        None => return (false, None, Some("Missing violation_details parameter".to_string())),
+        None => {
+            return (
+                false,
+                None,
+                Some("Missing violation_details parameter".to_string()),
+            )
+        }
     };
 
-    let last_valid_sequence = match request.params.get("last_valid_sequence").and_then(|v| v.as_u64()) {
+    let last_valid_sequence = match request
+        .params
+        .get("last_valid_sequence")
+        .and_then(|v| v.as_u64())
+    {
         Some(seq) => seq,
-        None => return (false, None, Some("Missing last_valid_sequence parameter".to_string())),
+        None => {
+            return (
+                false,
+                None,
+                Some("Missing last_valid_sequence parameter".to_string()),
+            )
+        }
     };
 
     // Parse sighash
@@ -545,8 +731,14 @@ pub async fn process_custody_transfer_sign_request(
     };
 
     println!("    Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
-    println!("    New custodian: {}...", &new_custodian_hex[..16.min(new_custodian_hex.len())]);
-    println!("    Violation: {}", &violation_details[..50.min(violation_details.len())]);
+    println!(
+        "    New custodian: {}...",
+        &new_custodian_hex[..16.min(new_custodian_hex.len())]
+    );
+    println!(
+        "    Violation: {}",
+        &violation_details[..50.min(violation_details.len())]
+    );
 
     // Validate that we're a quorum member for this ledger
     // First, we need to verify the violation by fetching and validating the ledger ourselves
@@ -564,7 +756,10 @@ pub async fn process_custody_transfer_sign_request(
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [ledger_tag(ledger_id.as_str())])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [ledger_tag(ledger_id.as_str())],
+        )
         .limit(500);
 
     let events = match client.fetch_events(vec![filter], None).await {
@@ -588,21 +783,33 @@ pub async fn process_custody_transfer_sign_request(
 
     // Deduplicate by (sequence_number, operator_id, current_hash) to handle relay duplicates
     // Include operator_id to preserve different operators' updates at same sequence
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
+    updates.dedup_by(|a, b| {
+        a.sequence_number == b.sequence_number
+            && a.operator_id == b.operator_id
+            && a.current_hash == b.current_hash
+    });
 
     // Find the original operator (the one who opened the ledger)
-    let original_operator = updates.iter()
+    let original_operator = updates
+        .iter()
         .find(|u| u.sequence_number == 0)
         .map(|u| u.operator_id);
 
     let original_operator = match original_operator {
         Some(op) => op,
-        None => return (false, None, Some("Could not find ledger genesis (sequence 0)".to_string())),
+        None => {
+            return (
+                false,
+                None,
+                Some("Could not find ledger genesis (sequence 0)".to_string()),
+            )
+        }
     };
 
     // Filter to only the original operator's updates for violation validation
     // (dispute branches from other operators are valid forks, not violations)
-    let original_updates: Vec<&SignedLedgerUpdate> = updates.iter()
+    let original_updates: Vec<&SignedLedgerUpdate> = updates
+        .iter()
         .filter(|u| u.operator_id == original_operator)
         .collect();
 
@@ -640,15 +847,23 @@ pub async fn process_custody_transfer_sign_request(
     }
 
     if !found_violation {
-        return (false, None, Some("Could not verify violation - ledger appears conforming".to_string()));
+        return (
+            false,
+            None,
+            Some("Could not verify violation - ledger appears conforming".to_string()),
+        );
     }
 
     // Verify that the last_valid_sequence matches our validation
     if validated_sequence != last_valid_sequence as i64 {
-        return (false, None, Some(format!(
-            "Sequence mismatch: requester says {}, we validated {}",
-            last_valid_sequence, validated_sequence
-        )));
+        return (
+            false,
+            None,
+            Some(format!(
+                "Sequence mismatch: requester says {}, we validated {}",
+                last_valid_sequence, validated_sequence
+            )),
+        );
     }
 
     println!("    Violation verified at seq {}", validated_sequence + 1);
@@ -657,19 +872,20 @@ pub async fn process_custody_transfer_sign_request(
     let mut is_quorum_member = false;
     for update in updates.iter().take((validated_sequence + 1) as usize) {
         if let Ok(operation) = LedgerOperation::tlv_decode(&update.message) {
-            match operation {
-                LedgerOperation::QuorumAddMember { quorum_member, .. } => {
-                    if quorum_member == our_pubkey {
-                        is_quorum_member = true;
-                    }
+            if let LedgerOperation::QuorumAddMember { quorum_member, .. } = operation {
+                if quorum_member == our_pubkey {
+                    is_quorum_member = true;
                 }
-                _ => {}
             }
         }
     }
 
     if !is_quorum_member {
-        return (false, None, Some("We are not a quorum member for this ledger".to_string()));
+        return (
+            false,
+            None,
+            Some("We are not a quorum member for this ledger".to_string()),
+        );
     }
 
     println!("    Verified: we are a quorum member");
@@ -682,7 +898,10 @@ pub async fn process_custody_transfer_sign_request(
     let signature = secp.sign_schnorr(&msg, &keypair);
     let signature_bytes = signature.serialize();
 
-    println!("    Signed sighash: {}...", &hex::encode(&signature_bytes[..4]));
+    println!(
+        "    Signed sighash: {}...",
+        &hex::encode(&signature_bytes[..4])
+    );
 
     // Return the signature
     let result = serde_json::json!({
@@ -700,15 +919,15 @@ pub async fn process_custody_transfer_sign_request(
 /// that moves reserves to a lottery output for dispute resolution.
 pub async fn process_confiscation_sign_request(
     node: &Node,
-    config: &NodeConfig,
+    _config: &NodeConfig,
     request: &LedgerRequest,
 ) -> (bool, Option<serde_json::Value>, Option<String>) {
+    use crate::nostr::{ledger_tag, KIND_LEDGER_UPDATE};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use bitcoin::secp256k1::{Keypair, Secp256k1};
     use deposits_core::messages::LedgerOperation;
-    use deposits_core::{TlvDecode, SignedLedgerUpdate};
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use deposits_core::{SignedLedgerUpdate, TlvDecode};
     use nostr_sdk::prelude::*;
-    use crate::nostr::{KIND_LEDGER_UPDATE, ledger_tag};
 
     // Unused: node (we don't need the node for this handler, we fetch ledger from Nostr directly)
     let _ = node;
@@ -728,17 +947,43 @@ pub async fn process_confiscation_sign_request(
 
     let _unsigned_tx_hex = match request.params.get("unsigned_tx").and_then(|v| v.as_str()) {
         Some(tx) => tx.to_string(),
-        None => return (false, None, Some("Missing unsigned_tx parameter".to_string())),
+        None => {
+            return (
+                false,
+                None,
+                Some("Missing unsigned_tx parameter".to_string()),
+            )
+        }
     };
 
-    let lottery_address = match request.params.get("lottery_address").and_then(|v| v.as_str()) {
+    let lottery_address = match request
+        .params
+        .get("lottery_address")
+        .and_then(|v| v.as_str())
+    {
         Some(a) => a.to_string(),
-        None => return (false, None, Some("Missing lottery_address parameter".to_string())),
+        None => {
+            return (
+                false,
+                None,
+                Some("Missing lottery_address parameter".to_string()),
+            )
+        }
     };
 
-    let violation_details = match request.params.get("violation_details").and_then(|v| v.as_str()) {
+    let violation_details = match request
+        .params
+        .get("violation_details")
+        .and_then(|v| v.as_str())
+    {
         Some(d) => d.to_string(),
-        None => return (false, None, Some("Missing violation_details parameter".to_string())),
+        None => {
+            return (
+                false,
+                None,
+                Some("Missing violation_details parameter".to_string()),
+            )
+        }
     };
 
     // Parse sighash
@@ -753,8 +998,14 @@ pub async fn process_confiscation_sign_request(
     };
 
     println!("    Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
-    println!("    Lottery addr: {}...", &lottery_address[..20.min(lottery_address.len())]);
-    println!("    Reason: {}", &violation_details[..50.min(violation_details.len())]);
+    println!(
+        "    Lottery addr: {}...",
+        &lottery_address[..20.min(lottery_address.len())]
+    );
+    println!(
+        "    Reason: {}",
+        &violation_details[..50.min(violation_details.len())]
+    );
 
     // Use the node's operator key (BIP32-derived from seed, not raw seed)
     let secp = Secp256k1::new();
@@ -769,7 +1020,10 @@ pub async fn process_confiscation_sign_request(
 
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [ledger_tag(ledger_id.as_str())])
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [ledger_tag(ledger_id.as_str())],
+        )
         .limit(500);
 
     let events = match client.fetch_events(vec![filter], None).await {
@@ -790,25 +1044,30 @@ pub async fn process_confiscation_sign_request(
     }
 
     updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
+    updates.dedup_by(|a, b| {
+        a.sequence_number == b.sequence_number
+            && a.operator_id == b.operator_id
+            && a.current_hash == b.current_hash
+    });
 
     // Verify we're a quorum member by checking the ledger operations
     let mut is_quorum_member = false;
     for update in updates.iter() {
         if let Ok(operation) = LedgerOperation::tlv_decode(&update.message) {
-            match operation {
-                LedgerOperation::QuorumAddMember { quorum_member, .. } => {
-                    if quorum_member == our_pubkey {
-                        is_quorum_member = true;
-                    }
+            if let LedgerOperation::QuorumAddMember { quorum_member, .. } = operation {
+                if quorum_member == our_pubkey {
+                    is_quorum_member = true;
                 }
-                _ => {}
             }
         }
     }
 
     if !is_quorum_member {
-        return (false, None, Some("We are not a quorum member for this ledger".to_string()));
+        return (
+            false,
+            None,
+            Some("We are not a quorum member for this ledger".to_string()),
+        );
     }
 
     println!("    Verified: we are a quorum member");
@@ -824,10 +1083,14 @@ pub async fn process_confiscation_sign_request(
     }
 
     if armed_count < 2 {
-        return (false, None, Some(format!(
-            "Not enough armed participants for confiscation (found {})",
-            armed_count
-        )));
+        return (
+            false,
+            None,
+            Some(format!(
+                "Not enough armed participants for confiscation (found {})",
+                armed_count
+            )),
+        );
     }
 
     println!("    Found {} armed participants", armed_count);
@@ -837,7 +1100,10 @@ pub async fn process_confiscation_sign_request(
     let signature = secp.sign_schnorr(&msg, &keypair);
     let signature_bytes = signature.serialize();
 
-    println!("    Signed sighash: {}...", &hex::encode(&signature_bytes[..4]));
+    println!(
+        "    Signed sighash: {}...",
+        &hex::encode(&signature_bytes[..4])
+    );
 
     // Return the signature
     let result = serde_json::json!({
@@ -858,8 +1124,8 @@ pub async fn process_custodian_query_request(
     ledger_id: &str,
     _request: &LedgerRequest,
 ) -> (bool, Option<serde_json::Value>, Option<String>) {
-    use bitcoin::secp256k1::{Secp256k1, Message};
     use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::secp256k1::{Message, Secp256k1};
 
     // Look up the ledger
     let ledger = if let Some((_, l)) = node.get_ledger_by_ledger_id(ledger_id) {
@@ -882,9 +1148,7 @@ pub async fn process_custodian_query_request(
 
     let attestation_msg = format!(
         "CUSTODIAN_ATTESTATION:{}:{}:{}",
-        ledger_id,
-        current_custodian,
-        timestamp
+        ledger_id, current_custodian, timestamp
     );
 
     // Sign the attestation with our operator key

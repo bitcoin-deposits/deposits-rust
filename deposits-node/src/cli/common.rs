@@ -122,8 +122,7 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     });
 
     // Create data directory
-    std::fs::create_dir_all(&data_dir)
-        .map_err(|e| format!("Failed to create data dir: {}", e))?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create data dir: {}", e))?;
 
     Ok(NodeConfig {
         seed,

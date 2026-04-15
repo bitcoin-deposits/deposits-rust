@@ -13,12 +13,12 @@ use bitcoin::Network;
 use deposits_core::ledger::Ledger;
 use deposits_core::message_validation::HandlerContext;
 use deposits_core::messages::LedgerOperation;
-use deposits_core::TlvDecode;
 use deposits_core::types::{
-    Deposit, DepositId, DepositOffer, DepositOfferStatus, DescriptorWitness, FeeStructure,
-    OnChainWithdrawal, OnChainWithdrawalStatus,
-    WithdrawalLockResult, WithdrawalCompleteResult, compute_deposit_id,
+    compute_deposit_id, Deposit, DepositId, DepositOffer, DepositOfferStatus, DescriptorWitness,
+    FeeStructure, OnChainWithdrawal, OnChainWithdrawalStatus, WithdrawalCompleteResult,
+    WithdrawalLockResult,
 };
+use deposits_core::TlvDecode;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -278,7 +278,8 @@ pub struct Node {
 
     /// Pending consent requests: request_id -> oneshot sender for consent result
     /// Used by quorum_add to await the member's consent signature
-    pending_consent_requests: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<ConsentResult>>>>,
+    pending_consent_requests:
+        Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<ConsentResult>>>>,
 
     /// Per-ledger staging lock. Only one update can be in-flight at a time per ledger.
     /// Prevents concurrent state mutations and ensures cosign requests are serialized.
@@ -317,13 +318,15 @@ pub struct Node {
     /// Persistent per-ledger worker channels. Each owned ledger gets a dedicated
     /// mpsc channel. The main loop routes requests to the channel. A persistent
     /// tokio task reads and processes requests one at a time — no spawn/reap gaps.
-    ledger_workers: Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<crate::nostr::LedgerRequest>>>,
+    ledger_workers:
+        Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<crate::nostr::LedgerRequest>>>,
 
     /// Persistent per-ledger workers for cosign requests (where we're a quorum member).
     /// Separate from ledger_workers so cosign request processing never blocks the main
     /// loop — the main loop must stay free to pump process_events + drain_responses so
     /// our OWN cosign responses get routed to oneshot channels.
-    cosign_workers: Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<crate::nostr::LedgerRequest>>>,
+    cosign_workers:
+        Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<crate::nostr::LedgerRequest>>>,
 
     /// Whether deposit access control is enabled (DEPOSIT_ACCESS_CONTROL=true).
     /// When false, all deposit opens are allowed (denylist still checked).
@@ -431,11 +434,18 @@ impl Node {
         let relay_url = config.relays.first().cloned().unwrap_or_default();
 
         // Create nostr transport (fast relays for subs/publish, slow relays for gap-fill)
-        let nostr = NostrTransport::new_with_slow(secret_key, config.relays, config.slow_relays, config.skip_nostr_verify).await?;
+        let nostr = NostrTransport::new_with_slow(
+            secret_key,
+            config.relays,
+            config.slow_relays,
+            config.skip_nostr_verify,
+        )
+        .await?;
 
         // Create handler with data_dir for ledger persistence
         let handler_data_dir = config.data_dir.join("wallet");
-        let enable_metrics_emitter = std::env::var("DEPOSITS_ENABLE_METRICS_EMITTER").as_deref() == Ok("1");
+        let enable_metrics_emitter =
+            std::env::var("DEPOSITS_ENABLE_METRICS_EMITTER").as_deref() == Ok("1");
         let (handler, outbound_rx) = DepositsHandler::new(
             secret_key,
             wallet.clone(),
@@ -457,7 +467,8 @@ impl Node {
         // Collect owned ledger IDs from already-loaded handler ledgers
         {
             let ledgers = handler_arc.ledgers.lock().unwrap();
-            let owned_ids: Vec<String> = ledgers.iter()
+            let owned_ids: Vec<String> = ledgers
+                .iter()
                 .filter(|(_, larc)| larc.read().unwrap().operator_key() == node_id)
                 .map(|(_, larc)| larc.read().unwrap().ledger_id_hex())
                 .collect();
@@ -502,16 +513,28 @@ impl Node {
             deposit_access_control: std::env::var("DEPOSIT_ACCESS_CONTROL")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
-            deposit_allowlist: RwLock::new(Self::load_list(&config.data_dir, "deposit_allowlist.txt")),
-            deposit_denylist: RwLock::new(Self::load_list(&config.data_dir, "deposit_denylist.txt")),
-            deposit_domain_allowlist: RwLock::new(Self::load_list(&config.data_dir, "deposit_domain_allowlist.txt")),
-            attestation_verifier_pubkey: std::env::var("ATTESTATION_VERIFIER_PUBKEY").ok().filter(|s| !s.is_empty()).map(|s| {
-                // Normalize npub/hex to hex at load time
-                match nostr_sdk::PublicKey::parse(&s) {
-                    Ok(pk) => pk.to_hex(),
-                    Err(_) => s,
-                }
-            }),
+            deposit_allowlist: RwLock::new(Self::load_list(
+                &config.data_dir,
+                "deposit_allowlist.txt",
+            )),
+            deposit_denylist: RwLock::new(Self::load_list(
+                &config.data_dir,
+                "deposit_denylist.txt",
+            )),
+            deposit_domain_allowlist: RwLock::new(Self::load_list(
+                &config.data_dir,
+                "deposit_domain_allowlist.txt",
+            )),
+            attestation_verifier_pubkey: std::env::var("ATTESTATION_VERIFIER_PUBKEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    // Normalize npub/hex to hex at load time
+                    match nostr_sdk::PublicKey::parse(&s) {
+                        Ok(pk) => pk.to_hex(),
+                        Err(_) => s,
+                    }
+                }),
             max_deposit_balance_msats: std::env::var("MAX_DEPOSIT_BALANCE_MSATS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -545,11 +568,15 @@ impl Node {
     ///
     /// Call this after appending an operation to sign the update before broadcasting.
     pub fn sign_last_update(&self, ledger_id: &str) -> Result<(), Error> {
-        use bitcoin::secp256k1::{Secp256k1, Message};
-        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::Message;
 
         // Get the ledger by ledger_id
-        let ledger_arc = self.handler.ledgers.lock().unwrap()
+        let ledger_arc = self
+            .handler
+            .ledgers
+            .lock()
+            .unwrap()
             .get(ledger_id)
             .cloned()
             .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
@@ -562,11 +589,16 @@ impl Node {
             let hash = sha256::Hash::hash(&data);
             let secp = &self.secp;
             let msg = Message::from_digest(*hash.as_byte_array());
-            let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+            let keypair =
+                bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
             let sig = secp.sign_schnorr(&msg, &keypair);
 
             update.operator_signature = sig.serialize();
-            tracing::debug!("Signed update seq={} for ledger {}", update.sequence_number, &ledger_id[..16.min(ledger_id.len())]);
+            tracing::debug!(
+                "Signed update seq={} for ledger {}",
+                update.sequence_number,
+                &ledger_id[..16.min(ledger_id.len())]
+            );
         }
 
         // Finalize state.hash = chain_hash = SHA256(current_hash || operator_signature)
@@ -585,7 +617,8 @@ impl Node {
         // The daemon is the sole writer — validate in-memory chain consistency
         // instead of re-reading the entire JSONL from disk.
         let ledgers = self.handler.ledgers.lock().unwrap();
-        let ledger_arc = ledgers.get(ledger_id)
+        let ledger_arc = ledgers
+            .get(ledger_id)
             .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
         let ledger = ledger_arc.read().unwrap();
 
@@ -638,7 +671,10 @@ impl Node {
     /// Deferred persistence reduces write syscalls by batching multiple
     /// modifications into a single persist at the end of request processing.
     fn mark_ledger_dirty(&self, ledger_id: &str) {
-        self.dirty_ledgers.lock().unwrap().insert(ledger_id.to_string());
+        self.dirty_ledgers
+            .lock()
+            .unwrap()
+            .insert(ledger_id.to_string());
     }
 
     /// Flush all dirty ledgers to disk.
@@ -653,13 +689,22 @@ impl Node {
         if self.handler.ledgers.try_lock().is_err() {
             let mut d = self.dirty_ledgers.lock().unwrap();
             let count = dirty.len();
-            for id in dirty { d.insert(id); }
-            tracing::warn!("flush_dirty_ledgers: ledgers lock contended, deferring {} ledgers", count);
+            for id in dirty {
+                d.insert(id);
+            }
+            tracing::warn!(
+                "flush_dirty_ledgers: ledgers lock contended, deferring {} ledgers",
+                count
+            );
             return;
         }
         for ledger_id in &dirty {
             if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-                tracing::warn!("Failed to persist dirty ledger {}: {}", &ledger_id[..16.min(ledger_id.len())], e);
+                tracing::warn!(
+                    "Failed to persist dirty ledger {}: {}",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    e
+                );
             }
         }
     }
@@ -672,12 +717,18 @@ impl Node {
         // Get the ledger by ledger_id and clone the update.
         // Clone before the await to avoid holding RwLockReadGuard across await (not Send).
         let (update, seq) = {
-            let ledger_arc = self.handler.ledgers.lock().unwrap()
+            let ledger_arc = self
+                .handler
+                .ledgers
+                .lock()
+                .unwrap()
                 .get(ledger_id)
                 .cloned()
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = ledger_arc.read().unwrap();
-            let update = ledger.history.last()
+            let update = ledger
+                .history
+                .last()
                 .ok_or_else(|| Error::Protocol("Ledger has no updates".to_string()))?
                 .clone();
             let seq = update.sequence_number;
@@ -697,7 +748,11 @@ impl Node {
     /// all initial operations (LedgerOpen, LedgerOpen, etc.)
     pub async fn broadcast_all_updates(&self, ledger_id: &str) -> Result<usize, Error> {
         // Get the ledger by ledger_id
-        let ledger_arc = self.handler.ledgers.lock().unwrap()
+        let ledger_arc = self
+            .handler
+            .ledgers
+            .lock()
+            .unwrap()
             .get(ledger_id)
             .cloned()
             .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
@@ -708,11 +763,19 @@ impl Node {
         for update in &ledger.history {
             match self.nostr.broadcast_ledger_update(update).await {
                 Ok(event_id) => {
-                    tracing::debug!("Broadcast update seq={} to Nostr: {}", update.sequence_number, &event_id[..16]);
+                    tracing::debug!(
+                        "Broadcast update seq={} to Nostr: {}",
+                        update.sequence_number,
+                        &event_id[..16]
+                    );
                     count += 1;
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to broadcast update seq={}: {}", update.sequence_number, e);
+                    tracing::warn!(
+                        "Failed to broadcast update seq={}: {}",
+                        update.sequence_number,
+                        e
+                    );
                 }
             }
         }
@@ -758,7 +821,8 @@ impl Node {
 
         // Set up per-ledger filters for polling and interested ledger set
         if !ledger_ids.is_empty() {
-            self.nostr.set_interested_ledgers(ledger_ids.iter().cloned());
+            self.nostr
+                .set_interested_ledgers(ledger_ids.iter().cloned());
             self.nostr.set_request_ledger_filter(ledger_ids.clone());
         }
 
@@ -812,7 +876,10 @@ impl Node {
                         if l.operator_key() == self.node_id {
                             match cached_versions.get(lid) {
                                 Some(&v) if v == l.history.len() => {}
-                                _ => { stale = true; break; }
+                                _ => {
+                                    stale = true;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -845,7 +912,10 @@ impl Node {
 
                 // Only scan entries beyond what we've already scanned.
                 // Cap at history_len in case history was truncated.
-                let prev_len = prev_versions.get(ledger_id).copied().unwrap_or(0)
+                let prev_len = prev_versions
+                    .get(ledger_id)
+                    .copied()
+                    .unwrap_or(0)
                     .min(ledger.history.len());
                 for update in ledger.history.iter().skip(prev_len) {
                     scanned_new += 1;
@@ -867,8 +937,12 @@ impl Node {
         let elapsed = t0.elapsed();
         if elapsed.as_millis() > 1 || scanned_new > 100 {
             let total: usize = new_versions.values().sum();
-            tracing::info!("[PROFILE] get_joined_ledger_ids: scanned {} new entries ({} total) in {:?}",
-                scanned_new, total, elapsed);
+            tracing::info!(
+                "[PROFILE] get_joined_ledger_ids: scanned {} new entries ({} total) in {:?}",
+                scanned_new,
+                total,
+                elapsed
+            );
         }
 
         let mut cache = self.joined_ledger_cache.lock().unwrap();
@@ -891,12 +965,12 @@ impl Node {
     /// Auto-import joined ledgers from Nostr so we can validate their updates.
     /// Called from the reload cycle when we discover joined ledger IDs not in our local map.
     async fn auto_import_joined_ledgers(&self, joined_ids: &[String]) {
-        use deposits_core::validation::LedgerExport;
-        use deposits_core::messages::LedgerOperation;
-        use deposits_core::TlvDecode;
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::validation::LedgerExport;
+        use deposits_core::TlvDecode;
+
         use nostr_sdk::{Filter, Kind};
-        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
 
         for ledger_id in joined_ids {
             // Skip if already in local map
@@ -904,7 +978,10 @@ impl Node {
                 let ledgers = self.handler.ledgers.lock().unwrap();
                 if ledgers.contains_key(ledger_id) {
                     // Mark as imported so we don't check again
-                    self.imported_joined_ledgers.lock().unwrap().insert(ledger_id.clone());
+                    self.imported_joined_ledgers
+                        .lock()
+                        .unwrap()
+                        .insert(ledger_id.clone());
                     continue;
                 }
             }
@@ -917,19 +994,37 @@ impl Node {
                 }
             }
 
-            tracing::info!("Auto-importing joined ledger {}...", &ledger_id[..16.min(ledger_id.len())]);
+            tracing::info!(
+                "Auto-importing joined ledger {}...",
+                &ledger_id[..16.min(ledger_id.len())]
+            );
 
             // Fetch ledger updates from Nostr
             let filter = Filter::new()
                 .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
-                .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())]);
+                .custom_tag(
+                    crate::nostr::TAG_LEDGER_ID,
+                    [crate::nostr::ledger_tag(ledger_id.as_str())],
+                );
 
-            let events = match self.nostr.fetch_client().fetch_events(vec![filter], None).await {
+            let events = match self
+                .nostr
+                .fetch_client()
+                .fetch_events(vec![filter], None)
+                .await
+            {
                 Ok(events) => events,
                 Err(e) => {
-                    tracing::warn!("Failed to fetch ledger {} from Nostr: {}", &ledger_id[..16], e);
+                    tracing::warn!(
+                        "Failed to fetch ledger {} from Nostr: {}",
+                        &ledger_id[..16],
+                        e
+                    );
                     // Mark as attempted so we don't retry every cycle
-                    self.imported_joined_ledgers.lock().unwrap().insert(ledger_id.clone());
+                    self.imported_joined_ledgers
+                        .lock()
+                        .unwrap()
+                        .insert(ledger_id.clone());
                     continue;
                 }
             };
@@ -966,7 +1061,13 @@ impl Node {
             // Find LedgerOpen to get metadata
             let ledger_open = updates.iter().find_map(|u| {
                 if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
-                    if let LedgerOperation::LedgerOpen { operator_id, reserves_id, genesis_block, .. } = op {
+                    if let LedgerOperation::LedgerOpen {
+                        operator_id,
+                        reserves_id,
+                        genesis_block,
+                        ..
+                    } = op
+                    {
                         return Some((operator_id, reserves_id, genesis_block));
                     }
                 }
@@ -974,13 +1075,22 @@ impl Node {
             });
 
             let Some((operator_id, reserves_id, genesis_block)) = ledger_open else {
-                tracing::warn!("No LedgerOpen found for ledger {} — cannot import", &ledger_id[..16]);
-                self.imported_joined_ledgers.lock().unwrap().insert(ledger_id.clone());
+                tracing::warn!(
+                    "No LedgerOpen found for ledger {} — cannot import",
+                    &ledger_id[..16]
+                );
+                self.imported_joined_ledgers
+                    .lock()
+                    .unwrap()
+                    .insert(ledger_id.clone());
                 continue;
             };
 
             // Build best chain (handle branches: prefer chains with DisputeAcquire, then longest)
-            let by_prev: std::collections::HashMap<[u8; 32], Vec<&deposits_core::SignedLedgerUpdate>> = {
+            let by_prev: std::collections::HashMap<
+                [u8; 32],
+                Vec<&deposits_core::SignedLedgerUpdate>,
+            > = {
                 let mut map = std::collections::HashMap::new();
                 for u in &updates {
                     map.entry(u.previous_hash).or_insert_with(Vec::new).push(u);
@@ -994,7 +1104,9 @@ impl Node {
                 let mut chain: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
                 let mut current_hash = [0u8; 32];
                 loop {
-                    let Some(children) = by_prev.get(&current_hash) else { break; };
+                    let Some(children) = by_prev.get(&current_hash) else {
+                        break;
+                    };
                     // Single child (common case): just follow it
                     let next = if children.len() == 1 {
                         children[0]
@@ -1037,11 +1149,15 @@ impl Node {
                 }
                 chain
             };
-            let filtered: Vec<deposits_core::SignedLedgerUpdate> = best_chain.iter().map(|u| (*u).clone()).collect();
+            let filtered: Vec<deposits_core::SignedLedgerUpdate> =
+                best_chain.iter().map(|u| (*u).clone()).collect();
 
             if filtered.is_empty() {
                 tracing::warn!("No valid chain found for ledger {}", &ledger_id[..16]);
-                self.imported_joined_ledgers.lock().unwrap().insert(ledger_id.clone());
+                self.imported_joined_ledgers
+                    .lock()
+                    .unwrap()
+                    .insert(ledger_id.clone());
                 continue;
             }
 
@@ -1054,7 +1170,10 @@ impl Node {
                 }
                 _ => {
                     tracing::warn!("Invalid ledger_id hex: {}", &ledger_id[..16]);
-                    self.imported_joined_ledgers.lock().unwrap().insert(ledger_id.clone());
+                    self.imported_joined_ledgers
+                        .lock()
+                        .unwrap()
+                        .insert(ledger_id.clone());
                     continue;
                 }
             };
@@ -1083,7 +1202,10 @@ impl Node {
                 }
             }
 
-            self.imported_joined_ledgers.lock().unwrap().insert(ledger_id.clone());
+            self.imported_joined_ledgers
+                .lock()
+                .unwrap()
+                .insert(ledger_id.clone());
         }
     }
 
@@ -1092,12 +1214,12 @@ impl Node {
     /// Called when `handle_ledger_update` detects a gap between the local
     /// history and an incoming update sequence number.
     async fn reimport_joined_ledger(&self, ledger_id: &str) -> Result<(), Error> {
-        use deposits_core::validation::LedgerExport;
-        use deposits_core::messages::LedgerOperation;
-        use deposits_core::TlvDecode;
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::validation::LedgerExport;
+        use deposits_core::TlvDecode;
+
         use nostr_sdk::{Filter, Kind, Timestamp};
-        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
 
         // Skip our own ledgers — they're managed via open_ledger, not reimport
         {
@@ -1112,7 +1234,8 @@ impl Node {
 
         let local_tip_seq = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
+            ledgers
+                .get(ledger_id)
                 .map(|arc| arc.read().unwrap().next_sequence())
                 .unwrap_or(0)
         };
@@ -1129,14 +1252,19 @@ impl Node {
         loop {
             let mut filter = Filter::new()
                 .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
-                .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
+                .custom_tag(
+                    crate::nostr::TAG_LEDGER_ID,
+                    [crate::nostr::ledger_tag(ledger_id)],
+                )
                 .limit(Self::RELAY_FETCH_PAGE_LIMIT);
 
             if cursor_ts > 0 {
                 filter = filter.since(Timestamp::from(cursor_ts));
             }
 
-            let events = self.nostr.fetch_client()
+            let events = self
+                .nostr
+                .fetch_client()
                 .fetch_events(vec![filter], Some(std::time::Duration::from_secs(15)))
                 .await
                 .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
@@ -1168,7 +1296,10 @@ impl Node {
 
             // If the max timestamp didn't advance or we got fewer events than
             // our page size, we've reached the end.
-            if page_max_ts <= cursor_ts || page_count < Self::RELAY_FETCH_MIN_PAGE || pages >= max_pages {
+            if page_max_ts <= cursor_ts
+                || page_count < Self::RELAY_FETCH_MIN_PAGE
+                || pages >= max_pages
+            {
                 break;
             }
 
@@ -1194,7 +1325,10 @@ impl Node {
 
         tracing::info!(
             "reimport_joined_ledger {}...: fetched {} updates in {} pages (local_tip_seq={})",
-            &ledger_id[..16.min(ledger_id.len())], all_fetched.len(), pages, local_tip_seq,
+            &ledger_id[..16.min(ledger_id.len())],
+            all_fetched.len(),
+            pages,
+            local_tip_seq,
         );
 
         // For existing ledgers (the common case — stale set only contains known
@@ -1217,7 +1351,8 @@ impl Node {
             };
 
             // Filter, sort, dedup relay events to those beyond our tip
-            let mut new_updates: Vec<_> = all_fetched.iter()
+            let mut new_updates: Vec<_> = all_fetched
+                .iter()
                 .filter(|u| u.sequence_number >= local_next_seq)
                 .cloned()
                 .collect();
@@ -1227,7 +1362,8 @@ impl Node {
             if new_updates.is_empty() {
                 tracing::debug!(
                     "Ledger {}... already up to date (tip seq={})",
-                    &ledger_id[..16.min(ledger_id.len())], local_next_seq,
+                    &ledger_id[..16.min(ledger_id.len())],
+                    local_next_seq,
                 );
                 return Ok(()); // Already caught up — not an error
             }
@@ -1238,7 +1374,8 @@ impl Node {
             {
                 tracing::warn!(
                     "Chain break on ledger {}... at seq {} — purging and re-importing from genesis",
-                    &ledger_id[..16.min(ledger_id.len())], local_next_seq,
+                    &ledger_id[..16.min(ledger_id.len())],
+                    local_next_seq,
                 );
                 // Remove the corrupted ledger so the slow path can rebuild
                 self.handler.ledgers.lock().unwrap().remove(ledger_id);
@@ -1246,17 +1383,25 @@ impl Node {
                 self.invalidate_joined_ledger_cache();
                 need_full_reimport = true;
             } else {
-                match self.handler.apply_updates_to_ledger(ledger_id, new_updates.clone()) {
+                match self
+                    .handler
+                    .apply_updates_to_ledger(ledger_id, new_updates.clone())
+                {
                     Ok(applied) => {
                         tracing::info!(
                             "Re-imported joined ledger {} (+{} updates from relay, tip_seq {})",
-                            &ledger_id[..16], applied,
+                            &ledger_id[..16],
+                            applied,
                             new_updates.last().map(|u| u.sequence_number).unwrap_or(0),
                         );
                         return Ok(());
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to apply relay updates to ledger {}: {}", &ledger_id[..16], e);
+                        tracing::warn!(
+                            "Failed to apply relay updates to ledger {}: {}",
+                            &ledger_id[..16],
+                            e
+                        );
                         return Err(Error::Protocol(format!("Apply updates failed: {}", e)));
                     }
                 }
@@ -1275,7 +1420,13 @@ impl Node {
 
             let ledger_open = updates.iter().find_map(|u| {
                 if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
-                    if let LedgerOperation::LedgerOpen { operator_id, reserves_id, genesis_block, .. } = op {
+                    if let LedgerOperation::LedgerOpen {
+                        operator_id,
+                        reserves_id,
+                        genesis_block,
+                        ..
+                    } = op
+                    {
                         return Some((operator_id, reserves_id, genesis_block));
                     }
                 }
@@ -1287,9 +1438,14 @@ impl Node {
             };
 
             // Build best chain from genesis
-            let by_prev: std::collections::HashMap<[u8; 32], Vec<&deposits_core::SignedLedgerUpdate>> = {
+            let by_prev: std::collections::HashMap<
+                [u8; 32],
+                Vec<&deposits_core::SignedLedgerUpdate>,
+            > = {
                 let mut map = std::collections::HashMap::new();
-                for u in &updates { map.entry(u.previous_hash).or_insert_with(Vec::new).push(u); }
+                for u in &updates {
+                    map.entry(u.previous_hash).or_insert_with(Vec::new).push(u);
+                }
                 map
             };
 
@@ -1297,7 +1453,9 @@ impl Node {
                 let mut chain: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
                 let mut current_hash = [0u8; 32];
                 loop {
-                    let Some(children) = by_prev.get(&current_hash) else { break; };
+                    let Some(children) = by_prev.get(&current_hash) else {
+                        break;
+                    };
                     let next = if children.len() == 1 {
                         children[0]
                     } else {
@@ -1337,7 +1495,8 @@ impl Node {
                 }
                 chain
             };
-            let filtered: Vec<deposits_core::SignedLedgerUpdate> = best_chain.iter().map(|u| (*u).clone()).collect();
+            let filtered: Vec<deposits_core::SignedLedgerUpdate> =
+                best_chain.iter().map(|u| (*u).clone()).collect();
 
             if filtered.is_empty() {
                 return Err(Error::Protocol("No valid chain found".into()));
@@ -1347,7 +1506,9 @@ impl Node {
                 .map_err(|e| Error::Protocol(format!("Bad hex: {}", e)))
                 .and_then(|bytes| {
                     if bytes.len() == 32 {
-                        let mut arr = [0u8; 32]; arr.copy_from_slice(&bytes); Ok(arr)
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&bytes);
+                        Ok(arr)
                     } else {
                         Err(Error::Protocol("Wrong length".into()))
                     }
@@ -1356,14 +1517,22 @@ impl Node {
             let block_height = self.wallet.get_block_height().unwrap_or(0);
 
             let export = LedgerExport::new(
-                ledger_id_bytes, genesis_block, operator_id,
-                reserves_id, filtered.clone(), block_height,
+                ledger_id_bytes,
+                genesis_block,
+                operator_id,
+                reserves_id,
+                filtered.clone(),
+                block_height,
             );
 
             match self.handler.import_ledger(export) {
                 Ok(_) => {
-                    tracing::info!("Imported new joined ledger {} ({} updates, tip_seq {} from relay)",
-                        &ledger_id[..16], filtered.len(), filtered.last().map(|u| u.sequence_number).unwrap_or(0));
+                    tracing::info!(
+                        "Imported new joined ledger {} ({} updates, tip_seq {} from relay)",
+                        &ledger_id[..16],
+                        filtered.len(),
+                        filtered.last().map(|u| u.sequence_number).unwrap_or(0)
+                    );
                     Ok(())
                 }
                 Err(e) => {
@@ -1392,7 +1561,11 @@ impl Node {
 
         let (ledger_id_bytes, operator_id, local_next_seq) = {
             let ledger = ledger_arc.read().unwrap();
-            (ledger.state.ledger_id, ledger.state.parent_pubkey, ledger.next_sequence())
+            (
+                ledger.state.ledger_id,
+                ledger.state.parent_pubkey,
+                ledger.next_sequence(),
+            )
         };
 
         let store = self.handler.event_store.lock().unwrap();
@@ -1425,7 +1598,7 @@ impl Node {
             return 0;
         }
 
-        let count = to_append.len();
+        let _count = to_append.len();
         let mut ledger = ledger_arc.write().unwrap();
 
         // Re-check after acquiring write lock (another thread may have caught up)
@@ -1433,9 +1606,7 @@ impl Node {
         let mut tip_hash = ledger.tail_hash();
         let mut appended = 0u64;
         for update in to_append {
-            if update.sequence_number == next_seq + appended
-                && update.previous_hash == tip_hash
-            {
+            if update.sequence_number == next_seq + appended && update.previous_hash == tip_hash {
                 // Apply state changes so our state stays current with history
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
                     let _ = ledger.apply_state_changes(&op);
@@ -1509,7 +1680,11 @@ impl Node {
             "requester": hex::encode(self.node_id.serialize()),
         });
 
-        match self.nostr.send_ledger_request(ledger_id, "resync", params).await {
+        match self
+            .nostr
+            .send_ledger_request(ledger_id, "resync", params)
+            .await
+        {
             Ok(event_id) => {
                 tracing::info!(
                     "Sent resync request for ledger {}... from_seq={} to operator {}...",
@@ -1542,11 +1717,7 @@ impl Node {
 
         // Track last request poll time (fallback for missed subscription events)
         let mut last_poll = tokio::time::Instant::now();
-        let poll_interval = if self.fast_poll {
-            tokio::time::Duration::from_secs(30)  // Safety net only — subscriptions handle real-time delivery
-        } else {
-            tokio::time::Duration::from_secs(30)
-        };
+        let poll_interval = tokio::time::Duration::from_secs(30); // Safety net only — subscriptions handle real-time delivery
 
         // Track last periodic tasks time (wallet sync, auto-complete deposits, etc.)
         let mut last_periodic = tokio::time::Instant::now();
@@ -1566,7 +1737,9 @@ impl Node {
         };
 
         if self.fast_poll {
-            tracing::info!("Fast poll mode enabled: periodic=5s, wallet_sync=30s, poll=30s, reload=2s");
+            tracing::info!(
+                "Fast poll mode enabled: periodic=5s, wallet_sync=30s, poll=30s, reload=2s"
+            );
         }
 
         // Adaptive timeout: short when busy (more requests likely coming),
@@ -1579,7 +1752,7 @@ impl Node {
             loop_iteration += 1;
 
             // Watchdog: log every 100th iteration so we can see if the loop is running
-            if loop_iteration % 100 == 0 {
+            if loop_iteration.is_multiple_of(100) {
                 tracing::debug!("run loop iteration {}", loop_iteration);
             }
 
@@ -1614,16 +1787,33 @@ impl Node {
                     tokio::spawn(async move {
                         macro_rules! timed_periodic {
                             ($name:expr, $call:expr) => {
-                                match tokio::time::timeout(std::time::Duration::from_secs(10), $call).await {
-                                    Ok(()) => {},
-                                    Err(_) => tracing::error!("Periodic task '{}' timed out after 10s", $name),
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(10),
+                                    $call,
+                                )
+                                .await
+                                {
+                                    Ok(()) => {}
+                                    Err(_) => tracing::error!(
+                                        "Periodic task '{}' timed out after 10s",
+                                        $name
+                                    ),
                                 }
                             };
                         }
                         timed_periodic!("auto_complete_deposits", node.auto_complete_deposits());
-                        timed_periodic!("auto_credit_received_payments", node.auto_credit_received_payments());
-                        timed_periodic!("auto_complete_outbound_payments", node.auto_complete_outbound_payments());
-                        timed_periodic!("auto_complete_withdrawals", node.auto_complete_withdrawals());
+                        timed_periodic!(
+                            "auto_credit_received_payments",
+                            node.auto_credit_received_payments()
+                        );
+                        timed_periodic!(
+                            "auto_complete_outbound_payments",
+                            node.auto_complete_outbound_payments()
+                        );
+                        timed_periodic!(
+                            "auto_complete_withdrawals",
+                            node.auto_complete_withdrawals()
+                        );
                         timed_periodic!("auto_collect_fees", node.auto_collect_fees());
                         timed_periodic!("auto_timeout_transfers", node.auto_timeout_transfers());
 
@@ -1635,9 +1825,15 @@ impl Node {
                         }
 
                         // Dispute-related periodic tasks
-                        timed_periodic!("auto_lottery_claim_or_yield", node.auto_lottery_claim_or_yield());
+                        timed_periodic!(
+                            "auto_lottery_claim_or_yield",
+                            node.auto_lottery_claim_or_yield()
+                        );
                         timed_periodic!("auto_confiscate", node.auto_confiscate());
-                        timed_periodic!("auto_reveal_on_confiscation", node.auto_reveal_on_confiscation());
+                        timed_periodic!(
+                            "auto_reveal_on_confiscation",
+                            node.auto_reveal_on_confiscation()
+                        );
                         timed_periodic!("auto_post_win_cleanup", node.auto_post_win_cleanup());
 
                         // Reload allowlist (non-async, fast)
@@ -1671,7 +1867,11 @@ impl Node {
                         let cur_len = current.len();
                         let prev_len = prev.len();
                         *prev = std::mem::take(&mut *current);
-                        tracing::debug!("Rotated processed_requests: current={} -> prev (dropped {} old)", cur_len, prev_len);
+                        tracing::debug!(
+                            "Rotated processed_requests: current={} -> prev (dropped {} old)",
+                            cur_len,
+                            prev_len
+                        );
                     }
                 }
 
@@ -1700,8 +1900,12 @@ impl Node {
                         if len > JOINED_HISTORY_RETAIN * 2 {
                             let before = len;
                             ledger.history.drain(..len - JOINED_HISTORY_RETAIN);
-                            tracing::debug!("Truncated history for {}: {} -> {} entries",
-                                &lid[..16.min(lid.len())], before, ledger.history.len());
+                            tracing::debug!(
+                                "Truncated history for {}: {} -> {} entries",
+                                &lid[..16.min(lid.len())],
+                                before,
+                                ledger.history.len()
+                            );
                         }
                     }
                 }
@@ -1719,264 +1923,327 @@ impl Node {
                     tracing::warn!("reload section: ledgers lock contended, skipping this cycle");
                     last_reload = tokio::time::Instant::now();
                 } else {
-                let reload_start = std::time::Instant::now();
-                let discovered = self.handler.discover_new_ledgers();
-                if discovered > 0 {
-                    // Force-invalidate: external process changed ledger files
-                    self.invalidate_joined_ledger_cache();
-                }
-                // Otherwise, get_joined_ledger_ids() self-validates via version check
-
-                // Single pass over ledgers: collect IDs, emit metrics, gather event store keys.
-                // This avoids two separate iterations and eliminates the nested
-                // event_store + ledgers lock that risked deadlock with catch_up paths.
-                let mut all_ledger_ids = self.get_joined_ledger_ids();
-                let mut owned_ids = Vec::new();
-                let mut tip_queries: Vec<(String, [u8; 32], bitcoin::secp256k1::PublicKey)> = Vec::new();
-                {
-                    let ledgers = match self.handler.ledgers.try_lock() {
-                        Ok(l) => l,
-                        Err(_) => {
-                            tracing::warn!("reload section: ledgers lock contended, skipping this cycle");
-                            last_reload = tokio::time::Instant::now();
-                            continue;
-                        }
-                    };
-                    metrics::set_ledger_count(ledgers.len());
-                    let mut total_balance_sats: u64 = 0;
-                    let mut total_history_bytes: u64 = 0;
-                    for (ledger_id, ledger_arc) in ledgers.iter() {
-                        let ledger = ledger_arc.read().unwrap();
-                        if ledger.operator_key() == self.node_id {
-                            all_ledger_ids.push(ledger_id.clone());
-                            owned_ids.push(ledger.ledger_id_hex());
-                        }
-                        let hist_len = ledger.history.len();
-                        metrics::set_ledger_history_length(ledger_id, hist_len);
-                        // ~570 bytes per entry (370 struct + ~200 avg message Vec)
-                        total_history_bytes += hist_len as u64 * 570;
-                        // Emit per-ledger and per-deposit balance metrics
-                        let mut ledger_balance_sats: u64 = 0;
-                        for (dep_id_bytes, deposit) in &ledger.state.deposits {
-                            let balance_sats = deposit.balance / 1000;
-                            ledger_balance_sats += balance_sats;
-                            let dep_id = hex::encode(dep_id_bytes);
-                            metrics::set_deposit_balance_sats(&dep_id, balance_sats);
-                        }
-                        metrics::set_ledger_deposit_balance_sats(ledger_id, ledger_balance_sats);
-                        total_balance_sats += ledger_balance_sats;
-                        tip_queries.push((ledger_id.clone(), ledger.state.ledger_id, ledger.state.parent_pubkey));
+                    let reload_start = std::time::Instant::now();
+                    let discovered = self.handler.discover_new_ledgers();
+                    if discovered > 0 {
+                        // Force-invalidate: external process changed ledger files
+                        self.invalidate_joined_ledger_cache();
                     }
-                    metrics::set_total_deposit_balance_sats(total_balance_sats);
-                    metrics::set_history_memory_estimate_bytes(total_history_bytes);
-                }
+                    // Otherwise, get_joined_ledger_ids() self-validates via version check
 
-                // Emit event store validated tips — separate lock, no nesting
-                {
-                    let store = self.handler.event_store.lock().unwrap();
-                    for (ledger_id, ledger_id_bytes, parent_pubkey) in &tip_queries {
-                        if let Some(tip) = store.validated_tip(ledger_id_bytes, parent_pubkey) {
-                            metrics::set_event_store_validated_tip(ledger_id, tip);
-                        }
-                    }
-                }
-
-                // Update interested ledgers + poll filter
-                self.nostr.set_interested_ledgers(all_ledger_ids.iter().cloned());
-                self.nostr.set_request_ledger_filter(all_ledger_ids.clone());
-
-                // Auto-import joined ledgers from Nostr (so we can validate their updates)
-                let joined_ids = self.get_joined_ledger_ids();
-                if !joined_ids.is_empty() {
-                    match tokio::time::timeout(std::time::Duration::from_secs(10), self.auto_import_joined_ledgers(&joined_ids)).await {
-                        Ok(()) => {},
-                        Err(_) => tracing::error!("auto_import_joined_ledgers timed out after 10s"),
-                    }
-                }
-
-                // Subscribe with compacted global filters (4 filters instead of 36+ per-ledger).
-                // Per-ledger filtering happens in-process via interested_ledgers.
-                match tokio::time::timeout(std::time::Duration::from_secs(5), self.nostr.subscribe_global()).await {
-                    Ok(Err(e)) => tracing::debug!("Global subscribe failed: {}", e),
-                    Err(_) => tracing::error!("subscribe_global timed out after 5s"),
-                    _ => {},
-                }
-
-                // Background gap-fill for stale joined ledgers.
-                // Try event store first (free, in-memory), then fall back to relay fetch
-                // (one per cycle, 30s cooldown per ledger) for post-restart recovery.
-                {
-                    let stale_ids: Vec<String> = {
-                        let mut stale = self.stale_joined_ledgers.lock().unwrap();
-                        stale.drain().collect()
-                    };
-
-                    let mut relay_fetched_this_cycle = false;
-                    let relay_cooldown = Self::RELAY_FETCH_COOLDOWN;
-
-                    for stale_id in &stale_ids {
-                        // Try event store first (free, in-memory)
-                        let caught_up = self.catch_up_ledger_from_event_store(stale_id);
-                        if caught_up > 0 {
-                            tracing::info!(
-                                "Background gap-fill: ledger {}... +{} events from event store",
-                                &stale_id[..16.min(stale_id.len())], caught_up,
+                    // Single pass over ledgers: collect IDs, emit metrics, gather event store keys.
+                    // This avoids two separate iterations and eliminates the nested
+                    // event_store + ledgers lock that risked deadlock with catch_up paths.
+                    let mut all_ledger_ids = self.get_joined_ledger_ids();
+                    let mut owned_ids = Vec::new();
+                    let mut tip_queries: Vec<(String, [u8; 32], bitcoin::secp256k1::PublicKey)> =
+                        Vec::new();
+                    {
+                        let ledgers = match self.handler.ledgers.try_lock() {
+                            Ok(l) => l,
+                            Err(_) => {
+                                tracing::warn!(
+                                    "reload section: ledgers lock contended, skipping this cycle"
+                                );
+                                last_reload = tokio::time::Instant::now();
+                                continue;
+                            }
+                        };
+                        metrics::set_ledger_count(ledgers.len());
+                        let mut total_balance_sats: u64 = 0;
+                        let mut total_history_bytes: u64 = 0;
+                        for (ledger_id, ledger_arc) in ledgers.iter() {
+                            let ledger = ledger_arc.read().unwrap();
+                            if ledger.operator_key() == self.node_id {
+                                all_ledger_ids.push(ledger_id.clone());
+                                owned_ids.push(ledger.ledger_id_hex());
+                            }
+                            let hist_len = ledger.history.len();
+                            metrics::set_ledger_history_length(ledger_id, hist_len);
+                            // ~570 bytes per entry (370 struct + ~200 avg message Vec)
+                            total_history_bytes += hist_len as u64 * 570;
+                            // Emit per-ledger and per-deposit balance metrics
+                            let mut ledger_balance_sats: u64 = 0;
+                            for (dep_id_bytes, deposit) in &ledger.state.deposits {
+                                let balance_sats = deposit.balance / 1000;
+                                ledger_balance_sats += balance_sats;
+                                let dep_id = hex::encode(dep_id_bytes);
+                                metrics::set_deposit_balance_sats(&dep_id, balance_sats);
+                            }
+                            metrics::set_ledger_deposit_balance_sats(
+                                ledger_id,
+                                ledger_balance_sats,
                             );
-                            metrics::record_gap_fill("from_store");
-                            continue; // Resolved — don't re-queue
+                            total_balance_sats += ledger_balance_sats;
+                            tip_queries.push((
+                                ledger_id.clone(),
+                                ledger.state.ledger_id,
+                                ledger.state.parent_pubkey,
+                            ));
                         }
+                        metrics::set_total_deposit_balance_sats(total_balance_sats);
+                        metrics::set_history_memory_estimate_bytes(total_history_bytes);
+                    }
 
-                        // Event store empty (typical after restart). Try relay fetch
-                        // — one per cycle to avoid blocking the run loop.
-                        if !relay_fetched_this_cycle {
-                            let should_fetch = {
-                                let times = self.last_relay_fetch_times.lock().unwrap();
-                                match times.get(stale_id) {
-                                    Some(last) => last.elapsed() >= relay_cooldown,
-                                    None => true,
-                                }
-                            };
+                    // Emit event store validated tips — separate lock, no nesting
+                    {
+                        let store = self.handler.event_store.lock().unwrap();
+                        for (ledger_id, ledger_id_bytes, parent_pubkey) in &tip_queries {
+                            if let Some(tip) = store.validated_tip(ledger_id_bytes, parent_pubkey) {
+                                metrics::set_event_store_validated_tip(ledger_id, tip);
+                            }
+                        }
+                    }
 
-                            if should_fetch {
-                                relay_fetched_this_cycle = true;
-                                self.last_relay_fetch_times.lock().unwrap()
-                                    .insert(stale_id.clone(), std::time::Instant::now());
+                    // Update interested ledgers + poll filter
+                    self.nostr
+                        .set_interested_ledgers(all_ledger_ids.iter().cloned());
+                    self.nostr.set_request_ledger_filter(all_ledger_ids.clone());
 
-                                let local_seq = {
-                                    let ledgers = self.handler.ledgers.lock().unwrap();
-                                    ledgers.get(stale_id)
-                                        .map(|arc| arc.read().unwrap().next_sequence())
-                                        .unwrap_or(0)
+                    // Auto-import joined ledgers from Nostr (so we can validate their updates)
+                    let joined_ids = self.get_joined_ledger_ids();
+                    if !joined_ids.is_empty() {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            self.auto_import_joined_ledgers(&joined_ids),
+                        )
+                        .await
+                        {
+                            Ok(()) => {}
+                            Err(_) => {
+                                tracing::error!("auto_import_joined_ledgers timed out after 10s")
+                            }
+                        }
+                    }
+
+                    // Subscribe with compacted global filters (4 filters instead of 36+ per-ledger).
+                    // Per-ledger filtering happens in-process via interested_ledgers.
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        self.nostr.subscribe_global(),
+                    )
+                    .await
+                    {
+                        Ok(Err(e)) => tracing::debug!("Global subscribe failed: {}", e),
+                        Err(_) => tracing::error!("subscribe_global timed out after 5s"),
+                        _ => {}
+                    }
+
+                    // Background gap-fill for stale joined ledgers.
+                    // Try event store first (free, in-memory), then fall back to relay fetch
+                    // (one per cycle, 30s cooldown per ledger) for post-restart recovery.
+                    {
+                        let stale_ids: Vec<String> = {
+                            let mut stale = self.stale_joined_ledgers.lock().unwrap();
+                            stale.drain().collect()
+                        };
+
+                        let mut relay_fetched_this_cycle = false;
+                        let relay_cooldown = Self::RELAY_FETCH_COOLDOWN;
+
+                        for stale_id in &stale_ids {
+                            // Try event store first (free, in-memory)
+                            let caught_up = self.catch_up_ledger_from_event_store(stale_id);
+                            if caught_up > 0 {
+                                tracing::info!(
+                                    "Background gap-fill: ledger {}... +{} events from event store",
+                                    &stale_id[..16.min(stale_id.len())],
+                                    caught_up,
+                                );
+                                metrics::record_gap_fill("from_store");
+                                continue; // Resolved — don't re-queue
+                            }
+
+                            // Event store empty (typical after restart). Try relay fetch
+                            // — one per cycle to avoid blocking the run loop.
+                            if !relay_fetched_this_cycle {
+                                let should_fetch = {
+                                    let times = self.last_relay_fetch_times.lock().unwrap();
+                                    match times.get(stale_id) {
+                                        Some(last) => last.elapsed() >= relay_cooldown,
+                                        None => true,
+                                    }
                                 };
 
-                                // Skip gap-fill if cosign requests are pending — the relay fetch
-                                // blocks the run loop and prevents cosign responses from being processed.
-                                if !self.pending_cosign_requests.lock().unwrap().is_empty() {
-                                    tracing::debug!("Skipping gap-fill for {}... (cosign pending)", &stale_id[..16.min(stale_id.len())]);
-                                    self.stale_joined_ledgers.lock().unwrap().insert(stale_id.clone());
-                                    continue;
-                                }
+                                if should_fetch {
+                                    relay_fetched_this_cycle = true;
+                                    self.last_relay_fetch_times
+                                        .lock()
+                                        .unwrap()
+                                        .insert(stale_id.clone(), std::time::Instant::now());
 
-                                tracing::info!(
+                                    let local_seq = {
+                                        let ledgers = self.handler.ledgers.lock().unwrap();
+                                        ledgers
+                                            .get(stale_id)
+                                            .map(|arc| arc.read().unwrap().next_sequence())
+                                            .unwrap_or(0)
+                                    };
+
+                                    // Skip gap-fill if cosign requests are pending — the relay fetch
+                                    // blocks the run loop and prevents cosign responses from being processed.
+                                    if !self.pending_cosign_requests.lock().unwrap().is_empty() {
+                                        tracing::debug!(
+                                            "Skipping gap-fill for {}... (cosign pending)",
+                                            &stale_id[..16.min(stale_id.len())]
+                                        );
+                                        self.stale_joined_ledgers
+                                            .lock()
+                                            .unwrap()
+                                            .insert(stale_id.clone());
+                                        continue;
+                                    }
+
+                                    tracing::info!(
                                     "Background gap-fill: fetching ledger {}... from relay (local_seq={})",
                                     &stale_id[..16.min(stale_id.len())], local_seq,
                                 );
 
-                                match tokio::time::timeout(std::time::Duration::from_secs(10), self.reimport_joined_ledger(stale_id)).await {
-                                    Err(_) => {
-                                        tracing::error!("reimport_joined_ledger timed out for {}...", &stale_id[..16.min(stale_id.len())]);
-                                        // Re-queue for next cycle
-                                        self.stale_joined_ledgers.lock().unwrap().insert(stale_id.clone());
-                                    }
-                                    Ok(Ok(())) => {
-                                        let new_seq = {
-                                            let ledgers = self.handler.ledgers.lock().unwrap();
-                                            ledgers.get(stale_id)
-                                                .map(|arc| arc.read().unwrap().next_sequence())
-                                                .unwrap_or(0)
-                                        };
-                                        tracing::info!(
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_secs(10),
+                                        self.reimport_joined_ledger(stale_id),
+                                    )
+                                    .await
+                                    {
+                                        Err(_) => {
+                                            tracing::error!(
+                                                "reimport_joined_ledger timed out for {}...",
+                                                &stale_id[..16.min(stale_id.len())]
+                                            );
+                                            // Re-queue for next cycle
+                                            self.stale_joined_ledgers
+                                                .lock()
+                                                .unwrap()
+                                                .insert(stale_id.clone());
+                                        }
+                                        Ok(Ok(())) => {
+                                            let new_seq = {
+                                                let ledgers = self.handler.ledgers.lock().unwrap();
+                                                ledgers
+                                                    .get(stale_id)
+                                                    .map(|arc| arc.read().unwrap().next_sequence())
+                                                    .unwrap_or(0)
+                                            };
+                                            tracing::info!(
                                             "Background gap-fill: relay fetch succeeded for {}... (seq {} -> {})",
                                             &stale_id[..16.min(stale_id.len())], local_seq, new_seq,
                                         );
-                                        if new_seq > local_seq {
-                                            metrics::record_gap_fill("from_relay");
-                                            // Persist the updated ledger
-                                            self.dirty_ledgers.lock().unwrap().insert(stale_id.clone());
-                                            continue; // Resolved — don't re-queue
-                                        }
-                                        // Relay had no new events — ask operator to re-broadcast.
-                                        // Only resync every 5 minutes to avoid spamming.
-                                        let should_resync = {
-                                            let cooldown = std::time::Duration::from_secs(300);
-                                            let times = self.last_relay_fetch_times.lock().unwrap();
-                                            let last = times.get(stale_id)
-                                                .copied()
-                                                .unwrap_or(std::time::Instant::now() - cooldown);
-                                            last.elapsed() >= cooldown
-                                        };
-                                        if should_resync {
-                                            tracing::info!(
+                                            if new_seq > local_seq {
+                                                metrics::record_gap_fill("from_relay");
+                                                // Persist the updated ledger
+                                                self.dirty_ledgers
+                                                    .lock()
+                                                    .unwrap()
+                                                    .insert(stale_id.clone());
+                                                continue; // Resolved — don't re-queue
+                                            }
+                                            // Relay had no new events — ask operator to re-broadcast.
+                                            // Only resync every 5 minutes to avoid spamming.
+                                            let should_resync = {
+                                                let cooldown = std::time::Duration::from_secs(300);
+                                                let times =
+                                                    self.last_relay_fetch_times.lock().unwrap();
+                                                let last = times.get(stale_id).copied().unwrap_or(
+                                                    std::time::Instant::now() - cooldown,
+                                                );
+                                                last.elapsed() >= cooldown
+                                            };
+                                            if should_resync {
+                                                tracing::info!(
                                                 "Background gap-fill: relay had no new events for {}..., requesting resync",
                                                 &stale_id[..16.min(stale_id.len())],
                                             );
-                                            metrics::record_gap_fill("relay_empty");
-                                            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.send_resync_request_if_needed(stale_id)).await;
-                                        } else {
-                                            tracing::debug!(
+                                                metrics::record_gap_fill("relay_empty");
+                                                let _ = tokio::time::timeout(
+                                                    std::time::Duration::from_secs(5),
+                                                    self.send_resync_request_if_needed(stale_id),
+                                                )
+                                                .await;
+                                            } else {
+                                                tracing::debug!(
                                                 "Background gap-fill: relay empty for {}..., resync on cooldown",
                                                 &stale_id[..16.min(stale_id.len())],
                                             );
+                                            }
                                         }
-                                    }
-                                    Ok(Err(e)) => {
-                                        let err_str = format!("{}", e);
-                                        // Chain break = unbridgeable gap (operator history truncated).
-                                        // Don't resync — it will just repeat the same failure.
-                                        if err_str.contains("wrong previous_hash") || err_str.contains("Chain break") {
-                                            tracing::info!(
+                                        Ok(Err(e)) => {
+                                            let err_str = format!("{}", e);
+                                            // Chain break = unbridgeable gap (operator history truncated).
+                                            // Don't resync — it will just repeat the same failure.
+                                            if err_str.contains("wrong previous_hash")
+                                                || err_str.contains("Chain break")
+                                            {
+                                                tracing::info!(
                                                 "Background gap-fill: chain break for {}... — dropping from stale queue (gap is unbridgeable)",
                                                 &stale_id[..16.min(stale_id.len())],
                                             );
-                                            metrics::record_gap_fill("chain_break");
-                                            continue; // Don't re-queue
-                                        }
-                                        tracing::warn!(
+                                                metrics::record_gap_fill("chain_break");
+                                                continue; // Don't re-queue
+                                            }
+                                            tracing::warn!(
                                             "Background gap-fill: relay fetch failed for {}...: {}",
                                             &stale_id[..16.min(stale_id.len())], e,
                                         );
-                                        metrics::record_gap_fill("relay_failed");
-                                        // Only resync every 5 minutes
-                                        let should_resync = {
-                                            let cooldown = std::time::Duration::from_secs(300);
-                                            let times = self.last_relay_fetch_times.lock().unwrap();
-                                            let last = times.get(stale_id)
-                                                .copied()
-                                                .unwrap_or(std::time::Instant::now() - cooldown);
-                                            last.elapsed() >= cooldown
-                                        };
-                                        if should_resync {
-                                            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.send_resync_request_if_needed(stale_id)).await;
+                                            metrics::record_gap_fill("relay_failed");
+                                            // Only resync every 5 minutes
+                                            let should_resync = {
+                                                let cooldown = std::time::Duration::from_secs(300);
+                                                let times =
+                                                    self.last_relay_fetch_times.lock().unwrap();
+                                                let last = times.get(stale_id).copied().unwrap_or(
+                                                    std::time::Instant::now() - cooldown,
+                                                );
+                                                last.elapsed() >= cooldown
+                                            };
+                                            if should_resync {
+                                                let _ = tokio::time::timeout(
+                                                    std::time::Duration::from_secs(5),
+                                                    self.send_resync_request_if_needed(stale_id),
+                                                )
+                                                .await;
+                                            }
                                         }
                                     }
                                 }
                             }
+
+                            // Still behind — re-queue for next cycle
+                            self.stale_joined_ledgers
+                                .lock()
+                                .unwrap()
+                                .insert(stale_id.clone());
                         }
 
-                        // Still behind — re-queue for next cycle
-                        self.stale_joined_ledgers.lock().unwrap().insert(stale_id.clone());
+                        let remaining = self.stale_joined_ledgers.lock().unwrap().len();
+                        metrics::set_stale_joined_ledgers(remaining);
                     }
 
-                    let remaining = self.stale_joined_ledgers.lock().unwrap().len();
-                    metrics::set_stale_joined_ledgers(remaining);
-                }
+                    // Emit event store stats
+                    {
+                        let store = self.handler.event_store.lock().unwrap();
+                        metrics::set_event_store_total(store.len());
+                        metrics::set_event_store_unknown(store.unknown_count());
+                        metrics::set_event_store_by_parent_size(store.by_parent_len());
+                        metrics::set_event_store_evictions(store.evicted_total());
+                    }
 
-                // Emit event store stats
-                {
-                    let store = self.handler.event_store.lock().unwrap();
-                    metrics::set_event_store_total(store.len());
-                    metrics::set_event_store_unknown(store.unknown_count());
-                    metrics::set_event_store_by_parent_size(store.by_parent_len());
-                    metrics::set_event_store_evictions(store.evicted_total());
-                }
+                    // Emit process-level metrics (CPU, memory, I/O) + per-thread CPU
+                    metrics::emit_process_metrics();
+                    metrics::emit_thread_cpu_metrics();
 
-                // Emit process-level metrics (CPU, memory, I/O) + per-thread CPU
-                metrics::emit_process_metrics();
-                metrics::emit_thread_cpu_metrics();
+                    // Check for paid Lightning invoices — spawn as a task so it doesn't
+                    // block the main loop (credit_deposit → sign_and_broadcast → request_cosign
+                    // needs the main loop to pump events for response delivery).
+                    if !self.pending_invoices.lock().unwrap().is_empty() {
+                        let node = Arc::clone(self);
+                        tokio::spawn(async move {
+                            node.auto_credit_received_payments().await;
+                        });
+                    }
 
-                // Check for paid Lightning invoices — spawn as a task so it doesn't
-                // block the main loop (credit_deposit → sign_and_broadcast → request_cosign
-                // needs the main loop to pump events for response delivery).
-                if !self.pending_invoices.lock().unwrap().is_empty() {
-                    let node = Arc::clone(self);
-                    tokio::spawn(async move {
-                        node.auto_credit_received_payments().await;
-                    });
-                }
-
-                metrics::record_run_loop_phase("reload", reload_start.elapsed());
-                last_reload = tokio::time::Instant::now();
-            } // else (reload body)
+                    metrics::record_run_loop_phase("reload", reload_start.elapsed());
+                    last_reload = tokio::time::Instant::now();
+                } // else (reload body)
             }
 
             // Poll for recent requests — safety net for missed subscription events.
@@ -1985,17 +2252,32 @@ impl Node {
                 let poll_start = std::time::Instant::now();
                 let mut poll_processed = 0usize;
                 if let Ok(requests) = self.nostr.fetch_recent_requests(7).await {
-                    let mut poll_by_ledger: std::collections::HashMap<String, Vec<crate::nostr::LedgerRequest>> = std::collections::HashMap::new();
+                    let mut poll_by_ledger: std::collections::HashMap<
+                        String,
+                        Vec<crate::nostr::LedgerRequest>,
+                    > = std::collections::HashMap::new();
                     for request in requests {
                         let already_processed = {
                             let processed = self.processed_requests.lock().unwrap();
-                            if processed.contains(&request.event_id) { true }
-                            else { self.processed_requests_prev.lock().unwrap().contains(&request.event_id) }
+                            if processed.contains(&request.event_id) {
+                                true
+                            } else {
+                                self.processed_requests_prev
+                                    .lock()
+                                    .unwrap()
+                                    .contains(&request.event_id)
+                            }
                         };
                         if !already_processed {
-                            tracing::debug!("Request via polling: action={}, event={}...",
-                                request.action, &request.event_id[..16.min(request.event_id.len())]);
-                            self.processed_requests.lock().unwrap().insert(request.event_id.clone());
+                            tracing::debug!(
+                                "Request via polling: action={}, event={}...",
+                                request.action,
+                                &request.event_id[..16.min(request.event_id.len())]
+                            );
+                            self.processed_requests
+                                .lock()
+                                .unwrap()
+                                .insert(request.event_id.clone());
                             poll_by_ledger
                                 .entry(request.ledger_id.clone())
                                 .or_default()
@@ -2007,12 +2289,18 @@ impl Node {
                         // Dispatch poll requests to workers (non-blocking)
                         for (_lid, reqs) in poll_by_ledger {
                             for req in reqs {
-                                if req.action == "cosign_update" || req.action == "cosign_offer" || req.action == "cosign_invoice" {
+                                if req.action == "cosign_update"
+                                    || req.action == "cosign_offer"
+                                    || req.action == "cosign_invoice"
+                                {
                                     // Dispatch to cosign worker
                                     let lid = req.ledger_id.clone();
                                     let mut workers = self.cosign_workers.lock().unwrap();
                                     let tx = workers.entry(lid.clone()).or_insert_with(|| {
-                                        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::nostr::LedgerRequest>();
+                                        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<
+                                            crate::nostr::LedgerRequest,
+                                        >(
+                                        );
                                         let node = Arc::clone(self);
                                         let lid_for_task = lid.clone();
                                         tokio::spawn(async move {
@@ -2020,9 +2308,13 @@ impl Node {
                                                 let _ = tokio::time::timeout(
                                                     std::time::Duration::from_secs(3),
                                                     node.handle_ledger_request(r),
-                                                ).await;
+                                                )
+                                                .await;
                                             }
-                                            tracing::info!("Cosign worker (poll) exiting for {}...", &lid_for_task[..16.min(lid_for_task.len())]);
+                                            tracing::info!(
+                                                "Cosign worker (poll) exiting for {}...",
+                                                &lid_for_task[..16.min(lid_for_task.len())]
+                                            );
                                         });
                                         tx
                                     });
@@ -2032,7 +2324,10 @@ impl Node {
                                     let lid = req.ledger_id.clone();
                                     let mut workers = self.ledger_workers.lock().unwrap();
                                     let tx = workers.entry(lid.clone()).or_insert_with(|| {
-                                        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::nostr::LedgerRequest>();
+                                        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<
+                                            crate::nostr::LedgerRequest,
+                                        >(
+                                        );
                                         let node = Arc::clone(self);
                                         let lid_for_task = lid.clone();
                                         tokio::spawn(async move {
@@ -2040,9 +2335,13 @@ impl Node {
                                                 let _ = tokio::time::timeout(
                                                     std::time::Duration::from_secs(5),
                                                     node.handle_ledger_request(r),
-                                                ).await;
+                                                )
+                                                .await;
                                             }
-                                            tracing::info!("Per-ledger worker (poll) exiting for {}...", &lid_for_task[..16.min(lid_for_task.len())]);
+                                            tracing::info!(
+                                                "Per-ledger worker (poll) exiting for {}...",
+                                                &lid_for_task[..16.min(lid_for_task.len())]
+                                            );
                                         });
                                         tx
                                     });
@@ -2066,7 +2365,10 @@ impl Node {
             let events_timeout_ms: u64 = if had_requests_last_iteration { 1 } else { 10 };
             metrics::record_events_timeout_ms(events_timeout_ms);
             let process_events_start = std::time::Instant::now();
-            let _ = self.nostr.process_events_with_timeout(events_timeout_ms).await;
+            let _ = self
+                .nostr
+                .process_events_with_timeout(events_timeout_ms)
+                .await;
             metrics::record_run_loop_phase("process_events", process_events_start.elapsed());
 
             // Handle P2P messages
@@ -2091,16 +2393,28 @@ impl Node {
                 while let Some(request) = self.nostr.try_recv_request() {
                     let already_processed = {
                         let processed = self.processed_requests.lock().unwrap();
-                        if processed.contains(&request.event_id) { true }
-                        else { self.processed_requests_prev.lock().unwrap().contains(&request.event_id) }
+                        if processed.contains(&request.event_id) {
+                            true
+                        } else {
+                            self.processed_requests_prev
+                                .lock()
+                                .unwrap()
+                                .contains(&request.event_id)
+                        }
                     };
                     if already_processed {
-                        if drain_start.elapsed() >= drain_budget { break; }
+                        if drain_start.elapsed() >= drain_budget {
+                            break;
+                        }
                         continue;
                     }
 
-                    self.processed_requests.lock().unwrap().insert(request.event_id.clone());
-                    tracing::info!("RECV request: action={}, ledger={}..., sender={}..., age={:.0}ms",
+                    self.processed_requests
+                        .lock()
+                        .unwrap()
+                        .insert(request.event_id.clone());
+                    tracing::info!(
+                        "RECV request: action={}, ledger={}..., sender={}..., age={:.0}ms",
                         request.action,
                         &request.ledger_id[..16.min(request.ledger_id.len())],
                         &request.sender[..12.min(request.sender.len())],
@@ -2117,11 +2431,16 @@ impl Node {
                     // These are requests from PARTNERS asking US to co-sign their updates.
                     // Must not block main loop — main loop needs to pump process_events +
                     // drain_responses so our OWN outbound cosign responses get routed.
-                    if request.action == "cosign_update" || request.action == "cosign_offer" || request.action == "cosign_invoice" {
+                    if request.action == "cosign_update"
+                        || request.action == "cosign_offer"
+                        || request.action == "cosign_invoice"
+                    {
                         let lid = request.ledger_id.clone();
                         let mut workers = self.cosign_workers.lock().unwrap();
                         let tx = workers.entry(lid.clone()).or_insert_with(|| {
-                            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::nostr::LedgerRequest>();
+                            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<
+                                crate::nostr::LedgerRequest,
+                            >();
                             let node = Arc::clone(self);
                             let lid_for_task = lid.clone();
                             tokio::spawn(async move {
@@ -2129,9 +2448,13 @@ impl Node {
                                     let _ = tokio::time::timeout(
                                         std::time::Duration::from_secs(3),
                                         node.handle_ledger_request(req),
-                                    ).await;
+                                    )
+                                    .await;
                                 }
-                                tracing::info!("Cosign worker exiting for {}...", &lid_for_task[..16.min(lid_for_task.len())]);
+                                tracing::info!(
+                                    "Cosign worker exiting for {}...",
+                                    &lid_for_task[..16.min(lid_for_task.len())]
+                                );
                             });
                             tx
                         });
@@ -2168,7 +2491,11 @@ impl Node {
                             tx
                         });
                         if let Err(e) = tx.send(request) {
-                            tracing::warn!("Per-ledger worker channel closed for {}...: {}", &lid[..16.min(lid.len())], e);
+                            tracing::warn!(
+                                "Per-ledger worker channel closed for {}...: {}",
+                                &lid[..16.min(lid.len())],
+                                e
+                            );
                             workers.remove(&lid);
                         }
                         total_drained += 1;
@@ -2204,7 +2531,11 @@ impl Node {
                     tokio::task::spawn_blocking(move || {
                         for ledger_id in &needs_compaction {
                             if let Err(e) = handler.compact_ledger(ledger_id) {
-                                tracing::warn!("Background compaction failed for {}: {}", &ledger_id[..16.min(ledger_id.len())], e);
+                                tracing::warn!(
+                                    "Background compaction failed for {}: {}",
+                                    &ledger_id[..16.min(ledger_id.len())],
+                                    e
+                                );
                             }
                         }
                     });
@@ -2215,13 +2546,23 @@ impl Node {
             {
                 let phase_start = std::time::Instant::now();
                 while let Some(dispute) = self.nostr.try_recv_dispute() {
-                    tracing::info!("RECV dispute: ledger={}..., reason={}, from={}...",
+                    tracing::info!(
+                        "RECV dispute: ledger={}..., reason={}, from={}...",
                         &dispute.ledger_id[..16.min(dispute.ledger_id.len())],
                         dispute.reason,
-                        &dispute.disputer_pubkey[..12.min(dispute.disputer_pubkey.len())]);
-                    match tokio::time::timeout(std::time::Duration::from_secs(5), self.handle_dispute(dispute)).await {
-                        Ok(()) => {},
-                        Err(_) => { tracing::error!("handle_dispute timed out after 5s"); break; }
+                        &dispute.disputer_pubkey[..12.min(dispute.disputer_pubkey.len())]
+                    );
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        self.handle_dispute(dispute),
+                    )
+                    .await
+                    {
+                        Ok(()) => {}
+                        Err(_) => {
+                            tracing::error!("handle_dispute timed out after 5s");
+                            break;
+                        }
                     }
                 }
                 metrics::record_run_loop_phase("drain_disputes", phase_start.elapsed());
@@ -2231,12 +2572,22 @@ impl Node {
             {
                 let phase_start = std::time::Instant::now();
                 while let Some(fp) = self.nostr.try_recv_fraud_proof() {
-                    tracing::info!("RECV fraud_proof: from={}..., event={}...",
+                    tracing::info!(
+                        "RECV fraud_proof: from={}..., event={}...",
                         &fp.sender[..12.min(fp.sender.len())],
-                        &fp.event_id[..16.min(fp.event_id.len())]);
-                    match tokio::time::timeout(std::time::Duration::from_secs(5), self.handle_fraud_proof(fp)).await {
-                        Ok(()) => {},
-                        Err(_) => { tracing::error!("handle_fraud_proof timed out after 5s"); break; }
+                        &fp.event_id[..16.min(fp.event_id.len())]
+                    );
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        self.handle_fraud_proof(fp),
+                    )
+                    .await
+                    {
+                        Ok(()) => {}
+                        Err(_) => {
+                            tracing::error!("handle_fraud_proof timed out after 5s");
+                            break;
+                        }
                     }
                 }
                 metrics::record_run_loop_phase("drain_fraud_proofs", phase_start.elapsed());
@@ -2246,13 +2597,23 @@ impl Node {
             {
                 let phase_start = std::time::Instant::now();
                 while let Some(response) = self.nostr.try_recv_response() {
-                    tracing::info!("RECV response: request={}..., success={}, error={:?}",
+                    tracing::info!(
+                        "RECV response: request={}..., success={}, error={:?}",
                         &response.request_id[..16.min(response.request_id.len())],
                         response.success,
-                        response.error.as_deref().unwrap_or(""));
-                    match tokio::time::timeout(std::time::Duration::from_secs(5), self.handle_ledger_response(response)).await {
-                        Ok(()) => {},
-                        Err(_) => { tracing::error!("handle_ledger_response timed out after 5s"); break; }
+                        response.error.as_deref().unwrap_or("")
+                    );
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        self.handle_ledger_response(response),
+                    )
+                    .await
+                    {
+                        Ok(()) => {}
+                        Err(_) => {
+                            tracing::error!("handle_ledger_response timed out after 5s");
+                            break;
+                        }
                     }
                 }
                 metrics::record_run_loop_phase("drain_responses", phase_start.elapsed());
@@ -2262,9 +2623,11 @@ impl Node {
             {
                 let phase_start = std::time::Instant::now();
                 while let Some(update) = self.nostr.try_recv_ledger_update() {
-                    tracing::info!("RECV update: ledger={}..., seq={}",
+                    tracing::info!(
+                        "RECV update: ledger={}..., seq={}",
                         &update.ledger_id[..16.min(update.ledger_id.len())],
-                        update.update.sequence_number);
+                        update.update.sequence_number
+                    );
                     self.handle_ledger_update(update).await;
                 }
                 metrics::record_run_loop_phase("drain_updates", phase_start.elapsed());
@@ -2272,10 +2635,18 @@ impl Node {
 
             // Check for outbound messages (non-blocking)
             while let Ok(outbound) = self.outbound_rx.lock().unwrap().try_recv() {
-                match tokio::time::timeout(std::time::Duration::from_secs(5), self.nostr.send_message(outbound.peer, outbound.message)).await {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    self.nostr.send_message(outbound.peer, outbound.message),
+                )
+                .await
+                {
                     Ok(Err(e)) => tracing::error!("Failed to send message: {}", e),
-                    Err(_) => { tracing::error!("send_message timed out after 5s"); break; }
-                    _ => {},
+                    Err(_) => {
+                        tracing::error!("send_message timed out after 5s");
+                        break;
+                    }
+                    _ => {}
                 }
             }
 
@@ -2309,20 +2680,29 @@ impl Node {
         // use the same operator key and we want the daemon to process those.
         let is_own_event = {
             let sent = self.sent_events.lock().unwrap();
-            if sent.contains(&request.event_id) { true }
-            else { self.sent_events_prev.lock().unwrap().contains(&request.event_id) }
+            if sent.contains(&request.event_id) {
+                true
+            } else {
+                self.sent_events_prev
+                    .lock()
+                    .unwrap()
+                    .contains(&request.event_id)
+            }
         };
         if is_own_event {
-            tracing::info!("DROP own_event: action={}, ledger={}...",
-                request.action, &request.ledger_id[..16.min(request.ledger_id.len())]);
+            tracing::info!(
+                "DROP own_event: action={}, ledger={}...",
+                request.action,
+                &request.ledger_id[..16.min(request.ledger_id.len())]
+            );
             return;
         }
 
         // Check if this request is for a ledger we own or have joined
         let is_our_ledger = self.has_ledger(&request.ledger_id)
             || self.has_ledger_by_reserves_key(&request.ledger_id);
-        let is_cross_ledger_sign = request.action == "custody_transfer_sign"
-            || request.action == "confiscation_sign";
+        let is_cross_ledger_sign =
+            request.action == "custody_transfer_sign" || request.action == "confiscation_sign";
         // cosign requests can come from ledgers where we're a quorum member
         // (we may not have the full ledger locally, just a QuorumJoin record)
         let is_cosign_request = request.action == "cosign_update"
@@ -2331,16 +2711,44 @@ impl Node {
 
         // Silently drop operator-only actions if we're not the operator
         // (these are broadcast but only the operator should respond)
-        let operator_only_actions = ["deposit_open", "make_offer", "withdraw", "collateral_lock", "offer_status", "balance_query", "make_invoice", "pay_invoice", "transfer_lock", "transfer_complete", "bump", "complete_offer", "deposit_credit", "quorum_add", "quorum_remove", "quorum_join", "collateral_record", "quorum_begin", "resync"];
-        if operator_only_actions.contains(&request.action.as_str()) && !self.is_operator_of_ledger(&request.ledger_id) {
-            tracing::info!("DROP not_operator: action={}, ledger={}...",
-                request.action, &request.ledger_id[..16.min(request.ledger_id.len())]);
+        let operator_only_actions = [
+            "deposit_open",
+            "make_offer",
+            "withdraw",
+            "collateral_lock",
+            "offer_status",
+            "balance_query",
+            "make_invoice",
+            "pay_invoice",
+            "transfer_lock",
+            "transfer_complete",
+            "bump",
+            "complete_offer",
+            "deposit_credit",
+            "quorum_add",
+            "quorum_remove",
+            "quorum_join",
+            "collateral_record",
+            "quorum_begin",
+            "resync",
+        ];
+        if operator_only_actions.contains(&request.action.as_str())
+            && !self.is_operator_of_ledger(&request.ledger_id)
+        {
+            tracing::info!(
+                "DROP not_operator: action={}, ledger={}...",
+                request.action,
+                &request.ledger_id[..16.min(request.ledger_id.len())]
+            );
             return;
         }
 
         if !is_our_ledger && !is_cross_ledger_sign && !is_cosign_request {
-            tracing::info!("DROP not_ours: action={}, ledger={}...",
-                request.action, &request.ledger_id[..16.min(request.ledger_id.len())]);
+            tracing::info!(
+                "DROP not_ours: action={}, ledger={}...",
+                request.action,
+                &request.ledger_id[..16.min(request.ledger_id.len())]
+            );
             return;
         }
 
@@ -2372,7 +2780,8 @@ impl Node {
         // Discard stale transfer requests. The simulator retries on timeout,
         // so processing old requests wastes cycles and creates state conflicts.
         // 15s is well within the client's 30s lock_timeout.
-        let is_transfer = request.action == "transfer_lock" || request.action == "transfer_complete";
+        let is_transfer =
+            request.action == "transfer_lock" || request.action == "transfer_complete";
         if is_transfer && request_age_secs >= 15.0 {
             tracing::debug!(
                 "Discarding stale {} request: age={:.0}s, event={}...",
@@ -2425,10 +2834,7 @@ impl Node {
             if drained > 0 {
                 // Also try event store catch-up for this specific ledger
                 self.catch_up_ledger_from_event_store(&request.ledger_id);
-                tracing::debug!(
-                    "Pre-cosign drain: processed {} buffered updates",
-                    drained,
-                );
+                tracing::debug!("Pre-cosign drain: processed {} buffered updates", drained,);
             }
             metrics::record_pre_cosign_drain(drained, true);
         }
@@ -2467,16 +2873,20 @@ impl Node {
                 // Silently ignore if we're not a quorum member for this ledger
                 // (co-sign requests are broadcast, only quorum members should respond)
                 if !self.is_quorum_member_of_ledger(&request.ledger_id) {
-                    tracing::info!("DROP not_quorum_member: action=cosign_update, ledger={}...",
-                        &request.ledger_id[..16.min(request.ledger_id.len())]);
+                    tracing::info!(
+                        "DROP not_quorum_member: action=cosign_update, ledger={}...",
+                        &request.ledger_id[..16.min(request.ledger_id.len())]
+                    );
                     return;
                 }
 
                 let result = self.process_cosign_request(&request).await;
                 if !result.0 {
-                    tracing::info!("DROP cosign_failed: action=cosign_update, ledger={}..., error={}",
+                    tracing::info!(
+                        "DROP cosign_failed: action=cosign_update, ledger={}..., error={}",
                         &request.ledger_id[..16.min(request.ledger_id.len())],
-                        result.2.as_deref().unwrap_or("(silent)"));
+                        result.2.as_deref().unwrap_or("(silent)")
+                    );
                     return;
                 }
                 result
@@ -2484,8 +2894,11 @@ impl Node {
             "cosign_offer" | "cosign_invoice" => {
                 // Silently ignore if we're not a quorum member for this ledger
                 if !self.is_quorum_member_of_ledger(&request.ledger_id) {
-                    tracing::info!("DROP not_quorum_member: action={}, ledger={}...",
-                        request.action, &request.ledger_id[..16.min(request.ledger_id.len())]);
+                    tracing::info!(
+                        "DROP not_quorum_member: action={}, ledger={}...",
+                        request.action,
+                        &request.ledger_id[..16.min(request.ledger_id.len())]
+                    );
                     return;
                 }
 
@@ -2495,10 +2908,12 @@ impl Node {
                     self.process_cosign_invoice_request(&request).await
                 };
                 if !result.0 {
-                    tracing::info!("DROP cosign_failed: action={}, ledger={}..., error={}",
+                    tracing::info!(
+                        "DROP cosign_failed: action={}, ledger={}..., error={}",
                         request.action,
                         &request.ledger_id[..16.min(request.ledger_id.len())],
-                        result.2.as_deref().unwrap_or("(silent)"));
+                        result.2.as_deref().unwrap_or("(silent)")
+                    );
                     return;
                 }
                 result
@@ -2513,7 +2928,14 @@ impl Node {
                     (false, None, Some(format!("Wallet sync failed: {}", e)))
                 } else {
                     self.auto_complete_deposits().await;
-                    (true, Some(serde_json::json!({"message": "Wallet synced and deposits checked"}).to_string()), None)
+                    (
+                        true,
+                        Some(
+                            serde_json::json!({"message": "Wallet synced and deposits checked"})
+                                .to_string(),
+                        ),
+                        None,
+                    )
                 }
             }
             "complete_offer" => self.process_complete_offer_request(&request).await,
@@ -2529,40 +2951,68 @@ impl Node {
             "health_ping" => self.process_health_ping_request(&request).await,
             _ => {
                 tracing::warn!("Unknown request action: {}", request.action);
-                (false, None, Some(format!("Unknown action: {}", request.action)))
+                (
+                    false,
+                    None,
+                    Some(format!("Unknown action: {}", request.action)),
+                )
             }
         };
 
         // Record request processing time
         let processing_time = start_time.elapsed();
         if !success || processing_time.as_millis() > 10 {
-            tracing::info!("[PROFILE] handle_ledger_request action={} took {:.1}ms, age={:.1}ms (success={})",
-                request.action, processing_time.as_secs_f64() * 1000.0, request_age_secs * 1000.0, success);
+            tracing::info!(
+                "[PROFILE] handle_ledger_request action={} took {:.1}ms, age={:.1}ms (success={})",
+                request.action,
+                processing_time.as_secs_f64() * 1000.0,
+                request_age_secs * 1000.0,
+                success
+            );
         }
-        crate::metrics::record_request_processing(&request.action, &request.ledger_id, success, processing_time);
-        crate::metrics::record_response_sent_for_ledger(&request.action, &request.ledger_id, success);
+        crate::metrics::record_request_processing(
+            &request.action,
+            &request.ledger_id,
+            success,
+            processing_time,
+        );
+        crate::metrics::record_response_sent_for_ledger(
+            &request.action,
+            &request.ledger_id,
+            success,
+        );
         // Note: record_response_sent is called inside send_ledger_response (nostr.rs)
 
         // Send response - parse result String as JSON Value
         let result_json = result.and_then(|s| serde_json::from_str(&s).ok());
-        if let Err(e) = self.nostr.send_ledger_response(
-            &request.event_id,
-            &request.ledger_id,
-            &request.action,
-            success,
-            result_json,
-            error.clone(),
-            request.gift_wrap_sender.as_deref(),
-        ).await {
+        if let Err(e) = self
+            .nostr
+            .send_ledger_response(
+                &request.event_id,
+                &request.ledger_id,
+                &request.action,
+                success,
+                result_json,
+                error.clone(),
+                request.gift_wrap_sender.as_deref(),
+            )
+            .await
+        {
             tracing::error!("Failed to send response: {}", e);
         } else if success {
-            tracing::info!("SEND response: action={}, ledger={}..., success=true, {:.0}ms",
-                request.action, &request.ledger_id[..16.min(request.ledger_id.len())],
-                processing_time.as_secs_f64() * 1000.0);
+            tracing::info!(
+                "SEND response: action={}, ledger={}..., success=true, {:.0}ms",
+                request.action,
+                &request.ledger_id[..16.min(request.ledger_id.len())],
+                processing_time.as_secs_f64() * 1000.0
+            );
         } else {
-            tracing::info!("SEND response: action={}, ledger={}..., success=false, error={}",
-                request.action, &request.ledger_id[..16.min(request.ledger_id.len())],
-                error.unwrap_or_default());
+            tracing::info!(
+                "SEND response: action={}, ledger={}..., success=false, error={}",
+                request.action,
+                &request.ledger_id[..16.min(request.ledger_id.len())],
+                error.unwrap_or_default()
+            );
         }
     }
 
@@ -2632,14 +3082,20 @@ impl Node {
             let is_from_operator = inbound.update.operator_id == ledger.state.parent_pubkey;
             if !is_from_operator {
                 use deposits_core::tlv::TlvDecode;
-                let is_dispute = deposits_core::messages::LedgerOperation::tlv_decode(&inbound.update.message)
-                    .map(|op| matches!(op, deposits_core::messages::LedgerOperation::DisputeEnter { .. }))
-                    .unwrap_or(false);
+                let is_dispute =
+                    deposits_core::messages::LedgerOperation::tlv_decode(&inbound.update.message)
+                        .map(|op| {
+                            matches!(
+                                op,
+                                deposits_core::messages::LedgerOperation::DisputeEnter { .. }
+                            )
+                        })
+                        .unwrap_or(false);
                 if !is_dispute {
                     // If the ledger is in a dispute state, the operator may have
                     // changed (DisputeAcquire).  Re-import and re-check.
-                    let in_dispute = ledger.state.dispute_state
-                        != deposits_core::types::DisputeState::Normal;
+                    let in_dispute =
+                        ledger.state.dispute_state != deposits_core::types::DisputeState::Normal;
                     drop(ledger);
 
                     if in_dispute {
@@ -2655,7 +3111,8 @@ impl Node {
                             return;
                         };
                         let fresh_ledger = fresh_arc.read().unwrap();
-                        let now_from_operator = inbound.update.operator_id == fresh_ledger.state.parent_pubkey;
+                        let now_from_operator =
+                            inbound.update.operator_id == fresh_ledger.state.parent_pubkey;
                         drop(fresh_ledger);
                         drop(ledgers);
                         if !now_from_operator {
@@ -2701,7 +3158,8 @@ impl Node {
                 // Re-check if still behind after catch-up
                 let still_behind = {
                     let ledgers = self.handler.ledgers.lock().unwrap();
-                    ledgers.get(&inbound.ledger_id)
+                    ledgers
+                        .get(&inbound.ledger_id)
                         .map(|arc| {
                             let l = arc.read().unwrap();
                             l.next_sequence() < inbound.update.sequence_number
@@ -2711,7 +3169,10 @@ impl Node {
 
                 if still_behind {
                     // Mark as stale for background gap-fill (non-blocking)
-                    self.stale_joined_ledgers.lock().unwrap().insert(inbound.ledger_id.clone());
+                    self.stale_joined_ledgers
+                        .lock()
+                        .unwrap()
+                        .insert(inbound.ledger_id.clone());
                     let stale_count = self.stale_joined_ledgers.lock().unwrap().len();
                     metrics::set_stale_joined_ledgers(stale_count);
                     if caught_up > 0 {
@@ -2759,7 +3220,10 @@ impl Node {
                 &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
                 e
             );
-            tracing::warn!("  From operator: {}...", hex::encode(inbound.update.operator_id.serialize())[..16].to_string());
+            tracing::warn!(
+                "  From operator: {}...",
+                hex::encode(inbound.update.operator_id.serialize())[..16].to_string()
+            );
             tracing::warn!("  Sequence: {}", inbound.update.sequence_number);
 
             // Get the last valid sequence number (the one before this invalid update)
@@ -2771,7 +3235,10 @@ impl Node {
 
             // Auto-arm for the dispute
             tracing::info!("Auto-arming for dispute...");
-            match self.auto_arm_for_dispute(&inbound.ledger_id, last_valid_seq).await {
+            match self
+                .auto_arm_for_dispute(&inbound.ledger_id, last_valid_seq)
+                .await
+            {
                 Ok(()) => {
                     tracing::info!("Successfully auto-armed for dispute on invalid update");
                 }
@@ -2827,13 +3294,19 @@ impl Node {
         tracing::info!("We are a quorum member - auto-participating in dispute");
 
         // Auto-arm for the dispute
-        match self.auto_arm_for_dispute(&dispute.ledger_id, dispute.last_valid_sequence).await {
+        match self
+            .auto_arm_for_dispute(&dispute.ledger_id, dispute.last_valid_sequence)
+            .await
+        {
             Ok(()) => {
                 tracing::info!("Successfully auto-armed for dispute");
             }
             Err(e) => {
                 tracing::error!("Failed to auto-arm for dispute: {}", e);
-                tracing::warn!("Manual intervention required: Run 'recovery arm {}'", dispute.ledger_id);
+                tracing::warn!(
+                    "Manual intervention required: Run 'recovery arm {}'",
+                    dispute.ledger_id
+                );
             }
         }
     }
@@ -2843,9 +3316,6 @@ impl Node {
     /// Verifies the proof hash against the embedding, then checks if we're
     /// a quorum member. If so, initiates a custody dispute.
     async fn handle_fraud_proof(&self, fp: crate::nostr::FraudProofEvent) {
-        use deposits_core::fraud::FraudProofType;
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-
         let broadcast = &fp.broadcast;
         let ledger_id = &broadcast.proof.ledger_id;
 
@@ -2867,10 +3337,17 @@ impl Node {
             if let Some(arc) = ledgers.get(&embedding.ledger_id) {
                 let ledger = arc.read().unwrap();
                 ledger.history.iter().any(|u| {
-                    if u.sequence_number != embedding.sequence { return false; }
+                    if u.sequence_number != embedding.sequence {
+                        return false;
+                    }
                     // Decode the operation and check the nonce field
-                    if let Ok(op) = deposits_core::messages::LedgerOperation::tlv_decode(&u.message) {
-                        if let deposits_core::messages::LedgerOperation::TransferLock { nonce, .. } = op {
+                    if let Ok(op) = deposits_core::messages::LedgerOperation::tlv_decode(&u.message)
+                    {
+                        if let deposits_core::messages::LedgerOperation::TransferLock {
+                            nonce,
+                            ..
+                        } = op
+                        {
                             return nonce == proof_hash;
                         }
                     }
@@ -2882,14 +3359,22 @@ impl Node {
         };
 
         if !embedding_verified {
-            tracing::warn!("Fraud proof embedding not verified — hash {} not found at seq {} on ledger {}",
-                &proof_hash_hex[..16], embedding.sequence, &embedding.ledger_id[..16]);
+            tracing::warn!(
+                "Fraud proof embedding not verified — hash {} not found at seq {} on ledger {}",
+                &proof_hash_hex[..16],
+                embedding.sequence,
+                &embedding.ledger_id[..16]
+            );
             // Don't act on unverified proofs, but log for manual review
             return;
         }
 
-        tracing::warn!("Fraud proof embedding VERIFIED: hash {} at seq {} on {}",
-            &proof_hash_hex[..16], embedding.sequence, &embedding.ledger_id[..16]);
+        tracing::warn!(
+            "Fraud proof embedding VERIFIED: hash {} at seq {} on {}",
+            &proof_hash_hex[..16],
+            embedding.sequence,
+            &embedding.ledger_id[..16]
+        );
 
         // 3. Verify causal chain (if indirect embedding)
         if embedding.ledger_id != *ledger_id {
@@ -2902,15 +3387,19 @@ impl Node {
                         let ledger = arc.read().unwrap();
                         ledger.history.iter().any(|u| {
                             u.sequence_number == link.sequence
-                                && u.member_ledger_hash.map(|h| hex::encode(h)) == Some(link.member_ledger_hash.clone())
+                                && u.member_ledger_hash.map(hex::encode)
+                                    == Some(link.member_ledger_hash.clone())
                         })
                     } else {
                         false
                     }
                 };
                 if !link_ok {
-                    tracing::warn!("Causal link not verified: seq {} on ledger {}",
-                        link.sequence, &link.ledger_id[..16]);
+                    tracing::warn!(
+                        "Causal link not verified: seq {} on ledger {}",
+                        link.sequence,
+                        &link.ledger_id[..16]
+                    );
                     chain_verified = false;
                     break;
                 }
@@ -2919,12 +3408,18 @@ impl Node {
                 tracing::warn!("Fraud proof causal chain not fully verified — skipping");
                 return;
             }
-            tracing::warn!("Fraud proof causal chain verified ({} links)", broadcast.causal_chain.len());
+            tracing::warn!(
+                "Fraud proof causal chain verified ({} links)",
+                broadcast.causal_chain.len()
+            );
         }
 
         // 4. Check if we're a quorum member of the accused ledger
         if !self.is_quorum_member_of_ledger(ledger_id) {
-            tracing::info!("Not a quorum member of accused ledger {}, skipping", &ledger_id[..16]);
+            tracing::info!(
+                "Not a quorum member of accused ledger {}, skipping",
+                &ledger_id[..16]
+            );
             return;
         }
 
@@ -2943,7 +3438,8 @@ impl Node {
                 // For stale cosign and inactive quorum, use the embedding sequence
                 // as a reference point (the fraud happened before this)
                 let ledgers = self.handler.ledgers.lock().unwrap();
-                ledgers.get(ledger_id)
+                ledgers
+                    .get(ledger_id)
                     .map(|arc| arc.read().unwrap().next_sequence().saturating_sub(1))
                     .unwrap_or(0)
             }
@@ -2951,7 +3447,9 @@ impl Node {
 
         tracing::warn!(
             "INITIATING DISPUTE based on fraud proof: ledger={}, last_valid_seq={}, type={:?}",
-            &ledger_id[..16], last_valid_seq, broadcast.proof.proof_type
+            &ledger_id[..16],
+            last_valid_seq,
+            broadcast.proof.proof_type
         );
 
         // 6. Auto-arm for dispute
@@ -2963,15 +3461,19 @@ impl Node {
                 // Also broadcast a dispute event referencing the fraud proof
                 let secret = self.wallet.operator_secret();
                 let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&self.secp, &secret);
-                if let Err(e) = self.nostr.publish_dispute(
-                    ledger_id,
-                    &reason,
-                    &format!("Fraud proof verified: {}", &fp.event_id[..16]),
-                    proof_hash,
-                    last_valid_seq,
-                    None,
-                    &keypair,
-                ).await {
+                if let Err(e) = self
+                    .nostr
+                    .publish_dispute(
+                        ledger_id,
+                        &reason,
+                        &format!("Fraud proof verified: {}", &fp.event_id[..16]),
+                        proof_hash,
+                        last_valid_seq,
+                        None,
+                        &keypair,
+                    )
+                    .await
+                {
                     tracing::error!("Failed to broadcast dispute: {:?}", e);
                 }
             }
@@ -3010,7 +3512,10 @@ impl Node {
             if jid == ledger_id {
                 let elapsed = t0.elapsed();
                 if elapsed.as_millis() > 1 {
-                    tracing::info!("[PROFILE] is_quorum_member_of_ledger (found via history scan): {:?}", elapsed);
+                    tracing::info!(
+                        "[PROFILE] is_quorum_member_of_ledger (found via history scan): {:?}",
+                        elapsed
+                    );
                 }
                 return true;
             }
@@ -3018,7 +3523,10 @@ impl Node {
 
         let elapsed = t0.elapsed();
         if elapsed.as_millis() > 1 {
-            tracing::info!("[PROFILE] is_quorum_member_of_ledger (not found, full scan): {:?}", elapsed);
+            tracing::info!(
+                "[PROFILE] is_quorum_member_of_ledger (not found, full scan): {:?}",
+                elapsed
+            );
         }
         false
     }
@@ -3058,28 +3566,41 @@ impl Node {
     ///
     /// Returns the compound tracking key for the fork.
     fn create_dispute_fork(&self, ledger_id: &str, last_valid_seq: u64) -> Result<String, Error> {
-        use deposits_core::TlvDecode;
-        use deposits_core::messages::LedgerOperation;
         use crate::handler::DepositsHandler;
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::TlvDecode;
 
         let secp = &self.secp;
-        let our_pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &self.wallet.operator_secret());
+        let our_pubkey =
+            bitcoin::secp256k1::PublicKey::from_secret_key(secp, &self.wallet.operator_secret());
 
         // Check if we already have a fork for this ledger
         if let Some(existing_fork) = self.handler.find_our_fork(ledger_id) {
-            tracing::info!("Already have fork for ledger {}: {}", &ledger_id[..16], &existing_fork[..32.min(existing_fork.len())]);
+            tracing::info!(
+                "Already have fork for ledger {}: {}",
+                &ledger_id[..16],
+                &existing_fork[..32.min(existing_fork.len())]
+            );
             return Ok(existing_fork);
         }
 
         // Clone the Partner copy of the disputed ledger
-        let original_arc = self.handler.ledgers.lock().unwrap()
+        let original_arc = self
+            .handler
+            .ledgers
+            .lock()
+            .unwrap()
             .get(ledger_id)
             .cloned()
-            .ok_or_else(|| Error::Protocol(format!("Don't have disputed ledger: {}", &ledger_id[..16])))?;
+            .ok_or_else(|| {
+                Error::Protocol(format!("Don't have disputed ledger: {}", &ledger_id[..16]))
+            })?;
         let original = original_arc.read().unwrap();
 
         // Truncate history to last_valid_seq
-        let truncated_history: Vec<_> = original.history.iter()
+        let truncated_history: Vec<_> = original
+            .history
+            .iter()
             .filter(|u| u.sequence_number <= last_valid_seq)
             .cloned()
             .collect();
@@ -3115,7 +3636,8 @@ impl Node {
                 if let Err(e) = fork.apply_state_changes(&op) {
                     tracing::warn!(
                         "Fork replay seq {}: failed to apply state change: {}",
-                        update.sequence_number, e
+                        update.sequence_number,
+                        e
                     );
                 }
             }
@@ -3123,7 +3645,7 @@ impl Node {
 
         // Update sequence/hash from last valid update
         if let Some(last) = truncated_history.last() {
-            fork.state.sequence = last.sequence_number as u64;
+            fork.state.sequence = last.sequence_number;
             fork.state.chain_tip_hash = last.chain_hash();
         }
 
@@ -3137,7 +3659,10 @@ impl Node {
             fork.history.len(),
         );
 
-        self.handler.ledgers.lock().unwrap()
+        self.handler
+            .ledgers
+            .lock()
+            .unwrap()
             .insert(fork_key.clone(), Arc::new(RwLock::new(fork)));
 
         Ok(fork_key)
@@ -3149,25 +3674,33 @@ impl Node {
     /// This ensures the operator's own ledger stays in Normal state and is
     /// not affected by the dispute. The fork is stored under a compound
     /// tracking key and persisted as a separate JSONL file.
-    async fn auto_arm_for_dispute(&self, ledger_id: &str, last_valid_seq: u64) -> Result<(), Error> {
-        use bitcoin::hashes::{Hash, hash160};
-        use bitcoin::secp256k1::Secp256k1;
+    async fn auto_arm_for_dispute(
+        &self,
+        ledger_id: &str,
+        last_valid_seq: u64,
+    ) -> Result<(), Error> {
+        use bitcoin::hashes::{hash160, Hash};
         use bitcoin::secp256k1::rand::rngs::OsRng;
         use bitcoin::secp256k1::rand::Rng;
-        use deposits_core::TlvEncode;
+
         use deposits_core::messages::LedgerOperation;
 
         let secp = &self.secp;
 
         // Get our operator keypair
-        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let keypair =
+            bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
         let our_pubkey = keypair.public_key();
 
         // 0. Create a fork of the disputed ledger (or reuse existing one)
         let fork_key = self.create_dispute_fork(ledger_id, last_valid_seq)?;
 
         // Get the fork ledger's arc
-        let fork_arc = self.handler.ledgers.lock().unwrap()
+        let fork_arc = self
+            .handler
+            .ledgers
+            .lock()
+            .unwrap()
             .get(&fork_key)
             .cloned()
             .ok_or_else(|| Error::Protocol("Fork ledger not found after creation".to_string()))?;
@@ -3198,11 +3731,11 @@ impl Node {
                     reason: "auto_dispute".to_string(),
                 };
 
-                fork_ledger.append_operation_with_block(
-                    dispute_op,
-                    current_block,
-                    block_hash,
-                ).map_err(|e| Error::Protocol(format!("Failed to append DisputeEnter to fork: {:?}", e)))?;
+                fork_ledger
+                    .append_operation_with_block(dispute_op, current_block, block_hash)
+                    .map_err(|e| {
+                        Error::Protocol(format!("Failed to append DisputeEnter to fork: {:?}", e))
+                    })?;
 
                 // Set parent_pubkey to our key (we now operate this fork branch)
                 fork_ledger.state.parent_pubkey = our_pubkey;
@@ -3228,7 +3761,8 @@ impl Node {
             // Collect arcs for all our owned ledgers
             let our_ledger_arcs: Vec<_> = {
                 let ledgers = self.handler.ledgers.lock().unwrap();
-                ledgers.iter()
+                ledgers
+                    .iter()
                     .filter(|(lid, arc)| {
                         let l = arc.read().unwrap();
                         l.operator_key() == self.node_id && lid.len() <= 64
@@ -3238,7 +3772,8 @@ impl Node {
             };
 
             let mut attestations_to_copy: Vec<LedgerOperation> = Vec::new();
-            let mut quorum_members_to_add: Vec<(bitcoin::secp256k1::PublicKey, String)> = Vec::new();
+            let mut quorum_members_to_add: Vec<(bitcoin::secp256k1::PublicKey, String)> =
+                Vec::new();
 
             // Use derived collateral_attestations state instead of scanning history
             for ledger_arc in &our_ledger_arcs {
@@ -3255,8 +3790,12 @@ impl Node {
                             signature: att.signature,
                             ledger_hash: att.ledger_hash,
                         });
-                        if !quorum_members_to_add.iter().any(|(pk, _)| pk == collateral_op) {
-                            quorum_members_to_add.push((*collateral_op, att.collateral_ledger_id.clone()));
+                        if !quorum_members_to_add
+                            .iter()
+                            .any(|(pk, _)| pk == collateral_op)
+                        {
+                            quorum_members_to_add
+                                .push((*collateral_op, att.collateral_ledger_id.clone()));
                         }
                     }
                 }
@@ -3267,7 +3806,12 @@ impl Node {
                 for (member, member_ledger_id) in quorum_members_to_add {
                     let mut fork_ledger = fork_arc.write().unwrap();
 
-                    if fork_ledger.state.quorum_members.iter().any(|m| m.pubkey == member) {
+                    if fork_ledger
+                        .state
+                        .quorum_members
+                        .iter()
+                        .any(|m| m.pubkey == member)
+                    {
                         continue;
                     }
 
@@ -3287,17 +3831,18 @@ impl Node {
                         max_descriptor_bytes: None,
                     };
 
-                    if let Err(e) = fork_ledger.append_operation_with_block(
-                        add_op,
-                        current_block,
-                        block_hash,
-                    ) {
+                    if let Err(e) =
+                        fork_ledger.append_operation_with_block(add_op, current_block, block_hash)
+                    {
                         tracing::warn!("Failed to add quorum member to fork: {:?}", e);
                     } else {
                         if let Some(update) = fork_ledger.history.last_mut() {
                             update.operator_id = our_pubkey;
                         }
-                        tracing::info!("Added quorum member to fork: {}...", &hex::encode(member.serialize())[..16]);
+                        tracing::info!(
+                            "Added quorum member to fork: {}...",
+                            &hex::encode(member.serialize())[..16]
+                        );
                         added_new_operations = true;
                     }
                 }
@@ -3350,8 +3895,10 @@ impl Node {
                 let commitment_hash: [u8; 20] = *hash160::Hash::hash(&preimage).as_byte_array();
 
                 // Store preimage for later reveal (keyed by disputed ledger_id prefix)
-                let preimage_file = self.data_dir.join(format!("lottery_preimage_{}.hex",
-                    &ledger_id[..16.min(ledger_id.len())]));
+                let preimage_file = self.data_dir.join(format!(
+                    "lottery_preimage_{}.hex",
+                    &ledger_id[..16.min(ledger_id.len())]
+                ));
                 if let Err(e) = std::fs::write(&preimage_file, hex::encode(&preimage)) {
                     tracing::warn!("Failed to store preimage: {}", e);
                 } else {
@@ -3362,7 +3909,8 @@ impl Node {
                 let pubkey_bytes: [u8; 33] = our_pubkey.serialize();
                 let compressed = bitcoin::CompressedPublicKey::from_slice(&pubkey_bytes)
                     .map_err(|e| Error::Protocol(format!("Invalid pubkey: {}", e)))?;
-                let target_reserves = bitcoin::Address::p2wpkh(&compressed, self.wallet.network()).to_string();
+                let target_reserves =
+                    bitcoin::Address::p2wpkh(&compressed, self.wallet.network()).to_string();
 
                 let armed_op = LedgerOperation::DisputeArmed {
                     armed_block: current_block,
@@ -3370,11 +3918,11 @@ impl Node {
                     target_reserves,
                 };
 
-                fork_ledger.append_operation_with_block(
-                    armed_op,
-                    current_block,
-                    block_hash,
-                ).map_err(|e| Error::Protocol(format!("Failed to append DisputeArmed to fork: {:?}", e)))?;
+                fork_ledger
+                    .append_operation_with_block(armed_op, current_block, block_hash)
+                    .map_err(|e| {
+                        Error::Protocol(format!("Failed to append DisputeArmed to fork: {:?}", e))
+                    })?;
 
                 // Patch operator_id
                 if let Some(update) = fork_ledger.history.last_mut() {
@@ -3395,8 +3943,10 @@ impl Node {
         }
 
         // Create custody_armed marker (needed by auto_confiscate)
-        let armed_marker = self.data_dir.join(format!("custody_armed_{}.marker",
-            &ledger_id[..16.min(ledger_id.len())]));
+        let armed_marker = self.data_dir.join(format!(
+            "custody_armed_{}.marker",
+            &ledger_id[..16.min(ledger_id.len())]
+        ));
         if let Err(e) = std::fs::write(&armed_marker, "armed") {
             tracing::warn!("Failed to write armed marker: {}", e);
         } else {
@@ -3425,8 +3975,10 @@ impl Node {
         }
 
         // Check if we have a preimage file for this ledger
-        let preimage_file = self.data_dir.join(format!("lottery_preimage_{}.hex",
-            &ledger_id[..16.min(ledger_id.len())]));
+        let preimage_file = self.data_dir.join(format!(
+            "lottery_preimage_{}.hex",
+            &ledger_id[..16.min(ledger_id.len())]
+        ));
 
         if !preimage_file.exists() {
             tracing::debug!("No preimage file for ledger {}", &ledger_id[..16]);
@@ -3434,8 +3986,10 @@ impl Node {
         }
 
         // Check if we already revealed (marker file)
-        let revealed_marker = self.data_dir.join(format!("lottery_revealed_{}.marker",
-            &ledger_id[..16.min(ledger_id.len())]));
+        let revealed_marker = self.data_dir.join(format!(
+            "lottery_revealed_{}.marker",
+            &ledger_id[..16.min(ledger_id.len())]
+        ));
         if revealed_marker.exists() {
             tracing::debug!("Already revealed preimage for ledger {}", &ledger_id[..16]);
             return;
@@ -3458,8 +4012,15 @@ impl Node {
             }
         };
 
-        tracing::info!("Auto-revealing lottery preimage for ledger {}...", &ledger_id[..16]);
-        tracing::info!("  Preimage length: {} bytes (contribution: {})", preimage.len(), preimage.len().saturating_sub(16));
+        tracing::info!(
+            "Auto-revealing lottery preimage for ledger {}...",
+            &ledger_id[..16]
+        );
+        tracing::info!(
+            "  Preimage length: {} bytes (contribution: {})",
+            preimage.len(),
+            preimage.len().saturating_sub(16)
+        );
 
         // Publish reveal via Nostr
         let reveal_params = serde_json::json!({
@@ -3467,14 +4028,17 @@ impl Node {
             "preimage": preimage_hex,
         });
 
-        match self.nostr.send_ledger_request(
-            ledger_id,
-            "lottery_reveal",
-            reveal_params,
-        ).await {
+        match self
+            .nostr
+            .send_ledger_request(ledger_id, "lottery_reveal", reveal_params)
+            .await
+        {
             Ok(request_id) => {
                 self.track_sent_event(&request_id);
-                tracing::info!("Lottery preimage revealed! Request ID: {}...", &request_id[..16.min(request_id.len())]);
+                tracing::info!(
+                    "Lottery preimage revealed! Request ID: {}...",
+                    &request_id[..16.min(request_id.len())]
+                );
 
                 // Create marker file to prevent double-reveal
                 if let Err(e) = std::fs::write(&revealed_marker, "revealed") {
@@ -3495,10 +4059,9 @@ impl Node {
     /// 3. Winner: claim lottery output + publish DisputeAcquire
     /// 4. Loser: publish DisputeYield
     async fn auto_lottery_claim_or_yield(&self) {
-        use bitcoin::secp256k1::Secp256k1;
-
         let secp = &self.secp;
-        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let keypair =
+            bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
 
         // Find revealed marker files in data_dir
         let entries = match std::fs::read_dir(&self.data_dir) {
@@ -3509,7 +4072,9 @@ impl Node {
         let revealed_markers: Vec<_> = entries
             .filter_map(|e| e.ok())
             .filter(|e| {
-                e.file_name().to_string_lossy().starts_with("lottery_revealed_")
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("lottery_revealed_")
                     && e.file_name().to_string_lossy().ends_with(".marker")
             })
             .collect();
@@ -3533,7 +4098,9 @@ impl Node {
             }
 
             // Check if we've already claimed/yielded (completed marker)
-            let completed_marker = self.data_dir.join(format!("lottery_completed_{}.marker", ledger_prefix));
+            let completed_marker = self
+                .data_dir
+                .join(format!("lottery_completed_{}.marker", ledger_prefix));
             if completed_marker.exists() {
                 continue;
             }
@@ -3575,15 +4142,15 @@ impl Node {
         ledger_id: &str,
         keypair: &bitcoin::secp256k1::Keypair,
     ) -> Result<bool, Error> {
-        use bitcoin::hashes::{Hash, sha256, hash160};
-        use bitcoin::secp256k1::{Secp256k1, PublicKey};
-        use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate};
-        use deposits_core::messages::LedgerOperation;
-        use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant, LotteryOutput};
-        use crate::nostr::{KIND_LEDGER_UPDATE, KIND_LEDGER_REQUEST};
+        use crate::nostr::{KIND_LEDGER_REQUEST, KIND_LEDGER_UPDATE};
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+        use bitcoin::secp256k1::PublicKey;
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tapscript_reserves::{LotteryOutput, LotteryParticipant};
+        use deposits_core::{SignedLedgerUpdate, TlvDecode};
+
         use nostr_sdk::{Filter, Kind, TagKind};
-        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
 
         let our_pubkey = keypair.public_key();
 
@@ -3593,7 +4160,10 @@ impl Node {
         // Fetch ledger updates
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
+            .custom_tag(
+                crate::nostr::TAG_LEDGER_ID,
+                [crate::nostr::ledger_tag(ledger_id)],
+            )
             .limit(500);
 
         let update_events = client
@@ -3620,13 +4190,17 @@ impl Node {
             if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
                 if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        if let LedgerOperation::DisputeArmed { commitment_hash, target_reserves, .. } = op {
+                        if let LedgerOperation::DisputeArmed {
+                            commitment_hash,
+                            target_reserves,
+                            ..
+                        } = op
+                        {
                             let x_only = update.operator_id.x_only_public_key().0;
-                            participants.push((update.operator_id, LotteryParticipant::new(
-                                x_only,
-                                commitment_hash,
-                                target_reserves,
-                            )));
+                            participants.push((
+                                update.operator_id,
+                                LotteryParticipant::new(x_only, commitment_hash, target_reserves),
+                            ));
                             if update.operator_id == our_pubkey {
                                 our_armed = Some(update);
                             }
@@ -3637,22 +4211,28 @@ impl Node {
         }
 
         if participants.is_empty() {
-            return Err(Error::Protocol("No DisputeArmed participants found".to_string()));
+            return Err(Error::Protocol(
+                "No DisputeArmed participants found".to_string(),
+            ));
         }
 
-        let our_armed = our_armed.ok_or_else(||
-            Error::Protocol("Could not find our DisputeArmed".to_string()))?;
+        let our_armed = our_armed
+            .ok_or_else(|| Error::Protocol("Could not find our DisputeArmed".to_string()))?;
 
         // Sort participants by x-only pubkey for deterministic order
         participants.sort_by(|a, b| a.1.pubkey.serialize().cmp(&b.1.pubkey.serialize()));
 
         // Collect revealed preimages
-        let mut preimages: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+        let mut preimages: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
 
         for event in reveal_events.iter() {
             let is_lottery_reveal = event.tags.iter().any(|tag| {
-                tag.kind() == TagKind::custom("action") &&
-                tag.content().map(|c| c == "lottery_reveal").unwrap_or(false)
+                tag.kind() == TagKind::custom("action")
+                    && tag
+                        .content()
+                        .map(|c| c == "lottery_reveal")
+                        .unwrap_or(false)
             });
 
             if is_lottery_reveal {
@@ -3679,7 +4259,9 @@ impl Node {
             if let Some(preimage) = preimages.get(&pubkey_str) {
                 ordered_preimages.push(preimage.clone());
             } else {
-                return Err(Error::Protocol(format!("Missing preimage from participant")));
+                return Err(Error::Protocol(
+                    "Missing preimage from participant".to_string(),
+                ));
             }
         }
 
@@ -3687,16 +4269,28 @@ impl Node {
         let winner_index = LotteryOutput::calculate_winner(&ordered_preimages)
             .map_err(|e| Error::Protocol(format!("Failed to calculate winner: {:?}", e)))?;
 
-        let (winner_pubkey, winner_participant) = &participants[winner_index];
+        let (winner_pubkey, _winner_participant) = &participants[winner_index];
 
         if *winner_pubkey == our_pubkey {
             // WE WON - claim the lottery
             tracing::info!("We won the lottery for ledger {}!", &ledger_id[..16]);
-            self.claim_lottery(ledger_id, &participants, &ordered_preimages, winner_index, &our_armed, keypair).await?;
+            self.claim_lottery(
+                ledger_id,
+                &participants,
+                &ordered_preimages,
+                winner_index,
+                &our_armed,
+                keypair,
+            )
+            .await?;
         } else {
             // We lost - yield
-            tracing::info!("We lost the lottery for ledger {}. Publishing DisputeYield.", &ledger_id[..16]);
-            self.publish_custody_yield(ledger_id, &our_armed, keypair).await?;
+            tracing::info!(
+                "We lost the lottery for ledger {}. Publishing DisputeYield.",
+                &ledger_id[..16]
+            );
+            self.publish_custody_yield(ledger_id, &our_armed, keypair)
+                .await?;
         }
 
         Ok(true)
@@ -3706,34 +4300,36 @@ impl Node {
     async fn claim_lottery(
         &self,
         ledger_id: &str,
-        participants: &[(bitcoin::secp256k1::PublicKey, deposits_core::tapscript_reserves::LotteryParticipant)],
+        participants: &[(
+            bitcoin::secp256k1::PublicKey,
+            deposits_core::tapscript_reserves::LotteryParticipant,
+        )],
         ordered_preimages: &[Vec<u8>],
         winner_index: usize,
         our_armed: &deposits_core::SignedLedgerUpdate,
         keypair: &bitcoin::secp256k1::Keypair,
     ) -> Result<(), Error> {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, PublicKey, Message};
-        use bitcoin::{Transaction, TxIn, TxOut, Witness, Amount, ScriptBuf};
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::Message;
         use bitcoin::sighash::{SighashCache, TapSighashType};
         use bitcoin::taproot::TapLeafHash;
-        use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate};
+        use bitcoin::{Amount, ScriptBuf, Transaction, TxIn, TxOut, Witness};
         use deposits_core::messages::LedgerOperation;
-        use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant, LotteryOutput};
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use deposits_core::tapscript_reserves::{LotteryParticipant, LotteryScriptBuilder};
+        use deposits_core::{SignedLedgerUpdate, TlvEncode};
 
         let secp = &self.secp;
         let our_pubkey = keypair.public_key();
         let (_, winner_participant) = &participants[winner_index];
 
         // Build lottery participants list
-        let lottery_participants: Vec<LotteryParticipant> = participants.iter()
-            .map(|(_, p)| p.clone())
-            .collect();
+        let lottery_participants: Vec<LotteryParticipant> =
+            participants.iter().map(|(_, p)| p.clone()).collect();
 
         // Get recovery voters (need to fetch from ledger)
         // For now, use participants as recovery voters
-        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = participants.iter()
+        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = participants
+            .iter()
             .map(|(pk, _)| pk.x_only_public_key().0)
             .collect();
 
@@ -3747,25 +4343,36 @@ impl Node {
             self.wallet.network(),
         );
 
-        let lottery_output = lottery_builder.build()
+        let lottery_output = lottery_builder
+            .build()
             .map_err(|e| Error::Protocol(format!("Failed to build lottery output: {:?}", e)))?;
 
         // Find the lottery UTXO on-chain
         let lottery_script = lottery_output.address.script_pubkey();
 
         // Use wallet's esplora to find UTXO
-        let lottery_utxo = self.wallet.find_utxo_for_script(&lottery_script)
+        let lottery_utxo = self
+            .wallet
+            .find_utxo_for_script(&lottery_script)
             .map_err(|e| Error::Protocol(format!("Failed to find lottery UTXO: {:?}", e)))?;
 
         let (lottery_outpoint, lottery_amount) = lottery_utxo
             .ok_or_else(|| Error::Protocol("No unspent UTXO at lottery address".to_string()))?;
 
-        tracing::info!("Found lottery UTXO: {} ({} sats)", lottery_outpoint, lottery_amount);
+        tracing::info!(
+            "Found lottery UTXO: {} ({} sats)",
+            lottery_outpoint,
+            lottery_amount
+        );
 
         // Parse winner's target address
-        let target_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> = winner_participant.target_reserves.parse()
-            .map_err(|e| Error::Protocol(format!("Invalid target address: {}", e)))?;
-        let target_address = target_address.require_network(self.wallet.network())
+        let target_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+            winner_participant
+                .target_reserves
+                .parse()
+                .map_err(|e| Error::Protocol(format!("Invalid target address: {}", e)))?;
+        let target_address = target_address
+            .require_network(self.wallet.network())
             .map_err(|e| Error::Protocol(format!("Address network mismatch: {}", e)))?;
 
         // Build claim transaction
@@ -3793,15 +4400,20 @@ impl Node {
             script_pubkey: lottery_script.clone(),
         }];
 
-        let leaf_hash = TapLeafHash::from_script(&lottery_output.lottery_script, bitcoin::taproot::LeafVersion::TapScript);
+        let leaf_hash = TapLeafHash::from_script(
+            &lottery_output.lottery_script,
+            bitcoin::taproot::LeafVersion::TapScript,
+        );
 
         let mut sighash_cache = SighashCache::new(&claim_tx);
-        let sighash = sighash_cache.taproot_script_spend_signature_hash(
-            0,
-            &bitcoin::sighash::Prevouts::All(&prevouts),
-            leaf_hash,
-            TapSighashType::Default,
-        ).map_err(|e| Error::Protocol(format!("Failed to compute sighash: {}", e)))?;
+        let sighash = sighash_cache
+            .taproot_script_spend_signature_hash(
+                0,
+                &bitcoin::sighash::Prevouts::All(&prevouts),
+                leaf_hash,
+                TapSighashType::Default,
+            )
+            .map_err(|e| Error::Protocol(format!("Failed to compute sighash: {}", e)))?;
 
         // Sign
         let msg = Message::from_digest(*sighash.as_ref());
@@ -3809,7 +4421,8 @@ impl Node {
         let sig_bytes: [u8; 64] = *signature.as_ref();
 
         // Create witness
-        let witness = lottery_output.create_claim_witness(&sig_bytes, ordered_preimages)
+        let witness = lottery_output
+            .create_claim_witness(&sig_bytes, ordered_preimages)
             .map_err(|e| Error::Protocol(format!("Failed to create witness: {:?}", e)))?;
 
         let mut claim_tx = claim_tx;
@@ -3850,7 +4463,7 @@ impl Node {
             "deposits:ledger:{}:{}:{}",
             hex::encode(our_armed.current_hash),
             sequence,
-            hex::encode(&new_hash)
+            hex::encode(new_hash)
         );
         let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
         let msg = Message::from_digest(*msg_hash.as_ref());
@@ -3880,7 +4493,9 @@ impl Node {
         };
 
         // Broadcast to Nostr
-        self.nostr.broadcast_ledger_update(&signed_update).await
+        self.nostr
+            .broadcast_ledger_update(&signed_update)
+            .await
             .map_err(|e| Error::Protocol(format!("Failed to broadcast DisputeAcquire: {:?}", e)))?;
 
         tracing::info!("DisputeAcquire published! We are now the operator.");
@@ -3894,10 +4509,10 @@ impl Node {
         our_armed: &deposits_core::SignedLedgerUpdate,
         keypair: &bitcoin::secp256k1::Keypair,
     ) -> Result<(), Error> {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message};
-        use deposits_core::{TlvEncode, SignedLedgerUpdate};
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::Message;
         use deposits_core::messages::LedgerOperation;
+        use deposits_core::{SignedLedgerUpdate, TlvEncode};
 
         let secp = &self.secp;
         let our_pubkey = keypair.public_key();
@@ -3922,7 +4537,7 @@ impl Node {
             "deposits:ledger:{}:{}:{}",
             hex::encode(our_armed.current_hash),
             sequence,
-            hex::encode(&new_hash)
+            hex::encode(new_hash)
         );
         let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
         let msg = Message::from_digest(*msg_hash.as_ref());
@@ -3952,7 +4567,9 @@ impl Node {
         };
 
         // Broadcast to Nostr
-        self.nostr.broadcast_ledger_update(&signed_update).await
+        self.nostr
+            .broadcast_ledger_update(&signed_update)
+            .await
             .map_err(|e| Error::Protocol(format!("Failed to broadcast DisputeYield: {:?}", e)))?;
 
         tracing::info!("DisputeYield published. Branch terminated.");
@@ -3975,9 +4592,8 @@ impl Node {
     /// Non-blocking: collect signatures for pending confiscation requests and broadcast when ready.
     async fn collect_confiscation_signatures(&self) {
         use bitcoin::secp256k1::PublicKey;
+
         use nostr_sdk::{Filter, Kind};
-        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
-        use bitcoin::Witness;
 
         let prefixes: Vec<String> = {
             let pending = self.pending_confiscations.lock().unwrap();
@@ -3990,7 +4606,10 @@ impl Node {
                 let pending = self.pending_confiscations.lock().unwrap();
                 if let Some(pc) = pending.get(&prefix) {
                     if pc.created_at.elapsed() > std::time::Duration::from_secs(120) {
-                        tracing::warn!("Confiscation request for {} timed out, will re-initiate", prefix);
+                        tracing::warn!(
+                            "Confiscation request for {} timed out, will re-initiate",
+                            prefix
+                        );
                         drop(pending);
                         self.pending_confiscations.lock().unwrap().remove(&prefix);
                         continue;
@@ -4012,7 +4631,9 @@ impl Node {
                 .kind(Kind::Custom(crate::nostr::KIND_LEDGER_RESPONSE))
                 .since(since);
 
-            let response_events = match self.nostr.client()
+            let response_events = match self
+                .nostr
+                .client()
                 .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
                 .await
             {
@@ -4032,7 +4653,9 @@ impl Node {
                 for event in response_events.iter() {
                     let mut is_our_request = false;
                     for tag in event.tags.iter() {
-                        if tag.kind() == nostr_sdk::TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF) {
+                        if tag.kind()
+                            == nostr_sdk::TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF)
+                        {
                             if let Some(val) = tag.content() {
                                 if val == request_id {
                                     is_our_request = true;
@@ -4042,20 +4665,25 @@ impl Node {
                         }
                     }
 
-                    if !is_our_request { continue; }
+                    if !is_our_request {
+                        continue;
+                    }
 
-                    if let Ok(response) = serde_json::from_str::<crate::nostr::LedgerResponse>(&event.content) {
+                    if let Ok(response) =
+                        serde_json::from_str::<crate::nostr::LedgerResponse>(&event.content)
+                    {
                         if response.success {
                             if let Some(result) = &response.result {
                                 if let (Some(signer_hex), Some(sig_hex)) = (
                                     result.get("signer").and_then(|v| v.as_str()),
-                                    result.get("signature").and_then(|v| v.as_str())
+                                    result.get("signature").and_then(|v| v.as_str()),
                                 ) {
-                                    if let (Ok(signer), Ok(sig_bytes)) = (
-                                        signer_hex.parse::<PublicKey>(),
-                                        hex::decode(sig_hex)
-                                    ) {
-                                        if sig_bytes.len() == 64 && !pc.signatures.contains_key(&signer) {
+                                    if let (Ok(signer), Ok(sig_bytes)) =
+                                        (signer_hex.parse::<PublicKey>(), hex::decode(sig_hex))
+                                    {
+                                        if sig_bytes.len() == 64
+                                            && !pc.signatures.contains_key(&signer)
+                                        {
                                             let mut sig_arr = [0u8; 64];
                                             sig_arr.copy_from_slice(&sig_bytes);
                                             pc.signatures.insert(signer, sig_arr);
@@ -4089,7 +4717,11 @@ impl Node {
             None => return,
         };
 
-        tracing::info!("  Building witness with {} signatures for {}...", pc.signatures.len(), prefix);
+        tracing::info!(
+            "  Building witness with {} signatures for {}...",
+            pc.signatures.len(),
+            prefix
+        );
 
         let control_block = match pc.taproot_output.control_block_for_tier(pc.tier_index) {
             Some(cb) => cb,
@@ -4127,11 +4759,16 @@ impl Node {
         match self.wallet.broadcast(&confiscation_tx) {
             Ok(_) => {
                 let confiscation_txid = confiscation_tx.compute_txid();
-                tracing::info!("Confiscation transaction broadcast! Txid: {}", confiscation_txid);
+                tracing::info!(
+                    "Confiscation transaction broadcast! Txid: {}",
+                    confiscation_txid
+                );
                 tracing::info!("  Lottery address: {}", pc.lottery_address);
 
                 // Write confiscated marker
-                if let Err(e) = std::fs::write(&pc.confiscated_marker, confiscation_txid.to_string()) {
+                if let Err(e) =
+                    std::fs::write(&pc.confiscated_marker, confiscation_txid.to_string())
+                {
                     tracing::warn!("Failed to write confiscated marker: {}", e);
                 }
             }
@@ -4143,19 +4780,21 @@ impl Node {
 
     /// Non-blocking: initiate confiscation for armed ledgers that don't already have a pending request.
     async fn initiate_confiscations(&self) {
-        use bitcoin::secp256k1::{Secp256k1, Keypair, Message, PublicKey, XOnlyPublicKey};
-        use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate, VoterSet, ThresholdConfig, TapscriptReservesBuilder};
-        use deposits_core::messages::LedgerOperation;
-        use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant};
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        use nostr_sdk::{Filter, Kind};
-        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
-        use bitcoin::{Transaction, TxIn, TxOut, Witness, Amount};
+        use bitcoin::secp256k1::{Keypair, Message, PublicKey, XOnlyPublicKey};
         use bitcoin::sighash::{SighashCache, TapSighashType};
+        use bitcoin::{Amount, Transaction, TxIn, TxOut, Witness};
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tapscript_reserves::{LotteryParticipant, LotteryScriptBuilder};
+        use deposits_core::{
+            SignedLedgerUpdate, TapscriptReservesBuilder, ThresholdConfig, TlvDecode, VoterSet,
+        };
+
+        use nostr_sdk::{Filter, Kind};
         use std::collections::HashMap;
 
         let secp = &self.secp;
-        let keypair = Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let keypair = Keypair::from_secret_key(secp, &self.wallet.operator_secret());
         let our_pubkey = keypair.public_key();
 
         // Find armed markers (ledgers where we've armed)
@@ -4176,8 +4815,12 @@ impl Node {
                 .trim_end_matches(".marker");
 
             // Skip if already confiscated or revealed
-            let confiscated_marker = self.data_dir.join(format!("confiscated_{}.marker", ledger_prefix));
-            let revealed_marker = self.data_dir.join(format!("lottery_revealed_{}.marker", ledger_prefix));
+            let confiscated_marker = self
+                .data_dir
+                .join(format!("confiscated_{}.marker", ledger_prefix));
+            let revealed_marker = self
+                .data_dir
+                .join(format!("lottery_revealed_{}.marker", ledger_prefix));
             if confiscated_marker.exists() || revealed_marker.exists() {
                 continue;
             }
@@ -4190,7 +4833,10 @@ impl Node {
                 }
             }
 
-            tracing::debug!("Checking if confiscation ready for ledger {}...", ledger_prefix);
+            tracing::debug!(
+                "Checking if confiscation ready for ledger {}...",
+                ledger_prefix
+            );
 
             // Find the fork or original ledger key (prefer fork for dispute operations)
             let ledger_key = match self.find_fork_or_original_by_prefix(ledger_prefix) {
@@ -4210,10 +4856,16 @@ impl Node {
 
             let filter = Filter::new()
                 .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
-                .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
+                .custom_tag(
+                    crate::nostr::TAG_LEDGER_ID,
+                    [crate::nostr::ledger_tag(ledger_id.as_str())],
+                )
                 .limit(500);
 
-            let events = match client.fetch_events(vec![filter], Some(std::time::Duration::from_secs(10))).await {
+            let events = match client
+                .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+                .await
+            {
                 Ok(e) => e,
                 Err(_) => continue,
             };
@@ -4230,7 +4882,11 @@ impl Node {
                     if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                         if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
                             match op {
-                                LedgerOperation::LedgerOpen { operator_id, reserves_id, .. } => {
+                                LedgerOperation::LedgerOpen {
+                                    operator_id,
+                                    reserves_id,
+                                    ..
+                                } => {
                                     original_operator = Some(operator_id);
                                     // Use LedgerOpen reserves_id as fallback if no QuorumBegin
                                     if reserves_address.is_none() {
@@ -4244,15 +4900,24 @@ impl Node {
                                     let is_from_original = original_operator
                                         .map(|op| update.operator_id == op)
                                         .unwrap_or(true);
-                                    if is_from_original && !quorum_members.contains(&quorum_member) {
+                                    if is_from_original && !quorum_members.contains(&quorum_member)
+                                    {
                                         quorum_members.push(quorum_member);
                                     }
                                 }
-                                LedgerOperation::QuorumBegin { reserves_id, ledger_hash: lh, .. } => {
+                                LedgerOperation::QuorumBegin {
+                                    reserves_id,
+                                    ledger_hash: lh,
+                                    ..
+                                } => {
                                     reserves_address = Some(reserves_id);
                                     ledger_hash = Some(lh);
                                 }
-                                LedgerOperation::DisputeArmed { commitment_hash, target_reserves, .. } => {
+                                LedgerOperation::DisputeArmed {
+                                    commitment_hash,
+                                    target_reserves,
+                                    ..
+                                } => {
                                     let x_only = update.operator_id.x_only_public_key().0;
                                     // Check if we already have this participant
                                     if !participants.iter().any(|p| p.pubkey == x_only) {
@@ -4272,14 +4937,20 @@ impl Node {
 
             // Need at least 2 participants to proceed
             if participants.len() < 2 {
-                tracing::debug!("Not enough DisputeArmed participants yet ({}/2)", participants.len());
+                tracing::debug!(
+                    "Not enough DisputeArmed participants yet ({}/2)",
+                    participants.len()
+                );
                 continue;
             }
 
             let original_operator = match original_operator {
                 Some(op) => op,
                 None => {
-                    tracing::debug!("Could not find original operator (LedgerOpen) for {}", ledger_prefix);
+                    tracing::debug!(
+                        "Could not find original operator (LedgerOpen) for {}",
+                        ledger_prefix
+                    );
                     continue;
                 }
             };
@@ -4316,7 +4987,8 @@ impl Node {
             participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
 
             // Build recovery voters (quorum minus original operator)
-            let recovery_voters: Vec<XOnlyPublicKey> = quorum_members.iter()
+            let recovery_voters: Vec<XOnlyPublicKey> = quorum_members
+                .iter()
                 .filter(|pk| **pk != original_operator)
                 .map(|pk| pk.x_only_public_key().0)
                 .collect();
@@ -4342,10 +5014,11 @@ impl Node {
             tracing::info!("  Lottery address: {}", lottery_output.address);
 
             // Look up reserves UTXO
-            let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = match reserves_address_str.parse() {
-                Ok(a) => a,
-                Err(_) => continue,
-            };
+            let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+                match reserves_address_str.parse() {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
             let reserves_addr = match reserves_addr.require_network(self.wallet.network()) {
                 Ok(a) => a,
                 Err(_) => continue,
@@ -4362,7 +5035,11 @@ impl Node {
             };
 
             let (reserves_outpoint, reserves_amount) = utxo;
-            tracing::info!("  Found reserves: {} sats at {}", reserves_amount, reserves_outpoint);
+            tracing::info!(
+                "  Found reserves: {} sats at {}",
+                reserves_amount,
+                reserves_outpoint
+            );
 
             // Build confiscation transaction
             let fee_rate = 2u64;
@@ -4406,7 +5083,9 @@ impl Node {
             };
 
             // Use quorum-override tier (threshold without tie-breaker)
-            let (tier_index, tier) = match threshold_config.tiers.iter()
+            let (tier_index, tier) = match threshold_config
+                .tiers
+                .iter()
                 .enumerate()
                 .find(|(_, t)| !t.requires_tie_breaker && t.threshold > 1)
             {
@@ -4417,8 +5096,12 @@ impl Node {
                 }
             };
 
-            tracing::info!("  Using Tier {} for confiscation (threshold={}/{})",
-                tier_index, tier.threshold, voter_count);
+            tracing::info!(
+                "  Using Tier {} for confiscation (threshold={}/{})",
+                tier_index,
+                tier.threshold,
+                voter_count
+            );
 
             // Build leaf script and compute sighash
             let leaf_script = match taproot_builder.build_threshold_leaf(tier) {
@@ -4429,14 +5112,16 @@ impl Node {
                 }
             };
 
-            let leaf_hash = bitcoin::taproot::TapLeafHash::from_script(&leaf_script, bitcoin::taproot::LeafVersion::TapScript);
+            let leaf_hash = bitcoin::taproot::TapLeafHash::from_script(
+                &leaf_script,
+                bitcoin::taproot::LeafVersion::TapScript,
+            );
 
             let prevouts = vec![TxOut {
                 value: Amount::from_sat(reserves_amount),
                 script_pubkey: reserves_addr.script_pubkey(),
             }];
 
-            let confiscation_tx = confiscation_tx;
             let mut sighash_cache = SighashCache::new(&confiscation_tx);
             let sighash = match sighash_cache.taproot_script_spend_signature_hash(
                 0,
@@ -4464,7 +5149,11 @@ impl Node {
 
             // Request signatures from other quorum members via Nostr
             let required_sigs = tier.threshold;
-            tracing::info!("  Need {}/{} signatures, requesting co-signatures...", required_sigs, voter_count);
+            tracing::info!(
+                "  Need {}/{} signatures, requesting co-signatures...",
+                required_sigs,
+                voter_count
+            );
 
             // If we already have enough signatures (e.g., threshold=1), broadcast immediately
             if signatures.len() >= required_sigs {
@@ -4524,11 +5213,11 @@ impl Node {
                 "violation_details": "Confiscation to lottery for dispute resolution",
             });
 
-            let request_id = match self.nostr.send_ledger_request(
-                &ledger_id,
-                "confiscation_sign",
-                request_params,
-            ).await {
+            let request_id = match self
+                .nostr
+                .send_ledger_request(&ledger_id, "confiscation_sign", request_params)
+                .await
+            {
                 Ok(id) => id,
                 Err(e) => {
                     tracing::error!("Failed to send sign request: {:?}", e);
@@ -4537,8 +5226,10 @@ impl Node {
             };
             self.track_sent_event(&request_id);
 
-            tracing::info!("  Sent confiscation_sign request {}..., will collect signatures on next cycle",
-                &request_id[..16.min(request_id.len())]);
+            tracing::info!(
+                "  Sent confiscation_sign request {}..., will collect signatures on next cycle",
+                &request_id[..16.min(request_id.len())]
+            );
 
             // Store pending state — signatures will be collected on subsequent periodic cycles
             let pending = PendingConfiscation {
@@ -4557,7 +5248,10 @@ impl Node {
                 created_at: std::time::Instant::now(),
             };
 
-            self.pending_confiscations.lock().unwrap().insert(ledger_prefix.to_string(), pending);
+            self.pending_confiscations
+                .lock()
+                .unwrap()
+                .insert(ledger_prefix.to_string(), pending);
         }
     }
 
@@ -4566,10 +5260,6 @@ impl Node {
     /// For each ledger where we're armed but haven't revealed yet,
     /// check if the lottery UTXO exists with 3+ confirmations.
     async fn auto_reveal_on_confiscation(&self) {
-        use deposits_core::TlvDecode;
-        use deposits_core::messages::LedgerOperation;
-        use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant};
-
         // Find armed marker files (preimage exists but not revealed)
         let entries = match std::fs::read_dir(&self.data_dir) {
             Ok(e) => e,
@@ -4596,7 +5286,9 @@ impl Node {
             }
 
             // Skip if already revealed
-            let revealed_marker = self.data_dir.join(format!("lottery_revealed_{}.marker", ledger_prefix));
+            let revealed_marker = self
+                .data_dir
+                .join(format!("lottery_revealed_{}.marker", ledger_prefix));
             if revealed_marker.exists() {
                 continue;
             }
@@ -4617,36 +5309,50 @@ impl Node {
             // Check if confiscation TX is confirmed with 3+ blocks
             match self.check_confiscation_confirmed(&ledger_id, 3).await {
                 Ok(true) => {
-                    tracing::info!("Confiscation TX confirmed +3 for ledger {}. Auto-revealing preimage.", &ledger_id[..16]);
+                    tracing::info!(
+                        "Confiscation TX confirmed +3 for ledger {}. Auto-revealing preimage.",
+                        &ledger_id[..16]
+                    );
                     self.auto_reveal_preimage(&ledger_id).await;
                 }
                 Ok(false) => {
                     // Not yet confirmed enough
                 }
                 Err(e) => {
-                    tracing::debug!("Could not check confiscation for {}: {}", &ledger_id[..16], e);
+                    tracing::debug!(
+                        "Could not check confiscation for {}: {}",
+                        &ledger_id[..16],
+                        e
+                    );
                 }
             }
         }
     }
 
     /// Check if the confiscation TX for a ledger has enough confirmations
-    async fn check_confiscation_confirmed(&self, ledger_id: &str, min_confirmations: u32) -> Result<bool, Error> {
-        use bitcoin::secp256k1::PublicKey;
-        use deposits_core::TlvDecode;
-        use deposits_core::messages::LedgerOperation;
-        use deposits_core::tapscript_reserves::{LotteryScriptBuilder, LotteryParticipant};
+    async fn check_confiscation_confirmed(
+        &self,
+        ledger_id: &str,
+        min_confirmations: u32,
+    ) -> Result<bool, Error> {
         use crate::nostr::KIND_LEDGER_UPDATE;
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use bitcoin::secp256k1::PublicKey;
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tapscript_reserves::{LotteryParticipant, LotteryScriptBuilder};
+        use deposits_core::TlvDecode;
+
         use nostr_sdk::{Filter, Kind};
-        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
 
         // Use the slow relay client for historical fetch
         let client = self.nostr.fetch_client();
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
+            .custom_tag(
+                crate::nostr::TAG_LEDGER_ID,
+                [crate::nostr::ledger_tag(ledger_id)],
+            )
             .limit(500);
 
         let events = client
@@ -4677,10 +5383,18 @@ impl Node {
                                     quorum_members.push(quorum_member);
                                 }
                             }
-                            LedgerOperation::DisputeArmed { commitment_hash, target_reserves, .. } => {
+                            LedgerOperation::DisputeArmed {
+                                commitment_hash,
+                                target_reserves,
+                                ..
+                            } => {
                                 let x_only = update.operator_id.x_only_public_key().0;
                                 if !participants.iter().any(|p| p.pubkey == x_only) {
-                                    participants.push(LotteryParticipant::new(x_only, commitment_hash, target_reserves));
+                                    participants.push(LotteryParticipant::new(
+                                        x_only,
+                                        commitment_hash,
+                                        target_reserves,
+                                    ));
                                 }
                             }
                             _ => {}
@@ -4691,7 +5405,9 @@ impl Node {
         }
 
         if participants.len() < 2 {
-            return Err(Error::Protocol("Not enough participants for lottery".to_string()));
+            return Err(Error::Protocol(
+                "Not enough participants for lottery".to_string(),
+            ));
         }
 
         // Sort participants by x-only pubkey for deterministic order
@@ -4702,8 +5418,9 @@ impl Node {
             quorum_members.retain(|pk| *pk != orig_op);
         }
 
-        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = quorum_members.iter()
-            .filter(|pk| original_operator.map_or(true, |op| **pk != op))
+        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = quorum_members
+            .iter()
+            .filter(|pk| original_operator != Some(**pk))
             .map(|pk| pk.x_only_public_key().0)
             .collect();
         let recovery_threshold = (recovery_voters.len() / 2) + 1;
@@ -4715,10 +5432,14 @@ impl Node {
             self.wallet.network(),
         );
 
-        let lottery_output = lottery_builder.build()
+        let lottery_output = lottery_builder
+            .build()
             .map_err(|e| Error::Protocol(format!("Failed to build lottery output: {:?}", e)))?;
 
-        tracing::debug!("check_confiscation_confirmed: lottery address = {}", lottery_output.address);
+        tracing::debug!(
+            "check_confiscation_confirmed: lottery address = {}",
+            lottery_output.address
+        );
 
         // Check if lottery address has a UTXO with enough confirmations
         let lottery_script = lottery_output.address.script_pubkey();
@@ -4733,7 +5454,10 @@ impl Node {
         let current_height = self.wallet.get_block_height().unwrap_or(0);
 
         // Use armed height heuristic: if UTXO exists and 3+ blocks since we first saw it, confirmed
-        let armed_height_file = self.data_dir.join(format!("lottery_armed_height_{}.txt", &ledger_id[..16.min(ledger_id.len())]));
+        let armed_height_file = self.data_dir.join(format!(
+            "lottery_armed_height_{}.txt",
+            &ledger_id[..16.min(ledger_id.len())]
+        ));
 
         if let Ok(height_str) = std::fs::read_to_string(&armed_height_file) {
             if let Ok(armed_height) = height_str.trim().parse::<u32>() {
@@ -4779,7 +5503,9 @@ impl Node {
             }
 
             // Skip if already rotated
-            let rotated_marker = self.data_dir.join(format!("lottery_rotated_{}.marker", ledger_prefix));
+            let rotated_marker = self
+                .data_dir
+                .join(format!("lottery_rotated_{}.marker", ledger_prefix));
             if rotated_marker.exists() {
                 continue;
             }
@@ -4800,7 +5526,10 @@ impl Node {
             // Check if we won (we published DisputeAcquire)
             match self.check_if_we_won(&ledger_id).await {
                 Ok(true) => {
-                    tracing::info!("We won lottery for {}. Auto-rotating to quorum...", &ledger_id[..16]);
+                    tracing::info!(
+                        "We won lottery for {}. Auto-rotating to quorum...",
+                        &ledger_id[..16]
+                    );
 
                     // Auto-rotate
                     match self.auto_rotate_to_quorum(&ledger_id).await {
@@ -4832,16 +5561,17 @@ impl Node {
 
     /// Check if we won the lottery for a ledger (we published DisputeAcquire)
     async fn check_if_we_won(&self, ledger_id: &str) -> Result<bool, Error> {
-        use deposits_core::TlvDecode;
-        use deposits_core::messages::LedgerOperation;
         use crate::nostr::KIND_LEDGER_UPDATE;
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        use nostr_sdk::{Client, Keys, Filter, Kind};
-        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
-        use bitcoin::secp256k1::Secp256k1;
+
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::TlvDecode;
+
+        use nostr_sdk::{Filter, Kind};
 
         let secp = &self.secp;
-        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let keypair =
+            bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
         let our_pubkey = keypair.public_key();
 
         // Use the slow relay client for historical fetch
@@ -4849,7 +5579,10 @@ impl Node {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
+            .custom_tag(
+                crate::nostr::TAG_LEDGER_ID,
+                [crate::nostr::ledger_tag(ledger_id)],
+            )
             .limit(500);
 
         let events = client
@@ -4877,18 +5610,21 @@ impl Node {
 
     /// Auto-rotate winnings to quorum-controlled Taproot
     async fn auto_rotate_to_quorum(&self, ledger_id: &str) -> Result<(), Error> {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, PublicKey, Message};
-        use bitcoin::{Transaction, TxIn, TxOut, Witness, Amount, ScriptBuf};
-        use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate, VoterSet, ThresholdConfig, TapscriptReservesBuilder};
-        use deposits_core::messages::LedgerOperation;
         use crate::nostr::KIND_LEDGER_UPDATE;
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{Message, PublicKey};
+        use bitcoin::{Amount, ScriptBuf, Transaction, TxIn, TxOut, Witness};
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::{
+            SignedLedgerUpdate, TapscriptReservesBuilder, TlvDecode, TlvEncode, VoterSet,
+        };
+
         use nostr_sdk::{Filter, Kind};
-        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
 
         let secp = &self.secp;
-        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let keypair =
+            bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
         let our_pubkey = keypair.public_key();
 
         // Use the slow relay client for historical fetch
@@ -4896,7 +5632,10 @@ impl Node {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
+            .custom_tag(
+                crate::nostr::TAG_LEDGER_ID,
+                [crate::nostr::ledger_tag(ledger_id)],
+            )
             .limit(500);
 
         let events = client
@@ -4914,7 +5653,11 @@ impl Node {
                 if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                     if update.operator_id == our_pubkey {
                         if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                            if let LedgerOperation::DisputeAcquire { ref new_reserves_address, .. } = op {
+                            if let LedgerOperation::DisputeAcquire {
+                                ref new_reserves_address,
+                                ..
+                            } = op
+                            {
                                 current_reserves_address = Some(new_reserves_address.clone());
                             }
                             if let LedgerOperation::QuorumAddMember { quorum_member, .. } = op {
@@ -4923,7 +5666,9 @@ impl Node {
                                 }
                             }
                         }
-                        if our_latest.is_none() || update.sequence_number > our_latest.as_ref().unwrap().sequence_number {
+                        if our_latest.is_none()
+                            || update.sequence_number > our_latest.as_ref().unwrap().sequence_number
+                        {
                             our_latest = Some(update);
                         }
                     }
@@ -4933,23 +5678,32 @@ impl Node {
 
         let current_reserves_address = current_reserves_address
             .ok_or_else(|| Error::Protocol("No DisputeAcquire found".to_string()))?;
-        let our_latest = our_latest
-            .ok_or_else(|| Error::Protocol("No latest update found".to_string()))?;
+        let our_latest =
+            our_latest.ok_or_else(|| Error::Protocol("No latest update found".to_string()))?;
 
         if quorum_members.is_empty() {
             return Err(Error::Protocol("No quorum members found".to_string()));
         }
 
-        tracing::info!("Rotating from {} with {} quorum members", &current_reserves_address[..20.min(current_reserves_address.len())], quorum_members.len());
+        tracing::info!(
+            "Rotating from {} with {} quorum members",
+            &current_reserves_address[..20.min(current_reserves_address.len())],
+            quorum_members.len()
+        );
 
         // Find UTXO at current reserves address
-        let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = current_reserves_address.parse()
-            .map_err(|e| Error::Protocol(format!("Invalid address: {}", e)))?;
-        let reserves_addr = reserves_addr.require_network(self.wallet.network())
+        let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+            current_reserves_address
+                .parse()
+                .map_err(|e| Error::Protocol(format!("Invalid address: {}", e)))?;
+        let reserves_addr = reserves_addr
+            .require_network(self.wallet.network())
             .map_err(|e| Error::Protocol(format!("Network mismatch: {}", e)))?;
 
         let script_pubkey = reserves_addr.script_pubkey();
-        let utxo = self.wallet.find_utxo_for_script(&script_pubkey)?
+        let utxo = self
+            .wallet
+            .find_utxo_for_script(&script_pubkey)?
             .ok_or_else(|| Error::Protocol("No UTXO at reserves address".to_string()))?;
 
         let (outpoint, amount) = utxo;
@@ -4967,21 +5721,19 @@ impl Node {
         let voter_set = VoterSet::new(our_pubkey, other_voters);
 
         // Compute quorum parameters for QuorumBegin
-        let quorum_size = quorum_members.len() as u8;
-        let quorum_threshold = ((quorum_members.len() + 1) / 2) as u8;
+        let _quorum_size = quorum_members.len() as u8;
+        let _quorum_threshold = quorum_members.len().div_ceil(2) as u8;
         let quorum_expiry = expiry_block;
 
         // Compute ledger hash
         let ledger_hash = our_latest.current_hash;
 
         // Build Taproot reserves with default config
-        let tapscript_builder = TapscriptReservesBuilder::with_defaults(
-            voter_set,
-            self.wallet.network(),
-            ledger_hash,
-        );
+        let tapscript_builder =
+            TapscriptReservesBuilder::with_defaults(voter_set, self.wallet.network(), ledger_hash);
 
-        let taproot_output = tapscript_builder.build()
+        let taproot_output = tapscript_builder
+            .build()
             .map_err(|e| Error::Protocol(format!("Failed to build taproot output: {:?}", e)))?;
 
         // Build rotation TX
@@ -5008,19 +5760,21 @@ impl Node {
         let compressed = bitcoin::CompressedPublicKey::from_slice(&pubkey_bytes)
             .map_err(|e| Error::Protocol(format!("Invalid pubkey: {}", e)))?;
 
-        use bitcoin::sighash::{SighashCache, EcdsaSighashType};
-        let prevouts = vec![TxOut {
+        use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+        let _prevouts = [TxOut {
             value: Amount::from_sat(amount),
             script_pubkey: script_pubkey.clone(),
         }];
 
         let mut sighash_cache = SighashCache::new(&rotate_tx);
-        let sighash = sighash_cache.p2wpkh_signature_hash(
-            0,
-            &script_pubkey,
-            Amount::from_sat(amount),
-            EcdsaSighashType::All,
-        ).map_err(|e| Error::Protocol(format!("Sighash error: {}", e)))?;
+        let sighash = sighash_cache
+            .p2wpkh_signature_hash(
+                0,
+                &script_pubkey,
+                Amount::from_sat(amount),
+                EcdsaSighashType::All,
+            )
+            .map_err(|e| Error::Protocol(format!("Sighash error: {}", e)))?;
 
         let msg = Message::from_digest(*sighash.as_ref());
         let signature = secp.sign_ecdsa(&msg, &self.wallet.operator_secret());
@@ -5040,7 +5794,8 @@ impl Node {
         // Compute total attested collateral from the ledger state
         let total_collateral = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
+            ledgers
+                .get(ledger_id)
                 .map(|arc| arc.read().unwrap().state.total_collateral())
                 .unwrap_or(0)
         };
@@ -5071,7 +5826,7 @@ impl Node {
             "deposits:ledger:{}:{}:{}",
             hex::encode(our_latest.current_hash),
             sequence,
-            hex::encode(&new_hash)
+            hex::encode(new_hash)
         );
         let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
         let msg = Message::from_digest(*msg_hash.as_ref());
@@ -5101,26 +5856,32 @@ impl Node {
             block_hash,
         };
 
-        self.nostr.broadcast_ledger_update(&signed_update).await
+        self.nostr
+            .broadcast_ledger_update(&signed_update)
+            .await
             .map_err(|e| Error::Protocol(format!("Failed to broadcast QuorumBegin: {:?}", e)))?;
 
-        tracing::info!("QuorumBegin published. New reserves at: {}", taproot_output.address);
+        tracing::info!(
+            "QuorumBegin published. New reserves at: {}",
+            taproot_output.address
+        );
         Ok(())
     }
 
     /// Auto-continue ledger after rotation (re-open deposits)
     async fn auto_continue_ledger(&self, ledger_id: &str) -> Result<(), Error> {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, PublicKey, Message};
-        use deposits_core::{TlvDecode, TlvEncode, SignedLedgerUpdate};
-        use deposits_core::messages::LedgerOperation;
         use crate::nostr::KIND_LEDGER_UPDATE;
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        use nostr_sdk::{Client, Keys, Filter, Kind};
-        use nostr_sdk::prelude::{SingleLetterTag, Alphabet};
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::Message;
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::{SignedLedgerUpdate, TlvDecode, TlvEncode};
+
+        use nostr_sdk::{Filter, Kind};
 
         let secp = &self.secp;
-        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let keypair =
+            bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
         let our_pubkey = keypair.public_key();
 
         // Use the slow relay client for historical fetch
@@ -5128,7 +5889,10 @@ impl Node {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id)])
+            .custom_tag(
+                crate::nostr::TAG_LEDGER_ID,
+                [crate::nostr::ledger_tag(ledger_id)],
+            )
             .limit(500);
 
         let events = client
@@ -5145,24 +5909,31 @@ impl Node {
                 if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                     // Collect depositors
                     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        if let LedgerOperation::DepositOpen { deposit_id, descriptor, .. } = op {
+                        if let LedgerOperation::DepositOpen {
+                            deposit_id,
+                            descriptor,
+                            ..
+                        } = op
+                        {
                             if !original_depositors.iter().any(|(id, _)| *id == deposit_id) {
                                 original_depositors.push((deposit_id, descriptor));
                             }
                         }
                     }
 
-                    if update.operator_id == our_pubkey {
-                        if our_latest.is_none() || update.sequence_number > our_latest.as_ref().unwrap().sequence_number {
-                            our_latest = Some(update);
-                        }
+                    if update.operator_id == our_pubkey
+                        && (our_latest.is_none()
+                            || update.sequence_number
+                                > our_latest.as_ref().unwrap().sequence_number)
+                    {
+                        our_latest = Some(update);
                     }
                 }
             }
         }
 
-        let mut our_latest = our_latest
-            .ok_or_else(|| Error::Protocol("No latest update found".to_string()))?;
+        let mut our_latest =
+            our_latest.ok_or_else(|| Error::Protocol("No latest update found".to_string()))?;
 
         if original_depositors.is_empty() {
             tracing::info!("No original depositors to re-open");
@@ -5204,7 +5975,7 @@ impl Node {
                 "deposits:ledger:{}:{}:{}",
                 hex::encode(our_latest.current_hash),
                 sequence,
-                hex::encode(&new_hash)
+                hex::encode(new_hash)
             );
             let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
             let msg = Message::from_digest(*msg_hash.as_ref());
@@ -5222,19 +5993,23 @@ impl Node {
                 operator_signature: operator_sig_bytes,
                 cosigner_pubkey: None,
                 member_ledger_hash: None,
-            cosignatures: Vec::new(),
+                cosignatures: Vec::new(),
                 cosign_signature: [0u8; 64],
                 operator_id: our_pubkey,
                 ledger_id: ledger_id_bytes,
                 sequence_number: sequence,
                 previous_hash: our_latest.current_hash,
                 current_hash: new_hash,
-                    block_height: current_block,
+                block_height: current_block,
                 block_hash,
             };
 
-            self.nostr.broadcast_ledger_update(&signed_update).await
-                .map_err(|e| Error::Protocol(format!("Failed to broadcast DepositOpen: {:?}", e)))?;
+            self.nostr
+                .broadcast_ledger_update(&signed_update)
+                .await
+                .map_err(|e| {
+                    Error::Protocol(format!("Failed to broadcast DepositOpen: {:?}", e))
+                })?;
 
             tracing::info!("Re-opened deposit {}...", hex::encode(&deposit_id[..8]));
 
@@ -5251,26 +6026,45 @@ impl Node {
     // These process incoming Nostr requests for ledger operations.
     // ========================================================================
 
-    async fn process_deposit_open_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_deposit_open_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
-        tracing::info!("Processing deposit_open request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+        tracing::info!(
+            "Processing deposit_open request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         // Deposit access control: denylist → (if enabled) npub allowlist → attestation + domain
         //
         // All RwLock guards are dropped before any .await to keep the future Send.
         {
             // Denylist is always checked, even when access control is off
-            if self.deposit_denylist.read().unwrap().contains(&request.sender) {
-                tracing::warn!("Deposit open rejected: sender {} is on denylist", &request.sender[..16.min(request.sender.len())]);
-                return (false,
+            if self
+                .deposit_denylist
+                .read()
+                .unwrap()
+                .contains(&request.sender)
+            {
+                tracing::warn!(
+                    "Deposit open rejected: sender {} is on denylist",
+                    &request.sender[..16.min(request.sender.len())]
+                );
+                return (
+                    false,
                     Some(serde_json::json!({"code": "denied"}).to_string()),
-                    Some("Not authorized to open deposits on this ledger".to_string()));
+                    Some("Not authorized to open deposits on this ledger".to_string()),
+                );
             }
 
             if self.deposit_access_control {
-                let on_allowlist = self.deposit_allowlist.read().unwrap().contains(&request.sender);
+                let on_allowlist = self
+                    .deposit_allowlist
+                    .read()
+                    .unwrap()
+                    .contains(&request.sender);
 
                 if on_allowlist {
                     // Explicitly allowed
@@ -5281,18 +6075,27 @@ impl Node {
 
                     let has_domains = !domains.is_empty();
                     let authorized = if has_domains {
-                        self.check_attestation_domain(&request.sender, &domains).await
+                        self.check_attestation_domain(&request.sender, &domains)
+                            .await
                     } else {
                         None
                     };
 
                     match authorized {
                         Some(domain) => {
-                            tracing::info!("Deposit open authorized via attestation: sender {} domain {}", &request.sender[..16.min(request.sender.len())], domain);
+                            tracing::info!(
+                                "Deposit open authorized via attestation: sender {} domain {}",
+                                &request.sender[..16.min(request.sender.len())],
+                                domain
+                            );
                         }
                         None => {
                             tracing::warn!("Deposit open rejected: sender {} not on allowlist and no valid attestation", &request.sender[..16.min(request.sender.len())]);
-                            let code = if has_domains { "attestation_required" } else { "not_authorized" };
+                            let code = if has_domains {
+                                "attestation_required"
+                            } else {
+                                "not_authorized"
+                            };
                             let mut err_data = serde_json::json!({"code": code});
                             if has_domains {
                                 if let Some(ref vk) = self.attestation_verifier_pubkey {
@@ -5301,9 +6104,11 @@ impl Node {
                                 let domain_list: Vec<String> = domains.iter().cloned().collect();
                                 err_data["allowed_domains"] = serde_json::json!(domain_list);
                             }
-                            return (false,
+                            return (
+                                false,
                                 Some(err_data.to_string()),
-                                Some("Not authorized to open deposits on this ledger".to_string()));
+                                Some("Not authorized to open deposits on this ledger".to_string()),
+                            );
                         }
                     }
                 }
@@ -5319,19 +6124,32 @@ impl Node {
         // Extract deposit_pubkey from params
         let deposit_pubkey_str = match request.params.get("deposit_pubkey") {
             Some(serde_json::Value::String(s)) => s.clone(),
-            _ => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+            _ => {
+                return (
+                    false,
+                    None,
+                    Some("Missing deposit_pubkey parameter".to_string()),
+                )
+            }
         };
 
-        let deposit_pubkey = match PublicKey::from_str(&deposit_pubkey_str) {
+        let _deposit_pubkey = match PublicKey::from_str(&deposit_pubkey_str) {
             Ok(pk) => pk,
             Err(e) => return (false, None, Some(format!("Invalid deposit_pubkey: {}", e))),
         };
 
         // Fetch the advertisement to get fee minimums
-        let advertisement = match self.nostr.fetch_ledger_advertisement(&request.ledger_id).await {
+        let advertisement = match self
+            .nostr
+            .fetch_ledger_advertisement(&request.ledger_id)
+            .await
+        {
             Ok(Some(ad)) => ad,
             Ok(None) => {
-                tracing::warn!("No advertisement found for ledger {}, using zero fee minimums", &request.ledger_id[..16]);
+                tracing::warn!(
+                    "No advertisement found for ledger {}, using zero fee minimums",
+                    &request.ledger_id[..16]
+                );
                 crate::nostr::LedgerAdvertisement::new(
                     request.ledger_id.clone(),
                     String::new(),
@@ -5340,7 +6158,10 @@ impl Node {
                 )
             }
             Err(e) => {
-                tracing::warn!("Failed to fetch advertisement: {}, using zero fee minimums", e);
+                tracing::warn!(
+                    "Failed to fetch advertisement: {}, using zero fee minimums",
+                    e
+                );
                 crate::nostr::LedgerAdvertisement::new(
                     request.ledger_id.clone(),
                     String::new(),
@@ -5353,8 +6174,14 @@ impl Node {
         let (min_annual_bps, min_fixed_per_period) = advertisement.minimum_fees();
 
         // Extract fee parameters from request OR use advertisement defaults
-        let ad_period = if advertisement.fee_period_blocks > 0 { advertisement.fee_period_blocks } else { 2016 };
-        let frequency_blocks = request.params.get("fee_frequency")
+        let ad_period = if advertisement.fee_period_blocks > 0 {
+            advertisement.fee_period_blocks
+        } else {
+            2016
+        };
+        let frequency_blocks = request
+            .params
+            .get("fee_frequency")
             .and_then(|v| v.as_u64())
             .map(|v| if v > 0 { v as u32 } else { 2016 })
             .unwrap_or(ad_period);
@@ -5363,10 +6190,14 @@ impl Node {
             || request.params.get("fee_bps").is_some()
         {
             FeeStructure {
-                annualized_msats: request.params.get("fee_fixed")
+                annualized_msats: request
+                    .params
+                    .get("fee_fixed")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0),
-                annualized_bps: request.params.get("fee_bps")
+                annualized_bps: request
+                    .params
+                    .get("fee_bps")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u16,
                 frequency_blocks,
@@ -5377,12 +6208,16 @@ impl Node {
         };
 
         // Check if this is a collateral deposit
-        let is_collateral = request.params.get("is_collateral")
+        let is_collateral = request
+            .params
+            .get("is_collateral")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
         // Check if receiving requires wallet signature
-        let receive_requires_sig = request.params.get("receive_requires_sig")
+        let receive_requires_sig = request
+            .params
+            .get("receive_requires_sig")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
@@ -5397,8 +6232,14 @@ impl Node {
 
         // Extract per-transfer fee schedule (optional, defaults to 2 sats fixed + 20 bps)
         let transfer_fees = {
-            let fixed = request.params.get("transfer_fee_fixed").and_then(|v| v.as_u64());
-            let rate = request.params.get("transfer_fee_rate_bps").and_then(|v| v.as_u64());
+            let fixed = request
+                .params
+                .get("transfer_fee_fixed")
+                .and_then(|v| v.as_u64());
+            let rate = request
+                .params
+                .get("transfer_fee_rate_bps")
+                .and_then(|v| v.as_u64());
             if fixed.is_some() || rate.is_some() {
                 Some(deposits_core::TransferFeeSchedule::new(
                     fixed.unwrap_or(2),
@@ -5417,22 +6258,40 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&ledger_id) {
                 let ledger = ledger_arc.read().unwrap();
-                let max_bytes = ledger.state.quorum_members.iter()
+                let max_bytes = ledger
+                    .state
+                    .quorum_members
+                    .iter()
                     .filter_map(|m| m.max_descriptor_bytes)
                     .min();
                 if let Some(limit) = max_bytes {
                     if descriptor.len() as u32 > limit {
-                        return (false, None, Some(format!(
-                            "Descriptor size {} bytes exceeds quorum limit of {} bytes",
-                            descriptor.len(), limit
-                        )));
+                        return (
+                            false,
+                            None,
+                            Some(format!(
+                                "Descriptor size {} bytes exceeds quorum limit of {} bytes",
+                                descriptor.len(),
+                                limit
+                            )),
+                        );
                     }
                 }
             }
         }
 
         // Open the deposit with co-signing
-        match self.open_deposit(&ledger_id, &descriptor, Some(fees), transfer_fees, is_collateral, receive_requires_sig).await {
+        match self
+            .open_deposit(
+                &ledger_id,
+                &descriptor,
+                Some(fees),
+                transfer_fees,
+                is_collateral,
+                receive_requires_sig,
+            )
+            .await
+        {
             Ok(deposit) => {
                 let result = serde_json::json!({
                     "deposit_pubkey": deposit_pubkey_str,
@@ -5457,28 +6316,47 @@ impl Node {
         }
     }
 
-    async fn process_make_offer_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_make_offer_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
-        tracing::info!("Processing make_offer request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+        tracing::info!(
+            "Processing make_offer request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         // Verify the ledger exists (ledger_id may be a hash or reserves_id)
-        let resolved_ledger_id = if request.ledger_id.len() == 64 && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        let resolved_ledger_id = if request.ledger_id.len() == 64
+            && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
             // Already a 64-char hex ledger_id hash
             request.ledger_id.clone()
         } else {
             // It's a reserves_id, look up the ledger to get its ledger_id
             match self.get_ledger_by_reserves_key(&request.ledger_id) {
                 Some((_, ledger)) => ledger.ledger_id_hex(),
-                None => return (false, None, Some(format!("Ledger not found: {}", &request.ledger_id[..16]))),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Ledger not found: {}", &request.ledger_id[..16])),
+                    )
+                }
             }
         };
 
         // Extract deposit_pubkey from params
         let deposit_pubkey_str = match request.params.get("deposit_pubkey") {
             Some(serde_json::Value::String(s)) => s.clone(),
-            _ => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+            _ => {
+                return (
+                    false,
+                    None,
+                    Some("Missing deposit_pubkey parameter".to_string()),
+                )
+            }
         };
 
         let deposit_pubkey = match PublicKey::from_str(&deposit_pubkey_str) {
@@ -5499,18 +6377,35 @@ impl Node {
 
         let blocks_valid = match request.params.get("blocks_valid").and_then(|v| v.as_u64()) {
             Some(v) => v as u32,
-            None => return (false, None, Some("Missing blocks_valid parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing blocks_valid parameter".to_string()),
+                )
+            }
         };
 
         if min_sats >= max_sats {
-            return (false, None, Some("min_sats must be less than max_sats".to_string()));
+            return (
+                false,
+                None,
+                Some("min_sats must be less than max_sats".to_string()),
+            );
         }
 
         // Fetch the advertisement to get fee minimums
-        let advertisement = match self.nostr.fetch_ledger_advertisement(&resolved_ledger_id).await {
+        let advertisement = match self
+            .nostr
+            .fetch_ledger_advertisement(&resolved_ledger_id)
+            .await
+        {
             Ok(Some(ad)) => ad,
             Ok(None) => {
-                tracing::warn!("No advertisement found for ledger {}, using zero fee minimums", &resolved_ledger_id[..16]);
+                tracing::warn!(
+                    "No advertisement found for ledger {}, using zero fee minimums",
+                    &resolved_ledger_id[..16]
+                );
                 crate::nostr::LedgerAdvertisement::new(
                     resolved_ledger_id.clone(),
                     String::new(),
@@ -5519,7 +6414,10 @@ impl Node {
                 )
             }
             Err(e) => {
-                tracing::warn!("Failed to fetch advertisement: {}, using zero fee minimums", e);
+                tracing::warn!(
+                    "Failed to fetch advertisement: {}, using zero fee minimums",
+                    e
+                );
                 crate::nostr::LedgerAdvertisement::new(
                     resolved_ledger_id.clone(),
                     String::new(),
@@ -5530,23 +6428,33 @@ impl Node {
         };
 
         let (min_annual_bps, min_fixed_per_period) = advertisement.minimum_fees();
-        let ad_period = if advertisement.fee_period_blocks > 0 { advertisement.fee_period_blocks } else { 2016 };
+        let ad_period = if advertisement.fee_period_blocks > 0 {
+            advertisement.fee_period_blocks
+        } else {
+            2016
+        };
 
         // Extract fee parameters from request if provided, or use advertisement defaults
         let fees = if request.params.get("fee_fixed").is_some()
             || request.params.get("fee_bps").is_some()
             || request.params.get("fee_frequency").is_some()
         {
-            let frequency_blocks = request.params.get("fee_frequency")
+            let frequency_blocks = request
+                .params
+                .get("fee_frequency")
                 .and_then(|v| v.as_u64())
                 .map(|v| if v > 0 { v as u32 } else { ad_period })
                 .unwrap_or(ad_period);
 
             FeeStructure {
-                annualized_msats: request.params.get("fee_fixed")
+                annualized_msats: request
+                    .params
+                    .get("fee_fixed")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0),
-                annualized_bps: request.params.get("fee_bps")
+                annualized_bps: request
+                    .params
+                    .get("fee_bps")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u16,
                 frequency_blocks,
@@ -5576,16 +6484,30 @@ impl Node {
                     if deposit.receive_requires_sig {
                         // Verify receive signature from deposit key
                         use bitcoin::secp256k1::{schnorr::Signature, Message};
-                        let recv_sig_hex = match request.params.get("receive_signature").and_then(|v| v.as_str()) {
+                        let recv_sig_hex = match request
+                            .params
+                            .get("receive_signature")
+                            .and_then(|v| v.as_str())
+                        {
                             Some(s) => s,
-                            None => return (false, None, Some("Deposit requires receive_signature for offers".to_string())),
+                            None => {
+                                return (
+                                    false,
+                                    None,
+                                    Some(
+                                        "Deposit requires receive_signature for offers".to_string(),
+                                    ),
+                                )
+                            }
                         };
                         let recv_sig = match hex::decode(recv_sig_hex)
                             .ok()
                             .and_then(|bytes| Signature::from_slice(&bytes).ok())
                         {
                             Some(sig) => sig,
-                            None => return (false, None, Some("Invalid receive_signature".to_string())),
+                            None => {
+                                return (false, None, Some("Invalid receive_signature".to_string()))
+                            }
                         };
                         // Sign the deposit_id to authorize receiving
                         let recv_msg = Message::from_digest({
@@ -5595,7 +6517,10 @@ impl Node {
                         });
                         let dest_pubkey = deposit_pubkey.x_only_public_key().0;
                         let secp = &self.secp;
-                        if secp.verify_schnorr(&recv_sig, &recv_msg, &dest_pubkey).is_err() {
+                        if secp
+                            .verify_schnorr(&recv_sig, &recv_msg, &dest_pubkey)
+                            .is_err()
+                        {
                             return (false, None, Some("Invalid receive_signature".to_string()));
                         }
                     }
@@ -5609,19 +6534,30 @@ impl Node {
         }
 
         // Check collateral obligation limits before creating the offer
-        if let Some(err) = self.check_collateral_obligation_limit(&resolved_ledger_id, max_sats * 1000) {
+        if let Some(err) =
+            self.check_collateral_obligation_limit(&resolved_ledger_id, max_sats * 1000)
+        {
             return (false, None, Some(err));
         }
 
         // Check per-deposit balance limit
         let descriptor = format!("pk({})", deposit_pubkey_str);
         let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
-        if let Some(err) = self.check_deposit_balance_limit(&resolved_ledger_id, &deposit_id, max_sats * 1000) {
+        if let Some(err) =
+            self.check_deposit_balance_limit(&resolved_ledger_id, &deposit_id, max_sats * 1000)
+        {
             return (false, None, Some(err));
         }
 
         // Create the offer using ledger_id (stable across custody transfers)
-        match self.create_deposit_offer(&resolved_ledger_id, deposit_pubkey, max_sats, min_sats, blocks_valid, Some(fees)) {
+        match self.create_deposit_offer(
+            &resolved_ledger_id,
+            deposit_pubkey,
+            max_sats,
+            min_sats,
+            blocks_valid,
+            Some(fees),
+        ) {
             Ok(offer) => {
                 // Check if we need a co-signature (post-rotation)
                 let requires_cosign = self.is_quorum_active(&resolved_ledger_id);
@@ -5633,12 +6569,21 @@ impl Node {
                     let mut last_err = String::new();
                     for attempt in 1..=max_attempts {
                         match self.request_offer_cosign(&resolved_ledger_id, &offer).await {
-                            Ok(result) => { cosign_ok = Some(result); break; }
+                            Ok(result) => {
+                                cosign_ok = Some(result);
+                                break;
+                            }
                             Err(e) => {
-                                tracing::warn!("Offer cosign attempt {}/{} failed: {}", attempt, max_attempts, e);
+                                tracing::warn!(
+                                    "Offer cosign attempt {}/{} failed: {}",
+                                    attempt,
+                                    max_attempts,
+                                    e
+                                );
                                 last_err = e.to_string();
                                 if attempt < max_attempts {
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(500))
+                                        .await;
                                 }
                             }
                         }
@@ -5646,7 +6591,7 @@ impl Node {
                     match cosign_ok {
                         Some(cosign_result) => {
                             let result = serde_json::json!({
-                                "offer_id": hex::encode(&offer.offer_id),
+                                "offer_id": hex::encode(offer.offer_id),
                                 "operator_id": pubkey_hex(&offer.operator_id),
                                 "funding_address": offer.funding_address,
                                 "deadline_block": offer.deadline_block,
@@ -5658,18 +6603,29 @@ impl Node {
                                 "cosigner_ledger_hash": hex::encode(cosign_result.member_ledger_hash),
                                 "cosign_signature": hex::encode(cosign_result.signature),
                             });
-                            tracing::info!("Deposit offer created with co-signature: {}...", &hex::encode(&offer.offer_id[..8]));
+                            tracing::info!(
+                                "Deposit offer created with co-signature: {}...",
+                                &hex::encode(&offer.offer_id[..8])
+                            );
                             (true, Some(result.to_string()), None)
                         }
                         None => {
-                            tracing::warn!("Failed to get co-signature for offer after {} attempts: {}", max_attempts, last_err);
-                            (false, None, Some(format!("Co-signature required but failed: {}", last_err)))
+                            tracing::warn!(
+                                "Failed to get co-signature for offer after {} attempts: {}",
+                                max_attempts,
+                                last_err
+                            );
+                            (
+                                false,
+                                None,
+                                Some(format!("Co-signature required but failed: {}", last_err)),
+                            )
                         }
                     }
                 } else {
                     // Pre-rotation: no co-signature required
                     let result = serde_json::json!({
-                        "offer_id": hex::encode(&offer.offer_id),
+                        "offer_id": hex::encode(offer.offer_id),
                         "operator_id": pubkey_hex(&offer.operator_id),
                         "funding_address": offer.funding_address,
                         "deadline_block": offer.deadline_block,
@@ -5678,7 +6634,10 @@ impl Node {
                         "min_sats": min_sats,
                         "cosign_required": false,
                     });
-                    tracing::info!("Deposit offer created: {}...", &hex::encode(&offer.offer_id[..8]));
+                    tracing::info!(
+                        "Deposit offer created: {}...",
+                        &hex::encode(&offer.offer_id[..8])
+                    );
                     (true, Some(result.to_string()), None)
                 }
             }
@@ -5698,7 +6657,10 @@ impl Node {
     /// If offer_id is found, returns the offer status.
     /// If offer_id is not found but deposit_pubkey is provided, checks if the deposit
     /// exists in the ledger (meaning the offer was completed).
-    async fn process_offer_status_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_offer_status_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use deposits_core::types::DepositOfferStatus;
 
         // Extract offer_id from params
@@ -5708,7 +6670,10 @@ impl Node {
         };
 
         // Also extract deposit_pubkey if provided (for fallback lookup)
-        let deposit_pubkey_hex = request.params.get("deposit_pubkey").and_then(|v| v.as_str());
+        let deposit_pubkey_hex = request
+            .params
+            .get("deposit_pubkey")
+            .and_then(|v| v.as_str());
 
         // Parse hex offer_id
         let offer_id_bytes = match hex::decode(offer_id_hex) {
@@ -5728,13 +6693,21 @@ impl Node {
                     DepositOfferStatus::Pending => serde_json::json!({
                         "status": "pending",
                     }),
-                    DepositOfferStatus::FundingReceived { txid, amount_sats, detected_at_block } => serde_json::json!({
+                    DepositOfferStatus::FundingReceived {
+                        txid,
+                        amount_sats,
+                        detected_at_block,
+                    } => serde_json::json!({
                         "status": "funding_received",
                         "txid": txid,
                         "amount_sats": amount_sats,
                         "detected_at_block": detected_at_block,
                     }),
-                    DepositOfferStatus::Completed { txid, amount_sats, confirmed_at_block } => serde_json::json!({
+                    DepositOfferStatus::Completed {
+                        txid,
+                        amount_sats,
+                        confirmed_at_block,
+                    } => serde_json::json!({
                         "status": "completed",
                         "txid": txid,
                         "amount_sats": amount_sats,
@@ -5759,7 +6732,11 @@ impl Node {
                     "status": status_json,
                 });
 
-                tracing::debug!("Offer status query: {}... -> {:?}", &offer_id_hex[..16], status_json);
+                tracing::debug!(
+                    "Offer status query: {}... -> {:?}",
+                    &offer_id_hex[..16],
+                    status_json
+                );
                 (true, Some(result.to_string()), None)
             }
             None => {
@@ -5771,7 +6748,8 @@ impl Node {
                     let deposit_id = compute_deposit_id(&descriptor);
 
                     // Check if deposit exists in the ledger
-                    if let Some((_, ledger)) = self.get_ledger_by_ledger_id(&request.ledger_id)
+                    if let Some((_, ledger)) = self
+                        .get_ledger_by_ledger_id(&request.ledger_id)
                         .or_else(|| self.get_ledger_by_reserves_key(&request.ledger_id))
                     {
                         if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
@@ -5783,7 +6761,10 @@ impl Node {
                                     "amount_sats": deposit.balance / 1000,
                                 },
                             });
-                            tracing::debug!("Offer status query: {}... -> completed (from ledger)", &offer_id_hex[..16]);
+                            tracing::debug!(
+                                "Offer status query: {}... -> completed (from ledger)",
+                                &offer_id_hex[..16]
+                            );
                             return (true, Some(result.to_string()), None);
                         }
                     }
@@ -5796,7 +6777,10 @@ impl Node {
                         "status": "not_found",
                     },
                 });
-                tracing::debug!("Offer status query: {}... -> not found", &offer_id_hex[..16]);
+                tracing::debug!(
+                    "Offer status query: {}... -> not found",
+                    &offer_id_hex[..16]
+                );
                 (true, Some(result.to_string()), None)
             }
         }
@@ -5808,11 +6792,24 @@ impl Node {
     /// - deposit_pubkey: hex-encoded depositor's pubkey (legacy, converted to deposit_id)
     ///
     /// Returns the current balance in the ledger (in millisatoshis)
-    async fn process_balance_query_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_balance_query_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         // Extract deposit_pubkey from params
-        let deposit_pubkey_hex = match request.params.get("deposit_pubkey").and_then(|v| v.as_str()) {
+        let deposit_pubkey_hex = match request
+            .params
+            .get("deposit_pubkey")
+            .and_then(|v| v.as_str())
+        {
             Some(pk) => pk,
-            None => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing deposit_pubkey parameter".to_string()),
+                )
+            }
         };
 
         // Convert pubkey hex to deposit_id via descriptor
@@ -5820,7 +6817,8 @@ impl Node {
         let deposit_id = compute_deposit_id(&descriptor);
 
         // Find the ledger
-        let (_, ledger) = match self.get_ledger_by_ledger_id(&request.ledger_id)
+        let (_, ledger) = match self
+            .get_ledger_by_ledger_id(&request.ledger_id)
             .or_else(|| self.get_ledger_by_reserves_key(&request.ledger_id))
         {
             Some(l) => l,
@@ -5841,12 +6839,21 @@ impl Node {
                     "collateral_lock_expires": deposit.collateral_lock_expires,
                     "block_height": block_height,
                 });
-                tracing::debug!("Balance query: {}... -> {} msats", &deposit_pubkey_hex[..16], deposit.balance);
+                tracing::debug!(
+                    "Balance query: {}... -> {} msats",
+                    &deposit_pubkey_hex[..16],
+                    deposit.balance
+                );
                 (true, Some(result.to_string()), None)
             }
-            None => {
-                (false, None, Some(format!("Deposit not found for pubkey: {}...", &deposit_pubkey_hex[..16])))
-            }
+            None => (
+                false,
+                None,
+                Some(format!(
+                    "Deposit not found for pubkey: {}...",
+                    &deposit_pubkey_hex[..16]
+                )),
+            ),
         }
     }
 
@@ -5858,15 +6865,28 @@ impl Node {
     /// - deposit_pubkey: hex-encoded depositor's pubkey
     /// - amount_sats: amount for the invoice
     /// - description: optional invoice description
-    async fn process_make_invoice_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_make_invoice_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use crate::ldk_cli::LdkCli;
         use lightning_invoice::Bolt11Invoice;
         use std::str::FromStr;
 
         // Extract parameters
-        let deposit_pubkey_hex = match request.params.get("deposit_pubkey").and_then(|v| v.as_str()) {
+        let deposit_pubkey_hex = match request
+            .params
+            .get("deposit_pubkey")
+            .and_then(|v| v.as_str())
+        {
             Some(pk) => pk,
-            None => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing deposit_pubkey parameter".to_string()),
+                )
+            }
         };
 
         // Convert pubkey hex to descriptor and deposit_id
@@ -5881,16 +6901,31 @@ impl Node {
                 if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
                     if deposit.receive_requires_sig {
                         use bitcoin::secp256k1::{schnorr::Signature, Message};
-                        let recv_sig_hex = match request.params.get("receive_signature").and_then(|v| v.as_str()) {
+                        let recv_sig_hex = match request
+                            .params
+                            .get("receive_signature")
+                            .and_then(|v| v.as_str())
+                        {
                             Some(s) => s,
-                            None => return (false, None, Some("Deposit requires receive_signature for invoices".to_string())),
+                            None => {
+                                return (
+                                    false,
+                                    None,
+                                    Some(
+                                        "Deposit requires receive_signature for invoices"
+                                            .to_string(),
+                                    ),
+                                )
+                            }
                         };
                         let recv_sig = match hex::decode(recv_sig_hex)
                             .ok()
                             .and_then(|bytes| Signature::from_slice(&bytes).ok())
                         {
                             Some(sig) => sig,
-                            None => return (false, None, Some("Invalid receive_signature".to_string())),
+                            None => {
+                                return (false, None, Some("Invalid receive_signature".to_string()))
+                            }
                         };
                         // Sign the deposit_id to authorize receiving
                         let recv_msg = Message::from_digest({
@@ -5903,10 +6938,15 @@ impl Node {
                             .and_then(|b| bitcoin::secp256k1::PublicKey::from_slice(&b).ok())
                         {
                             Some(pk) => pk.x_only_public_key().0,
-                            None => return (false, None, Some("Invalid deposit_pubkey".to_string())),
+                            None => {
+                                return (false, None, Some("Invalid deposit_pubkey".to_string()))
+                            }
                         };
                         let secp = &self.secp;
-                        if secp.verify_schnorr(&recv_sig, &recv_msg, &dest_pubkey).is_err() {
+                        if secp
+                            .verify_schnorr(&recv_sig, &recv_msg, &dest_pubkey)
+                            .is_err()
+                        {
                             return (false, None, Some("Invalid receive_signature".to_string()));
                         }
                     }
@@ -5916,10 +6956,18 @@ impl Node {
 
         let amount_sats = match request.params.get("amount_sats").and_then(|v| v.as_u64()) {
             Some(a) => a,
-            None => return (false, None, Some("Missing amount_sats parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing amount_sats parameter".to_string()),
+                )
+            }
         };
 
-        let description = request.params.get("description")
+        let description = request
+            .params
+            .get("description")
             .and_then(|v| v.as_str())
             .unwrap_or("Deposit credit");
 
@@ -5931,7 +6979,9 @@ impl Node {
         }
 
         // Check per-deposit balance limit
-        if let Some(err) = self.check_deposit_balance_limit(&request.ledger_id, &deposit_id, amount_msat) {
+        if let Some(err) =
+            self.check_deposit_balance_limit(&request.ledger_id, &deposit_id, amount_msat)
+        {
             return (false, None, Some(err));
         }
 
@@ -5972,13 +7022,18 @@ impl Node {
                     payment_hash_hex: hex::encode(payment_hash),
                 };
 
-                self.pending_invoices.lock().unwrap().insert(payment_hash, pending);
+                self.pending_invoices
+                    .lock()
+                    .unwrap()
+                    .insert(payment_hash, pending);
                 self.save_pending_invoices();
 
-                tracing::info!("Created invoice for {}... amount={} sats, hash={}",
+                tracing::info!(
+                    "Created invoice for {}... amount={} sats, hash={}",
                     &deposit_pubkey_hex[..16.min(deposit_pubkey_hex.len())],
                     amount_sats,
-                    hex::encode(&payment_hash[..8]));
+                    hex::encode(&payment_hash[..8])
+                );
 
                 // Request co-signature from quorum member (if post-rotation)
                 let requires_cosign = self.is_quorum_active(&request.ledger_id);
@@ -5991,24 +7046,37 @@ impl Node {
                     });
 
                     let mut notification_rx = self.nostr.create_notification_receiver();
-                    let req_id = match self.nostr.send_ledger_request(&request.ledger_id, "cosign_invoice", params).await {
+                    let req_id = match self
+                        .nostr
+                        .send_ledger_request(&request.ledger_id, "cosign_invoice", params)
+                        .await
+                    {
                         Ok(id) => id,
                         Err(e) => {
-                            return (false, None, Some(format!("Failed to send cosign_invoice: {:?}", e)));
+                            return (
+                                false,
+                                None,
+                                Some(format!("Failed to send cosign_invoice: {:?}", e)),
+                            );
                         }
                     };
                     self.track_sent_event(&req_id);
 
                     // Poll for response (3s timeout)
-                    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
+                    let deadline =
+                        tokio::time::Instant::now() + tokio::time::Duration::from_secs(3);
                     let mut cosign_result: Option<serde_json::Value> = None;
                     loop {
                         // Drain notifications to trigger response processing
                         match tokio::time::timeout(
                             tokio::time::Duration::from_millis(100),
                             notification_rx.recv(),
-                        ).await {
-                            Ok(Ok(n)) => { self.nostr.dispatch_or_extract_request(n, ""); }
+                        )
+                        .await
+                        {
+                            Ok(Ok(n)) => {
+                                self.nostr.dispatch_or_extract_request(n, "");
+                            }
                             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
                             _ => {}
                         }
@@ -6019,7 +7087,9 @@ impl Node {
                                 break;
                             }
                         }
-                        if cosign_result.is_some() || tokio::time::Instant::now() >= deadline { break; }
+                        if cosign_result.is_some() || tokio::time::Instant::now() >= deadline {
+                            break;
+                        }
                     }
 
                     match cosign_result {
@@ -6037,9 +7107,14 @@ impl Node {
                             });
                             (true, Some(result.to_string()), None)
                         }
-                        None => {
-                            (false, None, Some("Invoice co-signature required but no quorum member responded".to_string()))
-                        }
+                        None => (
+                            false,
+                            None,
+                            Some(
+                                "Invoice co-signature required but no quorum member responded"
+                                    .to_string(),
+                            ),
+                        ),
                     }
                 } else {
                     let result = serde_json::json!({
@@ -6054,7 +7129,11 @@ impl Node {
             }
             Err(e) => {
                 tracing::error!("Failed to create invoice: {}", e);
-                (false, None, Some(format!("Failed to create invoice: {}", e)))
+                (
+                    false,
+                    None,
+                    Some(format!("Failed to create invoice: {}", e)),
+                )
             }
         }
     }
@@ -6068,17 +7147,30 @@ impl Node {
     /// - invoice: bolt11 invoice string
     /// - nonce: hex-encoded 32-byte nonce
     /// - signature: hex-encoded Schnorr signature over payment message
-    async fn process_pay_invoice_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_pay_invoice_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use crate::ldk_cli::LdkCli;
-        use bitcoin::secp256k1::{Secp256k1, schnorr::Signature, Message};
+        use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
         use deposits_core::messages::LedgerOperation;
         use lightning_invoice::Bolt11Invoice;
         use std::str::FromStr;
 
         // Extract parameters
-        let deposit_pubkey_hex = match request.params.get("deposit_pubkey").and_then(|v| v.as_str()) {
+        let deposit_pubkey_hex = match request
+            .params
+            .get("deposit_pubkey")
+            .and_then(|v| v.as_str())
+        {
             Some(pk) => pk,
-            None => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing deposit_pubkey parameter".to_string()),
+                )
+            }
         };
 
         let invoice_str = match request.params.get("invoice").and_then(|v| v.as_str()) {
@@ -6088,12 +7180,24 @@ impl Node {
 
         let payment_hash_hex = match request.params.get("payment_hash").and_then(|v| v.as_str()) {
             Some(h) => h,
-            None => return (false, None, Some("Missing payment_hash parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing payment_hash parameter".to_string()),
+                )
+            }
         };
 
         let amount_msat = match request.params.get("amount_msats").and_then(|v| v.as_u64()) {
             Some(a) => a,
-            None => return (false, None, Some("Missing amount_msats parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing amount_msats parameter".to_string()),
+                )
+            }
         };
 
         let signature_hex = match request.params.get("signature").and_then(|v| v.as_str()) {
@@ -6116,13 +7220,21 @@ impl Node {
 
         let invoice_payment_hash = invoice.payment_hash();
         let invoice_hash_bytes: &[u8] = invoice_payment_hash.as_ref();
-        if invoice_hash_bytes != &payment_id {
-            return (false, None, Some("payment_hash does not match invoice".to_string()));
+        if invoice_hash_bytes != payment_id {
+            return (
+                false,
+                None,
+                Some("payment_hash does not match invoice".to_string()),
+            );
         }
 
         let invoice_amount = invoice.amount_milli_satoshis().unwrap_or(0);
         if invoice_amount != amount_msat {
-            return (false, None, Some("amount_msats does not match invoice".to_string()));
+            return (
+                false,
+                None,
+                Some("amount_msats does not match invoice".to_string()),
+            );
         }
 
         // Convert pubkey hex to descriptor and deposit_id
@@ -6159,7 +7271,11 @@ impl Node {
 
         let xonly = bitcoin::secp256k1::XOnlyPublicKey::from(deposit_pubkey);
         if secp.verify_schnorr(&signature, &msg, &xonly).is_err() {
-            return (false, None, Some("Signature verification failed".to_string()));
+            return (
+                false,
+                None,
+                Some("Signature verification failed".to_string()),
+            );
         }
 
         // Find the ledger and check deposit balance
@@ -6178,17 +7294,23 @@ impl Node {
             };
 
             if deposit.balance < amount_msat {
-                return (false, None, Some(format!(
-                    "Insufficient balance: {} msat available, {} msat needed",
-                    deposit.balance, amount_msat
-                )));
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "Insufficient balance: {} msat available, {} msat needed",
+                        deposit.balance, amount_msat
+                    )),
+                );
             }
 
             ledger.next_sequence()
         };
 
         // Create witness from signature
-        let witness = DescriptorWitness { stack: vec![sig_bytes.clone()] };
+        let witness = DescriptorWitness {
+            stack: vec![sig_bytes.clone()],
+        };
 
         let lock_operation = LedgerOperation::InvoiceLock {
             deposit_id,
@@ -6203,17 +7325,26 @@ impl Node {
             return (false, None, Some(format!("Failed to lock funds: {}", e)));
         }
 
-        tracing::info!("Locked {} msat for payment {}",
-            amount_msat, hex::encode(&payment_id[..8]));
+        tracing::info!(
+            "Locked {} msat for payment {}",
+            amount_msat,
+            hex::encode(&payment_id[..8])
+        );
 
         // Check for self-pay: if this invoice was created by us (exists in pending_invoices),
         // settle internally without touching LDK. This handles the case where a depositor
         // pays an invoice created for another depositor on the same operator.
-        let self_pay = self.pending_invoices.lock().unwrap().contains_key(&payment_id);
+        let self_pay = self
+            .pending_invoices
+            .lock()
+            .unwrap()
+            .contains_key(&payment_id);
 
         if self_pay {
-            tracing::info!("Self-pay detected for payment {}... — settling internally",
-                hex::encode(&payment_id[..8]));
+            tracing::info!(
+                "Self-pay detected for payment {}... — settling internally",
+                hex::encode(&payment_id[..8])
+            );
 
             // Look up the pending invoice to find the destination deposit
             let pending = self.pending_invoices.lock().unwrap().remove(&payment_id);
@@ -6235,7 +7366,11 @@ impl Node {
                 };
 
                 if let Err(e) = self.commit_operation(ledger_id, fulfill_operation).await {
-                    return (false, None, Some(format!("Failed to fulfill self-pay: {}", e)));
+                    return (
+                        false,
+                        None,
+                        Some(format!("Failed to fulfill self-pay: {}", e)),
+                    );
                 }
 
                 // Credit the destination deposit
@@ -6256,13 +7391,15 @@ impl Node {
                     tracing::error!("Failed to credit destination deposit: {}", e);
                 }
 
-                tracing::info!("Self-pay settled: {} msat from {} to {}",
+                tracing::info!(
+                    "Self-pay settled: {} msat from {} to {}",
                     amount_msat,
                     hex::encode(&deposit_id[..4]),
-                    hex::encode(&pending.deposit_id[..4]));
+                    hex::encode(&pending.deposit_id[..4])
+                );
 
                 let result = serde_json::json!({
-                    "payment_id": hex::encode(&payment_id),
+                    "payment_id": hex::encode(payment_id),
                     "deposit_pubkey": deposit_pubkey_hex,
                     "amount_msat": amount_msat,
                     "status": "succeeded",
@@ -6278,20 +7415,27 @@ impl Node {
         let cli = LdkCli::from_env();
         match cli.pay_invoice(invoice_str) {
             Ok(_) => {
-                tracing::info!("LDK payment dispatched for {}..., will complete in background",
-                    hex::encode(&payment_id[..8]));
+                tracing::info!(
+                    "LDK payment dispatched for {}..., will complete in background",
+                    hex::encode(&payment_id[..8])
+                );
             }
             Err(e) => {
                 let err_str = e.to_string();
                 // "already initiated" means the invoice exists on the shared LDK node
                 // (created by another operator). This is cross-node self-pay — the payment
                 // will settle internally via LDK. Let auto_complete_outbound_payments handle it.
-                if err_str.contains("already been initiated") || err_str.contains("already initiated") {
+                if err_str.contains("already been initiated")
+                    || err_str.contains("already initiated")
+                {
                     tracing::info!("Cross-node self-pay detected for {}... (shared LDK node), will complete in background",
                         hex::encode(&payment_id[..8]));
                 } else {
-                    tracing::warn!("LDK pay_invoice failed for {}...: {}, failing lock",
-                        hex::encode(&payment_id[..8]), e);
+                    tracing::warn!(
+                        "LDK pay_invoice failed for {}...: {}, failing lock",
+                        hex::encode(&payment_id[..8]),
+                        e
+                    );
 
                     let fail_sequence = {
                         let ledger = ledger_arc.read().unwrap();
@@ -6312,7 +7456,7 @@ impl Node {
         }
 
         let result = serde_json::json!({
-            "payment_id": hex::encode(&payment_id),
+            "payment_id": hex::encode(payment_id),
             "deposit_pubkey": deposit_pubkey_hex,
             "amount_msat": amount_msat,
             "status": "pending",
@@ -6330,14 +7474,23 @@ impl Node {
     /// - fee_sats: fee for the withdrawal transaction
     /// - nonce: hex-encoded 32-byte nonce
     /// - signature: hex-encoded Schnorr signature over WITHDRAWAL message
-    async fn process_withdraw_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
-        use bitcoin::secp256k1::{Secp256k1, schnorr::Signature, Message};
+    async fn process_withdraw_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        use bitcoin::secp256k1::{schnorr::Signature, Message};
 
-        tracing::info!("Processing withdraw request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+        tracing::info!(
+            "Processing withdraw request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         // Extract parameters
-        let deposit_pubkey_hex = match request.params.get("deposit_pubkey").and_then(|v| v.as_str()) {
+        let deposit_pubkey_hex = match request
+            .params
+            .get("deposit_pubkey")
+            .and_then(|v| v.as_str())
+        {
             Some(p) => p,
             None => return (false, None, Some("Missing deposit_pubkey".to_string())),
         };
@@ -6379,14 +7532,24 @@ impl Node {
         let mut deposit_id = [0u8; 16];
         match hex::decode(deposit_id_hex) {
             Ok(bytes) if bytes.len() == 16 => deposit_id.copy_from_slice(&bytes),
-            _ => return (false, None, Some("Invalid deposit_id (must be 16 bytes hex)".to_string())),
+            _ => {
+                return (
+                    false,
+                    None,
+                    Some("Invalid deposit_id (must be 16 bytes hex)".to_string()),
+                )
+            }
         }
 
         // Verify deposit_id matches pubkey
         let descriptor = format!("pk({})", deposit_pubkey_hex);
         let expected_deposit_id = compute_deposit_id(&descriptor);
         if deposit_id != expected_deposit_id {
-            return (false, None, Some("deposit_id does not match deposit_pubkey".to_string()));
+            return (
+                false,
+                None,
+                Some("deposit_id does not match deposit_pubkey".to_string()),
+            );
         }
 
         // Parse nonce
@@ -6396,7 +7559,13 @@ impl Node {
                 arr.copy_from_slice(&bytes);
                 arr
             }
-            _ => return (false, None, Some("Invalid nonce (must be 32 bytes hex)".to_string())),
+            _ => {
+                return (
+                    false,
+                    None,
+                    Some("Invalid nonce (must be 32 bytes hex)".to_string()),
+                )
+            }
         };
 
         // Parse signature
@@ -6421,11 +7590,16 @@ impl Node {
         let x_only = deposit_pubkey.x_only_public_key().0;
 
         if secp.verify_schnorr(&signature, &msg, &x_only).is_err() {
-            return (false, None, Some("Invalid withdrawal signature".to_string()));
+            return (
+                false,
+                None,
+                Some("Invalid withdrawal signature".to_string()),
+            );
         }
 
         // Find the ledger
-        let (reserves_id, _ledger) = match self.get_ledger_by_ledger_id(&request.ledger_id)
+        let (reserves_id, _ledger) = match self
+            .get_ledger_by_ledger_id(&request.ledger_id)
             .or_else(|| self.get_ledger_by_reserves_key(&request.ledger_id))
         {
             Some(l) => l,
@@ -6442,16 +7616,19 @@ impl Node {
         };
 
         // Lock the withdrawal with co-signing
-        match self.lock_withdrawal(
-            &reserves_id,
-            deposit_id,
-            address.to_string(),
-            amount_sats,
-            fee_sats,
-            nonce,
-            depositor_witness,
-            None, // no memo
-        ).await {
+        match self
+            .lock_withdrawal(
+                &reserves_id,
+                deposit_id,
+                address.to_string(),
+                amount_sats,
+                fee_sats,
+                nonce,
+                depositor_witness,
+                None, // no memo
+            )
+            .await
+        {
             Ok(lock_result) => {
                 let withdrawal_id = lock_result.withdrawal.withdrawal_id;
                 let result = serde_json::json!({
@@ -6470,26 +7647,45 @@ impl Node {
     }
 
     /// Process a transfer_lock request - lock funds for conditional transfer
-    async fn process_transfer_lock_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
-        use bitcoin::secp256k1::{Secp256k1, schnorr::Signature, Message};
-        use deposits_core::types::{compute_deposit_id, DescriptorWitness};
+    async fn process_transfer_lock_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        use bitcoin::secp256k1::schnorr::Signature;
         use deposits_core::messages::LedgerOperation;
+        use deposits_core::types::DescriptorWitness;
 
-        tracing::debug!("Processing transfer_lock request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+        tracing::debug!(
+            "Processing transfer_lock request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         // Extract parameters
         let nonce_hex = match request.params.get("nonce").and_then(|v| v.as_str()) {
             Some(n) => n,
             None => return (false, None, Some("Missing nonce".to_string())),
         };
-        let source_id_hex = match request.params.get("source_deposit_id").and_then(|v| v.as_str()) {
+        let source_id_hex = match request
+            .params
+            .get("source_deposit_id")
+            .and_then(|v| v.as_str())
+        {
             Some(s) => s,
             None => return (false, None, Some("Missing source_deposit_id".to_string())),
         };
-        let dest_id_hex = match request.params.get("destination_deposit_id").and_then(|v| v.as_str()) {
+        let dest_id_hex = match request
+            .params
+            .get("destination_deposit_id")
+            .and_then(|v| v.as_str())
+        {
             Some(d) => d,
-            None => return (false, None, Some("Missing destination_deposit_id".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing destination_deposit_id".to_string()),
+                )
+            }
         };
         let amount_msats = match request.params.get("amount").and_then(|v| v.as_u64()) {
             Some(a) => a,
@@ -6499,11 +7695,19 @@ impl Node {
             Some(f) => f,
             None => return (false, None, Some("Missing fee".to_string())),
         };
-        let completion_script = match request.params.get("completion_script").and_then(|v| v.as_str()) {
+        let completion_script = match request
+            .params
+            .get("completion_script")
+            .and_then(|v| v.as_str())
+        {
             Some(s) => s,
             None => return (false, None, Some("Missing completion_script".to_string())),
         };
-        let timeout_height = match request.params.get("timeout_height").and_then(|v| v.as_u64()) {
+        let timeout_height = match request
+            .params
+            .get("timeout_height")
+            .and_then(|v| v.as_u64())
+        {
             Some(t) => t as u32,
             None => return (false, None, Some("Missing timeout_height".to_string())),
         };
@@ -6532,7 +7736,13 @@ impl Node {
         let mut destination_deposit_id = [0u8; 16];
         match hex::decode(dest_id_hex) {
             Ok(bytes) if bytes.len() == 16 => destination_deposit_id.copy_from_slice(&bytes),
-            _ => return (false, None, Some("Invalid destination_deposit_id".to_string())),
+            _ => {
+                return (
+                    false,
+                    None,
+                    Some("Invalid destination_deposit_id".to_string()),
+                )
+            }
         }
 
         // Parse transfer_id
@@ -6558,7 +7768,13 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = match ledgers.get(ledger_id) {
                 Some(l) => l.clone(),
-                None => return (false, None, Some(format!("Ledger not found: {}", ledger_id))),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Ledger not found: {}", ledger_id)),
+                    )
+                }
             };
             let ledger = ledger_arc.read().unwrap();
 
@@ -6568,39 +7784,54 @@ impl Node {
             };
 
             // Validate timeout_height against max_transfer_timeout_blocks (strictest quorum member)
-            let max_timeout = ledger.state.quorum_members.iter()
+            let max_timeout = ledger
+                .state
+                .quorum_members
+                .iter()
                 .filter_map(|m| m.max_transfer_timeout_blocks)
                 .min()
                 .unwrap_or(1008); // default ~1 week
-            let current_block = ledger.history.last()
-                .map(|u| u.block_height)
-                .unwrap_or(0);
+            let current_block = ledger.history.last().map(|u| u.block_height).unwrap_or(0);
             if current_block > 0 && timeout_height > current_block.saturating_add(max_timeout) {
-                return (false, None, Some(format!(
-                    "timeout_height {} exceeds max: current_block {} + max_timeout {} = {}",
-                    timeout_height, current_block, max_timeout,
-                    current_block.saturating_add(max_timeout)
-                )));
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "timeout_height {} exceeds max: current_block {} + max_timeout {} = {}",
+                        timeout_height,
+                        current_block,
+                        max_timeout,
+                        current_block.saturating_add(max_timeout)
+                    )),
+                );
             }
 
             // Validate fee against deposit's transfer fee schedule (all in msats)
             let expected_fee = deposit.transfer_fees.calculate_fee(amount_msats);
             if fee_msats != expected_fee {
-                return (false, None, Some(format!(
+                return (
+                    false,
+                    None,
+                    Some(format!(
                     "Fee mismatch: expected {} msats (fixed={} + {}bps on {} msats), got {} msats",
                     expected_fee, deposit.transfer_fees.fixed_msats,
                     deposit.transfer_fees.rate_bps, amount_msats, fee_msats
-                )));
+                )),
+                );
             }
 
             // Check sufficient balance
             let total = amount_msats + fee_msats;
             if deposit.balance < total {
                 let balance_json = format!("{{\"balance_msats\":{}}}", deposit.balance);
-                return (false, Some(balance_json), Some(format!(
-                    "Insufficient balance: {} msats available, {} msats needed",
-                    deposit.balance, total
-                )));
+                return (
+                    false,
+                    Some(balance_json),
+                    Some(format!(
+                        "Insufficient balance: {} msats available, {} msats needed",
+                        deposit.balance, total
+                    )),
+                );
             }
 
             deposit.descriptor.clone()
@@ -6616,7 +7847,7 @@ impl Node {
         }
 
         // Verify signature
-        let secp = &self.secp;
+        let _secp = &self.secp;
         let msg_hash = deposits_core::signature_utils::transfer_lock_signing_message(
             &nonce,
             &source_deposit_id,
@@ -6628,11 +7859,19 @@ impl Node {
         );
 
         // Verify signature against deposit descriptor (supports any miniscript)
-        let witness = DescriptorWitness { stack: vec![signature.serialize().to_vec()] };
+        let witness = DescriptorWitness {
+            stack: vec![signature.serialize().to_vec()],
+        };
         match deposits_core::descriptor::verify_witness(&deposit_descriptor, &witness, &msg_hash) {
-            Ok(true) => {},
+            Ok(true) => {}
             Ok(false) => return (false, None, Some("Invalid signature".to_string())),
-            Err(e) => return (false, None, Some(format!("Descriptor verification failed: {}", e))),
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("Descriptor verification failed: {}", e)),
+                )
+            }
         }
 
         // Check if destination deposit requires a receive signature
@@ -6643,19 +7882,36 @@ impl Node {
                 if let Some(dest_deposit) = ledger.state.deposits.get(&destination_deposit_id) {
                     if dest_deposit.receive_requires_sig {
                         // Verify receive signature from destination deposit key
-                        let recv_sig_hex = match request.params.get("receive_signature").and_then(|v| v.as_str()) {
+                        let recv_sig_hex = match request
+                            .params
+                            .get("receive_signature")
+                            .and_then(|v| v.as_str())
+                        {
                             Some(s) => s,
-                            None => return (false, None, Some("Destination deposit requires receive_signature".to_string())),
+                            None => {
+                                return (
+                                    false,
+                                    None,
+                                    Some(
+                                        "Destination deposit requires receive_signature"
+                                            .to_string(),
+                                    ),
+                                )
+                            }
                         };
                         let recv_sig = match hex::decode(recv_sig_hex)
                             .ok()
                             .and_then(|bytes| Signature::from_slice(&bytes).ok())
                         {
                             Some(sig) => sig,
-                            None => return (false, None, Some("Invalid receive_signature".to_string())),
+                            None => {
+                                return (false, None, Some("Invalid receive_signature".to_string()))
+                            }
                         };
                         // Destination descriptor signs the transfer_id to authorize receiving
-                        let recv_witness = DescriptorWitness { stack: vec![recv_sig.serialize().to_vec()] };
+                        let recv_witness = DescriptorWitness {
+                            stack: vec![recv_sig.serialize().to_vec()],
+                        };
                         match deposits_core::descriptor::verify_witness(&dest_deposit.descriptor, &recv_witness, &transfer_id) {
                             Ok(true) => {},
                             Ok(false) => return (false, None, Some("Invalid receive_signature: does not satisfy destination descriptor".to_string())),
@@ -6667,7 +7923,9 @@ impl Node {
         }
 
         // Create and append the operation (amount_msats/fee_msats computed above in fee validation)
-        let witness = DescriptorWitness { stack: vec![signature.serialize().to_vec()] };
+        let witness = DescriptorWitness {
+            stack: vec![signature.serialize().to_vec()],
+        };
         let operation = LedgerOperation::TransferLock {
             nonce,
             source_deposit_id,
@@ -6687,7 +7945,11 @@ impl Node {
             match self.commit_operation(ledger_id, operation).await {
                 Ok(_) => {}
                 Err(e) => {
-                    return (false, None, Some(format!("Failed to commit transfer_lock: {}", e)));
+                    return (
+                        false,
+                        None,
+                        Some(format!("Failed to commit transfer_lock: {}", e)),
+                    );
                 }
             }
         }
@@ -6695,21 +7957,33 @@ impl Node {
 
         tracing::debug!("Transfer locked: {}", hex::encode(&transfer_id[..8]));
         tracing::debug!("[PROFILE] transfer_lock: {:?}", append_elapsed);
-        (true, Some(serde_json::json!({
-            "transfer_id": transfer_id_hex,
-            "amount": amount_msats,
-            "fee": fee_msats,
-            "message": "Transfer locked successfully"
-        }).to_string()), None)
+        (
+            true,
+            Some(
+                serde_json::json!({
+                    "transfer_id": transfer_id_hex,
+                    "amount": amount_msats,
+                    "fee": fee_msats,
+                    "message": "Transfer locked successfully"
+                })
+                .to_string(),
+            ),
+            None,
+        )
     }
 
     /// Process a transfer_complete request - complete a transfer by revealing preimage
-    async fn process_transfer_complete_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
-        use deposits_core::types::DescriptorWitness;
+    async fn process_transfer_complete_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use deposits_core::messages::LedgerOperation;
+        use deposits_core::types::DescriptorWitness;
 
-        tracing::debug!("Processing transfer_complete request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+        tracing::debug!(
+            "Processing transfer_complete request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         // Extract parameters
         let transfer_id_hex = match request.params.get("transfer_id").and_then(|v| v.as_str()) {
@@ -6730,7 +8004,13 @@ impl Node {
         // Parse preimage
         let preimage: Vec<u8> = match hex::decode(preimage_hex) {
             Ok(bytes) if bytes.len() == 32 => bytes,
-            _ => return (false, None, Some("Invalid preimage (must be 32 bytes)".to_string())),
+            _ => {
+                return (
+                    false,
+                    None,
+                    Some("Invalid preimage (must be 32 bytes)".to_string()),
+                )
+            }
         };
 
         // Verify the preimage matches the hash in the pending transfer
@@ -6739,7 +8019,13 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = match ledgers.get(ledger_id) {
                 Some(l) => l.clone(),
-                None => return (false, None, Some(format!("Ledger not found: {}", ledger_id))),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Ledger not found: {}", ledger_id)),
+                    )
+                }
             };
             let ledger = ledger_arc.read().unwrap();
 
@@ -6751,19 +8037,34 @@ impl Node {
             // Verify preimage: hash it and check against completion_script
             // completion_script is like "sha256(abc123...)"
             if pending.completion_script.starts_with("sha256(") {
-                let expected_hash_hex = &pending.completion_script[7..pending.completion_script.len()-1];
+                let expected_hash_hex =
+                    &pending.completion_script[7..pending.completion_script.len() - 1];
                 let expected_hash = match hex::decode(expected_hash_hex) {
                     Ok(h) => h,
-                    Err(_) => return (false, None, Some("Invalid hash in completion_script".to_string())),
+                    Err(_) => {
+                        return (
+                            false,
+                            None,
+                            Some("Invalid hash in completion_script".to_string()),
+                        )
+                    }
                 };
 
                 use bitcoin::hashes::{sha256, Hash};
                 let actual_hash = sha256::Hash::hash(&preimage);
                 if actual_hash.as_byte_array()[..] != expected_hash[..] {
-                    return (false, None, Some("Preimage does not match hash".to_string()));
+                    return (
+                        false,
+                        None,
+                        Some("Preimage does not match hash".to_string()),
+                    );
                 }
             } else {
-                return (false, None, Some("Only sha256() completion scripts supported".to_string()));
+                return (
+                    false,
+                    None,
+                    Some("Only sha256() completion scripts supported".to_string()),
+                );
             }
         }
 
@@ -6776,7 +8077,9 @@ impl Node {
         };
 
         // Create and append the operation
-        let script_witness = DescriptorWitness { stack: vec![preimage] };
+        let script_witness = DescriptorWitness {
+            stack: vec![preimage],
+        };
         let operation = LedgerOperation::TransferComplete {
             transfer_id,
             script_witness,
@@ -6786,7 +8089,11 @@ impl Node {
         match self.commit_operation(ledger_id, operation).await {
             Ok(_) => {}
             Err(e) => {
-                return (false, None, Some(format!("Failed to commit transfer_complete: {}", e)));
+                return (
+                    false,
+                    None,
+                    Some(format!("Failed to commit transfer_complete: {}", e)),
+                );
             }
         }
 
@@ -6796,20 +8103,32 @@ impl Node {
             .as_ref()
             .map(|p| (p.amount, p.fee))
             .unwrap_or((0, 0));
-        (true, Some(serde_json::json!({
-            "transfer_id": transfer_id_hex,
-            "amount": completed_amount,
-            "fee": completed_fee,
-            "message": "Transfer completed successfully"
-        }).to_string()), None)
+        (
+            true,
+            Some(
+                serde_json::json!({
+                    "transfer_id": transfer_id_hex,
+                    "amount": completed_amount,
+                    "fee": completed_fee,
+                    "message": "Transfer completed successfully"
+                })
+                .to_string(),
+            ),
+            None,
+        )
     }
 
-    async fn process_collateral_lock_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_collateral_lock_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use bitcoin::secp256k1::SecretKey;
         use std::str::FromStr;
 
-        tracing::info!("Processing collateral_lock request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+        tracing::info!(
+            "Processing collateral_lock request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         // Resolve to ledger_id (handles both hash and reserves_key formats)
         let ledger_id = match self.resolve_to_ledger_id(&request.ledger_id) {
@@ -6820,12 +8139,24 @@ impl Node {
         // Extract deposit_secret from params
         let deposit_secret_hex = match request.params.get("deposit_secret") {
             Some(serde_json::Value::String(s)) => s.clone(),
-            _ => return (false, None, Some("Missing deposit_secret parameter".to_string())),
+            _ => {
+                return (
+                    false,
+                    None,
+                    Some("Missing deposit_secret parameter".to_string()),
+                )
+            }
         };
 
         let secret_bytes = match hex::decode(&deposit_secret_hex) {
             Ok(b) => b,
-            Err(e) => return (false, None, Some(format!("Invalid deposit_secret hex: {}", e))),
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("Invalid deposit_secret hex: {}", e)),
+                )
+            }
         };
 
         let deposit_secret = match SecretKey::from_slice(&secret_bytes) {
@@ -6835,32 +8166,58 @@ impl Node {
 
         // Derive the deposit pubkey from the secret and create descriptor
         let secp = &self.secp;
-        let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
+        let deposit_pubkey = PublicKey::from_secret_key(secp, &deposit_secret);
         let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
 
         // Extract required parameters
         let amount_msats = match request.params.get("amount_msats").and_then(|v| v.as_u64()) {
             Some(v) => v,
-            None => return (false, None, Some("Missing amount_msats parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing amount_msats parameter".to_string()),
+                )
+            }
         };
 
         let lock_blocks = match request.params.get("lock_blocks").and_then(|v| v.as_u64()) {
             Some(v) => v as u32,
-            None => return (false, None, Some("Missing lock_blocks parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing lock_blocks parameter".to_string()),
+                )
+            }
         };
 
         // Get current block height and compute lock_until_block
         let current_block = match self.wallet.get_block_height() {
             Ok(h) => h,
-            Err(e) => return (false, None, Some(format!("Failed to get block height: {}", e))),
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("Failed to get block height: {}", e)),
+                )
+            }
         };
         let lock_until_block = current_block + lock_blocks;
 
         // Parse requesting operator (defaults to our node_id for self-request)
-        let requesting_operator = if let Some(serde_json::Value::String(hex)) = request.params.get("requesting_operator") {
+        let requesting_operator = if let Some(serde_json::Value::String(hex)) =
+            request.params.get("requesting_operator")
+        {
             match PublicKey::from_str(hex) {
                 Ok(pk) => pk,
-                Err(e) => return (false, None, Some(format!("Invalid requesting_operator: {}", e))),
+                Err(e) => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Invalid requesting_operator: {}", e)),
+                    )
+                }
             }
         } else {
             // Default to our own node_id (self-request)
@@ -6878,19 +8235,28 @@ impl Node {
                     Err(_) => return (false, None, Some("Invalid sender pubkey".to_string())),
                 }
             }
-            _ => return (false, None, Some("Invalid sender pubkey format".to_string())),
+            _ => {
+                return (
+                    false,
+                    None,
+                    Some("Invalid sender pubkey format".to_string()),
+                )
+            }
         };
 
         // Lock the collateral (now includes co-signing and broadcast)
-        match self.lock_collateral(
-            &ledger_id,
-            &descriptor,
-            &deposit_secret,
-            amount_msats,
-            lock_until_block,
-            requesting_operator,
-            quorum_member,
-        ).await {
+        match self
+            .lock_collateral(
+                &ledger_id,
+                &descriptor,
+                &deposit_secret,
+                amount_msats,
+                lock_until_block,
+                requesting_operator,
+                quorum_member,
+            )
+            .await
+        {
             Ok(attestation) => {
                 // Auto-record the attestation on our own ledger
                 let att_op = LedgerOperation::CollateralAttestation {
@@ -6904,9 +8270,16 @@ impl Node {
                     ledger_hash: attestation.ledger_hash,
                 };
                 if let Err(e) = self.commit_operation(&ledger_id, att_op).await {
-                    tracing::warn!("Failed to auto-record attestation on {}: {}", &ledger_id[..16], e);
+                    tracing::warn!(
+                        "Failed to auto-record attestation on {}: {}",
+                        &ledger_id[..16],
+                        e
+                    );
                 } else {
-                    tracing::info!("Auto-recorded attestation on ledger {}...", &ledger_id[..16]);
+                    tracing::info!(
+                        "Auto-recorded attestation on ledger {}...",
+                        &ledger_id[..16]
+                    );
                 }
 
                 // Serialize attestation as JSON then base64 encode
@@ -6919,7 +8292,11 @@ impl Node {
                     "quorum_member": pubkey_hex(&attestation.quorum_member),
                     "attestation_b64": attestation_b64,
                 });
-                tracing::info!("Collateral locked: {} msats until block {}", amount_msats, lock_until_block);
+                tracing::info!(
+                    "Collateral locked: {} msats until block {}",
+                    amount_msats,
+                    lock_until_block
+                );
                 (true, Some(result.to_string()), None)
             }
             Err(e) => {
@@ -6940,30 +8317,52 @@ impl Node {
     ///
     /// The signature covers: cosign_data || our_ledger_current_hash
     /// This binds the co-signature to the current state of our own ledger.
-    async fn process_cosign_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_cosign_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::{Message, Secp256k1};
-        use std::str::FromStr;
+        use bitcoin::secp256k1::Message;
 
         let t1_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
-        let t0_us = request.params.get("t0_us").and_then(|v| v.as_u64()).unwrap_or(0);
+        let t0_us = request
+            .params
+            .get("t0_us")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
 
-        tracing::info!("PROC cosign_update: ledger={}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+        tracing::info!(
+            "PROC cosign_update: ledger={}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         // Extract sequence_number early — we need it for the freshness check.
-        let sequence_number = match request.params.get("sequence_number").and_then(|v| v.as_u64()) {
+        let sequence_number = match request
+            .params
+            .get("sequence_number")
+            .and_then(|v| v.as_u64())
+        {
             Some(seq) => seq,
-            None => return (false, None, Some("Missing sequence_number parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing sequence_number parameter".to_string()),
+                )
+            }
         };
 
         // Apply piggybacked updates before freshness check.
         // The requester includes the previous signed update (seq N-1) so we can
         // catch up inline without waiting for relay delivery.
-        if let Some(prev_arr) = request.params.get("previous_updates").and_then(|v| v.as_array()) {
+        if let Some(prev_arr) = request
+            .params
+            .get("previous_updates")
+            .and_then(|v| v.as_array())
+        {
             use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
             let mut applied = 0usize;
             for item in prev_arr {
@@ -6993,8 +8392,11 @@ impl Node {
             }
             if applied > 0 {
                 self.catch_up_ledger_from_event_store(&request.ledger_id);
-                tracing::debug!("Applied {} piggybacked updates for {}...",
-                    applied, &request.ledger_id[..16.min(request.ledger_id.len())]);
+                tracing::debug!(
+                    "Applied {} piggybacked updates for {}...",
+                    applied,
+                    &request.ledger_id[..16.min(request.ledger_id.len())]
+                );
             }
         }
 
@@ -7009,11 +8411,15 @@ impl Node {
             if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
                 let ledger = ledger_arc.read().unwrap();
                 if ledger.state.dispute_state != deposits_core::types::DisputeState::Normal {
-                    return (false, None, Some(format!(
-                        "Ledger {}... in dispute state {:?}",
-                        &request.ledger_id[..16.min(request.ledger_id.len())],
-                        ledger.state.dispute_state
-                    )));
+                    return (
+                        false,
+                        None,
+                        Some(format!(
+                            "Ledger {}... in dispute state {:?}",
+                            &request.ledger_id[..16.min(request.ledger_id.len())],
+                            ledger.state.dispute_state
+                        )),
+                    );
                 }
                 let local_seq = ledger.next_sequence();
                 if local_seq < sequence_number {
@@ -7034,7 +8440,8 @@ impl Node {
                     // Re-check after catch-up
                     let still_stale = {
                         let ledgers = self.handler.ledgers.lock().unwrap();
-                        ledgers.get(&request.ledger_id)
+                        ledgers
+                            .get(&request.ledger_id)
                             .map(|arc| {
                                 let l = arc.read().unwrap();
                                 l.next_sequence() < sequence_number
@@ -7050,36 +8457,69 @@ impl Node {
                         // giving the background fetch time to catch up.
                         metrics::record_cosign_freshness_recovery("stale");
                         metrics::record_pre_cosign_drain(0, false);
-                        self.stale_joined_ledgers.lock().unwrap().insert(request.ledger_id.clone());
+                        self.stale_joined_ledgers
+                            .lock()
+                            .unwrap()
+                            .insert(request.ledger_id.clone());
                         // Reset relay-fetch cooldown so next reload cycle fetches immediately.
-                        self.last_relay_fetch_times.lock().unwrap().remove(&request.ledger_id);
+                        self.last_relay_fetch_times
+                            .lock()
+                            .unwrap()
+                            .remove(&request.ledger_id);
                         let current_len = {
                             let ledgers = self.handler.ledgers.lock().unwrap();
-                            ledgers.get(&request.ledger_id)
+                            ledgers
+                                .get(&request.ledger_id)
                                 .map(|arc| arc.read().unwrap().next_sequence())
                                 .unwrap_or(0)
                         };
                         tracing::info!(
                             "Cosign stale: have {}, need {} for {}...",
-                            current_len, sequence_number,
+                            current_len,
+                            sequence_number,
                             &request.ledger_id[..16.min(request.ledger_id.len())]
                         );
-                        return (false, None, Some(format!(
-                            "Stale: have seq {}, need {}", current_len, sequence_number
-                        )));
+                        return (
+                            false,
+                            None,
+                            Some(format!(
+                                "Stale: have seq {}, need {}",
+                                current_len, sequence_number
+                            )),
+                        );
                     }
                 }
             }
         }
 
-        let cosign_data_hex = match request.params.get("cosign_data_hex").and_then(|v| v.as_str()) {
+        let cosign_data_hex = match request
+            .params
+            .get("cosign_data_hex")
+            .and_then(|v| v.as_str())
+        {
             Some(hex) => hex.to_string(),
-            None => return (false, None, Some("Missing cosign_data_hex parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing cosign_data_hex parameter".to_string()),
+                )
+            }
         };
 
-        let current_hash_hex = match request.params.get("current_hash_hex").and_then(|v| v.as_str()) {
+        let current_hash_hex = match request
+            .params
+            .get("current_hash_hex")
+            .and_then(|v| v.as_str())
+        {
             Some(hex) => hex.to_string(),
-            None => return (false, None, Some("Missing current_hash_hex parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing current_hash_hex parameter".to_string()),
+                )
+            }
         };
 
         // Decode cosign data
@@ -7095,17 +8535,33 @@ impl Node {
                 arr.copy_from_slice(&bytes);
                 arr
             }
-            Ok(_) => return (false, None, Some("current_hash_hex must be 32 bytes".to_string())),
-            Err(e) => return (false, None, Some(format!("Invalid current_hash_hex: {}", e))),
+            Ok(_) => {
+                return (
+                    false,
+                    None,
+                    Some("current_hash_hex must be 32 bytes".to_string()),
+                )
+            }
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("Invalid current_hash_hex: {}", e)),
+                )
+            }
         };
 
         // Find the operator's ledger where we are a quorum member (for sequence validation)
         // Get the target ledger and extract operator/reserves for matching
-        let (operator_ledger_arc, target_operator_id, target_reserves_key) = {
+        let (operator_ledger_arc, target_operator_id, _target_reserves_key) = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(arc) = ledgers.get(&request.ledger_id) {
                 let ledger = arc.read().unwrap();
-                (Some(arc.clone()), Some(ledger.operator_key()), Some(ledger.reserves_key().to_string()))
+                (
+                    Some(arc.clone()),
+                    Some(ledger.operator_key()),
+                    Some(ledger.reserves_key().to_string()),
+                )
             } else {
                 (None, None, None)
             }
@@ -7124,7 +8580,10 @@ impl Node {
                     compressed[1..].copy_from_slice(&x_only_bytes);
                     match PublicKey::from_slice(&compressed) {
                         Ok(sender_key) => {
-                            tracing::debug!("Using request sender as target operator: {}...", &request.sender[..16]);
+                            tracing::debug!(
+                                "Using request sender as target operator: {}...",
+                                &request.sender[..16]
+                            );
                             Some(sender_key)
                         }
                         Err(e) => {
@@ -7134,7 +8593,10 @@ impl Node {
                     }
                 }
                 _ => {
-                    tracing::warn!("Invalid sender pubkey format: {}", &request.sender[..16.min(request.sender.len())]);
+                    tracing::warn!(
+                        "Invalid sender pubkey format: {}",
+                        &request.sender[..16.min(request.sender.len())]
+                    );
                     None
                 }
             }
@@ -7161,18 +8623,27 @@ impl Node {
             if sequence_number > expected_seq {
                 tracing::info!(
                     "Cosign seq mismatch: expected {}, got {} for {}...",
-                    expected_seq, sequence_number,
+                    expected_seq,
+                    sequence_number,
                     &request.ledger_id[..16.min(request.ledger_id.len())]
                 );
-                return (false, None, Some(format!(
-                    "Seq mismatch: expected {}, got {}", expected_seq, sequence_number
-                )));
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "Seq mismatch: expected {}, got {}",
+                        expected_seq, sequence_number
+                    )),
+                );
             }
 
             if let Some(last_update) = ledger.history.last() {
                 let prev_hash = last_update.current_hash;
-                tracing::trace!("Validating co-sign for seq {} (prev_hash: {}...)",
-                    sequence_number, &hex::encode(&prev_hash[..4]));
+                tracing::trace!(
+                    "Validating co-sign for seq {} (prev_hash: {}...)",
+                    sequence_number,
+                    &hex::encode(&prev_hash[..4])
+                );
             }
         }
 
@@ -7181,85 +8652,115 @@ impl Node {
         // expensive O(N) history TLV-decode scan on every cosign request.
         let member_ledger_hash: [u8; 32] = {
             // Fast path: check cache
-            let cached_key = self.cosign_member_cache.lock().unwrap()
-                .get(&request.ledger_id).cloned();
+            let cached_key = self
+                .cosign_member_cache
+                .lock()
+                .unwrap()
+                .get(&request.ledger_id)
+                .cloned();
 
-            let member_key = if let Some(key) = cached_key {
-                key
-            } else {
-                // Cache miss: do the full scan, then cache the result
-                let t_scan = std::time::Instant::now();
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                let mut found_key = None;
+            let member_key =
+                if let Some(key) = cached_key {
+                    key
+                } else {
+                    // Cache miss: do the full scan, then cache the result
+                    let t_scan = std::time::Instant::now();
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    let mut found_key = None;
 
-                for (ledger_key, arc) in ledgers.iter() {
-                    let ledger = arc.read().unwrap();
-                    if ledger.operator_key() != self.node_id {
-                        continue;
-                    }
-
-                    let history_len = ledger.history.len();
-                    let jq_count = ledger.state.joined_quorums.len();
-                    // Use derived joined_quorums state instead of scanning history
-                    let has_join = ledger.state.joined_quorums.iter().any(|jq| {
-                        if jq.ledger_id == request.ledger_id {
-                            return true;
+                    for (ledger_key, arc) in ledgers.iter() {
+                        let ledger = arc.read().unwrap();
+                        if ledger.operator_key() != self.node_id {
+                            continue;
                         }
-                        if let Some(target_op) = &target_operator_id {
-                            let jq_x = &jq.operator_id.serialize()[1..];
-                            let target_x = &target_op.serialize()[1..];
-                            if jq_x == target_x {
+
+                        let history_len = ledger.history.len();
+                        let jq_count = ledger.state.joined_quorums.len();
+                        // Use derived joined_quorums state instead of scanning history
+                        let has_join = ledger.state.joined_quorums.iter().any(|jq| {
+                            if jq.ledger_id == request.ledger_id {
                                 return true;
                             }
+                            if let Some(target_op) = &target_operator_id {
+                                let jq_x = &jq.operator_id.serialize()[1..];
+                                let target_x = &target_op.serialize()[1..];
+                                if jq_x == target_x {
+                                    return true;
+                                }
+                            }
+                            false
+                        });
+                        tracing::info!(
+                            "cosign scan: ledger={}..., history={}, joined_quorums={}, match={}",
+                            &ledger_key[..16.min(ledger_key.len())],
+                            history_len,
+                            jq_count,
+                            has_join
+                        );
+
+                        let scan_elapsed = t_scan.elapsed();
+                        if scan_elapsed.as_millis() > 0 {
+                            tracing::info!(
+                                "[PROFILE] cosign QuorumJoin scan (cache miss): {} entries in {:?}",
+                                history_len,
+                                scan_elapsed
+                            );
                         }
-                        false
-                    });
-                    tracing::info!("cosign scan: ledger={}..., history={}, joined_quorums={}, match={}",
-                        &ledger_key[..16.min(ledger_key.len())], history_len, jq_count, has_join);
 
-                    let scan_elapsed = t_scan.elapsed();
-                    if scan_elapsed.as_millis() > 0 {
-                        tracing::info!("[PROFILE] cosign QuorumJoin scan (cache miss): {} entries in {:?}", history_len, scan_elapsed);
+                        if has_join {
+                            found_key = Some(ledger_key.clone());
+                            break;
+                        }
                     }
+                    drop(ledgers);
 
-                    if has_join {
-                        found_key = Some(ledger_key.clone());
-                        break;
+                    match found_key {
+                        Some(key) => {
+                            self.cosign_member_cache
+                                .lock()
+                                .unwrap()
+                                .insert(request.ledger_id.clone(), key.clone());
+                            key
+                        }
+                        None => return (
+                            false,
+                            None,
+                            Some(
+                                "No ledger found with QuorumJoin to target - not a quorum member"
+                                    .to_string(),
+                            ),
+                        ),
                     }
-                }
-                drop(ledgers);
-
-                match found_key {
-                    Some(key) => {
-                        self.cosign_member_cache.lock().unwrap()
-                            .insert(request.ledger_id.clone(), key.clone());
-                        key
-                    }
-                    None => return (false, None, Some(
-                        "No ledger found with QuorumJoin to target - not a quorum member".to_string()
-                    )),
-                }
-            };
+                };
 
             // O(1) hash lookup using the cached member ledger key
             let ledgers = self.handler.ledgers.lock().unwrap();
             match ledgers.get(&member_key) {
                 Some(arc) => {
                     let ledger = arc.read().unwrap();
-                    let hash = ledger.history.last()
+                    let hash = ledger
+                        .history
+                        .last()
                         .map(|u| u.current_hash)
                         .unwrap_or([0u8; 32]);
-                    tracing::trace!("Member ledger {} hash {}...",
+                    tracing::trace!(
+                        "Member ledger {} hash {}...",
                         &member_key[..16.min(member_key.len())],
-                        &hex::encode(&hash[..4]));
+                        &hex::encode(&hash[..4])
+                    );
                     hash
                 }
                 None => {
                     // Ledger disappeared — invalidate cache entry and fail
-                    self.cosign_member_cache.lock().unwrap().remove(&request.ledger_id);
-                    return (false, None, Some(
-                        "Member ledger no longer found".to_string()
-                    ));
+                    self.cosign_member_cache
+                        .lock()
+                        .unwrap()
+                        .remove(&request.ledger_id);
+                    return (
+                        false,
+                        None,
+                        Some("Member ledger no longer found".to_string()),
+                    );
                 }
             }
         };
@@ -7286,9 +8787,14 @@ impl Node {
                         &hex::encode(cosign_prev_hash)[..16],
                         &hex::encode(our_tip)[..16],
                     );
-                    return (false, None, Some(format!(
-                        "Chain mismatch: update prev_hash doesn't match our validated tip"
-                    )));
+                    return (
+                        false,
+                        None,
+                        Some(
+                            "Chain mismatch: update prev_hash doesn't match our validated tip"
+                                .to_string(),
+                        ),
+                    );
                 }
             }
 
@@ -7301,26 +8807,42 @@ impl Node {
                         // Try applying the operation to a clone to check validity
                         match ledger.state.apply(&operation) {
                             Ok(_) => {
-                                tracing::debug!("Cosign validation passed: seq={} op={}",
-                                    sequence_number, Self::format_op_short(&operation));
+                                tracing::debug!(
+                                    "Cosign validation passed: seq={} op={}",
+                                    sequence_number,
+                                    Self::format_op_short(&operation)
+                                );
                             }
                             Err(e) => {
-                                tracing::warn!("Cosign validation FAILED: seq={} op={} error={}",
-                                    sequence_number, Self::format_op_short(&operation), e);
-                                return (false, None, Some(format!(
-                                    "Operation validation failed: {}", e
-                                )));
+                                tracing::warn!(
+                                    "Cosign validation FAILED: seq={} op={} error={}",
+                                    sequence_number,
+                                    Self::format_op_short(&operation),
+                                    e
+                                );
+                                return (
+                                    false,
+                                    None,
+                                    Some(format!("Operation validation failed: {}", e)),
+                                );
                             }
                         }
                     }
                 }
                 Err(e) => {
                     tracing::warn!("Cosign: failed to decode operation TLV: {}", e);
-                    return (false, None, Some(format!("Failed to decode operation: {}", e)));
+                    return (
+                        false,
+                        None,
+                        Some(format!("Failed to decode operation: {}", e)),
+                    );
                 }
             }
         } else {
-            tracing::warn!("Cosign: cosign_data too short ({} bytes)", cosign_data.len());
+            tracing::warn!(
+                "Cosign: cosign_data too short ({} bytes)",
+                cosign_data.len()
+            );
             return (false, None, Some("cosign_data too short".to_string()));
         }
 
@@ -7346,8 +8868,12 @@ impl Node {
         let sig = secp.sign_schnorr(&msg, &keypair);
         let sig_bytes = sig.serialize();
 
-        tracing::debug!("Co-signed update seq={} for ledger {}... (member_ledger_hash: {}...)",
-            sequence_number, &request.ledger_id[..16], &hex::encode(&member_ledger_hash[..4]));
+        tracing::debug!(
+            "Co-signed update seq={} for ledger {}... (member_ledger_hash: {}...)",
+            sequence_number,
+            &request.ledger_id[..16],
+            &hex::encode(&member_ledger_hash[..4])
+        );
 
         // Return the signature, our pubkey, and our ledger hash
         let t2_us = std::time::SystemTime::now()
@@ -7365,10 +8891,12 @@ impl Node {
         });
 
         if t0_us > 0 {
-            tracing::info!("[COSIGN-TRACE] seq={} relay_in={}us process={}us",
+            tracing::info!(
+                "[COSIGN-TRACE] seq={} relay_in={}us process={}us",
                 sequence_number,
                 t1_us.saturating_sub(t0_us),
-                t2_us.saturating_sub(t1_us));
+                t2_us.saturating_sub(t1_us)
+            );
         }
 
         (true, Some(result.to_string()), None)
@@ -7386,13 +8914,18 @@ impl Node {
     /// - operator_id: hex-encoded compressed public key of the operator
     /// - funding_address: the Bitcoin address for the deposit
     /// - deadline_block: block height when offer expires
-    async fn process_cosign_offer_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_cosign_offer_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::{Message, Secp256k1};
+        use bitcoin::secp256k1::Message;
         use std::str::FromStr;
 
-        tracing::info!("Processing cosign_offer request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+        tracing::info!(
+            "Processing cosign_offer request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         // Refuse to co-sign if the ledger is in a disputed state.
         // Don't block on reimport — the background sync will catch up.
@@ -7401,13 +8934,19 @@ impl Node {
             if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
                 let ledger = ledger_arc.read().unwrap();
                 if ledger.state.dispute_state != deposits_core::types::DisputeState::Normal {
-                    tracing::warn!("Refusing to cosign offer for ledger {} - dispute state: {:?}",
+                    tracing::warn!(
+                        "Refusing to cosign offer for ledger {} - dispute state: {:?}",
                         &request.ledger_id[..16.min(request.ledger_id.len())],
-                        ledger.state.dispute_state);
-                    return (false, None, Some(format!(
-                        "Ledger is in {:?} state - cannot co-sign offers",
                         ledger.state.dispute_state
-                    )));
+                    );
+                    return (
+                        false,
+                        None,
+                        Some(format!(
+                            "Ledger is in {:?} state - cannot co-sign offers",
+                            ledger.state.dispute_state
+                        )),
+                    );
                 }
             }
         }
@@ -7430,7 +8969,13 @@ impl Node {
 
         let operator_id_hex = match request.params.get("operator_id").and_then(|v| v.as_str()) {
             Some(id) => id.to_string(),
-            None => return (false, None, Some("Missing operator_id parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing operator_id parameter".to_string()),
+                )
+            }
         };
 
         let operator_id = match PublicKey::from_str(&operator_id_hex) {
@@ -7438,14 +8983,34 @@ impl Node {
             Err(e) => return (false, None, Some(format!("Invalid operator_id: {}", e))),
         };
 
-        let funding_address = match request.params.get("funding_address").and_then(|v| v.as_str()) {
+        let funding_address = match request
+            .params
+            .get("funding_address")
+            .and_then(|v| v.as_str())
+        {
             Some(addr) => addr.to_string(),
-            None => return (false, None, Some("Missing funding_address parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing funding_address parameter".to_string()),
+                )
+            }
         };
 
-        let deadline_block = match request.params.get("deadline_block").and_then(|v| v.as_u64()) {
+        let deadline_block = match request
+            .params
+            .get("deadline_block")
+            .and_then(|v| v.as_u64())
+        {
             Some(b) => b as u32,
-            None => return (false, None, Some("Missing deadline_block parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing deadline_block parameter".to_string()),
+                )
+            }
         };
 
         // Get the target operator from the request sender
@@ -7455,10 +9020,7 @@ impl Node {
                 let mut compressed = [0u8; 33];
                 compressed[0] = 0x02;
                 compressed[1..].copy_from_slice(&x_only_bytes);
-                match PublicKey::from_slice(&compressed) {
-                    Ok(sender_key) => Some(sender_key),
-                    Err(_) => None,
-                }
+                PublicKey::from_slice(&compressed).ok()
             }
             _ => None,
         };
@@ -7495,9 +9057,11 @@ impl Node {
 
                 if has_join {
                     found_hash = Some(
-                        ledger.history.last()
+                        ledger
+                            .history
+                            .last()
                             .map(|u| u.current_hash)
-                            .unwrap_or([0u8; 32])
+                            .unwrap_or([0u8; 32]),
                     );
                     break;
                 }
@@ -7505,9 +9069,16 @@ impl Node {
 
             match found_hash {
                 Some(h) => h,
-                None => return (false, None, Some(
-                    "No ledger found with QuorumJoin to target - not a quorum member".to_string()
-                )),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some(
+                            "No ledger found with QuorumJoin to target - not a quorum member"
+                                .to_string(),
+                        ),
+                    )
+                }
             }
         };
 
@@ -7540,8 +9111,12 @@ impl Node {
         let sig = secp.sign_schnorr(&msg, &keypair);
         let sig_bytes = sig.serialize();
 
-        tracing::info!("Co-signed offer {} for ledger {}... (member_ledger_hash: {}...)",
-            &offer_id_hex[..16], &request.ledger_id[..16], &hex::encode(&member_ledger_hash[..4]));
+        tracing::info!(
+            "Co-signed offer {} for ledger {}... (member_ledger_hash: {}...)",
+            &offer_id_hex[..16],
+            &request.ledger_id[..16],
+            &hex::encode(&member_ledger_hash[..4])
+        );
 
         // Return the signature, our pubkey, and our ledger hash
         let result = serde_json::json!({
@@ -7553,12 +9128,17 @@ impl Node {
         (true, Some(result.to_string()), None)
     }
 
-    async fn process_cosign_invoice_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_cosign_invoice_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use bitcoin::hashes::{sha256, Hash};
         use bitcoin::secp256k1::Message;
 
-        tracing::info!("Processing cosign_invoice request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+        tracing::info!(
+            "Processing cosign_invoice request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         // Extract parameters
         let payment_hash_hex = match request.params.get("payment_hash").and_then(|v| v.as_str()) {
@@ -7575,32 +9155,56 @@ impl Node {
         };
 
         let payment_hash: [u8; 32] = match hex::decode(&payment_hash_hex) {
-            Ok(b) if b.len() == 32 => { let mut a = [0u8; 32]; a.copy_from_slice(&b); a }
+            Ok(b) if b.len() == 32 => {
+                let mut a = [0u8; 32];
+                a.copy_from_slice(&b);
+                a
+            }
             _ => return (false, None, Some("Invalid payment_hash".to_string())),
         };
         let deposit_id: [u8; 16] = match hex::decode(&deposit_id_hex) {
-            Ok(b) if b.len() == 16 => { let mut a = [0u8; 16]; a.copy_from_slice(&b); a }
+            Ok(b) if b.len() == 16 => {
+                let mut a = [0u8; 16];
+                a.copy_from_slice(&b);
+                a
+            }
             _ => return (false, None, Some("Invalid deposit_id".to_string())),
         };
 
         // Find our member ledger hash (same lookup as cosign_offer)
         let member_ledger_hash: [u8; 32] = {
-            let cached_key = self.cosign_member_cache.lock().unwrap()
-                .get(&request.ledger_id).cloned();
-            let member_key = if let Some(key) = cached_key { key } else {
+            let cached_key = self
+                .cosign_member_cache
+                .lock()
+                .unwrap()
+                .get(&request.ledger_id)
+                .cloned();
+            let member_key = if let Some(key) = cached_key {
+                key
+            } else {
                 let ledgers = self.handler.ledgers.lock().unwrap();
                 let mut found_key = None;
                 for (ledger_key, arc) in ledgers.iter() {
                     let ledger = arc.read().unwrap();
-                    if ledger.operator_key() != self.node_id { continue; }
-                    let has_join = ledger.state.joined_quorums.iter()
+                    if ledger.operator_key() != self.node_id {
+                        continue;
+                    }
+                    let has_join = ledger
+                        .state
+                        .joined_quorums
+                        .iter()
                         .any(|jq| jq.ledger_id == request.ledger_id);
-                    if has_join { found_key = Some(ledger_key.clone()); break; }
+                    if has_join {
+                        found_key = Some(ledger_key.clone());
+                        break;
+                    }
                 }
                 drop(ledgers);
                 match found_key {
                     Some(key) => {
-                        self.cosign_member_cache.lock().unwrap()
+                        self.cosign_member_cache
+                            .lock()
+                            .unwrap()
                             .insert(request.ledger_id.clone(), key.clone());
                         key
                     }
@@ -7609,15 +9213,23 @@ impl Node {
             };
             let ledgers = self.handler.ledgers.lock().unwrap();
             match ledgers.get(&member_key) {
-                Some(arc) => arc.read().unwrap().history.last()
-                    .map(|u| u.current_hash).unwrap_or([0u8; 32]),
+                Some(arc) => arc
+                    .read()
+                    .unwrap()
+                    .history
+                    .last()
+                    .map(|u| u.current_hash)
+                    .unwrap_or([0u8; 32]),
                 None => return (false, None, Some("Member ledger not found".to_string())),
             }
         };
 
         // Build tagged hash: SHA256(tag || tag || signing_data || member_ledger_hash)
         let signing_data = Self::build_invoice_signing_data(
-            &request.ledger_id, &payment_hash, &deposit_id, amount_msat,
+            &request.ledger_id,
+            &payment_hash,
+            &deposit_id,
+            amount_msat,
         );
         let tag = b"deposits/invoice_cosign";
         let tag_hash = sha256::Hash::hash(tag);
@@ -7634,8 +9246,11 @@ impl Node {
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(secp, &secret);
         let sig = secp.sign_schnorr(&msg, &keypair);
 
-        tracing::info!("Co-signed invoice {} for ledger {}...",
-            &payment_hash_hex[..16], &request.ledger_id[..16]);
+        tracing::info!(
+            "Co-signed invoice {} for ledger {}...",
+            &payment_hash_hex[..16],
+            &request.ledger_id[..16]
+        );
 
         let result = serde_json::json!({
             "cosign_signature": hex::encode(sig.serialize()),
@@ -7645,12 +9260,15 @@ impl Node {
         (true, Some(result.to_string()), None)
     }
 
-    async fn process_custody_transfer_sign_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_custody_transfer_sign_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        use crate::nostr::KIND_LEDGER_UPDATE;
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         use bitcoin::secp256k1::{Keypair, Message};
         use deposits_core::SignedLedgerUpdate;
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         use nostr_sdk::prelude::*;
-        use crate::nostr::KIND_LEDGER_UPDATE;
 
         tracing::info!("Processing custody_transfer_sign request...");
 
@@ -7667,22 +9285,54 @@ impl Node {
 
         let _unsigned_tx_hex = match request.params.get("unsigned_tx").and_then(|v| v.as_str()) {
             Some(tx) => tx.to_string(),
-            None => return (false, None, Some("Missing unsigned_tx parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing unsigned_tx parameter".to_string()),
+                )
+            }
         };
 
         let new_custodian_hex = match request.params.get("new_custodian").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
-            None => return (false, None, Some("Missing new_custodian parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing new_custodian parameter".to_string()),
+                )
+            }
         };
 
-        let violation_details = match request.params.get("violation_details").and_then(|v| v.as_str()) {
+        let violation_details = match request
+            .params
+            .get("violation_details")
+            .and_then(|v| v.as_str())
+        {
             Some(d) => d.to_string(),
-            None => return (false, None, Some("Missing violation_details parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing violation_details parameter".to_string()),
+                )
+            }
         };
 
-        let last_valid_sequence = match request.params.get("last_valid_sequence").and_then(|v| v.as_u64()) {
+        let last_valid_sequence = match request
+            .params
+            .get("last_valid_sequence")
+            .and_then(|v| v.as_u64())
+        {
             Some(seq) => seq,
-            None => return (false, None, Some("Missing last_valid_sequence parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing last_valid_sequence parameter".to_string()),
+                )
+            }
         };
 
         // Parse sighash
@@ -7703,13 +9353,19 @@ impl Node {
         };
 
         tracing::info!("    Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
-        tracing::info!("    New custodian: {}...", &new_custodian_hex[..16.min(new_custodian_hex.len())]);
-        tracing::info!("    Violation: {}", &violation_details[..50.min(violation_details.len())]);
+        tracing::info!(
+            "    New custodian: {}...",
+            &new_custodian_hex[..16.min(new_custodian_hex.len())]
+        );
+        tracing::info!(
+            "    Violation: {}",
+            &violation_details[..50.min(violation_details.len())]
+        );
 
         // Use the node's operator key
         let secp = &self.secp;
         let secret_key = self.wallet.operator_secret();
-        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+        let keypair = Keypair::from_secret_key(secp, &secret_key);
         let our_pubkey = self.node_id;
 
         tracing::info!("    Our key: {}...", &our_pubkey.to_string()[..16]);
@@ -7719,7 +9375,10 @@ impl Node {
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(crate::nostr::TAG_LEDGER_ID, [crate::nostr::ledger_tag(ledger_id.as_str())])
+            .custom_tag(
+                crate::nostr::TAG_LEDGER_ID,
+                [crate::nostr::ledger_tag(ledger_id.as_str())],
+            )
             .limit(500);
 
         let events = match client.fetch_events(vec![filter], None).await {
@@ -7740,20 +9399,32 @@ impl Node {
         }
 
         updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
-        updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.operator_id == b.operator_id && a.current_hash == b.current_hash);
+        updates.dedup_by(|a, b| {
+            a.sequence_number == b.sequence_number
+                && a.operator_id == b.operator_id
+                && a.current_hash == b.current_hash
+        });
 
         // Find the original operator (the one who opened the ledger)
-        let original_operator = updates.iter()
+        let original_operator = updates
+            .iter()
             .find(|u| u.sequence_number == 0)
             .map(|u| u.operator_id);
 
         let original_operator = match original_operator {
             Some(op) => op,
-            None => return (false, None, Some("Could not find ledger genesis (sequence 0)".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Could not find ledger genesis (sequence 0)".to_string()),
+                )
+            }
         };
 
         // Filter to only the original operator's updates for violation validation
-        let original_updates: Vec<&SignedLedgerUpdate> = updates.iter()
+        let original_updates: Vec<&SignedLedgerUpdate> = updates
+            .iter()
             .filter(|u| u.operator_id == original_operator)
             .collect();
 
@@ -7791,15 +9462,23 @@ impl Node {
         }
 
         if !found_violation {
-            return (false, None, Some("Could not verify violation - ledger appears conforming".to_string()));
+            return (
+                false,
+                None,
+                Some("Could not verify violation - ledger appears conforming".to_string()),
+            );
         }
 
         // Verify that the last_valid_sequence matches our validation
         if validated_sequence != last_valid_sequence as i64 {
-            return (false, None, Some(format!(
-                "Sequence mismatch: requester says {}, we validated {}",
-                last_valid_sequence, validated_sequence
-            )));
+            return (
+                false,
+                None,
+                Some(format!(
+                    "Sequence mismatch: requester says {}, we validated {}",
+                    last_valid_sequence, validated_sequence
+                )),
+            );
         }
 
         tracing::info!("    Violation verified at seq {}", validated_sequence + 1);
@@ -7808,19 +9487,20 @@ impl Node {
         let mut is_quorum_member = false;
         for update in updates.iter().take((validated_sequence + 1) as usize) {
             if let Ok(operation) = LedgerOperation::tlv_decode(&update.message) {
-                match operation {
-                    LedgerOperation::QuorumAddMember { quorum_member, .. } => {
-                        if quorum_member == our_pubkey {
-                            is_quorum_member = true;
-                        }
+                if let LedgerOperation::QuorumAddMember { quorum_member, .. } = operation {
+                    if quorum_member == our_pubkey {
+                        is_quorum_member = true;
                     }
-                    _ => {}
                 }
             }
         }
 
         if !is_quorum_member {
-            return (false, None, Some("We are not a quorum member for this ledger".to_string()));
+            return (
+                false,
+                None,
+                Some("We are not a quorum member for this ledger".to_string()),
+            );
         }
 
         tracing::info!("    Verified: we are a quorum member");
@@ -7830,7 +9510,10 @@ impl Node {
         let signature = secp.sign_schnorr(&msg, &keypair);
         let signature_bytes = signature.serialize();
 
-        tracing::info!("    Signed sighash: {}...", &hex::encode(&signature_bytes[..4]));
+        tracing::info!(
+            "    Signed sighash: {}...",
+            &hex::encode(&signature_bytes[..4])
+        );
 
         // Return the signature
         let result = serde_json::json!({
@@ -7842,11 +9525,16 @@ impl Node {
         (true, Some(result.to_string()), None)
     }
 
-    async fn process_confiscation_sign_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
-        use bitcoin::secp256k1::{Secp256k1, Message};
+    async fn process_confiscation_sign_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        use bitcoin::secp256k1::Message;
 
-        tracing::info!("Processing confiscation_sign request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+        tracing::info!(
+            "Processing confiscation_sign request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         // Extract sighash from request params
         let sighash_hex = match request.params.get("sighash").and_then(|v| v.as_str()) {
@@ -7865,7 +9553,9 @@ impl Node {
 
         // Check if we have an armed marker for this ledger (meaning we're participating in the dispute)
         let ledger_prefix = &request.ledger_id[..16.min(request.ledger_id.len())];
-        let armed_marker = self.data_dir.join(format!("custody_armed_{}.marker", ledger_prefix));
+        let armed_marker = self
+            .data_dir
+            .join(format!("custody_armed_{}.marker", ledger_prefix));
 
         if !armed_marker.exists() {
             return (false, None, Some("Not armed for this dispute".to_string()));
@@ -7873,23 +9563,31 @@ impl Node {
 
         // Sign the sighash
         let secp = &self.secp;
-        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+        let keypair =
+            bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
         let msg = Message::from_digest(sighash_bytes);
         let signature = secp.sign_schnorr(&msg, &keypair);
 
-        let our_pubkey = keypair.public_key();
+        let _our_pubkey = keypair.public_key();
         let result = serde_json::json!({
             "signer": self.node_id_hex.clone(),
             "signature": hex::encode(signature.serialize()),
         });
 
-        tracing::info!("Signed confiscation sighash for ledger {}...", ledger_prefix);
+        tracing::info!(
+            "Signed confiscation sighash for ledger {}...",
+            ledger_prefix
+        );
         (true, Some(result.to_string()), None)
     }
 
-    async fn process_custodian_query_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_custodian_query_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         // Get ledger
-        let (reserves_id, ledger) = match self.get_ledger_by_ledger_id(&request.ledger_id)
+        let (reserves_id, ledger) = match self
+            .get_ledger_by_ledger_id(&request.ledger_id)
             .or_else(|| self.get_ledger_by_reserves_key(&request.ledger_id))
         {
             Some(l) => l,
@@ -7913,9 +9611,14 @@ impl Node {
     // Daemon-mediated CLI request handlers
     // ========================================================================
 
-    async fn process_complete_offer_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
-        tracing::info!("Processing complete_offer request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+    async fn process_complete_offer_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        tracing::info!(
+            "Processing complete_offer request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         let offer_id_hex = match request.params.get("offer_id").and_then(|v| v.as_str()) {
             Some(s) => s,
@@ -7927,12 +9630,24 @@ impl Node {
         };
         let amount_sats = match request.params.get("amount_sats").and_then(|v| v.as_u64()) {
             Some(v) => v,
-            None => return (false, None, Some("Missing amount_sats parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing amount_sats parameter".to_string()),
+                )
+            }
         };
 
         let offer_id_bytes = match hex::decode(offer_id_hex) {
             Ok(bytes) if bytes.len() == 32 => bytes,
-            _ => return (false, None, Some("Invalid offer_id (must be 64 hex chars)".to_string())),
+            _ => {
+                return (
+                    false,
+                    None,
+                    Some("Invalid offer_id (must be 64 hex chars)".to_string()),
+                )
+            }
         };
         let mut offer_id = [0u8; 32];
         offer_id.copy_from_slice(&offer_id_bytes);
@@ -7942,7 +9657,10 @@ impl Node {
             tracing::warn!("Wallet sync failed before complete_offer: {}", e);
         }
 
-        match self.complete_deposit_offer(&offer_id, txid, amount_sats).await {
+        match self
+            .complete_deposit_offer(&offer_id, txid, amount_sats)
+            .await
+        {
             Ok(new_balance) => {
                 let result = serde_json::json!({
                     "status": "SUCCESS",
@@ -7958,21 +9676,48 @@ impl Node {
         }
     }
 
-    async fn process_deposit_credit_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
-        tracing::info!("Processing deposit_credit request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+    async fn process_deposit_credit_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        tracing::info!(
+            "Processing deposit_credit request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
-        let deposit_pubkey_hex = match request.params.get("deposit_pubkey").and_then(|v| v.as_str()) {
+        let deposit_pubkey_hex = match request
+            .params
+            .get("deposit_pubkey")
+            .and_then(|v| v.as_str())
+        {
             Some(s) => s,
-            None => return (false, None, Some("Missing deposit_pubkey parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing deposit_pubkey parameter".to_string()),
+                )
+            }
         };
         let amount_msats = match request.params.get("amount_msats").and_then(|v| v.as_u64()) {
             Some(v) => v,
-            None => return (false, None, Some("Missing amount_msats parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing amount_msats parameter".to_string()),
+                )
+            }
         };
         let invoice_id = match request.params.get("invoice_id").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
-            None => return (false, None, Some("Missing invoice_id parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing invoice_id parameter".to_string()),
+                )
+            }
         };
 
         // Compute deposit_id from pubkey
@@ -7983,13 +9728,16 @@ impl Node {
         use bitcoin::hashes::{sha256, Hash};
         let payment_hash = sha256::Hash::hash(invoice_id.as_bytes()).to_byte_array();
 
-        match self.credit_deposit(
-            &request.ledger_id,
-            deposit_id,
-            amount_msats,
-            payment_hash,
-            invoice_id,
-        ).await {
+        match self
+            .credit_deposit(
+                &request.ledger_id,
+                deposit_id,
+                amount_msats,
+                payment_hash,
+                invoice_id,
+            )
+            .await
+        {
             Ok(new_balance) => {
                 let result = serde_json::json!({
                     "status": "SUCCESS",
@@ -8005,19 +9753,40 @@ impl Node {
         }
     }
 
-    async fn process_quorum_add_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_quorum_add_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
-        tracing::info!("Processing quorum_add request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+        tracing::info!(
+            "Processing quorum_add request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         let member_pubkey_hex = match request.params.get("member_pubkey").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => return (false, None, Some("Missing member_pubkey parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing member_pubkey parameter".to_string()),
+                )
+            }
         };
-        let member_ledger_id = match request.params.get("member_ledger_id").and_then(|v| v.as_str()) {
+        let member_ledger_id = match request
+            .params
+            .get("member_ledger_id")
+            .and_then(|v| v.as_str())
+        {
             Some(s) => s.to_string(),
-            None => return (false, None, Some("Missing member_ledger_id parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing member_ledger_id parameter".to_string()),
+                )
+            }
         };
 
         let quorum_member = match PublicKey::from_str(member_pubkey_hex) {
@@ -8025,17 +9794,30 @@ impl Node {
             Err(e) => return (false, None, Some(format!("Invalid member_pubkey: {}", e))),
         };
 
-        if member_ledger_id.len() != 64 || !member_ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
-            return (false, None, Some("member_ledger_id must be 64 hex chars".to_string()));
+        if member_ledger_id.len() != 64 || !member_ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return (
+                false,
+                None,
+                Some("member_ledger_id must be 64 hex chars".to_string()),
+            );
         }
 
         // Resolve ledger_id
-        let ledger_id = if request.ledger_id.len() == 64 && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        let ledger_id = if request.ledger_id.len() == 64
+            && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
             request.ledger_id.clone()
         } else {
             match self.get_ledger_by_reserves_key(&request.ledger_id) {
                 Some((_, ledger)) => ledger.ledger_id_hex(),
-                None => return (false, None, Some(format!("Ledger not found: {}", &request.ledger_id[..16]))),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Ledger not found: {}", &request.ledger_id[..16])),
+                    )
+                }
             }
         };
 
@@ -8049,15 +9831,43 @@ impl Node {
         };
 
         // Extract fee limits the member is imposing (from their advertisement)
-        let min_fee_bps = request.params.get("min_fee_bps").and_then(|v| v.as_u64()).map(|v| v as u16);
+        let min_fee_bps = request
+            .params
+            .get("min_fee_bps")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u16);
         let min_fee_fixed = request.params.get("min_fee_fixed").and_then(|v| v.as_u64());
-        let max_fee_period = request.params.get("max_fee_period").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let max_fee_period = request
+            .params
+            .get("max_fee_period")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
 
         // Extract collateral commitment from request
-        let collateral_lock_amount = request.params.get("collateral_lock_amount").and_then(|v| v.as_u64());
-        let collateral_lock_until = request.params.get("collateral_lock_until").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let collateral_lock_amount = request
+            .params
+            .get("collateral_lock_amount")
+            .and_then(|v| v.as_u64());
+        let collateral_lock_until = request
+            .params
+            .get("collateral_lock_until")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
 
-        match self.add_quorum_member(&ledger_id, quorum_member, &member_ledger_id, consent_signature, min_fee_bps, min_fee_fixed, max_fee_period, collateral_lock_amount, collateral_lock_until).await {
+        match self
+            .add_quorum_member(
+                &ledger_id,
+                quorum_member,
+                &member_ledger_id,
+                consent_signature,
+                min_fee_bps,
+                min_fee_fixed,
+                max_fee_period,
+                collateral_lock_amount,
+                collateral_lock_until,
+            )
+            .await
+        {
             Ok(event_id) => {
                 let result = serde_json::json!({
                     "status": "SUCCESS",
@@ -8074,12 +9884,21 @@ impl Node {
         }
     }
 
-    async fn process_quorum_remove_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_quorum_remove_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
         let member_pubkey_hex = match request.params.get("member_pubkey").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => return (false, None, Some("Missing member_pubkey parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing member_pubkey parameter".to_string()),
+                )
+            }
         };
 
         let quorum_member = match PublicKey::from_str(member_pubkey_hex) {
@@ -8089,9 +9908,11 @@ impl Node {
 
         let ledger_id = &request.ledger_id;
 
-        tracing::info!("Removing quorum member {}... from ledger {}...",
+        tracing::info!(
+            "Removing quorum member {}... from ledger {}...",
             &member_pubkey_hex[..16.min(member_pubkey_hex.len())],
-            &ledger_id[..16.min(ledger_id.len())]);
+            &ledger_id[..16.min(ledger_id.len())]
+        );
 
         let operation = LedgerOperation::QuorumRemoveMember {
             quorum_member,
@@ -8100,31 +9921,73 @@ impl Node {
 
         match self.commit_operation(ledger_id, operation).await {
             Ok(_) => {
-                tracing::info!("Quorum member removed: {}...", &member_pubkey_hex[..16.min(member_pubkey_hex.len())]);
+                tracing::info!(
+                    "Quorum member removed: {}...",
+                    &member_pubkey_hex[..16.min(member_pubkey_hex.len())]
+                );
                 let result = serde_json::json!({ "removed": member_pubkey_hex });
                 (true, Some(result.to_string()), None)
             }
-            Err(e) => (false, None, Some(format!("Failed to remove quorum member: {}", e))),
+            Err(e) => (
+                false,
+                None,
+                Some(format!("Failed to remove quorum member: {}", e)),
+            ),
         }
     }
 
-    async fn process_quorum_join_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_quorum_join_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
-        tracing::info!("Processing quorum_join request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+        tracing::info!(
+            "Processing quorum_join request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
-        let target_operator_hex = match request.params.get("target_operator").and_then(|v| v.as_str()) {
+        let target_operator_hex = match request
+            .params
+            .get("target_operator")
+            .and_then(|v| v.as_str())
+        {
             Some(s) => s,
-            None => return (false, None, Some("Missing target_operator parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing target_operator parameter".to_string()),
+                )
+            }
         };
-        let target_ledger_id = match request.params.get("target_ledger_id").and_then(|v| v.as_str()) {
+        let target_ledger_id = match request
+            .params
+            .get("target_ledger_id")
+            .and_then(|v| v.as_str())
+        {
             Some(s) => s.to_string(),
-            None => return (false, None, Some("Missing target_ledger_id parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing target_ledger_id parameter".to_string()),
+                )
+            }
         };
-        let membership_expires = match request.params.get("membership_expires").and_then(|v| v.as_u64()) {
+        let membership_expires = match request
+            .params
+            .get("membership_expires")
+            .and_then(|v| v.as_u64())
+        {
             Some(v) => v as u32,
-            None => return (false, None, Some("Missing membership_expires parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing membership_expires parameter".to_string()),
+                )
+            }
         };
 
         let target_operator = match PublicKey::from_str(target_operator_hex) {
@@ -8132,24 +9995,37 @@ impl Node {
             Err(e) => return (false, None, Some(format!("Invalid target_operator: {}", e))),
         };
 
-        if target_ledger_id.len() != 64 || !target_ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
-            return (false, None, Some("target_ledger_id must be 64 hex chars".to_string()));
+        if target_ledger_id.len() != 64 || !target_ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return (
+                false,
+                None,
+                Some("target_ledger_id must be 64 hex chars".to_string()),
+            );
         }
 
         // Resolve our ledger_id
-        let our_ledger_id = if request.ledger_id.len() == 64 && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        let our_ledger_id = if request.ledger_id.len() == 64
+            && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
             request.ledger_id.clone()
         } else {
             match self.get_ledger_by_reserves_key(&request.ledger_id) {
                 Some((_, ledger)) => ledger.ledger_id_hex(),
-                None => return (false, None, Some(format!("Ledger not found: {}", &request.ledger_id[..16]))),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Ledger not found: {}", &request.ledger_id[..16])),
+                    )
+                }
             }
         };
 
         // Sign consent: COLLATERAL_CONSENT || operator_pubkey(33 bytes) || ledger_id(string bytes)
-        let signature = {
-            use bitcoin::hashes::{Hash, sha256};
-            use bitcoin::secp256k1::{Secp256k1, Message, Keypair};
+        let _signature = {
+            use bitcoin::hashes::{sha256, Hash};
+            use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
 
             let mut sign_content = Vec::new();
             sign_content.extend_from_slice(b"COLLATERAL_CONSENT");
@@ -8164,7 +10040,15 @@ impl Node {
             sig.serialize()
         };
 
-        match self.record_quorum_join(&our_ledger_id, target_operator, &target_ledger_id, membership_expires).await {
+        match self
+            .record_quorum_join(
+                &our_ledger_id,
+                target_operator,
+                &target_ledger_id,
+                membership_expires,
+            )
+            .await
+        {
             Ok(event_id) => {
                 let result = serde_json::json!({
                     "status": "SUCCESS",
@@ -8186,19 +10070,44 @@ impl Node {
     ///
     /// Auto-consents: signs the consent content, records QuorumJoin on our ledger,
     /// and returns the signature so the operator can record QuorumAddMember.
-    async fn process_consent_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_consent_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
-        tracing::info!("Processing consent_request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+        tracing::info!(
+            "Processing consent_request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
-        let operator_pubkey_hex = match request.params.get("operator_pubkey").and_then(|v| v.as_str()) {
+        let operator_pubkey_hex = match request
+            .params
+            .get("operator_pubkey")
+            .and_then(|v| v.as_str())
+        {
             Some(s) => s,
-            None => return (false, None, Some("Missing operator_pubkey parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing operator_pubkey parameter".to_string()),
+                )
+            }
         };
-        let operator_ledger_id = match request.params.get("operator_ledger_id").and_then(|v| v.as_str()) {
+        let operator_ledger_id = match request
+            .params
+            .get("operator_ledger_id")
+            .and_then(|v| v.as_str())
+        {
             Some(s) => s.to_string(),
-            None => return (false, None, Some("Missing operator_ledger_id parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing operator_ledger_id parameter".to_string()),
+                )
+            }
         };
 
         let operator_pubkey = match PublicKey::from_str(operator_pubkey_hex) {
@@ -8206,8 +10115,14 @@ impl Node {
             Err(e) => return (false, None, Some(format!("Invalid operator_pubkey: {}", e))),
         };
 
-        if operator_ledger_id.len() != 64 || !operator_ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
-            return (false, None, Some("operator_ledger_id must be 64 hex chars".to_string()));
+        if operator_ledger_id.len() != 64
+            || !operator_ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return (
+                false,
+                None,
+                Some("operator_ledger_id must be 64 hex chars".to_string()),
+            );
         }
 
         // Sign consent: COLLATERAL_CONSENT || operator_pubkey(33 bytes) || ledger_id(string bytes)
@@ -8217,8 +10132,8 @@ impl Node {
         sign_content.extend_from_slice(operator_ledger_id.as_bytes());
 
         let signature = {
-            use bitcoin::hashes::{Hash, sha256};
-            use bitcoin::secp256k1::{Secp256k1, Message, Keypair};
+            use bitcoin::hashes::{sha256, Hash};
+            use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
 
             let hash = sha256::Hash::hash(&sign_content);
             let secp_msg = Message::from_digest(hash.to_byte_array());
@@ -8233,11 +10148,21 @@ impl Node {
         let current_block = self.wallet.get_block_height().unwrap_or(0);
         let membership_expires = current_block + 1000; // ~1 week at 10 min/block
 
-        match self.record_quorum_join(&our_ledger_id, operator_pubkey, &operator_ledger_id, membership_expires).await {
+        match self
+            .record_quorum_join(
+                &our_ledger_id,
+                operator_pubkey,
+                &operator_ledger_id,
+                membership_expires,
+            )
+            .await
+        {
             Ok(_event_id) => {
-                tracing::info!("Consent granted: recorded QuorumJoin for operator {}... on our ledger {}...",
+                tracing::info!(
+                    "Consent granted: recorded QuorumJoin for operator {}... on our ledger {}...",
                     &operator_pubkey_hex[..16.min(operator_pubkey_hex.len())],
-                    &our_ledger_id[..16]);
+                    &our_ledger_id[..16]
+                );
                 let result = serde_json::json!({
                     "status": "CONSENT_GRANTED",
                     "consent_signature": hex::encode(signature),
@@ -8247,14 +10172,23 @@ impl Node {
             }
             Err(e) => {
                 tracing::error!("Failed to record QuorumJoin: {}", e);
-                (false, None, Some(format!("Failed to record QuorumJoin: {}", e)))
+                (
+                    false,
+                    None,
+                    Some(format!("Failed to record QuorumJoin: {}", e)),
+                )
             }
         }
     }
 
-    async fn process_collateral_record_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
-        tracing::info!("Processing collateral_record request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+    async fn process_collateral_record_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        tracing::info!(
+            "Processing collateral_record request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         let attestation_json = match request.params.get("attestation").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
@@ -8262,27 +10196,51 @@ impl Node {
                 // Try the whole params object as the attestation (if passed as object)
                 match request.params.get("attestation") {
                     Some(v) => v.to_string(),
-                    None => return (false, None, Some("Missing attestation parameter".to_string())),
+                    None => {
+                        return (
+                            false,
+                            None,
+                            Some("Missing attestation parameter".to_string()),
+                        )
+                    }
                 }
             }
         };
 
-        let attestation: deposits_core::CollateralAttestationMsg = match serde_json::from_str(&attestation_json) {
-            Ok(a) => a,
-            Err(e) => return (false, None, Some(format!("Invalid attestation JSON: {}", e))),
-        };
+        let attestation: deposits_core::CollateralAttestationMsg =
+            match serde_json::from_str(&attestation_json) {
+                Ok(a) => a,
+                Err(e) => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Invalid attestation JSON: {}", e)),
+                    )
+                }
+            };
 
         // Resolve ledger_id
-        let ledger_id = if request.ledger_id.len() == 64 && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        let ledger_id = if request.ledger_id.len() == 64
+            && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
             request.ledger_id.clone()
         } else {
             match self.get_ledger_by_reserves_key(&request.ledger_id) {
                 Some((_, ledger)) => ledger.ledger_id_hex(),
-                None => return (false, None, Some(format!("Ledger not found: {}", &request.ledger_id[..16]))),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Ledger not found: {}", &request.ledger_id[..16])),
+                    )
+                }
             }
         };
 
-        match self.record_collateral_attestation(&ledger_id, attestation).await {
+        match self
+            .record_collateral_attestation(&ledger_id, attestation)
+            .await
+        {
             Ok(event_id) => {
                 let result = serde_json::json!({
                     "status": "SUCCESS",
@@ -8297,17 +10255,30 @@ impl Node {
         }
     }
 
-    async fn process_quorum_begin_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
-        tracing::info!("Processing quorum_begin request for ledger {}...",
-            &request.ledger_id[..16.min(request.ledger_id.len())]);
+    async fn process_quorum_begin_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        tracing::info!(
+            "Processing quorum_begin request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
 
         // Resolve ledger_id
-        let ledger_id = if request.ledger_id.len() == 64 && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        let ledger_id = if request.ledger_id.len() == 64
+            && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
             request.ledger_id.clone()
         } else {
             match self.get_ledger_by_reserves_key(&request.ledger_id) {
                 Some((_, ledger)) => ledger.ledger_id_hex(),
-                None => return (false, None, Some(format!("Ledger not found: {}", &request.ledger_id[..16]))),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Ledger not found: {}", &request.ledger_id[..16])),
+                    )
+                }
             }
         };
 
@@ -8349,8 +10320,13 @@ impl Node {
     /// Process a resync request from a quorum member asking us to re-broadcast
     /// ledger updates from a given sequence number. This enables post-restart
     /// recovery when the relay has evicted old events.
-    async fn process_resync_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
-        let from_seq = request.params.get("from_seq")
+    async fn process_resync_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        let from_seq = request
+            .params
+            .get("from_seq")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
@@ -8366,16 +10342,22 @@ impl Node {
             match ledgers.get(&request.ledger_id) {
                 Some(arc) => {
                     let ledger = arc.read().unwrap();
-                    ledger.history.iter()
+                    ledger
+                        .history
+                        .iter()
                         .filter(|u| u.sequence_number >= from_seq)
                         .cloned()
                         .collect()
                 }
                 None => {
-                    return (false, None, Some(format!(
-                        "Ledger not found: {}...",
-                        &request.ledger_id[..16.min(request.ledger_id.len())]
-                    )));
+                    return (
+                        false,
+                        None,
+                        Some(format!(
+                            "Ledger not found: {}...",
+                            &request.ledger_id[..16.min(request.ledger_id.len())]
+                        )),
+                    );
                 }
             }
         };
@@ -8403,7 +10385,8 @@ impl Node {
                 Err(e) => {
                     tracing::warn!(
                         "Resync broadcast failed at seq {}: {}",
-                        update.sequence_number, e,
+                        update.sequence_number,
+                        e,
                     );
                     break;
                 }
@@ -8476,16 +10459,19 @@ impl Node {
         // Ledgers
         let ledger_info: Vec<serde_json::Value> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.iter().map(|(lid, arc)| {
-                let l = arc.read().unwrap();
-                serde_json::json!({
-                    "id": &lid[..16.min(lid.len())],
-                    "role": format!("{:?}", l.role),
-                    "sequence": l.state.sequence,
-                    "deposits": l.state.deposits.len(),
-                    "quorum_members": l.state.quorum_members.len(),
+            ledgers
+                .iter()
+                .map(|(lid, arc)| {
+                    let l = arc.read().unwrap();
+                    serde_json::json!({
+                        "id": &lid[..16.min(lid.len())],
+                        "role": format!("{:?}", l.role),
+                        "sequence": l.state.sequence,
+                        "deposits": l.state.deposits.len(),
+                        "quorum_members": l.state.quorum_members.len(),
+                    })
                 })
-            }).collect()
+                .collect()
         };
 
         let result = serde_json::json!({
@@ -8506,7 +10492,10 @@ impl Node {
     // ========================================================================
     /// Health ping: create a dummy FeeCollect(0) update, cosign it via the daemon's
     /// live connections, measure RTT, then discard the update.
-    async fn process_health_ping_request(&self, request: &crate::nostr::LedgerRequest) -> (bool, Option<String>, Option<String>) {
+    async fn process_health_ping_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
         use deposits_core::messages::LedgerOperation;
 
         let ledger_id = &request.ledger_id;
@@ -8544,11 +10533,13 @@ impl Node {
                 let total_ms = start.elapsed().as_secs_f64() * 1000.0;
                 let cosigner = {
                     let ledgers = self.handler.ledgers.lock().unwrap();
-                    ledgers.get(ledger_id)
+                    ledgers
+                        .get(ledger_id)
                         .and_then(|arc| {
                             let l = arc.read().unwrap();
-                            l.history.last()
-                                .and_then(|u| u.cosigner_pubkey.map(|pk| hex::encode(pk.serialize())))
+                            l.history.last().and_then(|u| {
+                                u.cosigner_pubkey.map(|pk| hex::encode(pk.serialize()))
+                            })
                         })
                         .unwrap_or_default()
                 };
@@ -8560,7 +10551,11 @@ impl Node {
             }
             Err(e) => {
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
-                (false, None, Some(format!("Cosign failed ({:.0}ms): {}", ms, e)))
+                (
+                    false,
+                    None,
+                    Some(format!("Cosign failed ({:.0}ms): {}", ms, e)),
+                )
             }
         }
     }
@@ -8573,7 +10568,8 @@ impl Node {
         use deposits_core::types::DepositOfferStatus;
 
         let offers = self.list_deposit_offers();
-        let pending: Vec<_> = offers.iter()
+        let pending: Vec<_> = offers
+            .iter()
             .filter(|(_, status)| matches!(status, DepositOfferStatus::Pending))
             .collect();
 
@@ -8609,12 +10605,12 @@ impl Node {
                     );
 
                     // Complete the deposit with co-signing
-                    match self.complete_deposit_offer(&offer_id, txid.clone(), amount_sats).await {
+                    match self
+                        .complete_deposit_offer(&offer_id, txid.clone(), amount_sats)
+                        .await
+                    {
                         Ok(new_balance) => {
-                            tracing::info!(
-                                "Deposit completed! New balance: {} msats",
-                                new_balance
-                            );
+                            tracing::info!("Deposit completed! New balance: {} msats", new_balance);
                         }
                         Err(e) => {
                             tracing::error!(
@@ -8644,7 +10640,8 @@ impl Node {
         // Get all locked withdrawals
         let locked_withdrawals: Vec<([u8; 32], OnChainWithdrawal)> = {
             let withdrawals = self.withdrawals.lock().unwrap();
-            withdrawals.iter()
+            withdrawals
+                .iter()
                 .filter_map(|(id, (w, status))| {
                     if matches!(status, OnChainWithdrawalStatus::Locked { .. }) {
                         Some((*id, w.clone()))
@@ -8665,7 +10662,9 @@ impl Node {
                 let ledgers = match self.handler.ledgers.try_lock() {
                     Ok(l) => l,
                     Err(_) => {
-                        tracing::warn!("auto_complete_withdrawals: ledgers lock contended, skipping");
+                        tracing::warn!(
+                            "auto_complete_withdrawals: ledgers lock contended, skipping"
+                        );
                         return;
                     }
                 };
@@ -8737,7 +10736,7 @@ impl Node {
             }
         };
 
-        let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+        let _block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
 
         // Get operated ledgers (where we are the operator)
         // Use try_lock to avoid blocking the tokio thread if a detached JoinSet task holds the mutex
@@ -8748,7 +10747,8 @@ impl Node {
                 return;
             }
         };
-        let operated: Vec<_> = ledgers.into_iter()
+        let operated: Vec<_> = ledgers
+            .into_iter()
             .filter(|(_, arc)| arc.read().unwrap().operator_key() == self.node_id)
             .collect();
 
@@ -8756,7 +10756,10 @@ impl Node {
             // Collect fees that are due
             let fee_ops: Vec<(DepositId, u64)> = {
                 let ledger = ledger_arc.read().unwrap();
-                ledger.state.deposits.iter()
+                ledger
+                    .state
+                    .deposits
+                    .iter()
                     .filter_map(|(deposit_id, deposit)| {
                         let fee = deposit.calculate_fees_due(current_block);
                         let available = deposit.balance.saturating_sub(deposit.locked_balance);
@@ -8790,7 +10793,8 @@ impl Node {
                 if let Err(e) = self.commit_operation(&ledger_id, operation).await {
                     tracing::warn!(
                         "Failed to collect fee from deposit {}...: {}",
-                        hex::encode(&deposit_id[..8]), e
+                        hex::encode(&deposit_id[..8]),
+                        e
                     );
                     continue;
                 }
@@ -8820,11 +10824,14 @@ impl Node {
         let ledgers = match self.handler.ledgers.try_lock() {
             Ok(l) => l.clone(),
             Err(_) => {
-                tracing::warn!("auto_timeout_transfers: ledgers lock contended, skipping this cycle");
+                tracing::warn!(
+                    "auto_timeout_transfers: ledgers lock contended, skipping this cycle"
+                );
                 return;
             }
         };
-        let operated: Vec<_> = ledgers.into_iter()
+        let operated: Vec<_> = ledgers
+            .into_iter()
             .filter(|(_, arc)| arc.read().unwrap().operator_key() == self.node_id)
             .collect();
 
@@ -8832,7 +10839,10 @@ impl Node {
             // Find expired transfers
             let expired_transfers: Vec<[u8; 32]> = {
                 let ledger = ledger_arc.read().unwrap();
-                ledger.state.pending_transfers.iter()
+                ledger
+                    .state
+                    .pending_transfers
+                    .iter()
                     .filter(|(_, pending)| current_block >= pending.timeout_height)
                     .map(|(id, _)| *id)
                     .collect()
@@ -8901,7 +10911,9 @@ impl Node {
 
         // Get pending invoices
         let pending: Vec<([u8; 32], PendingInvoice)> = {
-            self.pending_invoices.lock().unwrap()
+            self.pending_invoices
+                .lock()
+                .unwrap()
                 .iter()
                 .map(|(h, p)| (*h, p.clone()))
                 .collect()
@@ -8931,8 +10943,7 @@ impl Node {
             let payment_hash_hex = hex::encode(payment_hash);
 
             // Find matching payment by ID (payment hash)
-            let matching_payment = payments.iter()
-                .find(|p| p.id == payment_hash_hex);
+            let matching_payment = payments.iter().find(|p| p.id == payment_hash_hex);
 
             if let Some(payment) = matching_payment {
                 // status: 0 = pending, 1 = succeeded, 2 = failed
@@ -8947,15 +10958,21 @@ impl Node {
                         );
 
                         // Generate invoice_id from the invoice string
-                        let invoice_id = format!("bolt11:{}", &invoice.invoice[..32.min(invoice.invoice.len())]);
+                        let invoice_id = format!(
+                            "bolt11:{}",
+                            &invoice.invoice[..32.min(invoice.invoice.len())]
+                        );
 
-                        match self.credit_deposit(
-                            &invoice.ledger_id,
-                            invoice.deposit_id,
-                            invoice.amount_msat,
-                            payment_hash,
-                            invoice_id,
-                        ).await {
+                        match self
+                            .credit_deposit(
+                                &invoice.ledger_id,
+                                invoice.deposit_id,
+                                invoice.amount_msat,
+                                payment_hash,
+                                invoice_id,
+                            )
+                            .await
+                        {
                             Ok(new_balance) => {
                                 tracing::info!(
                                     "Deposit credited! New balance: {} msat",
@@ -9015,12 +11032,15 @@ impl Node {
         use crate::ldk_cli::LdkCli;
 
         // Collect open locks from all owned ledgers
-        let mut open_locks: Vec<(String, [u8; 32], deposits_core::types::OpenInvoiceLock)> = Vec::new();
+        let mut open_locks: Vec<(String, [u8; 32], deposits_core::types::OpenInvoiceLock)> =
+            Vec::new();
         {
             let ledgers = match self.handler.ledgers.try_lock() {
                 Ok(l) => l,
                 Err(_) => {
-                    tracing::warn!("auto_complete_outbound_payments: ledgers lock contended, skipping");
+                    tracing::warn!(
+                        "auto_complete_outbound_payments: ledgers lock contended, skipping"
+                    );
                     return;
                 }
             };
@@ -9036,7 +11056,10 @@ impl Node {
             return;
         }
 
-        tracing::info!("auto_complete_outbound: checking {} open invoice lock(s)", open_locks.len());
+        tracing::info!(
+            "auto_complete_outbound: checking {} open invoice lock(s)",
+            open_locks.len()
+        );
 
         let cli = LdkCli::from_env();
         let payments = match cli.list_payments() {
@@ -9081,10 +11104,16 @@ impl Node {
                     };
 
                     match self.commit_operation(&ledger_id, op).await {
-                        Ok(_) => tracing::info!("auto_complete_outbound: fulfilled payment {}..., {} msat",
-                            &payment_hex[..16], lock.amount),
-                        Err(e) => tracing::error!("auto_complete_outbound: failed to fulfill {}...: {}",
-                            &payment_hex[..16], e),
+                        Ok(_) => tracing::info!(
+                            "auto_complete_outbound: fulfilled payment {}..., {} msat",
+                            &payment_hex[..16],
+                            lock.amount
+                        ),
+                        Err(e) => tracing::error!(
+                            "auto_complete_outbound: failed to fulfill {}...: {}",
+                            &payment_hex[..16],
+                            e
+                        ),
                     }
                 }
                 Some(p) if p.status == 2 => {
@@ -9105,15 +11134,24 @@ impl Node {
                     };
 
                     match self.commit_operation(&ledger_id, op).await {
-                        Ok(_) => tracing::info!("auto_complete_outbound: failed payment {}..., {} msat unlocked",
-                            &payment_hex[..16], lock.amount),
-                        Err(e) => tracing::error!("auto_complete_outbound: failed to record fail {}...: {}",
-                            &payment_hex[..16], e),
+                        Ok(_) => tracing::info!(
+                            "auto_complete_outbound: failed payment {}..., {} msat unlocked",
+                            &payment_hex[..16],
+                            lock.amount
+                        ),
+                        Err(e) => tracing::error!(
+                            "auto_complete_outbound: failed to record fail {}...: {}",
+                            &payment_hex[..16],
+                            e
+                        ),
                     }
                 }
                 _ => {
                     // Still pending or not found in LDK — leave alone
-                    tracing::debug!("auto_complete_outbound: payment {}... still pending", &payment_hex[..16]);
+                    tracing::debug!(
+                        "auto_complete_outbound: payment {}... still pending",
+                        &payment_hex[..16]
+                    );
                 }
             }
         }
@@ -9176,12 +11214,18 @@ impl Node {
                     return;
                 };
 
-                let sig_hex = result_obj.get("cosign_signature_hex").and_then(|v| v.as_str());
-                let hash_hex = result_obj.get("member_ledger_hash_hex").and_then(|v| v.as_str());
+                let sig_hex = result_obj
+                    .get("cosign_signature_hex")
+                    .and_then(|v| v.as_str());
+                let hash_hex = result_obj
+                    .get("member_ledger_hash_hex")
+                    .and_then(|v| v.as_str());
                 let cosigner_str = result_obj.get("cosigner_pubkey").and_then(|v| v.as_str());
 
                 if let (Some(sig_hex), Some(hash_hex)) = (sig_hex, hash_hex) {
-                    if let (Ok(sig_vec), Ok(hash_vec)) = (hex::decode(sig_hex), hex::decode(hash_hex)) {
+                    if let (Ok(sig_vec), Ok(hash_vec)) =
+                        (hex::decode(sig_hex), hex::decode(hash_hex))
+                    {
                         if sig_vec.len() == 64 && hash_vec.len() == 32 {
                             let mut sig = [0u8; 64];
                             sig.copy_from_slice(&sig_vec);
@@ -9200,7 +11244,6 @@ impl Node {
                                 t2_send_us: result_obj.get("t2_send_us").and_then(|v| v.as_u64()),
                             };
                             collector.add(cosign_result);
-                            return;
                         } else {
                             tracing::warn!("Co-sign response has wrong signature/hash lengths");
                         }
@@ -9208,7 +11251,9 @@ impl Node {
                         tracing::warn!("Co-sign response has invalid hex encoding");
                     }
                 } else {
-                    tracing::warn!("Co-sign response missing cosign_signature_hex or member_ledger_hash_hex");
+                    tracing::warn!(
+                        "Co-sign response missing cosign_signature_hex or member_ledger_hash_hex"
+                    );
                 }
             } else {
                 tracing::warn!("Co-sign response has no result");
@@ -9257,9 +11302,13 @@ impl Node {
                     };
 
                     // Extract cosign_signature_hex
-                    let sig_hex = result_obj.get("cosign_signature_hex").and_then(|v| v.as_str());
+                    let sig_hex = result_obj
+                        .get("cosign_signature_hex")
+                        .and_then(|v| v.as_str());
                     // Extract member_ledger_hash_hex
-                    let hash_hex = result_obj.get("member_ledger_hash_hex").and_then(|v| v.as_str());
+                    let hash_hex = result_obj
+                        .get("member_ledger_hash_hex")
+                        .and_then(|v| v.as_str());
                     // Extract cosigner_pubkey
                     let cosigner_str = result_obj.get("cosigner_pubkey").and_then(|v| v.as_str());
 
@@ -9289,8 +11338,10 @@ impl Node {
                                     t2_send_us: None,
                                 };
                                 collector.add(cosign_result);
-                                tracing::debug!("Co-sign response received: sig + member_hash {}...",
-                                    &hash_hex[..8.min(hash_hex.len())]);
+                                tracing::debug!(
+                                    "Co-sign response received: sig + member_hash {}...",
+                                    &hash_hex[..8.min(hash_hex.len())]
+                                );
                                 return;
                             }
                         }
@@ -9334,7 +11385,10 @@ impl Node {
                     };
 
                     let sig_hex = result_obj.get("consent_signature").and_then(|v| v.as_str());
-                    let expires = result_obj.get("membership_expires").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let expires = result_obj
+                        .get("membership_expires")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
 
                     if let Some(sig_hex) = sig_hex {
                         if let Ok(sig_vec) = hex::decode(sig_hex) {
@@ -9346,8 +11400,10 @@ impl Node {
                                     membership_expires: expires,
                                 };
                                 let _ = tx.send(consent_result);
-                                tracing::info!("Consent response received: signature ok, expires block {}",
-                                    expires);
+                                tracing::info!(
+                                    "Consent response received: signature ok, expires block {}",
+                                    expires
+                                );
                                 return;
                             }
                         }
@@ -9412,13 +11468,14 @@ impl Node {
             }
         };
 
-        let attestation: deposits_core::CollateralAttestationMsg = match serde_json::from_str(&attestation_json) {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::error!("Failed to parse attestation JSON: {}", e);
-                return;
-            }
-        };
+        let attestation: deposits_core::CollateralAttestationMsg =
+            match serde_json::from_str(&attestation_json) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::error!("Failed to parse attestation JSON: {}", e);
+                    return;
+                }
+            };
 
         tracing::info!(
             "Auto-recording attestation: amount={} msats, until_block={}, from operator {}...",
@@ -9428,11 +11485,16 @@ impl Node {
         );
 
         // Record the attestation on our ledger (now includes co-signing and broadcast)
-        match self.record_collateral_attestation(&reserves_id, attestation).await {
+        match self
+            .record_collateral_attestation(&reserves_id, attestation)
+            .await
+        {
             Ok(event_id) => {
-                tracing::info!("Attestation recorded and broadcast on ledger {}: event_id={}",
+                tracing::info!(
+                    "Attestation recorded and broadcast on ledger {}: event_id={}",
                     &reserves_id[..16.min(reserves_id.len())],
-                    &event_id[..16.min(event_id.len())]);
+                    &event_id[..16.min(event_id.len())]
+                );
             }
             Err(e) => {
                 tracing::error!("Failed to record attestation: {}", e);
@@ -9460,9 +11522,13 @@ impl Node {
         });
 
         // Send the request
-        let request_id = self.nostr.send_ledger_request(target_ledger_id, "collateral_lock", params)
+        let request_id = self
+            .nostr
+            .send_ledger_request(target_ledger_id, "collateral_lock", params)
             .await
-            .map_err(|e| Error::Protocol(format!("Failed to send collateral_lock request: {:?}", e)))?;
+            .map_err(|e| {
+                Error::Protocol(format!("Failed to send collateral_lock request: {:?}", e))
+            })?;
         self.track_sent_event(&request_id);
 
         // Track for auto-recording
@@ -9507,7 +11573,10 @@ impl Node {
         // Acquire semaphore to serialize cosign requests. Multiple concurrent
         // mini loops compete for shared channels and cause distributed deadlocks
         // when all operators are in batch-await simultaneously.
-        let _permit = self.cosign_semaphore.acquire().await
+        let _permit = self
+            .cosign_semaphore
+            .acquire()
+            .await
             .map_err(|_| Error::Protocol("Cosign semaphore closed".to_string()))?;
 
         // Compute cosign data
@@ -9546,7 +11615,7 @@ impl Node {
                     let num = (len - 1).min(MAX_PIGGYBACK);
                     let prev_updates: Vec<String> = ledger.history[len - 1 - num..len - 1]
                         .iter()
-                        .map(|u| BASE64.encode(&u.tlv_encode()))
+                        .map(|u| BASE64.encode(u.tlv_encode()))
                         .collect();
                     params["previous_updates"] = serde_json::json!(prev_updates);
                 }
@@ -9556,11 +11625,16 @@ impl Node {
         // Determine cosig threshold: floor(n/2) + 1
         let threshold = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
+            ledgers
+                .get(ledger_id)
                 .map(|arc| {
                     let l = arc.read().unwrap();
                     let n = l.state.quorum_members.len();
-                    if n == 0 { 1 } else { (n / 2) + 1 }
+                    if n == 0 {
+                        1
+                    } else {
+                        (n / 2) + 1
+                    }
                 })
                 .unwrap_or(1)
         };
@@ -9568,7 +11642,9 @@ impl Node {
         let collector = Arc::new(CosignCollector::new(threshold));
 
         // Send the multicast request to the ledger
-        let request_id = self.nostr.send_ledger_request(ledger_id, "cosign_update", params)
+        let request_id = self
+            .nostr
+            .send_ledger_request(ledger_id, "cosign_update", params)
             .await
             .map_err(|e| Error::Protocol(format!("Failed to send co_sign request: {:?}", e)))?;
         self.track_sent_event(&request_id);
@@ -9576,7 +11652,10 @@ impl Node {
         // Store collector in pending requests — handle_ledger_response() accumulates responses.
         {
             let mut pending = self.pending_cosign_requests.lock().unwrap();
-            pending.insert(request_id.clone(), (ledger_id.to_string(), Arc::clone(&collector)));
+            pending.insert(
+                request_id.clone(),
+                (ledger_id.to_string(), Arc::clone(&collector)),
+            );
             metrics::set_pending_cosign_requests(pending.len());
         }
 
@@ -9618,22 +11697,29 @@ impl Node {
         if results.len() < threshold {
             return Err(Error::Protocol(format!(
                 "Cosign timeout: got {}/{} cosigs in {}ms",
-                results.len(), threshold, cosign_rtt.as_millis()
+                results.len(),
+                threshold,
+                cosign_rtt.as_millis()
             )));
         }
 
-        tracing::info!("[COSIGN] seq={} collected {}/{} cosigs in {:.0}ms",
-            update.sequence_number, results.len(), threshold,
-            cosign_rtt.as_secs_f64() * 1000.0);
+        tracing::info!(
+            "[COSIGN] seq={} collected {}/{} cosigs in {:.0}ms",
+            update.sequence_number,
+            results.len(),
+            threshold,
+            cosign_rtt.as_secs_f64() * 1000.0
+        );
 
         // Convert to CosignEntries
-        let entries: Vec<deposits_core::CosignEntry> = results.into_iter().map(|r| {
-            deposits_core::CosignEntry {
+        let entries: Vec<deposits_core::CosignEntry> = results
+            .into_iter()
+            .map(|r| deposits_core::CosignEntry {
                 cosigner_pubkey: r.cosigner_pubkey,
                 cosign_signature: r.cosign_signature,
                 member_ledger_hash: r.member_ledger_hash,
-            }
-        }).collect();
+            })
+            .collect();
 
         Ok(entries)
     }
@@ -9657,9 +11743,12 @@ impl Node {
 
         // Temporarily add member's ledger to our interest set so we receive
         // the response (which is tagged with member_ledger_id).
-        self.nostr.add_interested_ledger(member_ledger_id.to_string());
+        self.nostr
+            .add_interested_ledger(member_ledger_id.to_string());
 
-        let request_id = self.nostr.send_ledger_request(member_ledger_id, "consent_request", params)
+        let request_id = self
+            .nostr
+            .send_ledger_request(member_ledger_id, "consent_request", params)
             .await
             .map_err(|e| Error::Protocol(format!("Failed to send consent request: {:?}", e)))?;
         self.track_sent_event(&request_id);
@@ -9719,12 +11808,12 @@ impl Node {
         ledger_id: &str,
         offer: &DepositOffer,
     ) -> Result<OfferCoSignResult, Error> {
-        use tokio::time::Duration;
         use std::str::FromStr;
+        use tokio::time::Duration;
 
         // Create request parameters
         let params = serde_json::json!({
-            "offer_id": hex::encode(&offer.offer_id),
+            "offer_id": hex::encode(offer.offer_id),
             "operator_id": offer.operator_id.to_string(),
             "funding_address": offer.funding_address,
             "deadline_block": offer.deadline_block,
@@ -9736,9 +11825,13 @@ impl Node {
         let mut notification_rx = self.nostr.create_notification_receiver();
 
         // Send the multicast request to quorum members
-        let request_id = self.nostr.send_ledger_request(ledger_id, "cosign_offer", params)
+        let request_id = self
+            .nostr
+            .send_ledger_request(ledger_id, "cosign_offer", params)
             .await
-            .map_err(|e| Error::Protocol(format!("Failed to send cosign_offer request: {:?}", e)))?;
+            .map_err(|e| {
+                Error::Protocol(format!("Failed to send cosign_offer request: {:?}", e))
+            })?;
         self.track_sent_event(&request_id);
 
         tracing::info!(
@@ -9860,12 +11953,12 @@ impl Node {
 
                     // Process cosign_offer requests extracted inline from notifications.
                     for request in inline_offer_requests {
-                        if request.sender != our_x_only {
-                            if self.is_quorum_member_of_ledger(&request.ledger_id) {
+                        if request.sender != our_x_only
+                            && self.is_quorum_member_of_ledger(&request.ledger_id) {
                                 // Mark as processed to prevent polling fallback from re-processing
                                 self.processed_requests.lock().unwrap().insert(request.event_id.clone());
                                 let (success, result, error) = self.process_cosign_offer_request(&request).await;
-                                let result_json = result.map(|s| serde_json::Value::String(s));
+                                let result_json = result.map(serde_json::Value::String);
                                 if let Err(e) = self.nostr.send_ledger_response(
                                     &request.event_id,
                                     &request.ledger_id,
@@ -9878,7 +11971,6 @@ impl Node {
                                     tracing::debug!("Failed to send cosign_offer response: {}", e);
                                 }
                             }
-                        }
                     }
                 }
 
@@ -9893,7 +11985,10 @@ impl Node {
     /// Track a Nostr event sent by this daemon process so we can filter it
     /// when it comes back via the relay broadcast.
     fn track_sent_event(&self, event_id: &str) {
-        self.sent_events.lock().unwrap().insert(event_id.to_string());
+        self.sent_events
+            .lock()
+            .unwrap()
+            .insert(event_id.to_string());
     }
 
     /// Check if this ledger has an active quorum (set by QuorumBegin).
@@ -9914,7 +12009,11 @@ impl Node {
     /// either the reserves limit or 2x the smallest quorum member's collateral commitment.
     ///
     /// Returns None if OK, or Some(error_message) if either limit would be exceeded.
-    fn check_collateral_obligation_limit(&self, ledger_id: &str, additional_msats: u64) -> Option<String> {
+    fn check_collateral_obligation_limit(
+        &self,
+        ledger_id: &str,
+        additional_msats: u64,
+    ) -> Option<String> {
         let ledgers = self.handler.ledgers.lock().unwrap();
         let ledger_arc = match ledgers.get(ledger_id) {
             Some(l) => l.clone(),
@@ -9923,7 +12022,10 @@ impl Node {
         let ledger = ledger_arc.read().unwrap();
 
         // All deposits (including collateral) count toward reserves usage
-        let all_deposits: u64 = ledger.state.deposits.values()
+        let all_deposits: u64 = ledger
+            .state
+            .deposits
+            .values()
             .map(|d| d.balance + d.locked_balance)
             .sum();
         let new_total_all = all_deposits.saturating_add(additional_msats);
@@ -9933,21 +12035,29 @@ impl Node {
         if reserves_limit_msats > 0 && new_total_all > reserves_limit_msats {
             return Some(format!(
                 "Would exceed reserves: {} + {} = {} msats > {} msats (reserves {} msats)",
-                all_deposits, additional_msats, new_total_all,
-                reserves_limit_msats, ledger.state.reserves_amount
+                all_deposits,
+                additional_msats,
+                new_total_all,
+                reserves_limit_msats,
+                ledger.state.reserves_amount
             ));
         }
 
         // Non-collateral obligations only for collateral limit checks
         // (collateral does not cover collateral — only customer deposits)
-        let customer_obligations: u64 = ledger.state.deposits.values()
+        let customer_obligations: u64 = ledger
+            .state
+            .deposits
+            .values()
             .filter(|d| !d.is_collateral)
             .map(|d| d.balance + d.locked_balance)
             .sum();
         let new_customer_total = customer_obligations.saturating_add(additional_msats);
 
         // Check total_collateral limit: customer obligations <= sum of attested collateral
-        if ledger.state.total_collateral() > 0 && new_customer_total > ledger.state.total_collateral() {
+        if ledger.state.total_collateral() > 0
+            && new_customer_total > ledger.state.total_collateral()
+        {
             return Some(format!(
                 "Would exceed total collateral: {} + {} = {} msats > {} msats (total attested collateral)",
                 customer_obligations, additional_msats, new_customer_total, ledger.state.total_collateral()
@@ -9955,7 +12065,10 @@ impl Node {
         }
 
         // Check per-member collateral limit: customer obligations <= 2 * min(member.collateral_lock_amount)
-        let min_collateral = ledger.state.quorum_members.iter()
+        let min_collateral = ledger
+            .state
+            .quorum_members
+            .iter()
             .filter_map(|m| m.collateral_lock_amount)
             .min();
 
@@ -9993,7 +12106,10 @@ impl Node {
         };
         let ledger = ledger_arc.read().unwrap();
 
-        let current_balance = ledger.state.deposits.get(deposit_id)
+        let current_balance = ledger
+            .state
+            .deposits
+            .get(deposit_id)
             .map(|d| d.balance + d.locked_balance)
             .unwrap_or(0);
         let new_balance = current_balance.saturating_add(additional_msats);
@@ -10084,7 +12200,8 @@ impl Node {
     async fn acquire_staging_lock(&self, ledger_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
             let mut locks = self.staging_locks.lock().unwrap();
-            locks.entry(ledger_id.to_string())
+            locks
+                .entry(ledger_id.to_string())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
@@ -10104,9 +12221,9 @@ impl Node {
         ledger_id: &str,
         operation: deposits_core::messages::LedgerOperation,
     ) -> Result<String, Error> {
-        use deposits_core::ledger::StagedUpdate;
-        use bitcoin::secp256k1::{Secp256k1, Keypair};
         use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::Keypair;
+        use deposits_core::ledger::StagedUpdate;
 
         // Acquire per-ledger lock — one update at a time
         let _lock = self.acquire_staging_lock(ledger_id).await;
@@ -10117,11 +12234,13 @@ impl Node {
         // 1. Stage: validate + build, no state changes
         let mut staged: StagedUpdate = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            let arc = ledgers.get(ledger_id)
+            let arc = ledgers
+                .get(ledger_id)
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
                 .clone();
             let ledger = arc.read().unwrap();
-            ledger.stage_operation(operation, block_height, block_hash)
+            ledger
+                .stage_operation(operation, block_height, block_hash)
                 .map_err(|e| Error::Protocol(format!("Stage failed: {}", e)))?
         };
 
@@ -10131,7 +12250,11 @@ impl Node {
             let entries = self.request_cosign(ledger_id, &staged.update).await?;
             // Sort by pubkey and set on update
             let mut sorted = entries;
-            sorted.sort_by(|a, b| a.cosigner_pubkey.serialize().cmp(&b.cosigner_pubkey.serialize()));
+            sorted.sort_by(|a, b| {
+                a.cosigner_pubkey
+                    .serialize()
+                    .cmp(&b.cosigner_pubkey.serialize())
+            });
             staged.update.cosignatures = sorted;
             staged.update.cosigner_pubkey = None;
             staged.update.member_ledger_hash = None;
@@ -10154,11 +12277,13 @@ impl Node {
         let update_clone = staged.update.clone();
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            let arc = ledgers.get(ledger_id)
+            let arc = ledgers
+                .get(ledger_id)
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
                 .clone();
             let mut ledger = arc.write().unwrap();
-            ledger.commit_staged(staged)
+            ledger
+                .commit_staged(staged)
                 .map_err(|e| Error::Protocol(format!("Commit failed: {}", e)))?;
         }
 
@@ -10168,9 +12293,16 @@ impl Node {
         }
 
         // 6. Broadcast
-        let event_id = self.nostr.broadcast_ledger_update(&update_clone).await
+        let event_id = self
+            .nostr
+            .broadcast_ledger_update(&update_clone)
+            .await
             .unwrap_or_else(|e| {
-                tracing::warn!("Failed to broadcast update seq={}: {}", update_clone.sequence_number, e);
+                tracing::warn!(
+                    "Failed to broadcast update seq={}: {}",
+                    update_clone.sequence_number,
+                    e
+                );
                 String::new()
             });
 
@@ -10179,7 +12311,11 @@ impl Node {
             update_clone.sequence_number,
             &ledger_id[..16.min(ledger_id.len())],
             quorum_active,
-            if event_id.len() > 16 { &event_id[..16] } else { &event_id },
+            if event_id.len() > 16 {
+                &event_id[..16]
+            } else {
+                &event_id
+            },
         );
 
         Ok(event_id)
@@ -10202,7 +12338,9 @@ impl Node {
             let has_quorum_members = !ledger.state.quorum_members.is_empty();
 
             // Clone the last update for co-signing
-            let update_clone = ledger.history.last()
+            let update_clone = ledger
+                .history
+                .last()
                 .ok_or_else(|| Error::Protocol("No update to sign".to_string()))?
                 .clone();
 
@@ -10214,7 +12352,8 @@ impl Node {
             if quorum_active {
                 metrics::record_sign_and_broadcast("error_no_quorum", sab_start.elapsed());
                 return Err(Error::Protocol(
-                    "Reserves have been rotated but no quorum members available - cannot sign".to_string()
+                    "Reserves have been rotated but no quorum members available - cannot sign"
+                        .to_string(),
                 ));
             }
             tracing::debug!("No quorum members yet, using operator-only signature");
@@ -10227,7 +12366,9 @@ impl Node {
         // round-trip entirely to avoid blocking the event loop (each attempt holds
         // the run loop for 500ms, causing cascading timeouts under load).
         if !quorum_active {
-            tracing::debug!("Pre-rotation: skipping optional co-sign, using operator-only signature");
+            tracing::debug!(
+                "Pre-rotation: skipping optional co-sign, using operator-only signature"
+            );
             let result = self.operator_sign_persist_broadcast(ledger_id).await;
             metrics::record_sign_and_broadcast("success_skip_cosign", sab_start.elapsed());
             return result;
@@ -10254,9 +12395,15 @@ impl Node {
                     // Apply majority cosignatures, recompute current_hash
                     ledger.apply_cosignatures(entries);
 
-                    tracing::debug!("Applied {} cosigs (new chain_hash: {}...)",
-                        ledger.history.last().map(|u| u.cosignatures.len()).unwrap_or(0),
-                        &hex::encode(&ledger.state.chain_tip_hash[..4]));
+                    tracing::debug!(
+                        "Applied {} cosigs (new chain_hash: {}...)",
+                        ledger
+                            .history
+                            .last()
+                            .map(|u| u.cosignatures.len())
+                            .unwrap_or(0),
+                        &hex::encode(&ledger.state.chain_tip_hash[..4])
+                    );
                     last_error = None;
                     break;
                 }
@@ -10288,7 +12435,10 @@ impl Node {
                 )));
             }
             // Before rotation, allow fallback to operator-only
-            tracing::warn!("Co-sign multicast failed after {} attempts, using operator-only signature", max_attempts);
+            tracing::warn!(
+                "Co-sign multicast failed after {} attempts, using operator-only signature",
+                max_attempts
+            );
         }
 
         // Sign as operator
@@ -10350,7 +12500,12 @@ impl Node {
             let ledger = ledger_arc.read().unwrap();
 
             // Check if already a member
-            if ledger.state.quorum_members.iter().any(|m| m.pubkey == quorum_member) {
+            if ledger
+                .state
+                .quorum_members
+                .iter()
+                .any(|m| m.pubkey == quorum_member)
+            {
                 return Err(Error::Protocol("Already a quorum member".to_string()));
             }
 
@@ -10403,7 +12558,10 @@ impl Node {
             let block_height = self.wallet.get_block_height().unwrap_or(0);
 
             // Count active (non-expired) quorum memberships from derived state
-            let active_quorums = ledger.state.joined_quorums.iter()
+            let active_quorums = ledger
+                .state
+                .joined_quorums
+                .iter()
                 .filter(|jq| jq.membership_expires > block_height)
                 .count();
 
@@ -10426,7 +12584,11 @@ impl Node {
         // Subscribe to the target ledger's requests so we can receive co-sign requests
         // This is important for quorum members to respond to update co-signing
         if let Err(e) = self.subscribe_to_ledger(target_ledger_id).await {
-            tracing::warn!("Failed to subscribe to target ledger {}: {}", &target_ledger_id[..16.min(target_ledger_id.len())], e);
+            tracing::warn!(
+                "Failed to subscribe to target ledger {}: {}",
+                &target_ledger_id[..16.min(target_ledger_id.len())],
+                e
+            );
         }
 
         result
@@ -10448,7 +12610,7 @@ impl Node {
         quorum_member: PublicKey,
     ) -> Result<deposits_core::CollateralAttestationMsg, Error> {
         use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::{Secp256k1, Message};
+        use bitcoin::secp256k1::{Message, Secp256k1};
 
         let deposit_id = compute_deposit_id(descriptor);
 
@@ -10461,11 +12623,9 @@ impl Node {
             let ledger = ledger_arc.read().unwrap();
 
             // Check if deposit exists
-            let deposit = ledger.state.deposits.get(&deposit_id)
-                .ok_or_else(|| Error::Protocol(format!(
-                    "Deposit not found for descriptor {}",
-                    descriptor
-                )))?;
+            let deposit = ledger.state.deposits.get(&deposit_id).ok_or_else(|| {
+                Error::Protocol(format!("Deposit not found for descriptor {}", descriptor))
+            })?;
 
             let block_height = self.wallet.get_block_height().unwrap_or(0);
 
@@ -10485,7 +12645,8 @@ impl Node {
             // Create the deposit holder's signature for the lock
             let secp = Secp256k1::signing_only();
             let _deposit_pubkey = PublicKey::from_secret_key(&secp, deposit_secret);
-            let msg_str = format!("COLLATERAL_LOCK:{}:{}:{}:{}",
+            let msg_str = format!(
+                "COLLATERAL_LOCK:{}:{}:{}:{}",
                 hex::encode(deposit_id),
                 amount_msats,
                 lock_until_block,
@@ -10498,7 +12659,9 @@ impl Node {
             let lock_signature: [u8; 64] = signature.serialize();
 
             // Create witness from signature
-            let witness = DescriptorWitness { stack: vec![lock_signature.to_vec()] };
+            let witness = DescriptorWitness {
+                stack: vec![lock_signature.to_vec()],
+            };
 
             // Apply the CollateralLock operation
             let operation = LedgerOperation::CollateralLock {
@@ -10524,7 +12687,10 @@ impl Node {
 
             // Use the specific deposit's lock amount, not the total across all deposits.
             // Each attestation is for one deposit's collateral contribution.
-            let deposit = ledger.state.deposits.get(&deposit_id)
+            let deposit = ledger
+                .state
+                .deposits
+                .get(&deposit_id)
                 .ok_or_else(|| Error::Protocol("Deposit disappeared after lock".to_string()))?;
             let locked_amount = deposit.collateral_lock_amount;
             let lock_expiry = deposit.collateral_lock_expires;
@@ -10549,7 +12715,8 @@ impl Node {
             let msg = Message::from_digest(hash.to_byte_array());
 
             let secp = &self.secp;
-            let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+            let keypair =
+                bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
             let sig = secp.sign_schnorr(&msg, &keypair);
             let attestation_signature: [u8; 64] = *sig.as_ref();
 
@@ -10623,7 +12790,8 @@ impl Node {
         // Pre-validate: check deposit doesn't already exist
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            let arc = ledgers.get(ledger_id)
+            let arc = ledgers
+                .get(ledger_id)
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = arc.read().unwrap();
             if ledger.state.deposits.contains_key(&deposit_id) {
@@ -10656,12 +12824,19 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let arc = ledgers.get(ledger_id).unwrap();
             let ledger = arc.read().unwrap();
-            ledger.state.deposits.get(&deposit_id)
+            ledger
+                .state
+                .deposits
+                .get(&deposit_id)
                 .cloned()
                 .ok_or_else(|| Error::Protocol("Deposit not found after commit".to_string()))?
         };
 
-        tracing::info!("Opened deposit {} in ledger {}", hex::encode(deposit_id), ledger_id);
+        tracing::info!(
+            "Opened deposit {} in ledger {}",
+            hex::encode(deposit_id),
+            ledger_id
+        );
         Ok(deposit)
     }
 
@@ -10707,14 +12882,19 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let arc = ledgers.get(ledger_id).unwrap();
             let ledger = arc.read().unwrap();
-            ledger.state.deposits.get(&deposit_id)
+            ledger
+                .state
+                .deposits
+                .get(&deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
 
         tracing::info!(
             "Credited deposit {} with {} msats (on-chain), new balance: {} msats",
-            hex::encode(deposit_id), amount_msats, new_balance
+            hex::encode(deposit_id),
+            amount_msats,
+            new_balance
         );
         Ok(new_balance)
     }
@@ -10730,12 +12910,14 @@ impl Node {
     ) -> Result<u64, Error> {
         let sequence_number = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            let arc = ledgers.get(ledger_id)
+            let arc = ledgers
+                .get(ledger_id)
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = arc.read().unwrap();
             if !ledger.state.deposits.contains_key(&deposit_id) {
                 return Err(Error::Protocol(format!(
-                    "Deposit not found for id {}", hex::encode(deposit_id)
+                    "Deposit not found for id {}",
+                    hex::encode(deposit_id)
                 )));
             }
             ledger.sequence() + 1
@@ -10755,12 +12937,19 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let arc = ledgers.get(ledger_id).unwrap();
             let ledger = arc.read().unwrap();
-            ledger.state.deposits.get(&deposit_id).map(|d| d.balance).unwrap_or(0)
+            ledger
+                .state
+                .deposits
+                .get(&deposit_id)
+                .map(|d| d.balance)
+                .unwrap_or(0)
         };
 
         tracing::info!(
             "Credited deposit {} with {} msats (invoice), new balance: {} msats",
-            hex::encode(deposit_id), amount_msats, new_balance
+            hex::encode(deposit_id),
+            amount_msats,
+            new_balance
         );
         Ok(new_balance)
     }
@@ -10782,16 +12971,18 @@ impl Node {
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = ledger_arc.read().unwrap();
 
-            let deposit = ledger.state.deposits.get(&deposit_id)
-                .ok_or_else(|| Error::Protocol(format!(
+            let deposit = ledger.state.deposits.get(&deposit_id).ok_or_else(|| {
+                Error::Protocol(format!(
                     "Deposit not found for id {}",
                     hex::encode(deposit_id)
-                )))?;
+                ))
+            })?;
 
             if deposit.available_balance() < amount_msats {
                 return Err(Error::Protocol(format!(
                     "Insufficient available balance: {} msats available, {} msats needed",
-                    deposit.available_balance(), amount_msats
+                    deposit.available_balance(),
+                    amount_msats
                 )));
             }
 
@@ -10812,14 +13003,19 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let arc = ledgers.get(ledger_id).unwrap();
             let ledger = arc.read().unwrap();
-            ledger.state.deposits.get(&deposit_id)
+            ledger
+                .state
+                .deposits
+                .get(&deposit_id)
                 .map(|d| d.locked_balance)
                 .unwrap_or(0)
         };
 
         tracing::info!(
             "Locked {} msats for invoice payment {} on deposit {}",
-            amount_msats, hex::encode(&payment_id[..8]), hex::encode(deposit_id)
+            amount_msats,
+            hex::encode(&payment_id[..8]),
+            hex::encode(deposit_id)
         );
         Ok(new_locked)
     }
@@ -10840,11 +13036,12 @@ impl Node {
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = ledger_arc.read().unwrap();
 
-            let deposit = ledger.state.deposits.get(&deposit_id)
-                .ok_or_else(|| Error::Protocol(format!(
+            let deposit = ledger.state.deposits.get(&deposit_id).ok_or_else(|| {
+                Error::Protocol(format!(
                     "Deposit not found for id {}",
                     hex::encode(deposit_id)
-                )))?;
+                ))
+            })?;
 
             if deposit.locked_balance < amount_msats {
                 return Err(Error::Protocol(format!(
@@ -10869,14 +13066,20 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let arc = ledgers.get(ledger_id).unwrap();
             let ledger = arc.read().unwrap();
-            ledger.state.deposits.get(&deposit_id)
+            ledger
+                .state
+                .deposits
+                .get(&deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
 
         tracing::info!(
             "Failed invoice payment {} for {} msats on deposit {}, new balance: {} msats",
-            hex::encode(&payment_id[..8]), amount_msats, hex::encode(deposit_id), new_balance
+            hex::encode(&payment_id[..8]),
+            amount_msats,
+            hex::encode(deposit_id),
+            new_balance
         );
         Ok(new_balance)
     }
@@ -10899,11 +13102,12 @@ impl Node {
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = ledger_arc.read().unwrap();
 
-            let deposit = ledger.state.deposits.get(&deposit_id)
-                .ok_or_else(|| Error::Protocol(format!(
+            let deposit = ledger.state.deposits.get(&deposit_id).ok_or_else(|| {
+                Error::Protocol(format!(
                     "Deposit not found for id {}",
                     hex::encode(deposit_id)
-                )))?;
+                ))
+            })?;
 
             if deposit.locked_balance < amount_msats {
                 return Err(Error::Protocol(format!(
@@ -10930,14 +13134,20 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let arc = ledgers.get(ledger_id).unwrap();
             let ledger = arc.read().unwrap();
-            ledger.state.deposits.get(&deposit_id)
+            ledger
+                .state
+                .deposits
+                .get(&deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
 
         tracing::info!(
             "Fulfilled invoice payment {} for {} msats on deposit {}, new balance: {} msats",
-            hex::encode(&payment_id[..8]), amount_msats, hex::encode(deposit_id), new_balance
+            hex::encode(&payment_id[..8]),
+            amount_msats,
+            hex::encode(deposit_id),
+            new_balance
         );
         Ok(new_balance)
     }
@@ -10995,11 +13205,12 @@ impl Node {
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = ledger_arc.read().unwrap();
 
-            let deposit = ledger.state.deposits.get(&deposit_id)
-                .ok_or_else(|| Error::Protocol(format!(
+            let deposit = ledger.state.deposits.get(&deposit_id).ok_or_else(|| {
+                Error::Protocol(format!(
                     "Deposit not found for id {}",
                     hex::encode(deposit_id)
-                )))?;
+                ))
+            })?;
 
             let total_debit_msats = (amount_sats + fee_sats) * 1000;
             if deposit.balance < total_debit_msats {
@@ -11027,7 +13238,10 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let arc = ledgers.get(ledger_id).unwrap();
             let ledger = arc.read().unwrap();
-            ledger.state.deposits.get(&deposit_id)
+            ledger
+                .state
+                .deposits
+                .get(&deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
@@ -11049,8 +13263,11 @@ impl Node {
         tracing::info!(
             "Locked withdrawal {} for {} sats + {} fee to {}, balance {} -> {} msats",
             hex::encode(&withdrawal_id[..8]),
-            amount_sats, fee_sats, withdrawal.destination_address,
-            previous_balance, new_balance
+            amount_sats,
+            fee_sats,
+            withdrawal.destination_address,
+            previous_balance,
+            new_balance
         );
 
         Ok(WithdrawalLockResult {
@@ -11115,7 +13332,10 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let arc = ledgers.get(ledger_id).unwrap();
             let ledger = arc.read().unwrap();
-            ledger.state.deposits.get(&withdrawal.deposit_id)
+            ledger
+                .state
+                .deposits
+                .get(&withdrawal.deposit_id)
                 .map(|d| d.balance)
                 .unwrap_or(0)
         };
@@ -11137,7 +13357,9 @@ impl Node {
 
         tracing::info!(
             "Completed withdrawal {}: txid={}, final balance={} msats",
-            hex::encode(&withdrawal_id[..8]), txid, final_balance
+            hex::encode(&withdrawal_id[..8]),
+            txid,
+            final_balance
         );
 
         Ok(WithdrawalCompleteResult {
@@ -11184,7 +13406,8 @@ impl Node {
         partners: Vec<PublicKey>,
         threshold: usize,
     ) -> Result<crate::wallet::ReservesOutput, Error> {
-        self.wallet.create_reserves_output(amount_sats, partners, threshold)
+        self.wallet
+            .create_reserves_output(amount_sats, partners, threshold)
     }
 
     // ========================================================================
@@ -11210,22 +13433,31 @@ impl Node {
         // in create_reserves_output), so address-based matching is correct.
         let used_addresses: std::collections::HashSet<String> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.values().map(|l| l.read().unwrap().state.reserves_key.clone()).collect()
+            ledgers
+                .values()
+                .map(|l| l.read().unwrap().state.reserves_key.clone())
+                .collect()
         };
 
-        let unused = all_reserves.iter().find(|r| {
-            let addr = bitcoin::Address::p2wsh(&r.redeem_script, self.wallet.network()).to_string();
-            !used_addresses.contains(&addr)
-        }).ok_or_else(|| {
-            Error::Protocol(format!(
-                "All {} reserves are already backing ledgers ({} used addresses)",
-                all_reserves.len(), used_addresses.len()
-            ))
-        })?;
+        let unused = all_reserves
+            .iter()
+            .find(|r| {
+                let addr =
+                    bitcoin::Address::p2wsh(&r.redeem_script, self.wallet.network()).to_string();
+                !used_addresses.contains(&addr)
+            })
+            .ok_or_else(|| {
+                Error::Protocol(format!(
+                    "All {} reserves are already backing ledgers ({} used addresses)",
+                    all_reserves.len(),
+                    used_addresses.len()
+                ))
+            })?;
 
         let reserves_balance = unused.amount;
         let reserves_outpoint = Some(unused.outpoint);
-        let reserves_address = bitcoin::Address::p2wsh(&unused.redeem_script, self.wallet.network()).to_string();
+        let reserves_address =
+            bitcoin::Address::p2wsh(&unused.redeem_script, self.wallet.network()).to_string();
 
         if reserves_balance == 0 {
             return Err(Error::NoReserves);
@@ -11246,12 +13478,15 @@ impl Node {
         // Convert reserves_balance from sats to msats at the on-chain boundary
         let reserves_balance_msats = reserves_balance.saturating_mul(1000);
         let ledger_arc = self.handler.get_or_create_ledger_with_outpoint(
-            self.node_id, reserves_id.clone(), Some(reserves_balance_msats), None,
+            self.node_id,
+            reserves_id.clone(),
+            Some(reserves_balance_msats),
+            None,
         );
 
         // Update state, get ledger_id
         let ledger_id = {
-            let mut ledger_guard = ledger_arc.write().unwrap();
+            let ledger_guard = ledger_arc.write().unwrap();
             // spend_to removed with legacy ReservesOutput struct
             ledger_guard.ledger_id_hex()
         };
@@ -11331,7 +13566,9 @@ impl Node {
     /// Returns (our_ledgers, joined_quorums) for display.
     /// our_ledgers: Vec<(ledger_id, active_members, pending_members)>
     /// joined_quorums: grouped by our_ledger_id -> Vec<(operator_id, their_ledger_id, expires)>
-    pub fn list_quorum_info(&self) -> (
+    pub fn list_quorum_info(
+        &self,
+    ) -> (
         Vec<(String, Vec<PublicKey>, Vec<PublicKey>)>,
         Vec<(String, Vec<(PublicKey, String, u32)>)>,
     ) {
@@ -11339,14 +13576,25 @@ impl Node {
 
         let mut our_ledgers = Vec::new();
         // Map from our_ledger_id -> Vec<(operator, their_ledger, expires)>
-        let mut joined_by_ledger: std::collections::BTreeMap<String, Vec<(PublicKey, String, u32)>> = std::collections::BTreeMap::new();
+        let mut joined_by_ledger: std::collections::BTreeMap<
+            String,
+            Vec<(PublicKey, String, u32)>,
+        > = std::collections::BTreeMap::new();
 
         for (ledger_id, ledger_arc) in ledgers.iter() {
             let ledger = ledger_arc.read().unwrap();
 
             if ledger.operator_key() == self.node_id {
-                let active: Vec<PublicKey> = ledger.state.quorum_members.iter().map(|m| m.pubkey).collect();
-                let pending: Vec<PublicKey> = ledger.state.next_quorum_members.iter()
+                let active: Vec<PublicKey> = ledger
+                    .state
+                    .quorum_members
+                    .iter()
+                    .map(|m| m.pubkey)
+                    .collect();
+                let pending: Vec<PublicKey> = ledger
+                    .state
+                    .next_quorum_members
+                    .iter()
                     .filter(|m| !active.contains(&m.pubkey))
                     .map(|m| m.pubkey)
                     .collect();
@@ -11402,9 +13650,19 @@ impl Node {
             // time the members are still in next_quorum_members (pending).
             // Fall back to active quorum_members for re-rotation after an existing QuorumBegin.
             let members: Vec<PublicKey> = if !ledger.state.next_quorum_members.is_empty() {
-                ledger.state.next_quorum_members.iter().map(|m| m.pubkey).collect()
+                ledger
+                    .state
+                    .next_quorum_members
+                    .iter()
+                    .map(|m| m.pubkey)
+                    .collect()
             } else {
-                ledger.state.quorum_members.iter().map(|m| m.pubkey).collect()
+                ledger
+                    .state
+                    .quorum_members
+                    .iter()
+                    .map(|m| m.pubkey)
+                    .collect()
             };
 
             let current_block = self.wallet.get_block_height().unwrap_or(0);
@@ -11421,7 +13679,7 @@ impl Node {
 
         if quorum_members.is_empty() {
             return Err(Error::Protocol(
-                "No quorum members to rotate to. Add quorum members first.".to_string()
+                "No quorum members to rotate to. Add quorum members first.".to_string(),
             ));
         }
 
@@ -11470,11 +13728,11 @@ impl Node {
             };
 
             let mut ledger = ledger_arc.write().unwrap();
-            ledger.append_operation_with_block(
-                operation,
-                block_height,
-                block_hash,
-            ).map_err(|e| Error::Protocol(format!("Failed to record reserves rotation: {:?}", e)))?;
+            ledger
+                .append_operation_with_block(operation, block_height, block_hash)
+                .map_err(|e| {
+                    Error::Protocol(format!("Failed to record reserves rotation: {:?}", e))
+                })?;
 
             tracing::info!(
                 "Appended QuorumBegin operation to ledger: txid={}, quorum={} members",
@@ -11559,7 +13817,8 @@ impl Node {
             max_amount_sats,
             min_amount_sats,
             deadline_block,
-        ).map_err(|e| Error::Protocol(format!("Failed to sign offer: {:?}", e)))?;
+        )
+        .map_err(|e| Error::Protocol(format!("Failed to sign offer: {:?}", e)))?;
 
         // Create the offer
         let offer = DepositOffer {
@@ -11604,7 +13863,10 @@ impl Node {
     }
 
     /// Get a specific deposit offer by ID
-    pub fn get_deposit_offer(&self, offer_id: &[u8; 32]) -> Option<(DepositOffer, DepositOfferStatus)> {
+    pub fn get_deposit_offer(
+        &self,
+        offer_id: &[u8; 32],
+    ) -> Option<(DepositOffer, DepositOfferStatus)> {
         let offers = self.deposit_offers.lock().unwrap();
         offers.get(offer_id).cloned()
     }
@@ -11634,7 +13896,8 @@ impl Node {
         {
             let mut offers = self.deposit_offers.lock().unwrap();
             for (offer_id, (offer, status)) in offers.iter_mut() {
-                if matches!(status, DepositOfferStatus::Pending) && offer.is_expired(current_block) {
+                if matches!(status, DepositOfferStatus::Pending) && offer.is_expired(current_block)
+                {
                     *status = DepositOfferStatus::Expired {
                         expired_at_block: current_block,
                     };
@@ -11659,7 +13922,8 @@ impl Node {
         }
         match std::fs::read_to_string(&path) {
             Ok(contents) => {
-                let invoices: Vec<PendingInvoice> = serde_json::from_str(&contents).unwrap_or_default();
+                let invoices: Vec<PendingInvoice> =
+                    serde_json::from_str(&contents).unwrap_or_default();
                 let mut map = HashMap::new();
                 for inv in invoices {
                     if let Ok(hash_bytes) = hex::decode(&inv.payment_hash_hex) {
@@ -11685,8 +13949,13 @@ impl Node {
     /// Save pending invoices to disk
     fn save_pending_invoices(&self) {
         let path = self.data_dir.join("wallet").join("pending_invoices.json");
-        let invoices: Vec<PendingInvoice> = self.pending_invoices.lock().unwrap()
-            .values().cloned().collect();
+        let invoices: Vec<PendingInvoice> = self
+            .pending_invoices
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
         if let Ok(json) = serde_json::to_string_pretty(&invoices) {
             if let Err(e) = std::fs::write(&path, json) {
                 tracing::warn!("Failed to save pending invoices: {}", e);
@@ -11743,7 +14012,8 @@ impl Node {
     /// Update the pending deposit offers metric
     fn update_pending_offers_metric(&self) {
         let offers = self.deposit_offers.lock().unwrap();
-        let pending_count = offers.values()
+        let pending_count = offers
+            .values()
             .filter(|(_, status)| matches!(status, DepositOfferStatus::Pending))
             .count();
         metrics::set_pending_deposit_offers(pending_count);
@@ -11769,14 +14039,23 @@ impl Node {
             if let Some((_, ref mut memory_status)) = memory_offers.get_mut(&offer_id) {
                 // If disk has a "more complete" status, use it
                 // Pending < FundingReceived < Completed/Expired/Cancelled
-                let should_update = match (&*memory_status, &disk_status) {
-                    (DepositOfferStatus::Pending, DepositOfferStatus::FundingReceived { .. }) => true,
-                    (DepositOfferStatus::Pending, DepositOfferStatus::Completed { .. }) => true,
-                    (DepositOfferStatus::Pending, DepositOfferStatus::Expired { .. }) => true,
-                    (DepositOfferStatus::Pending, DepositOfferStatus::Cancelled) => true,
-                    (DepositOfferStatus::FundingReceived { .. }, DepositOfferStatus::Completed { .. }) => true,
-                    _ => false,
-                };
+                let should_update = matches!(
+                    (&*memory_status, &disk_status),
+                    (
+                        DepositOfferStatus::Pending,
+                        DepositOfferStatus::FundingReceived { .. }
+                    ) | (
+                        DepositOfferStatus::Pending,
+                        DepositOfferStatus::Completed { .. }
+                    ) | (
+                        DepositOfferStatus::Pending,
+                        DepositOfferStatus::Expired { .. }
+                    ) | (DepositOfferStatus::Pending, DepositOfferStatus::Cancelled)
+                        | (
+                            DepositOfferStatus::FundingReceived { .. },
+                            DepositOfferStatus::Completed { .. },
+                        )
+                );
 
                 if should_update {
                     tracing::debug!(
@@ -11794,7 +14073,8 @@ impl Node {
         }
 
         // Update metrics - need to count pending within the lock
-        let pending_count = memory_offers.values()
+        let pending_count = memory_offers
+            .values()
             .filter(|(_, status)| matches!(status, DepositOfferStatus::Pending))
             .count();
         drop(memory_offers);
@@ -11806,11 +14086,7 @@ impl Node {
     // ========================================================================
 
     /// Cancel a withdrawal (only if not yet broadcast)
-    pub fn cancel_withdrawal(
-        &self,
-        withdrawal_id: &[u8; 32],
-        reason: String,
-    ) -> Result<(), Error> {
+    pub fn cancel_withdrawal(&self, withdrawal_id: &[u8; 32], reason: String) -> Result<(), Error> {
         let current_block = self.wallet.get_block_height()?;
 
         {
@@ -11862,7 +14138,9 @@ impl Node {
             },
             Err(_) => return,
         };
-        if price <= 0.0 { return; }
+        if price <= 0.0 {
+            return;
+        }
         if let Err(e) = self.nostr.publish_price(price).await {
             tracing::debug!("Failed to publish price: {}", e);
         }
@@ -11889,7 +14167,11 @@ impl Node {
     }
 
     /// Reload a single list file if changed.
-    fn reload_list(data_dir: &std::path::Path, filename: &str, current: &RwLock<std::collections::HashSet<String>>) {
+    fn reload_list(
+        data_dir: &std::path::Path,
+        filename: &str,
+        current: &RwLock<std::collections::HashSet<String>>,
+    ) {
         let new_list = Self::load_list(data_dir, filename);
         let guard = current.read().unwrap();
         if *guard != new_list {
@@ -11935,10 +14217,12 @@ impl Node {
                 [sender_pubkey.to_hex()],
             );
 
-        let events = match self.nostr.client().fetch_events(
-            vec![filter],
-            Some(std::time::Duration::from_secs(5)),
-        ).await {
+        let events = match self
+            .nostr
+            .client()
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+            .await
+        {
             Ok(events) => events,
             Err(e) => {
                 tracing::warn!("Attestation query failed: {}", e);
@@ -11965,9 +14249,21 @@ impl Node {
 
     /// Reload all deposit access lists from disk.
     pub fn reload_allowlist(&self) {
-        Self::reload_list(&self.data_dir, "deposit_allowlist.txt", &self.deposit_allowlist);
-        Self::reload_list(&self.data_dir, "deposit_denylist.txt", &self.deposit_denylist);
-        Self::reload_list(&self.data_dir, "deposit_domain_allowlist.txt", &self.deposit_domain_allowlist);
+        Self::reload_list(
+            &self.data_dir,
+            "deposit_allowlist.txt",
+            &self.deposit_allowlist,
+        );
+        Self::reload_list(
+            &self.data_dir,
+            "deposit_denylist.txt",
+            &self.deposit_denylist,
+        );
+        Self::reload_list(
+            &self.data_dir,
+            "deposit_domain_allowlist.txt",
+            &self.deposit_domain_allowlist,
+        );
     }
 
     /// Generate a random nonce for withdrawal uniqueness
@@ -12037,11 +14333,7 @@ impl Node {
     // ========================================================================
 
     /// Get a deposit by deposit_id from a ledger
-    pub fn get_deposit(
-        &self,
-        ledger_id: &str,
-        deposit_id: DepositId,
-    ) -> Option<Deposit> {
+    pub fn get_deposit(&self, ledger_id: &str, deposit_id: DepositId) -> Option<Deposit> {
         let ledgers = self.handler.ledgers.lock().unwrap();
         if let Some(ledger_arc) = ledgers.get(ledger_id) {
             let ledger = ledger_arc.read().unwrap();
@@ -12055,7 +14347,10 @@ impl Node {
         let ledgers = self.handler.ledgers.lock().unwrap();
         if let Some(ledger_arc) = ledgers.get(ledger_id) {
             let ledger = ledger_arc.read().unwrap();
-            return ledger.state.deposits.iter()
+            return ledger
+                .state
+                .deposits
+                .iter()
                 .map(|(k, v)| (*k, v.clone()))
                 .collect();
         }
@@ -12075,20 +14370,24 @@ impl Node {
         use deposits_core::types::DepositOfferStatus;
 
         // Get the offer
-        let (offer, status) = self.get_deposit_offer(offer_id)
+        let (offer, status) = self
+            .get_deposit_offer(offer_id)
             .ok_or(Error::OfferNotFound)?;
 
         // Only the ledger operator may complete deposits
         if !self.is_operator_of_ledger(&offer.ledger_id) {
             return Err(Error::Protocol(
-                "Cannot complete deposit: not the operator of this ledger".to_string()
+                "Cannot complete deposit: not the operator of this ledger".to_string(),
             ));
         }
 
         // Check offer is in correct state.
         // If already Completed (another process finished just before we got the lock), return its result.
         if let DepositOfferStatus::Completed { amount_sats, .. } = &status {
-            tracing::info!("Deposit already completed (detected after reload): {} sats", amount_sats);
+            tracing::info!(
+                "Deposit already completed (detected after reload): {} sats",
+                amount_sats
+            );
             return Ok(*amount_sats * 1000);
         }
         if !matches!(status, DepositOfferStatus::Pending) {
@@ -12123,14 +14422,27 @@ impl Node {
             .map_err(|_| Error::Protocol("Invalid txid length".to_string()))?;
 
         // Look up the ledger by ledger_id hash
-        let (reserves_id, _) = self.get_ledger_by_ledger_id(&offer.ledger_id)
-            .ok_or_else(|| Error::Protocol(format!(
-                "Ledger not found for ledger_id: {}",
-                &offer.ledger_id[..16.min(offer.ledger_id.len())]
-            )))?;
+        let (reserves_id, _) = self
+            .get_ledger_by_ledger_id(&offer.ledger_id)
+            .ok_or_else(|| {
+                Error::Protocol(format!(
+                    "Ledger not found for ledger_id: {}",
+                    &offer.ledger_id[..16.min(offer.ledger_id.len())]
+                ))
+            })?;
 
         // First, open the deposit if it doesn't already exist (with co-signing)
-        match self.open_deposit(&reserves_id, &offer.descriptor, offer.fees.clone(), offer.transfer_fees.clone(), false, false).await {
+        match self
+            .open_deposit(
+                &reserves_id,
+                &offer.descriptor,
+                offer.fees.clone(),
+                offer.transfer_fees.clone(),
+                false,
+                false,
+            )
+            .await
+        {
             Ok(_) => {
                 tracing::info!(
                     "Opened deposit for {} in ledger {}",
@@ -12149,14 +14461,16 @@ impl Node {
         }
 
         // Credit the deposit with co-signing
-        let new_balance = self.credit_deposit_onchain(
-            &reserves_id,
-            &offer.descriptor,
-            amount_msats,
-            txid_bytes,
-            0, // vout - typically 0 for deposit offers
-            offer.funding_address.clone(),
-        ).await?;
+        let new_balance = self
+            .credit_deposit_onchain(
+                &reserves_id,
+                &offer.descriptor,
+                amount_msats,
+                txid_bytes,
+                0, // vout - typically 0 for deposit offers
+                offer.funding_address.clone(),
+            )
+            .await?;
 
         // Update offer status
         {
@@ -12185,7 +14499,10 @@ impl Node {
     ///
     /// Returns Some((txid, amount_sats)) if funds are detected, None otherwise.
     /// This version syncs the wallet before checking - use for single-call CLI usage.
-    pub fn check_deposit_offer_funding(&self, offer_id: &[u8; 32]) -> Result<Option<(String, u64)>, Error> {
+    pub fn check_deposit_offer_funding(
+        &self,
+        offer_id: &[u8; 32],
+    ) -> Result<Option<(String, u64)>, Error> {
         // Sync wallet first for CLI/single-call usage
         self.wallet.sync()?;
         self.check_deposit_offer_funding_inner(offer_id, true)
@@ -12194,8 +14511,13 @@ impl Node {
     /// Inner implementation of check_deposit_offer_funding
     ///
     /// If skip_sync is true, assumes wallet is already synced (for batch operations).
-    fn check_deposit_offer_funding_inner(&self, offer_id: &[u8; 32], skip_sync: bool) -> Result<Option<(String, u64)>, Error> {
-        let (offer, status) = self.get_deposit_offer(offer_id)
+    fn check_deposit_offer_funding_inner(
+        &self,
+        offer_id: &[u8; 32],
+        skip_sync: bool,
+    ) -> Result<Option<(String, u64)>, Error> {
+        let (offer, status) = self
+            .get_deposit_offer(offer_id)
             .ok_or(Error::OfferNotFound)?;
 
         tracing::debug!(
@@ -12205,7 +14527,10 @@ impl Node {
         );
 
         // If already completed, return the completed info
-        if let DepositOfferStatus::Completed { txid, amount_sats, .. } = &status {
+        if let DepositOfferStatus::Completed {
+            txid, amount_sats, ..
+        } = &status
+        {
             tracing::debug!("check_deposit_offer_funding: already completed");
             return Ok(Some((txid.clone(), *amount_sats)));
         }
@@ -12217,7 +14542,9 @@ impl Node {
         }
 
         // Parse the funding address and check for received funds
-        let address = offer.funding_address.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+        let address = offer
+            .funding_address
+            .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
             .map_err(|e| Error::Protocol(format!("Invalid funding address: {}", e)))?;
 
         // Sync wallet if not already synced
@@ -12325,16 +14652,22 @@ impl Node {
         if let Some((lid, _)) = self.get_ledger_by_reserves_key(identifier) {
             return Ok(lid);
         }
-        Err(format!("Ledger not found: {}", &identifier[..16.min(identifier.len())]))
+        Err(format!(
+            "Ledger not found: {}",
+            &identifier[..16.min(identifier.len())]
+        ))
     }
 
     /// Check if a ledger exists by ledger_id (no clone).
     /// Resolve a possibly-truncated ledger ID to the full 64-char ID.
     /// Returns the input unchanged if already full-length or not found.
     fn resolve_ledger_id(&self, ledger_id: &str) -> String {
-        if ledger_id.len() >= 64 { return ledger_id.to_string(); }
+        if ledger_id.len() >= 64 {
+            return ledger_id.to_string();
+        }
         let ledgers = self.handler.ledgers.lock().unwrap();
-        ledgers.keys()
+        ledgers
+            .keys()
             .find(|k| k.starts_with(ledger_id))
             .cloned()
             .unwrap_or_else(|| ledger_id.to_string())
@@ -12342,7 +14675,9 @@ impl Node {
 
     fn has_ledger(&self, ledger_id: &str) -> bool {
         let ledgers = self.handler.ledgers.lock().unwrap();
-        if ledgers.contains_key(ledger_id) { return true; }
+        if ledgers.contains_key(ledger_id) {
+            return true;
+        }
         // Prefix match for truncated IDs (16-char tags from Nostr events)
         if ledger_id.len() < 64 {
             return ledgers.keys().any(|k| k.starts_with(ledger_id));
@@ -12353,7 +14688,9 @@ impl Node {
     /// Check if a ledger exists by reserves_key (no clone).
     fn has_ledger_by_reserves_key(&self, reserves_key: &str) -> bool {
         let ledgers = self.handler.ledgers.lock().unwrap();
-        ledgers.values().any(|arc| arc.read().unwrap().reserves_key() == reserves_key)
+        ledgers
+            .values()
+            .any(|arc| arc.read().unwrap().reserves_key() == reserves_key)
     }
 
     /// Check if we are the operator of the given ledger.
@@ -12379,7 +14716,10 @@ impl Node {
                 }
             } else {
                 // Try reserves_key lookup
-                match ledgers.iter().find(|(_, a)| a.read().unwrap().reserves_key() == ledger_id) {
+                match ledgers
+                    .iter()
+                    .find(|(_, a)| a.read().unwrap().reserves_key() == ledger_id)
+                {
                     Some((lid, arc)) => (lid.clone(), arc.clone()),
                     None => return false,
                 }
@@ -12433,7 +14773,10 @@ impl Node {
         drop(ledger);
 
         // Store in cache
-        self.operator_of_cache.lock().unwrap().insert(canonical_id, (result, history_len));
+        self.operator_of_cache
+            .lock()
+            .unwrap()
+            .insert(canonical_id, (result, history_len));
         result
     }
 }

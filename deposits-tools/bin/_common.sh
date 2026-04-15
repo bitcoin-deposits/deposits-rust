@@ -79,10 +79,10 @@ generate_relay_config() {
 
     mkdir -p "$db_dir"
 
-    # Base config from the fast relay template
-    local src_conf="$REPO_ROOT/strfry-performance/strfry.conf"
+    # Base config from the relay config templates
+    local src_conf="$REPO_ROOT/deposits-tools/config/strfry.conf"
     if [ "$name" = "ledgers" ]; then
-        src_conf="$REPO_ROOT/strfry-performance/strfry-slow.conf"
+        src_conf="$REPO_ROOT/deposits-tools/config/strfry-slow.conf"
     fi
 
     # Copy and patch: db path, port, and write policy path

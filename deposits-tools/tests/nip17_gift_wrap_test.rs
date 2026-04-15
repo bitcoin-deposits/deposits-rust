@@ -2,14 +2,14 @@
 //! Tests the full gift wrap flow: create -> transmit -> unwrap
 //! This validates that our server and client implementations are compatible.
 
-use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey, Keypair, XOnlyPublicKey};
-use bitcoin::hashes::{Hash, sha256};
+use bitcoin::hashes::{sha256, Hash};
+use bitcoin::secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 // chacha20poly1305 import removed - using chacha20 stream cipher directly per NIP-44 spec
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use serde_json::{json, Value};
 use rand::RngCore;
+use serde_json::{json, Value};
+use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -66,11 +66,14 @@ fn pad_plaintext(data: &[u8]) -> Vec<u8> {
 
 fn unpad_plaintext(data: &[u8]) -> Vec<u8> {
     let len = ((data[0] as usize) << 8) | (data[1] as usize);
-    data[2..2+len].to_vec()
+    data[2..2 + len].to_vec()
 }
 
 fn nip44_encrypt(conversation_key: &[u8; 32], plaintext: &str) -> String {
-    use chacha20::{ChaCha20, cipher::{KeyIvInit, StreamCipher}};
+    use chacha20::{
+        cipher::{KeyIvInit, StreamCipher},
+        ChaCha20,
+    };
 
     let mut nonce = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);
@@ -104,10 +107,14 @@ fn nip44_encrypt(conversation_key: &[u8; 32], plaintext: &str) -> String {
 }
 
 fn nip44_decrypt(conversation_key: &[u8; 32], payload_b64: &str) -> Result<String, String> {
-    use chacha20::{ChaCha20, cipher::{KeyIvInit, StreamCipher}};
     use base64::Engine;
+    use chacha20::{
+        cipher::{KeyIvInit, StreamCipher},
+        ChaCha20,
+    };
 
-    let payload = base64::engine::general_purpose::STANDARD.decode(payload_b64)
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(payload_b64)
         .map_err(|e| format!("Base64 decode failed: {}", e))?;
 
     if payload.len() < 1 + 32 + 34 + 32 {
@@ -133,7 +140,8 @@ fn nip44_decrypt(conversation_key: &[u8; 32], payload_b64: &str) -> Result<Strin
     let mut mac = <HmacSha256 as Mac>::new_from_slice(&hmac_key).unwrap();
     mac.update(&nonce);
     mac.update(ciphertext);
-    mac.verify_slice(received_hmac).map_err(|_| "HMAC verification failed")?;
+    mac.verify_slice(received_hmac)
+        .map_err(|_| "HMAC verification failed")?;
 
     let mut cipher = ChaCha20::new(&chacha_key.into(), &chacha_nonce.into());
     let mut padded = ciphertext.to_vec();
@@ -188,7 +196,8 @@ fn create_gift_wrap(
     ]);
     let seal_id = sha256::Hash::hash(seal_data.to_string().as_bytes());
     let seal_id_hex = hex::encode(seal_id.as_byte_array());
-    let seal_message = bitcoin::secp256k1::Message::from_digest_slice(seal_id.as_byte_array()).unwrap();
+    let seal_message =
+        bitcoin::secp256k1::Message::from_digest_slice(seal_id.as_byte_array()).unwrap();
     let seal_sig = secp.sign_schnorr(&seal_message, sender_keypair);
 
     let seal = json!({
@@ -222,7 +231,8 @@ fn create_gift_wrap(
     ]);
     let wrap_id = sha256::Hash::hash(wrap_data.to_string().as_bytes());
     let wrap_id_hex = hex::encode(wrap_id.as_byte_array());
-    let wrap_message = bitcoin::secp256k1::Message::from_digest_slice(wrap_id.as_byte_array()).unwrap();
+    let wrap_message =
+        bitcoin::secp256k1::Message::from_digest_slice(wrap_id.as_byte_array()).unwrap();
     let wrap_sig = secp.sign_schnorr(&wrap_message, &ephemeral_keypair);
 
     json!({
@@ -243,13 +253,15 @@ fn unwrap_gift_wrap(
     event: &Value,
 ) -> Result<(String, String), String> {
     // Get ephemeral pubkey and encrypted content from gift wrap
-    let ephemeral_pubkey_str = event.get("pubkey")
+    let ephemeral_pubkey_str = event
+        .get("pubkey")
         .and_then(|p| p.as_str())
         .ok_or("Gift wrap missing pubkey")?;
     let ephemeral_xonly = XOnlyPublicKey::from_str(ephemeral_pubkey_str)
         .map_err(|e| format!("Invalid ephemeral pubkey: {}", e))?;
 
-    let encrypted_seal = event.get("content")
+    let encrypted_seal = event
+        .get("content")
         .and_then(|c| c.as_str())
         .ok_or("Gift wrap missing content")?;
 
@@ -258,16 +270,18 @@ fn unwrap_gift_wrap(
     let seal_json = nip44_decrypt(&wrap_conv_key, encrypted_seal)?;
 
     // Parse seal
-    let seal: Value = serde_json::from_str(&seal_json)
-        .map_err(|e| format!("Invalid seal JSON: {}", e))?;
+    let seal: Value =
+        serde_json::from_str(&seal_json).map_err(|e| format!("Invalid seal JSON: {}", e))?;
 
-    let sender_pubkey_str = seal.get("pubkey")
+    let sender_pubkey_str = seal
+        .get("pubkey")
         .and_then(|p| p.as_str())
         .ok_or("Seal missing pubkey")?;
     let sender_xonly = XOnlyPublicKey::from_str(sender_pubkey_str)
         .map_err(|e| format!("Invalid sender pubkey: {}", e))?;
 
-    let encrypted_rumor = seal.get("content")
+    let encrypted_rumor = seal
+        .get("content")
         .and_then(|c| c.as_str())
         .ok_or("Seal missing content")?;
 
@@ -276,10 +290,11 @@ fn unwrap_gift_wrap(
     let rumor_json = nip44_decrypt(&seal_conv_key, encrypted_rumor)?;
 
     // Parse rumor and extract content
-    let rumor: Value = serde_json::from_str(&rumor_json)
-        .map_err(|e| format!("Invalid rumor JSON: {}", e))?;
+    let rumor: Value =
+        serde_json::from_str(&rumor_json).map_err(|e| format!("Invalid rumor JSON: {}", e))?;
 
-    let content = rumor.get("content")
+    let content = rumor
+        .get("content")
         .and_then(|c| c.as_str())
         .ok_or("Rumor missing content")?;
 
@@ -327,12 +342,20 @@ fn test_gift_wrap_roundtrip() {
         assert_eq!(gift_wrap["kind"], 1059, "Gift wrap should be kind 1059");
 
         // Unwrap as recipient
-        let (recovered_sender, recovered_content) = unwrap_gift_wrap(&recipient_secret, &gift_wrap)
-            .expect("Failed to unwrap gift wrap");
+        let (recovered_sender, recovered_content) =
+            unwrap_gift_wrap(&recipient_secret, &gift_wrap).expect("Failed to unwrap gift wrap");
 
         // Verify sender and content
-        assert_eq!(recovered_sender, sender_xonly.to_string(), "Sender pubkey mismatch");
-        assert_eq!(recovered_content, message, "Content mismatch for message: {}", message);
+        assert_eq!(
+            recovered_sender,
+            sender_xonly.to_string(),
+            "Sender pubkey mismatch"
+        );
+        assert_eq!(
+            recovered_content, message,
+            "Content mismatch for message: {}",
+            message
+        );
     }
 }
 
@@ -387,17 +410,33 @@ fn test_gift_wrap_structure() {
     // Verify structure
     assert!(gift_wrap.get("id").is_some(), "Gift wrap should have id");
     assert_eq!(gift_wrap["kind"], 1059, "Gift wrap should be kind 1059");
-    assert!(gift_wrap.get("pubkey").is_some(), "Gift wrap should have pubkey");
-    assert!(gift_wrap.get("content").is_some(), "Gift wrap should have content");
-    assert!(gift_wrap.get("created_at").is_some(), "Gift wrap should have created_at");
+    assert!(
+        gift_wrap.get("pubkey").is_some(),
+        "Gift wrap should have pubkey"
+    );
+    assert!(
+        gift_wrap.get("content").is_some(),
+        "Gift wrap should have content"
+    );
+    assert!(
+        gift_wrap.get("created_at").is_some(),
+        "Gift wrap should have created_at"
+    );
     assert!(gift_wrap.get("sig").is_some(), "Gift wrap should have sig");
-    assert!(gift_wrap.get("tags").is_some(), "Gift wrap should have tags");
+    assert!(
+        gift_wrap.get("tags").is_some(),
+        "Gift wrap should have tags"
+    );
 
     // Verify p tag points to recipient
     let tags = gift_wrap["tags"].as_array().unwrap();
     assert_eq!(tags.len(), 1, "Gift wrap should have one tag");
     assert_eq!(tags[0][0], "p", "Tag should be p tag");
-    assert_eq!(tags[0][1], recipient_xonly.to_string(), "p tag should contain recipient");
+    assert_eq!(
+        tags[0][1],
+        recipient_xonly.to_string(),
+        "p tag should contain recipient"
+    );
 }
 
 #[test]
@@ -413,7 +452,10 @@ fn test_gift_wrap_ephemeral_key_is_unique() {
 
     let mut recipient_secret_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut recipient_secret_bytes);
-    let recipient_keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&recipient_secret_bytes).unwrap());
+    let recipient_keypair = Keypair::from_secret_key(
+        &secp,
+        &SecretKey::from_slice(&recipient_secret_bytes).unwrap(),
+    );
     let (recipient_xonly, _) = XOnlyPublicKey::from_keypair(&recipient_keypair);
 
     // Create two gift wraps
@@ -426,8 +468,16 @@ fn test_gift_wrap_ephemeral_key_is_unique() {
     assert_ne!(pubkey1, pubkey2, "Ephemeral keys should be unique");
 
     // Neither should be the sender's key
-    assert_ne!(pubkey1, sender_xonly.to_string(), "Ephemeral key should not be sender key");
-    assert_ne!(pubkey2, sender_xonly.to_string(), "Ephemeral key should not be sender key");
+    assert_ne!(
+        pubkey1,
+        sender_xonly.to_string(),
+        "Ephemeral key should not be sender key"
+    );
+    assert_ne!(
+        pubkey2,
+        sender_xonly.to_string(),
+        "Ephemeral key should not be sender key"
+    );
 }
 
 #[test]
@@ -467,7 +517,8 @@ fn test_gift_wrap_json_content() {
     // Generate keypairs
     let mut sender_secret_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut sender_secret_bytes);
-    let sender_keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&sender_secret_bytes).unwrap());
+    let sender_keypair =
+        Keypair::from_secret_key(&secp, &SecretKey::from_slice(&sender_secret_bytes).unwrap());
 
     let mut recipient_secret_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut recipient_secret_bytes);
@@ -481,7 +532,8 @@ fn test_gift_wrap_json_content() {
         "channel_id": "channel123",
         "balance_sat": 100000,
         "nwc_connection_string": "nostr+walletconnect://..."
-    }).to_string();
+    })
+    .to_string();
 
     let gift_wrap = create_gift_wrap(&secp, &sender_keypair, &recipient_xonly, &json_content);
     let (_, content) = unwrap_gift_wrap(&recipient_secret, &gift_wrap).unwrap();

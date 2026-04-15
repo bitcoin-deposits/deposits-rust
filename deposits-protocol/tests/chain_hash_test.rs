@@ -29,7 +29,7 @@ fn make_update(seq: u64, prev_hash: [u8; 32], message: &[u8]) -> SignedLedgerUpd
         operator_signature: [0u8; 64],
         cosigner_pubkey: None,
         member_ledger_hash: None,
-            cosignatures: Vec::new(),
+        cosignatures: Vec::new(),
     };
     u.current_hash = u.compute_hash();
     u
@@ -278,7 +278,7 @@ fn swapping_operator_sig_breaks_chain() {
 
 #[test]
 fn tlv_roundtrip_derives_current_hash() {
-    use deposits_protocol::tlv::{TlvEncode, TlvDecode};
+    use deposits_protocol::tlv::{TlvDecode, TlvEncode};
 
     let mut u = make_update(5, [0xAA; 32], &[10, 20, 30]);
     u.cosign_signature = [0xBB; 64];
@@ -295,7 +295,10 @@ fn tlv_roundtrip_derives_current_hash() {
     // Decode — current_hash is recomputed from content
     let decoded = SignedLedgerUpdate::tlv_decode(&encoded).unwrap();
 
-    assert_eq!(decoded.current_hash, expected_hash, "derived current_hash should match original");
+    assert_eq!(
+        decoded.current_hash, expected_hash,
+        "derived current_hash should match original"
+    );
     assert_eq!(decoded.sequence_number, 5);
     assert_eq!(decoded.previous_hash, [0xAA; 32]);
     assert_eq!(decoded.message, vec![10, 20, 30]);
@@ -307,7 +310,7 @@ fn tlv_roundtrip_derives_current_hash() {
 
 #[test]
 fn tlv_roundtrip_unsigned_update_derives_hash() {
-    use deposits_protocol::tlv::{TlvEncode, TlvDecode};
+    use deposits_protocol::tlv::{TlvDecode, TlvEncode};
 
     let u = make_update(0, [0u8; 32], &[1, 2, 3]);
     let expected = u.current_hash;
@@ -334,16 +337,31 @@ fn tlv_wire_does_not_contain_current_hash_bytes() {
     // With new layout, no field maps to current_hash
 
     // Check fields are present with new tag numbers
-    assert!(stream.get(0).is_some(), "operator_id (type 0) should be present");
-    assert!(stream.get(4).is_some(), "sequence_number (type 4) should be present");
-    assert!(stream.get(6).is_some(), "previous_hash (type 6) should be present");
-    assert!(stream.get(8).is_some(), "message (type 8) should be present");
-    assert!(stream.get(20).is_some(), "operator_signature (type 20) should be present");
+    assert!(
+        stream.get(0).is_some(),
+        "operator_id (type 0) should be present"
+    );
+    assert!(
+        stream.get(4).is_some(),
+        "sequence_number (type 4) should be present"
+    );
+    assert!(
+        stream.get(6).is_some(),
+        "previous_hash (type 6) should be present"
+    );
+    assert!(
+        stream.get(8).is_some(),
+        "message (type 8) should be present"
+    );
+    assert!(
+        stream.get(20).is_some(),
+        "operator_signature (type 20) should be present"
+    );
 }
 
 #[test]
 fn chain_of_three_survives_tlv_roundtrip() {
-    use deposits_protocol::tlv::{TlvEncode, TlvDecode};
+    use deposits_protocol::tlv::{TlvDecode, TlvEncode};
 
     // Build a 3-update chain
     let mut u0 = make_update(0, [0u8; 32], &[1]);

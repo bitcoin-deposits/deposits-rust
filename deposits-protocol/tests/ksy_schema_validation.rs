@@ -8,8 +8,8 @@
 //! If a field is added to Rust but not documented in .ksy (or vice versa),
 //! the roundtrip will fail because the Rust codec will produce different bytes.
 
-use deposits_protocol::tlv::{TlvEncode, TlvDecode, TlvStream, write_varint};
 use deposits_protocol::messages::LedgerOperation;
+use deposits_protocol::tlv::{write_varint, TlvDecode, TlvEncode, TlvStream};
 use deposits_protocol::types::{FeeStructure, TransferFeeSchedule};
 
 // ============================================================================
@@ -21,24 +21,49 @@ fn pubkey_bytes() -> Vec<u8> {
     hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798").unwrap()
 }
 
-fn hash32() -> Vec<u8> { vec![0xab; 32] }
-fn hash20() -> Vec<u8> { vec![0xcd; 20] }
-fn sig64() -> Vec<u8> { vec![0x30; 64] }
-fn deposit_id() -> Vec<u8> { vec![0x01; 16] }
-fn str_bytes(s: &str) -> Vec<u8> { s.as_bytes().to_vec() }
-fn u8_bytes(v: u8) -> Vec<u8> { vec![v] }
-fn u16_bytes(v: u16) -> Vec<u8> { v.to_be_bytes().to_vec() }
-fn u32_bytes(v: u32) -> Vec<u8> { v.to_be_bytes().to_vec() }
-fn u64_bytes(v: u64) -> Vec<u8> { v.to_be_bytes().to_vec() }
+fn hash32() -> Vec<u8> {
+    vec![0xab; 32]
+}
+fn hash20() -> Vec<u8> {
+    vec![0xcd; 20]
+}
+fn sig64() -> Vec<u8> {
+    vec![0x30; 64]
+}
+fn deposit_id() -> Vec<u8> {
+    vec![0x01; 16]
+}
+fn str_bytes(s: &str) -> Vec<u8> {
+    s.as_bytes().to_vec()
+}
+fn u8_bytes(v: u8) -> Vec<u8> {
+    vec![v]
+}
+fn u16_bytes(v: u16) -> Vec<u8> {
+    v.to_be_bytes().to_vec()
+}
+fn u32_bytes(v: u32) -> Vec<u8> {
+    v.to_be_bytes().to_vec()
+}
+fn u64_bytes(v: u64) -> Vec<u8> {
+    v.to_be_bytes().to_vec()
+}
 
 fn fee_structure_tlv() -> Vec<u8> {
     // Nested TLV matching FeeStructure: type 0 = annualized_msats, 2 = annualized_bps, 4 = frequency
-    let fees = FeeStructure { annualized_msats: 1000, annualized_bps: 50, frequency_blocks: 2016 };
+    let fees = FeeStructure {
+        annualized_msats: 1000,
+        annualized_bps: 50,
+        frequency_blocks: 2016,
+    };
     fees.tlv_encode()
 }
 
 fn transfer_fee_tlv() -> Vec<u8> {
-    let tf = TransferFeeSchedule { fixed_msats: 2, rate_bps: 20 };
+    let tf = TransferFeeSchedule {
+        fixed_msats: 2,
+        rate_bps: 20,
+    };
     tf.tlv_encode()
 }
 
@@ -72,11 +97,21 @@ fn validate_schema(disc: u8, name: &str, fields: &[(u64, Vec<u8>)]) {
     let ksy_bytes = build_tlv(disc, fields);
 
     // Rust decode
-    let decoded = LedgerOperation::tlv_decode(&ksy_bytes)
-        .unwrap_or_else(|e| panic!("[{}] disc={}: Rust decode failed on .ksy-derived payload: {:?}", name, disc, e));
+    let decoded = LedgerOperation::tlv_decode(&ksy_bytes).unwrap_or_else(|e| {
+        panic!(
+            "[{}] disc={}: Rust decode failed on .ksy-derived payload: {:?}",
+            name, disc, e
+        )
+    });
 
-    assert_eq!(decoded.discriminant(), disc,
-        "[{}]: decoded discriminant {} != expected {}", name, decoded.discriminant(), disc);
+    assert_eq!(
+        decoded.discriminant(),
+        disc,
+        "[{}]: decoded discriminant {} != expected {}",
+        name,
+        decoded.discriminant(),
+        disc
+    );
 
     // Re-encode
     let rust_bytes = decoded.tlv_encode();
@@ -93,25 +128,40 @@ fn validate_schema(disc: u8, name: &str, fields: &[(u64, Vec<u8>)]) {
         // Fields in Rust but not in .ksy
         for t in &rust_types {
             if !ksy_types.contains(t) {
-                panic!("[{}] disc={}: Rust emits field type {} not documented in .ksy", name, disc, t);
+                panic!(
+                    "[{}] disc={}: Rust emits field type {} not documented in .ksy",
+                    name, disc, t
+                );
             }
         }
         // Fields in .ksy but not in Rust
         for t in &ksy_types {
             if !rust_types.contains(t) {
-                panic!("[{}] disc={}: .ksy documents field type {} but Rust doesn't emit it", name, disc, t);
+                panic!(
+                    "[{}] disc={}: .ksy documents field type {} but Rust doesn't emit it",
+                    name, disc, t
+                );
             }
         }
         // Value differences
         for (t, ksy_val) in ksy_stream.iter() {
             if let Some(rust_val) = rust_stream.get(t) {
                 if ksy_val != rust_val {
-                    panic!("[{}] disc={}: field {} values differ (ksy {} bytes, rust {} bytes)",
-                        name, disc, t, ksy_val.len(), rust_val.len());
+                    panic!(
+                        "[{}] disc={}: field {} values differ (ksy {} bytes, rust {} bytes)",
+                        name,
+                        disc,
+                        t,
+                        ksy_val.len(),
+                        rust_val.len()
+                    );
                 }
             }
         }
-        panic!("[{}] disc={}: bytes differ but no field-level diff found", name, disc);
+        panic!(
+            "[{}] disc={}: bytes differ but no field-level diff found",
+            name, disc
+        );
     }
 }
 
@@ -193,236 +243,313 @@ const FEE: u64 = 2; // shares with AMOUNT for some ops, but fee uses it differen
 
 #[test]
 fn schema_ledger_open() {
-    validate_schema(1, "LedgerOpen", &[
-        (OPERATOR_ID, pubkey_bytes()),
-        (RESERVES_ID, str_bytes("bcrt1qtest")),
-        (62, u64_bytes(100_000_000)), // RESERVES_AMOUNT
-        (GENESIS_BLOCK, u32_bytes(100)),
-    ]);
+    validate_schema(
+        1,
+        "LedgerOpen",
+        &[
+            (OPERATOR_ID, pubkey_bytes()),
+            (RESERVES_ID, str_bytes("bcrt1qtest")),
+            (62, u64_bytes(100_000_000)), // RESERVES_AMOUNT
+            (GENESIS_BLOCK, u32_bytes(100)),
+        ],
+    );
 }
 
 #[test]
 fn schema_quorum_begin() {
-    validate_schema(12, "QuorumBegin", &[
-        (RESERVES_ID, str_bytes("bcrt1qtest")),
-        (SPENDING_TXID, hash32()),
-        (NEW_OUTPOINT_TXID, hash32()),
-        (NEW_OUTPOINT_VOUT, u32_bytes(0)),
-        (AMOUNT, u64_bytes(100_000_000)),
-        (QUORUM_EXPIRY, u32_bytes(1000)),
-        (LEDGER_HASH, hash32()),
-        (6, pubkey_bytes()), // QUORUM_MEMBERS — one member
-        (88, u64_bytes(50_000_000)), // TOTAL_COLLATERAL
-    ]);
+    validate_schema(
+        12,
+        "QuorumBegin",
+        &[
+            (RESERVES_ID, str_bytes("bcrt1qtest")),
+            (SPENDING_TXID, hash32()),
+            (NEW_OUTPOINT_TXID, hash32()),
+            (NEW_OUTPOINT_VOUT, u32_bytes(0)),
+            (AMOUNT, u64_bytes(100_000_000)),
+            (QUORUM_EXPIRY, u32_bytes(1000)),
+            (LEDGER_HASH, hash32()),
+            (6, pubkey_bytes()),         // QUORUM_MEMBERS — one member
+            (88, u64_bytes(50_000_000)), // TOTAL_COLLATERAL
+        ],
+    );
 }
 
 #[test]
 fn schema_deposit_open() {
-    validate_schema(20, "DepositOpen", &[
-        (DEPOSIT_ID, deposit_id()),
-        (DESCRIPTOR, str_bytes("pk(0279be66...)")),
-        (FEES, fee_structure_tlv()),
-        (TRANSFER_FEES, transfer_fee_tlv()),
-        (PAYMENT_HASH, hash32()),
-        (INVOICE, str_bytes("lnbcrt1test")),
-        (COSIGNER_SIG, sig64()),
-        (230, u8_bytes(1)), // IS_COLLATERAL
-    ]);
+    validate_schema(
+        20,
+        "DepositOpen",
+        &[
+            (DEPOSIT_ID, deposit_id()),
+            (DESCRIPTOR, str_bytes("pk(0279be66...)")),
+            (FEES, fee_structure_tlv()),
+            (TRANSFER_FEES, transfer_fee_tlv()),
+            (PAYMENT_HASH, hash32()),
+            (INVOICE, str_bytes("lnbcrt1test")),
+            (COSIGNER_SIG, sig64()),
+            (230, u8_bytes(1)), // IS_COLLATERAL
+        ],
+    );
 }
 
 #[test]
 fn schema_deposit_close() {
-    validate_schema(21, "DepositClose", &[
-        (DEPOSIT_ID, deposit_id()),
-    ]);
+    validate_schema(21, "DepositClose", &[(DEPOSIT_ID, deposit_id())]);
 }
 
 #[test]
 fn schema_fee_change() {
-    validate_schema(22, "FeeChange", &[
-        (DEPOSIT_ID, deposit_id()),
-        (NEW_FEES, fee_structure_tlv()),
-        (250, u32_bytes(0)), // EFFECTIVE_BLOCK
-    ]);
+    validate_schema(
+        22,
+        "FeeChange",
+        &[
+            (DEPOSIT_ID, deposit_id()),
+            (NEW_FEES, fee_structure_tlv()),
+            (250, u32_bytes(0)), // EFFECTIVE_BLOCK
+        ],
+    );
 }
 
 #[test]
 fn schema_deposit_key_rotate() {
-    validate_schema(23, "DepositKeyRotate", &[
-        (DEPOSIT_ID, deposit_id()),
-        (NEW_DESCRIPTOR, str_bytes("pk(03...)")),
-        (WITNESS, witness_tlv()),
-    ]);
+    validate_schema(
+        23,
+        "DepositKeyRotate",
+        &[
+            (DEPOSIT_ID, deposit_id()),
+            (NEW_DESCRIPTOR, str_bytes("pk(03...)")),
+            (WITNESS, witness_tlv()),
+        ],
+    );
 }
 
 #[test]
 fn schema_invoice_credit() {
-    validate_schema(30, "InvoiceCredit", &[
-        (PAYMENT_HASH, hash32()),
-        (DEPOSIT_ID, deposit_id()),
-        (AMOUNT, u64_bytes(10_000_000)),
-        (INVOICE_ID, str_bytes("bolt11:test")),
-        (SEQUENCE_NUMBER, u64_bytes(42)),
-    ]);
+    validate_schema(
+        30,
+        "InvoiceCredit",
+        &[
+            (PAYMENT_HASH, hash32()),
+            (DEPOSIT_ID, deposit_id()),
+            (AMOUNT, u64_bytes(10_000_000)),
+            (INVOICE_ID, str_bytes("bolt11:test")),
+            (SEQUENCE_NUMBER, u64_bytes(42)),
+        ],
+    );
 }
 
 #[test]
 fn schema_invoice_lock() {
-    validate_schema(31, "InvoiceLock", &[
-        (DEPOSIT_ID, deposit_id()),
-        (AMOUNT, u64_bytes(5_000_000)),
-        (PAYMENT_ID, hash32()),
-        (SEQUENCE_NUMBER, u64_bytes(43)),
-        (WITNESS, witness_tlv()),
-    ]);
+    validate_schema(
+        31,
+        "InvoiceLock",
+        &[
+            (DEPOSIT_ID, deposit_id()),
+            (AMOUNT, u64_bytes(5_000_000)),
+            (PAYMENT_ID, hash32()),
+            (SEQUENCE_NUMBER, u64_bytes(43)),
+            (WITNESS, witness_tlv()),
+        ],
+    );
 }
 
 #[test]
 fn schema_invoice_fail() {
-    validate_schema(32, "InvoiceFail", &[
-        (DEPOSIT_ID, deposit_id()),
-        (AMOUNT, u64_bytes(5_000_000)),
-        (PAYMENT_ID, hash32()),
-        (SEQUENCE_NUMBER, u64_bytes(44)),
-    ]);
+    validate_schema(
+        32,
+        "InvoiceFail",
+        &[
+            (DEPOSIT_ID, deposit_id()),
+            (AMOUNT, u64_bytes(5_000_000)),
+            (PAYMENT_ID, hash32()),
+            (SEQUENCE_NUMBER, u64_bytes(44)),
+        ],
+    );
 }
 
 #[test]
 fn schema_invoice_fulfill() {
-    validate_schema(33, "InvoiceFulfill", &[
-        (DEPOSIT_ID, deposit_id()),
-        (AMOUNT, u64_bytes(5_000_000)),
-        (PAYMENT_ID, hash32()),
-        (SEQUENCE_NUMBER, u64_bytes(45)),
-        (WITNESS, witness_tlv()),
-        (PREIMAGE, hash32()),
-    ]);
+    validate_schema(
+        33,
+        "InvoiceFulfill",
+        &[
+            (DEPOSIT_ID, deposit_id()),
+            (AMOUNT, u64_bytes(5_000_000)),
+            (PAYMENT_ID, hash32()),
+            (SEQUENCE_NUMBER, u64_bytes(45)),
+            (WITNESS, witness_tlv()),
+            (PREIMAGE, hash32()),
+        ],
+    );
 }
 
 #[test]
 fn schema_onchain_credit() {
-    validate_schema(35, "OnchainCredit", &[
-        (TXID, hash32()),
-        (VOUT, u32_bytes(0)),
-        (DEPOSIT_ID, deposit_id()),
-        (AMOUNT, u64_bytes(100_000_000)),
-        (FUNDING_ADDRESS, str_bytes("bcrt1qfund")),
-    ]);
+    validate_schema(
+        35,
+        "OnchainCredit",
+        &[
+            (TXID, hash32()),
+            (VOUT, u32_bytes(0)),
+            (DEPOSIT_ID, deposit_id()),
+            (AMOUNT, u64_bytes(100_000_000)),
+            (FUNDING_ADDRESS, str_bytes("bcrt1qfund")),
+        ],
+    );
 }
 
 #[test]
 fn schema_onchain_lock() {
-    validate_schema(36, "OnchainLock", &[
-        (DEPOSIT_ID, deposit_id()),
-        (AMOUNT, u64_bytes(50_000_000)),
-        (FEES, u64_bytes(500)),
-        (DESTINATION_ADDRESS, str_bytes("bcrt1qdest")),
-        (WITHDRAWAL_ID, hash32()),
-        (WITNESS, witness_tlv()),
-    ]);
+    validate_schema(
+        36,
+        "OnchainLock",
+        &[
+            (DEPOSIT_ID, deposit_id()),
+            (AMOUNT, u64_bytes(50_000_000)),
+            (FEES, u64_bytes(500)),
+            (DESTINATION_ADDRESS, str_bytes("bcrt1qdest")),
+            (WITHDRAWAL_ID, hash32()),
+            (WITNESS, witness_tlv()),
+        ],
+    );
 }
 
 #[test]
 fn schema_onchain_fail() {
-    validate_schema(37, "OnchainFail", &[
-        (DEPOSIT_ID, deposit_id()),
-        (WITHDRAWAL_ID, hash32()),
-    ]);
+    validate_schema(
+        37,
+        "OnchainFail",
+        &[(DEPOSIT_ID, deposit_id()), (WITHDRAWAL_ID, hash32())],
+    );
 }
 
 #[test]
 fn schema_onchain_fulfill() {
-    validate_schema(38, "OnchainFulfill", &[
-        (DEPOSIT_ID, deposit_id()),
-        (WITHDRAWAL_ID, hash32()),
-        (AMOUNT, u64_bytes(50_000_000)),
-        (TXID, hash32()),
-        (DESTINATION_ADDRESS, str_bytes("bcrt1qdest")),
-    ]);
+    validate_schema(
+        38,
+        "OnchainFulfill",
+        &[
+            (DEPOSIT_ID, deposit_id()),
+            (WITHDRAWAL_ID, hash32()),
+            (AMOUNT, u64_bytes(50_000_000)),
+            (TXID, hash32()),
+            (DESTINATION_ADDRESS, str_bytes("bcrt1qdest")),
+        ],
+    );
 }
 
 #[test]
 fn schema_collateral_attestation() {
-    validate_schema(42, "CollateralAttestation", &[
-        (COLLATERAL_OPERATOR, pubkey_bytes()),
-        (QUORUM_MEMBER, pubkey_bytes()),
-        (COLLATERAL_LEDGER_ID, str_bytes("abc123")),
-        (AMOUNT, u64_bytes(50_000_000)),
-        (BLOCK_HEIGHT, u32_bytes(200)),
-        (LOCK_UNTIL_BLOCK, u32_bytes(1000)),
-        (LEDGER_HASH, hash32()),
-        (SIGNATURE, sig64()),
-    ]);
+    validate_schema(
+        42,
+        "CollateralAttestation",
+        &[
+            (COLLATERAL_OPERATOR, pubkey_bytes()),
+            (QUORUM_MEMBER, pubkey_bytes()),
+            (COLLATERAL_LEDGER_ID, str_bytes("abc123")),
+            (AMOUNT, u64_bytes(50_000_000)),
+            (BLOCK_HEIGHT, u32_bytes(200)),
+            (LOCK_UNTIL_BLOCK, u32_bytes(1000)),
+            (LEDGER_HASH, hash32()),
+            (SIGNATURE, sig64()),
+        ],
+    );
 }
 
 #[test]
 fn schema_quorum_add_member() {
-    validate_schema(43, "QuorumAddMember", &[
-        (QUORUM_MEMBER, pubkey_bytes()),
-        (QUORUM_MEMBER_SIG, sig64()),
-        (MEMBER_LEDGER_ID, str_bytes("abc123")),
-        (MIN_FEE_BPS, u16_bytes(500)),
-        (MIN_FEE_FIXED, u64_bytes(100_000)),
-        (MAX_FEE_PERIOD, u32_bytes(2016)),
-        (COLLATERAL_LOCK_AMT, u64_bytes(50_000_000)),
-        (COLLATERAL_LOCK_UNTIL_BLOCK, u32_bytes(10000)),
-    ]);
+    validate_schema(
+        43,
+        "QuorumAddMember",
+        &[
+            (QUORUM_MEMBER, pubkey_bytes()),
+            (QUORUM_MEMBER_SIG, sig64()),
+            (MEMBER_LEDGER_ID, str_bytes("abc123")),
+            (MIN_FEE_BPS, u16_bytes(500)),
+            (MIN_FEE_FIXED, u64_bytes(100_000)),
+            (MAX_FEE_PERIOD, u32_bytes(2016)),
+            (COLLATERAL_LOCK_AMT, u64_bytes(50_000_000)),
+            (COLLATERAL_LOCK_UNTIL_BLOCK, u32_bytes(10000)),
+        ],
+    );
 }
 
 #[test]
 fn schema_quorum_remove_member() {
-    validate_schema(44, "QuorumRemoveMember", &[
-        (QUORUM_MEMBER, pubkey_bytes()),
-        (OPERATOR_SIG, sig64()),
-    ]);
+    validate_schema(
+        44,
+        "QuorumRemoveMember",
+        &[(QUORUM_MEMBER, pubkey_bytes()), (OPERATOR_SIG, sig64())],
+    );
 }
 
 #[test]
 fn schema_collateral_lock() {
-    validate_schema(45, "CollateralLock", &[
-        (DEPOSIT_ID, deposit_id()),
-        (AMOUNT, u64_bytes(25_000_000)),
-        (LOCK_UNTIL_BLOCK, u32_bytes(1000)),
-        (OPERATOR_ID, pubkey_bytes()),
-        (WITNESS, witness_tlv()),
-    ]);
+    validate_schema(
+        45,
+        "CollateralLock",
+        &[
+            (DEPOSIT_ID, deposit_id()),
+            (AMOUNT, u64_bytes(25_000_000)),
+            (LOCK_UNTIL_BLOCK, u32_bytes(1000)),
+            (OPERATOR_ID, pubkey_bytes()),
+            (WITNESS, witness_tlv()),
+            (MEMBER_LEDGER_ID, str_bytes("test_ledger_id")),
+        ],
+    );
 }
 
 #[test]
 fn schema_quorum_join() {
-    validate_schema(46, "QuorumJoin", &[
-        (OPERATOR_ID, pubkey_bytes()),
-        (RESERVES_ID, str_bytes("abc123def456")),
-        (MEMBERSHIP_EXPIRES, u32_bytes(100_000)),
-    ]);
+    validate_schema(
+        46,
+        "QuorumJoin",
+        &[
+            (OPERATOR_ID, pubkey_bytes()),
+            (RESERVES_ID, str_bytes("abc123def456")),
+            (MEMBERSHIP_EXPIRES, u32_bytes(100_000)),
+        ],
+    );
 }
 
 #[test]
 fn schema_fee_collect() {
-    validate_schema(50, "FeeCollect", &[
-        (DEPOSIT_ID, deposit_id()),
-        (AMOUNT, u64_bytes(1000)),
-        (BLOCK_HEIGHT, u32_bytes(500)),
-    ]);
+    validate_schema(
+        50,
+        "FeeCollect",
+        &[
+            (DEPOSIT_ID, deposit_id()),
+            (AMOUNT, u64_bytes(1000)),
+            (BLOCK_HEIGHT, u32_bytes(500)),
+        ],
+    );
 }
 
 #[test]
 fn schema_custody_dispute() {
-    validate_schema(54, "DisputeEnter", &[
-        (LAST_VALID_SEQUENCE, u64_bytes(10)),
-        (REASON, str_bytes("hash_chain_broken")),
-    ]);
+    validate_schema(
+        54,
+        "DisputeEnter",
+        &[
+            (LAST_VALID_SEQUENCE, u64_bytes(10)),
+            (REASON, str_bytes("hash_chain_broken")),
+        ],
+    );
 }
 
 #[test]
 fn schema_custody_acquire() {
-    validate_schema(55, "DisputeAcquire", &[
-        (NEW_CUSTODIAN, pubkey_bytes()),
-        (ENTROPY_BLOCK_HEIGHT, u32_bytes(400)),
-        (ENTROPY_BLOCK_HASH, hash32()),
-        (SPEND_TXID, hash32()),
-        (NEW_RESERVES_ADDRESS, str_bytes("bcrt1qnew")),
-    ]);
+    validate_schema(
+        55,
+        "DisputeAcquire",
+        &[
+            (NEW_CUSTODIAN, pubkey_bytes()),
+            (ENTROPY_BLOCK_HEIGHT, u32_bytes(400)),
+            (ENTROPY_BLOCK_HASH, hash32()),
+            (SPEND_TXID, hash32()),
+            (NEW_RESERVES_ADDRESS, str_bytes("bcrt1qnew")),
+        ],
+    );
 }
 
 #[test]
@@ -432,11 +559,15 @@ fn schema_custody_yield() {
 
 #[test]
 fn schema_custody_armed() {
-    validate_schema(57, "DisputeArmed", &[
-        (ARMED_BLOCK, u32_bytes(300)),
-        (COMMITMENT_HASH, hash20()),
-        (TARGET_RESERVES, str_bytes("bcrt1qtarget")),
-    ]);
+    validate_schema(
+        57,
+        "DisputeArmed",
+        &[
+            (ARMED_BLOCK, u32_bytes(300)),
+            (COMMITMENT_HASH, hash20()),
+            (TARGET_RESERVES, str_bytes("bcrt1qtarget")),
+        ],
+    );
 }
 
 #[test]
@@ -446,32 +577,41 @@ fn schema_ledger_close() {
 
 #[test]
 fn schema_transfer_lock() {
-    validate_schema(70, "TransferLock", &[
-        (NONCE, hash32()),
-        (SOURCE_DEPOSIT_ID, deposit_id()),
-        (DESTINATION_DEPOSIT_ID, vec![0x02; 16]),
-        (AMOUNT, u64_bytes(1_000_000)),
-        (FEES, u64_bytes(2000)),
-        (COMPLETION_SCRIPT, str_bytes("sha256(abcd1234)")),
-        (TIMEOUT_HEIGHT, u32_bytes(5000)),
-        (TRANSFER_ID, hash32()),
-        (WITNESS, witness_tlv()),
-    ]);
+    validate_schema(
+        70,
+        "TransferLock",
+        &[
+            (NONCE, hash32()),
+            (SOURCE_DEPOSIT_ID, deposit_id()),
+            (DESTINATION_DEPOSIT_ID, vec![0x02; 16]),
+            (AMOUNT, u64_bytes(1_000_000)),
+            (FEES, u64_bytes(2000)),
+            (COMPLETION_SCRIPT, str_bytes("sha256(abcd1234)")),
+            (TIMEOUT_HEIGHT, u32_bytes(5000)),
+            (TRANSFER_ID, hash32()),
+            (WITNESS, witness_tlv()),
+        ],
+    );
 }
 
 #[test]
 fn schema_transfer_complete() {
-    validate_schema(71, "TransferComplete", &[
-        (TRANSFER_ID, hash32()),
-        (SCRIPT_WITNESS, witness_tlv()),
-    ]);
+    validate_schema(
+        71,
+        "TransferComplete",
+        &[(TRANSFER_ID, hash32()), (SCRIPT_WITNESS, witness_tlv())],
+    );
 }
 
 #[test]
 fn schema_transfer_fail() {
-    validate_schema(72, "TransferFail", &[
-        (TRANSFER_ID, hash32()),
-        (BLOCK_HASH, hash32()),
-        (FAIL_REASON, u8_bytes(1)),
-    ]);
+    validate_schema(
+        72,
+        "TransferFail",
+        &[
+            (TRANSFER_ID, hash32()),
+            (BLOCK_HASH, hash32()),
+            (FAIL_REASON, u8_bytes(1)),
+        ],
+    );
 }

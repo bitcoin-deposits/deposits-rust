@@ -20,7 +20,7 @@
 use bitcoin::secp256k1::PublicKey;
 
 use crate::error::{DepositsError, DepositsResult};
-use crate::types::{LedgerState, Deposit, PendingInvoice, Invoice};
+use crate::types::{Deposit, Invoice, LedgerState, PendingInvoice};
 
 /// Core validation rules for Bitcoin Deposits protocol operations
 pub struct ValidationRules;
@@ -97,10 +97,7 @@ impl ValidationRules {
     }
 
     /// Validate deposit removal conditions
-    pub fn validate_deposit_removal(
-        deposit: &Deposit,
-        current_time: u64,
-    ) -> DepositsResult<()> {
+    pub fn validate_deposit_removal(deposit: &Deposit, current_time: u64) -> DepositsResult<()> {
         // Check for non-zero balance
         if deposit.balance > 0 {
             return Err(DepositsError::NonZeroBalance {
@@ -150,11 +147,17 @@ impl ValidationRules {
         state: &'a LedgerState,
         deposit_id: &crate::types::DepositId,
     ) -> DepositsResult<&'a Deposit> {
-        state.deposits.get(deposit_id).ok_or(DepositsError::DepositNotFound)
+        state
+            .deposits
+            .get(deposit_id)
+            .ok_or(DepositsError::DepositNotFound)
     }
 
     /// Validate that deposit does not already exist
-    pub fn validate_deposit_not_exists(state: &LedgerState, deposit_id: &crate::types::DepositId) -> DepositsResult<()> {
+    pub fn validate_deposit_not_exists(
+        state: &LedgerState,
+        deposit_id: &crate::types::DepositId,
+    ) -> DepositsResult<()> {
         if state.deposits.contains_key(deposit_id) {
             return Err(DepositsError::DepositAlreadyExists);
         }
@@ -170,7 +173,10 @@ impl ValidationRules {
     }
 
     /// Validate invoice expiration
-    pub fn validate_invoice_not_expired(invoice: &Invoice, current_time: u64) -> DepositsResult<()> {
+    pub fn validate_invoice_not_expired(
+        invoice: &Invoice,
+        current_time: u64,
+    ) -> DepositsResult<()> {
         if invoice.is_expired(current_time) {
             return Err(DepositsError::InvalidMessage {
                 reason: "Invoice has expired".to_string(),
@@ -205,10 +211,7 @@ impl ValidationRules {
     }
 
     /// Validate fee assessment for deposit
-    pub fn validate_fee_assessment(
-        deposit: &Deposit,
-        blocks_elapsed: u32,
-    ) -> DepositsResult<u64> {
+    pub fn validate_fee_assessment(deposit: &Deposit, blocks_elapsed: u32) -> DepositsResult<u64> {
         // Calculate fee amount based on fee structure
         let fee_amount = Self::calculate_fee_amount(deposit, blocks_elapsed);
 
@@ -251,7 +254,10 @@ pub struct OperationValidator;
 
 impl OperationValidator {
     /// Validate complete add deposit operation
-    pub fn validate_add_deposit(state: &LedgerState, deposit_id: &crate::types::DepositId) -> DepositsResult<()> {
+    pub fn validate_add_deposit(
+        state: &LedgerState,
+        deposit_id: &crate::types::DepositId,
+    ) -> DepositsResult<()> {
         // Check deposit doesn't already exist
         ValidationRules::validate_deposit_not_exists(state, deposit_id)?;
 
@@ -508,7 +514,8 @@ impl LedgerConformanceValidator {
         claimed_reserves: u64,
         collateral_amounts: &[u64],
     ) -> bool {
-        self.validate_state(state, claimed_reserves, collateral_amounts).is_conforming
+        self.validate_state(state, claimed_reserves, collateral_amounts)
+            .is_conforming
     }
 }
 
@@ -595,14 +602,16 @@ impl LedgerExport {
 
     /// Get the genesis hash (first update's previous_hash, which should be [0u8; 32]).
     pub fn genesis_hash(&self) -> [u8; 32] {
-        self.updates.first()
+        self.updates
+            .first()
             .map(|u| u.previous_hash)
             .unwrap_or([0u8; 32])
     }
 
     /// Get the tail hash (last update's current_hash).
     pub fn tail_hash(&self) -> [u8; 32] {
-        self.updates.last()
+        self.updates
+            .last()
             .map(|u| u.current_hash)
             .unwrap_or([0u8; 32])
     }
@@ -690,31 +699,19 @@ pub struct RuleCheck {
 pub enum ValidationError {
     /// Hash chain is broken at the given sequence.
     #[error("Hash chain broken at sequence {sequence}: {reason}")]
-    HashChainBroken {
-        sequence: u64,
-        reason: String,
-    },
+    HashChainBroken { sequence: u64, reason: String },
 
     /// Signature verification failed.
     #[error("Signature verification failed at sequence {sequence}: {reason}")]
-    SignatureInvalid {
-        sequence: u64,
-        reason: String,
-    },
+    SignatureInvalid { sequence: u64, reason: String },
 
     /// State transition failed to apply.
     #[error("State transition failed at sequence {sequence}: {reason}")]
-    StateTransitionFailed {
-        sequence: u64,
-        reason: String,
-    },
+    StateTransitionFailed { sequence: u64, reason: String },
 
     /// Business rule violation.
     #[error("Business rule violation: {rule}: {details}")]
-    BusinessRuleViolation {
-        rule: String,
-        details: String,
-    },
+    BusinessRuleViolation { rule: String, details: String },
 
     /// Decode error.
     #[error("Decode error: {0}")]
@@ -748,7 +745,8 @@ impl LedgerConformanceValidator {
         let business_rules = Self::validate_business_rules(&ledger);
 
         // Check if any critical business rule failed
-        let critical_failure = business_rules.iter()
+        let critical_failure = business_rules
+            .iter()
             .find(|r| !r.passed && r.rule == "reserves_coverage");
 
         // Collect warnings
@@ -757,10 +755,16 @@ impl LedgerConformanceValidator {
             warnings.push(format!("{} updates are unsigned", signatures.unsigned));
         }
         if signatures.operator_only > 0 {
-            warnings.push(format!("{} updates have only operator signature", signatures.operator_only));
+            warnings.push(format!(
+                "{} updates have only operator signature",
+                signatures.operator_only
+            ));
         }
         if !signatures.invalid_signatures.is_empty() {
-            warnings.push(format!("{} updates have invalid signatures", signatures.invalid_signatures.len()));
+            warnings.push(format!(
+                "{} updates have invalid signatures",
+                signatures.invalid_signatures.len()
+            ));
         }
 
         // Build chain status
@@ -782,7 +786,9 @@ impl LedgerConformanceValidator {
 
         let is_valid = critical_failure.is_none()
             && signatures.invalid_signatures.is_empty()
-            && business_rules.iter().all(|r| r.passed || r.rule != "reserves_coverage");
+            && business_rules
+                .iter()
+                .all(|r| r.passed || r.rule != "reserves_coverage");
 
         Ok(ValidationReport {
             is_valid,
@@ -796,7 +802,9 @@ impl LedgerConformanceValidator {
     }
 
     /// Validate just the hash chain (fast check).
-    pub fn validate_hash_chain(updates: &[crate::types::SignedLedgerUpdate]) -> Result<(), ValidationError> {
+    pub fn validate_hash_chain(
+        updates: &[crate::types::SignedLedgerUpdate],
+    ) -> Result<(), ValidationError> {
         let mut expected_prev = [0u8; 32];
 
         for (i, update) in updates.iter().enumerate() {
@@ -844,8 +852,10 @@ impl LedgerConformanceValidator {
 
     /// Validate signatures on all updates.
     pub fn validate_signatures(export: &LedgerExport) -> Result<SignatureReport, ValidationError> {
-        let mut report = SignatureReport::default();
-        report.total_updates = export.updates.len();
+        let mut report = SignatureReport {
+            total_updates: export.updates.len(),
+            ..Default::default()
+        };
 
         for update in &export.updates {
             let has_operator = update.operator_signature != [0u8; 64];
@@ -867,9 +877,11 @@ impl LedgerConformanceValidator {
     }
 
     /// Replay updates and verify state conformance.
-    pub fn validate_state_transitions(export: &LedgerExport) -> Result<crate::ledger::Ledger, ValidationError> {
-        use crate::tlv::TlvDecode;
+    pub fn validate_state_transitions(
+        export: &LedgerExport,
+    ) -> Result<crate::ledger::Ledger, ValidationError> {
         use crate::ledger::{Ledger, LedgerRole};
+        use crate::tlv::TlvDecode;
 
         // Create empty ledger as partner (for validation purposes)
         let mut ledger = Ledger::new(
@@ -887,11 +899,12 @@ impl LedgerConformanceValidator {
                 .map_err(|e| ValidationError::DecodeError(format!("{:?}", e)))?;
 
             // Apply state changes (skip validation for replay - we trust the history)
-            ledger.apply_state_changes(&operation)
-                .map_err(|e| ValidationError::StateTransitionFailed {
+            ledger.apply_state_changes(&operation).map_err(|e| {
+                ValidationError::StateTransitionFailed {
                     sequence: update.sequence_number,
                     reason: format!("{}", e),
-                })?;
+                }
+            })?;
 
             // Update sequence/hash to match the update (use chain_hash for signed entries
             // so state.hash reflects the full hash chain including operator signature)
@@ -919,12 +932,19 @@ impl LedgerConformanceValidator {
                 "reserves: {} sats, deposits: {} sats ({}%)",
                 reserves_msats / 1000,
                 total_deposits_msats / 1000,
-                if total_deposits_msats > 0 { (reserves_msats * 100) / total_deposits_msats } else { 100 }
+                if total_deposits_msats > 0 {
+                    (reserves_msats * 100) / total_deposits_msats
+                } else {
+                    100
+                }
             )),
         });
 
         // Rule 2: no negative balances (locked > balance is invalid)
-        let has_invalid_balance = ledger.state.deposits.values()
+        let has_invalid_balance = ledger
+            .state
+            .deposits
+            .values()
             .any(|d| d.locked_balance > d.balance);
         checks.push(RuleCheck {
             rule: "non_negative_available_balance".to_string(),
@@ -951,8 +971,7 @@ impl LedgerConformanceValidator {
             passed: sequence_matches,
             details: Some(format!(
                 "history length: {}, current sequence: {}",
-                history_len,
-                current_seq
+                history_len, current_seq
             )),
         });
 
@@ -965,7 +984,10 @@ impl LedgerConformanceValidator {
         checks.push(RuleCheck {
             rule: "final_hash_consistency".to_string(),
             passed: final_hash_valid,
-            details: Some(format!("final hash: {}", hex::encode(ledger.state.chain_tip_hash))),
+            details: Some(format!(
+                "final hash: {}",
+                hex::encode(ledger.state.chain_tip_hash)
+            )),
         });
 
         checks
@@ -976,7 +998,8 @@ impl LedgerConformanceValidator {
     /// This is a convenience method that validates and returns the reconstructed ledger.
     pub fn from_export(export: LedgerExport) -> Result<crate::ledger::Ledger, ValidationError> {
         let report = Self::validate(&export)?;
-        report.reconstructed_ledger
+        report
+            .reconstructed_ledger
             .ok_or_else(|| ValidationError::StateTransitionFailed {
                 sequence: 0,
                 reason: "Failed to reconstruct ledger".to_string(),
@@ -1145,7 +1168,10 @@ mod tests {
         let other_id = compute_deposit_id(&other_descriptor);
         let result = ValidationRules::validate_deposit_exists(&state, &other_id);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), DepositsError::DepositNotFound));
+        assert!(matches!(
+            result.unwrap_err(),
+            DepositsError::DepositNotFound
+        ));
     }
 
     #[test]
@@ -1317,7 +1343,8 @@ mod tests {
     fn test_ledger_export_creation() {
         let op = test_pubkey();
         let genesis_block = 1000u32;
-        let ledger_id = crate::types::LedgerState::compute_ledger_id(&op, "reserves_id", genesis_block);
+        let ledger_id =
+            crate::types::LedgerState::compute_ledger_id(&op, "reserves_id", genesis_block);
         let export = LedgerExport::new(
             ledger_id,
             genesis_block,
@@ -1341,7 +1368,8 @@ mod tests {
     fn test_ledger_export_json_roundtrip() {
         let op = test_pubkey();
         let genesis_block = 1000u32;
-        let ledger_id = crate::types::LedgerState::compute_ledger_id(&op, "reserves_id", genesis_block);
+        let ledger_id =
+            crate::types::LedgerState::compute_ledger_id(&op, "reserves_id", genesis_block);
         let export = LedgerExport::new(
             ledger_id,
             genesis_block,
@@ -1369,7 +1397,8 @@ mod tests {
     fn test_ledger_export_binary_roundtrip() {
         let op = test_pubkey();
         let genesis_block = 1000u32;
-        let ledger_id = crate::types::LedgerState::compute_ledger_id(&op, "reserves_id", genesis_block);
+        let ledger_id =
+            crate::types::LedgerState::compute_ledger_id(&op, "reserves_id", genesis_block);
         let export = LedgerExport::new(
             ledger_id,
             genesis_block,
@@ -1384,7 +1413,8 @@ mod tests {
         assert!(!binary.is_empty());
 
         // Deserialize from binary
-        let imported = LedgerExport::from_binary(&binary).expect("Binary deserialization should succeed");
+        let imported =
+            LedgerExport::from_binary(&binary).expect("Binary deserialization should succeed");
         assert_eq!(imported.version, export.version);
         assert_eq!(imported.ledger_id, export.ledger_id);
         assert_eq!(imported.genesis_block, export.genesis_block);
@@ -1467,7 +1497,8 @@ mod tests {
     fn test_validate_empty_ledger_fails() {
         let op = test_pubkey();
         let genesis_block = 1000u32;
-        let ledger_id = crate::types::LedgerState::compute_ledger_id(&op, "reserves_id", genesis_block);
+        let ledger_id =
+            crate::types::LedgerState::compute_ledger_id(&op, "reserves_id", genesis_block);
         let export = LedgerExport::new(
             ledger_id,
             genesis_block,

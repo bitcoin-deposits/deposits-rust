@@ -8,14 +8,14 @@
 
 extern crate kaitai;
 use kaitai::*;
+use std::cell::{Cell, Ref, RefCell};
 use std::convert::{TryFrom, TryInto};
-use std::cell::{Ref, Cell, RefCell};
 use std::rc::{Rc, Weak};
 
 /**
  * Bitcoin Deposits Protocol wire format. All structures use TLV (Type-Length-Value)
  * encoding with BigEndian varints, compatible with Lightning Network TLV format.
- * 
+ *
  * Fields are ordered by type number. Even types are required, odd are optional.
  * Unknown fields are preserved for forward compatibility.
  */
@@ -45,13 +45,16 @@ impl KStruct for DepositsProtocol {
         let _rrc = self_rc._root.get_value().borrow().upgrade();
         let _prc = self_rc._parent.get_value().borrow().upgrade();
         let _r = _rrc.as_ref().unwrap();
-        let t = Self::read_into::<_, DepositsProtocol_SignedLedgerUpdate>(&*_io, Some(self_rc._root.clone()), Some(self_rc._self.clone()))?.into();
+        let t = Self::read_into::<_, DepositsProtocol_SignedLedgerUpdate>(
+            _io,
+            Some(self_rc._root.clone()),
+            Some(self_rc._self.clone()),
+        )?;
         *self_rc.body.borrow_mut() = t;
         Ok(())
     }
 }
-impl DepositsProtocol {
-}
+impl DepositsProtocol {}
 impl DepositsProtocol {
     pub fn body(&self) -> Ref<'_, OptRc<DepositsProtocol_SignedLedgerUpdate>> {
         self.body.borrow()
@@ -100,7 +103,11 @@ impl KStruct for DepositsProtocol_FeeStructure {
         {
             let mut _i = 0;
             while !_io.is_eof() {
-                let t = Self::read_into::<_, DepositsProtocol_TlvRecord>(&*_io, Some(self_rc._root.clone()), None)?.into();
+                let t = Self::read_into::<_, DepositsProtocol_TlvRecord>(
+                    _io,
+                    Some(self_rc._root.clone()),
+                    None,
+                )?;
                 self_rc.records.borrow_mut().push(t);
                 _i += 1;
             }
@@ -108,8 +115,7 @@ impl KStruct for DepositsProtocol_FeeStructure {
         Ok(())
     }
 }
-impl DepositsProtocol_FeeStructure {
-}
+impl DepositsProtocol_FeeStructure {}
 impl DepositsProtocol_FeeStructure {
     pub fn records(&self) -> Ref<'_, Vec<OptRc<DepositsProtocol_TlvRecord>>> {
         self.records.borrow()
@@ -124,7 +130,7 @@ impl DepositsProtocol_FeeStructure {
 /**
  * A ledger operation — the inner message of a SignedLedgerUpdate.
  * First field (type 0) is always the discriminant byte identifying the operation type.
- * 
+ *
  * Discriminant values:
  *   1  = LedgerOpen
  *   10 = ReservesIncrease
@@ -192,7 +198,11 @@ impl KStruct for DepositsProtocol_LedgerOperation {
         {
             let mut _i = 0;
             while !_io.is_eof() {
-                let t = Self::read_into::<_, DepositsProtocol_TlvRecord>(&*_io, Some(self_rc._root.clone()), None)?.into();
+                let t = Self::read_into::<_, DepositsProtocol_TlvRecord>(
+                    _io,
+                    Some(self_rc._root.clone()),
+                    None,
+                )?;
                 self_rc.records.borrow_mut().push(t);
                 _i += 1;
             }
@@ -201,13 +211,10 @@ impl KStruct for DepositsProtocol_LedgerOperation {
     }
 }
 impl DepositsProtocol_LedgerOperation {
-
     /**
      * Operation type (type 0, 1 byte)
      */
-    pub fn discriminant(
-        &self
-    ) -> KResult<Ref<'_, u8>> {
+    pub fn discriminant(&self) -> KResult<Ref<'_, u8>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
@@ -216,7 +223,7 @@ impl DepositsProtocol_LedgerOperation {
             return Ok(self.discriminant.borrow());
         }
         self.f_discriminant.set(true);
-        *self.discriminant.borrow_mut() = (self.records()[0 as usize].value()[0 as usize]) as u8;
+        *self.discriminant.borrow_mut() = (self.records()[0_usize].value()[0_usize]);
         Ok(self.discriminant.borrow())
     }
 }
@@ -285,7 +292,11 @@ impl KStruct for DepositsProtocol_SignedLedgerUpdate {
         {
             let mut _i = 0;
             while !_io.is_eof() {
-                let t = Self::read_into::<_, DepositsProtocol_TlvRecord>(&*_io, Some(self_rc._root.clone()), None)?.into();
+                let t = Self::read_into::<_, DepositsProtocol_TlvRecord>(
+                    _io,
+                    Some(self_rc._root.clone()),
+                    None,
+                )?;
                 self_rc.records.borrow_mut().push(t);
                 _i += 1;
             }
@@ -294,13 +305,10 @@ impl KStruct for DepositsProtocol_SignedLedgerUpdate {
     }
 }
 impl DepositsProtocol_SignedLedgerUpdate {
-
     /**
      * 32-byte hash of this update (type 12)
      */
-    pub fn current_hash(
-        &self
-    ) -> KResult<Ref<'_, Vec<u8>>> {
+    pub fn current_hash(&self) -> KResult<Ref<'_, Vec<u8>>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
@@ -309,16 +317,14 @@ impl DepositsProtocol_SignedLedgerUpdate {
             return Ok(self.current_hash.borrow());
         }
         self.f_current_hash.set(true);
-        *self.current_hash.borrow_mut() = self.records()[6 as usize].value().to_vec();
+        *self.current_hash.borrow_mut() = self.records()[6_usize].value().to_vec();
         Ok(self.current_hash.borrow())
     }
 
     /**
      * 32-byte ledger identifier hash (type 6)
      */
-    pub fn ledger_id(
-        &self
-    ) -> KResult<Ref<'_, Vec<u8>>> {
+    pub fn ledger_id(&self) -> KResult<Ref<'_, Vec<u8>>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
@@ -327,16 +333,14 @@ impl DepositsProtocol_SignedLedgerUpdate {
             return Ok(self.ledger_id.borrow());
         }
         self.f_ledger_id.set(true);
-        *self.ledger_id.borrow_mut() = self.records()[3 as usize].value().to_vec();
+        *self.ledger_id.borrow_mut() = self.records()[3_usize].value().to_vec();
         Ok(self.ledger_id.borrow())
     }
 
     /**
      * Inner LedgerOperation TLV bytes (type 0)
      */
-    pub fn message(
-        &self
-    ) -> KResult<Ref<'_, Vec<u8>>> {
+    pub fn message(&self) -> KResult<Ref<'_, Vec<u8>>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
@@ -345,16 +349,14 @@ impl DepositsProtocol_SignedLedgerUpdate {
             return Ok(self.message.borrow());
         }
         self.f_message.set(true);
-        *self.message.borrow_mut() = self.records()[0 as usize].value().to_vec();
+        *self.message.borrow_mut() = self.records()[0_usize].value().to_vec();
         Ok(self.message.borrow())
     }
 
     /**
      * Protocol message type constant (type 2)
      */
-    pub fn message_type(
-        &self
-    ) -> KResult<Ref<'_, Vec<u8>>> {
+    pub fn message_type(&self) -> KResult<Ref<'_, Vec<u8>>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
@@ -363,16 +365,14 @@ impl DepositsProtocol_SignedLedgerUpdate {
             return Ok(self.message_type.borrow());
         }
         self.f_message_type.set(true);
-        *self.message_type.borrow_mut() = self.records()[1 as usize].value().to_vec();
+        *self.message_type.borrow_mut() = self.records()[1_usize].value().to_vec();
         Ok(self.message_type.borrow())
     }
 
     /**
      * Operator's 33-byte compressed secp256k1 pubkey (type 4)
      */
-    pub fn operator_id(
-        &self
-    ) -> KResult<Ref<'_, Vec<u8>>> {
+    pub fn operator_id(&self) -> KResult<Ref<'_, Vec<u8>>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
@@ -381,16 +381,14 @@ impl DepositsProtocol_SignedLedgerUpdate {
             return Ok(self.operator_id.borrow());
         }
         self.f_operator_id.set(true);
-        *self.operator_id.borrow_mut() = self.records()[2 as usize].value().to_vec();
+        *self.operator_id.borrow_mut() = self.records()[2_usize].value().to_vec();
         Ok(self.operator_id.borrow())
     }
 
     /**
      * 64-byte Schnorr signature from operator (type 18)
      */
-    pub fn operator_signature(
-        &self
-    ) -> KResult<Ref<'_, Vec<u8>>> {
+    pub fn operator_signature(&self) -> KResult<Ref<'_, Vec<u8>>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
@@ -399,16 +397,14 @@ impl DepositsProtocol_SignedLedgerUpdate {
             return Ok(self.operator_signature.borrow());
         }
         self.f_operator_signature.set(true);
-        *self.operator_signature.borrow_mut() = self.records()[9 as usize].value().to_vec();
+        *self.operator_signature.borrow_mut() = self.records()[9_usize].value().to_vec();
         Ok(self.operator_signature.borrow())
     }
 
     /**
      * 64-byte ECDSA signature from co-signing partner (type 16)
      */
-    pub fn cosign_signature(
-        &self
-    ) -> KResult<Ref<'_, Vec<u8>>> {
+    pub fn cosign_signature(&self) -> KResult<Ref<'_, Vec<u8>>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
@@ -417,16 +413,14 @@ impl DepositsProtocol_SignedLedgerUpdate {
             return Ok(self.cosign_signature.borrow());
         }
         self.f_cosign_signature.set(true);
-        *self.cosign_signature.borrow_mut() = self.records()[8 as usize].value().to_vec();
+        *self.cosign_signature.borrow_mut() = self.records()[8_usize].value().to_vec();
         Ok(self.cosign_signature.borrow())
     }
 
     /**
      * 32-byte hash of the previous update (type 10)
      */
-    pub fn previous_hash(
-        &self
-    ) -> KResult<Ref<'_, Vec<u8>>> {
+    pub fn previous_hash(&self) -> KResult<Ref<'_, Vec<u8>>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
@@ -435,16 +429,14 @@ impl DepositsProtocol_SignedLedgerUpdate {
             return Ok(self.previous_hash.borrow());
         }
         self.f_previous_hash.set(true);
-        *self.previous_hash.borrow_mut() = self.records()[5 as usize].value().to_vec();
+        *self.previous_hash.borrow_mut() = self.records()[5_usize].value().to_vec();
         Ok(self.previous_hash.borrow())
     }
 
     /**
      * Monotonically increasing sequence number (type 8)
      */
-    pub fn sequence_number(
-        &self
-    ) -> KResult<Ref<'_, Vec<u8>>> {
+    pub fn sequence_number(&self) -> KResult<Ref<'_, Vec<u8>>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
@@ -453,16 +445,14 @@ impl DepositsProtocol_SignedLedgerUpdate {
             return Ok(self.sequence_number.borrow());
         }
         self.f_sequence_number.set(true);
-        *self.sequence_number.borrow_mut() = self.records()[4 as usize].value().to_vec();
+        *self.sequence_number.borrow_mut() = self.records()[4_usize].value().to_vec();
         Ok(self.sequence_number.borrow())
     }
 
     /**
      * Unix timestamp in seconds (type 14)
      */
-    pub fn timestamp(
-        &self
-    ) -> KResult<Ref<'_, Vec<u8>>> {
+    pub fn timestamp(&self) -> KResult<Ref<'_, Vec<u8>>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
@@ -471,7 +461,7 @@ impl DepositsProtocol_SignedLedgerUpdate {
             return Ok(self.timestamp.borrow());
         }
         self.f_timestamp.set(true);
-        *self.timestamp.borrow_mut() = self.records()[7 as usize].value().to_vec();
+        *self.timestamp.borrow_mut() = self.records()[7_usize].value().to_vec();
         Ok(self.timestamp.borrow())
     }
 }
@@ -517,16 +507,23 @@ impl KStruct for DepositsProtocol_TlvRecord {
         let _rrc = self_rc._root.get_value().borrow().upgrade();
         let _prc = self_rc._parent.get_value().borrow().upgrade();
         let _r = _rrc.as_ref().unwrap();
-        let t = Self::read_into::<_, DepositsProtocol_Varint>(&*_io, Some(self_rc._root.clone()), Some(self_rc._self.clone()))?.into();
+        let t = Self::read_into::<_, DepositsProtocol_Varint>(
+            _io,
+            Some(self_rc._root.clone()),
+            Some(self_rc._self.clone()),
+        )?;
         *self_rc.record_type.borrow_mut() = t;
-        let t = Self::read_into::<_, DepositsProtocol_Varint>(&*_io, Some(self_rc._root.clone()), Some(self_rc._self.clone()))?.into();
+        let t = Self::read_into::<_, DepositsProtocol_Varint>(
+            _io,
+            Some(self_rc._root.clone()),
+            Some(self_rc._self.clone()),
+        )?;
         *self_rc.length.borrow_mut() = t;
-        *self_rc.value.borrow_mut() = _io.read_bytes(*self_rc.length().value()? as usize)?.into();
+        *self_rc.value.borrow_mut() = _io.read_bytes(*self_rc.length().value()? as usize)?;
         Ok(())
     }
 }
-impl DepositsProtocol_TlvRecord {
-}
+impl DepositsProtocol_TlvRecord {}
 impl DepositsProtocol_TlvRecord {
     pub fn record_type(&self) -> Ref<'_, OptRc<DepositsProtocol_Varint>> {
         self.record_type.borrow()
@@ -581,7 +578,11 @@ impl KStruct for DepositsProtocol_TlvStream {
         {
             let mut _i = 0;
             while !_io.is_eof() {
-                let t = Self::read_into::<_, DepositsProtocol_TlvRecord>(&*_io, Some(self_rc._root.clone()), None)?.into();
+                let t = Self::read_into::<_, DepositsProtocol_TlvRecord>(
+                    _io,
+                    Some(self_rc._root.clone()),
+                    None,
+                )?;
                 self_rc.records.borrow_mut().push(t);
                 _i += 1;
             }
@@ -589,8 +590,7 @@ impl KStruct for DepositsProtocol_TlvStream {
         Ok(())
     }
 }
-impl DepositsProtocol_TlvStream {
-}
+impl DepositsProtocol_TlvStream {}
 impl DepositsProtocol_TlvStream {
     pub fn records(&self) -> Ref<'_, Vec<OptRc<DepositsProtocol_TlvRecord>>> {
         self.records.borrow()
@@ -638,7 +638,11 @@ impl KStruct for DepositsProtocol_TransferFeeSchedule {
         {
             let mut _i = 0;
             while !_io.is_eof() {
-                let t = Self::read_into::<_, DepositsProtocol_TlvRecord>(&*_io, Some(self_rc._root.clone()), None)?.into();
+                let t = Self::read_into::<_, DepositsProtocol_TlvRecord>(
+                    _io,
+                    Some(self_rc._root.clone()),
+                    None,
+                )?;
                 self_rc.records.borrow_mut().push(t);
                 _i += 1;
             }
@@ -646,8 +650,7 @@ impl KStruct for DepositsProtocol_TransferFeeSchedule {
         Ok(())
     }
 }
-impl DepositsProtocol_TransferFeeSchedule {
-}
+impl DepositsProtocol_TransferFeeSchedule {}
 impl DepositsProtocol_TransferFeeSchedule {
     pub fn records(&self) -> Ref<'_, Vec<OptRc<DepositsProtocol_TlvRecord>>> {
         self.records.borrow()
@@ -693,23 +696,21 @@ impl KStruct for DepositsProtocol_Varint {
         let _rrc = self_rc._root.get_value().borrow().upgrade();
         let _prc = self_rc._parent.get_value().borrow().upgrade();
         let _r = _rrc.as_ref().unwrap();
-        *self_rc.first_byte.borrow_mut() = _io.read_u1()?.into();
+        *self_rc.first_byte.borrow_mut() = _io.read_u1()?;
         if *self_rc.first_byte() == 253 {
-            *self_rc.value_2.borrow_mut() = _io.read_u2be()?.into();
+            *self_rc.value_2.borrow_mut() = _io.read_u2be()?;
         }
         if *self_rc.first_byte() == 254 {
-            *self_rc.value_4.borrow_mut() = _io.read_u4be()?.into();
+            *self_rc.value_4.borrow_mut() = _io.read_u4be()?;
         }
         if *self_rc.first_byte() == 255 {
-            *self_rc.value_8.borrow_mut() = _io.read_u8be()?.into();
+            *self_rc.value_8.borrow_mut() = _io.read_u8be()?;
         }
         Ok(())
     }
 }
 impl DepositsProtocol_Varint {
-    pub fn value(
-        &self
-    ) -> KResult<Ref<'_, u64>> {
+    pub fn value(&self) -> KResult<Ref<'_, u64>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
@@ -718,7 +719,15 @@ impl DepositsProtocol_Varint {
             return Ok(self.value.borrow());
         }
         self.f_value.set(true);
-        *self.value.borrow_mut() = if *self.first_byte() == 255 { *self.value_8() } else if *self.first_byte() == 254 { *self.value_4() as u64 } else if *self.first_byte() == 253 { *self.value_2() as u64 } else { *self.first_byte() as u64 };
+        *self.value.borrow_mut() = if *self.first_byte() == 255 {
+            *self.value_8()
+        } else if *self.first_byte() == 254 {
+            *self.value_4() as u64
+        } else if *self.first_byte() == 253 {
+            *self.value_2() as u64
+        } else {
+            *self.first_byte() as u64
+        };
         Ok(self.value.borrow())
     }
 }

@@ -9,8 +9,8 @@
 #![cfg(feature = "bitcoin-deposits")]
 
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
-use deposits_core::types::QuorumMember;
 use deposits_core::ledger::{Ledger, LedgerRole};
+use deposits_core::types::QuorumMember;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -93,12 +93,8 @@ fn test_new_as_operator_helper() {
     let operator = generate_test_pubkey(1);
     let partner = generate_test_pubkey(2);
 
-    let ledger = Ledger::new_as_operator(
-        operator,
-        partner.to_string(),
-        "test_address".to_string(),
-        0,
-    );
+    let ledger =
+        Ledger::new_as_operator(operator, partner.to_string(), "test_address".to_string(), 0);
 
     assert!(ledger.is_operator());
     assert_eq!(ledger.role, LedgerRole::Operator);
@@ -146,7 +142,7 @@ fn test_unified_ledger_storage() {
     let _charlie_audit_ledger = Ledger::new(
         alice,
         bob.to_string(),
-        LedgerRole::Auditor,  // Charlie is auditing this ledger
+        LedgerRole::Auditor, // Charlie is auditing this ledger
         vec![],
         "alice_bob_addr".to_string(),
         0,
@@ -199,7 +195,8 @@ fn test_ledger_lookup_patterns() {
         node_a: PublicKey,
         node_b: PublicKey,
     ) -> Option<&'a Arc<RwLock<Ledger>>> {
-        ledgers.get(&(node_a, node_b))
+        ledgers
+            .get(&(node_a, node_b))
             .or_else(|| ledgers.get(&(node_b, node_a)))
     }
 
@@ -238,8 +235,14 @@ fn test_role_based_state_access() {
     );
 
     // Both should have same operator/reserves IDs
-    assert_eq!(op_ledger.state.operator_key, partner_ledger.state.operator_key);
-    assert_eq!(op_ledger.state.reserves_key, partner_ledger.state.reserves_key);
+    assert_eq!(
+        op_ledger.state.operator_key,
+        partner_ledger.state.operator_key
+    );
+    assert_eq!(
+        op_ledger.state.reserves_key,
+        partner_ledger.state.reserves_key
+    );
 
     // But different roles
     assert_ne!(op_ledger.role, partner_ledger.role);
@@ -337,26 +340,44 @@ fn test_ledger_multiple_quorum_members() {
     let qm1 = QuorumMember {
         pubkey: generate_test_pubkey(3),
         ledger_id: "collateral_ledger_1".to_string(),
-        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
-        collateral_lock_amount: None, collateral_lock_until: None,
-        dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None,
-        max_transfer_timeout_blocks: None, max_descriptor_bytes: None,
+        min_fee_bps: None,
+        min_fee_fixed: None,
+        max_fee_period: None,
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
+        dispute_response_blocks: None,
+        dispute_arm_blocks: None,
+        service_response_blocks: None,
+        max_transfer_timeout_blocks: None,
+        max_descriptor_bytes: None,
     };
     let qm2 = QuorumMember {
         pubkey: generate_test_pubkey(4),
         ledger_id: "collateral_ledger_2".to_string(),
-        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
-        collateral_lock_amount: None, collateral_lock_until: None,
-        dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None,
-        max_transfer_timeout_blocks: None, max_descriptor_bytes: None,
+        min_fee_bps: None,
+        min_fee_fixed: None,
+        max_fee_period: None,
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
+        dispute_response_blocks: None,
+        dispute_arm_blocks: None,
+        service_response_blocks: None,
+        max_transfer_timeout_blocks: None,
+        max_descriptor_bytes: None,
     };
     let qm3 = QuorumMember {
         pubkey: generate_test_pubkey(5),
         ledger_id: "collateral_ledger_3".to_string(),
-        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
-        collateral_lock_amount: None, collateral_lock_until: None,
-        dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None,
-        max_transfer_timeout_blocks: None, max_descriptor_bytes: None,
+        min_fee_bps: None,
+        min_fee_fixed: None,
+        max_fee_period: None,
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
+        dispute_response_blocks: None,
+        dispute_arm_blocks: None,
+        service_response_blocks: None,
+        max_transfer_timeout_blocks: None,
+        max_descriptor_bytes: None,
     };
 
     let ledger = Ledger::new(
@@ -410,7 +431,10 @@ fn test_ledger_same_operator_partner_key() {
     );
 
     // Should still work structurally
-    assert_eq!(ledger.state.operator_key.to_string(), ledger.state.reserves_key);
+    assert_eq!(
+        ledger.state.operator_key.to_string(),
+        ledger.state.reserves_key
+    );
     assert!(ledger.is_operator());
 }
 
@@ -460,8 +484,8 @@ fn test_concurrent_ledger_reads() {
 
 #[test]
 fn test_concurrent_ledger_writes() {
-    use std::thread;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
 
     let operator = generate_test_pubkey(1);
     let partner = generate_test_pubkey(2);

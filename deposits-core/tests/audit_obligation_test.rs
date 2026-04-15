@@ -48,9 +48,19 @@ fn total_collateral_computed_from_attestations() {
 
     // Add an attestation
     use deposits_core::types::CollateralAttestation;
-    ledger.state.collateral_attestations.insert(test_pubkey_2(), CollateralAttestation::new(
-        test_pubkey(), test_pubkey_2(), String::new(), 500_000, 0, 0, [0u8; 64], [0u8; 32],
-    ));
+    ledger.state.collateral_attestations.insert(
+        test_pubkey_2(),
+        CollateralAttestation::new(
+            test_pubkey(),
+            test_pubkey_2(),
+            String::new(),
+            500_000,
+            0,
+            0,
+            [0u8; 64],
+            [0u8; 32],
+        ),
+    );
     assert_eq!(ledger.state.total_collateral(), 500_000);
 }
 

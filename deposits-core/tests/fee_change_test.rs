@@ -2,8 +2,8 @@
 
 use deposits_core::ledger::{Ledger, LedgerRole};
 use deposits_core::messages::LedgerOperation;
-use deposits_core::types::{compute_deposit_id, FeeStructure, LedgerState};
 use deposits_core::operation_validation::validate_deposit_fee_change;
+use deposits_core::types::{compute_deposit_id, FeeStructure, LedgerState};
 
 fn test_pubkey() -> bitcoin::secp256k1::PublicKey {
     use std::str::FromStr;
@@ -14,11 +14,7 @@ fn test_pubkey() -> bitcoin::secp256k1::PublicKey {
 }
 
 fn make_ledger() -> Ledger {
-    let state = LedgerState::new(
-        test_pubkey(),
-        "bcrt1qtest".to_string(),
-        0,
-    );
+    let state = LedgerState::new(test_pubkey(), "bcrt1qtest".to_string(), 0);
     Ledger {
         state,
         protocol: Default::default(),
@@ -71,7 +67,9 @@ fn fee_change_no_constraints_passes() {
         &mut ledger,
         "pk(test1)",
         FeeStructure::new(1000, 100, 2016),
-        None, None, None,
+        None,
+        None,
+        None,
         100,
     );
 
@@ -94,7 +92,8 @@ fn fee_change_too_early_rejected() {
         "pk(test2)",
         FeeStructure::new(1000, 100, 2016),
         Some(1000), // can't change until block 1100 (opened at 100)
-        None, None,
+        None,
+        None,
         100,
     );
 
@@ -112,7 +111,8 @@ fn fee_change_after_waiting_period_passes() {
         "pk(test3)",
         FeeStructure::new(1000, 100, 2016),
         Some(1000),
-        None, None,
+        None,
+        None,
         100,
     );
 
@@ -173,7 +173,8 @@ fn fee_change_within_limit_passes() {
         &mut ledger,
         "pk(test6)",
         FeeStructure::new(10000, 1000, 2016),
-        None, None,
+        None,
+        None,
         Some(1000), // 10% limit
         100,
     );
@@ -190,7 +191,8 @@ fn fee_change_exceeding_bps_limit_rejected() {
         &mut ledger,
         "pk(test7)",
         FeeStructure::new(10000, 1000, 2016),
-        None, None,
+        None,
+        None,
         Some(1000), // 10% limit
         100,
     );
@@ -208,7 +210,8 @@ fn fee_change_exceeding_fixed_limit_rejected() {
         &mut ledger,
         "pk(test8)",
         FeeStructure::new(10000, 100, 2016),
-        None, None,
+        None,
+        None,
         Some(1000), // 10% limit
         100,
     );
@@ -226,7 +229,8 @@ fn fee_decrease_within_limit_passes() {
         &mut ledger,
         "pk(test9)",
         FeeStructure::new(10000, 1000, 2016),
-        None, None,
+        None,
+        None,
         Some(1000), // 10% limit
         100,
     );
@@ -247,9 +251,9 @@ fn all_constraints_satisfied_passes() {
         &mut ledger,
         "pk(test10)",
         FeeStructure::new(10000, 1000, 2016),
-        Some(1000),  // can't change until block 1100
-        Some(144),   // 144 blocks notice
-        Some(1000),  // 10% limit
+        Some(1000), // can't change until block 1100
+        Some(144),  // 144 blocks notice
+        Some(1000), // 10% limit
         100,
     );
 
@@ -288,16 +292,20 @@ fn deposit_update_creates_pending_fee_change() {
         &mut ledger,
         "pk(test12)",
         FeeStructure::new(1000, 100, 2016),
-        None, None, None,
+        None,
+        None,
+        None,
         100,
     );
 
     // Apply FeeChange
-    ledger.apply_state_changes(&LedgerOperation::FeeChange {
-        deposit_id: did,
-        new_fees: FeeStructure::new(2000, 200, 2016),
-        effective_block: 500,
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::FeeChange {
+            deposit_id: did,
+            new_fees: FeeStructure::new(2000, 200, 2016),
+            effective_block: 500,
+        })
+        .unwrap();
 
     let deposit = ledger.state.deposits.get(&did).unwrap();
     // Current fees unchanged
@@ -316,42 +324,52 @@ fn fee_collect_applies_pending_change_at_effective_block() {
         &mut ledger,
         "pk(test13)",
         FeeStructure::new(1000, 100, 2016),
-        None, None, None,
+        None,
+        None,
+        None,
         100,
     );
 
     // Credit some balance
-    ledger.apply_state_changes(&LedgerOperation::InvoiceCredit {
-        payment_hash: [0xaa; 32],
-        deposit_id: did,
-        amount: 1_000_000,
-        invoice_id: "fund".to_string(),
-        sequence_number: 1,
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::InvoiceCredit {
+            payment_hash: [0xaa; 32],
+            deposit_id: did,
+            amount: 1_000_000,
+            invoice_id: "fund".to_string(),
+            sequence_number: 1,
+        })
+        .unwrap();
 
     // Schedule fee change for block 500
-    ledger.apply_state_changes(&LedgerOperation::FeeChange {
-        deposit_id: did,
-        new_fees: FeeStructure::new(2000, 200, 2016),
-        effective_block: 500,
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::FeeChange {
+            deposit_id: did,
+            new_fees: FeeStructure::new(2000, 200, 2016),
+            effective_block: 500,
+        })
+        .unwrap();
 
     // FeeCollect before effective block: old fees still apply
-    ledger.apply_state_changes(&LedgerOperation::FeeCollect {
-        deposit_id: did,
-        amount: 10,
-        block_height: 400,
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::FeeCollect {
+            deposit_id: did,
+            amount: 10,
+            block_height: 400,
+        })
+        .unwrap();
     let deposit = ledger.state.deposits.get(&did).unwrap();
     assert_eq!(deposit.fees.annualized_bps, 100); // still old
     assert!(deposit.pending_fee_change.is_some()); // still pending
 
     // FeeCollect at effective block: new fees applied
-    ledger.apply_state_changes(&LedgerOperation::FeeCollect {
-        deposit_id: did,
-        amount: 10,
-        block_height: 500,
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::FeeCollect {
+            deposit_id: did,
+            amount: 10,
+            block_height: 500,
+        })
+        .unwrap();
     let deposit = ledger.state.deposits.get(&did).unwrap();
     assert_eq!(deposit.fees.annualized_bps, 200); // new!
     assert_eq!(deposit.fees.annualized_msats, 2000);
@@ -370,7 +388,8 @@ fn append_fee_change_too_early_rejected() {
         "pk(test14)",
         FeeStructure::new(1000, 100, 2016),
         Some(1000), // can't change until block 1100
-        None, None,
+        None,
+        None,
         100,
     );
 
@@ -386,7 +405,11 @@ fn append_fee_change_too_early_rejected() {
     );
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("too early") || err.contains("fee_change"), "{}", err);
+    assert!(
+        err.contains("too early") || err.contains("fee_change"),
+        "{}",
+        err
+    );
 }
 
 #[test]
@@ -396,7 +419,8 @@ fn append_fee_change_exceeding_limit_rejected() {
         &mut ledger,
         "pk(test15)",
         FeeStructure::new(10000, 1000, 2016),
-        None, None,
+        None,
+        None,
         Some(1000), // 10% limit
         100,
     );
@@ -413,7 +437,11 @@ fn append_fee_change_exceeding_limit_rejected() {
     );
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("change too large") || err.contains("fee_change"), "{}", err);
+    assert!(
+        err.contains("change too large") || err.contains("fee_change"),
+        "{}",
+        err
+    );
 }
 
 // =========================================================================
@@ -427,7 +455,8 @@ fn fee_change_from_zero_fees_allowed() {
         &mut ledger,
         "pk(zero_fees)",
         FeeStructure::new(0, 0, 2016), // start at zero
-        None, None,
+        None,
+        None,
         Some(1000), // 10% limit — but 10% of zero is zero, needs special handling
         100,
     );
@@ -444,7 +473,8 @@ fn fee_change_to_zero_within_limit() {
         &mut ledger,
         "pk(to_zero)",
         FeeStructure::new(100, 100, 2016),
-        None, None,
+        None,
+        None,
         Some(10000), // 100% limit — allows going to zero
         100,
     );
@@ -460,7 +490,8 @@ fn fee_change_frequency_not_constrained_by_limit() {
         &mut ledger,
         "pk(freq_change)",
         FeeStructure::new(1000, 100, 2016),
-        None, None,
+        None,
+        None,
         Some(1000), // 10% limit on bps/fixed
         100,
     );
@@ -478,7 +509,8 @@ fn opened_at_block_recorded_correctly() {
         "pk(block_track)",
         FeeStructure::new(1000, 100, 2016),
         Some(500),
-        None, None,
+        None,
+        None,
         750, // opened at block 750
     );
 
@@ -494,42 +526,67 @@ fn pending_fee_change_survives_multiple_fee_collects_before_effective() {
         &mut ledger,
         "pk(multi_collect)",
         FeeStructure::new(1000, 100, 2016),
-        None, None, None,
+        None,
+        None,
+        None,
         100,
     );
 
     // Credit balance
-    ledger.apply_state_changes(&LedgerOperation::InvoiceCredit {
-        payment_hash: [0xaa; 32],
-        deposit_id: did,
-        amount: 1_000_000,
-        invoice_id: "fund".to_string(),
-        sequence_number: 1,
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::InvoiceCredit {
+            payment_hash: [0xaa; 32],
+            deposit_id: did,
+            amount: 1_000_000,
+            invoice_id: "fund".to_string(),
+            sequence_number: 1,
+        })
+        .unwrap();
 
     // Schedule change for block 500
-    ledger.apply_state_changes(&LedgerOperation::FeeChange {
-        deposit_id: did,
-        new_fees: FeeStructure::new(2000, 200, 2016),
-        effective_block: 500,
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::FeeChange {
+            deposit_id: did,
+            new_fees: FeeStructure::new(2000, 200, 2016),
+            effective_block: 500,
+        })
+        .unwrap();
 
     // Multiple fee collects before effective block
     for block in [300, 350, 400, 450] {
-        ledger.apply_state_changes(&LedgerOperation::FeeCollect {
-            deposit_id: did, amount: 1, block_height: block,
-        }).unwrap();
+        ledger
+            .apply_state_changes(&LedgerOperation::FeeCollect {
+                deposit_id: did,
+                amount: 1,
+                block_height: block,
+            })
+            .unwrap();
         let d = ledger.state.deposits.get(&did).unwrap();
-        assert_eq!(d.fees.annualized_bps, 100, "should still be old fees at block {}", block);
-        assert!(d.pending_fee_change.is_some(), "pending should survive at block {}", block);
+        assert_eq!(
+            d.fees.annualized_bps, 100,
+            "should still be old fees at block {}",
+            block
+        );
+        assert!(
+            d.pending_fee_change.is_some(),
+            "pending should survive at block {}",
+            block
+        );
     }
 
     // Finally at block 500
-    ledger.apply_state_changes(&LedgerOperation::FeeCollect {
-        deposit_id: did, amount: 1, block_height: 500,
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::FeeCollect {
+            deposit_id: did,
+            amount: 1,
+            block_height: 500,
+        })
+        .unwrap();
     let d = ledger.state.deposits.get(&did).unwrap();
-    assert_eq!(d.fees.annualized_bps, 200, "new fees should apply at effective block");
+    assert_eq!(
+        d.fees.annualized_bps, 200,
+        "new fees should apply at effective block"
+    );
     assert!(d.pending_fee_change.is_none());
 }
 
@@ -540,23 +597,29 @@ fn second_fee_change_replaces_pending() {
         &mut ledger,
         "pk(replace)",
         FeeStructure::new(1000, 100, 2016),
-        None, None, None,
+        None,
+        None,
+        None,
         100,
     );
 
     // First change
-    ledger.apply_state_changes(&LedgerOperation::FeeChange {
-        deposit_id: did,
-        new_fees: FeeStructure::new(2000, 200, 2016),
-        effective_block: 500,
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::FeeChange {
+            deposit_id: did,
+            new_fees: FeeStructure::new(2000, 200, 2016),
+            effective_block: 500,
+        })
+        .unwrap();
 
     // Second change replaces the first
-    ledger.apply_state_changes(&LedgerOperation::FeeChange {
-        deposit_id: did,
-        new_fees: FeeStructure::new(3000, 300, 2016),
-        effective_block: 600,
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::FeeChange {
+            deposit_id: did,
+            new_fees: FeeStructure::new(3000, 300, 2016),
+            effective_block: 600,
+        })
+        .unwrap();
 
     let d = ledger.state.deposits.get(&did).unwrap();
     let (pending_fees, effective) = d.pending_fee_change.as_ref().unwrap();

@@ -1,6 +1,6 @@
-use deposits_protocol::messages::{LedgerOperation, BinaryCodec};
-use deposits_protocol::tlv::{TlvEncode, TlvDecode};
-use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
+use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+use deposits_protocol::messages::{BinaryCodec, LedgerOperation};
+use deposits_protocol::tlv::{TlvDecode, TlvEncode};
 use std::io::Cursor;
 
 fn test_pubkey() -> PublicKey {
@@ -33,12 +33,19 @@ fn delivery_embed_tlv_roundtrip() {
     let decoded = LedgerOperation::tlv_decode(&encoded).unwrap();
 
     match decoded {
-        LedgerOperation::DeliveryEmbed { request_hash, target_ledger_id, target_operator } => {
+        LedgerOperation::DeliveryEmbed {
+            request_hash,
+            target_ledger_id,
+            target_operator,
+        } => {
             assert_eq!(request_hash, [0xAB; 32]);
             assert_eq!(target_ledger_id, [0xCD; 32]);
             assert_eq!(target_operator, test_pubkey());
         }
-        other => panic!("Expected DeliveryEmbed, got discriminant {}", other.discriminant()),
+        other => panic!(
+            "Expected DeliveryEmbed, got discriminant {}",
+            other.discriminant()
+        ),
     }
 }
 
@@ -59,12 +66,19 @@ fn delivery_embed_binary_roundtrip() {
     let decoded = LedgerOperation::read_from(&mut Cursor::new(&bytes)).unwrap();
 
     match decoded {
-        LedgerOperation::DeliveryEmbed { request_hash, target_ledger_id, target_operator } => {
+        LedgerOperation::DeliveryEmbed {
+            request_hash,
+            target_ledger_id,
+            target_operator,
+        } => {
             assert_eq!(request_hash, [0x11; 32]);
             assert_eq!(target_ledger_id, [0x22; 32]);
             assert_eq!(target_operator, test_pubkey_2());
         }
-        other => panic!("Expected DeliveryEmbed, got discriminant {}", other.discriminant()),
+        other => panic!(
+            "Expected DeliveryEmbed, got discriminant {}",
+            other.discriminant()
+        ),
     }
 }
 
@@ -123,7 +137,10 @@ fn quorum_add_member_with_timing_params_tlv_roundtrip() {
             assert_eq!(max_transfer_timeout_blocks, Some(1008));
             assert_eq!(max_descriptor_bytes, Some(500));
         }
-        other => panic!("Expected QuorumAddMember, got discriminant {}", other.discriminant()),
+        other => panic!(
+            "Expected QuorumAddMember, got discriminant {}",
+            other.discriminant()
+        ),
     }
 }
 
@@ -182,7 +199,10 @@ fn quorum_add_member_none_timing_params_tlv_roundtrip() {
             assert_eq!(max_transfer_timeout_blocks, None);
             assert_eq!(max_descriptor_bytes, None);
         }
-        other => panic!("Expected QuorumAddMember, got discriminant {}", other.discriminant()),
+        other => panic!(
+            "Expected QuorumAddMember, got discriminant {}",
+            other.discriminant()
+        ),
     }
 }
 
@@ -249,6 +269,9 @@ fn quorum_add_member_binary_roundtrip_with_timing_params() {
             assert_eq!(max_transfer_timeout_blocks, None);
             assert_eq!(max_descriptor_bytes, None);
         }
-        other => panic!("Expected QuorumAddMember, got discriminant {}", other.discriminant()),
+        other => panic!(
+            "Expected QuorumAddMember, got discriminant {}",
+            other.discriminant()
+        ),
     }
 }

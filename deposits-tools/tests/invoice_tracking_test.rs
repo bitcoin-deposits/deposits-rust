@@ -8,10 +8,10 @@
 #![cfg(feature = "bitcoin-deposits")]
 
 use bitcoin::hashes::{sha256, Hash};
-use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
+use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 
 // Use core types for Invoice/PendingInvoice since Deposit.invoices is Vec<deposits_core::Invoice>
-use deposits_core::{Invoice, PendingInvoice, FeeStructure};
+use deposits_core::{FeeStructure, Invoice, PendingInvoice};
 // Use Deposit type from deposits-core
 use deposits_core::types::Deposit;
 
@@ -49,7 +49,11 @@ fn create_test_invoice(deposit_pubkey: PublicKey, payment_hash: [u8; 32], amount
 }
 
 /// Create a test pending invoice
-fn create_test_pending_invoice(deposit_pubkey: PublicKey, payment_hash: [u8; 32], amount: u64) -> PendingInvoice {
+fn create_test_pending_invoice(
+    deposit_pubkey: PublicKey,
+    payment_hash: [u8; 32],
+    amount: u64,
+) -> PendingInvoice {
     let deposit_id = deposit_id_from_pubkey(&deposit_pubkey);
     PendingInvoice {
         amount,
@@ -124,13 +128,23 @@ fn test_invoice_removal_by_payment_hash() {
     let payment_hash2 = generate_payment_hash(&preimage2);
 
     let mut deposit = create_test_deposit(deposit_pubkey, 100_000_000);
-    deposit.invoices.push(create_test_invoice(deposit_pubkey, payment_hash1, 5_000_000));
-    deposit.invoices.push(create_test_invoice(deposit_pubkey, payment_hash2, 10_000_000));
+    deposit.invoices.push(create_test_invoice(
+        deposit_pubkey,
+        payment_hash1,
+        5_000_000,
+    ));
+    deposit.invoices.push(create_test_invoice(
+        deposit_pubkey,
+        payment_hash2,
+        10_000_000,
+    ));
 
     assert_eq!(deposit.invoices.len(), 2);
 
     // Remove first invoice by payment hash (same pattern as in protocol.rs)
-    deposit.invoices.retain(|inv| inv.payment_hash != payment_hash1);
+    deposit
+        .invoices
+        .retain(|inv| inv.payment_hash != payment_hash1);
 
     assert_eq!(deposit.invoices.len(), 1);
     assert_eq!(deposit.invoices[0].payment_hash, payment_hash2);
@@ -147,15 +161,25 @@ fn test_find_invoice_by_payment_hash() {
     let payment_hash = generate_payment_hash(&preimage);
 
     let mut deposit = create_test_deposit(deposit_pubkey, 100_000_000);
-    deposit.invoices.push(create_test_invoice(deposit_pubkey, payment_hash, 25_000_000));
+    deposit.invoices.push(create_test_invoice(
+        deposit_pubkey,
+        payment_hash,
+        25_000_000,
+    ));
 
     // Find by payment hash
-    let found = deposit.invoices.iter().find(|inv| inv.payment_hash == payment_hash);
+    let found = deposit
+        .invoices
+        .iter()
+        .find(|inv| inv.payment_hash == payment_hash);
     assert!(found.is_some());
     assert_eq!(found.unwrap().amount, 25_000_000);
 
     // Non-existent payment hash
-    let not_found = deposit.invoices.iter().find(|inv| inv.payment_hash == [0xFF; 32]);
+    let not_found = deposit
+        .invoices
+        .iter()
+        .find(|inv| inv.payment_hash == [0xFF; 32]);
     assert!(not_found.is_none());
 }
 
@@ -179,7 +203,9 @@ fn test_invoice_lifecycle_add_then_credit() {
 
     // Step 2: Credit deposit and remove invoice (simulates payment received)
     deposit.balance += amount;
-    deposit.invoices.retain(|inv| inv.payment_hash != payment_hash);
+    deposit
+        .invoices
+        .retain(|inv| inv.payment_hash != payment_hash);
 
     assert_eq!(deposit.invoices.len(), 0);
     assert_eq!(deposit.balance, 100_000_000 + amount);
@@ -206,7 +232,10 @@ fn test_pending_invoice_conversion() {
 
     assert_eq!(invoice.payment_hash, payment_hash);
     assert_eq!(invoice.amount, amount);
-    assert_eq!(invoice.assigned_deposit, deposit_id_from_pubkey(&deposit_pubkey));
+    assert_eq!(
+        invoice.assigned_deposit,
+        deposit_id_from_pubkey(&deposit_pubkey)
+    );
 }
 
 // =============================================================================
@@ -258,14 +287,18 @@ fn test_find_bolt11_by_payment_hash() {
     });
 
     // Find bolt11 for first payment hash
-    let bolt11 = deposit.invoices.iter()
+    let bolt11 = deposit
+        .invoices
+        .iter()
         .find(|inv| inv.payment_hash == payment_hash1)
         .map(|inv| inv.bolt11.clone());
 
     assert_eq!(bolt11, Some("lnbc100n1first".to_string()));
 
     // Find bolt11 for second payment hash
-    let bolt11 = deposit.invoices.iter()
+    let bolt11 = deposit
+        .invoices
+        .iter()
         .find(|inv| inv.payment_hash == payment_hash2)
         .map(|inv| inv.bolt11.clone());
 
@@ -289,7 +322,9 @@ fn test_same_node_transfer_removes_receiver_invoice() {
 
     // Receiver deposit with invoice
     let mut receiver = create_test_deposit(receiver_pubkey, 50_000_000);
-    receiver.invoices.push(create_test_invoice(receiver_pubkey, payment_hash, amount));
+    receiver
+        .invoices
+        .push(create_test_invoice(receiver_pubkey, payment_hash, amount));
 
     assert_eq!(receiver.invoices.len(), 1);
 
@@ -299,7 +334,9 @@ fn test_same_node_transfer_removes_receiver_invoice() {
 
     // 2. Credit receiver and remove invoice
     receiver.balance += amount;
-    receiver.invoices.retain(|inv| inv.payment_hash != payment_hash);
+    receiver
+        .invoices
+        .retain(|inv| inv.payment_hash != payment_hash);
 
     assert_eq!(sender.balance, 90_000_000);
     assert_eq!(receiver.balance, 60_000_000);
@@ -315,14 +352,24 @@ fn test_same_node_transfer_only_removes_matching_invoice() {
     let payment_hash2 = generate_payment_hash(&preimage2);
 
     let mut receiver = create_test_deposit(receiver_pubkey, 50_000_000);
-    receiver.invoices.push(create_test_invoice(receiver_pubkey, payment_hash1, 5_000_000));
-    receiver.invoices.push(create_test_invoice(receiver_pubkey, payment_hash2, 10_000_000));
+    receiver.invoices.push(create_test_invoice(
+        receiver_pubkey,
+        payment_hash1,
+        5_000_000,
+    ));
+    receiver.invoices.push(create_test_invoice(
+        receiver_pubkey,
+        payment_hash2,
+        10_000_000,
+    ));
 
     assert_eq!(receiver.invoices.len(), 2);
 
     // Pay first invoice only
     receiver.balance += 5_000_000;
-    receiver.invoices.retain(|inv| inv.payment_hash != payment_hash1);
+    receiver
+        .invoices
+        .retain(|inv| inv.payment_hash != payment_hash1);
 
     // Second invoice should remain
     assert_eq!(receiver.invoices.len(), 1);
@@ -342,7 +389,9 @@ fn test_remove_nonexistent_invoice_is_noop() {
 
     // Try to remove invoice that doesn't exist
     let original_len = deposit.invoices.len();
-    deposit.invoices.retain(|inv| inv.payment_hash != payment_hash);
+    deposit
+        .invoices
+        .retain(|inv| inv.payment_hash != payment_hash);
 
     assert_eq!(deposit.invoices.len(), original_len);
 }
@@ -356,13 +405,21 @@ fn test_duplicate_invoice_payment_hashes_both_removed() {
     let mut deposit = create_test_deposit(deposit_pubkey, 100_000_000);
 
     // Add two invoices with same payment hash (shouldn't happen in practice)
-    deposit.invoices.push(create_test_invoice(deposit_pubkey, payment_hash, 5_000_000));
-    deposit.invoices.push(create_test_invoice(deposit_pubkey, payment_hash, 10_000_000));
+    deposit
+        .invoices
+        .push(create_test_invoice(deposit_pubkey, payment_hash, 5_000_000));
+    deposit.invoices.push(create_test_invoice(
+        deposit_pubkey,
+        payment_hash,
+        10_000_000,
+    ));
 
     assert_eq!(deposit.invoices.len(), 2);
 
     // Retain removes ALL matching - both should be gone
-    deposit.invoices.retain(|inv| inv.payment_hash != payment_hash);
+    deposit
+        .invoices
+        .retain(|inv| inv.payment_hash != payment_hash);
 
     assert_eq!(deposit.invoices.len(), 0);
 }

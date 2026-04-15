@@ -6,10 +6,10 @@
 //!
 //! This ensures the .ksy comments are the single source of truth for the wire format.
 
-use std::collections::HashMap;
-use deposits_protocol::tlv::{TlvEncode, TlvDecode, TlvStream, write_varint};
 use deposits_protocol::messages::LedgerOperation;
+use deposits_protocol::tlv::{write_varint, TlvDecode, TlvEncode, TlvStream};
 use deposits_protocol::types::{FeeStructure, TransferFeeSchedule};
+use std::collections::HashMap;
 
 // ============================================================================
 // .ksy comment parser
@@ -29,18 +29,20 @@ enum FieldType {
     U16,
     U32,
     U64,
-    Bytes(usize),   // fixed size
+    Bytes(usize), // fixed size
     String,
-    Pubkey,         // 33 bytes compressed secp256k1
-    DepositId,      // 16 bytes
+    Pubkey,            // 33 bytes compressed secp256k1
+    DepositId,         // 16 bytes
     NestedTlv(String), // name of nested type
 }
 
 /// Parse the .ksy file's TLV field type reference comments into a catalog
 fn parse_ksy_catalog() -> HashMap<u64, KsyField> {
-    let ksy = std::fs::read_to_string(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/deposits_protocol.ksy")
-    ).expect("failed to read .ksy file");
+    let ksy = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/deposits_protocol.ksy"
+    ))
+    .expect("failed to read .ksy file");
 
     let mut catalog = HashMap::new();
 
@@ -49,12 +51,16 @@ fn parse_ksy_catalog() -> HashMap<u64, KsyField> {
         // Match lines like: #   42  = ledger_hash (32 bytes)
         //                   #   200 = deposit_id (16 bytes)
         //                   #   12  = fees (nested TLV: FeeStructure ...)
-        if !line.starts_with('#') { continue; }
+        if !line.starts_with('#') {
+            continue;
+        }
         let line = line.trim_start_matches('#').trim();
 
         // Pattern: NUMBER = NAME (TYPE_DESC)
         let parts: Vec<&str> = line.splitn(2, '=').collect();
-        if parts.len() != 2 { continue; }
+        if parts.len() != 2 {
+            continue;
+        }
 
         let type_num: u64 = match parts[0].trim().parse() {
             Ok(n) => n,
@@ -65,7 +71,7 @@ fn parse_ksy_catalog() -> HashMap<u64, KsyField> {
         // Split "name (type_desc)" or just "name"
         let (name, type_desc) = if let Some(paren_start) = rest.find('(') {
             let name = rest[..paren_start].trim();
-            let desc = rest[paren_start+1..].trim_end_matches(')').trim();
+            let desc = rest[paren_start + 1..].trim_end_matches(')').trim();
             (name, desc)
         } else {
             (rest, "")
@@ -73,11 +79,14 @@ fn parse_ksy_catalog() -> HashMap<u64, KsyField> {
 
         let value_type = parse_field_type(type_desc);
 
-        catalog.insert(type_num, KsyField {
+        catalog.insert(
             type_num,
-            name: name.to_string(),
-            value_type,
-        });
+            KsyField {
+                type_num,
+                name: name.to_string(),
+                value_type,
+            },
+        );
     }
 
     catalog
@@ -86,8 +95,14 @@ fn parse_ksy_catalog() -> HashMap<u64, KsyField> {
 fn parse_field_type(desc: &str) -> FieldType {
     let desc_lower = desc.to_lowercase();
     if desc_lower.contains("nested tlv") {
-        let name = desc.split(':').nth(1).unwrap_or("unknown").trim()
-            .split(|c: char| !c.is_alphanumeric()).next().unwrap_or("unknown");
+        let name = desc
+            .split(':')
+            .nth(1)
+            .unwrap_or("unknown")
+            .trim()
+            .split(|c: char| !c.is_alphanumeric())
+            .next()
+            .unwrap_or("unknown");
         return FieldType::NestedTlv(name.to_string());
     }
     if desc_lower.contains("33 bytes") || desc_lower.contains("compressed secp256k1") {
@@ -122,8 +137,11 @@ fn parse_field_type(desc: &str) -> FieldType {
     }
     if desc_lower.contains("bytes") {
         // Generic bytes — try to parse size
-        if let Some(n) = desc_lower.split_whitespace().next()
-            .and_then(|s| s.parse::<usize>().ok()) {
+        if let Some(n) = desc_lower
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse::<usize>().ok())
+        {
             return FieldType::Bytes(n);
         }
         return FieldType::Bytes(32); // default
@@ -141,17 +159,21 @@ fn generate_value_for_disc(field: &KsyField, disc: u8) -> Vec<u8> {
     match field.type_num {
         // operator_id / pubkey fields need a valid compressed secp256k1 point
         10 | 38 | 44 | 56 | 108 => {
-            hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798").unwrap()
+            hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap()
         }
         // quorum_members: concatenated 33-byte compressed pubkeys
-        6 => {
-            hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798").unwrap()
-        }
+        6 => hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap(),
         // Field 12 is overloaded: nested FeeStructure in DepositOpen (20), plain u64 fee elsewhere
         12 => {
             if disc == 20 || disc == 22 {
                 // DepositOpen / FeeChange: nested FeeStructure
-                let f = FeeStructure { annualized_msats: 1000, annualized_bps: 50, frequency_blocks: 2016 };
+                let f = FeeStructure {
+                    annualized_msats: 1000,
+                    annualized_bps: 50,
+                    frequency_blocks: 2016,
+                };
                 f.tlv_encode()
             } else {
                 // OnchainLock (36), TransferLock (70), etc: plain u64 fee
@@ -160,7 +182,10 @@ fn generate_value_for_disc(field: &KsyField, disc: u8) -> Vec<u8> {
         }
         // Nested TransferFeeSchedule
         226 => {
-            let tf = TransferFeeSchedule { fixed_msats: 2, rate_bps: 20 };
+            let tf = TransferFeeSchedule {
+                fixed_msats: 2,
+                rate_bps: 20,
+            };
             tf.tlv_encode()
         }
         // Witness (nested TLV with stack elements)
@@ -173,7 +198,11 @@ fn generate_value_for_disc(field: &KsyField, disc: u8) -> Vec<u8> {
         }
         // nested FeeStructure (new_fees)
         20 => {
-            let f = FeeStructure { annualized_msats: 500, annualized_bps: 25, frequency_blocks: 1008 };
+            let f = FeeStructure {
+                annualized_msats: 500,
+                annualized_bps: 25,
+                frequency_blocks: 1008,
+            };
             f.tlv_encode()
         }
         // Default: generate from type annotation
@@ -189,11 +218,18 @@ fn generate_from_type(ft: &FieldType) -> Vec<u8> {
         FieldType::U64 => 10_000_000u64.to_be_bytes().to_vec(),
         FieldType::Bytes(n) => vec![0xab; *n],
         FieldType::String => b"test_value".to_vec(),
-        FieldType::Pubkey => hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798").unwrap(),
+        FieldType::Pubkey => {
+            hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap()
+        }
         FieldType::DepositId => vec![0x01; 16],
         FieldType::NestedTlv(_) => {
             // Generic nested — empty TLV
-            let f = FeeStructure { annualized_msats: 100, annualized_bps: 10, frequency_blocks: 144 };
+            let f = FeeStructure {
+                annualized_msats: 100,
+                annualized_bps: 10,
+                frequency_blocks: 144,
+            };
             f.tlv_encode()
         }
     }
@@ -231,11 +267,15 @@ fn every_rust_field_is_in_ksy_catalog() {
         let stream = TlvStream::decode(&encoded).expect("decode failed");
 
         for (field_type, _value) in stream.iter() {
-            if field_type == 0 { continue; } // discriminant always present
+            if field_type == 0 {
+                continue;
+            } // discriminant always present
             if !catalog.contains_key(&field_type) {
                 undocumented.push(format!(
                     "{} (disc {}): uses field type {} not in .ksy catalog",
-                    name, op.discriminant(), field_type
+                    name,
+                    op.discriminant(),
+                    field_type
                 ));
             }
         }
@@ -285,13 +325,20 @@ fn ksy_generated_payloads_roundtrip() {
             }
         };
 
-        assert_eq!(decoded.discriminant(), disc,
-            "[{}]: discriminant mismatch", name);
+        assert_eq!(
+            decoded.discriminant(),
+            disc,
+            "[{}]: discriminant mismatch",
+            name
+        );
 
         // Re-encode and verify byte-exact roundtrip
         let re_encoded = decoded.tlv_encode();
-        assert_eq!(re_encoded, catalog_bytes,
-            "[{}] disc={}: re-encode differs from catalog-generated bytes", name, disc);
+        assert_eq!(
+            re_encoded, catalog_bytes,
+            "[{}] disc={}: re-encode differs from catalog-generated bytes",
+            name, disc
+        );
     }
 }
 
@@ -302,122 +349,300 @@ fn ksy_generated_payloads_roundtrip() {
 fn pk() -> bitcoin::secp256k1::PublicKey {
     use std::str::FromStr;
     bitcoin::secp256k1::PublicKey::from_str(
-        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-    ).unwrap()
+        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+    )
+    .unwrap()
 }
-fn did() -> [u8; 16] { [0x01; 16] }
-fn h32() -> [u8; 32] { [0xab; 32] }
-fn h20() -> [u8; 20] { [0xab; 20] }
-fn sig() -> [u8; 64] { [0x30; 64] }
-fn fees() -> FeeStructure { FeeStructure { annualized_msats: 1000, annualized_bps: 50, frequency_blocks: 2016 } }
-fn tfees() -> TransferFeeSchedule { TransferFeeSchedule { fixed_msats: 2, rate_bps: 20 } }
+fn did() -> [u8; 16] {
+    [0x01; 16]
+}
+fn h32() -> [u8; 32] {
+    [0xab; 32]
+}
+fn h20() -> [u8; 20] {
+    [0xab; 20]
+}
+fn sig() -> [u8; 64] {
+    [0x30; 64]
+}
+fn fees() -> FeeStructure {
+    FeeStructure {
+        annualized_msats: 1000,
+        annualized_bps: 50,
+        frequency_blocks: 2016,
+    }
+}
+fn tfees() -> TransferFeeSchedule {
+    TransferFeeSchedule {
+        fixed_msats: 2,
+        rate_bps: 20,
+    }
+}
 fn wit() -> deposits_protocol::types::DescriptorWitness {
-    deposits_protocol::types::DescriptorWitness { stack: vec![vec![0x30; 64]] }
+    deposits_protocol::types::DescriptorWitness {
+        stack: vec![vec![0x30; 64]],
+    }
 }
 
 fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
     vec![
-        ("LedgerOpen", LedgerOperation::LedgerOpen {
-            operator_id: pk(), reserves_id: "bcrt1qtest".into(),
-            genesis_block: 100, reserves_amount: 100_000_000,
-        }),
-        ("QuorumBegin", LedgerOperation::QuorumBegin {
-            reserves_id: "bcrt1qtest".into(), spending_txid: h32(), new_outpoint_txid: h32(),
-            new_outpoint_vout: 0, amount: 100_000_000, 
-            quorum_expiry: 1000, ledger_hash: h32(),
-            quorum_members: vec![pk()],
-            total_collateral: 50_000_000,
-        }),
-        ("DepositOpen", LedgerOperation::DepositOpen {
-            deposit_id: did(), descriptor: "pk(0279be66...)".into(),
-            fees: Some(fees()), transfer_fees: Some(tfees()),
-            payment_hash: Some(h32()), invoice: Some("lnbcrt1test".into()),
-            cosigner_guarantee_signature: Some(sig()),
-            is_collateral: false,
-            receive_requires_sig: false,
-            fee_change_after_blocks: None,
-            fee_change_notice_blocks: None,
-            fee_change_limit_bps: None,
-        }),
-        ("DepositClose", LedgerOperation::DepositClose { deposit_id: did() }),
-        ("FeeChange", LedgerOperation::FeeChange { deposit_id: did(), new_fees: fees(), effective_block: 0 }),
-        ("DepositKeyRotate", LedgerOperation::DepositKeyRotate {
-            deposit_id: did(), new_descriptor: "pk(03...)".into(), witness: wit(),
-        }),
-        ("InvoiceCredit", LedgerOperation::InvoiceCredit {
-            payment_hash: h32(), deposit_id: did(), amount: 10_000_000,
-            invoice_id: "bolt11:test".into(), sequence_number: 42,
-        }),
-        ("InvoiceLock", LedgerOperation::InvoiceLock {
-            deposit_id: did(), amount: 5_000_000, payment_id: h32(), sequence_number: 43, witness: wit(),
-        }),
-        ("InvoiceFail", LedgerOperation::InvoiceFail {
-            deposit_id: did(), amount: 5_000_000, payment_id: h32(), sequence_number: 44,
-        }),
-        ("InvoiceFulfill", LedgerOperation::InvoiceFulfill {
-            deposit_id: did(), amount: 5_000_000, payment_id: h32(), sequence_number: 45,
-            witness: wit(), preimage: h32(),
-        }),
-        ("OnchainCredit", LedgerOperation::OnchainCredit {
-            txid: h32(), vout: 0, deposit_id: did(), amount: 100_000_000,
-            funding_address: "bcrt1qfund".into(),
-        }),
-        ("OnchainLock", LedgerOperation::OnchainLock {
-            deposit_id: did(), amount: 50_000_000, fee_sats: 500,
-            destination_address: "bcrt1qdest".into(), withdrawal_id: h32(), witness: wit(),
-        }),
-        ("OnchainFail", LedgerOperation::OnchainFail { deposit_id: did(), withdrawal_id: h32() }),
-        ("OnchainFulfill", LedgerOperation::OnchainFulfill {
-            deposit_id: did(), withdrawal_id: h32(), amount: 50_000_000,
-            txid: h32(), destination_address: "bcrt1qdest".into(),
-        }),
-        ("TransferLock", LedgerOperation::TransferLock {
-            nonce: h32(), source_deposit_id: did(), destination_deposit_id: [2; 16],
-            amount: 1_000_000, fee: 2000, completion_script: "sha256(abcd1234)".into(),
-            timeout_height: 5000, transfer_id: h32(), witness: wit(),
-        }),
-        ("TransferComplete", LedgerOperation::TransferComplete {
-            transfer_id: h32(), script_witness: wit(),
-        }),
-        ("TransferFail", LedgerOperation::TransferFail {
-            transfer_id: h32(), block_hash: h32(), reason: 1,
-        }),
-        ("CollateralAttestation", LedgerOperation::CollateralAttestation {
-            collateral_operator: pk(), quorum_member: pk(), collateral_ledger_id: "abc123".into(),
-            amount: 50_000_000, block_height: 200, lock_until_block: 1000,
-            ledger_hash: h32(), signature: sig(),
-        }),
-        ("QuorumAddMember", LedgerOperation::QuorumAddMember {
-            quorum_member: pk(), quorum_member_signature: sig(), member_ledger_id: "abc123".into(),
-            min_fee_bps: Some(500), min_fee_fixed: Some(100_000), max_fee_period: Some(2016),
-            collateral_lock_amount: Some(50_000_000), collateral_lock_until: Some(10000),
-            dispute_response_blocks: None, dispute_arm_blocks: None, service_response_blocks: None,
-            max_transfer_timeout_blocks: None, max_descriptor_bytes: None,
-        }),
-        ("QuorumRemoveMember", LedgerOperation::QuorumRemoveMember {
-            quorum_member: pk(), operator_signature: sig(),
-        }),
-        ("CollateralLock", LedgerOperation::CollateralLock {
-            deposit_id: did(), amount: 25_000_000, lock_until_block: 1000,
-            operator_id: pk(), witness: wit(),
-        }),
-        ("QuorumJoin", LedgerOperation::QuorumJoin {
-            operator_id: pk(), ledger_id: "abc123def456".into(),
-            membership_expires: 100_000,
-        }),
-        ("FeeCollect", LedgerOperation::FeeCollect {
-            deposit_id: did(), amount: 1000, block_height: 500,
-        }),
-        ("DisputeEnter", LedgerOperation::DisputeEnter {
-            last_valid_sequence: 10, reason: "hash_chain_broken".into(),
-        }),
-        ("DisputeArmed", LedgerOperation::DisputeArmed {
-            armed_block: 300, commitment_hash: h20(), target_reserves: "bcrt1qtarget".into(),
-        }),
-        ("DisputeAcquire", LedgerOperation::DisputeAcquire {
-            new_custodian: pk(), entropy_block_height: 400, entropy_block_hash: h32(),
-            spend_txid: h32(), new_reserves_address: "bcrt1qnew".into(),
-        }),
+        (
+            "LedgerOpen",
+            LedgerOperation::LedgerOpen {
+                operator_id: pk(),
+                reserves_id: "bcrt1qtest".into(),
+                genesis_block: 100,
+                reserves_amount: 100_000_000,
+            },
+        ),
+        (
+            "QuorumBegin",
+            LedgerOperation::QuorumBegin {
+                reserves_id: "bcrt1qtest".into(),
+                spending_txid: h32(),
+                new_outpoint_txid: h32(),
+                new_outpoint_vout: 0,
+                amount: 100_000_000,
+                quorum_expiry: 1000,
+                ledger_hash: h32(),
+                quorum_members: vec![pk()],
+                total_collateral: 50_000_000,
+            },
+        ),
+        (
+            "DepositOpen",
+            LedgerOperation::DepositOpen {
+                deposit_id: did(),
+                descriptor: "pk(0279be66...)".into(),
+                fees: Some(fees()),
+                transfer_fees: Some(tfees()),
+                payment_hash: Some(h32()),
+                invoice: Some("lnbcrt1test".into()),
+                cosigner_guarantee_signature: Some(sig()),
+                is_collateral: false,
+                receive_requires_sig: false,
+                fee_change_after_blocks: None,
+                fee_change_notice_blocks: None,
+                fee_change_limit_bps: None,
+            },
+        ),
+        (
+            "DepositClose",
+            LedgerOperation::DepositClose { deposit_id: did() },
+        ),
+        (
+            "FeeChange",
+            LedgerOperation::FeeChange {
+                deposit_id: did(),
+                new_fees: fees(),
+                effective_block: 0,
+            },
+        ),
+        (
+            "DepositKeyRotate",
+            LedgerOperation::DepositKeyRotate {
+                deposit_id: did(),
+                new_descriptor: "pk(03...)".into(),
+                witness: wit(),
+            },
+        ),
+        (
+            "InvoiceCredit",
+            LedgerOperation::InvoiceCredit {
+                payment_hash: h32(),
+                deposit_id: did(),
+                amount: 10_000_000,
+                invoice_id: "bolt11:test".into(),
+                sequence_number: 42,
+            },
+        ),
+        (
+            "InvoiceLock",
+            LedgerOperation::InvoiceLock {
+                deposit_id: did(),
+                amount: 5_000_000,
+                payment_id: h32(),
+                sequence_number: 43,
+                witness: wit(),
+            },
+        ),
+        (
+            "InvoiceFail",
+            LedgerOperation::InvoiceFail {
+                deposit_id: did(),
+                amount: 5_000_000,
+                payment_id: h32(),
+                sequence_number: 44,
+            },
+        ),
+        (
+            "InvoiceFulfill",
+            LedgerOperation::InvoiceFulfill {
+                deposit_id: did(),
+                amount: 5_000_000,
+                payment_id: h32(),
+                sequence_number: 45,
+                witness: wit(),
+                preimage: h32(),
+            },
+        ),
+        (
+            "OnchainCredit",
+            LedgerOperation::OnchainCredit {
+                txid: h32(),
+                vout: 0,
+                deposit_id: did(),
+                amount: 100_000_000,
+                funding_address: "bcrt1qfund".into(),
+            },
+        ),
+        (
+            "OnchainLock",
+            LedgerOperation::OnchainLock {
+                deposit_id: did(),
+                amount: 50_000_000,
+                fee_sats: 500,
+                destination_address: "bcrt1qdest".into(),
+                withdrawal_id: h32(),
+                witness: wit(),
+            },
+        ),
+        (
+            "OnchainFail",
+            LedgerOperation::OnchainFail {
+                deposit_id: did(),
+                withdrawal_id: h32(),
+            },
+        ),
+        (
+            "OnchainFulfill",
+            LedgerOperation::OnchainFulfill {
+                deposit_id: did(),
+                withdrawal_id: h32(),
+                amount: 50_000_000,
+                txid: h32(),
+                destination_address: "bcrt1qdest".into(),
+            },
+        ),
+        (
+            "TransferLock",
+            LedgerOperation::TransferLock {
+                nonce: h32(),
+                source_deposit_id: did(),
+                destination_deposit_id: [2; 16],
+                amount: 1_000_000,
+                fee: 2000,
+                completion_script: "sha256(abcd1234)".into(),
+                timeout_height: 5000,
+                transfer_id: h32(),
+                witness: wit(),
+            },
+        ),
+        (
+            "TransferComplete",
+            LedgerOperation::TransferComplete {
+                transfer_id: h32(),
+                script_witness: wit(),
+            },
+        ),
+        (
+            "TransferFail",
+            LedgerOperation::TransferFail {
+                transfer_id: h32(),
+                block_hash: h32(),
+                reason: 1,
+            },
+        ),
+        (
+            "CollateralAttestation",
+            LedgerOperation::CollateralAttestation {
+                collateral_operator: pk(),
+                quorum_member: pk(),
+                collateral_ledger_id: "abc123".into(),
+                amount: 50_000_000,
+                block_height: 200,
+                lock_until_block: 1000,
+                ledger_hash: h32(),
+                signature: sig(),
+            },
+        ),
+        (
+            "QuorumAddMember",
+            LedgerOperation::QuorumAddMember {
+                quorum_member: pk(),
+                quorum_member_signature: sig(),
+                member_ledger_id: "abc123".into(),
+                min_fee_bps: Some(500),
+                min_fee_fixed: Some(100_000),
+                max_fee_period: Some(2016),
+                collateral_lock_amount: Some(50_000_000),
+                collateral_lock_until: Some(10000),
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
+            },
+        ),
+        (
+            "QuorumRemoveMember",
+            LedgerOperation::QuorumRemoveMember {
+                quorum_member: pk(),
+                operator_signature: sig(),
+            },
+        ),
+        (
+            "CollateralLock",
+            LedgerOperation::CollateralLock {
+                deposit_id: did(),
+                amount: 25_000_000,
+                lock_until_block: 1000,
+                operator_id: pk(),
+                witness: wit(),
+                for_ledger_id: "test_ledger_id".to_string(),
+            },
+        ),
+        (
+            "QuorumJoin",
+            LedgerOperation::QuorumJoin {
+                operator_id: pk(),
+                ledger_id: "abc123def456".into(),
+                membership_expires: 100_000,
+            },
+        ),
+        (
+            "FeeCollect",
+            LedgerOperation::FeeCollect {
+                deposit_id: did(),
+                amount: 1000,
+                block_height: 500,
+            },
+        ),
+        (
+            "DisputeEnter",
+            LedgerOperation::DisputeEnter {
+                last_valid_sequence: 10,
+                reason: "hash_chain_broken".into(),
+            },
+        ),
+        (
+            "DisputeArmed",
+            LedgerOperation::DisputeArmed {
+                armed_block: 300,
+                commitment_hash: h20(),
+                target_reserves: "bcrt1qtarget".into(),
+            },
+        ),
+        (
+            "DisputeAcquire",
+            LedgerOperation::DisputeAcquire {
+                new_custodian: pk(),
+                entropy_block_height: 400,
+                entropy_block_hash: h32(),
+                spend_txid: h32(),
+                new_reserves_address: "bcrt1qnew".into(),
+            },
+        ),
         ("DisputeYield", LedgerOperation::DisputeYield),
         ("LedgerClose", LedgerOperation::LedgerClose),
     ]

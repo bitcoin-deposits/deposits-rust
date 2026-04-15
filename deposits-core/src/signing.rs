@@ -11,13 +11,12 @@
 //! (signing and verification). Pure data construction functions (signing message
 //! builders) live in `deposits_protocol::signature_utils`.
 
-use bitcoin::secp256k1::{Message, PublicKey, SecretKey, Secp256k1, Keypair, schnorr::Signature};
-use bitcoin::hashes::{Hash, sha256};
 use crate::error::DepositsError;
+use bitcoin::hashes::{sha256, Hash};
+use bitcoin::secp256k1::{schnorr::Signature, Keypair, Message, PublicKey, Secp256k1, SecretKey};
 use deposits_protocol::signature_utils::{
-    withdrawal_signing_message, collateral_lock_signing_message,
-    invoice_lock_signing_message, transfer_lock_signing_message,
-    compute_transfer_id,
+    collateral_lock_signing_message, compute_transfer_id, invoice_lock_signing_message,
+    transfer_lock_signing_message, withdrawal_signing_message,
 };
 
 /// Create a deposit guarantee signature (Bob's commitment to credit specific deposit)
@@ -26,7 +25,7 @@ use deposits_protocol::signature_utils::{
 pub fn create_deposit_guarantee_signature(
     private_key: &SecretKey,
     invoice: &str,
-    deposit_pubkey: &PublicKey
+    deposit_pubkey: &PublicKey,
 ) -> Result<[u8; 64], DepositsError> {
     // Create the guarantee message that Bob signs
     // Format: "DEPOSIT_GUARANTEE:{invoice}:{deposit_pubkey}"
@@ -34,11 +33,12 @@ pub fn create_deposit_guarantee_signature(
 
     // Hash the message
     let message_hash = sha256::Hash::hash(guarantee_message.as_bytes());
-    let secp_message = Message::from_digest_slice(message_hash.as_ref())
-        .map_err(|_| DepositsError::ProtocolViolation {
+    let secp_message = Message::from_digest_slice(message_hash.as_ref()).map_err(|_| {
+        DepositsError::ProtocolViolation {
             violation_type: "invalid_message_hash".to_string(),
             details: "Failed to create secp256k1 message from hash".to_string(),
-        })?;
+        }
+    })?;
 
     // Sign the message with Schnorr (BIP-340)
     let secp = Secp256k1::signing_only();
@@ -54,22 +54,23 @@ pub fn verify_deposit_guarantee_signature(
     signature: &[u8; 64],
     bob_pubkey: &PublicKey,
     invoice: &str,
-    deposit_pubkey: &PublicKey
+    deposit_pubkey: &PublicKey,
 ) -> Result<bool, DepositsError> {
     // Recreate the same guarantee message Bob signed
     let guarantee_message = format!("DEPOSIT_GUARANTEE:{}:{}", invoice, deposit_pubkey);
 
     // Hash the message
     let message_hash = sha256::Hash::hash(guarantee_message.as_bytes());
-    let secp_message = Message::from_digest_slice(message_hash.as_ref())
-        .map_err(|_| DepositsError::ProtocolViolation {
+    let secp_message = Message::from_digest_slice(message_hash.as_ref()).map_err(|_| {
+        DepositsError::ProtocolViolation {
             violation_type: "invalid_message_hash".to_string(),
             details: "Failed to create secp256k1 message from hash".to_string(),
-        })?;
+        }
+    })?;
 
     // Parse signature
-    let signature = Signature::from_slice(signature)
-        .map_err(|_| DepositsError::ProtocolViolation {
+    let signature =
+        Signature::from_slice(signature).map_err(|_| DepositsError::ProtocolViolation {
             violation_type: "invalid_signature".to_string(),
             details: "Failed to parse signature".to_string(),
         })?;
@@ -101,7 +102,7 @@ pub fn verify_payment_signature(
     // Skip validation for placeholder signatures (all zeros) during development
     // TODO: Remove this bypass once wallet signing is implemented
     if signature.iter().all(|&b| b == 0) {
-        return true;  // Accept placeholder signatures for now
+        return true; // Accept placeholder signatures for now
     }
 
     // Build the message to verify
@@ -169,7 +170,7 @@ pub fn create_payment_authorization_signature(
     private_key: &SecretKey,
     amount: u64,
     invoice_to_pay: &str,
-    payment_preimage: &[u8; 32]
+    payment_preimage: &[u8; 32],
 ) -> Result<Vec<u8>, DepositsError> {
     // Create the message that should be signed
     // Format: "PAY:{amount}:{invoice}:{preimage_hex}"
@@ -178,11 +179,12 @@ pub fn create_payment_authorization_signature(
 
     // Hash the message
     let message_hash = sha256::Hash::hash(authorization_message.as_bytes());
-    let secp_message = Message::from_digest_slice(message_hash.as_ref())
-        .map_err(|_| DepositsError::ProtocolViolation {
+    let secp_message = Message::from_digest_slice(message_hash.as_ref()).map_err(|_| {
+        DepositsError::ProtocolViolation {
             violation_type: "invalid_message_hash".to_string(),
             details: "Failed to create secp256k1 message from hash".to_string(),
-        })?;
+        }
+    })?;
 
     // Sign the message with Schnorr (BIP-340)
     let secp = Secp256k1::signing_only();
@@ -221,11 +223,12 @@ pub fn create_deposit_offer_signature(
 
     // Hash the message
     let message_hash = sha256::Hash::hash(signing_message.as_bytes());
-    let secp_message = Message::from_digest_slice(message_hash.as_ref())
-        .map_err(|_| DepositsError::ProtocolViolation {
+    let secp_message = Message::from_digest_slice(message_hash.as_ref()).map_err(|_| {
+        DepositsError::ProtocolViolation {
             violation_type: "invalid_message_hash".to_string(),
             details: "Failed to create secp256k1 message from hash".to_string(),
-        })?;
+        }
+    })?;
 
     // Sign the message with Schnorr (BIP-340)
     let secp = Secp256k1::signing_only();
@@ -246,18 +249,20 @@ pub fn verify_deposit_offer_signature(
 
     // Hash the message
     let message_hash = sha256::Hash::hash(signing_message.as_bytes());
-    let secp_message = Message::from_digest_slice(message_hash.as_ref())
-        .map_err(|_| DepositsError::ProtocolViolation {
+    let secp_message = Message::from_digest_slice(message_hash.as_ref()).map_err(|_| {
+        DepositsError::ProtocolViolation {
             violation_type: "invalid_message_hash".to_string(),
             details: "Failed to create secp256k1 message from hash".to_string(),
-        })?;
+        }
+    })?;
 
     // Parse Schnorr signature
-    let signature = Signature::from_slice(&offer.operator_signature)
-        .map_err(|_| DepositsError::ProtocolViolation {
+    let signature = Signature::from_slice(&offer.operator_signature).map_err(|_| {
+        DepositsError::ProtocolViolation {
             violation_type: "invalid_signature".to_string(),
             details: "Failed to parse deposit offer signature".to_string(),
-        })?;
+        }
+    })?;
 
     // Verify Schnorr signature against operator's x-only public key
     let secp = Secp256k1::verification_only();
@@ -287,11 +292,7 @@ pub fn verify_withdrawal_witness(
     );
 
     // Verify the witness satisfies the descriptor
-    crate::descriptor::verify_witness(
-        descriptor,
-        &withdrawal.depositor_witness,
-        &message_hash,
-    )
+    crate::descriptor::verify_witness(descriptor, &withdrawal.depositor_witness, &message_hash)
 }
 
 /// Verify an invoice lock witness satisfies the deposit descriptor.
@@ -306,11 +307,7 @@ pub fn verify_invoice_lock_witness(
     witness: &crate::types::DescriptorWitness,
 ) -> Result<bool, DepositsError> {
     let message_hash = invoice_lock_signing_message(deposit_id, payment_hash, amount_with_fees);
-    crate::descriptor::verify_witness(
-        descriptor,
-        witness,
-        &message_hash,
-    )
+    crate::descriptor::verify_witness(descriptor, witness, &message_hash)
 }
 
 /// Verify a witness satisfies the source deposit's descriptor for a transfer lock.
@@ -337,11 +334,7 @@ pub fn verify_transfer_lock_witness(
         completion_script,
         timeout_height,
     );
-    crate::descriptor::verify_witness(
-        source_descriptor,
-        witness,
-        &message_hash,
-    )
+    crate::descriptor::verify_witness(source_descriptor, witness, &message_hash)
 }
 
 /// Verify a witness satisfies the completion_script for a transfer completion.
@@ -377,11 +370,7 @@ pub fn verify_transfer_complete_witness(
     }
 
     // Verify the witness satisfies the completion_script
-    crate::descriptor::verify_witness(
-        completion_script,
-        script_witness,
-        &message_hash,
-    )
+    crate::descriptor::verify_witness(completion_script, script_witness, &message_hash)
 }
 
 /// Verify a collateral lock witness.
@@ -398,19 +387,11 @@ pub fn verify_collateral_lock_witness(
     _block_height: u32,
 ) -> Result<bool, DepositsError> {
     // Get the message hash
-    let message_hash = collateral_lock_signing_message(
-        deposit_id,
-        amount,
-        lock_until_block,
-        operator_id,
-    );
+    let message_hash =
+        collateral_lock_signing_message(deposit_id, amount, lock_until_block, operator_id);
 
     // Verify the witness
-    crate::descriptor::verify_witness(
-        descriptor,
-        witness,
-        &message_hash,
-    )
+    crate::descriptor::verify_witness(descriptor, witness, &message_hash)
 }
 
 /// Create a withdrawal authorization signature.
@@ -490,12 +471,8 @@ pub fn create_collateral_lock_signature(
     let deposit_id = crate::types::compute_deposit_id(&descriptor);
 
     // Get the message hash
-    let message_hash = collateral_lock_signing_message(
-        &deposit_id,
-        amount,
-        lock_until_block,
-        operator_id,
-    );
+    let message_hash =
+        collateral_lock_signing_message(&deposit_id, amount, lock_until_block, operator_id);
 
     // Sign with Schnorr
     let secp = Secp256k1::new();
@@ -528,7 +505,8 @@ mod tests {
         let sig = create_deposit_guarantee_signature(&secret, invoice, &deposit_pubkey).unwrap();
 
         // Verify signature
-        let valid = verify_deposit_guarantee_signature(&sig, &public, invoice, &deposit_pubkey).unwrap();
+        let valid =
+            verify_deposit_guarantee_signature(&sig, &public, invoice, &deposit_pubkey).unwrap();
         assert!(valid);
     }
 
@@ -543,7 +521,9 @@ mod tests {
         let sig = create_deposit_guarantee_signature(&secret, invoice, &deposit_pubkey).unwrap();
 
         // Verify with wrong invoice should fail
-        let valid = verify_deposit_guarantee_signature(&sig, &public, wrong_invoice, &deposit_pubkey).unwrap();
+        let valid =
+            verify_deposit_guarantee_signature(&sig, &public, wrong_invoice, &deposit_pubkey)
+                .unwrap();
         assert!(!valid);
     }
 
@@ -555,7 +535,8 @@ mod tests {
         let preimage = [42u8; 32];
 
         // Should successfully create authorization signature
-        let sig = create_payment_authorization_signature(&secret, amount, invoice, &preimage).unwrap();
+        let sig =
+            create_payment_authorization_signature(&secret, amount, invoice, &preimage).unwrap();
         assert_eq!(sig.len(), 64);
     }
 
@@ -567,7 +548,12 @@ mod tests {
         let placeholder_sig = [0u8; 64];
 
         // Placeholder signatures should be accepted during development
-        assert!(verify_payment_signature(&public, &payment_id, amount, &placeholder_sig));
+        assert!(verify_payment_signature(
+            &public,
+            &payment_id,
+            amount,
+            &placeholder_sig
+        ));
     }
 
     #[test]
@@ -578,12 +564,17 @@ mod tests {
         let invalid_sig = [1u8; 64]; // Non-zero but invalid signature
 
         // Invalid signatures should be rejected
-        assert!(!verify_payment_signature(&public, &payment_id, amount, &invalid_sig));
+        assert!(!verify_payment_signature(
+            &public,
+            &payment_id,
+            amount,
+            &invalid_sig
+        ));
     }
 
     #[test]
     fn test_deposit_offer_signature_roundtrip() {
-        use crate::types::{DepositOffer, compute_deposit_id};
+        use crate::types::{compute_deposit_id, DepositOffer};
 
         let (operator_secret, operator_pubkey) = create_test_keypair();
 
@@ -615,7 +606,8 @@ mod tests {
             max_amount_sats,
             min_amount_sats,
             deadline_block,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Create the offer struct
         let signing_message = DepositOffer::signing_message(
@@ -652,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_deposit_offer_signature_wrong_amount() {
-        use crate::types::{DepositOffer, compute_deposit_id};
+        use crate::types::{compute_deposit_id, DepositOffer};
 
         let (operator_secret, operator_pubkey) = create_test_keypair();
         let secp = Secp256k1::new();
@@ -679,7 +671,8 @@ mod tests {
             max_amount_sats,
             min_amount_sats,
             deadline_block,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Create offer with different amount
         let signing_message = DepositOffer::signing_message(
@@ -716,7 +709,7 @@ mod tests {
 
     #[test]
     fn test_withdrawal_signature_roundtrip() {
-        use crate::types::{OnChainWithdrawal, DescriptorWitness, compute_deposit_id};
+        use crate::types::{compute_deposit_id, DescriptorWitness, OnChainWithdrawal};
 
         let (depositor_secret, deposit_pubkey) = create_test_keypair();
         let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
@@ -735,7 +728,8 @@ mod tests {
             destination_address,
             amount_sats,
             fee_sats,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Create the withdrawal struct
         let signing_message = OnChainWithdrawal::signing_message(
@@ -772,7 +766,7 @@ mod tests {
 
     #[test]
     fn test_withdrawal_signature_wrong_amount() {
-        use crate::types::{OnChainWithdrawal, DescriptorWitness, compute_deposit_id};
+        use crate::types::{compute_deposit_id, DescriptorWitness, OnChainWithdrawal};
 
         let (depositor_secret, deposit_pubkey) = create_test_keypair();
         let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
@@ -791,7 +785,8 @@ mod tests {
             destination_address,
             amount_sats,
             fee_sats,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Create withdrawal with different amount
         let signing_message = OnChainWithdrawal::signing_message(
@@ -822,7 +817,7 @@ mod tests {
 
     #[test]
     fn test_collateral_lock_signature_roundtrip() {
-        use crate::types::{DescriptorWitness, compute_deposit_id};
+        use crate::types::{compute_deposit_id, DescriptorWitness};
 
         let (deposit_holder_secret, deposit_pubkey) = create_test_keypair();
         let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
@@ -843,7 +838,8 @@ mod tests {
             amount,
             lock_until_block,
             &operator_pubkey,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Verify signature using verify_collateral_lock_witness
         let witness = DescriptorWitness::from_signature(&sig);
@@ -855,13 +851,14 @@ mod tests {
             lock_until_block,
             &operator_pubkey,
             800_000,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(valid, "Collateral lock signature should be valid");
     }
 
     #[test]
     fn test_collateral_lock_signature_wrong_amount() {
-        use crate::types::{DescriptorWitness, compute_deposit_id};
+        use crate::types::{compute_deposit_id, DescriptorWitness};
 
         let (deposit_holder_secret, deposit_pubkey) = create_test_keypair();
         let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
@@ -881,7 +878,8 @@ mod tests {
             amount,
             lock_until_block,
             &operator_pubkey,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Verify with different amount should fail
         let witness = DescriptorWitness::from_signature(&sig);
@@ -893,7 +891,8 @@ mod tests {
             lock_until_block,
             &operator_pubkey,
             800_000,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(!valid, "Signature should be invalid for modified amount");
     }
 }

@@ -93,7 +93,9 @@ fn env_or_file(name: &str) -> Option<String> {
         return Some(val);
     }
     if let Ok(path) = std::env::var(format!("{}_FILE", name)) {
-        return std::fs::read_to_string(path).ok().map(|s| s.trim().to_string());
+        return std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string());
     }
     None
 }
@@ -152,14 +154,21 @@ fn ledger_to_subdomain(hex_id: &str) -> Option<String> {
 /// Decode a bech32-data subdomain label back to a hex ledger ID.
 fn subdomain_to_ledger(subdomain: &str) -> Option<String> {
     let bytes = bech32_data_to_bytes(subdomain)?;
-    if bytes.len() == 32 { Some(hex::encode(bytes)) } else { None }
+    if bytes.len() == 32 {
+        Some(hex::encode(bytes))
+    } else {
+        None
+    }
 }
 
 fn lnurl_err(msg: &str) -> (StatusCode, Json<LnurlError>) {
-    (StatusCode::BAD_REQUEST, Json(LnurlError {
-        status: "ERROR",
-        reason: msg.to_string(),
-    }))
+    (
+        StatusCode::BAD_REQUEST,
+        Json(LnurlError {
+            status: "ERROR",
+            reason: msg.to_string(),
+        }),
+    )
 }
 
 /// Extract ledger ID (full hex) from the Host header subdomain.
@@ -238,8 +247,10 @@ async fn lnurlp_callback(
         .ok_or_else(|| lnurl_err("Could not determine ledger from host"))?;
 
     if params.amount < state.min_msats || params.amount > state.max_msats {
-        return Err(lnurl_err(&format!("Amount must be between {} and {} msats",
-            state.min_msats, state.max_msats)));
+        return Err(lnurl_err(&format!(
+            "Amount must be between {} and {} msats",
+            state.min_msats, state.max_msats
+        )));
     }
 
     let amount_sats = params.amount / 1000;
@@ -253,7 +264,10 @@ async fn lnurlp_callback(
     });
 
     let tags = vec![
-        Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)), [ledger_id.as_str()]),
+        Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+            [ledger_id.as_str()],
+        ),
         Tag::custom(TagKind::custom("action"), ["make_invoice"]),
     ];
 
@@ -274,16 +288,16 @@ async fn lnurlp_callback(
         return Err(lnurl_err(&format!("Failed to send request: {}", e)));
     }
 
-    log::info!("Sent make_invoice: deposit={}-{}, amount={} sats, event={}...",
+    log::info!(
+        "Sent make_invoice: deposit={}-{}, amount={} sats, event={}...",
         &ledger_id[..16.min(ledger_id.len())],
         &deposit_pubkey[..16.min(deposit_pubkey.len())],
-        amount_sats, &event_id[..16]);
+        amount_sats,
+        &event_id[..16]
+    );
 
     // Wait for response with timeout
-    let response = match tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        rx,
-    ).await {
+    let response = match tokio::time::timeout(std::time::Duration::from_secs(15), rx).await {
         Ok(Ok(resp)) => resp,
         Ok(Err(_)) => {
             state.pending.lock().await.remove(&event_id);
@@ -296,10 +310,12 @@ async fn lnurlp_callback(
     };
 
     // Extract invoice from response
-    let invoice = response.get("invoice")
+    let invoice = response
+        .get("invoice")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            let error = response.get("error")
+            let error = response
+                .get("error")
                 .and_then(|v| v.as_str())
                 .unwrap_or("No invoice in response");
             lnurl_err(error)
@@ -331,7 +347,9 @@ async fn listen_for_responses(state: Arc<AppState>) {
 
                     // Find the request ID from the 'e' tag
                     let request_id = event.tags.iter().find_map(|tag| {
-                        if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)) {
+                        if tag.kind()
+                            == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E))
+                        {
                             tag.content().map(|s| s.to_string())
                         } else {
                             None
@@ -343,7 +361,8 @@ async fn listen_for_responses(state: Arc<AppState>) {
                         if let Some(tx) = pending.remove(&req_id) {
                             match serde_json::from_str::<serde_json::Value>(&event.content) {
                                 Ok(response) => {
-                                    let success = response.get("success")
+                                    let success = response
+                                        .get("success")
                                         .and_then(|v| v.as_bool())
                                         .unwrap_or(false);
                                     if success {
@@ -384,8 +403,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     // Parse config
-    let nsec_str = env_or_file("LNURL_NSEC")
-        .expect("Set LNURL_NSEC (hex or nsec) or LNURL_NSEC_FILE");
+    let nsec_str =
+        env_or_file("LNURL_NSEC").expect("Set LNURL_NSEC (hex or nsec) or LNURL_NSEC_FILE");
     let nostr_secret = if nsec_str.starts_with("nsec1") {
         nostr_sdk::SecretKey::from_bech32(&nsec_str)?
     } else {
@@ -401,29 +420,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    let domain = std::env::var("LNURL_DOMAIN")
-        .unwrap_or_else(|_| "localhost:3000".to_string());
-    let listen = std::env::var("LNURL_LISTEN")
-        .unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+    let domain = std::env::var("LNURL_DOMAIN").unwrap_or_else(|_| "localhost:3000".to_string());
+    let listen = std::env::var("LNURL_LISTEN").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
     let min_sats: u64 = std::env::var("LNURL_MIN_SATS")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
     let max_sats: u64 = std::env::var("LNURL_MAX_SATS")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
 
     log::info!("deposits-lnurl starting");
     log::info!("  pubkey: {}", keys.public_key().to_bech32()?);
     log::info!("  domain: {}", domain);
     log::info!("  relays: {:?}", relay_urls);
     log::info!("  limits: {}-{} sats", min_sats, max_sats);
-    log::info!("  address format: <deposit_pubkey>@<bech32_ledger_id>.{}", domain);
+    log::info!(
+        "  address format: <deposit_pubkey>@<bech32_ledger_id>.{}",
+        domain
+    );
 
     // Connect to relays
+    #[allow(deprecated)]
     let opts = Options::default().connection_timeout(Some(std::time::Duration::from_secs(30)));
-    let client = Client::with_opts(keys.clone(), opts);
+    let client = Client::builder().signer(keys.clone()).opts(opts).build();
     for url in &relay_urls {
         client.add_relay(url).await?;
     }
-    client.connect_with_timeout(std::time::Duration::from_secs(10)).await;
+    client
+        .connect_with_timeout(std::time::Duration::from_secs(10))
+        .await;
 
     // Subscribe to responses
     let response_filter = Filter::new().kind(Kind::Custom(20102));

@@ -23,11 +23,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--relay" => { relay = args.get(i + 1).cloned().unwrap_or_default(); i += 2; }
-            "--mode" => { mode = args.get(i + 1).map(|s| s.as_str()).unwrap_or("receiver"); i += 2; }
-            "--count" => { count = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(10); i += 2; }
-            "--interval" => { interval_ms = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(100); i += 2; }
-            "--seed" => { seed = args.get(i + 1).cloned(); i += 2; }
+            "--relay" => {
+                relay = args.get(i + 1).cloned().unwrap_or_default();
+                i += 2;
+            }
+            "--mode" => {
+                mode = args.get(i + 1).map(|s| s.as_str()).unwrap_or("receiver");
+                i += 2;
+            }
+            "--count" => {
+                count = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(10);
+                i += 2;
+            }
+            "--interval" => {
+                interval_ms = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(100);
+                i += 2;
+            }
+            "--seed" => {
+                seed = args.get(i + 1).cloned();
+                i += 2;
+            }
             "--help" | "-h" => {
                 println!("Relay latency test");
                 println!("  --mode sender|receiver");
@@ -60,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match mode {
         "sender" => run_sender(&client, count, interval_ms).await?,
-        "receiver" | _ => run_receiver(&client).await?,
+        _ => run_receiver(&client).await?,
     }
 
     Ok(())
@@ -73,8 +88,15 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
-async fn run_sender(client: &Client, count: u64, interval_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
-    println!("SENDER: Broadcasting {} messages at {}ms intervals", count, interval_ms);
+async fn run_sender(
+    client: &Client,
+    count: u64,
+    interval_ms: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "SENDER: Broadcasting {} messages at {}ms intervals",
+        count, interval_ms
+    );
     println!();
 
     for i in 0..count {
@@ -87,7 +109,10 @@ async fn run_sender(client: &Client, count: u64, interval_ms: u64) -> Result<(),
         client.send_event_builder(event).await?;
         let send_elapsed = start.elapsed();
 
-        println!("[{}] sent ts={} (send took {:?})", i, send_time, send_elapsed);
+        println!(
+            "[{}] sent ts={} (send took {:?})",
+            i, send_time, send_elapsed
+        );
 
         if i < count - 1 {
             tokio::time::sleep(Duration::from_millis(interval_ms)).await;
@@ -106,7 +131,7 @@ async fn run_receiver(client: &Client) -> Result<(), Box<dyn std::error::Error>>
     // Subscribe to timing test events
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_TIMING_TEST))
-        .since(Timestamp::now());  // Only new events
+        .since(Timestamp::now()); // Only new events
     client.subscribe(vec![filter], None).await?;
 
     let mut notifications = client.notifications();
@@ -133,7 +158,10 @@ async fn run_receiver(client: &Client) -> Result<(), Box<dyn std::error::Error>>
                 let latency_ms = recv_time.saturating_sub(send_time) as f64;
                 latencies.push(latency_ms);
 
-                println!("[{}] send={} recv={} latency={:.1}ms", seq, send_time, recv_time, latency_ms);
+                println!(
+                    "[{}] send={} recv={} latency={:.1}ms",
+                    seq, send_time, recv_time, latency_ms
+                );
             }
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {

@@ -15,14 +15,13 @@
 //! - **Tie-breaker**: The channel partner (required for immediate spend)
 //! - **Primary Voters**: Other channel partners in the network
 
-use bitcoin::{
-    Network, ScriptBuf, TxOut, Amount, Witness,
-    taproot::{TaprootBuilder, TaprootSpendInfo, LeafVersion},
-    secp256k1::{Secp256k1, XOnlyPublicKey, PublicKey},
-    Address,
-};
 use bitcoin::opcodes::all::*;
 use bitcoin::script::Builder;
+use bitcoin::{
+    secp256k1::{PublicKey, Secp256k1, XOnlyPublicKey},
+    taproot::{LeafVersion, TaprootBuilder, TaprootSpendInfo},
+    Address, Amount, Network, ScriptBuf, TxOut, Witness,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{DepositsError, DepositsResult};
@@ -38,7 +37,10 @@ pub struct Voter {
 
 impl Voter {
     pub fn new(pubkey: PublicKey, is_tie_breaker: bool) -> Self {
-        Self { pubkey, is_tie_breaker }
+        Self {
+            pubkey,
+            is_tie_breaker,
+        }
     }
 
     /// Convert to x-only pubkey for Tapscript
@@ -87,7 +89,7 @@ impl VoterSet {
     /// Get sorted x-only pubkeys (deterministic ordering for script construction)
     pub fn sorted_x_only_pubkeys(&self) -> Vec<XOnlyPublicKey> {
         let mut keys: Vec<_> = self.voters.iter().map(|v| v.x_only()).collect();
-        keys.sort_by(|a, b| a.serialize().cmp(&b.serialize()));
+        keys.sort_by_key(|a| a.serialize());
         keys
     }
 
@@ -111,7 +113,12 @@ pub struct ThresholdTier {
 }
 
 impl ThresholdTier {
-    pub fn new(threshold: usize, requires_tie_breaker: bool, timelock_blocks: u32, description: &str) -> Self {
+    pub fn new(
+        threshold: usize,
+        requires_tie_breaker: bool,
+        timelock_blocks: u32,
+        description: &str,
+    ) -> Self {
         Self {
             threshold,
             requires_tie_breaker,
@@ -123,13 +130,21 @@ impl ThresholdTier {
     /// Majority immediate: tie-breaker + majority of others, no timelock
     pub fn majority_immediate(voter_count: usize) -> Self {
         let majority = (voter_count / 2) + 1;
-        Self::new(majority, true, 0, "Majority immediate (tie-breaker required)")
+        Self::new(
+            majority,
+            true,
+            0,
+            "Majority immediate (tie-breaker required)",
+        )
     }
 
     /// Degraded tier with reduced threshold after timelock
     pub fn degraded(threshold: usize, requires_tie_breaker: bool, timelock_blocks: u32) -> Self {
         let desc = if requires_tie_breaker {
-            format!("{}-of-n after {} blocks (tie-breaker required)", threshold, timelock_blocks)
+            format!(
+                "{}-of-n after {} blocks (tie-breaker required)",
+                threshold, timelock_blocks
+            )
         } else {
             format!("{}-of-n after {} blocks", threshold, timelock_blocks)
         };
@@ -138,7 +153,12 @@ impl ThresholdTier {
 
     /// Emergency single-party recovery after extended timelock
     pub fn emergency_recovery(timelock_blocks: u32) -> Self {
-        Self::new(1, false, timelock_blocks, &format!("Emergency recovery after {} blocks", timelock_blocks))
+        Self::new(
+            1,
+            false,
+            timelock_blocks,
+            &format!("Emergency recovery after {} blocks", timelock_blocks),
+        )
     }
 }
 
@@ -168,11 +188,19 @@ impl ThresholdConfig {
             let minority = (n / 3).max(1);
             vec![
                 // Tier 0: majority of quorum (no operator) — immediate
-                ThresholdTier::new(majority, false, 0,
-                    &format!("{}-of-{} quorum (immediate)", majority, n)),
+                ThresholdTier::new(
+                    majority,
+                    false,
+                    0,
+                    &format!("{}-of-{} quorum (immediate)", majority, n),
+                ),
                 // Tier 1: minority of quorum (no operator) — after ~1 week
-                ThresholdTier::new(minority, false, 1008,
-                    &format!("{}-of-{} quorum (after 1008 blocks)", minority, n)),
+                ThresholdTier::new(
+                    minority,
+                    false,
+                    1008,
+                    &format!("{}-of-{} quorum (after 1008 blocks)", minority, n),
+                ),
                 // Tier 2: operator only — after ~2 weeks
                 ThresholdTier::new(1, true, 2016, "Operator only (after 2016 blocks)"),
                 // Tier 3: any single party — after ~4 weeks
@@ -198,8 +226,18 @@ pub struct TapscriptReservesBuilder {
 }
 
 impl TapscriptReservesBuilder {
-    pub fn new(voter_set: VoterSet, config: ThresholdConfig, network: Network, ledger_hash: [u8; 32]) -> Self {
-        Self { voter_set, config, network, ledger_hash }
+    pub fn new(
+        voter_set: VoterSet,
+        config: ThresholdConfig,
+        network: Network,
+        ledger_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            voter_set,
+            config,
+            network,
+            ledger_hash,
+        }
     }
 
     /// Create with default threshold configuration
@@ -213,7 +251,7 @@ impl TapscriptReservesBuilder {
     /// This is provably unspendable but commits the hash to the Taproot tree
     fn build_commitment_leaf(&self) -> ScriptBuf {
         Builder::new()
-            .push_slice(&self.ledger_hash)
+            .push_slice(self.ledger_hash)
             .push_opcode(OP_DROP)
             .push_opcode(OP_PUSHBYTES_0) // OP_FALSE is OP_0
             .into_script()
@@ -245,7 +283,7 @@ impl TapscriptReservesBuilder {
                         .push_opcode(OP_CHECKSIG);
                 } else {
                     return Err(DepositsError::InvalidState(
-                        "Tie-breaker required but not found".to_string()
+                        "Tie-breaker required but not found".to_string(),
                     ));
                 }
             } else {
@@ -260,26 +298,27 @@ impl TapscriptReservesBuilder {
 
             let keys_to_use = if tier.requires_tie_breaker {
                 // Must include tie-breaker, plus enough others to meet threshold
-                let tb = self.voter_set.tie_breaker()
-                    .ok_or_else(|| DepositsError::InvalidState(
-                        "Tie-breaker required but not found".to_string()
-                    ))?;
+                let tb = self.voter_set.tie_breaker().ok_or_else(|| {
+                    DepositsError::InvalidState("Tie-breaker required but not found".to_string())
+                })?;
 
                 let mut keys = vec![tb.x_only()];
                 for voter in self.voter_set.primary_voters() {
                     keys.push(voter.x_only());
                 }
                 // Sort for determinism
-                keys.sort_by(|a, b| a.serialize().cmp(&b.serialize()));
+                keys.sort_by_key(|a| a.serialize());
                 keys
             } else {
                 sorted_keys.clone()
             };
 
             if keys_to_use.len() < tier.threshold {
-                return Err(DepositsError::InvalidState(
-                    format!("Not enough keys ({}) for threshold ({})", keys_to_use.len(), tier.threshold)
-                ));
+                return Err(DepositsError::InvalidState(format!(
+                    "Not enough keys ({}) for threshold ({})",
+                    keys_to_use.len(),
+                    tier.threshold
+                )));
             }
 
             // First key uses CHECKSIG
@@ -289,9 +328,7 @@ impl TapscriptReservesBuilder {
 
             // Subsequent keys use CHECKSIGADD
             for key in keys_to_use.iter().skip(1) {
-                builder = builder
-                    .push_x_only_key(key)
-                    .push_opcode(OP_CHECKSIGADD);
+                builder = builder.push_x_only_key(key).push_opcode(OP_CHECKSIGADD);
             }
 
             // Check threshold (use >= so meeting OR exceeding threshold works)
@@ -316,7 +353,7 @@ impl TapscriptReservesBuilder {
 
         if leaves.is_empty() {
             return Err(DepositsError::InvalidState(
-                "No threshold tiers configured".to_string()
+                "No threshold tiers configured".to_string(),
             ));
         }
 
@@ -324,7 +361,9 @@ impl TapscriptReservesBuilder {
         let commitment_leaf = self.build_commitment_leaf();
 
         // Create internal key from tie-breaker (enables key-path spending if all agree)
-        let internal_key = self.voter_set.tie_breaker()
+        let internal_key = self
+            .voter_set
+            .tie_breaker()
             .map(|v| v.x_only())
             .unwrap_or_else(|| self.voter_set.sorted_x_only_pubkeys()[0]);
 
@@ -340,15 +379,14 @@ impl TapscriptReservesBuilder {
         for (i, script) in leaves.iter().enumerate() {
             // Calculate depth: deeper for later (less preferred) tiers
             let depth = if total_leaves == 2 {
-                1  // Binary tree: both at depth 1
+                1 // Binary tree: both at depth 1
             } else {
                 (i + 1) as u8
             };
 
-            builder = builder.add_leaf(depth, script.clone())
-                .map_err(|e| DepositsError::InvalidState(
-                    format!("Failed to add Tapscript leaf: {:?}", e)
-                ))?;
+            builder = builder.add_leaf(depth, script.clone()).map_err(|e| {
+                DepositsError::InvalidState(format!("Failed to add Tapscript leaf: {:?}", e))
+            })?;
         }
 
         // Add commitment leaf at the deepest level (paired with last spending leaf)
@@ -357,15 +395,15 @@ impl TapscriptReservesBuilder {
         } else {
             num_spending_leaves as u8
         };
-        builder = builder.add_leaf(commitment_depth, commitment_leaf)
-            .map_err(|e| DepositsError::InvalidState(
-                format!("Failed to add commitment leaf: {:?}", e)
-            ))?;
+        builder = builder
+            .add_leaf(commitment_depth, commitment_leaf)
+            .map_err(|e| {
+                DepositsError::InvalidState(format!("Failed to add commitment leaf: {:?}", e))
+            })?;
 
-        let spend_info = builder.finalize(&secp, internal_key)
-            .map_err(|e| DepositsError::InvalidState(
-                format!("Failed to finalize Taproot tree: {:?}", e)
-            ))?;
+        let spend_info = builder.finalize(&secp, internal_key).map_err(|e| {
+            DepositsError::InvalidState(format!("Failed to finalize Taproot tree: {:?}", e))
+        })?;
 
         // Create the output script (P2TR)
         let address = Address::p2tr(&secp, internal_key, spend_info.merkle_root(), self.network);
@@ -423,7 +461,10 @@ impl TaprootReservesOutput {
     }
 
     /// Get the control block for a specific tier (needed for script-path spending)
-    pub fn control_block_for_tier(&self, tier_index: usize) -> Option<bitcoin::taproot::ControlBlock> {
+    pub fn control_block_for_tier(
+        &self,
+        tier_index: usize,
+    ) -> Option<bitcoin::taproot::ControlBlock> {
         if tier_index >= self.config.tiers.len() {
             return None;
         }
@@ -436,8 +477,11 @@ impl TaprootReservesOutput {
             self.ledger_hash,
         );
 
-        let script = builder.build_threshold_leaf(&self.config.tiers[tier_index]).ok()?;
-        self.spend_info.control_block(&(script, LeafVersion::TapScript))
+        let script = builder
+            .build_threshold_leaf(&self.config.tiers[tier_index])
+            .ok()?;
+        self.spend_info
+            .control_block(&(script, LeafVersion::TapScript))
     }
 
     /// Get the ledger hash committed to in this output
@@ -526,7 +570,7 @@ impl ReservesSpendBuilder {
         params: &SpendTxParams,
         _reserves_script_pubkey: &ScriptBuf,
     ) -> DepositsResult<bitcoin::Transaction> {
-        use bitcoin::{Transaction, TxIn, TxOut, Sequence, Witness};
+        use bitcoin::{Sequence, Transaction, TxIn, TxOut, Witness};
 
         // Estimate tx size for fee calculation
         // Taproot script-path spend: ~input overhead + ~65 witness bytes per signature + control block
@@ -535,9 +579,10 @@ impl ReservesSpendBuilder {
         let fee = estimated_vbytes * params.fee_rate_sat_vbyte;
 
         if fee >= params.reserves_amount {
-            return Err(DepositsError::InvalidState(
-                format!("Fee {} exceeds reserves amount {}", fee, params.reserves_amount)
-            ));
+            return Err(DepositsError::InvalidState(format!(
+                "Fee {} exceeds reserves amount {}",
+                fee, params.reserves_amount
+            )));
         }
 
         let output_amount = params.reserves_amount - fee;
@@ -586,9 +631,9 @@ impl ReservesSpendBuilder {
                 bitcoin::taproot::TapLeafHash::from_script(leaf_script, LeafVersion::TapScript),
                 TapSighashType::Default,
             )
-            .map_err(|e| DepositsError::InvalidState(
-                format!("Failed to compute sighash: {:?}", e)
-            ))?;
+            .map_err(|e| {
+                DepositsError::InvalidState(format!("Failed to compute sighash: {:?}", e))
+            })?;
 
         Ok(sighash)
     }
@@ -614,7 +659,7 @@ impl ReservesSpendBuilder {
                 }
                 None => {
                     // Empty signature for non-participating voter
-                    witness.push(&[]);
+                    witness.push([]);
                 }
             }
         }
@@ -638,11 +683,8 @@ impl ReservesSpendBuilder {
         leaf_script: &ScriptBuf,
         control_block: &bitcoin::taproot::ControlBlock,
     ) -> bitcoin::Transaction {
-        tx.input[0].witness = Self::create_checksigadd_witness(
-            signatures,
-            leaf_script,
-            control_block,
-        );
+        tx.input[0].witness =
+            Self::create_checksigadd_witness(signatures, leaf_script, control_block);
         tx
     }
 }
@@ -664,7 +706,11 @@ pub struct LotteryParticipant {
 
 impl LotteryParticipant {
     pub fn new(pubkey: XOnlyPublicKey, commitment_hash: [u8; 20], target_reserves: String) -> Self {
-        Self { pubkey, commitment_hash, target_reserves }
+        Self {
+            pubkey,
+            commitment_hash,
+            target_reserves,
+        }
     }
 }
 
@@ -693,7 +739,12 @@ impl LotteryScriptBuilder {
         recovery_threshold: usize,
         network: Network,
     ) -> Self {
-        Self { participants, recovery_voters, recovery_threshold, network }
+        Self {
+            participants,
+            recovery_voters,
+            recovery_threshold,
+            network,
+        }
     }
 
     /// Build the lottery claim script.
@@ -710,12 +761,12 @@ impl LotteryScriptBuilder {
         let n = self.participants.len();
         if n < 2 {
             return Err(DepositsError::InvalidState(
-                "Lottery requires at least 2 participants".to_string()
+                "Lottery requires at least 2 participants".to_string(),
             ));
         }
         if n > 4 {
             return Err(DepositsError::InvalidState(
-                "Lottery supports at most 4 participants".to_string()
+                "Lottery supports at most 4 participants".to_string(),
             ));
         }
 
@@ -732,7 +783,7 @@ impl LotteryScriptBuilder {
             // Hash the preimage
             builder = builder.push_opcode(OP_HASH160);
             // Push expected hash and verify
-            builder = builder.push_slice(&participant.commitment_hash);
+            builder = builder.push_slice(participant.commitment_hash);
             builder = builder.push_opcode(OP_EQUALVERIFY);
             // Now stack has: ... <preimage_i>
             // Get size
@@ -816,9 +867,10 @@ impl LotteryScriptBuilder {
                 }
             }
             _ => {
-                return Err(DepositsError::InvalidState(
-                    format!("Unsupported participant count for lottery: {}", n)
-                ));
+                return Err(DepositsError::InvalidState(format!(
+                    "Unsupported participant count for lottery: {}",
+                    n
+                )));
             }
         }
         // Stack: <sig> <winner_index>
@@ -854,10 +906,11 @@ impl LotteryScriptBuilder {
     /// After CSV timeout, the quorum (minus disputed operator) can recover funds.
     pub fn build_recovery_script(&self, csv_blocks: u32) -> DepositsResult<ScriptBuf> {
         if self.recovery_voters.len() < self.recovery_threshold {
-            return Err(DepositsError::InvalidState(
-                format!("Not enough recovery voters ({}) for threshold ({})",
-                    self.recovery_voters.len(), self.recovery_threshold)
-            ));
+            return Err(DepositsError::InvalidState(format!(
+                "Not enough recovery voters ({}) for threshold ({})",
+                self.recovery_voters.len(),
+                self.recovery_threshold
+            )));
         }
 
         let mut builder = Builder::new();
@@ -870,7 +923,7 @@ impl LotteryScriptBuilder {
 
         // Sort keys for deterministic script
         let mut sorted_keys = self.recovery_voters.clone();
-        sorted_keys.sort_by(|a, b| a.serialize().cmp(&b.serialize()));
+        sorted_keys.sort_by_key(|a| a.serialize());
 
         // Multi-sig using CHECKSIGADD pattern
         if self.recovery_threshold == 1 {
@@ -886,9 +939,7 @@ impl LotteryScriptBuilder {
 
             // Subsequent keys use CHECKSIGADD
             for key in sorted_keys.iter().skip(1) {
-                builder = builder
-                    .push_x_only_key(key)
-                    .push_opcode(OP_CHECKSIGADD);
+                builder = builder.push_x_only_key(key).push_opcode(OP_CHECKSIGADD);
             }
 
             // Check threshold
@@ -915,9 +966,9 @@ impl LotteryScriptBuilder {
 
         // Build recovery scripts with degrading thresholds
         let recovery_scripts = vec![
-            (144, self.recovery_threshold),                                    // ~1 day
-            (1008, self.recovery_threshold.saturating_sub(1).max(1)),          // ~1 week
-            (4032, self.recovery_threshold.saturating_sub(2).max(1)),          // ~4 weeks
+            (144, self.recovery_threshold),                           // ~1 day
+            (1008, self.recovery_threshold.saturating_sub(1).max(1)), // ~1 week
+            (4032, self.recovery_threshold.saturating_sub(2).max(1)), // ~4 weeks
         ];
 
         let mut leaves: Vec<ScriptBuf> = vec![lottery_script.clone()];
@@ -934,11 +985,11 @@ impl LotteryScriptBuilder {
         // Use NUMS point as internal key (unspendable key path)
         // NUMS = "Nothing Up My Sleeve" - provably unspendable
         let nums_point = XOnlyPublicKey::from_slice(&[
-            0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54,
-            0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e,
-            0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5,
-            0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
-        ]).map_err(|_| DepositsError::InvalidState("Invalid NUMS point".to_string()))?;
+            0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9,
+            0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a,
+            0xce, 0x80, 0x3a, 0xc0,
+        ])
+        .map_err(|_| DepositsError::InvalidState("Invalid NUMS point".to_string()))?;
 
         // Build Taproot tree with balanced structure
         let mut builder = TaprootBuilder::new();
@@ -946,16 +997,14 @@ impl LotteryScriptBuilder {
         // Add leaves at appropriate depths for 4 leaves (balanced tree)
         // Depth 2 for all 4 leaves in a balanced binary tree
         for script in &leaves {
-            builder = builder.add_leaf(2, script.clone())
-                .map_err(|e| DepositsError::InvalidState(
-                    format!("Failed to add Tapscript leaf: {:?}", e)
-                ))?;
+            builder = builder.add_leaf(2, script.clone()).map_err(|e| {
+                DepositsError::InvalidState(format!("Failed to add Tapscript leaf: {:?}", e))
+            })?;
         }
 
-        let spend_info = builder.finalize(&secp, nums_point)
-            .map_err(|e| DepositsError::InvalidState(
-                format!("Failed to finalize Taproot tree: {:?}", e)
-            ))?;
+        let spend_info = builder.finalize(&secp, nums_point).map_err(|e| {
+            DepositsError::InvalidState(format!("Failed to finalize Taproot tree: {:?}", e))
+        })?;
 
         let address = Address::p2tr(&secp, nums_point, spend_info.merkle_root(), self.network);
 
@@ -1006,7 +1055,8 @@ impl LotteryOutput {
 
     /// Get the control block for the lottery claim script
     pub fn lottery_control_block(&self) -> Option<bitcoin::taproot::ControlBlock> {
-        self.spend_info.control_block(&(self.lottery_script.clone(), LeafVersion::TapScript))
+        self.spend_info
+            .control_block(&(self.lottery_script.clone(), LeafVersion::TapScript))
     }
 
     /// Calculate the winner given revealed preimages.
@@ -1015,16 +1065,19 @@ impl LotteryOutput {
     pub fn calculate_winner(preimages: &[Vec<u8>]) -> DepositsResult<usize> {
         let n = preimages.len();
         if n < 2 {
-            return Err(DepositsError::InvalidState("Need at least 2 preimages".to_string()));
+            return Err(DepositsError::InvalidState(
+                "Need at least 2 preimages".to_string(),
+            ));
         }
 
         let mut sum: usize = 0;
         for (i, preimage) in preimages.iter().enumerate() {
             let len = preimage.len();
-            if len < 17 || len > 20 {
-                return Err(DepositsError::InvalidState(
-                    format!("Preimage {} has invalid length {} (must be 17-20)", i, len)
-                ));
+            if !(17..=20).contains(&len) {
+                return Err(DepositsError::InvalidState(format!(
+                    "Preimage {} has invalid length {} (must be 17-20)",
+                    i, len
+                )));
             }
             sum += len - 16; // Contribution is 1-4
         }
@@ -1042,12 +1095,15 @@ impl LotteryOutput {
         preimages: &[Vec<u8>],
     ) -> DepositsResult<Witness> {
         if preimages.len() != self.participants.len() {
-            return Err(DepositsError::InvalidState(
-                format!("Expected {} preimages, got {}", self.participants.len(), preimages.len())
-            ));
+            return Err(DepositsError::InvalidState(format!(
+                "Expected {} preimages, got {}",
+                self.participants.len(),
+                preimages.len()
+            )));
         }
 
-        let control_block = self.lottery_control_block()
+        let control_block = self
+            .lottery_control_block()
             .ok_or_else(|| DepositsError::InvalidState("No control block".to_string()))?;
 
         let mut witness = Witness::new();
@@ -1153,7 +1209,11 @@ mod tests {
         let others: Vec<_> = (2..=4).map(generate_test_pubkey).collect();
         let voter_set = VoterSet::new(tie_breaker, others);
 
-        let builder = TapscriptReservesBuilder::with_defaults(voter_set, Network::Regtest, test_ledger_hash());
+        let builder = TapscriptReservesBuilder::with_defaults(
+            voter_set,
+            Network::Regtest,
+            test_ledger_hash(),
+        );
         let output = builder.build().expect("Should build successfully");
 
         // Verify we got a valid P2TR address
@@ -1171,7 +1231,11 @@ mod tests {
         let tie_breaker = generate_test_pubkey(1);
         let voter_set = VoterSet::new(tie_breaker, vec![generate_test_pubkey(2)]);
 
-        let builder = TapscriptReservesBuilder::with_defaults(voter_set, Network::Regtest, test_ledger_hash());
+        let builder = TapscriptReservesBuilder::with_defaults(
+            voter_set,
+            Network::Regtest,
+            test_ledger_hash(),
+        );
         let output = builder.build().expect("Should build successfully");
 
         let tx_out = output.to_tx_out(100_000);
@@ -1187,7 +1251,8 @@ mod tests {
         let hash1 = [0x11; 32];
         let hash2 = [0x22; 32];
 
-        let builder1 = TapscriptReservesBuilder::with_defaults(voter_set.clone(), Network::Regtest, hash1);
+        let builder1 =
+            TapscriptReservesBuilder::with_defaults(voter_set.clone(), Network::Regtest, hash1);
         let builder2 = TapscriptReservesBuilder::with_defaults(voter_set, Network::Regtest, hash2);
 
         let output1 = builder1.build().expect("Should build");
@@ -1237,12 +1302,7 @@ mod tests {
     fn test_lottery_winner_four_participants() {
         // Test with 4 participants
         // Lengths: 17, 18, 19, 20 -> contributions: 1, 2, 3, 4 -> sum 10 -> 10 % 4 = 2
-        let preimages = vec![
-            vec![0u8; 17],
-            vec![0u8; 18],
-            vec![0u8; 19],
-            vec![0u8; 20],
-        ];
+        let preimages = vec![vec![0u8; 17], vec![0u8; 18], vec![0u8; 19], vec![0u8; 20]];
         let winner = LotteryOutput::calculate_winner(&preimages).unwrap();
         assert_eq!(winner, 2); // (1 + 2 + 3 + 4) % 4 = 2
     }
@@ -1275,7 +1335,9 @@ mod tests {
             Network::Regtest,
         );
 
-        let script = builder.build_lottery_script().expect("Should build lottery script");
+        let script = builder
+            .build_lottery_script()
+            .expect("Should build lottery script");
         // Basic sanity check - script should be non-empty
         assert!(!script.is_empty());
     }
@@ -1300,10 +1362,7 @@ mod tests {
             ),
         ];
 
-        let recovery_voters = vec![
-            generate_x_only_pubkey(10),
-            generate_x_only_pubkey(11),
-        ];
+        let recovery_voters = vec![generate_x_only_pubkey(10), generate_x_only_pubkey(11)];
 
         let builder = LotteryScriptBuilder::new(
             participants,
@@ -1324,13 +1383,11 @@ mod tests {
     #[test]
     fn test_lottery_reject_invalid_participant_count() {
         // Too few participants
-        let participants = vec![
-            LotteryParticipant::new(
-                generate_x_only_pubkey(1),
-                test_commitment_hash(1),
-                "bcrt1p...".to_string(),
-            ),
-        ];
+        let participants = vec![LotteryParticipant::new(
+            generate_x_only_pubkey(1),
+            test_commitment_hash(1),
+            "bcrt1p...".to_string(),
+        )];
 
         let builder = LotteryScriptBuilder::new(
             participants,

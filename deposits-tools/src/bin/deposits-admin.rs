@@ -1,4 +1,4 @@
-use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
+use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use clap::{Arg, ArgMatches, Command, CommandFactory, ValueHint};
 use clap_complete::{generate, Shell};
 // TODO: These service types were protobuf-generated in deposits-ldk, which has been removed.
@@ -226,7 +226,6 @@ pub struct QuorumRemoveMemberRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct QuorumRemoveMemberResponse {}
 
-
 mod endpoints {
     pub const GET_NODE_INFO_PATH: &str = "/v1/node/info";
     pub const DEPOSITS_INIT_LEDGER_PATH: &str = "/v1/deposits/init-ledger";
@@ -265,8 +264,8 @@ fn compute_auth_header(body: &[u8]) -> String {
         .as_secs();
 
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(API_KEY.as_bytes())
-        .expect("HMAC can take key of any size");
+    let mut mac =
+        HmacSha256::new_from_slice(API_KEY.as_bytes()).expect("HMAC can take key of any size");
     mac.update(&timestamp.to_be_bytes());
     mac.update(body);
     let result = mac.finalize();
@@ -344,7 +343,10 @@ fn resolve_port(port_or_alias: &str) -> String {
 
 /// Resolve a node alias (alice, bob, charlie, etc.) to its node ID by querying the API
 /// If the input is already a valid pubkey (66 hex chars), return it as-is
-async fn resolve_node_id(client: &Client, node_id_or_alias: &str) -> Result<String, Box<dyn Error>> {
+async fn resolve_node_id(
+    client: &Client,
+    node_id_or_alias: &str,
+) -> Result<String, Box<dyn Error>> {
     // If it looks like a pubkey (66 hex characters), return as-is
     if node_id_or_alias.len() == 66 && node_id_or_alias.chars().all(|c| c.is_ascii_hexdigit()) {
         return Ok(node_id_or_alias.to_string());
@@ -361,7 +363,9 @@ async fn resolve_node_id(client: &Client, node_id_or_alias: &str) -> Result<Stri
         &base_url,
         &format!("/{}", endpoints::GET_NODE_INFO_PATH),
         request,
-    ).await.map_err(|e| format!("Failed to resolve node alias '{}': {}", node_id_or_alias, e))?;
+    )
+    .await
+    .map_err(|e| format!("Failed to resolve node alias '{}': {}", node_id_or_alias, e))?;
 
     Ok(response.node_id)
 }
@@ -387,7 +391,9 @@ async fn build_node_name_map(client: &Client) -> HashMap<String, String> {
             &base_url,
             &format!("/{}", endpoints::GET_NODE_INFO_PATH),
             request,
-        ).await {
+        )
+        .await
+        {
             map.insert(response.node_id, name.to_string());
         }
     }
@@ -397,9 +403,14 @@ async fn build_node_name_map(client: &Client) -> HashMap<String, String> {
 /// Look up a node name from node_id, returns "Name (prefix..suffix)" or just "prefix..suffix"
 fn format_node_id(node_id: &str, name_map: &HashMap<String, String>) -> String {
     if let Some(name) = name_map.get(node_id) {
-        format!("{} ({}..{})", name, &node_id[..4], &node_id[node_id.len()-4..])
+        format!(
+            "{} ({}..{})",
+            name,
+            &node_id[..4],
+            &node_id[node_id.len() - 4..]
+        )
     } else {
-        format!("{}..{}", &node_id[..4], &node_id[node_id.len()-4..])
+        format!("{}..{}", &node_id[..4], &node_id[node_id.len() - 4..])
     }
 }
 
@@ -662,13 +673,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let matches = build_cli().get_matches();
 
     // Check if --port was explicitly provided or use TARGET env var, fallback to default
-    let port_or_alias = if matches.value_source("port") == Some(clap::parser::ValueSource::DefaultValue) {
-        // --port was not explicitly provided, check TARGET env var
-        env::var("TARGET").unwrap_or_else(|_| "alice".to_string())
-    } else {
-        // --port was explicitly provided
-        matches.get_one::<String>("port").unwrap().to_string()
-    };
+    let port_or_alias =
+        if matches.value_source("port") == Some(clap::parser::ValueSource::DefaultValue) {
+            // --port was not explicitly provided, check TARGET env var
+            env::var("TARGET").unwrap_or_else(|_| "alice".to_string())
+        } else {
+            // --port was explicitly provided
+            matches.get_one::<String>("port").unwrap().to_string()
+        };
 
     let port = resolve_port(&port_or_alias);
     let base_url = format!("https://localhost:{}", port);
@@ -691,14 +703,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 }
             };
-            generate(shell, &mut Cli::command(), "deposits-admin", &mut io::stdout());
+            generate(
+                shell,
+                &mut Cli::command(),
+                "deposits-admin",
+                &mut io::stdout(),
+            );
             return Ok(());
         }
         Some(("_complete", sub_m)) => {
             let comp_type = sub_m.get_one::<String>("type").unwrap();
             let port_or_alias = sub_m.get_one::<String>("port").unwrap_or(&port);
             let resolved_port = resolve_port(port_or_alias);
-            complete_dynamic(&client, &format!("https://localhost:{}", resolved_port), comp_type).await?;
+            complete_dynamic(
+                &client,
+                &format!("https://localhost:{}", resolved_port),
+                comp_type,
+            )
+            .await?;
             return Ok(());
         }
         Some(("get-node-id", _)) => {
@@ -709,7 +731,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 &base_url,
                 &format!("/{}", endpoints::GET_NODE_INFO_PATH),
                 request,
-            ).await?;
+            )
+            .await?;
             println!("{}", response.node_id);
         }
         Some(("gen-keypair", _)) => {
@@ -721,7 +744,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .expect("32 random bytes are always a valid secret key");
             let public_key = PublicKey::from_secret_key(&secp, &secret_key);
             // Output: secret_hex pubkey_hex (space-separated for easy parsing)
-            println!("{} {}", hex::encode(secret_bytes), hex::encode(public_key.serialize()));
+            println!(
+                "{} {}",
+                hex::encode(secret_bytes),
+                hex::encode(public_key.serialize())
+            );
         }
         Some(("add-ledger", sub_m)) => {
             add_ledger(&client, &base_url, sub_m).await?;
@@ -781,7 +808,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         Some(("status", sub_m)) => {
             // Use node arg if provided, otherwise use original alias (before resolution)
-            let node_name = sub_m.get_one::<String>("node")
+            let node_name = sub_m
+                .get_one::<String>("node")
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| port_or_alias.clone());
             let resolved_port = resolve_port(&node_name);
@@ -800,7 +828,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn add_ledger(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+async fn add_ledger(
+    client: &Client,
+    base_url: &str,
+    matches: &ArgMatches,
+) -> Result<(), Box<dyn Error>> {
     let partner_input = matches.get_one::<String>("partner").unwrap();
 
     // Resolve alias to node ID if needed
@@ -818,7 +850,8 @@ async fn add_ledger(client: &Client, base_url: &str, matches: &ArgMatches) -> Re
         base_url,
         endpoints::DEPOSITS_INIT_LEDGER_PATH,
         request,
-    ).await?;
+    )
+    .await?;
 
     println!("✅ Ledger added successfully!");
     println!("Ledger ID: {}", response.ledger_id);
@@ -826,7 +859,11 @@ async fn add_ledger(client: &Client, base_url: &str, matches: &ArgMatches) -> Re
     Ok(())
 }
 
-async fn remove_ledger(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+async fn remove_ledger(
+    client: &Client,
+    base_url: &str,
+    matches: &ArgMatches,
+) -> Result<(), Box<dyn Error>> {
     let partner_input = matches.get_one::<String>("partner").unwrap();
 
     // Resolve alias to node ID if needed
@@ -843,7 +880,8 @@ async fn remove_ledger(client: &Client, base_url: &str, matches: &ArgMatches) ->
         base_url,
         endpoints::DEPOSITS_CLOSE_LEDGER_PATH,
         request,
-    ).await?;
+    )
+    .await?;
 
     println!("✅ Ledger removed successfully!");
 
@@ -860,7 +898,8 @@ async fn list_ledgers(client: &Client, base_url: &str) -> Result<(), Box<dyn Err
         base_url,
         endpoints::DEPOSITS_LIST_LEDGERS_PATH,
         request,
-    ).await?;
+    )
+    .await?;
 
     if response.ledgers.is_empty() {
         println!("No ledgers found.");
@@ -870,8 +909,10 @@ async fn list_ledgers(client: &Client, base_url: &str) -> Result<(), Box<dyn Err
             println!("  Ledger: {}", ledger.ledger_id);
             println!("    Operator: {}", ledger.operator_node_id);
             println!("    Partner:  {}", ledger.partner_node_id);
-            println!("    Balances: operator={} sat, partner={} sat",
-                ledger.operator_balance_sat, ledger.partner_balance_sat);
+            println!(
+                "    Balances: operator={} sat, partner={} sat",
+                ledger.operator_balance_sat, ledger.partner_balance_sat
+            );
             println!("    Reserves: {} sat", ledger.reserves_sat);
             println!("    Deposits: {}", ledger.deposit_count);
             println!("    Sequence: {}", ledger.sequence_number);
@@ -888,7 +929,11 @@ async fn list_orphans(_client: &Client, _base_url: &str) -> Result<(), Box<dyn E
     std::process::exit(1);
 }
 
-async fn list_deposits(client: &Client, base_url: &str, partner: Option<&str>) -> Result<(), Box<dyn Error>> {
+async fn list_deposits(
+    client: &Client,
+    base_url: &str,
+    partner: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
     let request = ListDepositsRequest {
         ledger_id: partner.map(|s| s.to_string()),
     };
@@ -904,7 +949,8 @@ async fn list_deposits(client: &Client, base_url: &str, partner: Option<&str>) -
         base_url,
         endpoints::DEPOSITS_LIST_DEPOSITS_PATH,
         request,
-    ).await?;
+    )
+    .await?;
 
     if response.deposits.is_empty() {
         println!("No deposits found.");
@@ -922,7 +968,11 @@ async fn list_deposits(client: &Client, base_url: &str, partner: Option<&str>) -
     Ok(())
 }
 
-async fn deposit_balance(client: &Client, base_url: &str, deposit_pubkey: &str) -> Result<(), Box<dyn Error>> {
+async fn deposit_balance(
+    client: &Client,
+    base_url: &str,
+    deposit_pubkey: &str,
+) -> Result<(), Box<dyn Error>> {
     // List all deposits and find the one matching the pubkey
     let request = ListDepositsRequest { ledger_id: None };
     let response: ListDepositsResponse = proto_request(
@@ -930,7 +980,8 @@ async fn deposit_balance(client: &Client, base_url: &str, deposit_pubkey: &str) 
         base_url,
         endpoints::DEPOSITS_LIST_DEPOSITS_PATH,
         request,
-    ).await?;
+    )
+    .await?;
 
     for deposit in &response.deposits {
         if deposit.deposit_pubkey == deposit_pubkey {
@@ -945,7 +996,11 @@ async fn deposit_balance(client: &Client, base_url: &str, deposit_pubkey: &str) 
     Ok(())
 }
 
-async fn get_updates(client: &Client, base_url: &str, partner: Option<&str>) -> Result<(), Box<dyn Error>> {
+async fn get_updates(
+    client: &Client,
+    base_url: &str,
+    partner: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
     // If no partner specified, list ledgers first to get all partner IDs
     if partner.is_none() {
         log::info!("📋 Fetching all ledger updates...");
@@ -955,7 +1010,8 @@ async fn get_updates(client: &Client, base_url: &str, partner: Option<&str>) -> 
             base_url,
             endpoints::DEPOSITS_LIST_LEDGERS_PATH,
             list_req,
-        ).await?;
+        )
+        .await?;
 
         for ledger in &ledgers.ledgers {
             println!("Updates for ledger {}:", ledger.ledger_id);
@@ -969,14 +1025,18 @@ async fn get_updates(client: &Client, base_url: &str, partner: Option<&str>) -> 
                 base_url,
                 endpoints::DEPOSITS_GET_LEDGER_UPDATES_PATH,
                 request,
-            ).await?;
+            )
+            .await?;
             print_updates(&response);
         }
         return Ok(());
     }
 
     let partner_pubkey = partner.unwrap();
-    log::info!("📋 Fetching ledger updates for partner {}...", partner_pubkey);
+    log::info!(
+        "📋 Fetching ledger updates for partner {}...",
+        partner_pubkey
+    );
 
     let request = GetLedgerUpdatesRequest {
         ledger_id: partner_pubkey.to_string(),
@@ -989,7 +1049,8 @@ async fn get_updates(client: &Client, base_url: &str, partner: Option<&str>) -> 
         base_url,
         endpoints::DEPOSITS_GET_LEDGER_UPDATES_PATH,
         request,
-    ).await?;
+    )
+    .await?;
 
     print_updates(&response);
     Ok(())
@@ -1036,7 +1097,8 @@ fn print_updates(response: &GetLedgerUpdatesResponse) {
                 format!("  {}", params.join(" "))
             };
 
-            println!("  {:>3} [{}~{}] {}{}{} {:<20}{}",
+            println!(
+                "  {:>3} [{}~{}] {}{}{} {:<20}{}",
                 update.sequence_number,
                 prev_hash,
                 curr_hash,
@@ -1044,17 +1106,25 @@ fn print_updates(response: &GetLedgerUpdatesResponse) {
                 node_count,
                 commit_indicator,
                 update.operation_type,
-                params_str);
+                params_str
+            );
         }
     }
     println!();
 }
 
-async fn add_deposit(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+async fn add_deposit(
+    client: &Client,
+    base_url: &str,
+    matches: &ArgMatches,
+) -> Result<(), Box<dyn Error>> {
     let partner_input = matches.get_one::<String>("partner").unwrap();
     let deposit_pubkey = matches.get_one::<String>("deposit-pubkey").unwrap();
     let _channel_id = matches.get_one::<String>("channel-id").map(|s| s.as_str());
-    let _amount = matches.get_one::<String>("amount").unwrap().parse::<u64>()?;
+    let _amount = matches
+        .get_one::<String>("amount")
+        .unwrap()
+        .parse::<u64>()?;
 
     // Resolve alias to node ID if needed
     let partner = resolve_node_id(client, partner_input).await?;
@@ -1073,7 +1143,8 @@ async fn add_deposit(client: &Client, base_url: &str, matches: &ArgMatches) -> R
         base_url,
         endpoints::DEPOSITS_ADD_DEPOSIT_PATH,
         request,
-    ).await?;
+    )
+    .await?;
 
     println!("✅ Deposit added successfully:");
     println!("  Deposit pubkey: {}", response.deposit_pubkey);
@@ -1081,7 +1152,11 @@ async fn add_deposit(client: &Client, base_url: &str, matches: &ArgMatches) -> R
     Ok(())
 }
 
-async fn remove_deposit(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+async fn remove_deposit(
+    client: &Client,
+    base_url: &str,
+    matches: &ArgMatches,
+) -> Result<(), Box<dyn Error>> {
     let partner_input = matches.get_one::<String>("partner").unwrap();
     let deposit_pubkey = matches.get_one::<String>("deposit-pubkey").unwrap();
 
@@ -1102,7 +1177,8 @@ async fn remove_deposit(client: &Client, base_url: &str, matches: &ArgMatches) -
         base_url,
         endpoints::DEPOSITS_REMOVE_DEPOSIT_PATH,
         request,
-    ).await?;
+    )
+    .await?;
 
     println!("✅ Deposit removed successfully");
 
@@ -1115,7 +1191,11 @@ async fn collect_fees(_client: &Client, _base_url: &str) -> Result<(), Box<dyn E
     std::process::exit(1);
 }
 
-async fn add_reserves(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+async fn add_reserves(
+    client: &Client,
+    base_url: &str,
+    matches: &ArgMatches,
+) -> Result<(), Box<dyn Error>> {
     let partner_input = matches.get_one::<String>("partner").unwrap();
     let amount_str = matches.get_one::<String>("amount").unwrap();
     let amount: u64 = amount_str.parse()?;
@@ -1123,7 +1203,10 @@ async fn add_reserves(client: &Client, base_url: &str, matches: &ArgMatches) -> 
     // Resolve alias to node ID if needed
     let partner = resolve_node_id(client, partner_input).await?;
 
-    println!("📈 Adding {} sats to reserves with partner {}...", amount, partner);
+    println!(
+        "📈 Adding {} sats to reserves with partner {}...",
+        amount, partner
+    );
 
     let request = AddReservesRequest {
         partner_node_id: partner,
@@ -1135,14 +1218,19 @@ async fn add_reserves(client: &Client, base_url: &str, matches: &ArgMatches) -> 
         base_url,
         endpoints::DEPOSITS_ADD_RESERVES_PATH,
         request,
-    ).await?;
+    )
+    .await?;
 
     println!("✅ Reserves added successfully (Taproot output with ledger hash committed)");
 
     Ok(())
 }
 
-async fn reduce_reserves(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+async fn reduce_reserves(
+    client: &Client,
+    base_url: &str,
+    matches: &ArgMatches,
+) -> Result<(), Box<dyn Error>> {
     let partner_input = matches.get_one::<String>("partner").unwrap();
     let amount_str = matches.get_one::<String>("amount").unwrap();
     let amount: u64 = amount_str.parse()?;
@@ -1150,7 +1238,10 @@ async fn reduce_reserves(client: &Client, base_url: &str, matches: &ArgMatches) 
     // Resolve alias to node ID if needed
     let partner = resolve_node_id(client, partner_input).await?;
 
-    println!("📉 Reducing {} sats from reserves with partner {}...", amount, partner);
+    println!(
+        "📉 Reducing {} sats from reserves with partner {}...",
+        amount, partner
+    );
 
     let request = ReduceReservesRequest {
         partner_node_id: partner,
@@ -1162,20 +1253,28 @@ async fn reduce_reserves(client: &Client, base_url: &str, matches: &ArgMatches) 
         base_url,
         endpoints::DEPOSITS_REDUCE_RESERVES_PATH,
         request,
-    ).await?;
+    )
+    .await?;
 
     println!("✅ Reserves reduced successfully");
 
     Ok(())
 }
 
-async fn remove_reserves(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+async fn remove_reserves(
+    client: &Client,
+    base_url: &str,
+    matches: &ArgMatches,
+) -> Result<(), Box<dyn Error>> {
     let partner_input = matches.get_one::<String>("partner").unwrap();
 
     // Resolve alias to node ID if needed
     let partner_id = resolve_node_id(client, partner_input).await?;
 
-    println!("🗑️  Removing reserves output from ledger with {}...", partner_id);
+    println!(
+        "🗑️  Removing reserves output from ledger with {}...",
+        partner_id
+    );
 
     let request = RemoveReservesRequest {
         partner_node_id: partner_id.clone(),
@@ -1186,14 +1285,19 @@ async fn remove_reserves(client: &Client, base_url: &str, matches: &ArgMatches) 
         base_url,
         endpoints::DEPOSITS_REMOVE_RESERVES_PATH,
         request,
-    ).await?;
+    )
+    .await?;
 
     println!("✅ Reserves output removed successfully");
 
     Ok(())
 }
 
-async fn add_quorum_member(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+async fn add_quorum_member(
+    client: &Client,
+    base_url: &str,
+    matches: &ArgMatches,
+) -> Result<(), Box<dyn Error>> {
     let partner_input = matches.get_one::<String>("partner").unwrap();
     let quorum_input = matches.get_one::<String>("quorum-member").unwrap();
 
@@ -1201,7 +1305,10 @@ async fn add_quorum_member(client: &Client, base_url: &str, matches: &ArgMatches
     let partner_id = resolve_node_id(client, partner_input).await?;
     let quorum_member_id = resolve_node_id(client, quorum_input).await?;
 
-    println!("🔗 Adding quorum member {} to ledger with {}...", quorum_member_id, partner_id);
+    println!(
+        "🔗 Adding quorum member {} to ledger with {}...",
+        quorum_member_id, partner_id
+    );
 
     let request = QuorumAddMemberRequest {
         partner_node_id: partner_id.clone(),
@@ -1213,14 +1320,19 @@ async fn add_quorum_member(client: &Client, base_url: &str, matches: &ArgMatches
         base_url,
         endpoints::DEPOSITS_ADD_QUORUM_MEMBER_PATH,
         request,
-    ).await?;
+    )
+    .await?;
 
     println!("✅ Quorum member added successfully!");
 
     Ok(())
 }
 
-async fn remove_quorum_member(client: &Client, base_url: &str, matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
+async fn remove_quorum_member(
+    client: &Client,
+    base_url: &str,
+    matches: &ArgMatches,
+) -> Result<(), Box<dyn Error>> {
     let partner_input = matches.get_one::<String>("partner").unwrap();
     let quorum_input = matches.get_one::<String>("quorum-member").unwrap();
 
@@ -1228,7 +1340,10 @@ async fn remove_quorum_member(client: &Client, base_url: &str, matches: &ArgMatc
     let partner_id = resolve_node_id(client, partner_input).await?;
     let quorum_member_id = resolve_node_id(client, quorum_input).await?;
 
-    println!("🔗 Removing quorum member {} from ledger with {}...", quorum_member_id, partner_id);
+    println!(
+        "🔗 Removing quorum member {} from ledger with {}...",
+        quorum_member_id, partner_id
+    );
 
     let request = QuorumRemoveMemberRequest {
         partner_node_id: partner_id.clone(),
@@ -1240,14 +1355,19 @@ async fn remove_quorum_member(client: &Client, base_url: &str, matches: &ArgMatc
         base_url,
         endpoints::DEPOSITS_REMOVE_QUORUM_MEMBER_PATH,
         request,
-    ).await?;
+    )
+    .await?;
 
     println!("✅ Quorum member removed successfully!");
 
     Ok(())
 }
 
-async fn complete_dynamic(client: &Client, base_url: &str, comp_type: &str) -> Result<(), Box<dyn Error>> {
+async fn complete_dynamic(
+    client: &Client,
+    base_url: &str,
+    comp_type: &str,
+) -> Result<(), Box<dyn Error>> {
     // Dynamic completion - queries the node for real data
     match comp_type {
         "aliases" => {
@@ -1268,7 +1388,9 @@ async fn complete_dynamic(client: &Client, base_url: &str, comp_type: &str) -> R
                 base_url,
                 endpoints::DEPOSITS_LIST_LEDGERS_PATH,
                 request,
-            ).await {
+            )
+            .await
+            {
                 for ledger in &response.ledgers {
                     println!("{}", ledger.partner_node_id);
                 }
@@ -1282,7 +1404,9 @@ async fn complete_dynamic(client: &Client, base_url: &str, comp_type: &str) -> R
                 base_url,
                 endpoints::DEPOSITS_LIST_DEPOSITS_PATH,
                 request,
-            ).await {
+            )
+            .await
+            {
                 for deposit in &response.deposits {
                     println!("{}", deposit.deposit_pubkey);
                 }
@@ -1290,7 +1414,7 @@ async fn complete_dynamic(client: &Client, base_url: &str, comp_type: &str) -> R
         }
         "channels" => {
             // Get all channels via info endpoint (JSON - not a deposits endpoint)
-            if let Ok(resp) = client.get(&format!("{}/info", base_url)).send().await {
+            if let Ok(resp) = client.get(format!("{}/info", base_url)).send().await {
                 if let Ok(info) = resp.json::<Value>().await {
                     if let Some(channels) = info["channels"].as_array() {
                         for channel in channels {
@@ -1308,12 +1432,16 @@ async fn complete_dynamic(client: &Client, base_url: &str, comp_type: &str) -> R
     Ok(())
 }
 
-async fn show_status(client: &Client, base_url: &str, node_name: &str) -> Result<(), Box<dyn Error>> {
+async fn show_status(
+    client: &Client,
+    base_url: &str,
+    node_name: &str,
+) -> Result<(), Box<dyn Error>> {
     println!("📡 {}", node_name);
     println!("{}", "=".repeat(60));
 
     // Get node info
-    let info_response = client.get(&format!("{}/info", base_url)).send().await;
+    let info_response = client.get(format!("{}/info", base_url)).send().await;
 
     let (node_id, num_channels, num_peers) = match info_response {
         Ok(resp) => {
@@ -1337,11 +1465,19 @@ async fn show_status(client: &Client, base_url: &str, node_name: &str) -> Result
     let node_names = build_node_name_map(client).await;
 
     // Get balance
-    let balance = if let Ok(resp) = client.get(&format!("{}/bitcoin/balance", base_url)).send().await {
+    let balance = if let Ok(resp) = client
+        .get(format!("{}/bitcoin/balance", base_url))
+        .send()
+        .await
+    {
         if let Ok(bal) = resp.json::<Value>().await {
             bal["data"]["total_sat"].as_u64().unwrap_or(0)
-        } else { 0 }
-    } else { 0 };
+        } else {
+            0
+        }
+    } else {
+        0
+    };
 
     // Print node ID
     if let Some(ref id) = node_id {
@@ -1349,7 +1485,10 @@ async fn show_status(client: &Client, base_url: &str, node_name: &str) -> Result
     }
 
     // Dense line: peers, channels, balance
-    println!("Peers: {}  Channels: {}  Balance: {} sat", num_peers, num_channels, balance);
+    println!(
+        "Peers: {}  Channels: {}  Balance: {} sat",
+        num_peers, num_channels, balance
+    );
 
     // Get channels and ledgers - show one line per channel
     let mut channel_peers: Vec<String> = Vec::new();
@@ -1360,7 +1499,9 @@ async fn show_status(client: &Client, base_url: &str, node_name: &str) -> Result
         base_url,
         endpoints::DEPOSITS_LIST_LEDGERS_PATH,
         request,
-    ).await {
+    )
+    .await
+    {
         if !response.ledgers.is_empty() {
             println!("Channels:");
         }
@@ -1393,11 +1534,12 @@ async fn show_status(client: &Client, base_url: &str, node_name: &str) -> Result
             channel_peers.push(counterparty.to_string());
 
             // Local/remote depends on perspective
-            let (to_local, to_remote) = if node_id.as_ref().map(|id| id == operator).unwrap_or(false) {
-                (operator_sat, partner_sat)
-            } else {
-                (partner_sat, operator_sat)
-            };
+            let (to_local, to_remote) =
+                if node_id.as_ref().map(|id| id == operator).unwrap_or(false) {
+                    (operator_sat, partner_sat)
+                } else {
+                    (partner_sat, operator_sat)
+                };
 
             let status_char = if status == "active" { "✓" } else { "…" };
             let local_hash = &ledger.local_ledger_hash;
@@ -1406,10 +1548,14 @@ async fn show_status(client: &Client, base_url: &str, node_name: &str) -> Result
             // Multi-line format with ledger hashes
             let peer_display = format_node_id(counterparty, &node_names);
             println!("  {} {} Capacity: {}", peer_display, status_char, capacity);
-            println!("    to_local: {:>5}  reserves: {:>5}  ledger_hash: {}",
-                to_local, reserves, local_hash);
-            println!("    to_remote:{:>5}                   ledger_hash: {}",
-                to_remote, remote_hash);
+            println!(
+                "    to_local: {:>5}  reserves: {:>5}  ledger_hash: {}",
+                to_local, reserves, local_hash
+            );
+            println!(
+                "    to_remote:{:>5}                   ledger_hash: {}",
+                to_remote, remote_hash
+            );
         }
     }
 
@@ -1423,10 +1569,10 @@ async fn show_status(client: &Client, base_url: &str, node_name: &str) -> Result
 }
 
 async fn show_info(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
-    let response = client.get(&format!("{}/info", base_url)).send().await?;
+    let response = client.get(format!("{}/info", base_url)).send().await?;
     let info: Value = response.json().await?;
-    
+
     println!("{}", serde_json::to_string_pretty(&info)?);
-    
+
     Ok(())
 }

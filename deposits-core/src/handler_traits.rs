@@ -38,7 +38,8 @@ pub trait CollateralOperations {
     fn get_quorum_members(&self, partner_node_id: PublicKey) -> Vec<PublicKey>;
 
     /// Check if a node is a quorum member for a channel
-    fn is_quorum_member(&self, partner_node_id: PublicKey, potential_collateral: PublicKey) -> bool;
+    fn is_quorum_member(&self, partner_node_id: PublicKey, potential_collateral: PublicKey)
+        -> bool;
 
     /// Get the total available collateral for a channel
     fn get_total_available_collateral(&self, partner_node_id: PublicKey) -> u64;
@@ -54,7 +55,10 @@ pub trait DepositOperations {
     fn list_deposits(&self) -> Result<Vec<DepositId>, DepositsError>;
 
     /// List deposits matching a specific deposit_id
-    fn list_deposits_for_deposit_id(&self, deposit_id: DepositId) -> Result<Vec<DepositId>, DepositsError>;
+    fn list_deposits_for_deposit_id(
+        &self,
+        deposit_id: DepositId,
+    ) -> Result<Vec<DepositId>, DepositsError>;
 
     /// Get the available balance for a deposit (balance - locked)
     fn get_deposit_balance(&self, deposit_id: DepositId) -> Result<u64, DepositsError>;
@@ -64,7 +68,10 @@ pub trait DepositOperations {
 
     /// Find a deposit by payment_hash (from an invoice)
     /// Returns (reserves_id, deposit_id, invoice_amount) if found
-    fn find_deposit_by_payment_hash(&self, payment_hash: &[u8; 32]) -> Option<(String, DepositId, u64)>;
+    fn find_deposit_by_payment_hash(
+        &self,
+        payment_hash: &[u8; 32],
+    ) -> Option<(String, DepositId, u64)>;
 
     /// Get all deposit_ids with positive balances
     fn get_active_depositors(&self) -> Vec<DepositId>;
@@ -74,7 +81,10 @@ pub trait DepositOperations {
 
     /// Get detailed deposit info for a partner
     /// Returns Vec of (deposit_id, balance, locked_balance)
-    fn get_deposits_for_partner(&self, partner_node_id: PublicKey) -> Option<Vec<(DepositId, u64, u64)>>;
+    fn get_deposits_for_partner(
+        &self,
+        partner_node_id: PublicKey,
+    ) -> Option<Vec<(DepositId, u64, u64)>>;
 
     /// Get max outstanding invoice amount for a channel
     fn get_max_outstanding_invoice_amount(&self, partner_node_id: PublicKey) -> Option<u64>;
@@ -91,7 +101,8 @@ pub trait LedgerOperations {
 
     /// Get both local and remote committed ledger hashes for a channel partner
     /// Returns (local_hash, remote_hash)
-    fn get_ledger_hashes(&self, partner_node_id: PublicKey) -> (Option<[u8; 32]>, Option<[u8; 32]>);
+    fn get_ledger_hashes(&self, partner_node_id: PublicKey)
+        -> (Option<[u8; 32]>, Option<[u8; 32]>);
 
     /// Get committed ledger hashes directly from the channel state
     /// Returns (local_hash, remote_hash)
@@ -147,7 +158,10 @@ pub trait PaymentTracking {
 
     /// Get the full deposit info for a payment hash
     /// Returns (reserves_id, deposit_pubkey, invoice_id, bolt11) if found
-    fn get_deposit_for_payment(&self, payment_hash: &[u8; 32]) -> Option<(PublicKey, PublicKey, String, String)>;
+    fn get_deposit_for_payment(
+        &self,
+        payment_hash: &[u8; 32],
+    ) -> Option<(PublicKey, PublicKey, String, String)>;
 
     /// Unregister a deposit invoice (e.g., after payment or expiry)
     fn unregister_deposit_invoice(&self, payment_hash: &[u8; 32]);
@@ -214,7 +228,10 @@ pub trait RecoveryOperations {
 /// query methods for reserves status.
 pub trait ReservesQueryOps {
     /// Get the current reserves status for a channel
-    fn get_channel_reserves_status(&self, partner_node_id: PublicKey) -> Result<ReservesStatus, DepositsError>;
+    fn get_channel_reserves_status(
+        &self,
+        partner_node_id: PublicKey,
+    ) -> Result<ReservesStatus, DepositsError>;
 
     /// Get the reserves amount from our ledger
     fn get_channel_reserves_amount(&self, partner_node_id: PublicKey) -> Option<u64>;

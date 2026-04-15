@@ -11,17 +11,16 @@
 //!     --target-tps 500
 
 use bitcoin::hashes::Hash as _;
-use bitcoin::secp256k1::{self, Keypair, Message, Secp256k1, SecretKey};
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
-use deposits_node::nostr::{TAG_LEDGER_ID, TAG_EVENT_REF, TAG_LEDGER_REQ};
+use bitcoin::secp256k1::{self, Keypair, Message, Secp256k1, SecretKey};
+use deposits_node::nostr::{TAG_EVENT_REF, TAG_LEDGER_ID, TAG_LEDGER_REQ};
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use chrono::Utc;
 use tokio::sync::oneshot;
 
 // Nostr event kinds (must match deposits-node/src/nostr.rs)
@@ -95,7 +94,11 @@ impl SimMetrics {
 
     fn record_error(&self, error: &str) {
         // Truncate to first 80 chars for grouping
-        let key = if error.len() > 80 { &error[..80] } else { error };
+        let key = if error.len() > 80 {
+            &error[..80]
+        } else {
+            error
+        };
         let mut counts = self.error_counts.lock().unwrap();
         let count = counts.entry(key.to_string()).or_insert(0);
         *count += 1;
@@ -124,26 +127,31 @@ struct LedgerResponseData {
 }
 
 impl SimTransport {
-    async fn new(secret_key: SecretKey, relay_url: &str, ledger_ids: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn new(
+        secret_key: SecretKey,
+        relay_url: &str,
+        ledger_ids: &[String],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_multi(secret_key, &[relay_url.to_string()], ledger_ids).await
     }
 
-    async fn new_multi(secret_key: SecretKey, relay_urls: &[String], ledger_ids: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn new_multi(
+        secret_key: SecretKey,
+        relay_urls: &[String],
+        ledger_ids: &[String],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let secret_bytes = secret_key.secret_bytes();
         let nostr_secret = nostr_sdk::SecretKey::from_slice(&secret_bytes)
             .map_err(|e| format!("Invalid key: {}", e))?;
         let keys = Keys::new(nostr_secret);
 
-        let opts = Options::default()
-            .connection_timeout(Some(Duration::from_secs(30)))
-            .notification_channel_size(65536);
-        let client = Client::builder()
-            .signer(keys.clone())
-            .opts(opts)
-            .build();
+        let opts = Options::default().notification_channel_size(65536);
+        let client = Client::builder().signer(keys.clone()).opts(opts).build();
 
         for url in relay_urls {
-            client.add_relay(url.as_str()).await
+            client
+                .add_relay(url.as_str())
+                .await
                 .map_err(|e| format!("Failed to add relay {}: {}", url, e))?;
         }
         client.connect_with_timeout(Duration::from_secs(10)).await;
@@ -152,7 +160,10 @@ impl SimTransport {
         let start = Instant::now();
         loop {
             let relays = client.relays().await;
-            if relays.values().any(|r| r.status() == RelayStatus::Connected) {
+            if relays
+                .values()
+                .any(|r| r.status() == RelayStatus::Connected)
+            {
                 break;
             }
             if start.elapsed() > Duration::from_secs(10) {
@@ -164,12 +175,11 @@ impl SimTransport {
         // Subscribe to responses for our ledger IDs
         let mut filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_RESPONSE));
         if !ledger_ids.is_empty() {
-            filter = filter.custom_tag(
-                TAG_LEDGER_REQ,
-                ledger_ids.iter().map(|s| s.as_str()),
-            );
+            filter = filter.custom_tag(TAG_LEDGER_REQ, ledger_ids.iter().map(|s| s.as_str()));
         }
-        client.subscribe(vec![filter], None).await
+        client
+            .subscribe(vec![filter], None)
+            .await
             .map_err(|e| format!("Failed to subscribe: {}", e))?;
 
         let pending: Arc<Mutex<HashMap<String, oneshot::Sender<LedgerResponseData>>>> =
@@ -200,14 +210,21 @@ impl SimTransport {
                         };
 
                         // Parse response
-                        let response: LedgerResponseData = match serde_json::from_str::<serde_json::Value>(&event.content) {
-                            Ok(v) => LedgerResponseData {
-                                success: v.get("success").and_then(|s| s.as_bool()).unwrap_or(false),
-                                error: v.get("error").and_then(|s| s.as_str()).map(|s| s.to_string()),
-                                result: v.get("result").cloned(),
-                            },
-                            Err(_) => continue,
-                        };
+                        let response: LedgerResponseData =
+                            match serde_json::from_str::<serde_json::Value>(&event.content) {
+                                Ok(v) => LedgerResponseData {
+                                    success: v
+                                        .get("success")
+                                        .and_then(|s| s.as_bool())
+                                        .unwrap_or(false),
+                                    error: v
+                                        .get("error")
+                                        .and_then(|s| s.as_str())
+                                        .map(|s| s.to_string()),
+                                    result: v.get("result").cloned(),
+                                },
+                                Err(_) => continue,
+                            };
 
                         // Route to waiting task
                         let sender = pending_clone.lock().unwrap().remove(&request_id);
@@ -221,7 +238,11 @@ impl SimTransport {
             }
         });
 
-        Ok(Self { client, keys, pending })
+        Ok(Self {
+            client,
+            keys,
+            pending,
+        })
     }
 
     /// Send a transfer_lock request. Returns (request_event_id, oneshot_receiver).
@@ -229,7 +250,10 @@ impl SimTransport {
         &self,
         ledger_id: &str,
         params: serde_json::Value,
-    ) -> Result<(String, oneshot::Receiver<LedgerResponseData>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<
+        (String, oneshot::Receiver<LedgerResponseData>),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         self.send_request(ledger_id, "transfer_lock", params).await
     }
 
@@ -238,8 +262,12 @@ impl SimTransport {
         &self,
         ledger_id: &str,
         params: serde_json::Value,
-    ) -> Result<(String, oneshot::Receiver<LedgerResponseData>), Box<dyn std::error::Error + Send + Sync>> {
-        self.send_request(ledger_id, "transfer_complete", params).await
+    ) -> Result<
+        (String, oneshot::Receiver<LedgerResponseData>),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        self.send_request(ledger_id, "transfer_complete", params)
+            .await
     }
 
     async fn send_request(
@@ -247,7 +275,10 @@ impl SimTransport {
         ledger_id: &str,
         action: &str,
         params: serde_json::Value,
-    ) -> Result<(String, oneshot::Receiver<LedgerResponseData>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<
+        (String, oneshot::Receiver<LedgerResponseData>),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let content = serde_json::to_string(&params)?;
 
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &content)
@@ -255,10 +286,7 @@ impl SimTransport {
                 TagKind::SingleLetter(TAG_LEDGER_REQ),
                 [ledger_id],
             ))
-            .tag(Tag::custom(
-                TagKind::custom("action"),
-                [action],
-            ))
+            .tag(Tag::custom(TagKind::custom("action"), [action]))
             .sign_with_keys(&self.keys)
             .map_err(|e| format!("Sign failed: {}", e))?;
 
@@ -286,12 +314,19 @@ impl SimTransport {
 // ─── Key Derivation ─────────────────────────────────────────────────────────
 // Copied from deposits-wallet.rs (private functions, cannot import)
 
-fn derive_secret_key(seed: &[u8; 32], network: bitcoin::Network) -> Result<SecretKey, Box<dyn std::error::Error>> {
+fn derive_secret_key(
+    seed: &[u8; 32],
+    network: bitcoin::Network,
+) -> Result<SecretKey, Box<dyn std::error::Error>> {
     derive_secret_key_at_index(seed, network, 0)
 }
 
-fn derive_secret_key_at_index(seed: &[u8; 32], network: bitcoin::Network, index: u32) -> Result<SecretKey, Box<dyn std::error::Error>> {
-    use bitcoin::bip32::{Xpriv, DerivationPath};
+fn derive_secret_key_at_index(
+    seed: &[u8; 32],
+    network: bitcoin::Network,
+    index: u32,
+) -> Result<SecretKey, Box<dyn std::error::Error>> {
+    use bitcoin::bip32::{DerivationPath, Xpriv};
     use std::str::FromStr;
 
     let xpriv = Xpriv::new_master(network, seed)?;
@@ -313,7 +348,11 @@ struct WalletRunner {
 }
 
 impl WalletRunner {
-    fn new(config: &Config, node: &NodeConfig, extra_relays: &HashMap<String, String>) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(
+        config: &Config,
+        node: &NodeConfig,
+        extra_relays: &HashMap<String, String>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let exe = std::env::current_exe()?;
         let bin_dir = exe.parent().ok_or("Cannot determine binary directory")?;
         let wallet_bin = bin_dir.join("deposits-wallet");
@@ -410,7 +449,10 @@ struct Faucet {
 
 impl Faucet {
     fn new(bitcoin_cli: &str, data_dir: &PathBuf) -> Self {
-        let cli_parts: Vec<String> = bitcoin_cli.split_whitespace().map(|s| s.to_string()).collect();
+        let cli_parts: Vec<String> = bitcoin_cli
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect();
         Self {
             cli_parts,
             data_dir: data_dir.clone(),
@@ -424,25 +466,33 @@ impl Faucet {
             .map_err(|e| format!("Cannot read {}: {}", deposits_file.display(), e))?;
         let entries: Vec<serde_json::Value> = serde_json::from_str(&data)?;
 
-        let entry = entries.iter().find(|e| {
-            e.get("alias").and_then(|v| v.as_str()) == Some(alias)
-        }).ok_or_else(|| format!("Deposit '{}' not found in deposits.json", alias))?;
+        let entry = entries
+            .iter()
+            .find(|e| e.get("alias").and_then(|v| v.as_str()) == Some(alias))
+            .ok_or_else(|| format!("Deposit '{}' not found in deposits.json", alias))?;
 
-        let address = entry.get("funding_address")
+        let address = entry
+            .get("funding_address")
             .and_then(|v| v.as_str())
             .ok_or_else(|| format!("No funding_address for deposit '{}'", alias))?;
 
         let btc = format!("{:.8}", sats as f64 / 1e8);
 
-        let (cmd, base_args) = self.cli_parts.split_first()
+        let (cmd, base_args) = self
+            .cli_parts
+            .split_first()
             .ok_or("Empty bitcoin_cli command")?;
         let mut send_args: Vec<&str> = base_args.iter().map(|s| s.as_str()).collect();
         send_args.extend(["-rpcwallet=faucet", "sendtoaddress", address, &btc]);
 
-        eprintln!("  Funding '{}' with {} sats ({} BTC) → {}", alias, sats, btc, &address[..20]);
-        let output = std::process::Command::new(cmd)
-            .args(&send_args)
-            .output()?;
+        eprintln!(
+            "  Funding '{}' with {} sats ({} BTC) → {}",
+            alias,
+            sats,
+            btc,
+            &address[..20]
+        );
+        let output = std::process::Command::new(cmd).args(&send_args).output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("sendtoaddress failed: {}", stderr.trim()).into());
@@ -452,14 +502,14 @@ impl Faucet {
 
     /// Mine blocks to confirm pending transactions.
     fn generate_blocks(&self, count: u32) -> Result<(), Box<dyn std::error::Error>> {
-        let (cmd, base_args) = self.cli_parts.split_first()
+        let (cmd, base_args) = self
+            .cli_parts
+            .split_first()
             .ok_or("Empty bitcoin_cli command")?;
         let count_str = count.to_string();
         let mut gen_args: Vec<&str> = base_args.iter().map(|s| s.as_str()).collect();
         gen_args.extend(["-rpcwallet=faucet", "-generate", &count_str]);
-        let output = std::process::Command::new(cmd)
-            .args(&gen_args)
-            .output()?;
+        let output = std::process::Command::new(cmd).args(&gen_args).output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("block generation failed: {}", stderr.trim()).into());
@@ -490,21 +540,27 @@ struct LedgerFees {
 /// Fetch ledger advertisements from a relay. Returns (ledger_ids, ledger→relay_url mapping, ledger→fees mapping).
 /// Advertisements (Kind 39100) are NIP-33 replaceable events published by operators,
 /// containing ledger_id and the operator's primary relay_url.
-async fn fetch_advertisements(relay_url: &str) -> Result<(Vec<String>, HashMap<String, String>, HashMap<String, LedgerFees>), Box<dyn std::error::Error>> {
+async fn fetch_advertisements(
+    relay_url: &str,
+) -> Result<
+    (
+        Vec<String>,
+        HashMap<String, String>,
+        HashMap<String, LedgerFees>,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let keys = Keys::generate();
-    let opts = Options::default()
-        .connection_timeout(Some(Duration::from_secs(10)));
-    let client = Client::builder()
-        .signer(keys)
-        .opts(opts)
-        .build();
+    let opts = Options::default();
+    let client = Client::builder().signer(keys).opts(opts).build();
 
-    client.add_relay(relay_url).await
+    client
+        .add_relay(relay_url)
+        .await
         .map_err(|e| format!("Failed to add relay: {}", e))?;
     client.connect_with_timeout(Duration::from_secs(10)).await;
 
-    let filter = Filter::new()
-        .kind(Kind::Custom(KIND_LEDGER_ADVERTISE));
+    let filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_ADVERTISE));
 
     let events = client
         .fetch_events(vec![filter], Some(Duration::from_secs(10)))
@@ -523,7 +579,9 @@ async fn fetch_advertisements(relay_url: &str) -> Result<(Vec<String>, HashMap<S
         };
 
         // Extract ledger_id from #d tag (NIP-33 identifier) or JSON content
-        let ledger_id = event.tags.iter()
+        let ledger_id = event
+            .tags
+            .iter()
             .find_map(|tag| {
                 if tag.kind() == TagKind::SingleLetter(TAG_LEDGER_ID) {
                     tag.content().map(|s| s.to_string())
@@ -531,7 +589,11 @@ async fn fetch_advertisements(relay_url: &str) -> Result<(Vec<String>, HashMap<S
                     None
                 }
             })
-            .or_else(|| ad.get("ledger_id").and_then(|v| v.as_str()).map(|s| s.to_string()));
+            .or_else(|| {
+                ad.get("ledger_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
 
         let ledger_id = match ledger_id {
             Some(id) if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) => id,
@@ -548,15 +610,28 @@ async fn fetch_advertisements(relay_url: &str) -> Result<(Vec<String>, HashMap<S
         // Extract fee minimums from advertisement
         // fee_fixed in the request is annualized_msats, so we must convert:
         //   annualized = min_fee_sats_per_period * (52560 / fee_period_blocks)
-        let annual_fee_bps = ad.get("annual_fee_bps").and_then(|v| v.as_u64()).unwrap_or(0);
+        let annual_fee_bps = ad
+            .get("annual_fee_bps")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let min_fee_sats = ad.get("min_fee_sats").and_then(|v| v.as_u64()).unwrap_or(0);
-        let fee_period_blocks = ad.get("fee_period_blocks").and_then(|v| v.as_u64()).unwrap_or(2016);
-        let periods_per_year = if fee_period_blocks > 0 { 52560 / fee_period_blocks } else { 26 };
-        ledger_fees_map.insert(ledger_id.clone(), LedgerFees {
-            annual_fee_bps,
-            annualized_fixed: min_fee_sats.saturating_mul(periods_per_year),
-            fee_period_blocks,
-        });
+        let fee_period_blocks = ad
+            .get("fee_period_blocks")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2016);
+        let periods_per_year = if fee_period_blocks > 0 {
+            52560 / fee_period_blocks
+        } else {
+            26
+        };
+        ledger_fees_map.insert(
+            ledger_id.clone(),
+            LedgerFees {
+                annual_fee_bps,
+                annualized_fixed: min_fee_sats.saturating_mul(periods_per_year),
+                fee_period_blocks,
+            },
+        );
 
         ledger_ids.insert(ledger_id);
     }
@@ -572,7 +647,8 @@ async fn fetch_advertisements(relay_url: &str) -> Result<(Vec<String>, HashMap<S
 fn load_deposit_key_index(data_dir: &PathBuf) -> u32 {
     let path = data_dir.join("deposit_key_index.txt");
     if path.exists() {
-        std::fs::read_to_string(&path).ok()
+        std::fs::read_to_string(&path)
+            .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0)
     } else {
@@ -641,7 +717,9 @@ async fn batch_open_deposits(
                 "fee_bps": fees.map_or(0, |f| f.annual_fee_bps),
                 "fee_frequency": fees.map_or(2016, |f| f.fee_period_blocks),
             });
-            let rx_result = transport.send_request(&info.ledger_id, "deposit_open", open_params).await;
+            let rx_result = transport
+                .send_request(&info.ledger_id, "deposit_open", open_params)
+                .await;
             match rx_result {
                 Ok((_, rx)) => futures.push((batch_idx, rx)),
                 Err(e) => eprintln!("  {} deposit_open send failed: {}", info.alias, e),
@@ -653,10 +731,15 @@ async fn batch_open_deposits(
             let info = &batch[batch_idx];
             match tokio::time::timeout(Duration::from_secs(30), rx).await {
                 Ok(Ok(resp)) => {
-                    if resp.success || resp.error.as_deref().map_or(false, |e| e.contains("already")) {
+                    if resp.success || resp.error.as_deref().is_some_and(|e| e.contains("already"))
+                    {
                         opened.push(info.alias.clone());
                     } else {
-                        eprintln!("  {} deposit_open failed: {}", info.alias, resp.error.as_deref().unwrap_or("unknown"));
+                        eprintln!(
+                            "  {} deposit_open failed: {}",
+                            info.alias,
+                            resp.error.as_deref().unwrap_or("unknown")
+                        );
                     }
                 }
                 Ok(Err(_)) => eprintln!("  {} deposit_open: channel closed", info.alias),
@@ -669,8 +752,13 @@ async fn batch_open_deposits(
     let opened_set: std::collections::HashSet<&str> = opened.iter().map(|s| s.as_str()).collect();
 
     for batch in dep_infos.chunks(BATCH_SIZE) {
-        let batch_infos: Vec<&DepInfo> = batch.iter().filter(|i| opened_set.contains(i.alias.as_str())).collect();
-        if batch_infos.is_empty() { continue; }
+        let batch_infos: Vec<&DepInfo> = batch
+            .iter()
+            .filter(|i| opened_set.contains(i.alias.as_str()))
+            .collect();
+        if batch_infos.is_empty() {
+            continue;
+        }
 
         let mut futures = Vec::new();
         for info in &batch_infos {
@@ -684,7 +772,9 @@ async fn batch_open_deposits(
                 "fee_bps": fees.map_or(0, |f| f.annual_fee_bps),
                 "fee_frequency": fees.map_or(2016, |f| f.fee_period_blocks),
             });
-            let rx_result = transport.send_request(&info.ledger_id, "make_offer", offer_params).await;
+            let rx_result = transport
+                .send_request(&info.ledger_id, "make_offer", offer_params)
+                .await;
             match rx_result {
                 Ok((_, rx)) => futures.push((*info, rx)),
                 Err(e) => eprintln!("  {} make_offer send failed: {}", info.alias, e),
@@ -695,17 +785,31 @@ async fn batch_open_deposits(
             match tokio::time::timeout(Duration::from_secs(30), rx).await {
                 Ok(Ok(resp)) if resp.success => {
                     if let Some(ref result) = resp.result {
-                        let address = result.get("funding_address").and_then(|v| v.as_str()).unwrap_or("");
-                        let offer_id = result.get("offer_id").and_then(|v| v.as_str()).unwrap_or("");
+                        let address = result
+                            .get("funding_address")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let offer_id = result
+                            .get("offer_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         let min = result.get("min_sats").and_then(|v| v.as_u64()).unwrap_or(1);
-                        let max = result.get("max_sats").and_then(|v| v.as_u64()).unwrap_or(amount_sats);
+                        let max = result
+                            .get("max_sats")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(amount_sats);
 
                         if address.is_empty() || offer_id.is_empty() {
                             eprintln!("  {} make_offer: missing fields", info.alias);
                             continue;
                         }
 
-                        eprintln!("  {} → {} (ledger {}...)", info.alias, &address[..20], &info.ledger_id[..8]);
+                        eprintln!(
+                            "  {} → {} (ledger {}...)",
+                            info.alias,
+                            &address[..20],
+                            &info.ledger_id[..8]
+                        );
                         created.push(serde_json::json!({
                             "alias": info.alias,
                             "offer_id": offer_id,
@@ -723,7 +827,11 @@ async fn batch_open_deposits(
                     }
                 }
                 Ok(Ok(resp)) => {
-                    eprintln!("  {} make_offer failed: {}", info.alias, resp.error.as_deref().unwrap_or("unknown"));
+                    eprintln!(
+                        "  {} make_offer failed: {}",
+                        info.alias,
+                        resp.error.as_deref().unwrap_or("unknown")
+                    );
                 }
                 Ok(Err(_)) => eprintln!("  {} make_offer: channel closed", info.alias),
                 Err(_) => eprintln!("  {} make_offer: timeout", info.alias),
@@ -753,9 +861,15 @@ async fn run_bootstrap(config: &Config) -> Result<(), Box<dyn std::error::Error>
     } else {
         eprintln!("Discovering ledgers...");
         let (ids, relay_map, fees_map) = fetch_advertisements(&config.ledgers_relay).await?;
-        eprintln!("  Found {} ledger(s) with {} relay mappings", ids.len(), relay_map.len());
+        eprintln!(
+            "  Found {} ledger(s) with {} relay mappings",
+            ids.len(),
+            relay_map.len()
+        );
         if ids.is_empty() {
-            return Err("No ledgers found. Start operator nodes first, or use --ledger <id>.".into());
+            return Err(
+                "No ledgers found. Start operator nodes first, or use --ledger <id>.".into(),
+            );
         }
         (ids, relay_map, fees_map)
     };
@@ -786,13 +900,17 @@ async fn run_bootstrap(config: &Config) -> Result<(), Box<dyn std::error::Error>
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs() % 100000;
+            .as_secs()
+            % 100000;
 
         let aliases: Vec<String> = (0..to_create)
             .map(|i| format!("sim-{}-{:02}", ts, existing_count + i))
             .collect();
 
-        eprintln!("Creating {} deposits (have {}, target {})...", to_create, existing_count, target_count);
+        eprintln!(
+            "Creating {} deposits (have {}, target {})...",
+            to_create, existing_count, target_count
+        );
         // Collect all unique relay URLs for bootstrap (need to hear responses from all operators)
         let mut all_relay_urls: Vec<String> = vec![config.relay.clone()];
         for url in relay_map.values() {
@@ -801,18 +919,32 @@ async fn run_bootstrap(config: &Config) -> Result<(), Box<dyn std::error::Error>
             }
         }
         let new_deposits = batch_open_deposits(
-            &all_relay_urls, &node.seed, config.network, &node.data_dir,
-            &ledger_ids, &aliases, config.funding_sats, &fees_map,
-        ).await?;
+            &all_relay_urls,
+            &node.seed,
+            config.network,
+            &node.data_dir,
+            &ledger_ids,
+            &aliases,
+            config.funding_sats,
+            &fees_map,
+        )
+        .await?;
 
         // Merge with existing and save
         let mut all = existing;
         all.extend(new_deposits.iter().cloned());
         let json = serde_json::to_string_pretty(&all)?;
         std::fs::write(&deposits_file, json)?;
-        eprintln!("Created {} deposits ({} total)", new_deposits.len(), all.len());
+        eprintln!(
+            "Created {} deposits ({} total)",
+            new_deposits.len(),
+            all.len()
+        );
     } else {
-        eprintln!("Already have {} deposits (target {}), skipping creation", existing_count, target_count);
+        eprintln!(
+            "Already have {} deposits (target {}), skipping creation",
+            existing_count, target_count
+        );
     }
 
     // 4. Fund unfunded deposits (batched: send all txs, then mine once)
@@ -835,13 +967,20 @@ async fn run_bootstrap(config: &Config) -> Result<(), Box<dyn std::error::Error>
         };
         total_count += 1;
 
-        let status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+        let status = entry
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pending");
         if status == "funded" {
             already_funded += 1;
             continue;
         }
 
-        if entry.get("funding_address").and_then(|v| v.as_str()).is_none() {
+        if entry
+            .get("funding_address")
+            .and_then(|v| v.as_str())
+            .is_none()
+        {
             eprintln!("  Skipping '{}' — no funding_address", alias);
             continue;
         }
@@ -859,7 +998,10 @@ async fn run_bootstrap(config: &Config) -> Result<(), Box<dyn std::error::Error>
             eprintln!("  Warning: {}", e);
         }
     }
-    eprintln!("Funding: {} sent, {} already funded, {} total", sent_count, already_funded, total_count);
+    eprintln!(
+        "Funding: {} sent, {} already funded, {} total",
+        sent_count, already_funded, total_count
+    );
 
     if sent_count > 0 {
         // 5. Wait for confirmation — sync until all show balance > 0
@@ -875,7 +1017,10 @@ async fn run_bootstrap(config: &Config) -> Result<(), Box<dyn std::error::Error>
                 break;
             }
             if Instant::now() > deadline {
-                eprintln!("  Warning: timeout waiting for confirmations ({}/{} confirmed)", confirmed, total);
+                eprintln!(
+                    "  Warning: timeout waiting for confirmations ({}/{} confirmed)",
+                    confirmed, total
+                );
                 break;
             }
         }
@@ -898,7 +1043,11 @@ fn load_deposits(
 ) -> Result<Vec<SimDeposit>, Box<dyn std::error::Error>> {
     let deposits_file = node.data_dir.join("deposits.json");
     if !deposits_file.exists() {
-        eprintln!("  {} — no deposits.json at {}", node.name, deposits_file.display());
+        eprintln!(
+            "  {} — no deposits.json at {}",
+            node.name,
+            deposits_file.display()
+        );
         return Ok(Vec::new());
     }
 
@@ -917,14 +1066,23 @@ fn load_deposits(
             None => continue,
         };
         let key_index = d.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let balance_msats = d.get("balance_msats").and_then(|v| v.as_i64())
-            .or_else(|| d.get("amount_sats").and_then(|v| v.as_i64()).map(|s| s * 1000))
+        let balance_msats = d
+            .get("balance_msats")
+            .and_then(|v| v.as_i64())
+            .or_else(|| {
+                d.get("amount_sats")
+                    .and_then(|v| v.as_i64())
+                    .map(|s| s * 1000)
+            })
             .unwrap_or(0);
 
         let secret_key = match derive_secret_key_at_index(&node.seed, network, key_index) {
             Ok(k) => k,
             Err(e) => {
-                eprintln!("  {} — key derivation failed for {}: {}", node.name, alias, e);
+                eprintln!(
+                    "  {} — key derivation failed for {}: {}",
+                    node.name, alias, e
+                );
                 continue;
             }
         };
@@ -943,7 +1101,12 @@ fn load_deposits(
         });
     }
 
-    eprintln!("  {} — loaded {} deposits from {}", node.name, deposits.len(), deposits_file.display());
+    eprintln!(
+        "  {} — loaded {} deposits from {}",
+        node.name,
+        deposits.len(),
+        deposits_file.display()
+    );
     Ok(deposits)
 }
 
@@ -1003,30 +1166,52 @@ async fn execute_transfer(
 
     // ── transfer_lock ──
     let lock_start = Instant::now();
-    let (_, lock_rx) = match transport.send_transfer_lock(&sender.ledger_id, lock_params).await {
+    let (_, lock_rx) = match transport
+        .send_transfer_lock(&sender.ledger_id, lock_params)
+        .await
+    {
         Ok(r) => r,
-        Err(e) => return TransferResult {
-            success: false, locked: false, lock_us: 0, complete_us: 0,
-            error: Some(format!("send lock: {}", e)),
-        },
+        Err(e) => {
+            return TransferResult {
+                success: false,
+                locked: false,
+                lock_us: 0,
+                complete_us: 0,
+                error: Some(format!("send lock: {}", e)),
+            }
+        }
     };
 
-    let lock_response = match tokio::time::timeout(Duration::from_secs(lock_timeout_secs), lock_rx).await {
-        Ok(Ok(resp)) => resp,
-        Ok(Err(_)) => return TransferResult {
-            success: false, locked: false, lock_us: lock_start.elapsed().as_micros() as u64,
-            complete_us: 0, error: Some("lock oneshot closed".into()),
-        },
-        Err(_) => return TransferResult {
-            success: false, locked: false, lock_us: lock_start.elapsed().as_micros() as u64,
-            complete_us: 0, error: Some("lock timeout".into()),
-        },
-    };
+    let lock_response =
+        match tokio::time::timeout(Duration::from_secs(lock_timeout_secs), lock_rx).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(_)) => {
+                return TransferResult {
+                    success: false,
+                    locked: false,
+                    lock_us: lock_start.elapsed().as_micros() as u64,
+                    complete_us: 0,
+                    error: Some("lock oneshot closed".into()),
+                }
+            }
+            Err(_) => {
+                return TransferResult {
+                    success: false,
+                    locked: false,
+                    lock_us: lock_start.elapsed().as_micros() as u64,
+                    complete_us: 0,
+                    error: Some("lock timeout".into()),
+                }
+            }
+        };
     let lock_us = lock_start.elapsed().as_micros() as u64;
 
     if !lock_response.success {
         return TransferResult {
-            success: false, locked: false, lock_us, complete_us: 0,
+            success: false,
+            locked: false,
+            lock_us,
+            complete_us: 0,
             error: lock_response.error,
         };
     }
@@ -1047,7 +1232,10 @@ async fn execute_transfer(
             "preimage": hex::encode(work.preimage),
         });
 
-        let (_, complete_rx) = match transport.send_transfer_complete(&sender.ledger_id, complete_params).await {
+        let (_, complete_rx) = match transport
+            .send_transfer_complete(&sender.ledger_id, complete_params)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 last_error = Some(format!("send complete: {}", e));
@@ -1059,7 +1247,11 @@ async fn execute_transfer(
             Ok(Ok(resp)) if resp.success => {
                 let complete_us = complete_start.elapsed().as_micros() as u64;
                 return TransferResult {
-                    success: true, locked: true, lock_us, complete_us, error: None,
+                    success: true,
+                    locked: true,
+                    lock_us,
+                    complete_us,
+                    error: None,
                 };
             }
             Ok(Ok(resp)) => {
@@ -1071,7 +1263,10 @@ async fn execute_transfer(
                 }
                 let complete_us = complete_start.elapsed().as_micros() as u64;
                 return TransferResult {
-                    success: false, locked: true, lock_us, complete_us,
+                    success: false,
+                    locked: true,
+                    lock_us,
+                    complete_us,
                     error: Some(err),
                 };
             }
@@ -1088,7 +1283,10 @@ async fn execute_transfer(
 
     let complete_us = complete_start.elapsed().as_micros() as u64;
     TransferResult {
-        success: false, locked: true, lock_us, complete_us,
+        success: false,
+        locked: true,
+        lock_us,
+        complete_us,
         error: last_error,
     }
 }
@@ -1141,7 +1339,12 @@ fn load_or_generate_seed(data_dir: &PathBuf) -> Result<[u8; 32], Box<dyn std::er
         let seed_hex = std::fs::read_to_string(&seed_file)?;
         let seed_bytes = hex::decode(seed_hex.trim())?;
         if seed_bytes.len() != 32 {
-            return Err(format!("Invalid seed file at {} (expected 32 bytes, got {})", seed_file.display(), seed_bytes.len()).into());
+            return Err(format!(
+                "Invalid seed file at {} (expected 32 bytes, got {})",
+                seed_file.display(),
+                seed_bytes.len()
+            )
+            .into());
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&seed_bytes);
@@ -1177,7 +1380,8 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
         deposit_count: 0,
         funding_sats: 1_000_000,
         auto_topoff: false,
-        bitcoin_cli: "docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass".to_string(),
+        bitcoin_cli: "docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass"
+            .to_string(),
         ledger_ids: Vec::new(),
         lock_timeout_secs: 30,
     };
@@ -1185,8 +1389,14 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--relay" => { i += 1; config.relay = args[i].clone(); }
-            "--ledgers-relay" | "--slow-relay" => { i += 1; config.ledgers_relay = args[i].clone(); }
+            "--relay" => {
+                i += 1;
+                config.relay = args[i].clone();
+            }
+            "--ledgers-relay" | "--slow-relay" => {
+                i += 1;
+                config.ledgers_relay = args[i].clone();
+            }
             "--network" => {
                 i += 1;
                 config.network = match args[i].as_str() {
@@ -1197,21 +1407,64 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
                     _ => return Err(format!("Unknown network: {}", args[i]).into()),
                 };
             }
-            "--target-tps" => { i += 1; config.target_tps = args[i].parse()?; }
-            "--workers" => { i += 1; config.max_workers = args[i].parse()?; }
-            "--min-amount" => { i += 1; config.min_amount = args[i].parse()?; }
-            "--max-amount" => { i += 1; config.max_amount = args[i].parse()?; }
-            "--timeout-height" => { i += 1; config.timeout_height = args[i].parse()?; }
-            "--fee-fixed" => { i += 1; config.fee_fixed = args[i].parse()?; }
-            "--fee-rate-bps" => { i += 1; config.fee_rate_bps = args[i].parse()?; }
-            "--max-transfers" => { i += 1; config.max_transfers = args[i].parse()?; }
-            "--config" => { i += 1; config.config_file = Some(PathBuf::from(&args[i])); }
-            "--bootstrap" => { config.bootstrap = true; }
-            "--deposit-count" => { i += 1; config.deposit_count = args[i].parse()?; }
-            "--funding-sats" => { i += 1; config.funding_sats = args[i].parse()?; }
-            "--auto-topoff" => { config.auto_topoff = true; }
-            "--bitcoin-cli" => { i += 1; config.bitcoin_cli = args[i].clone(); }
-            "--lock-timeout" => { i += 1; config.lock_timeout_secs = args[i].parse()?; }
+            "--target-tps" => {
+                i += 1;
+                config.target_tps = args[i].parse()?;
+            }
+            "--workers" => {
+                i += 1;
+                config.max_workers = args[i].parse()?;
+            }
+            "--min-amount" => {
+                i += 1;
+                config.min_amount = args[i].parse()?;
+            }
+            "--max-amount" => {
+                i += 1;
+                config.max_amount = args[i].parse()?;
+            }
+            "--timeout-height" => {
+                i += 1;
+                config.timeout_height = args[i].parse()?;
+            }
+            "--fee-fixed" => {
+                i += 1;
+                config.fee_fixed = args[i].parse()?;
+            }
+            "--fee-rate-bps" => {
+                i += 1;
+                config.fee_rate_bps = args[i].parse()?;
+            }
+            "--max-transfers" => {
+                i += 1;
+                config.max_transfers = args[i].parse()?;
+            }
+            "--config" => {
+                i += 1;
+                config.config_file = Some(PathBuf::from(&args[i]));
+            }
+            "--bootstrap" => {
+                config.bootstrap = true;
+            }
+            "--deposit-count" => {
+                i += 1;
+                config.deposit_count = args[i].parse()?;
+            }
+            "--funding-sats" => {
+                i += 1;
+                config.funding_sats = args[i].parse()?;
+            }
+            "--auto-topoff" => {
+                config.auto_topoff = true;
+            }
+            "--bitcoin-cli" => {
+                i += 1;
+                config.bitcoin_cli = args[i].clone();
+            }
+            "--lock-timeout" => {
+                i += 1;
+                config.lock_timeout_secs = args[i].parse()?;
+            }
             "--ledger" => {
                 i += 1;
                 let id = args[i].clone();
@@ -1229,7 +1482,11 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
                         // name:seed_hex:data_dir
                         let seed_bytes = hex::decode(parts[1])?;
                         if seed_bytes.len() != 32 {
-                            return Err(format!("Seed must be 32 bytes (64 hex chars), got {}", seed_bytes.len()).into());
+                            return Err(format!(
+                                "Seed must be 32 bytes (64 hex chars), got {}",
+                                seed_bytes.len()
+                            )
+                            .into());
                         }
                         let mut seed = [0u8; 32];
                         seed.copy_from_slice(&seed_bytes);
@@ -1241,7 +1498,13 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
                         let seed = load_or_generate_seed(&data_dir)?;
                         (parts[0], seed, data_dir)
                     }
-                    _ => return Err(format!("--node must be name:seed_hex:data_dir or name:data_dir, got: {}", args[i]).into()),
+                    _ => {
+                        return Err(format!(
+                            "--node must be name:seed_hex:data_dir or name:data_dir, got: {}",
+                            args[i]
+                        )
+                        .into())
+                    }
                 };
                 config.nodes.push(NodeConfig {
                     name: name.to_string(),
@@ -1253,7 +1516,9 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
                 eprintln!("Usage: transfer-simulator [OPTIONS]");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  --relay <url>              Nostr relay (default: ws://localhost:7801)");
+                eprintln!(
+                    "  --relay <url>              Nostr relay (default: ws://localhost:7801)"
+                );
                 eprintln!("  --network <net>             Bitcoin network (default: regtest)");
                 eprintln!("  --target-tps <n>            Target TPS (default: 500)");
                 eprintln!("  --workers <n>               Concurrent workers (default: 50)");
@@ -1269,11 +1534,19 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
                 eprintln!("  --node <name:dir>           Add node, auto-load/generate seed");
                 eprintln!();
                 eprintln!("Bootstrap & Topoff:");
-                eprintln!("  --bootstrap                 Discover ledgers, create and fund deposits");
+                eprintln!(
+                    "  --bootstrap                 Discover ledgers, create and fund deposits"
+                );
                 eprintln!("  --deposit-count <n>         Target deposit count (default: auto)");
-                eprintln!("  --funding-sats <n>          Sats to fund each deposit (default: 1000000)");
-                eprintln!("  --auto-topoff               Re-fund depleted deposits during transfers");
-                eprintln!("  --bitcoin-cli <cmd>         bitcoin-cli command (default: docker exec ...)");
+                eprintln!(
+                    "  --funding-sats <n>          Sats to fund each deposit (default: 1000000)"
+                );
+                eprintln!(
+                    "  --auto-topoff               Re-fund depleted deposits during transfers"
+                );
+                eprintln!(
+                    "  --bitcoin-cli <cmd>         bitcoin-cli command (default: docker exec ...)"
+                );
                 eprintln!("  --ledger <id>               Explicit ledger ID, 64 hex (repeatable)");
                 std::process::exit(0);
             }
@@ -1323,14 +1596,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Relay:       {}", config.relay);
     eprintln!("Target TPS:  {}", config.target_tps);
     eprintln!("Workers:     {}", config.max_workers);
-    eprintln!("Amount:      {}-{} sats", config.min_amount, config.max_amount);
-    eprintln!("Fee:         {} + {}bps", config.fee_fixed, config.fee_rate_bps);
+    eprintln!(
+        "Amount:      {}-{} sats",
+        config.min_amount, config.max_amount
+    );
+    eprintln!(
+        "Fee:         {} + {}bps",
+        config.fee_fixed, config.fee_rate_bps
+    );
     eprintln!("Nodes:       {}", config.nodes.len());
     if config.bootstrap {
-        eprintln!("Bootstrap:   enabled (funding: {} sats)", config.funding_sats);
+        eprintln!(
+            "Bootstrap:   enabled (funding: {} sats)",
+            config.funding_sats
+        );
     }
     if config.auto_topoff {
-        eprintln!("Auto-topoff: enabled (threshold: 20% of {} sats)", config.funding_sats);
+        eprintln!(
+            "Auto-topoff: enabled (threshold: 20% of {} sats)",
+            config.funding_sats
+        );
     }
     eprintln!();
 
@@ -1350,42 +1635,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if all_deposits.is_empty() {
-        return Err("No deposits found. Use --bootstrap to create and fund deposits automatically.".into());
+        return Err(
+            "No deposits found. Use --bootstrap to create and fund deposits automatically.".into(),
+        );
     }
 
     // Build ledger → deposit indices map for receiver selection
     let mut ledger_deposits: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, d) in all_deposits.iter().enumerate() {
-        ledger_deposits.entry(d.ledger_id.clone()).or_default().push(i);
+        ledger_deposits
+            .entry(d.ledger_id.clone())
+            .or_default()
+            .push(i);
     }
 
-    eprintln!("Loaded {} deposits across {} ledgers", all_deposits.len(), ledger_deposits.len());
+    eprintln!(
+        "Loaded {} deposits across {} ledgers",
+        all_deposits.len(),
+        ledger_deposits.len()
+    );
     for (lid, indices) in &ledger_deposits {
-        eprintln!("  ledger {}... — {} deposits", &lid[..16.min(lid.len())], indices.len());
+        eprintln!(
+            "  ledger {}... — {} deposits",
+            &lid[..16.min(lid.len())],
+            indices.len()
+        );
     }
 
     // No per-ledger concurrency limit — operators process requests sequentially
     // and the cosign mini-loop handles cross-operator requests inline.
 
     // Filter to ledgers with >=2 deposits (need sender + receiver)
-    let eligible_deposit_indices: Vec<usize> = all_deposits.iter().enumerate()
+    let eligible_deposit_indices: Vec<usize> = all_deposits
+        .iter()
+        .enumerate()
         .filter(|(_, d)| {
-            ledger_deposits.get(&d.ledger_id).map_or(false, |v| v.len() >= 2)
+            ledger_deposits
+                .get(&d.ledger_id)
+                .is_some_and(|v| v.len() >= 2)
         })
         .map(|(i, _)| i)
         .collect();
 
     if eligible_deposit_indices.is_empty() {
-        return Err("No ledgers with >=2 deposits. Need at least 2 deposits on the same ledger.".into());
+        return Err(
+            "No ledgers with >=2 deposits. Need at least 2 deposits on the same ledger.".into(),
+        );
     }
 
-    eprintln!("{} eligible deposits (on ledgers with >=2 deposits)", eligible_deposit_indices.len());
+    eprintln!(
+        "{} eligible deposits (on ledgers with >=2 deposits)",
+        eligible_deposit_indices.len()
+    );
 
     // Discover ledger→relay mapping from advertisements
     eprintln!("Fetching relay routing from advertisements...");
     let (_, ledger_relay_map, _) = fetch_advertisements(&config.ledgers_relay).await?;
     if !ledger_relay_map.is_empty() {
-        eprintln!("Relay routing: {} ledgers mapped to per-operator relays", ledger_relay_map.len());
+        eprintln!(
+            "Relay routing: {} ledgers mapped to per-operator relays",
+            ledger_relay_map.len()
+        );
         let mut relay_counts: HashMap<&str, usize> = HashMap::new();
         for url in ledger_relay_map.values() {
             *relay_counts.entry(url.as_str()).or_default() += 1;
@@ -1400,7 +1710,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Deposits whose ledger has no relay mapping fall back to config.relay.
     let mut relay_ledger_groups: HashMap<String, Vec<String>> = HashMap::new();
     for d in &all_deposits {
-        let relay = ledger_relay_map.get(&d.ledger_id)
+        let relay = ledger_relay_map
+            .get(&d.ledger_id)
             .cloned()
             .unwrap_or_else(|| config.relay.clone());
         let lids = relay_ledger_groups.entry(relay).or_default();
@@ -1420,7 +1731,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Derive a unique key per relay to avoid nostr-sdk dedup issues
         // (same pubkey on multiple relays is fine, but separate clients need separate keys)
         let nostr_key = if idx == 0 {
-            nostr_key_base.clone()
+            nostr_key_base
         } else {
             // Derive a child key: hash(base_key || relay_idx)
             use bitcoin::hashes::{sha256, Hash};
@@ -1430,14 +1741,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             SecretKey::from_slice(&hash[..]).unwrap()
         };
         let transport = SimTransport::new(nostr_key, relay_url, ledger_ids_for_relay).await?;
-        eprintln!("  relay {} — {} ledgers, connected", relay_url, ledger_ids_for_relay.len());
+        eprintln!(
+            "  relay {} — {} ledgers, connected",
+            relay_url,
+            ledger_ids_for_relay.len()
+        );
         relay_to_transport_idx.insert(relay_url.clone(), idx);
         transports.push(Arc::new(transport));
     }
 
     // Re-map each deposit's node_idx to point to the correct transport
     for d in &all_deposits {
-        let relay = ledger_relay_map.get(&d.ledger_id)
+        let relay = ledger_relay_map
+            .get(&d.ledger_id)
             .cloned()
             .unwrap_or_else(|| config.relay.clone());
         if let Some(&tidx) = relay_to_transport_idx.get(&relay) {
@@ -1495,14 +1811,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let avg_lock = {
                 let count = metrics_clone.lock_count.load(Ordering::Relaxed);
                 if count > 0 {
-                    metrics_clone.lock_latency_us.load(Ordering::Relaxed) as f64 / count as f64 / 1000.0
-                } else { 0.0 }
+                    metrics_clone.lock_latency_us.load(Ordering::Relaxed) as f64
+                        / count as f64
+                        / 1000.0
+                } else {
+                    0.0
+                }
             };
             let avg_complete = {
                 let count = metrics_clone.complete_count.load(Ordering::Relaxed);
                 if count > 0 {
-                    metrics_clone.complete_latency_us.load(Ordering::Relaxed) as f64 / count as f64 / 1000.0
-                } else { 0.0 }
+                    metrics_clone.complete_latency_us.load(Ordering::Relaxed) as f64
+                        / count as f64
+                        / 1000.0
+                } else {
+                    0.0
+                }
             };
 
             let uptime = now.duration_since(report_start).as_secs();
@@ -1529,14 +1853,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Config file watcher — polls every 1s for runtime changes
     if let Some(config_path) = &config.config_file {
-        eprintln!("Config file: {} (hot-reload enabled)", config_path.display());
+        eprintln!(
+            "Config file: {} (hot-reload enabled)",
+            config_path.display()
+        );
         let path = config_path.clone();
         let target_tps_w = target_tps_dynamic.clone();
         let effective_tps_w = effective_tps.clone();
         let interval_us_w = interval_us.clone();
         let paused_w = paused.clone();
         let max_workers_w = max_workers_dynamic.clone();
-        let mut last_mtime = std::fs::metadata(&path).ok()
+        let mut last_mtime = std::fs::metadata(&path)
+            .ok()
             .and_then(|m| m.modified().ok())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
         let mut current_tps = config.target_tps;
@@ -1545,7 +1873,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                let mtime = match std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()) {
+                let mtime = match std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                {
                     Some(t) => t,
                     None => continue,
                 };
@@ -1563,7 +1894,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 // target_tps / target_qps
-                if let Some(tps) = json.get("target_tps")
+                if let Some(tps) = json
+                    .get("target_tps")
                     .or_else(|| json.get("target_qps"))
                     .and_then(|v| v.as_f64())
                     .map(|v| v as u64)
@@ -1583,12 +1915,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // max_concurrent
-                if let Some(workers) = json.get("max_concurrent")
+                if let Some(workers) = json
+                    .get("max_concurrent")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as usize)
                 {
                     if workers != current_workers && workers > 0 {
-                        eprintln!("[config] max_concurrent: {} -> {}", current_workers, workers);
+                        eprintln!(
+                            "[config] max_concurrent: {} -> {}",
+                            current_workers, workers
+                        );
                         max_workers_w.store(workers, Ordering::Relaxed);
                         current_workers = workers;
                     }
@@ -1615,12 +1951,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topoff_threshold_sats = config.funding_sats / 5; // 20%
     let topoff_running = Arc::new(AtomicBool::new(false));
     let topoff_wallet = if config.auto_topoff {
-        Some(Arc::new(WalletRunner::new(&config, &config.nodes[0], &ledger_relay_map)?))
+        Some(Arc::new(WalletRunner::new(
+            &config,
+            &config.nodes[0],
+            &ledger_relay_map,
+        )?))
     } else {
         None
     };
     let topoff_faucet = if config.auto_topoff {
-        Some(Arc::new(Faucet::new(&config.bitcoin_cli, &config.nodes[0].data_dir)))
+        Some(Arc::new(Faucet::new(
+            &config.bitcoin_cli,
+            &config.nodes[0].data_dir,
+        )))
     } else {
         None
     };
@@ -1631,15 +1974,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let output = std::process::Command::new("sh")
             .args(["-c", &format!("{} getblockcount", config.bitcoin_cli)])
             .output();
-        let height: u32 = output.ok()
+        let height: u32 = output
+            .ok()
             .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
             .unwrap_or(200);
         config.timeout_height = height + 500;
-        eprintln!("Timeout height: {} (current block {} + 500)", config.timeout_height, height);
+        eprintln!(
+            "Timeout height: {} (current block {} + 500)",
+            config.timeout_height, height
+        );
     }
 
-    eprintln!("\nStarting transfers (ramp 5 → {} TPS, {} workers, no throttle)...\n",
-        config.target_tps, config.max_workers);
+    eprintln!(
+        "\nStarting transfers (ramp 5 → {} TPS, {} workers, no throttle)...\n",
+        config.target_tps, config.max_workers
+    );
 
     // Ramp-up: increase TPS by 10% every 2s until target, then hold steady
     let mut last_adapt_time = Instant::now();
@@ -1677,7 +2026,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Auto-topoff check every 60s (runs in background thread to avoid blocking transfers)
-        if config.auto_topoff && last_topoff_check.elapsed() > Duration::from_secs(60)
+        if config.auto_topoff
+            && last_topoff_check.elapsed() > Duration::from_secs(60)
             && !topoff_running.load(Ordering::Relaxed)
         {
             last_topoff_check = Instant::now();
@@ -1698,10 +2048,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     eprintln!("[topoff] '{}' balance {} sats < threshold {} sats, funding {} sats",
                                         alias, balance, threshold, topoff_amount);
                                     if let Err(e) = faucet_c.fund(alias, topoff_amount) {
-                                        eprintln!("[topoff] Warning: failed to fund '{}': {}", alias, e);
+                                        eprintln!(
+                                            "[topoff] Warning: failed to fund '{}': {}",
+                                            alias, e
+                                        );
                                     } else {
-                                        if let Some(dep) = deposits_c.iter().find(|d| &d.alias == alias) {
-                                            dep.balance_msats.store(funding as i64 * 1000, Ordering::Relaxed);
+                                        if let Some(dep) =
+                                            deposits_c.iter().find(|d| &d.alias == alias)
+                                        {
+                                            dep.balance_msats
+                                                .store(funding as i64 * 1000, Ordering::Relaxed);
                                         }
                                     }
                                 }
@@ -1726,7 +2082,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Advance from previous deadline, not from now — ensures work time
             // between sends doesn't eat into the interval
             let interval = Duration::from_micros(current_interval);
-            next_send = next_send + interval;
+            next_send += interval;
             // If we fell behind (next_send is still in the past), snap forward
             // to avoid a burst of catch-up sends
             let now = Instant::now();
@@ -1752,15 +2108,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let debit_msats = amount_msats as i64 + fee_msats as i64;
 
         // Pre-debit balance atomically
-        let old_bal = sender.balance_msats.fetch_sub(debit_msats, Ordering::Relaxed);
+        let old_bal = sender
+            .balance_msats
+            .fetch_sub(debit_msats, Ordering::Relaxed);
         if old_bal - debit_msats < 0 {
-            sender.balance_msats.fetch_add(debit_msats, Ordering::Relaxed);
+            sender
+                .balance_msats
+                .fetch_add(debit_msats, Ordering::Relaxed);
             // Check if all deposits are depleted
             if last_dispatch_time.elapsed() > Duration::from_secs(30) {
                 let min_amount_msats = config.min_amount * 1000;
-                let min_fee_msats = config.fee_fixed + (min_amount_msats * config.fee_rate_bps / 10000);
+                let min_fee_msats =
+                    config.fee_fixed + (min_amount_msats * config.fee_rate_bps / 10000);
                 let min_needed = min_amount_msats as i64 + min_fee_msats as i64;
-                let any_funded = deposits.iter().any(|d| d.balance_msats.load(Ordering::Relaxed) >= min_needed);
+                let any_funded = deposits
+                    .iter()
+                    .any(|d| d.balance_msats.load(Ordering::Relaxed) >= min_needed);
                 if !any_funded {
                     eprintln!("\nAll deposits depleted — no deposit has enough balance for min transfer ({} sats + {} fee):", config.min_amount, config.fee_fixed);
                     for d in deposits.iter() {
@@ -1776,12 +2139,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Pick receiver (random deposit on same ledger, different from sender)
         let same_ledger = &ledger_deps[&sender.ledger_id];
-        let candidates: Vec<usize> = same_ledger.iter()
+        let candidates: Vec<usize> = same_ledger
+            .iter()
             .copied()
             .filter(|&i| i != sender_idx)
             .collect();
         if candidates.is_empty() {
-            sender.balance_msats.fetch_add(debit_msats, Ordering::Relaxed);
+            sender
+                .balance_msats
+                .fetch_add(debit_msats, Ordering::Relaxed);
             continue;
         }
         let receiver_idx = candidates[rng.next_u64() as usize % candidates.len()];
@@ -1819,20 +2185,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_dispatched += 1;
 
         tokio::spawn(async move {
-            let result = execute_transfer(&transports_c, &deposits_c, &secp_c, &work, timeout_height, lock_timeout_secs).await;
+            let result = execute_transfer(
+                &transports_c,
+                &deposits_c,
+                &secp_c,
+                &work,
+                timeout_height,
+                lock_timeout_secs,
+            )
+            .await;
 
             // Process result
             if result.success {
                 let credit_msats = work.amount_sats as i64 * 1000;
-                deposits_c[work.receiver_idx].balance_msats.fetch_add(credit_msats, Ordering::Relaxed);
+                deposits_c[work.receiver_idx]
+                    .balance_msats
+                    .fetch_add(credit_msats, Ordering::Relaxed);
                 metrics_c.success.fetch_add(1, Ordering::Relaxed);
-                metrics_c.volume_sats.fetch_add(work.amount_sats, Ordering::Relaxed);
+                metrics_c
+                    .volume_sats
+                    .fetch_add(work.amount_sats, Ordering::Relaxed);
             } else if !result.locked {
                 // Lock failed — restore sender balance
                 let restore = work.amount_sats as i64 * 1000 + work.fee_msats as i64;
-                deposits_c[work.sender_idx].balance_msats.fetch_add(restore, Ordering::Relaxed);
+                deposits_c[work.sender_idx]
+                    .balance_msats
+                    .fetch_add(restore, Ordering::Relaxed);
                 metrics_c.failed.fetch_add(1, Ordering::Relaxed);
-                if result.error.as_deref().map_or(false, |e| e.contains("timeout")) {
+                if result
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("timeout"))
+                {
                     metrics_c.timeouts.fetch_add(1, Ordering::Relaxed);
                 }
                 if let Some(ref e) = result.error {
@@ -1847,11 +2231,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if result.lock_us > 0 {
-                metrics_c.lock_latency_us.fetch_add(result.lock_us, Ordering::Relaxed);
+                metrics_c
+                    .lock_latency_us
+                    .fetch_add(result.lock_us, Ordering::Relaxed);
                 metrics_c.lock_count.fetch_add(1, Ordering::Relaxed);
             }
             if result.complete_us > 0 {
-                metrics_c.complete_latency_us.fetch_add(result.complete_us, Ordering::Relaxed);
+                metrics_c
+                    .complete_latency_us
+                    .fetch_add(result.complete_us, Ordering::Relaxed);
                 metrics_c.complete_count.fetch_add(1, Ordering::Relaxed);
             }
 
@@ -1888,12 +2276,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if metrics.lock_count.load(Ordering::Relaxed) > 0 {
         let avg_lock = metrics.lock_latency_us.load(Ordering::Relaxed) as f64
-            / metrics.lock_count.load(Ordering::Relaxed) as f64 / 1000.0;
+            / metrics.lock_count.load(Ordering::Relaxed) as f64
+            / 1000.0;
         eprintln!("Avg lock:     {:.1}ms", avg_lock);
     }
     if metrics.complete_count.load(Ordering::Relaxed) > 0 {
         let avg_complete = metrics.complete_latency_us.load(Ordering::Relaxed) as f64
-            / metrics.complete_count.load(Ordering::Relaxed) as f64 / 1000.0;
+            / metrics.complete_count.load(Ordering::Relaxed) as f64
+            / 1000.0;
         eprintln!("Avg complete: {:.1}ms", avg_complete);
     }
 

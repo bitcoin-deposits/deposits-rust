@@ -79,7 +79,10 @@ pub enum HandleError {
     /// Message references unknown ledger (by ledger_id)
     UnknownLedger { ledger_id: [u8; 32] },
     /// Message references unknown ledger (by operator/reserves)
-    UnknownLedgerByKey { operator: PublicKey, reserves_id: String },
+    UnknownLedgerByKey {
+        operator: PublicKey,
+        reserves_id: String,
+    },
     /// Validation failed
     ValidationFailed(String),
     /// Internal error
@@ -93,7 +96,10 @@ impl fmt::Display for HandleError {
             Self::UnknownLedger { ledger_id } => {
                 write!(f, "unknown ledger: {}", hex::encode(ledger_id))
             }
-            Self::UnknownLedgerByKey { operator, reserves_id } => {
+            Self::UnknownLedgerByKey {
+                operator,
+                reserves_id,
+            } => {
                 write!(f, "unknown ledger: {} -> {}", operator, reserves_id)
             }
             Self::ValidationFailed(e) => write!(f, "validation failed: {}", e),
@@ -317,7 +323,9 @@ pub trait ChannelOperations: Send + Sync {
 
     /// Get the first channel with a counterparty (convenience method)
     fn get_channel_with_counterparty(&self, counterparty: &PublicKey) -> Option<ChannelInfo> {
-        self.list_channels_with_counterparty(counterparty).into_iter().next()
+        self.list_channels_with_counterparty(counterparty)
+            .into_iter()
+            .next()
     }
 
     /// Get channel IDs for all partners we have channels with
@@ -372,17 +380,11 @@ pub trait ReservesOperations: Send + Sync {
     ) -> Option<[u8; 32]>;
 
     /// Check if there are pending (uncommitted) reserves updates
-    fn has_pending_reserves(
-        &self,
-        counterparty: &PublicKey,
-        channel_id: &[u8; 32],
-    ) -> bool;
+    fn has_pending_reserves(&self, counterparty: &PublicKey, channel_id: &[u8; 32]) -> bool;
 
     /// Get both local and remote reserves hashes for a channel
-    fn get_reserves_hashes(
-        &self,
-        counterparty: &PublicKey,
-    ) -> (Option<[u8; 32]>, Option<[u8; 32]>);
+    fn get_reserves_hashes(&self, counterparty: &PublicKey)
+        -> (Option<[u8; 32]>, Option<[u8; 32]>);
 }
 
 // ============================================================================
@@ -418,8 +420,8 @@ pub trait Storage: Send + Sync {
 // Deposits Storage Provider
 // ============================================================================
 
-use crate::types::{LedgerState, Deposit, ReservesOutput, SignedLedgerUpdate};
-use crate::tlv::{TlvEncode, TlvDecode};
+use crate::tlv::{TlvDecode, TlvEncode};
+use crate::types::{Deposit, LedgerState, ReservesOutput, SignedLedgerUpdate};
 
 /// High-level storage provider for Bitcoin Deposits protocol.
 ///
@@ -556,7 +558,11 @@ impl<S: Storage> DefaultStorageProvider<S> {
     }
 
     /// Build a key for a deposit.
-    fn deposit_key(operator: &PublicKey, reserves_id: &str, deposit_id: &crate::types::DepositId) -> Vec<u8> {
+    fn deposit_key(
+        operator: &PublicKey,
+        reserves_id: &str,
+        deposit_id: &crate::types::DepositId,
+    ) -> Vec<u8> {
         let mut key = b"deposits/deposit/".to_vec();
         key.extend_from_slice(&operator.serialize());
         key.push(b'/');
@@ -1094,13 +1100,11 @@ mod tests {
 
     #[test]
     fn test_transport_error_display() {
-        let err = TransportError::PeerNotConnected(
-            "02abc123".parse().unwrap_or_else(|_| {
-                let secp = bitcoin::secp256k1::Secp256k1::new();
-                let sk = bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
-                PublicKey::from_secret_key(&secp, &sk)
-            }),
-        );
+        let err = TransportError::PeerNotConnected("02abc123".parse().unwrap_or_else(|_| {
+            let secp = bitcoin::secp256k1::Secp256k1::new();
+            let sk = bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
+            PublicKey::from_secret_key(&secp, &sk)
+        }));
         assert!(err.to_string().contains("peer not connected"));
     }
 

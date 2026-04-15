@@ -47,7 +47,6 @@ path = "src/bin/deposits-lnurl.rs"
 [dependencies]
 # Bitcoin
 bitcoin = { version = "0.32", features = ["serde", "rand-std"] }
-bdk_wallet = { version = "2.2.0", default-features = false, features = ["std", "keys-bip39"] }
 
 # Deposits
 deposits-core = { path = "../deposits-core" }
@@ -111,3 +110,6 @@ axum = "0.7"
 
 # Nostr (for deposits-lnurl)
 nostr-sdk = "0.37"
+
+[lints]
+workspace = true

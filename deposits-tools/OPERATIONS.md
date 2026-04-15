@@ -14,7 +14,7 @@ shared **ledgers relay** that durably persists all non-ephemeral events.
   and expire after `ephemeralEventsLifetimeSeconds` (default 300s). This keeps
   the relay fast and prevents unbounded storage growth.
 - **Ports**: alice=7801, bob=7802, charlie=7803, diana=7804
-- **Config**: `strfry-performance/strfry.conf`
+- **Config**: `deposits-tools/config/strfry.conf`
 
 Node relays do NOT persist ledger updates (Kind 9100), advertisements (Kind
 39100), or any other data that needs to survive beyond a few minutes. They are
@@ -27,7 +27,7 @@ purely real-time message buses.
 - **Retention**: Persists all events indefinitely. Drops ephemeral kinds
   (20000-29999) via write policy to avoid storing cosign chatter.
 - **Port**: 7779
-- **Config**: `strfry-performance/strfry-slow.conf`
+- **Config**: `deposits-tools/config/strfry-slow.conf`
 - **Ingestion**: Streams from all node relays via `strfry stream` to capture
   events that nodes publish to their own relays.
 
@@ -107,7 +107,7 @@ field in the operator's advertisement (Kind 39100).
 ### Native Processes (strfry relays)
 
 Nostr relays run as native strfry processes (not Docker containers) on x86_64.
-The strfry binary is at `bin/strfry`, built from source in `strfry-performance/`.
+The strfry binary is at `bin/strfry` (built from the upstream [strfry](https://github.com/hoytech/strfry) project).
 
 - **relay-alice** (port 7801): Fast relay for alice
 - **relay-bob** (port 7802): Fast relay for bob

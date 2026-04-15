@@ -3,9 +3,9 @@
 //! Build: cargo build --release --bin nostr-bench
 //! Run: ./target/release/nostr-bench
 
+use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
+use sha2::{Digest, Sha256};
 use std::time::Instant;
-use sha2::{Sha256, Digest};
-use bitcoin::secp256k1::{Secp256k1, SecretKey, Keypair, XOnlyPublicKey, Message};
 
 fn main() {
     let secp = Secp256k1::new();
@@ -61,10 +61,11 @@ fn main() {
     let serialize_time = start.elapsed();
 
     // Benchmark tokio mutex (simulating nostr-sdk database locks)
-    use std::sync::Arc;
     use std::collections::HashMap;
+    use std::sync::Arc;
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let mutex: Arc<tokio::sync::Mutex<HashMap<u64, u64>>> = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let mutex: Arc<tokio::sync::Mutex<HashMap<u64, u64>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
     let start = Instant::now();
     rt.block_on(async {
@@ -77,40 +78,66 @@ fn main() {
 
     println!("=== Microbenchmark Results ({} iterations) ===", iterations);
     println!();
-    println!("Schnorr verify:    {:>8.2} µs/op ({:.0} ops/sec)",
+    println!(
+        "Schnorr verify:    {:>8.2} µs/op ({:.0} ops/sec)",
         verify_time.as_micros() as f64 / iterations as f64,
-        iterations as f64 / verify_time.as_secs_f64());
-    println!("SHA-256 hash:      {:>8.2} µs/op ({:.0} ops/sec)",
+        iterations as f64 / verify_time.as_secs_f64()
+    );
+    println!(
+        "SHA-256 hash:      {:>8.2} µs/op ({:.0} ops/sec)",
         hash_time.as_micros() as f64 / iterations as f64,
-        iterations as f64 / hash_time.as_secs_f64());
-    println!("JSON parse:        {:>8.2} µs/op ({:.0} ops/sec)",
+        iterations as f64 / hash_time.as_secs_f64()
+    );
+    println!(
+        "JSON parse:        {:>8.2} µs/op ({:.0} ops/sec)",
         parse_time.as_micros() as f64 / iterations as f64,
-        iterations as f64 / parse_time.as_secs_f64());
-    println!("JSON serialize:    {:>8.2} µs/op ({:.0} ops/sec)",
+        iterations as f64 / parse_time.as_secs_f64()
+    );
+    println!(
+        "JSON serialize:    {:>8.2} µs/op ({:.0} ops/sec)",
         serialize_time.as_micros() as f64 / iterations as f64,
-        iterations as f64 / serialize_time.as_secs_f64());
-    println!("Tokio mutex lock:  {:>8.2} µs/op ({:.0} ops/sec)",
+        iterations as f64 / serialize_time.as_secs_f64()
+    );
+    println!(
+        "Tokio mutex lock:  {:>8.2} µs/op ({:.0} ops/sec)",
         mutex_time.as_micros() as f64 / iterations as f64,
-        iterations as f64 / mutex_time.as_secs_f64());
+        iterations as f64 / mutex_time.as_secs_f64()
+    );
     println!();
 
     let crypto_ops = verify_time.as_micros() as f64 + hash_time.as_micros() as f64;
     let json_ops = parse_time.as_micros() as f64 + serialize_time.as_micros() as f64;
-    println!("Crypto per event:  {:>8.2} µs", crypto_ops / iterations as f64);
-    println!("JSON per event:    {:>8.2} µs", json_ops / iterations as f64);
+    println!(
+        "Crypto per event:  {:>8.2} µs",
+        crypto_ops / iterations as f64
+    );
+    println!(
+        "JSON per event:    {:>8.2} µs",
+        json_ops / iterations as f64
+    );
     println!();
 
-    let total_per_event = (verify_time + hash_time + parse_time + serialize_time + mutex_time).as_micros() as f64 / iterations as f64;
+    let total_per_event = (verify_time + hash_time + parse_time + serialize_time + mutex_time)
+        .as_micros() as f64
+        / iterations as f64;
     println!("Total per event:   {:>8.2} µs", total_per_event);
     println!();
 
     // nostr-sdk does 3 mutex locks per incoming event + 1 for send
     let nostr_sdk_db = mutex_time.as_micros() as f64 * 4.0 / iterations as f64;
-    println!("Estimated nostr-sdk DB overhead (4 locks): {:.2} µs", nostr_sdk_db);
+    println!(
+        "Estimated nostr-sdk DB overhead (4 locks): {:.2} µs",
+        nostr_sdk_db
+    );
     println!();
-    println!("For 148ms overhead, that's {:.0}x these operations", 148000.0 / total_per_event);
+    println!(
+        "For 148ms overhead, that's {:.0}x these operations",
+        148000.0 / total_per_event
+    );
     println!();
-    println!("Mystery overhead = 148ms - {:.2}ms = {:.2}ms",
+    println!(
+        "Mystery overhead = 148ms - {:.2}ms = {:.2}ms",
         total_per_event / 1000.0,
-        148.0 - total_per_event / 1000.0);
+        148.0 - total_per_event / 1000.0
+    );
 }

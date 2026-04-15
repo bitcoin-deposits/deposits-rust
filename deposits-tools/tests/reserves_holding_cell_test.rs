@@ -11,7 +11,7 @@
 
 #![cfg(feature = "bitcoin-deposits")]
 
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -57,8 +57,11 @@ fn test_concurrent_counter_pattern() {
     // The counter might not equal num_threads * iterations_per_thread
     // due to race conditions - this demonstrates why we need the holding cell
     let final_count = counter.load(Ordering::SeqCst);
-    println!("Final count: {} (expected without races: {})",
-             final_count, num_threads * iterations_per_thread);
+    println!(
+        "Final count: {} (expected without races: {})",
+        final_count,
+        num_threads * iterations_per_thread
+    );
 
     // The point is that without proper synchronization, we get races
     // The holding cell pattern ensures updates are serialized
@@ -84,7 +87,7 @@ fn test_compare_and_swap_pattern() {
                 0, // expected: not busy
                 1, // new: now busy
                 Ordering::SeqCst,
-                Ordering::SeqCst
+                Ordering::SeqCst,
             );
 
             match result {
@@ -109,7 +112,10 @@ fn test_compare_and_swap_pattern() {
     }
 
     let successes = success_count.load(Ordering::SeqCst);
-    println!("Successful immediate sends: {} out of {}", successes, num_threads);
+    println!(
+        "Successful immediate sends: {} out of {}",
+        successes, num_threads
+    );
 
     // At least one should succeed
     assert!(successes >= 1);
@@ -239,7 +245,10 @@ fn test_bidirectional_updates_pattern() {
     let bob_sent = bob_handle.join().unwrap();
 
     // Both should succeed because they're independent cells
-    assert!(alice_sent, "Alice's update should go through on her channel");
+    assert!(
+        alice_sent,
+        "Alice's update should go through on her channel"
+    );
     assert!(bob_sent, "Bob's update should go through on his channel");
 
     println!("Both parties successfully sent updates for their respective ledgers");
@@ -255,13 +264,9 @@ fn test_same_channel_concurrent_updates() {
     let cell1 = Arc::clone(&shared_cell);
     let cell2 = Arc::clone(&shared_cell);
 
-    let handle1 = thread::spawn(move || {
-        cell1.try_send(1000, [0x01; 32])
-    });
+    let handle1 = thread::spawn(move || cell1.try_send(1000, [0x01; 32]));
 
-    let handle2 = thread::spawn(move || {
-        cell2.try_send(2000, [0x02; 32])
-    });
+    let handle2 = thread::spawn(move || cell2.try_send(2000, [0x02; 32]));
 
     let result1 = handle1.join().unwrap();
     let result2 = handle2.join().unwrap();
@@ -369,13 +374,20 @@ fn test_full_holding_cell_cycle() {
     let cell = SimulatedHoldingCell::new();
 
     // Phase 1: Channel becomes busy
-    assert!(cell.try_send(1000, [0x01; 32]), "First update should succeed");
+    assert!(
+        cell.try_send(1000, [0x01; 32]),
+        "First update should succeed"
+    );
 
     // Phase 2: More updates come in while busy
     for i in 2..=5 {
         let mut hash = [0u8; 32];
         hash[0] = i;
-        assert!(!cell.try_send(i as u64 * 1000, hash), "Update {} should be queued", i);
+        assert!(
+            !cell.try_send(i as u64 * 1000, hash),
+            "Update {} should be queued",
+            i
+        );
     }
 
     // Phase 3: First update completes
@@ -387,7 +399,10 @@ fn test_full_holding_cell_cycle() {
     assert_eq!(hash[0], 5, "Should be hash from update 5");
 
     // Phase 4: Process the queued update
-    assert!(cell.try_send(amount, hash), "Processing queued update should succeed");
+    assert!(
+        cell.try_send(amount, hash),
+        "Processing queued update should succeed"
+    );
 
     // Phase 5: Complete and verify no more queued
     let final_queued = cell.complete();

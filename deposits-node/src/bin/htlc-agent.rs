@@ -20,11 +20,14 @@
 //!     --fee-fixed 100 --fee-bps 10
 
 use base64::prelude::*;
-use bitcoin::secp256k1::{self, Keypair, Message, Secp256k1, SecretKey};
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
-use deposits_core::{LedgerOperation, TlvDecode, compute_deposit_id};
-use deposits_node::nostr::{ledger_tag, TAG_LEDGER_ID, TAG_EVENT_REF, TAG_DEPOSIT_ID, TAG_LEDGER_REQ, TAG_SEQUENCE, TAG_PUBKEY, TAG_OP_TYPE};
+use bitcoin::secp256k1::{self, Keypair, Message, Secp256k1, SecretKey};
+use deposits_core::{compute_deposit_id, LedgerOperation, TlvDecode};
+use deposits_node::nostr::{
+    ledger_tag, TAG_DEPOSIT_ID, TAG_EVENT_REF, TAG_LEDGER_ID, TAG_LEDGER_REQ, TAG_OP_TYPE,
+    TAG_PUBKEY, TAG_SEQUENCE,
+};
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -81,7 +84,7 @@ struct InboundLock {
     destination_deposit_id: [u8; 16],
     amount_msats: u64,
     fee_msats: u64,
-    hash: [u8; 32],         // extracted from completion_script "sha256(<hex>)"
+    hash: [u8; 32], // extracted from completion_script "sha256(<hex>)"
     timeout_height: u32,
     detected_at: Instant,
 }
@@ -133,32 +136,39 @@ struct RouteSnapshot {
 impl Route {
     fn to_snapshot(&self) -> RouteSnapshot {
         match self {
-            Route::CrossLedger { inbound, outbound_ledger_id, outbound_transfer_id, status, .. } => {
-                RouteSnapshot {
-                    kind: "cross_ledger".into(),
-                    status: status.clone(),
-                    inbound_ledger: inbound.ledger_id[..16].to_string(),
-                    inbound_transfer_id: hex::encode(inbound.transfer_id),
-                    amount_msats: inbound.amount_msats,
-                    hash: hex::encode(inbound.hash),
-                    outbound_ledger: Some(outbound_ledger_id[..16].to_string()),
-                    outbound_transfer_id: outbound_transfer_id.map(|t| hex::encode(t)),
-                    age_secs: inbound.detected_at.elapsed().as_secs(),
-                }
-            }
-            Route::Lightning { inbound, invoice, status, .. } => {
-                RouteSnapshot {
-                    kind: "lightning".into(),
-                    status: status.clone(),
-                    inbound_ledger: inbound.ledger_id[..16].to_string(),
-                    inbound_transfer_id: hex::encode(inbound.transfer_id),
-                    amount_msats: inbound.amount_msats,
-                    hash: hex::encode(inbound.hash),
-                    outbound_ledger: None,
-                    outbound_transfer_id: Some(invoice.clone()),
-                    age_secs: inbound.detected_at.elapsed().as_secs(),
-                }
-            }
+            Route::CrossLedger {
+                inbound,
+                outbound_ledger_id,
+                outbound_transfer_id,
+                status,
+                ..
+            } => RouteSnapshot {
+                kind: "cross_ledger".into(),
+                status: status.clone(),
+                inbound_ledger: inbound.ledger_id[..16].to_string(),
+                inbound_transfer_id: hex::encode(inbound.transfer_id),
+                amount_msats: inbound.amount_msats,
+                hash: hex::encode(inbound.hash),
+                outbound_ledger: Some(outbound_ledger_id[..16].to_string()),
+                outbound_transfer_id: outbound_transfer_id.map(hex::encode),
+                age_secs: inbound.detected_at.elapsed().as_secs(),
+            },
+            Route::Lightning {
+                inbound,
+                invoice,
+                status,
+                ..
+            } => RouteSnapshot {
+                kind: "lightning".into(),
+                status: status.clone(),
+                inbound_ledger: inbound.ledger_id[..16].to_string(),
+                inbound_transfer_id: hex::encode(inbound.transfer_id),
+                amount_msats: inbound.amount_msats,
+                hash: hex::encode(inbound.hash),
+                outbound_ledger: None,
+                outbound_transfer_id: Some(invoice.clone()),
+                age_secs: inbound.detected_at.elapsed().as_secs(),
+            },
         }
     }
 }
@@ -240,15 +250,13 @@ impl AgentTransport {
             .map_err(|e| format!("Invalid key: {}", e))?;
         let keys = Keys::new(nostr_secret);
 
-        let opts = Options::default()
-            .notification_channel_size(65536);
-        let client = Client::builder()
-            .signer(keys.clone())
-            .opts(opts)
-            .build();
+        let opts = Options::default().notification_channel_size(65536);
+        let client = Client::builder().signer(keys.clone()).opts(opts).build();
 
         for url in relay_urls {
-            client.add_relay(url.as_str()).await
+            client
+                .add_relay(url.as_str())
+                .await
                 .map_err(|e| format!("Failed to add relay {}: {}", url, e))?;
         }
         client.connect_with_timeout(Duration::from_secs(10)).await;
@@ -257,7 +265,10 @@ impl AgentTransport {
         let start = Instant::now();
         loop {
             let relays = client.relays().await;
-            if relays.values().any(|r| r.status() == RelayStatus::Connected) {
+            if relays
+                .values()
+                .any(|r| r.status() == RelayStatus::Connected)
+            {
                 break;
             }
             if start.elapsed() > Duration::from_secs(10) {
@@ -271,10 +282,7 @@ impl AgentTransport {
         if !deposit_id_hexes.is_empty() {
             let update_filter = Filter::new()
                 .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-                .custom_tag(
-                    TAG_DEPOSIT_ID,
-                    deposit_id_hexes.iter().map(|s| s.as_str()),
-                );
+                .custom_tag(TAG_DEPOSIT_ID, deposit_id_hexes.iter().map(|s| s.as_str()));
             filters.push(update_filter);
         }
 
@@ -287,10 +295,7 @@ impl AgentTransport {
                     TAG_LEDGER_ID,
                     ledger_ids.iter().map(|s| ledger_tag(s.as_str())),
                 )
-                .custom_tag(
-                    TAG_OP_TYPE,
-                    ["71"],
-                );
+                .custom_tag(TAG_OP_TYPE, ["71"]);
             filters.push(complete_filter);
         }
 
@@ -298,10 +303,7 @@ impl AgentTransport {
         if !ledger_ids.is_empty() {
             let response_filter = Filter::new()
                 .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
-                .custom_tag(
-                    TAG_LEDGER_REQ,
-                    ledger_ids.iter().map(|s| s.as_str()),
-                );
+                .custom_tag(TAG_LEDGER_REQ, ledger_ids.iter().map(|s| s.as_str()));
             filters.push(response_filter);
         }
 
@@ -309,14 +311,13 @@ impl AgentTransport {
         let agent_pubkey_hex = keys.public_key().to_hex();
         let request_filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_REQUEST))
-            .custom_tag(
-                TAG_PUBKEY,
-                [agent_pubkey_hex.as_str()],
-            );
+            .custom_tag(TAG_PUBKEY, [agent_pubkey_hex.as_str()]);
         filters.push(request_filter);
 
         if !filters.is_empty() {
-            client.subscribe(filters, None).await
+            client
+                .subscribe(filters, None)
+                .await
                 .map_err(|e| format!("Failed to subscribe: {}", e))?;
         }
 
@@ -345,14 +346,22 @@ impl AgentTransport {
                                 }
                             });
                             if let Some(req_id) = request_id {
-                                let response: ResponseData = match serde_json::from_str::<serde_json::Value>(&event.content) {
-                                    Ok(v) => ResponseData {
-                                        success: v.get("success").and_then(|s| s.as_bool()).unwrap_or(false),
-                                        error: v.get("error").and_then(|s| s.as_str()).map(|s| s.to_string()),
-                                        result: v.get("result").cloned(),
-                                    },
-                                    Err(_) => continue,
-                                };
+                                let response: ResponseData =
+                                    match serde_json::from_str::<serde_json::Value>(&event.content)
+                                    {
+                                        Ok(v) => ResponseData {
+                                            success: v
+                                                .get("success")
+                                                .and_then(|s| s.as_bool())
+                                                .unwrap_or(false),
+                                            error: v
+                                                .get("error")
+                                                .and_then(|s| s.as_str())
+                                                .map(|s| s.to_string()),
+                                            result: v.get("result").cloned(),
+                                        },
+                                        Err(_) => continue,
+                                    };
                                 let sender = pending_clone.lock().unwrap().remove(&req_id);
                                 if let Some(tx) = sender {
                                     let _ = tx.send(response);
@@ -373,11 +382,15 @@ impl AgentTransport {
                                 }
                             });
                             if action.as_deref() == Some("request_route") {
-                                if let Ok(params) = serde_json::from_str::<serde_json::Value>(&event.content) {
-                                    let _ = update_tx.send(UpdateEvent::RouteRequest {
-                                        event_id: event.id.to_hex(),
-                                        params,
-                                    }).await;
+                                if let Ok(params) =
+                                    serde_json::from_str::<serde_json::Value>(&event.content)
+                                {
+                                    let _ = update_tx
+                                        .send(UpdateEvent::RouteRequest {
+                                            event_id: event.id.to_hex(),
+                                            params,
+                                        })
+                                        .await;
                                 }
                             }
                         }
@@ -388,7 +401,14 @@ impl AgentTransport {
             }
         });
 
-        Ok((Self { client, keys, pending_responses: pending }, update_rx))
+        Ok((
+            Self {
+                client,
+                keys,
+                pending_responses: pending,
+            },
+            update_rx,
+        ))
     }
 
     async fn send_request(
@@ -396,7 +416,8 @@ impl AgentTransport {
         ledger_id: &str,
         action: &str,
         params: serde_json::Value,
-    ) -> Result<(String, oneshot::Receiver<ResponseData>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(String, oneshot::Receiver<ResponseData>), Box<dyn std::error::Error + Send + Sync>>
+    {
         let content = serde_json::to_string(&params)?;
 
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &content)
@@ -404,17 +425,17 @@ impl AgentTransport {
                 TagKind::SingleLetter(TAG_LEDGER_REQ),
                 [ledger_id],
             ))
-            .tag(Tag::custom(
-                TagKind::custom("action"),
-                [action],
-            ))
+            .tag(Tag::custom(TagKind::custom("action"), [action]))
             .sign_with_keys(&self.keys)
             .map_err(|e| format!("Sign failed: {}", e))?;
 
         let event_id = event.id.to_hex();
 
         let (tx, rx) = oneshot::channel();
-        self.pending_responses.lock().unwrap().insert(event_id.clone(), tx);
+        self.pending_responses
+            .lock()
+            .unwrap()
+            .insert(event_id.clone(), tx);
 
         let urls: Vec<_> = self.client.relays().await.keys().cloned().collect();
         self.client
@@ -568,8 +589,11 @@ fn extract_hash_from_script(script: &str) -> Option<[u8; 32]> {
 
 // ─── Key Derivation (same as transfer-simulator) ────────────────────────────
 
-fn derive_secret_key(seed: &[u8; 32], network: bitcoin::Network) -> Result<SecretKey, Box<dyn std::error::Error>> {
-    use bitcoin::bip32::{Xpriv, DerivationPath};
+fn derive_secret_key(
+    seed: &[u8; 32],
+    network: bitcoin::Network,
+) -> Result<SecretKey, Box<dyn std::error::Error>> {
+    use bitcoin::bip32::{DerivationPath, Xpriv};
     let xpriv = Xpriv::new_master(network, seed)?;
     let secp = Secp256k1::new();
     let path: DerivationPath = "m/44'/1237'/0'/0/0".parse()?;
@@ -577,8 +601,12 @@ fn derive_secret_key(seed: &[u8; 32], network: bitcoin::Network) -> Result<Secre
     Ok(child.private_key)
 }
 
-fn derive_secret_key_at_index(seed: &[u8; 32], network: bitcoin::Network, index: u32) -> Result<SecretKey, Box<dyn std::error::Error>> {
-    use bitcoin::bip32::{Xpriv, DerivationPath, ChildNumber};
+fn derive_secret_key_at_index(
+    seed: &[u8; 32],
+    network: bitcoin::Network,
+    index: u32,
+) -> Result<SecretKey, Box<dyn std::error::Error>> {
+    use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv};
     let xpriv = Xpriv::new_master(network, seed)?;
     let secp = Secp256k1::new();
     let path: DerivationPath = "m/84'/0'/0'/0".parse()?;
@@ -604,11 +632,25 @@ fn load_deposits(
 
     let mut deposits = Vec::new();
     for entry in &entries {
-        let alias = entry.get("alias").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-        let ledger_id = entry.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let pubkey_hex = entry.get("deposit_pubkey").and_then(|v| v.as_str()).unwrap_or("");
+        let alias = entry
+            .get("alias")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+        let ledger_id = entry
+            .get("ledger_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let pubkey_hex = entry
+            .get("deposit_pubkey")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let key_index = entry.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let balance_msats = entry.get("balance_msats").and_then(|v| v.as_i64()).unwrap_or(0);
+        let balance_msats = entry
+            .get("balance_msats")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
 
         if ledger_id.is_empty() || pubkey_hex.is_empty() {
             continue;
@@ -632,7 +674,11 @@ fn load_deposits(
         });
     }
 
-    eprintln!("  Loaded {} deposits from {}", deposits.len(), deposits_file.display());
+    eprintln!(
+        "  Loaded {} deposits from {}",
+        deposits.len(),
+        deposits_file.display()
+    );
     Ok(deposits)
 }
 
@@ -645,18 +691,19 @@ struct OperatorAdInfo {
     transfer_fee_rate_bps: u16,
 }
 
-async fn fetch_advertisements(relay_url: &str) -> Result<HashMap<String, OperatorAdInfo>, Box<dyn std::error::Error>> {
+async fn fetch_advertisements(
+    relay_url: &str,
+) -> Result<HashMap<String, OperatorAdInfo>, Box<dyn std::error::Error>> {
     let keys = Keys::generate();
-    let client = Client::builder()
-        .signer(keys)
-        .build();
+    let client = Client::builder().signer(keys).build();
 
-    client.add_relay(relay_url).await
+    client
+        .add_relay(relay_url)
+        .await
         .map_err(|e| format!("Failed to add relay: {}", e))?;
     client.connect_with_timeout(Duration::from_secs(10)).await;
 
-    let filter = Filter::new()
-        .kind(Kind::Custom(KIND_LEDGER_ADVERTISE));
+    let filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_ADVERTISE));
 
     let events = client
         .fetch_events(vec![filter], Some(Duration::from_secs(10)))
@@ -671,7 +718,9 @@ async fn fetch_advertisements(relay_url: &str) -> Result<HashMap<String, Operato
             Err(_) => continue,
         };
 
-        let ledger_id = event.tags.iter()
+        let ledger_id = event
+            .tags
+            .iter()
             .find_map(|tag| {
                 if tag.kind() == TagKind::SingleLetter(TAG_LEDGER_ID) {
                     tag.content().map(|s| s.to_string())
@@ -679,23 +728,40 @@ async fn fetch_advertisements(relay_url: &str) -> Result<HashMap<String, Operato
                     None
                 }
             })
-            .or_else(|| ad.get("ledger_id").and_then(|v| v.as_str()).map(|s| s.to_string()));
+            .or_else(|| {
+                ad.get("ledger_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
 
         let ledger_id = match ledger_id {
             Some(id) if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) => id,
             _ => continue,
         };
 
-        let relay = ad.get("relay_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let fee_fixed = ad.get("transfer_fee_fixed_msats").and_then(|v| v.as_u64()).unwrap_or(0);
-        let fee_bps = ad.get("transfer_fee_rate_bps").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+        let relay = ad
+            .get("relay_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let fee_fixed = ad
+            .get("transfer_fee_fixed_msats")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let fee_bps = ad
+            .get("transfer_fee_rate_bps")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u16;
 
         if !relay.is_empty() {
-            ledger_map.insert(ledger_id, OperatorAdInfo {
-                relay_url: relay,
-                transfer_fee_fixed_msats: fee_fixed,
-                transfer_fee_rate_bps: fee_bps,
-            });
+            ledger_map.insert(
+                ledger_id,
+                OperatorAdInfo {
+                    relay_url: relay,
+                    transfer_fee_fixed_msats: fee_fixed,
+                    transfer_fee_rate_bps: fee_bps,
+                },
+            );
         }
     }
 
@@ -712,26 +778,29 @@ async fn publish_agent_advertisement(
     ledger_fees: &HashMap<String, LedgerFees>,
     network: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::builder()
-        .signer(keys.clone())
-        .build();
-    client.add_relay(ledgers_relay).await
+    let client = Client::builder().signer(keys.clone()).build();
+    client
+        .add_relay(ledgers_relay)
+        .await
         .map_err(|e| format!("Failed to add relay: {}", e))?;
     client.connect_with_timeout(Duration::from_secs(10)).await;
 
     // Build per-ledger deposit info with directional fees
-    let ledger_entries: Vec<serde_json::Value> = deposits.iter().map(|d| {
-        let fees = ledger_fees.get(&d.ledger_id);
-        serde_json::json!({
-            "ledger_id": d.ledger_id,
-            "deposit_id": d.deposit_id_hex,
-            "balance_msats": d.balance_msats,
-            "fee_in_fixed_msats": fees.map(|f| f.fee_in_fixed_msats).unwrap_or(0),
-            "fee_in_rate_bps": fees.map(|f| f.fee_in_rate_bps).unwrap_or(0),
-            "fee_out_fixed_msats": fees.map(|f| f.fee_out_fixed_msats).unwrap_or(0),
-            "fee_out_rate_bps": fees.map(|f| f.fee_out_rate_bps).unwrap_or(0),
+    let ledger_entries: Vec<serde_json::Value> = deposits
+        .iter()
+        .map(|d| {
+            let fees = ledger_fees.get(&d.ledger_id);
+            serde_json::json!({
+                "ledger_id": d.ledger_id,
+                "deposit_id": d.deposit_id_hex,
+                "balance_msats": d.balance_msats,
+                "fee_in_fixed_msats": fees.map(|f| f.fee_in_fixed_msats).unwrap_or(0),
+                "fee_in_rate_bps": fees.map(|f| f.fee_in_rate_bps).unwrap_or(0),
+                "fee_out_fixed_msats": fees.map(|f| f.fee_out_fixed_msats).unwrap_or(0),
+                "fee_out_rate_bps": fees.map(|f| f.fee_out_rate_bps).unwrap_or(0),
+            })
         })
-    }).collect();
+        .collect();
 
     let agent_pubkey = keys.public_key().to_hex();
 
@@ -746,14 +815,15 @@ async fn publish_agent_advertisement(
     let existing_ts = {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_AGENT_ADVERTISE))
-            .custom_tag(
-                TAG_LEDGER_ID,
-                [&agent_pubkey],
-            )
+            .custom_tag(TAG_LEDGER_ID, [&agent_pubkey])
             .limit(1);
-        let events = client.fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
-            .await.ok();
-        events.and_then(|evs| evs.iter().next().map(|e| e.created_at.as_u64())).unwrap_or(0)
+        let events = client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+            .await
+            .ok();
+        events
+            .and_then(|evs| evs.iter().next().map(|e| e.created_at.as_u64()))
+            .unwrap_or(0)
     };
 
     let now = std::time::SystemTime::now()
@@ -769,19 +839,22 @@ async fn publish_agent_advertisement(
             TagKind::SingleLetter(TAG_LEDGER_ID),
             [&agent_pubkey],
         ))
-        .tag(Tag::custom(
-            TagKind::custom("service"),
-            ["htlc_routing"],
-        ))
-        .tag(Tag::custom(
-            TagKind::SingleLetter(TAG_SEQUENCE),
-            [network],
-        ));
+        .tag(Tag::custom(TagKind::custom("service"), ["htlc_routing"]))
+        .tag(Tag::custom(TagKind::SingleLetter(TAG_SEQUENCE), [network]));
 
-    let signed = event.sign_with_keys(keys)
+    let signed = event
+        .sign_with_keys(keys)
         .map_err(|e| format!("Failed to sign advertisement: {}", e))?;
-    eprintln!("  Ad: kind={} ts={} (old={}) ledgers={}", KIND_AGENT_ADVERTISE, ts, existing_ts, deposits.len());
-    let output = client.send_event(signed).await
+    eprintln!(
+        "  Ad: kind={} ts={} (old={}) ledgers={}",
+        KIND_AGENT_ADVERTISE,
+        ts,
+        existing_ts,
+        deposits.len()
+    );
+    let output = client
+        .send_event(signed)
+        .await
         .map_err(|e| format!("Failed to publish advertisement: {}", e))?;
     if !output.failed.is_empty() {
         eprintln!("  Ad publish failures: {:?}", output.failed);
@@ -837,7 +910,9 @@ async fn execute_transfer_lock(
         "signature": hex::encode(signature.serialize()),
     });
 
-    let (_, rx) = transport.send_request(&source.ledger_id, "transfer_lock", params).await?;
+    let (_, rx) = transport
+        .send_request(&source.ledger_id, "transfer_lock", params)
+        .await?;
 
     let resp = tokio::time::timeout(Duration::from_secs(30), rx)
         .await
@@ -862,7 +937,9 @@ async fn execute_transfer_complete(
         "preimage": hex::encode(preimage),
     });
 
-    let (_, rx) = transport.send_request(ledger_id, "transfer_complete", params).await?;
+    let (_, rx) = transport
+        .send_request(ledger_id, "transfer_complete", params)
+        .await?;
 
     let resp = tokio::time::timeout(Duration::from_secs(30), rx)
         .await
@@ -870,7 +947,11 @@ async fn execute_transfer_complete(
         .map_err(|_| "channel closed")?;
 
     if !resp.success {
-        return Err(format!("transfer_complete failed: {}", resp.error.unwrap_or_default()).into());
+        return Err(format!(
+            "transfer_complete failed: {}",
+            resp.error.unwrap_or_default()
+        )
+        .into());
     }
 
     Ok(())
@@ -919,15 +1000,22 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
         margin_fixed_msats: 100,
         margin_rate_bps: 10,
         timeout_margin_blocks: 144,
-        bitcoin_cli: "docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass".to_string(),
+        bitcoin_cli: "docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass"
+            .to_string(),
         api_port: 3200,
     };
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--relay" => { i += 1; config.relay = args[i].clone(); }
-            "--ledgers-relay" | "--slow-relay" => { i += 1; config.ledgers_relay = args[i].clone(); }
+            "--relay" => {
+                i += 1;
+                config.relay = args[i].clone();
+            }
+            "--ledgers-relay" | "--slow-relay" => {
+                i += 1;
+                config.ledgers_relay = args[i].clone();
+            }
             "--network" => {
                 i += 1;
                 config.network = match args[i].as_str() {
@@ -952,21 +1040,42 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
                     data_dir,
                 });
             }
-            "--fee-fixed" | "--margin-fixed" => { i += 1; config.margin_fixed_msats = args[i].parse()?; }
-            "--fee-bps" | "--margin-bps" => { i += 1; config.margin_rate_bps = args[i].parse()?; }
-            "--timeout-margin" => { i += 1; config.timeout_margin_blocks = args[i].parse()?; }
-            "--bitcoin-cli" => { i += 1; config.bitcoin_cli = args[i].clone(); }
-            "--api-port" => { i += 1; config.api_port = args[i].parse()?; }
+            "--fee-fixed" | "--margin-fixed" => {
+                i += 1;
+                config.margin_fixed_msats = args[i].parse()?;
+            }
+            "--fee-bps" | "--margin-bps" => {
+                i += 1;
+                config.margin_rate_bps = args[i].parse()?;
+            }
+            "--timeout-margin" => {
+                i += 1;
+                config.timeout_margin_blocks = args[i].parse()?;
+            }
+            "--bitcoin-cli" => {
+                i += 1;
+                config.bitcoin_cli = args[i].clone();
+            }
+            "--api-port" => {
+                i += 1;
+                config.api_port = args[i].parse()?;
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: htlc-agent [OPTIONS]");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  --relay <url>              Primary relay (default: ws://localhost:7801)");
+                eprintln!(
+                    "  --relay <url>              Primary relay (default: ws://localhost:7801)"
+                );
                 eprintln!("  --ledgers-relay <url>      Durable relay for advertisements (default: ws://localhost:7779)");
                 eprintln!("  --network <net>            Network (default: regtest)");
                 eprintln!("  --node <name:data_dir>     Node identity and data directory");
-                eprintln!("  --margin-fixed <msats>     Agent margin per route in msats (default: 100)");
-                eprintln!("  --margin-bps <bps>         Agent margin per route in bps (default: 10)");
+                eprintln!(
+                    "  --margin-fixed <msats>     Agent margin per route in msats (default: 100)"
+                );
+                eprintln!(
+                    "  --margin-bps <bps>         Agent margin per route in bps (default: 10)"
+                );
                 eprintln!("  --timeout-margin <blocks>  Safety margin for outbound timeout (default: 144)");
                 eprintln!("  --bitcoin-cli <cmd>        bitcoin-cli command");
                 eprintln!("  --api-port <port>          HTTP API port (default: 3200)");
@@ -1016,19 +1125,26 @@ async fn run_api_server(port: u16, state: Arc<SharedState>) {
                         if let Some(hdr_end) = s.find("\r\n\r\n") {
                             // Extract Content-Length if present
                             let headers = &s[..hdr_end];
-                            let content_len = headers.lines()
+                            let content_len = headers
+                                .lines()
                                 .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
                                 .and_then(|l| l.split(':').nth(1)?.trim().parse::<usize>().ok())
                                 .unwrap_or(0);
                             let body_start = hdr_end + 4;
-                            if total >= body_start + content_len { break; }
+                            if total >= body_start + content_len {
+                                break;
+                            }
                         }
-                        if total >= buf.len() { break; }
+                        if total >= buf.len() {
+                            break;
+                        }
                     }
                     Err(_) => break,
                 }
             }
-            if total == 0 { return; }
+            if total == 0 {
+                return;
+            }
             let request = String::from_utf8_lossy(&buf[..total]);
             let method = request.split_whitespace().next().unwrap_or("GET");
             let path = request.split_whitespace().nth(1).unwrap_or("/");
@@ -1047,9 +1163,18 @@ async fn run_api_server(port: u16, state: Arc<SharedState>) {
 
             let (status, body) = match (method, path) {
                 (_, "/status") => {
-                    let active = state.stats.routes_active.load(std::sync::atomic::Ordering::Relaxed);
-                    let completed = state.stats.routes_completed.load(std::sync::atomic::Ordering::Relaxed);
-                    let failed = state.stats.routes_failed.load(std::sync::atomic::Ordering::Relaxed);
+                    let active = state
+                        .stats
+                        .routes_active
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let completed = state
+                        .stats
+                        .routes_completed
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let failed = state
+                        .stats
+                        .routes_failed
+                        .load(std::sync::atomic::Ordering::Relaxed);
                     let uptime = state.started_at.elapsed().as_secs();
                     let json = serde_json::json!({
                         "uptime_secs": uptime,
@@ -1069,7 +1194,8 @@ async fn run_api_server(port: u16, state: Arc<SharedState>) {
                 }
                 (_, "/routes") => {
                     let routes = state.routes.lock().unwrap();
-                    let snapshots: Vec<RouteSnapshot> = routes.iter().map(|r| r.to_snapshot()).collect();
+                    let snapshots: Vec<RouteSnapshot> =
+                        routes.iter().map(|r| r.to_snapshot()).collect();
                     let json = serde_json::to_string_pretty(&snapshots).unwrap();
                     ("200 OK", json)
                 }
@@ -1077,7 +1203,10 @@ async fn run_api_server(port: u16, state: Arc<SharedState>) {
                     let json = serde_json::json!({
                         "endpoints": ["/status", "/deposits", "/routes"]
                     });
-                    ("404 Not Found", serde_json::to_string_pretty(&json).unwrap())
+                    (
+                        "404 Not Found",
+                        serde_json::to_string_pretty(&json).unwrap(),
+                    )
                 }
             };
 
@@ -1087,7 +1216,9 @@ async fn run_api_server(port: u16, state: Arc<SharedState>) {
                  Access-Control-Allow-Origin: *\r\n\
                  Content-Length: {}\r\n\
                  Connection: close\r\n\r\n{}",
-                status, body.len(), body,
+                status,
+                body.len(),
+                body,
             );
             let _ = stream.write_all(response.as_bytes()).await;
         });
@@ -1105,24 +1236,49 @@ fn handle_request_route(request: &str, state: &SharedState) -> (&'static str, St
 
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(e) => return ("400 Bad Request", format!(r#"{{"error":"invalid json: {}"}}"#, e)),
+        Err(e) => {
+            return (
+                "400 Bad Request",
+                format!(r#"{{"error":"invalid json: {}"}}"#, e),
+            )
+        }
     };
 
     let source_ledger = match req["source_ledger"].as_str() {
         Some(s) => s.to_string(),
-        None => return ("400 Bad Request", r#"{"error":"missing source_ledger"}"#.into()),
+        None => {
+            return (
+                "400 Bad Request",
+                r#"{"error":"missing source_ledger"}"#.into(),
+            )
+        }
     };
     let dest_ledger = match req["dest_ledger"].as_str() {
         Some(s) => s.to_string(),
-        None => return ("400 Bad Request", r#"{"error":"missing dest_ledger"}"#.into()),
+        None => {
+            return (
+                "400 Bad Request",
+                r#"{"error":"missing dest_ledger"}"#.into(),
+            )
+        }
     };
     let dest_deposit_id_hex = match req["dest_deposit_id"].as_str() {
         Some(s) if s.len() == 32 => s.to_string(),
-        _ => return ("400 Bad Request", r#"{"error":"dest_deposit_id must be 32 hex chars"}"#.into()),
+        _ => {
+            return (
+                "400 Bad Request",
+                r#"{"error":"dest_deposit_id must be 32 hex chars"}"#.into(),
+            )
+        }
     };
     let amount_msats = match req["amount_msats"].as_u64() {
         Some(a) if a > 0 => a,
-        _ => return ("400 Bad Request", r#"{"error":"missing or zero amount_msats"}"#.into()),
+        _ => {
+            return (
+                "400 Bad Request",
+                r#"{"error":"missing or zero amount_msats"}"#.into(),
+            )
+        }
     };
 
     // Validate agent has deposits on both ledgers
@@ -1131,22 +1287,39 @@ fn handle_request_route(request: &str, state: &SharedState) -> (&'static str, St
 
     let agent_in = match agent_in {
         Some(d) => d,
-        None => return ("400 Bad Request", r#"{"error":"agent has no deposit on source_ledger"}"#.into()),
+        None => {
+            return (
+                "400 Bad Request",
+                r#"{"error":"agent has no deposit on source_ledger"}"#.into(),
+            )
+        }
     };
     let _agent_out = match agent_out {
         Some(d) => d,
-        None => return ("400 Bad Request", r#"{"error":"agent has no deposit on dest_ledger"}"#.into()),
+        None => {
+            return (
+                "400 Bad Request",
+                r#"{"error":"agent has no deposit on dest_ledger"}"#.into(),
+            )
+        }
     };
 
     // Calculate fees
     let in_fees = state.ledger_fees.get(&source_ledger);
     let out_fees = state.ledger_fees.get(&dest_ledger);
-    let fee_in = in_fees.map(|f| f.fee_in_fixed_msats + amount_msats * f.fee_in_rate_bps / 10000).unwrap_or(0);
-    let fee_out = out_fees.map(|f| f.fee_out_fixed_msats + amount_msats * f.fee_out_rate_bps / 10000).unwrap_or(0);
+    let fee_in = in_fees
+        .map(|f| f.fee_in_fixed_msats + amount_msats * f.fee_in_rate_bps / 10000)
+        .unwrap_or(0);
+    let fee_out = out_fees
+        .map(|f| f.fee_out_fixed_msats + amount_msats * f.fee_out_rate_bps / 10000)
+        .unwrap_or(0);
     let total_fee = fee_in + fee_out;
 
     if amount_msats <= total_fee {
-        return ("400 Bad Request", r#"{"error":"amount too small to cover fees"}"#.into());
+        return (
+            "400 Bad Request",
+            r#"{"error":"amount too small to cover fees"}"#.into(),
+        );
     }
     let forward_amount = amount_msats - total_fee;
 
@@ -1162,7 +1335,12 @@ fn handle_request_route(request: &str, state: &SharedState) -> (&'static str, St
     // Wallet generates preimage, sends hash to agent. Agent returns its deposit_id + fees.
     let hash_hex = match req["hash"].as_str() {
         Some(s) if s.len() == 64 => s.to_string(),
-        _ => return ("400 Bad Request", r#"{"error":"hash must be 64 hex chars"}"#.into()),
+        _ => {
+            return (
+                "400 Bad Request",
+                r#"{"error":"hash must be 64 hex chars"}"#.into(),
+            )
+        }
     };
     let hash: [u8; 32] = match hex::decode(&hash_hex) {
         Ok(b) if b.len() == 32 => {
@@ -1179,7 +1357,12 @@ fn handle_request_route(request: &str, state: &SharedState) -> (&'static str, St
             arr.copy_from_slice(&b);
             arr
         }
-        _ => return ("400 Bad Request", r#"{"error":"invalid dest_deposit_id"}"#.into()),
+        _ => {
+            return (
+                "400 Bad Request",
+                r#"{"error":"invalid dest_deposit_id"}"#.into(),
+            )
+        }
     };
 
     // Store pending route
@@ -1189,13 +1372,16 @@ fn handle_request_route(request: &str, state: &SharedState) -> (&'static str, St
         // Evict stale entries (older than 10 minutes)
         pending.retain(|_, r| r.created_at.elapsed() < Duration::from_secs(600));
 
-        pending.insert(hash, PendingRoute {
+        pending.insert(
             hash,
-            dest_deposit_id,
-            dest_ledger_id: dest_ledger,
-            amount_msats,
-            created_at: Instant::now(),
-        });
+            PendingRoute {
+                hash,
+                dest_deposit_id,
+                dest_ledger_id: dest_ledger,
+                amount_msats,
+                created_at: Instant::now(),
+            },
+        );
     }
 
     let json = serde_json::json!({
@@ -1221,11 +1407,15 @@ async fn cli_command(cmd: &str, port: u16) -> Result<(), Box<dyn std::error::Err
         }
     };
 
-    let stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await
+    let stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
         .map_err(|_| format!("Cannot connect to agent on port {} — is it running?", port))?;
 
     let (mut reader, mut writer) = stream.into_split();
-    let request = format!("GET {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", endpoint);
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        endpoint
+    );
     writer.write_all(request.as_bytes()).await?;
     writer.shutdown().await?;
 
@@ -1252,7 +1442,10 @@ async fn cli_command(cmd: &str, port: u16) -> Result<(), Box<dyn std::error::Err
 fn print_status(body: &str) {
     let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(_) => { println!("{}", body); return; }
+        Err(_) => {
+            println!("{}", body);
+            return;
+        }
     };
     let uptime = v["uptime_secs"].as_u64().unwrap_or(0);
     let h = uptime / 3600;
@@ -1262,7 +1455,10 @@ fn print_status(body: &str) {
     println!("HTLC Agent Status");
     println!("  Uptime:     {}h {}m {}s", h, m, s);
     println!("  Deposits:   {}", v["deposits"]);
-    println!("  Margin:     {} msats + {} bps", v["margin_fixed_msats"], v["margin_rate_bps"]);
+    println!(
+        "  Margin:     {} msats + {} bps",
+        v["margin_fixed_msats"], v["margin_rate_bps"]
+    );
     println!();
     println!("Routes:");
     println!("  Active:     {}", v["routes_active"]);
@@ -1274,10 +1470,14 @@ fn print_status(body: &str) {
         println!("Ledger fees:");
         for (lid, f) in fees {
             let short = &lid[..16.min(lid.len())];
-            println!("  {}...  in: {} + {}bps  out: {} + {}bps",
+            println!(
+                "  {}...  in: {} + {}bps  out: {} + {}bps",
                 short,
-                f["fee_in_fixed_msats"], f["fee_in_rate_bps"],
-                f["fee_out_fixed_msats"], f["fee_out_rate_bps"]);
+                f["fee_in_fixed_msats"],
+                f["fee_in_rate_bps"],
+                f["fee_out_fixed_msats"],
+                f["fee_out_rate_bps"]
+            );
         }
     }
 }
@@ -1285,7 +1485,10 @@ fn print_status(body: &str) {
 fn print_deposits(body: &str) {
     let deposits: Vec<serde_json::Value> = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(_) => { println!("{}", body); return; }
+        Err(_) => {
+            println!("{}", body);
+            return;
+        }
     };
     if deposits.is_empty() {
         println!("No deposits.");
@@ -1297,15 +1500,23 @@ fn print_deposits(body: &str) {
         let lid = d["ledger_id"].as_str().unwrap_or("?");
         let did = d["deposit_id"].as_str().unwrap_or("?");
         let bal = d["balance_msats"].as_i64().unwrap_or(0);
-        println!("  {:16}  ledger {}...  deposit {}...  {} msats",
-            alias, &lid[..16.min(lid.len())], &did[..16.min(did.len())], bal);
+        println!(
+            "  {:16}  ledger {}...  deposit {}...  {} msats",
+            alias,
+            &lid[..16.min(lid.len())],
+            &did[..16.min(did.len())],
+            bal
+        );
     }
 }
 
 fn print_routes(body: &str) {
     let routes: Vec<serde_json::Value> = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(_) => { println!("{}", body); return; }
+        Err(_) => {
+            println!("{}", body);
+            return;
+        }
     };
     if routes.is_empty() {
         println!("No active routes.");
@@ -1318,7 +1529,10 @@ fn print_routes(body: &str) {
         let status_str = if status.is_string() {
             status.as_str().unwrap().to_string()
         } else if let Some(obj) = status.as_object() {
-            obj.keys().next().map(|k| format!("Failed: {}", obj[k])).unwrap_or("?".into())
+            obj.keys()
+                .next()
+                .map(|k| format!("Failed: {}", obj[k]))
+                .unwrap_or("?".into())
         } else {
             "?".into()
         };
@@ -1327,8 +1541,10 @@ fn print_routes(body: &str) {
         let inbound = r["inbound_ledger"].as_str().unwrap_or("?");
         let outbound = r["outbound_ledger"].as_str().unwrap_or("-");
 
-        println!("  {} | {} msats | {} → {} | {} | {}s",
-            kind, amount, inbound, outbound, status_str, age);
+        println!(
+            "  {} | {} msats | {} → {} | {} | {}s",
+            kind, amount, inbound, outbound, status_str, age
+        );
     }
 }
 
@@ -1358,7 +1574,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("=== HTLC Agent ===");
     eprintln!("Relay:         {}", config.relay);
     eprintln!("Ledgers relay: {}", config.ledgers_relay);
-    eprintln!("Agent margin:  {} msats + {} bps", config.margin_fixed_msats, config.margin_rate_bps);
+    eprintln!(
+        "Agent margin:  {} msats + {} bps",
+        config.margin_fixed_msats, config.margin_rate_bps
+    );
     eprintln!("Timeout margin: {} blocks", config.timeout_margin_blocks);
     eprintln!();
 
@@ -1382,10 +1601,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ids
     };
 
-    eprintln!("Deposits: {} across {} ledgers", deposits.len(), ledger_ids.len());
+    eprintln!(
+        "Deposits: {} across {} ledgers",
+        deposits.len(),
+        ledger_ids.len()
+    );
     for d in &deposits {
-        eprintln!("  {} — ledger {}... deposit {}...",
-            d.alias, &d.ledger_id[..16], &d.deposit_id_hex[..16]);
+        eprintln!(
+            "  {} — ledger {}... deposit {}...",
+            d.alias,
+            &d.ledger_id[..16],
+            &d.deposit_id_hex[..16]
+        );
     }
     eprintln!();
 
@@ -1413,31 +1640,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   fee_out = operator transfer fee + agent margin (agent pays operator to send)
     let mut ledger_fees: HashMap<String, LedgerFees> = HashMap::new();
     for d in &deposits {
-        ledger_fees.entry(d.ledger_id.clone()).or_insert_with(|| LedgerFees {
-            fee_in_fixed_msats: config.margin_fixed_msats,
-            fee_in_rate_bps: config.margin_rate_bps,
-            fee_out_fixed_msats: d.operator_fee_fixed_msats + config.margin_fixed_msats,
-            fee_out_rate_bps: (d.operator_fee_rate_bps as u64) + config.margin_rate_bps,
-        });
+        ledger_fees
+            .entry(d.ledger_id.clone())
+            .or_insert_with(|| LedgerFees {
+                fee_in_fixed_msats: config.margin_fixed_msats,
+                fee_in_rate_bps: config.margin_rate_bps,
+                fee_out_fixed_msats: d.operator_fee_fixed_msats + config.margin_fixed_msats,
+                fee_out_rate_bps: (d.operator_fee_rate_bps as u64) + config.margin_rate_bps,
+            });
     }
 
     for d in &deposits {
         let fees = ledger_fees.get(&d.ledger_id).unwrap();
-        eprintln!("  {} fees: in={}/{}bps out={}/{}bps (operator={}/{}bps)",
+        eprintln!(
+            "  {} fees: in={}/{}bps out={}/{}bps (operator={}/{}bps)",
             d.alias,
-            fees.fee_in_fixed_msats, fees.fee_in_rate_bps,
-            fees.fee_out_fixed_msats, fees.fee_out_rate_bps,
-            d.operator_fee_fixed_msats, d.operator_fee_rate_bps);
+            fees.fee_in_fixed_msats,
+            fees.fee_in_rate_bps,
+            fees.fee_out_fixed_msats,
+            fees.fee_out_rate_bps,
+            d.operator_fee_fixed_msats,
+            d.operator_fee_rate_bps
+        );
     }
 
     // Create transport
     let nostr_key = derive_secret_key(&config.nodes[0].seed, config.network)?;
-    let (transport, mut update_rx) = AgentTransport::new(
-        nostr_key,
-        &relay_urls,
-        &deposit_id_hexes,
-        &ledger_ids,
-    ).await?;
+    let (transport, mut update_rx) =
+        AgentTransport::new(nostr_key, &relay_urls, &deposit_id_hexes, &ledger_ids).await?;
     let transport = Arc::new(transport);
 
     let secp = Secp256k1::new();
@@ -1453,12 +1683,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Shared state for API
     let shared = Arc::new(SharedState {
-        deposits: deposits.iter().map(|d| DepositInfo {
-            alias: d.alias.clone(),
-            ledger_id: d.ledger_id.clone(),
-            deposit_id: d.deposit_id_hex.clone(),
-            balance_msats: d.balance_msats,
-        }).collect(),
+        deposits: deposits
+            .iter()
+            .map(|d| DepositInfo {
+                alias: d.alias.clone(),
+                ledger_id: d.ledger_id.clone(),
+                deposit_id: d.deposit_id_hex.clone(),
+                balance_msats: d.balance_msats,
+            })
+            .collect(),
         routes: Mutex::new(Vec::new()),
         stats: AgentStats::default(),
         started_at: Instant::now(),
@@ -1484,8 +1717,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bitcoin::Network::Regtest => "regtest",
         _ => "unknown",
     };
-    let nostr_secret = nostr_sdk::SecretKey::from_slice(&nostr_key.secret_bytes())
-        .expect("valid key");
+    let nostr_secret =
+        nostr_sdk::SecretKey::from_slice(&nostr_key.secret_bytes()).expect("valid key");
     let agent_keys = Keys::new(nostr_secret);
     match publish_agent_advertisement(
         &agent_keys,
@@ -1493,7 +1726,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &deposits,
         &ledger_fees,
         network_str,
-    ).await {
+    )
+    .await
+    {
         Ok(()) => eprintln!("Published agent advertisement to {}", config.ledgers_relay),
         Err(e) => eprintln!("Warning: failed to publish advertisement: {}", e),
     }
@@ -1508,9 +1743,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             tokio::time::sleep(Duration::from_secs(1800)).await;
             let _ = publish_agent_advertisement(
-                &ad_keys, &ad_relay, &ad_deposits,
-                &ad_fees, &ad_network,
-            ).await;
+                &ad_keys,
+                &ad_relay,
+                &ad_deposits,
+                &ad_fees,
+                &ad_network,
+            )
+            .await;
         }
     });
 
@@ -1538,8 +1777,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
 
                 // Check if a pending route specifies the destination ledger
-                let pending_hint = shared.pending_routes.lock().unwrap()
-                    .get(&lock.hash).map(|pr| pr.dest_ledger_id.clone());
+                let pending_hint = shared
+                    .pending_routes
+                    .lock()
+                    .unwrap()
+                    .get(&lock.hash)
+                    .map(|pr| pr.dest_ledger_id.clone());
 
                 // Find a deposit on the target ledger (or first different ledger)
                 let source_ledger = &lock.ledger_id;
@@ -1568,8 +1811,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let in_fees = ledger_fees.get(&lock.ledger_id);
                     let out_fees = ledger_fees.get(&out_dep.ledger_id);
 
-                    let fee_in = in_fees.map(|f| f.fee_in_fixed_msats + lock.amount_msats * f.fee_in_rate_bps / 10000).unwrap_or(0);
-                    let fee_out = out_fees.map(|f| f.fee_out_fixed_msats + lock.amount_msats * f.fee_out_rate_bps / 10000).unwrap_or(0);
+                    let fee_in = in_fees
+                        .map(|f| {
+                            f.fee_in_fixed_msats + lock.amount_msats * f.fee_in_rate_bps / 10000
+                        })
+                        .unwrap_or(0);
+                    let fee_out = out_fees
+                        .map(|f| {
+                            f.fee_out_fixed_msats + lock.amount_msats * f.fee_out_rate_bps / 10000
+                        })
+                        .unwrap_or(0);
                     let total_fee = fee_in + fee_out;
                     let forward_amount = lock.amount_msats.saturating_sub(total_fee);
 
@@ -1577,12 +1828,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let transfer_fee = out_dep.operator_fee_fixed_msats
                         + (forward_amount * out_dep.operator_fee_rate_bps as u64 / 10000);
 
-                    let outbound_timeout = lock.timeout_height
+                    let outbound_timeout = lock
+                        .timeout_height
                         .saturating_sub(config.timeout_margin_blocks);
 
                     eprintln!(
                         "  → Cross-ledger route: {} msats via {} on ledger {}...",
-                        forward_amount, out_dep.alias, &out_dep.ledger_id[..16],
+                        forward_amount,
+                        out_dep.alias,
+                        &out_dep.ledger_id[..16],
                     );
 
                     // Look up pending route request by hash for the destination deposit_id.
@@ -1590,7 +1844,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // the destination info keyed by hash.
                     let pending = shared.pending_routes.lock().unwrap().remove(&lock.hash);
                     let dest_on_outbound = if let Some(pr) = &pending {
-                        eprintln!("  (matched pending route → dest {})", hex::encode(pr.dest_deposit_id));
+                        eprintln!(
+                            "  (matched pending route → dest {})",
+                            hex::encode(pr.dest_deposit_id)
+                        );
                         pr.dest_deposit_id
                     } else {
                         eprintln!("  (no pending route — using source as fallback)");
@@ -1615,7 +1872,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             transfer_fee,
                             &hash,
                             outbound_timeout,
-                        ).await {
+                        )
+                        .await
+                        {
                             Ok(outbound_tid) => {
                                 eprintln!(
                                     "  [LOCKED] outbound transfer {}... on ledger {}...",
@@ -1631,11 +1890,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     preimage: None,
                                     status: RouteStatus::OutboundLocked,
                                 });
-                                stats_c.stats.routes_active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                stats_c
+                                    .stats
+                                    .routes_active
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             Err(e) => {
                                 eprintln!("  [FAIL] outbound lock failed: {}", e);
-                                stats_c.stats.routes_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                stats_c
+                                    .stats
+                                    .routes_failed
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                     });
@@ -1644,7 +1909,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            UpdateEvent::PreimageRevealed { ledger_id, transfer_id, preimage } => {
+            UpdateEvent::PreimageRevealed {
+                ledger_id,
+                transfer_id,
+                preimage,
+            } => {
                 eprintln!(
                     "[PREIMAGE] transfer {}... on ledger {}...",
                     hex::encode(&transfer_id[..8]),
@@ -1653,13 +1922,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Find the matching route and complete the inbound leg
                 let mut routes_guard = routes.routes.lock().unwrap();
-                let route = routes_guard.iter_mut().find(|r| match r {
-                    Route::CrossLedger { outbound_transfer_id: Some(tid), status, .. }
-                        if *tid == transfer_id && *status == RouteStatus::OutboundLocked => true,
-                    _ => false,
+                let route = routes_guard.iter_mut().find(|r| {
+                    matches!(r,
+                        Route::CrossLedger {
+                            outbound_transfer_id: Some(tid),
+                            status,
+                            ..
+                        } if *tid == transfer_id && *status == RouteStatus::OutboundLocked
+                    )
                 });
 
-                if let Some(Route::CrossLedger { inbound, status, preimage: ref mut p, .. }) = route {
+                if let Some(Route::CrossLedger {
+                    inbound,
+                    status,
+                    preimage: ref mut p,
+                    ..
+                }) = route
+                {
                     *p = Some(preimage);
                     *status = RouteStatus::Completing;
                     let inbound_ledger = inbound.ledger_id.clone();
@@ -1677,21 +1956,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &inbound_ledger,
                             &inbound_tid,
                             &preimage_copy,
-                        ).await {
+                        )
+                        .await
+                        {
                             Ok(()) => {
                                 eprintln!(
                                     "  [DONE] completed inbound transfer {}...",
                                     hex::encode(&inbound_tid[..8]),
                                 );
-                                stats_c.stats.routes_completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                stats_c.stats.routes_active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                                stats_c
+                                    .stats
+                                    .routes_completed
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                stats_c
+                                    .stats
+                                    .routes_active
+                                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             Err(e) => {
-                                eprintln!(
-                                    "  [FAIL] complete inbound failed: {}",
-                                    e,
-                                );
-                                stats_c.stats.routes_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                eprintln!("  [FAIL] complete inbound failed: {}", e,);
+                                stats_c
+                                    .stats
+                                    .routes_failed
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                     });
@@ -1731,7 +2018,9 @@ fn process_route_request(params: &serde_json::Value, state: &SharedState) -> ser
     };
     let dest_deposit_id_hex = match params["dest_deposit_id"].as_str() {
         Some(s) if s.len() == 32 => s.to_string(),
-        _ => return serde_json::json!({"success": false, "error": "dest_deposit_id must be 32 hex chars"}),
+        _ => {
+            return serde_json::json!({"success": false, "error": "dest_deposit_id must be 32 hex chars"})
+        }
     };
     let amount_msats = match params["amount_msats"].as_u64() {
         Some(a) if a > 0 => a,
@@ -1742,28 +2031,47 @@ fn process_route_request(params: &serde_json::Value, state: &SharedState) -> ser
         _ => return serde_json::json!({"success": false, "error": "hash must be 64 hex chars"}),
     };
     let hash: [u8; 32] = match hex::decode(&hash_hex) {
-        Ok(b) if b.len() == 32 => { let mut arr = [0u8; 32]; arr.copy_from_slice(&b); arr }
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
         _ => return serde_json::json!({"success": false, "error": "invalid hash"}),
     };
     let dest_deposit_id: [u8; 16] = match hex::decode(&dest_deposit_id_hex) {
-        Ok(b) if b.len() == 16 => { let mut arr = [0u8; 16]; arr.copy_from_slice(&b); arr }
+        Ok(b) if b.len() == 16 => {
+            let mut arr = [0u8; 16];
+            arr.copy_from_slice(&b);
+            arr
+        }
         _ => return serde_json::json!({"success": false, "error": "invalid dest_deposit_id"}),
     };
 
     // Validate agent has deposits on both ledgers
     let agent_in = match state.deposits.iter().find(|d| d.ledger_id == source_ledger) {
         Some(d) => d,
-        None => return serde_json::json!({"success": false, "error": "agent has no deposit on source_ledger"}),
+        None => {
+            return serde_json::json!({"success": false, "error": "agent has no deposit on source_ledger"})
+        }
     };
-    if state.deposits.iter().find(|d| d.ledger_id == dest_ledger).is_none() {
+    if state
+        .deposits
+        .iter()
+        .find(|d| d.ledger_id == dest_ledger)
+        .is_none()
+    {
         return serde_json::json!({"success": false, "error": "agent has no deposit on dest_ledger"});
     }
 
     // Calculate fees
     let in_fees = state.ledger_fees.get(&source_ledger);
     let out_fees = state.ledger_fees.get(&dest_ledger);
-    let fee_in = in_fees.map(|f| f.fee_in_fixed_msats + amount_msats * f.fee_in_rate_bps / 10000).unwrap_or(0);
-    let fee_out = out_fees.map(|f| f.fee_out_fixed_msats + amount_msats * f.fee_out_rate_bps / 10000).unwrap_or(0);
+    let fee_in = in_fees
+        .map(|f| f.fee_in_fixed_msats + amount_msats * f.fee_in_rate_bps / 10000)
+        .unwrap_or(0);
+    let fee_out = out_fees
+        .map(|f| f.fee_out_fixed_msats + amount_msats * f.fee_out_rate_bps / 10000)
+        .unwrap_or(0);
     let total_fee = fee_in + fee_out;
 
     if amount_msats <= total_fee {
@@ -1775,17 +2083,25 @@ fn process_route_request(params: &serde_json::Value, state: &SharedState) -> ser
     {
         let mut pending = state.pending_routes.lock().unwrap();
         pending.retain(|_, r| r.created_at.elapsed() < Duration::from_secs(600));
-        pending.insert(hash, PendingRoute {
+        pending.insert(
             hash,
-            dest_deposit_id,
-            dest_ledger_id: dest_ledger,
-            amount_msats,
-            created_at: Instant::now(),
-        });
+            PendingRoute {
+                hash,
+                dest_deposit_id,
+                dest_ledger_id: dest_ledger,
+                amount_msats,
+                created_at: Instant::now(),
+            },
+        );
     }
 
-    eprintln!("  Route registered: {} → agent deposit {}, fee={}, forward={}",
-        &source_ledger[..8], agent_in.deposit_id, total_fee, forward_amount);
+    eprintln!(
+        "  Route registered: {} → agent deposit {}, fee={}, forward={}",
+        &source_ledger[..8],
+        agent_in.deposit_id,
+        total_fee,
+        forward_amount
+    );
 
     serde_json::json!({
         "success": true,

@@ -7,11 +7,11 @@
 //   discover                              # Use default data root
 //   discover --data-root /path/to/data    # Custom data root
 
-use std::collections::{HashMap, HashSet, BTreeMap};
-use std::path::{Path, PathBuf};
-use deposits_core::{SignedLedgerUpdate, LedgerState};
 use deposits_core::messages::LedgerOperation;
 use deposits_core::tlv::TlvDecode;
+use deposits_core::{LedgerState, SignedLedgerUpdate};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 
 const DEFAULT_DATA_ROOT: &str = "data";
 
@@ -51,7 +51,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 data_root = PathBuf::from(&args[i + 1]);
                 i += 2;
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
 
@@ -65,33 +67,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pk_to_name: HashMap<String, String> = HashMap::new();
 
     // Node name mapping from seed
-    let node_names: HashMap<&str, &str> = [
+    let _node_names: HashMap<&str, &str> = [
         ("416c696365", "Alice"),
         ("426f6200", "Bob"),
         ("436861726c6965", "Charlie"),
         ("4469616e61", "Diana"),
-    ].into();
+    ]
+    .into();
 
     for entry in std::fs::read_dir(&data_root)? {
         let entry = entry?;
         let node_dir = entry.path();
-        if !node_dir.is_dir() { continue; }
+        if !node_dir.is_dir() {
+            continue;
+        }
 
         let node_name = entry.file_name().to_string_lossy().to_string();
         // Skip non-node dirs
-        if node_name == "relays" { continue; }
+        if node_name == "relays" {
+            continue;
+        }
 
         let ledgers_dir = node_dir.join("wallet").join("ledgers");
-        if !ledgers_dir.exists() { continue; }
+        if !ledgers_dir.exists() {
+            continue;
+        }
 
         let mut node_operator_key: Option<String> = None;
 
         for ledger_file in std::fs::read_dir(&ledgers_dir)? {
             let ledger_file = ledger_file?;
             let path = ledger_file.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") { continue; }
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
 
-            let ledger_id = path.file_stem()
+            let ledger_id = path
+                .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
@@ -103,11 +115,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
 
             for line in contents.lines() {
-                if line.trim().is_empty() { continue; }
+                if line.trim().is_empty() {
+                    continue;
+                }
                 match serde_json::from_str::<LedgerLogRow>(line) {
-                    Ok(LedgerLogRow::Role { role: r }) => { role = r; }
-                    Ok(LedgerLogRow::State(s)) => { state = Some(s); }
-                    Ok(LedgerLogRow::Update(u)) => { updates.push(u); }
+                    Ok(LedgerLogRow::Role { role: r }) => {
+                        role = r;
+                    }
+                    Ok(LedgerLogRow::State(s)) => {
+                        state = Some(s);
+                    }
+                    Ok(LedgerLogRow::Update(u)) => {
+                        updates.push(u);
+                    }
                     Err(_) => {}
                 }
             }
@@ -118,7 +138,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             // Only process Operator-role ledgers for the main view
-            if role != "Operator" { continue; }
+            if role != "Operator" {
+                continue;
+            }
 
             // Replay operations from updates beyond the state snapshot
             let state_seq = state.sequence;
@@ -135,7 +157,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             for i in 0..ledger.history.len() {
                 let u = &ledger.history[i];
-                if (u.sequence_number as u64) <= state_seq { continue; }
+                if u.sequence_number <= state_seq {
+                    continue;
+                }
                 if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
                     let _ = ledger.apply_state_changes(&op);
                 }
@@ -146,32 +170,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             node_operator_key = Some(op_key.clone());
 
             // Get quorum members
-            let quorum_members: Vec<String> = state.quorum_members.iter()
+            let quorum_members: Vec<String> = state
+                .quorum_members
+                .iter()
                 .map(|m| hex::encode(m.pubkey.serialize()))
                 .collect();
 
             // Calculate obligations from deposits
-            let obligations: u64 = state.deposits.values()
+            let obligations: u64 = state
+                .deposits
+                .values()
                 .map(|d| d.balance + d.locked_balance)
                 .sum();
 
             let deposit_count = state.deposits.len();
 
             // Get collateral from attestations
-            let collateral: u64 = state.collateral_attestations.values()
+            let collateral: u64 = state
+                .collateral_attestations
+                .values()
                 .map(|a| a.available_collateral())
                 .sum();
 
             let display_name = node_name.clone();
             let display_name_cap = display_name[..1].to_uppercase() + &display_name[1..];
 
-            let op = operators.entry(display_name_cap.clone()).or_insert_with(|| {
-                OperatorInfo {
+            let op = operators
+                .entry(display_name_cap.clone())
+                .or_insert_with(|| OperatorInfo {
                     name: display_name_cap.clone(),
                     pubkey_hex: op_key.clone(),
                     ledgers: Vec::new(),
-                }
-            });
+                });
 
             op.ledgers.push(LedgerSummary {
                 ledger_id,
@@ -197,9 +227,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("Discovered {} operators in {}:\n", operators.len(), data_root.display());
+    println!(
+        "Discovered {} operators in {}:\n",
+        operators.len(),
+        data_root.display()
+    );
 
-    for (_, op) in &operators {
+    for op in operators.values() {
         let total_reserves: u64 = op.ledgers.iter().map(|l| l.reserves_msats).sum();
         let total_collateral: u64 = op.ledgers.iter().map(|l| l.collateral_msats).sum();
         let total_obligations: u64 = op.ledgers.iter().map(|l| l.obligations_msats).sum();
@@ -207,10 +241,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let collateral_pct = if total_reserves > 0 {
             (total_collateral as f64 / total_reserves as f64 * 100.0) as u64
-        } else { 0 };
+        } else {
+            0
+        };
 
         println!("  {} ({}...)", op.name, &op.pubkey_hex[..16]);
-        println!("    Ledgers: {}  |  Deposits: {}  |  Collateral: {}%", op.ledgers.len(), total_deposits, collateral_pct);
+        println!(
+            "    Ledgers: {}  |  Deposits: {}  |  Collateral: {}%",
+            op.ledgers.len(),
+            total_deposits,
+            collateral_pct
+        );
         println!("    Reserves:    {:>12} sats", total_reserves / 1000);
         println!("    Collateral:  {:>12} sats", total_collateral / 1000);
         if total_obligations > 0 {
@@ -220,17 +261,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for ledger in &op.ledgers {
             let pct = if ledger.reserves_msats > 0 {
                 (ledger.collateral_msats as f64 / ledger.reserves_msats as f64 * 100.0) as u64
-            } else { 0 };
+            } else {
+                0
+            };
 
             println!("    {}...", &ledger.ledger_id[..16]);
-            println!("      Reserves: {:>10} sats  |  Collateral: {} sats ({}%)  |  seq {}",
-                ledger.reserves_msats / 1000, ledger.collateral_msats / 1000, pct, ledger.sequence);
+            println!(
+                "      Reserves: {:>10} sats  |  Collateral: {} sats ({}%)  |  seq {}",
+                ledger.reserves_msats / 1000,
+                ledger.collateral_msats / 1000,
+                pct,
+                ledger.sequence
+            );
 
             if !ledger.quorum_members.is_empty() {
-                let names: Vec<String> = ledger.quorum_members.iter()
-                    .map(|pk| pk_to_name.get(pk).cloned().unwrap_or_else(|| format!("{}...", &pk[..12])))
+                let names: Vec<String> = ledger
+                    .quorum_members
+                    .iter()
+                    .map(|pk| {
+                        pk_to_name
+                            .get(pk)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{}...", &pk[..12]))
+                    })
                     .collect();
-                println!("      Quorum ({}): {}", ledger.quorum_members.len(), names.join(", "));
+                println!(
+                    "      Quorum ({}): {}",
+                    ledger.quorum_members.len(),
+                    names.join(", ")
+                );
             }
         }
         println!();
@@ -238,7 +297,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Topology
     println!("Topology:");
-    for (_, op) in &operators {
+    for op in operators.values() {
         let mut peers: HashSet<String> = HashSet::new();
         for ledger in &op.ledgers {
             for member in &ledger.quorum_members {
@@ -250,7 +309,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !peers.is_empty() {
             let mut peer_list: Vec<&String> = peers.iter().collect();
             peer_list.sort();
-            println!("  {} <-> {}", op.name, peer_list.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+            println!(
+                "  {} <-> {}",
+                op.name,
+                peer_list
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
     }
 

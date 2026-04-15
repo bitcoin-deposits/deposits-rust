@@ -9,8 +9,8 @@ use deposits_core::messages::LedgerOperation;
 use deposits_core::types::{
     compute_deposit_id, FeeStructure, LedgerState, QuorumMember, TransferFeeSchedule,
 };
-use deposits_protocol::TlvEncode;
 use deposits_protocol::TlvDecode;
+use deposits_protocol::TlvEncode;
 
 fn test_pubkey() -> bitcoin::secp256k1::PublicKey {
     use std::str::FromStr;
@@ -37,11 +37,7 @@ fn test_pubkey_3() -> bitcoin::secp256k1::PublicKey {
 }
 
 fn make_ledger() -> Ledger {
-    let state = LedgerState::new(
-        test_pubkey(),
-        "bcrt1qtest".to_string(),
-        0,
-    );
+    let state = LedgerState::new(test_pubkey(), "bcrt1qtest".to_string(), 0);
     Ledger {
         state,
         protocol: Default::default(),
@@ -100,10 +96,7 @@ fn strictest_quorum_limits(members: &[QuorumMember]) -> (Option<u16>, Option<u64
 }
 
 /// Check if a fee structure meets quorum limits.
-fn fees_meet_quorum_limits(
-    fees: &FeeStructure,
-    members: &[QuorumMember],
-) -> Result<(), String> {
+fn fees_meet_quorum_limits(fees: &FeeStructure, members: &[QuorumMember]) -> Result<(), String> {
     let (min_bps, min_fixed, max_period) = strictest_quorum_limits(members);
 
     if let Some(required_bps) = min_bps {
@@ -143,7 +136,13 @@ fn fees_meet_quorum_limits(
 #[test]
 fn quorum_add_member_stores_fee_limits() {
     let mut ledger = make_ledger();
-    add_member(&mut ledger, test_pubkey_2(), Some(50), Some(10_000), Some(2016));
+    add_member(
+        &mut ledger,
+        test_pubkey_2(),
+        Some(50),
+        Some(10_000),
+        Some(2016),
+    );
 
     assert_eq!(ledger.state.next_quorum_members.len(), 1);
     let member = &ledger.state.next_quorum_members[0];
@@ -284,8 +283,8 @@ fn strictest_limits_multiple_members_takes_most_restrictive() {
         QuorumMember {
             pubkey: test_pubkey_2(),
             ledger_id: String::new(),
-            min_fee_bps: Some(50),    // less strict
-            min_fee_fixed: Some(5000), // more strict
+            min_fee_bps: Some(50),      // less strict
+            min_fee_fixed: Some(5000),  // more strict
             max_fee_period: Some(4032), // less strict (longer period allowed)
             collateral_lock_amount: None,
             collateral_lock_until: None,
@@ -298,8 +297,8 @@ fn strictest_limits_multiple_members_takes_most_restrictive() {
         QuorumMember {
             pubkey: test_pubkey_3(),
             ledger_id: String::new(),
-            min_fee_bps: Some(100),   // more strict (higher min)
-            min_fee_fixed: Some(1000), // less strict
+            min_fee_bps: Some(100),     // more strict (higher min)
+            min_fee_fixed: Some(1000),  // less strict
             max_fee_period: Some(2016), // more strict (shorter max period)
             collateral_lock_amount: None,
             collateral_lock_until: None,
@@ -360,22 +359,20 @@ fn strictest_limits_with_none_values() {
 
 #[test]
 fn strictest_limits_all_none() {
-    let members = vec![
-        QuorumMember {
-            pubkey: test_pubkey_2(),
-            ledger_id: String::new(),
-            min_fee_bps: None,
-            min_fee_fixed: None,
-            max_fee_period: None,
-            collateral_lock_amount: None,
-            collateral_lock_until: None,
-            dispute_response_blocks: None,
-            dispute_arm_blocks: None,
-            service_response_blocks: None,
-            max_transfer_timeout_blocks: None,
-            max_descriptor_bytes: None,
-        },
-    ];
+    let members = vec![QuorumMember {
+        pubkey: test_pubkey_2(),
+        ledger_id: String::new(),
+        min_fee_bps: None,
+        min_fee_fixed: None,
+        max_fee_period: None,
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
+        dispute_response_blocks: None,
+        dispute_arm_blocks: None,
+        service_response_blocks: None,
+        max_transfer_timeout_blocks: None,
+        max_descriptor_bytes: None,
+    }];
 
     let (bps, fixed, period) = strictest_quorum_limits(&members);
     assert_eq!(bps, None);
@@ -405,7 +402,7 @@ fn fees_meeting_all_limits_pass() {
     }];
 
     let fees = FeeStructure {
-        annualized_bps: 100, // above 50 min
+        annualized_bps: 100,    // above 50 min
         annualized_msats: 5000, // above 1000 min
         frequency_blocks: 2016, // equal to max
     };
@@ -464,7 +461,11 @@ fn fees_below_min_fixed_rejected() {
     };
 
     let err = fees_meet_quorum_limits(&fees, &members).unwrap_err();
-    assert!(err.contains("Fixed fee"), "error should mention fixed fee: {}", err);
+    assert!(
+        err.contains("Fixed fee"),
+        "error should mention fixed fee: {}",
+        err
+    );
 }
 
 #[test]
@@ -491,7 +492,11 @@ fn fees_exceeding_max_period_rejected() {
     };
 
     let err = fees_meet_quorum_limits(&fees, &members).unwrap_err();
-    assert!(err.contains("period"), "error should mention period: {}", err);
+    assert!(
+        err.contains("period"),
+        "error should mention period: {}",
+        err
+    );
 }
 
 #[test]
@@ -562,7 +567,11 @@ fn fees_must_satisfy_strictest_member() {
     };
 
     let err = fees_meet_quorum_limits(&fees, &members).unwrap_err();
-    assert!(err.contains("200"), "error should mention strictest limit: {}", err);
+    assert!(
+        err.contains("200"),
+        "error should mention strictest limit: {}",
+        err
+    );
 
     // 200 bps meets both
     let fees_ok = FeeStructure {
@@ -583,14 +592,20 @@ fn deposit_open_on_ledger_with_quorum_fee_limits() {
     let mut ledger = make_ledger();
 
     // Add two quorum members with different fee requirements
-    add_member(&mut ledger, test_pubkey_2(), Some(50), Some(1000), Some(4032));
+    add_member(
+        &mut ledger,
+        test_pubkey_2(),
+        Some(50),
+        Some(1000),
+        Some(4032),
+    );
     add_member(&mut ledger, test_pubkey_3(), Some(100), None, Some(2016));
 
     assert_eq!(ledger.state.next_quorum_members.len(), 2);
 
     // Verify the strictest limits
     let (bps, fixed, period) = strictest_quorum_limits(&ledger.state.next_quorum_members);
-    assert_eq!(bps, Some(100));  // strictest: 100 > 50
+    assert_eq!(bps, Some(100)); // strictest: 100 > 50
     assert_eq!(fixed, Some(1000)); // only member 1 has a fixed limit
     assert_eq!(period, Some(2016)); // strictest: 2016 < 4032
 
@@ -624,8 +639,8 @@ fn deposit_open_on_ledger_with_quorum_fee_limits() {
 
     // A deposit with fees below limits should be rejected (by the co-signer)
     let bad_fees = FeeStructure {
-        annualized_bps: 25, // below 100 minimum
-        annualized_msats: 500, // below 1000 minimum
+        annualized_bps: 25,     // below 100 minimum
+        annualized_msats: 500,  // below 1000 minimum
         frequency_blocks: 8064, // above 2016 maximum
     };
     let err = fees_meet_quorum_limits(&bad_fees, &ledger.state.next_quorum_members).unwrap_err();
@@ -692,7 +707,8 @@ fn quorum_member_struct_no_limits_json_roundtrip() {
 /// Compute the maximum obligations allowed based on quorum collateral commitments.
 /// Returns None if no members have commitments (no limit).
 fn max_obligations(members: &[QuorumMember]) -> Option<u64> {
-    members.iter()
+    members
+        .iter()
         .filter_map(|m| m.collateral_lock_amount)
         .min()
         .map(|min_collateral| min_collateral.saturating_mul(2))
@@ -727,8 +743,11 @@ fn obligation_limit_no_collateral_commitments_no_limit() {
     let members = vec![QuorumMember {
         pubkey: test_pubkey_2(),
         ledger_id: String::new(),
-        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
-        collateral_lock_amount: None, collateral_lock_until: None,
+        min_fee_bps: None,
+        min_fee_fixed: None,
+        max_fee_period: None,
+        collateral_lock_amount: None,
+        collateral_lock_until: None,
         dispute_response_blocks: None,
         dispute_arm_blocks: None,
         service_response_blocks: None,
@@ -743,7 +762,9 @@ fn obligation_within_limit_passes() {
     let members = vec![QuorumMember {
         pubkey: test_pubkey_2(),
         ledger_id: String::new(),
-        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+        min_fee_bps: None,
+        min_fee_fixed: None,
+        max_fee_period: None,
         collateral_lock_amount: Some(100_000), // 2x = 200_000 max
         collateral_lock_until: Some(10000),
         dispute_response_blocks: None,
@@ -761,7 +782,9 @@ fn obligation_at_limit_passes() {
     let members = vec![QuorumMember {
         pubkey: test_pubkey_2(),
         ledger_id: String::new(),
-        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+        min_fee_bps: None,
+        min_fee_fixed: None,
+        max_fee_period: None,
         collateral_lock_amount: Some(100_000),
         collateral_lock_until: Some(10000),
         dispute_response_blocks: None,
@@ -779,7 +802,9 @@ fn obligation_exceeding_limit_rejected() {
     let members = vec![QuorumMember {
         pubkey: test_pubkey_2(),
         ledger_id: String::new(),
-        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+        min_fee_bps: None,
+        min_fee_fixed: None,
+        max_fee_period: None,
         collateral_lock_amount: Some(100_000),
         collateral_lock_until: Some(10000),
         dispute_response_blocks: None,
@@ -799,7 +824,9 @@ fn obligation_limit_uses_smallest_member() {
         QuorumMember {
             pubkey: test_pubkey_2(),
             ledger_id: String::new(),
-            min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+            min_fee_bps: None,
+            min_fee_fixed: None,
+            max_fee_period: None,
             collateral_lock_amount: Some(500_000), // large
             collateral_lock_until: Some(10000),
             dispute_response_blocks: None,
@@ -811,7 +838,9 @@ fn obligation_limit_uses_smallest_member() {
         QuorumMember {
             pubkey: test_pubkey_3(),
             ledger_id: String::new(),
-            min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+            min_fee_bps: None,
+            min_fee_fixed: None,
+            max_fee_period: None,
             collateral_lock_amount: Some(50_000), // small — this is the bottleneck
             collateral_lock_until: Some(10000),
             dispute_response_blocks: None,
@@ -832,7 +861,9 @@ fn obligation_limit_mixed_some_none() {
         QuorumMember {
             pubkey: test_pubkey_2(),
             ledger_id: String::new(),
-            min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+            min_fee_bps: None,
+            min_fee_fixed: None,
+            max_fee_period: None,
             collateral_lock_amount: Some(100_000),
             collateral_lock_until: Some(10000),
             dispute_response_blocks: None,
@@ -844,7 +875,9 @@ fn obligation_limit_mixed_some_none() {
         QuorumMember {
             pubkey: test_pubkey_3(),
             ledger_id: String::new(),
-            min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+            min_fee_bps: None,
+            min_fee_fixed: None,
+            max_fee_period: None,
             collateral_lock_amount: None, // no commitment
             collateral_lock_until: None,
             dispute_response_blocks: None,
@@ -865,9 +898,7 @@ fn obligation_limit_mixed_some_none() {
 
 /// Compute maximum membership duration from collateral lock times.
 fn max_membership_block(members: &[QuorumMember]) -> Option<u32> {
-    members.iter()
-        .filter_map(|m| m.collateral_lock_until)
-        .min()
+    members.iter().filter_map(|m| m.collateral_lock_until).min()
 }
 
 #[test]
@@ -876,7 +907,9 @@ fn membership_duration_limited_by_shortest_lock() {
         QuorumMember {
             pubkey: test_pubkey_2(),
             ledger_id: String::new(),
-            min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+            min_fee_bps: None,
+            min_fee_fixed: None,
+            max_fee_period: None,
             collateral_lock_amount: Some(100_000),
             collateral_lock_until: Some(50_000), // locks until block 50k
             dispute_response_blocks: None,
@@ -888,7 +921,9 @@ fn membership_duration_limited_by_shortest_lock() {
         QuorumMember {
             pubkey: test_pubkey_3(),
             ledger_id: String::new(),
-            min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+            min_fee_bps: None,
+            min_fee_fixed: None,
+            max_fee_period: None,
             collateral_lock_amount: Some(100_000),
             collateral_lock_until: Some(30_000), // locks until block 30k — shortest
             dispute_response_blocks: None,
@@ -907,7 +942,9 @@ fn membership_duration_no_locks_no_limit() {
     let members = vec![QuorumMember {
         pubkey: test_pubkey_2(),
         ledger_id: String::new(),
-        min_fee_bps: None, min_fee_fixed: None, max_fee_period: None,
+        min_fee_bps: None,
+        min_fee_fixed: None,
+        max_fee_period: None,
         collateral_lock_amount: None,
         collateral_lock_until: None,
         dispute_response_blocks: None,

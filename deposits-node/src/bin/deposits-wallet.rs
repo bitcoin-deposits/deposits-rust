@@ -19,25 +19,40 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-use bitcoin::secp256k1::{schnorr, Message, PublicKey, Secp256k1, SecretKey};
 use bitcoin::hashes::{sha256, Hash};
+use bitcoin::secp256k1::{schnorr, Message, PublicKey, Secp256k1, SecretKey};
 use chrono::Utc;
-use deposits_node::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE, TAG_LEDGER_ID, TAG_SEQUENCE, ledger_tag};
-use std::collections::{BTreeMap, HashSet};
+use deposits_node::nostr::{
+    ledger_tag, NostrTransportBuilder, KIND_LEDGER_UPDATE, TAG_LEDGER_ID, TAG_SEQUENCE,
+};
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use nostr_sdk::prelude::*;
+use deposits_core::messages::LedgerOperation;
 use deposits_core::tlv::TlvDecode;
 use deposits_core::SignedLedgerUpdate;
-use deposits_core::messages::LedgerOperation;
+use nostr_sdk::prelude::*;
 
 // ANSI color codes for --color-by-pk
 const COLORS: &[&str] = &[
-    "\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m",
-    "\x1b[91m", "\x1b[92m", "\x1b[93m", "\x1b[94m", "\x1b[95m", "\x1b[96m",
-    "\x1b[38;5;208m", "\x1b[38;5;205m", "\x1b[38;5;118m", "\x1b[38;5;39m",
+    "\x1b[31m",
+    "\x1b[32m",
+    "\x1b[33m",
+    "\x1b[34m",
+    "\x1b[35m",
+    "\x1b[36m",
+    "\x1b[91m",
+    "\x1b[92m",
+    "\x1b[93m",
+    "\x1b[94m",
+    "\x1b[95m",
+    "\x1b[96m",
+    "\x1b[38;5;208m",
+    "\x1b[38;5;205m",
+    "\x1b[38;5;118m",
+    "\x1b[38;5;39m",
 ];
 const RESET: &str = "\x1b[0m";
 
@@ -113,7 +128,10 @@ async fn verify_quorum_membership(
     let updates = match transport.fetch_ledger_updates(ledger_id).await {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("Warning: Failed to fetch ledger updates for verification: {}", e);
+            eprintln!(
+                "Warning: Failed to fetch ledger updates for verification: {}",
+                e
+            );
             return false;
         }
     };
@@ -169,20 +187,33 @@ fn print_usage(program: &str) {
     eprintln!("  ledger list                 List all ledgers on the relay");
     eprintln!("  ledger show <id>            Show all updates for a ledger");
     eprintln!("  ledger validate <id>        Validate ledger hash chain");
-    eprintln!("  ledger custody <id>         Trace custody chain (rotations, disputes, acquisitions)");
+    eprintln!(
+        "  ledger custody <id>         Trace custody chain (rotations, disputes, acquisitions)"
+    );
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --relay <url>       Nostr relay URL (required)");
-    eprintln!("  --network <net>     Network: bitcoin, testnet, signet, regtest (default: regtest)");
+    eprintln!(
+        "  --network <net>     Network: bitcoin, testnet, signet, regtest (default: regtest)"
+    );
     eprintln!("  --data-dir <path>   Data directory (default: ~/.deposits-wallet)");
     eprintln!("  --seed <hex>        Wallet seed (32 bytes hex)");
     eprintln!("  --alias <name>      Local alias for the deposit (for open command)");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  {} discover --relay ws://localhost:8080", program);
-    eprintln!("  {} open abc123... 100000 --alias savings --relay ws://localhost:8080", program);
-    eprintln!("  {} offer savings 50000 --relay ws://localhost:8080", program);
-    eprintln!("  {} withdraw savings 25000 --to bc1q... --relay ws://localhost:8080", program);
+    eprintln!(
+        "  {} open abc123... 100000 --alias savings --relay ws://localhost:8080",
+        program
+    );
+    eprintln!(
+        "  {} offer savings 50000 --relay ws://localhost:8080",
+        program
+    );
+    eprintln!(
+        "  {} withdraw savings 25000 --to bc1q... --relay ws://localhost:8080",
+        program
+    );
 }
 
 fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error::Error>> {
@@ -259,7 +290,7 @@ fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error::Err
             let mut rng = OsRng;
             let mut arr = [0u8; 32];
             rng.fill_bytes(&mut arr);
-            std::fs::write(&seed_file, hex::encode(&arr))?;
+            std::fs::write(&seed_file, hex::encode(arr))?;
             eprintln!("Generated new wallet seed: {}", seed_file.display());
             arr
         }
@@ -273,13 +304,20 @@ fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error::Err
     })
 }
 
-fn derive_secret_key(seed: &[u8; 32], network: bitcoin::Network) -> Result<SecretKey, Box<dyn std::error::Error>> {
+fn derive_secret_key(
+    seed: &[u8; 32],
+    network: bitcoin::Network,
+) -> Result<SecretKey, Box<dyn std::error::Error>> {
     derive_secret_key_at_index(seed, network, 0)
 }
 
 /// Derive a secret key at a specific index for per-deposit key isolation
-fn derive_secret_key_at_index(seed: &[u8; 32], network: bitcoin::Network, index: u32) -> Result<SecretKey, Box<dyn std::error::Error>> {
-    use bitcoin::bip32::{Xpriv, DerivationPath};
+fn derive_secret_key_at_index(
+    seed: &[u8; 32],
+    network: bitcoin::Network,
+    index: u32,
+) -> Result<SecretKey, Box<dyn std::error::Error>> {
+    use bitcoin::bip32::{DerivationPath, Xpriv};
     use std::str::FromStr;
 
     let xpriv = Xpriv::new_master(network, seed)?;
@@ -375,7 +413,7 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let secret_key = derive_secret_key(&config.seed, config.network)?;
-    let mut transport = NostrTransportBuilder::new(secret_key)
+    let transport = NostrTransportBuilder::new(secret_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -385,26 +423,35 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if json_output {
         // Machine-readable: one JSON object per line
         for ad in &ads {
-            println!("{}", serde_json::json!({
-                "type": "ledger",
-                "ledger_id": ad.ledger_id,
-                "operator_pubkey": ad.operator_pubkey,
-                "operator_name": ad.operator_name,
-                "relay_url": ad.relay_url,
-                "reserves_msats": ad.reserves_amount_msats,
-                "obligations_msats": ad.total_obligations_msats,
-                "headroom_msats": ad.available_headroom_msats,
-            }));
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "ledger",
+                    "ledger_id": ad.ledger_id,
+                    "operator_pubkey": ad.operator_pubkey,
+                    "operator_name": ad.operator_name,
+                    "relay_url": ad.relay_url,
+                    "reserves_msats": ad.reserves_amount_msats,
+                    "obligations_msats": ad.total_obligations_msats,
+                    "headroom_msats": ad.available_headroom_msats,
+                })
+            );
         }
         // Also include agent advertisements
-        let agent_ads = transport.fetch_agent_advertisements(network_str).await.unwrap_or_default();
+        let agent_ads = transport
+            .fetch_agent_advertisements(network_str)
+            .await
+            .unwrap_or_default();
         for ad in &agent_ads {
-            println!("{}", serde_json::json!({
-                "type": "agent",
-                "agent_pubkey": ad.agent_pubkey,
-                "service": ad.service,
-                "ledgers": ad.ledgers,
-            }));
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "agent",
+                    "agent_pubkey": ad.agent_pubkey,
+                    "service": ad.service,
+                    "ledgers": ad.ledgers,
+                })
+            );
         }
         return Ok(());
     }
@@ -421,23 +468,37 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Build a map of operator pubkey -> name for quorum member lookups
-    let pubkey_to_name: std::collections::HashMap<&str, &str> = ads.iter()
+    let _pubkey_to_name: std::collections::HashMap<&str, &str> = ads
+        .iter()
         .filter_map(|a| {
-            a.operator_name.as_deref()
+            a.operator_name
+                .as_deref()
                 .map(|name| (a.operator_pubkey.as_str(), name))
         })
         .collect();
 
     for (i, ad) in ads.iter().enumerate() {
         let operator_name = ad.operator_name.as_deref().unwrap_or("Anonymous");
-        println!("{}. {} ({}...)", i + 1, operator_name, &ad.operator_pubkey[..8.min(ad.operator_pubkey.len())]);
+        println!(
+            "{}. {} ({}...)",
+            i + 1,
+            operator_name,
+            &ad.operator_pubkey[..8.min(ad.operator_pubkey.len())]
+        );
         println!("   Ledger: {}", ad.ledger_id);
-        println!("   Available: {} sats ({} BTC)",
+        println!(
+            "   Available: {} sats ({} BTC)",
             ad.available_headroom_msats,
-            ad.available_headroom_msats as f64 / 100_000_000_000.0);
-        println!("   Reserves: {} msats, Obligations: {} msats",
-            ad.reserves_amount_msats, ad.total_obligations_msats);
-        println!("   Deposited collateral: {} msats", ad.attested_collateral_msats);
+            ad.available_headroom_msats as f64 / 100_000_000_000.0
+        );
+        println!(
+            "   Reserves: {} msats, Obligations: {} msats",
+            ad.reserves_amount_msats, ad.total_obligations_msats
+        );
+        println!(
+            "   Deposited collateral: {} msats",
+            ad.attested_collateral_msats
+        );
         println!("   Held collateral: {} msats", ad.held_collateral_msats);
 
         // Fee summary
@@ -479,11 +540,19 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("  deposits-wallet open <ledger_id> <amount_sats> --alias <name>");
 
     // ── Agent advertisements (Kind 39101) ──
-    let agent_ads = transport.fetch_agent_advertisements(network_str).await.unwrap_or_default();
+    let agent_ads = transport
+        .fetch_agent_advertisements(network_str)
+        .await
+        .unwrap_or_default();
     if !agent_ads.is_empty() {
         // Build ledger_id -> operator name map for display
-        let ledger_to_operator: std::collections::HashMap<&str, &str> = ads.iter()
-            .filter_map(|a| a.operator_name.as_deref().map(|name| (a.ledger_id.as_str(), name)))
+        let ledger_to_operator: std::collections::HashMap<&str, &str> = ads
+            .iter()
+            .filter_map(|a| {
+                a.operator_name
+                    .as_deref()
+                    .map(|name| (a.ledger_id.as_str(), name))
+            })
             .collect();
 
         println!();
@@ -498,16 +567,24 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         };
 
         for ad in &agent_ads {
-            println!("Agent: {}...", &ad.agent_pubkey[..16.min(ad.agent_pubkey.len())]);
+            println!(
+                "Agent: {}...",
+                &ad.agent_pubkey[..16.min(ad.agent_pubkey.len())]
+            );
             println!("  Service: {}", ad.service);
             println!("  Ledgers:");
             for entry in &ad.ledgers {
                 let label = ledger_label(&entry.ledger_id);
                 let balance_sats = entry.balance_msats / 1000;
-                println!("    {}: {} sats",
-                    label, balance_sats);
-                println!("      in:  {} msats + {} bps", entry.fee_in_fixed_msats, entry.fee_in_rate_bps);
-                println!("      out: {} msats + {} bps", entry.fee_out_fixed_msats, entry.fee_out_rate_bps);
+                println!("    {}: {} sats", label, balance_sats);
+                println!(
+                    "      in:  {} msats + {} bps",
+                    entry.fee_in_fixed_msats, entry.fee_in_rate_bps
+                );
+                println!(
+                    "      out: {} msats + {} bps",
+                    entry.fee_out_fixed_msats, entry.fee_out_rate_bps
+                );
             }
 
             // Show example route cost (first cross-operator pair)
@@ -515,20 +592,35 @@ async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 for i in 0..ad.ledgers.len() {
                     let mut shown = false;
                     for j in 0..ad.ledgers.len() {
-                        if i == j { continue; }
+                        if i == j {
+                            continue;
+                        }
                         let a = &ad.ledgers[i];
                         let b = &ad.ledgers[j];
-                        let op_a = ledger_to_operator.get(a.ledger_id.as_str()).copied().unwrap_or("");
-                        let op_b = ledger_to_operator.get(b.ledger_id.as_str()).copied().unwrap_or("");
-                        if op_a == op_b { continue; } // skip same-operator
-                        println!("  Route {} → {}: {} + {} bps",
-                            ledger_label(&a.ledger_id), ledger_label(&b.ledger_id),
+                        let op_a = ledger_to_operator
+                            .get(a.ledger_id.as_str())
+                            .copied()
+                            .unwrap_or("");
+                        let op_b = ledger_to_operator
+                            .get(b.ledger_id.as_str())
+                            .copied()
+                            .unwrap_or("");
+                        if op_a == op_b {
+                            continue;
+                        } // skip same-operator
+                        println!(
+                            "  Route {} → {}: {} + {} bps",
+                            ledger_label(&a.ledger_id),
+                            ledger_label(&b.ledger_id),
                             a.fee_out_fixed_msats + b.fee_in_fixed_msats,
-                            a.fee_out_rate_bps + b.fee_in_rate_bps);
+                            a.fee_out_rate_bps + b.fee_in_rate_bps
+                        );
                         shown = true;
                         break; // one example is enough
                     }
-                    if shown { break; }
+                    if shown {
+                        break;
+                    }
                 }
             }
             println!();
@@ -571,7 +663,7 @@ async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     let secret_key = derive_secret_key(&config.seed, config.network)?;
-    let mut transport = NostrTransportBuilder::new(secret_key)
+    let transport = NostrTransportBuilder::new(secret_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -596,36 +688,62 @@ async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         ledger_id
     };
 
-    let ad = transport.fetch_ledger_advertisement(&full_ledger_id).await?
+    let ad = transport
+        .fetch_ledger_advertisement(&full_ledger_id)
+        .await?
         .ok_or_else(|| format!("Ledger not found: {}", full_ledger_id))?;
 
     println!("Ledger Information");
     println!("==================");
     println!();
-    println!("Operator: {}", ad.operator_name.as_deref().unwrap_or("Anonymous"));
+    println!(
+        "Operator: {}",
+        ad.operator_name.as_deref().unwrap_or("Anonymous")
+    );
     println!("Operator Pubkey: {}", ad.operator_pubkey);
     println!("Ledger ID: {}", ad.ledger_id);
     println!("Reserves Address: {}", ad.reserves_address);
     println!();
     println!("Capacity");
     println!("--------");
-    println!("Available Headroom: {} sats ({} BTC)",
+    println!(
+        "Available Headroom: {} sats ({} BTC)",
         ad.available_headroom_msats,
-        ad.available_headroom_msats as f64 / 100_000_000_000.0);
+        ad.available_headroom_msats as f64 / 100_000_000_000.0
+    );
     println!("Total Reserves: {} sats", ad.reserves_amount_msats);
     println!("Current Obligations: {} sats", ad.total_obligations_msats);
     println!();
     println!("Trust & Security");
     println!("----------------");
-    println!("Attested Collateral: {} msats", ad.attested_collateral_msats);
+    println!(
+        "Attested Collateral: {} msats",
+        ad.attested_collateral_msats
+    );
     println!("Held Collateral: {} msats", ad.held_collateral_msats);
     println!();
     println!("Fee Structure");
     println!("-------------");
-    println!("Annual Fee: {}bps ({}%/year)", ad.annual_fee_bps, ad.annual_fee_bps as f64 / 100.0);
-    println!("Deposit Fee: {}bps ({}%)", ad.deposit_fee_bps, ad.deposit_fee_bps as f64 / 100.0);
-    println!("Withdrawal Fee: {}bps ({}%)", ad.withdrawal_fee_bps, ad.withdrawal_fee_bps as f64 / 100.0);
-    println!("Invoice Fee: {}bps ({}%)", ad.invoice_fee_bps, ad.invoice_fee_bps as f64 / 100.0);
+    println!(
+        "Annual Fee: {}bps ({}%/year)",
+        ad.annual_fee_bps,
+        ad.annual_fee_bps as f64 / 100.0
+    );
+    println!(
+        "Deposit Fee: {}bps ({}%)",
+        ad.deposit_fee_bps,
+        ad.deposit_fee_bps as f64 / 100.0
+    );
+    println!(
+        "Withdrawal Fee: {}bps ({}%)",
+        ad.withdrawal_fee_bps,
+        ad.withdrawal_fee_bps as f64 / 100.0
+    );
+    println!(
+        "Invoice Fee: {}bps ({}%)",
+        ad.invoice_fee_bps,
+        ad.invoice_fee_bps as f64 / 100.0
+    );
     if ad.min_fee_sats > 0 {
         println!("Minimum Fee: {} sats", ad.min_fee_sats);
     }
@@ -709,7 +827,9 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         i += 1;
     }
 
-    let ledger_id = ledger_id.ok_or("Usage: deposits-wallet open <ledger_id> <amount_sats> [--alias <name>] --relay <url>")?;
+    let ledger_id = ledger_id.ok_or(
+        "Usage: deposits-wallet open <ledger_id> <amount_sats> [--alias <name>] --relay <url>",
+    )?;
     let amount_sats = amount_sats.ok_or("Missing amount")?;
     let config = parse_config(&config_args)?;
 
@@ -723,8 +843,15 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         if deposits_file.exists() {
             let data = std::fs::read_to_string(&deposits_file)?;
             let deposits: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
-            if deposits.iter().any(|d| d.get("alias").and_then(|v| v.as_str()) == Some(a)) {
-                return Err(format!("Alias '{}' is already in use. Use 'list' to see existing deposits.", a).into());
+            if deposits
+                .iter()
+                .any(|d| d.get("alias").and_then(|v| v.as_str()) == Some(a))
+            {
+                return Err(format!(
+                    "Alias '{}' is already in use. Use 'list' to see existing deposits.",
+                    a
+                )
+                .into());
             }
         }
     }
@@ -738,7 +865,7 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // Also derive the nostr identity key at index 0 for signing requests
     let nostr_key = derive_secret_key(&config.seed, config.network)?;
 
-    let mut transport = NostrTransportBuilder::new(nostr_key)
+    let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -754,7 +881,8 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     let (ledger_id, advertisement) = if ledger_id.len() < 64 {
         let ads = transport.fetch_ledger_advertisements(network_str).await?;
-        let ad = ads.into_iter()
+        let ad = ads
+            .into_iter()
             .find(|a| a.ledger_id.starts_with(&ledger_id))
             .ok_or_else(|| format!("No ledger found matching: {}", ledger_id))?;
         let lid = ad.ledger_id.clone();
@@ -778,14 +906,27 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         let period = cli_fee_period.unwrap_or(2016);
         let fixed_sats = cli_fee_fixed.unwrap_or(0);
         let annualized_msats = fixed_sats * 1000 * (52560 / period);
-        println!("  Fees: {} bps/year + {} msats/year fixed (CLI override)", bps, annualized_msats);
+        println!(
+            "  Fees: {} bps/year + {} msats/year fixed (CLI override)",
+            bps, annualized_msats
+        );
         (annualized_msats, bps, period)
     } else if let Some(ref ad) = advertisement {
-        let period = if ad.fee_period_blocks > 0 { ad.fee_period_blocks } else { 2016 };
+        let period = if ad.fee_period_blocks > 0 {
+            ad.fee_period_blocks
+        } else {
+            2016
+        };
         let fee_struct = ad.to_fee_structure();
-        println!("  Fees: {} bps/year + {} sats/year fixed (period: {} blocks)",
-            ad.annual_fee_bps, fee_struct.annualized_msats, period);
-        (fee_struct.annualized_msats, fee_struct.annualized_bps as u64, period as u64)
+        println!(
+            "  Fees: {} bps/year + {} sats/year fixed (period: {} blocks)",
+            ad.annual_fee_bps, fee_struct.annualized_msats, period
+        );
+        (
+            fee_struct.annualized_msats,
+            fee_struct.annualized_bps as u64,
+            period as u64,
+        )
     } else {
         println!("  Fees: (using defaults - no advertisement found)");
         (0, 0, 2016)
@@ -805,30 +946,31 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     println!("Sending deposit_open request to operator...");
 
-    let open_request_id = transport.send_ledger_request(
-        &ledger_id,
-        "deposit_open",
-        open_params,
-    ).await?;
+    let open_request_id = transport
+        .send_ledger_request(&ledger_id, "deposit_open", open_params)
+        .await?;
 
     println!("  Request ID: {}...", &open_request_id[..16]);
 
     // Wait for deposit_open response using real-time subscription
     // Use wait_for_valid_response to skip error responses from rogue operators
     // (they may fail co-signing and return errors before the legitimate operator responds)
-    match transport.wait_for_valid_response(&open_request_id, 30000, |response| {
-        if response.success {
-            return true; // Accept success
-        }
-        let error = response.error.as_deref().unwrap_or("");
-        // Accept "already exists" errors (they're fine to continue with)
-        if error.contains("already exists") || error.contains("Deposit already") {
-            return true;
-        }
-        // Reject other errors and keep waiting for a valid response
-        eprintln!("Warning: Rejecting error response: {}", error);
-        false
-    }).await {
+    match transport
+        .wait_for_valid_response(&open_request_id, 30000, |response| {
+            if response.success {
+                return true; // Accept success
+            }
+            let error = response.error.as_deref().unwrap_or("");
+            // Accept "already exists" errors (they're fine to continue with)
+            if error.contains("already exists") || error.contains("Deposit already") {
+                return true;
+            }
+            // Reject other errors and keep waiting for a valid response
+            eprintln!("Warning: Rejecting error response: {}", error);
+            false
+        })
+        .await
+    {
         Ok(response) => {
             if response.success {
                 println!("  Deposit account created!");
@@ -854,11 +996,9 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     println!("Sending make_offer request for funding address...");
 
-    let request_id = transport.send_ledger_request(
-        &ledger_id,
-        "make_offer",
-        offer_params,
-    ).await?;
+    let request_id = transport
+        .send_ledger_request(&ledger_id, "make_offer", offer_params)
+        .await?;
 
     println!("  Request ID: {}...", &request_id[..16]);
     println!();
@@ -868,117 +1008,137 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("Waiting for operator response...");
 
     let ledger_id_clone = ledger_id.clone();
-    let response = transport.wait_for_valid_response(&request_id, 60000, |response| {
-        // Reject error responses from rogue operators and wait for a valid one
-        if !response.success {
-            let error = response.error.as_deref().unwrap_or("");
-            eprintln!("Warning: Rejecting error response: {}", error);
-            return false;
-        }
-
-        // Check if co-signature validation is needed
-        if let Some(result) = &response.result {
-            let cosign_required = result.get("cosign_required")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            if !cosign_required {
-                return true; // No co-signature needed, accept
+    let response = transport
+        .wait_for_valid_response(&request_id, 60000, |response| {
+            // Reject error responses from rogue operators and wait for a valid one
+            if !response.success {
+                let error = response.error.as_deref().unwrap_or("");
+                eprintln!("Warning: Rejecting error response: {}", error);
+                return false;
             }
 
-            // Validate co-signature fields
-            let address = result.get("funding_address").and_then(|v| v.as_str());
-            let offer_id_hex = result.get("offer_id").and_then(|v| v.as_str());
-            let operator_id_str = result.get("operator_id").and_then(|v| v.as_str());
-            let deadline_block = result.get("deadline_block").and_then(|v| v.as_u64());
-            let cosigner_pubkey_str = result.get("cosigner_pubkey").and_then(|v| v.as_str());
-            let cosigner_ledger_hash_hex = result.get("cosigner_ledger_hash").and_then(|v| v.as_str());
-            let cosign_signature_hex = result.get("cosign_signature").and_then(|v| v.as_str());
+            // Check if co-signature validation is needed
+            if let Some(result) = &response.result {
+                let cosign_required = result
+                    .get("cosign_required")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
-            if let (Some(addr), Some(offer_hex), Some(op_str), Some(deadline),
-                    Some(cosigner_str), Some(hash_hex), Some(sig_hex)) =
-                (address, offer_id_hex, operator_id_str, deadline_block,
-                 cosigner_pubkey_str, cosigner_ledger_hash_hex, cosign_signature_hex)
-            {
-                // Parse and verify co-signature
-                let offer_id_bytes: [u8; 32] = match hex::decode(offer_hex) {
-                    Ok(b) if b.len() == 32 => {
-                        let mut arr = [0u8; 32];
-                        arr.copy_from_slice(&b);
-                        arr
-                    }
-                    _ => {
-                        eprintln!("Warning: Invalid offer_id format, rejecting response");
-                        return false;
-                    }
-                };
-
-                let cosigner_pubkey = match PublicKey::from_str(cosigner_str) {
-                    Ok(pk) => pk,
-                    Err(_) => {
-                        eprintln!("Warning: Invalid cosigner_pubkey, rejecting response");
-                        return false;
-                    }
-                };
-
-                let operator_id = match PublicKey::from_str(op_str) {
-                    Ok(pk) => pk,
-                    Err(_) => {
-                        eprintln!("Warning: Invalid operator_id, rejecting response");
-                        return false;
-                    }
-                };
-
-                let member_ledger_hash: [u8; 32] = match hex::decode(hash_hex) {
-                    Ok(b) if b.len() == 32 => {
-                        let mut arr = [0u8; 32];
-                        arr.copy_from_slice(&b);
-                        arr
-                    }
-                    _ => {
-                        eprintln!("Warning: Invalid cosigner_ledger_hash, rejecting response");
-                        return false;
-                    }
-                };
-
-                let signature: [u8; 64] = match hex::decode(sig_hex) {
-                    Ok(b) if b.len() == 64 => {
-                        let mut arr = [0u8; 64];
-                        arr.copy_from_slice(&b);
-                        arr
-                    }
-                    _ => {
-                        eprintln!("Warning: Invalid cosign_signature, rejecting response");
-                        return false;
-                    }
-                };
-
-                // Verify the signature
-                if !verify_offer_cosignature(
-                    &ledger_id_clone,
-                    &offer_id_bytes,
-                    &operator_id,
-                    addr,
-                    deadline as u32,
-                    &cosigner_pubkey,
-                    &member_ledger_hash,
-                    &signature,
-                ) {
-                    eprintln!("Warning: Invalid co-signature, rejecting response from rogue operator");
-                    return false;
+                if !cosign_required {
+                    return true; // No co-signature needed, accept
                 }
 
-                // Note: quorum membership check happens after we accept the response
-                // since it requires async call which we can't do in the validator
-                true
+                // Validate co-signature fields
+                let address = result.get("funding_address").and_then(|v| v.as_str());
+                let offer_id_hex = result.get("offer_id").and_then(|v| v.as_str());
+                let operator_id_str = result.get("operator_id").and_then(|v| v.as_str());
+                let deadline_block = result.get("deadline_block").and_then(|v| v.as_u64());
+                let cosigner_pubkey_str = result.get("cosigner_pubkey").and_then(|v| v.as_str());
+                let cosigner_ledger_hash_hex =
+                    result.get("cosigner_ledger_hash").and_then(|v| v.as_str());
+                let cosign_signature_hex = result.get("cosign_signature").and_then(|v| v.as_str());
+
+                if let (
+                    Some(addr),
+                    Some(offer_hex),
+                    Some(op_str),
+                    Some(deadline),
+                    Some(cosigner_str),
+                    Some(hash_hex),
+                    Some(sig_hex),
+                ) = (
+                    address,
+                    offer_id_hex,
+                    operator_id_str,
+                    deadline_block,
+                    cosigner_pubkey_str,
+                    cosigner_ledger_hash_hex,
+                    cosign_signature_hex,
+                ) {
+                    // Parse and verify co-signature
+                    let offer_id_bytes: [u8; 32] = match hex::decode(offer_hex) {
+                        Ok(b) if b.len() == 32 => {
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&b);
+                            arr
+                        }
+                        _ => {
+                            eprintln!("Warning: Invalid offer_id format, rejecting response");
+                            return false;
+                        }
+                    };
+
+                    let cosigner_pubkey = match PublicKey::from_str(cosigner_str) {
+                        Ok(pk) => pk,
+                        Err(_) => {
+                            eprintln!("Warning: Invalid cosigner_pubkey, rejecting response");
+                            return false;
+                        }
+                    };
+
+                    let operator_id = match PublicKey::from_str(op_str) {
+                        Ok(pk) => pk,
+                        Err(_) => {
+                            eprintln!("Warning: Invalid operator_id, rejecting response");
+                            return false;
+                        }
+                    };
+
+                    let member_ledger_hash: [u8; 32] = match hex::decode(hash_hex) {
+                        Ok(b) if b.len() == 32 => {
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&b);
+                            arr
+                        }
+                        _ => {
+                            eprintln!("Warning: Invalid cosigner_ledger_hash, rejecting response");
+                            return false;
+                        }
+                    };
+
+                    let signature: [u8; 64] = match hex::decode(sig_hex) {
+                        Ok(b) if b.len() == 64 => {
+                            let mut arr = [0u8; 64];
+                            arr.copy_from_slice(&b);
+                            arr
+                        }
+                        _ => {
+                            eprintln!("Warning: Invalid cosign_signature, rejecting response");
+                            return false;
+                        }
+                    };
+
+                    // Verify the signature
+                    if !verify_offer_cosignature(
+                        &ledger_id_clone,
+                        &offer_id_bytes,
+                        &operator_id,
+                        addr,
+                        deadline as u32,
+                        &cosigner_pubkey,
+                        &member_ledger_hash,
+                        &signature,
+                    ) {
+                        eprintln!(
+                            "Warning: Invalid co-signature, rejecting response from rogue operator"
+                        );
+                        return false;
+                    }
+
+                    // Note: quorum membership check happens after we accept the response
+                    // since it requires async call which we can't do in the validator
+                    true
+                } else {
+                    eprintln!(
+                        "Warning: Response requires co-signature but missing fields, rejecting"
+                    );
+                    false
+                }
             } else {
-                eprintln!("Warning: Response requires co-signature but missing fields, rejecting");
-                false
+                true // Accept responses without result (will be handled as error below)
             }
-        } else {
-            true // Accept responses without result (will be handled as error below)
-        }
-    }).await?;
+        })
+        .await?;
 
     // Process the accepted response
     if !response.success {
@@ -986,25 +1146,40 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         return Err(format!("Deposit request failed: {}", error).into());
     }
 
-    let result = response.result.as_ref()
+    let result = response
+        .result
+        .as_ref()
         .ok_or("Response missing result data")?;
 
-    let address = result.get("funding_address").and_then(|v| v.as_str())
+    let address = result
+        .get("funding_address")
+        .and_then(|v| v.as_str())
         .ok_or("Response missing funding_address")?;
-    let offer_id_hex = result.get("offer_id").and_then(|v| v.as_str())
+    let offer_id_hex = result
+        .get("offer_id")
+        .and_then(|v| v.as_str())
         .ok_or("Response missing offer_id")?;
     let min_sats = result.get("min_sats").and_then(|v| v.as_u64()).unwrap_or(1);
-    let max_sats = result.get("max_sats").and_then(|v| v.as_u64()).unwrap_or(amount_sats);
+    let max_sats = result
+        .get("max_sats")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(amount_sats);
 
     // Verify quorum membership for co-signed responses (async check)
-    let cosign_required = result.get("cosign_required").and_then(|v| v.as_bool()).unwrap_or(false);
+    let cosign_required = result
+        .get("cosign_required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if cosign_required && !skip_cosign_verify {
         if let Some(cosigner_str) = result.get("cosigner_pubkey").and_then(|v| v.as_str()) {
             if let Ok(cosigner_pubkey) = PublicKey::from_str(cosigner_str) {
                 if !verify_quorum_membership(&transport, &ledger_id, &cosigner_pubkey).await {
                     return Err("Cosigner is not a quorum member".into());
                 }
-                println!("  Co-signature verified from quorum member {}...", &cosigner_str[..16.min(cosigner_str.len())]);
+                println!(
+                    "  Co-signature verified from quorum member {}...",
+                    &cosigner_str[..16.min(cosigner_str.len())]
+                );
             }
         }
     } else if cosign_required && skip_cosign_verify {
@@ -1020,9 +1195,9 @@ async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Err
         Vec::new()
     };
 
-    let final_alias = alias.clone().unwrap_or_else(|| {
-        format!("deposit-{}", deposits.len() + 1)
-    });
+    let final_alias = alias
+        .clone()
+        .unwrap_or_else(|| format!("deposit-{}", deposits.len() + 1));
 
     deposits.push(serde_json::json!({
         "alias": final_alias,
@@ -1086,16 +1261,22 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let data = std::fs::read_to_string(&deposits_file)?;
     let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
 
-    let deposit = deposits.iter()
+    let deposit = deposits
+        .iter()
         .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
-        .ok_or_else(|| format!("No deposit found with alias '{}'. Use 'list' to see your deposits.", alias))?;
+        .ok_or_else(|| {
+            format!(
+                "No deposit found with alias '{}'. Use 'list' to see your deposits.",
+                alias
+            )
+        })?;
 
-    let ledger_id = deposit.get("ledger_id")
+    let ledger_id = deposit
+        .get("ledger_id")
         .and_then(|v| v.as_str())
         .ok_or("Invalid deposit record: missing ledger_id")?;
 
-    let deposit_pubkey = deposit.get("deposit_pubkey")
-        .and_then(|v| v.as_str());
+    let deposit_pubkey = deposit.get("deposit_pubkey").and_then(|v| v.as_str());
 
     println!("Adding funds to deposit...");
     println!("  Alias: {}", alias);
@@ -1104,7 +1285,8 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Get the key_index for this deposit (defaults to 0 for legacy deposits)
-    let key_index = deposit.get("key_index")
+    let key_index = deposit
+        .get("key_index")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
 
@@ -1120,7 +1302,7 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Use nostr identity key (index 0) for transport signing
     let nostr_key = derive_secret_key(&config.seed, config.network)?;
 
-    let mut transport = NostrTransportBuilder::new(nostr_key)
+    let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -1128,9 +1310,17 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Fetch advertisement for fee structure
     let advertisement = transport.fetch_ledger_advertisement(ledger_id).await?;
     let (fee_fixed, fee_bps, fee_frequency) = if let Some(ref ad) = advertisement {
-        let period = if ad.fee_period_blocks > 0 { ad.fee_period_blocks } else { 2016 };
+        let period = if ad.fee_period_blocks > 0 {
+            ad.fee_period_blocks
+        } else {
+            2016
+        };
         let fee_struct = ad.to_fee_structure();
-        (fee_struct.annualized_msats, fee_struct.annualized_bps as u64, period as u64)
+        (
+            fee_struct.annualized_msats,
+            fee_struct.annualized_bps as u64,
+            period as u64,
+        )
     } else {
         (0, 0, 2016)
     };
@@ -1148,11 +1338,9 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Sending offer request to operator...");
 
-    let request_id = transport.send_ledger_request(
-        ledger_id,
-        "make_offer",
-        request_params,
-    ).await?;
+    let request_id = transport
+        .send_ledger_request(ledger_id, "make_offer", request_params)
+        .await?;
 
     println!("  Request ID: {}...", &request_id[..16]);
     println!();
@@ -1183,7 +1371,7 @@ async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 Err(format!("Offer request failed: {}", error).into())
             }
         }
-        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into())
+        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into()),
     }
 }
 
@@ -1214,12 +1402,30 @@ async fn list_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     println!();
 
     for deposit in &deposits {
-        let alias = deposit.get("alias").and_then(|v| v.as_str()).unwrap_or("(none)");
-        let ledger_id = deposit.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let amount = deposit.get("amount_sats").and_then(|v| v.as_u64()).unwrap_or(0);
-        let status = deposit.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let created_at = deposit.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
-        let deposit_pubkey = deposit.get("deposit_pubkey").and_then(|v| v.as_str()).unwrap_or("");
+        let alias = deposit
+            .get("alias")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(none)");
+        let ledger_id = deposit
+            .get("ledger_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let amount = deposit
+            .get("amount_sats")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let status = deposit
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let created_at = deposit
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let deposit_pubkey = deposit
+            .get("deposit_pubkey")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         // Compute descriptor and deposit_id from pubkey
         let descriptor = if !deposit_pubkey.is_empty() {
@@ -1238,7 +1444,10 @@ async fn list_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         println!("  {} ", alias);
         println!("    Deposit ID:  {}", deposit_id);
         println!("    Descriptor:  {}", descriptor);
-        println!("    Ledger:      {}...", &ledger_id[..16.min(ledger_id.len())]);
+        println!(
+            "    Ledger:      {}...",
+            &ledger_id[..16.min(ledger_id.len())]
+        );
         println!("    Amount:      {} sats", amount);
         println!("    Status:      {}", status);
         if !created_at.is_empty() {
@@ -1294,11 +1503,26 @@ async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let mut total_locked = 0u64;
 
     for deposit in &deposits {
-        let alias = deposit.get("alias").and_then(|v| v.as_str()).unwrap_or("(none)");
-        let deposit_pubkey = deposit.get("deposit_pubkey").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let amount = deposit.get("amount_sats").and_then(|v| v.as_u64()).unwrap_or(0);
-        let locked = deposit.get("locked_sats").and_then(|v| v.as_u64()).unwrap_or(0);
-        let status = deposit.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let alias = deposit
+            .get("alias")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(none)");
+        let deposit_pubkey = deposit
+            .get("deposit_pubkey")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let amount = deposit
+            .get("amount_sats")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let locked = deposit
+            .get("locked_sats")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let status = deposit
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
 
         let status_symbol = match status {
             "completed" | "funded" => "+",
@@ -1307,11 +1531,22 @@ async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         };
 
         if locked > 0 {
-            println!("  {} {} {:>10} sats  ({})  [{} pending]",
-                status_symbol, alias, amount, &deposit_pubkey[..8.min(deposit_pubkey.len())], locked);
+            println!(
+                "  {} {} {:>10} sats  ({})  [{} pending]",
+                status_symbol,
+                alias,
+                amount,
+                &deposit_pubkey[..8.min(deposit_pubkey.len())],
+                locked
+            );
         } else {
-            println!("  {} {} {:>10} sats  ({})",
-                status_symbol, alias, amount, &deposit_pubkey[..8.min(deposit_pubkey.len())]);
+            println!(
+                "  {} {} {:>10} sats  ({})",
+                status_symbol,
+                alias,
+                amount,
+                &deposit_pubkey[..8.min(deposit_pubkey.len())]
+            );
         }
 
         if status == "funded" || status == "completed" {
@@ -1322,9 +1557,18 @@ async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     println!();
     if total_locked > 0 {
-        println!("  Total:  {} sats ({} BTC)  [{} pending]", total_sats, total_sats as f64 / 100_000_000_000.0, total_locked);
+        println!(
+            "  Total:  {} sats ({} BTC)  [{} pending]",
+            total_sats,
+            total_sats as f64 / 100_000_000_000.0,
+            total_locked
+        );
     } else {
-        println!("  Total:  {} sats ({} BTC)", total_sats, total_sats as f64 / 100_000_000_000.0);
+        println!(
+            "  Total:  {} sats ({} BTC)",
+            total_sats,
+            total_sats as f64 / 100_000_000_000.0
+        );
     }
     println!();
     println!("  + = funded/completed, ~ = pending, [N pending] = locked for withdrawal");
@@ -1358,15 +1602,20 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let secret_key = SecretKey::from_slice(&config.seed)?;
 
     // Connect to all relays so we can see responses from any operator's primary relay
-    let mut transport = NostrTransportBuilder::new(secret_key)
+    let transport = NostrTransportBuilder::new(secret_key)
         .relays(config.relays.iter().cloned())
         .build()
         .await?;
 
     // Set response filter for relay-side #l tag filtering (reduces fan-out)
     {
-        let ledger_ids: Vec<String> = deposits.iter()
-            .filter_map(|d| d.get("ledger_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        let ledger_ids: Vec<String> = deposits
+            .iter()
+            .filter_map(|d| {
+                d.get("ledger_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
@@ -1388,21 +1637,42 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let mut updated = false;
 
     for deposit in &mut deposits {
-        let alias = deposit.get("alias").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-        let offer_id = deposit.get("offer_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let ledger_id = deposit.get("ledger_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let deposit_pubkey = deposit.get("deposit_pubkey").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let current_status = deposit.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+        let alias = deposit
+            .get("alias")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let offer_id = deposit
+            .get("offer_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let ledger_id = deposit
+            .get("ledger_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let deposit_pubkey = deposit
+            .get("deposit_pubkey")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let current_status = deposit
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
 
         // If we have deposit_pubkey, use balance_query (works for all funded deposits)
         // This is more reliable than offer_status since the daemon may have cleaned up offers
-        if let (Some(ref ledger_id), Some(ref deposit_pubkey)) = (ledger_id.as_ref(), deposit_pubkey.as_ref()) {
+        if let (Some(ledger_id), Some(ref deposit_pubkey)) =
+            (ledger_id.as_ref(), deposit_pubkey.as_ref())
+        {
             if !deposit_pubkey.is_empty() {
                 let params = serde_json::json!({
                     "deposit_pubkey": deposit_pubkey,
                 });
 
-                let request_id = transport.send_ledger_request(ledger_id, "balance_query", params).await?;
+                let request_id = transport
+                    .send_ledger_request(ledger_id, "balance_query", params)
+                    .await?;
                 eprintln!("  {} sent balance_query ({}...)", alias, &request_id[..16]);
 
                 // Give daemon a moment to process
@@ -1420,22 +1690,44 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                             if response.success {
                                 if let Some(result) = &response.result {
                                     // Get balance and locked from response
-                                    let balance_msats = result.get("balance_msats").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    let locked_msats = result.get("locked_msats").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    let available_sats = (balance_msats.saturating_sub(locked_msats)) / 1000;
+                                    let balance_msats = result
+                                        .get("balance_msats")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    let locked_msats = result
+                                        .get("locked_msats")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    let available_sats =
+                                        (balance_msats.saturating_sub(locked_msats)) / 1000;
                                     let locked_sats = locked_msats / 1000;
 
-                                    let current_amount = deposit.get("amount_sats").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    let current_locked = deposit.get("locked_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let current_amount = deposit
+                                        .get("amount_sats")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    let current_locked = deposit
+                                        .get("locked_sats")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
 
-                                    if available_sats != current_amount || locked_sats != current_locked {
+                                    if available_sats != current_amount
+                                        || locked_sats != current_locked
+                                    {
                                         if locked_sats > 0 {
-                                            println!("  {} balance: {} sats ({} pending)", alias, available_sats, locked_sats);
+                                            println!(
+                                                "  {} balance: {} sats ({} pending)",
+                                                alias, available_sats, locked_sats
+                                            );
                                         } else {
-                                            println!("  {} balance: {} sats", alias, available_sats);
+                                            println!(
+                                                "  {} balance: {} sats",
+                                                alias, available_sats
+                                            );
                                         }
                                         deposit["amount_sats"] = serde_json::json!(available_sats);
-                                        deposit["balance_msats"] = serde_json::json!(balance_msats as i64);
+                                        deposit["balance_msats"] =
+                                            serde_json::json!(balance_msats as i64);
                                         deposit["locked_sats"] = serde_json::json!(locked_sats);
                                         updated = true;
                                     }
@@ -1468,7 +1760,7 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             continue;
         }
 
-        if let (Some(ref offer_id), Some(ref ledger_id)) = (offer_id.as_ref(), ledger_id.as_ref()) {
+        if let (Some(ref offer_id), Some(ledger_id)) = (offer_id.as_ref(), ledger_id.as_ref()) {
             // Query daemon for offer status
             // Include deposit_pubkey so daemon can check ledger if offer not found
             let params = if let Some(ref pubkey) = deposit_pubkey {
@@ -1482,7 +1774,9 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                 })
             };
 
-            let request_id = transport.send_ledger_request(ledger_id, "offer_status", params).await?;
+            let request_id = transport
+                .send_ledger_request(ledger_id, "offer_status", params)
+                .await?;
 
             // Wait for response (with timeout)
             let start = std::time::Instant::now();
@@ -1496,12 +1790,17 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                             if let Some(result) = &response.result {
                                 // Get status from response
                                 if let Some(status_obj) = result.get("status") {
-                                    let status_str = status_obj.get("status").and_then(|v| v.as_str());
-                                    let amount = status_obj.get("amount_sats").and_then(|v| v.as_u64());
+                                    let status_str =
+                                        status_obj.get("status").and_then(|v| v.as_str());
+                                    let amount =
+                                        status_obj.get("amount_sats").and_then(|v| v.as_u64());
 
                                     if let Some(status_str) = status_str {
                                         if status_str != current_status.as_str() {
-                                            println!("  {} {} -> {}", alias, current_status, status_str);
+                                            println!(
+                                                "  {} {} -> {}",
+                                                alias, current_status, status_str
+                                            );
 
                                             // Update status
                                             deposit["status"] = serde_json::json!(status_str);
@@ -1544,7 +1843,6 @@ async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
 /// Withdraw from a deposit
 async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use bitcoin::hashes::{sha256, Hash};
     use bitcoin::secp256k1::rand::rngs::OsRng;
     use bitcoin::secp256k1::rand::RngCore;
 
@@ -1584,7 +1882,7 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let alias = alias.ok_or(
-        "Usage: deposits-wallet withdraw <alias> <amount_sats> --to <address> --relay <url>"
+        "Usage: deposits-wallet withdraw <alias> <amount_sats> --to <address> --relay <url>",
     )?;
     let amount_sats = amount_sats.ok_or("Missing amount")?;
     let destination = destination.ok_or("Missing destination. Use --to <address>")?;
@@ -1603,16 +1901,24 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let data = std::fs::read_to_string(&deposits_file)?;
     let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
 
-    let deposit = deposits.iter()
+    let deposit = deposits
+        .iter()
         .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
-        .ok_or_else(|| format!("No deposit found with alias '{}'. Use 'list' to see your deposits.", alias))?;
+        .ok_or_else(|| {
+            format!(
+                "No deposit found with alias '{}'. Use 'list' to see your deposits.",
+                alias
+            )
+        })?;
 
-    let ledger_id = deposit.get("ledger_id")
+    let ledger_id = deposit
+        .get("ledger_id")
         .and_then(|v| v.as_str())
         .ok_or("Invalid deposit record: missing ledger_id")?;
 
     // Get the key_index for this deposit (defaults to 0 for legacy deposits)
-    let key_index = deposit.get("key_index")
+    let key_index = deposit
+        .get("key_index")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
 
@@ -1653,7 +1959,7 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("  To: {}", destination);
     println!();
 
-    let mut transport = NostrTransportBuilder::new(nostr_key)
+    let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -1670,11 +1976,9 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Sending signed withdrawal request...");
 
-    let request_id = transport.send_ledger_request(
-        ledger_id,
-        "withdraw",
-        request_params,
-    ).await?;
+    let request_id = transport
+        .send_ledger_request(ledger_id, "withdraw", request_params)
+        .await?;
 
     println!("  Request ID: {}...", &request_id[..16]);
     println!();
@@ -1687,7 +1991,9 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if response.success {
                 println!("Withdrawal accepted!");
                 if let Some(result) = &response.result {
-                    if let Some(withdrawal_id) = result.get("withdrawal_id").and_then(|v| v.as_str()) {
+                    if let Some(withdrawal_id) =
+                        result.get("withdrawal_id").and_then(|v| v.as_str())
+                    {
                         println!("  Withdrawal ID: {}", withdrawal_id);
                     }
                     if let Some(message) = result.get("message").and_then(|v| v.as_str()) {
@@ -1700,7 +2006,7 @@ async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 Err(format!("Withdrawal failed: {}", error).into())
             }
         }
-        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into())
+        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into()),
     }
 }
 
@@ -1761,7 +2067,8 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         "Usage: deposits-wallet transfer <alias> <amount_sats> --to <dest_id> --hash <sha256> --timeout <block> [--fee <msats>] --relay <url>"
     )?;
     let amount_sats = amount_sats.ok_or("Missing amount")?;
-    let dest_deposit_id_hex = dest_deposit_id.ok_or("Missing destination. Use --to <deposit_id>")?;
+    let dest_deposit_id_hex =
+        dest_deposit_id.ok_or("Missing destination. Use --to <deposit_id>")?;
     let hash_hex = hash_hex.ok_or("Missing hash lock. Use --hash <sha256_hex>")?;
     let timeout_height = timeout_height.ok_or("Missing timeout. Use --timeout <block_height>")?;
     let config = parse_config(&config_args)?;
@@ -1794,15 +2101,23 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let data = std::fs::read_to_string(&deposits_file)?;
     let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
 
-    let deposit = deposits.iter()
+    let deposit = deposits
+        .iter()
         .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
-        .ok_or_else(|| format!("No deposit found with alias '{}'. Use 'list' to see your deposits.", alias))?;
+        .ok_or_else(|| {
+            format!(
+                "No deposit found with alias '{}'. Use 'list' to see your deposits.",
+                alias
+            )
+        })?;
 
-    let ledger_id = deposit.get("ledger_id")
+    let ledger_id = deposit
+        .get("ledger_id")
         .and_then(|v| v.as_str())
         .ok_or("Invalid deposit record: missing ledger_id")?;
 
-    let key_index = deposit.get("key_index")
+    let key_index = deposit
+        .get("key_index")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
 
@@ -1843,17 +2158,28 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
     println!("Transfer Lock Request");
     println!("=====================");
-    println!("  Source:      {} ({})", alias, hex::encode(&source_id[..4]));
+    println!(
+        "  Source:      {} ({})",
+        alias,
+        hex::encode(&source_id[..4])
+    );
     println!("  Destination: {}", dest_deposit_id_hex);
-    println!("  Amount:      {} sats ({} msats)", amount_sats, amount_msats);
+    println!(
+        "  Amount:      {} sats ({} msats)",
+        amount_sats, amount_msats
+    );
     println!("  Fee:         {} msats", fee_msats);
-    println!("  Hash Lock:   {}...{}", &hash_hex[..8], &hash_hex[hash_hex.len()-8..]);
+    println!(
+        "  Hash Lock:   {}...{}",
+        &hash_hex[..8],
+        &hash_hex[hash_hex.len() - 8..]
+    );
     println!("  Timeout:     block {}", timeout_height);
     println!("  Transfer ID: {}", hex::encode(transfer_id));
     println!();
 
     // Connect to relay
-    let mut transport = NostrTransportBuilder::new(nostr_key)
+    let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -1875,11 +2201,9 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
     println!("Sending transfer lock request...");
 
-    let request_id = transport.send_ledger_request(
-        ledger_id,
-        "transfer_lock",
-        request_params,
-    ).await?;
+    let request_id = transport
+        .send_ledger_request(ledger_id, "transfer_lock", request_params)
+        .await?;
 
     println!("  Request ID: {}...", &request_id[..16]);
     println!();
@@ -1895,7 +2219,7 @@ async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                 Err(format!("Transfer lock failed: {}", error).into())
             }
         }
-        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into())
+        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into()),
     }
 }
 
@@ -1966,7 +2290,7 @@ async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
     // Connect to relay
     let nostr_key = derive_secret_key(&config.seed, config.network)?;
-    let mut transport = NostrTransportBuilder::new(nostr_key)
+    let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -1981,11 +2305,9 @@ async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
     println!("Sending transfer complete request...");
 
-    let request_id = transport.send_ledger_request(
-        &ledger_id,
-        "transfer_complete",
-        request_params,
-    ).await?;
+    let request_id = transport
+        .send_ledger_request(&ledger_id, "transfer_complete", request_params)
+        .await?;
 
     println!("  Request ID: {}...", &request_id[..16]);
     println!();
@@ -2001,7 +2323,7 @@ async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
                 Err(format!("Transfer complete failed: {}", error).into())
             }
         }
-        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into())
+        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into()),
     }
 }
 
@@ -2011,8 +2333,8 @@ async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
 async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use bitcoin::secp256k1::rand::rngs::OsRng;
     use bitcoin::secp256k1::rand::RngCore;
+    use deposits_core::signature_utils::{compute_transfer_id, transfer_lock_signing_message};
     use deposits_core::types::compute_deposit_id;
-    use deposits_core::signature_utils::{transfer_lock_signing_message, compute_transfer_id};
 
     let mut from_alias: Option<String> = None;
     let mut to_alias: Option<String> = None;
@@ -2030,15 +2352,20 @@ async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 }
             }
             _ => {
-                if from_alias.is_none() { from_alias = Some(args[i].clone()); }
-                else if to_alias.is_none() { to_alias = Some(args[i].clone()); }
-                else if amount_sats.is_none() { amount_sats = Some(args[i].parse()?); }
+                if from_alias.is_none() {
+                    from_alias = Some(args[i].clone());
+                } else if to_alias.is_none() {
+                    to_alias = Some(args[i].clone());
+                } else if amount_sats.is_none() {
+                    amount_sats = Some(args[i].parse()?);
+                }
             }
         }
         i += 1;
     }
 
-    let from_alias = from_alias.ok_or("Usage: deposits-wallet route <from> <to> <amount_sats> --relay <url>")?;
+    let from_alias =
+        from_alias.ok_or("Usage: deposits-wallet route <from> <to> <amount_sats> --relay <url>")?;
     let to_alias = to_alias.ok_or("Missing destination alias")?;
     let amount_sats = amount_sats.ok_or("Missing amount")?;
     let config = parse_config(&config_args)?;
@@ -2055,22 +2382,34 @@ async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let data = std::fs::read_to_string(&deposits_file)?;
     let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
 
-    let from_dep = deposits.iter()
+    let from_dep = deposits
+        .iter()
         .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&from_alias))
         .ok_or_else(|| format!("No deposit '{}'. Use 'list' to see deposits.", from_alias))?;
-    let to_dep = deposits.iter()
+    let to_dep = deposits
+        .iter()
         .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&to_alias))
         .ok_or_else(|| format!("No deposit '{}'. Use 'list' to see deposits.", to_alias))?;
 
-    let from_ledger = from_dep["ledger_id"].as_str().ok_or("Missing ledger_id on source")?;
-    let to_ledger = to_dep["ledger_id"].as_str().ok_or("Missing ledger_id on dest")?;
+    let from_ledger = from_dep["ledger_id"]
+        .as_str()
+        .ok_or("Missing ledger_id on source")?;
+    let to_ledger = to_dep["ledger_id"]
+        .as_str()
+        .ok_or("Missing ledger_id on dest")?;
 
     if from_ledger == to_ledger {
         return Err("Source and destination are on the same ledger. Use 'transfer' for same-ledger transfers.".into());
     }
 
-    let from_key_index = from_dep.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let to_key_index = to_dep.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let from_key_index = from_dep
+        .get("key_index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let to_key_index = to_dep
+        .get("key_index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let from_secret = derive_secret_key_at_index(&config.seed, config.network, from_key_index)?;
@@ -2116,23 +2455,40 @@ async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error
     // Step 1: Find a courier that bridges both ledgers
     println!("Finding courier...");
     let agent_ads = transport.fetch_agent_advertisements(network_str).await?;
-    let courier = agent_ads.iter().find(|ad| {
-        ad.ledgers.iter().any(|l| l.ledger_id == from_ledger) &&
-        ad.ledgers.iter().any(|l| l.ledger_id == to_ledger)
-    }).ok_or_else(|| format!(
-        "No courier bridges {} and {}. Run 'discover' to check available couriers.",
-        &from_ledger[..8], &to_ledger[..8]
-    ))?;
+    let courier = agent_ads
+        .iter()
+        .find(|ad| {
+            ad.ledgers.iter().any(|l| l.ledger_id == from_ledger)
+                && ad.ledgers.iter().any(|l| l.ledger_id == to_ledger)
+        })
+        .ok_or_else(|| {
+            format!(
+                "No courier bridges {} and {}. Run 'discover' to check available couriers.",
+                &from_ledger[..8],
+                &to_ledger[..8]
+            )
+        })?;
 
-    let src_entry = courier.ledgers.iter().find(|l| l.ledger_id == from_ledger).unwrap();
-    let dst_entry = courier.ledgers.iter().find(|l| l.ledger_id == to_ledger).unwrap();
+    let src_entry = courier
+        .ledgers
+        .iter()
+        .find(|l| l.ledger_id == from_ledger)
+        .unwrap();
+    let dst_entry = courier
+        .ledgers
+        .iter()
+        .find(|l| l.ledger_id == to_ledger)
+        .unwrap();
     let fee_in = src_entry.fee_in_fixed_msats + amount_msats * src_entry.fee_in_rate_bps / 10000;
     let fee_out = dst_entry.fee_out_fixed_msats + amount_msats * dst_entry.fee_out_rate_bps / 10000;
     let route_fee = fee_in + fee_out;
     let forward = amount_msats.saturating_sub(route_fee);
 
     println!("  Courier: {}...", &courier.agent_pubkey[..16]);
-    println!("  Route fee: {} msats (in={}, out={})", route_fee, fee_in, fee_out);
+    println!(
+        "  Route fee: {} msats (in={}, out={})",
+        route_fee, fee_in, fee_out
+    );
     println!("  Forward:  {} msats ({} sats)", forward, forward / 1000);
     println!();
 
@@ -2157,14 +2513,23 @@ async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "hash": hash_hex,
     });
 
-    let req_id = transport.send_agent_request(&courier.agent_pubkey, "request_route", route_req).await?;
+    let req_id = transport
+        .send_agent_request(&courier.agent_pubkey, "request_route", route_req)
+        .await?;
     let route_resp = transport.wait_for_response(&req_id, 15000).await?;
     if !route_resp.success {
-        return Err(format!("Courier rejected route: {}", route_resp.error.unwrap_or_default()).into());
+        return Err(format!(
+            "Courier rejected route: {}",
+            route_resp.error.unwrap_or_default()
+        )
+        .into());
     }
 
-    let result = route_resp.result.ok_or("Missing result in route response")?;
-    let courier_deposit_id_hex = result["courier_deposit_id"].as_str()
+    let result = route_resp
+        .result
+        .ok_or("Missing result in route response")?;
+    let courier_deposit_id_hex = result["courier_deposit_id"]
+        .as_str()
         .ok_or("Missing courier_deposit_id in response")?;
     let courier_deposit_id = hex::decode(courier_deposit_id_hex)?;
     if courier_deposit_id.len() != 16 {
@@ -2184,9 +2549,13 @@ async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let balance_req = serde_json::json!({
         "deposit_pubkey": from_dep["deposit_pubkey"].as_str().unwrap_or(""),
     });
-    let bal_req_id = transport.send_ledger_request(from_ledger, "balance_query", balance_req).await?;
+    let bal_req_id = transport
+        .send_ledger_request(from_ledger, "balance_query", balance_req)
+        .await?;
     let bal_resp = transport.wait_for_response(&bal_req_id, 10000).await?;
-    let block_height = bal_resp.result.as_ref()
+    let block_height = bal_resp
+        .result
+        .as_ref()
         .and_then(|r| r["block_height"].as_u64())
         .unwrap_or(0) as u32;
     if block_height == 0 {
@@ -2197,17 +2566,22 @@ async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error
     // Get operator fee from advertisement
     let op_ads = transport.fetch_ledger_advertisements(network_str).await?;
     let op_ad = op_ads.iter().find(|a| a.ledger_id == from_ledger);
-    let operator_fee = op_ad.map(|a| {
-        a.transfer_fee_fixed_msats + amount_msats * a.transfer_fee_rate_bps as u64 / 10000
-    }).unwrap_or(2000);
+    let operator_fee = op_ad
+        .map(|a| a.transfer_fee_fixed_msats + amount_msats * a.transfer_fee_rate_bps as u64 / 10000)
+        .unwrap_or(2000);
 
     let completion_script = format!("sha256({})", hash_hex);
     let mut nonce = [0u8; 32];
     rng.fill_bytes(&mut nonce);
 
     let msg_hash = transfer_lock_signing_message(
-        &nonce, &from_deposit_id, &dest_id,
-        amount_msats, operator_fee, &completion_script, timeout,
+        &nonce,
+        &from_deposit_id,
+        &dest_id,
+        amount_msats,
+        operator_fee,
+        &completion_script,
+        timeout,
     );
     let transfer_id = compute_transfer_id(&msg_hash);
     let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
@@ -2225,12 +2599,17 @@ async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "signature": hex::encode(signature.serialize()),
     });
 
-    let lock_req_id = transport.send_ledger_request(from_ledger, "transfer_lock", lock_params).await?;
+    let lock_req_id = transport
+        .send_ledger_request(from_ledger, "transfer_lock", lock_params)
+        .await?;
     let lock_resp = transport.wait_for_response(&lock_req_id, 30000).await?;
     if !lock_resp.success {
         return Err(format!("Lock failed: {}", lock_resp.error.unwrap_or_default()).into());
     }
-    println!("  Locked! Transfer ID: {}...", hex::encode(&transfer_id[..8]));
+    println!(
+        "  Locked! Transfer ID: {}...",
+        hex::encode(&transfer_id[..8])
+    );
     println!();
 
     // Step 4: Wait for courier to forward on destination ledger
@@ -2249,25 +2628,28 @@ async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     completion_script: ref script,
                     transfer_id: ref tid,
                     ..
-                } = op {
-                    if destination_deposit_id == to_deposit_id
-                        && script.contains(&hash_hex)
-                    {
+                } = op
+                {
+                    if destination_deposit_id == to_deposit_id && script.contains(&hash_hex) {
                         outbound_transfer_id = Some(*tid);
                         break;
                     }
                 }
             }
         }
-        if outbound_transfer_id.is_some() { break; }
+        if outbound_transfer_id.is_some() {
+            break;
+        }
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
         eprint!(".");
     }
     eprintln!();
 
-    let outbound_tid = outbound_transfer_id
-        .ok_or("Courier did not forward within 90 seconds")?;
-    println!("  Courier forwarded! Outbound ID: {}...", hex::encode(&outbound_tid[..8]));
+    let outbound_tid = outbound_transfer_id.ok_or("Courier did not forward within 90 seconds")?;
+    println!(
+        "  Courier forwarded! Outbound ID: {}...",
+        hex::encode(&outbound_tid[..8])
+    );
     println!();
 
     // Step 5: Complete by revealing preimage
@@ -2276,15 +2658,24 @@ async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "transfer_id": hex::encode(outbound_tid),
         "preimage": hex::encode(preimage),
     });
-    let complete_req_id = transport.send_ledger_request(to_ledger, "transfer_complete", complete_params).await?;
+    let complete_req_id = transport
+        .send_ledger_request(to_ledger, "transfer_complete", complete_params)
+        .await?;
     let complete_resp = transport.wait_for_response(&complete_req_id, 15000).await?;
     if !complete_resp.success {
-        return Err(format!("Complete failed: {}", complete_resp.error.unwrap_or_default()).into());
+        return Err(format!(
+            "Complete failed: {}",
+            complete_resp.error.unwrap_or_default()
+        )
+        .into());
     }
 
     println!();
     println!("Routed transfer complete!");
-    println!("  {} sats sent from {} to {} via courier", amount_sats, from_alias, to_alias);
+    println!(
+        "  {} sats sent from {} to {} via courier",
+        amount_sats, from_alias, to_alias
+    );
     println!("  Fee: {} msats ({} sats)", route_fee, route_fee / 1000);
     Ok(())
 }
@@ -2312,13 +2703,16 @@ async fn spread_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 }
             }
             _ => {
-                if amount_sats.is_none() { amount_sats = Some(args[i].parse()?); }
+                if amount_sats.is_none() {
+                    amount_sats = Some(args[i].parse()?);
+                }
             }
         }
         i += 1;
     }
 
-    let total_sats = amount_sats.ok_or("Usage: deposits-wallet spread <amount_sats> [--count N] --relay <url>")?;
+    let total_sats = amount_sats
+        .ok_or("Usage: deposits-wallet spread <amount_sats> [--count N] --relay <url>")?;
     let config = parse_config(&config_args)?;
 
     if config.relays.is_empty() {
@@ -2365,7 +2759,10 @@ async fn spread_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     let remainder = total_sats % n as u64;
 
     println!("  Found {} operators", n);
-    println!("  Spreading {} sats across {} deposits ({} sats each)", total_sats, n, per_deposit);
+    println!(
+        "  Spreading {} sats across {} deposits ({} sats each)",
+        total_sats, n, per_deposit
+    );
     println!();
 
     // Load existing deposits to avoid duplicates and generate aliases
@@ -2376,8 +2773,13 @@ async fn spread_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         Vec::new()
     };
 
-    let existing_ledgers: std::collections::HashSet<String> = existing.iter()
-        .filter_map(|d| d.get("ledger_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    let existing_ledgers: std::collections::HashSet<String> = existing
+        .iter()
+        .filter_map(|d| {
+            d.get("ledger_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
 
     let mut opened = 0;
@@ -2388,15 +2790,29 @@ async fn spread_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         let ledger_id = &ad.ledger_id;
 
         if existing_ledgers.contains(ledger_id) {
-            println!("  {} ({}...): already have deposit, skipping", name, &ledger_id[..8]);
+            println!(
+                "  {} ({}...): already have deposit, skipping",
+                name,
+                &ledger_id[..8]
+            );
             skipped += 1;
             continue;
         }
 
-        let deposit_amount = if idx == 0 { per_deposit + remainder } else { per_deposit };
+        let deposit_amount = if idx == 0 {
+            per_deposit + remainder
+        } else {
+            per_deposit
+        };
         let alias = format!("{}-{}", name.to_lowercase(), &ledger_id[..4]);
 
-        println!("  {} ({}...): opening {} sats as '{}'...", name, &ledger_id[..8], deposit_amount, alias);
+        println!(
+            "  {} ({}...): opening {} sats as '{}'...",
+            name,
+            &ledger_id[..8],
+            deposit_amount,
+            alias
+        );
 
         // Build open command args — use operator's advertised relay
         let mut open_args = vec![
@@ -2436,7 +2852,10 @@ async fn spread_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     }
 
     println!();
-    println!("Spread complete: {} opened, {} skipped (existing)", opened, skipped);
+    println!(
+        "Spread complete: {} opened, {} skipped (existing)",
+        opened, skipped
+    );
     if opened > 0 {
         println!();
         println!("Fund the deposits with on-chain transactions or 'offer' commands.");
@@ -2478,7 +2897,8 @@ async fn make_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         i += 1;
     }
 
-    let alias = alias.ok_or("Usage: deposits-wallet make_invoice <alias> <amount_sats> --relay <url>")?;
+    let alias =
+        alias.ok_or("Usage: deposits-wallet make_invoice <alias> <amount_sats> --relay <url>")?;
     let amount_sats = amount_sats.ok_or("Missing amount")?;
     let config = parse_config(&config_args)?;
 
@@ -2495,22 +2915,30 @@ async fn make_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let data = std::fs::read_to_string(&deposits_file)?;
     let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
 
-    let deposit = deposits.iter()
+    let deposit = deposits
+        .iter()
         .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
-        .ok_or_else(|| format!("No deposit found with alias '{}'. Use 'list' to see your deposits.", alias))?;
+        .ok_or_else(|| {
+            format!(
+                "No deposit found with alias '{}'. Use 'list' to see your deposits.",
+                alias
+            )
+        })?;
 
-    let ledger_id = deposit.get("ledger_id")
+    let ledger_id = deposit
+        .get("ledger_id")
         .and_then(|v| v.as_str())
         .ok_or("Invalid deposit record: missing ledger_id")?;
 
-    let deposit_pubkey = deposit.get("deposit_pubkey")
+    let deposit_pubkey = deposit
+        .get("deposit_pubkey")
         .and_then(|v| v.as_str())
         .ok_or("Invalid deposit record: missing deposit_pubkey")?;
 
     // Use nostr identity key for transport
     let nostr_key = derive_secret_key(&config.seed, config.network)?;
 
-    let mut transport = NostrTransportBuilder::new(nostr_key)
+    let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -2525,11 +2953,9 @@ async fn make_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     println!("  Alias: {}", alias);
     println!("  Amount: {} sats", amount_sats);
 
-    let request_id = transport.send_ledger_request(
-        ledger_id,
-        "make_invoice",
-        request_params,
-    ).await?;
+    let request_id = transport
+        .send_ledger_request(ledger_id, "make_invoice", request_params)
+        .await?;
 
     // Wait for response using real-time subscription
     match transport.wait_for_response(&request_id, 60000).await {
@@ -2548,14 +2974,13 @@ async fn make_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 Err(format!("Invoice request failed: {}", error).into())
             }
         }
-        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into())
+        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into()),
     }
 }
 
 /// Pay a Lightning invoice from a deposit
 /// The operator's LDK sidecar pays the invoice, debiting the deposit
 async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-
     let mut alias: Option<String> = None;
     let mut invoice: Option<String> = None;
     let mut config_args = Vec::new();
@@ -2598,16 +3023,24 @@ async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let data = std::fs::read_to_string(&deposits_file)?;
     let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
 
-    let deposit = deposits.iter()
+    let deposit = deposits
+        .iter()
         .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
-        .ok_or_else(|| format!("No deposit found with alias '{}'. Use 'list' to see your deposits.", alias))?;
+        .ok_or_else(|| {
+            format!(
+                "No deposit found with alias '{}'. Use 'list' to see your deposits.",
+                alias
+            )
+        })?;
 
-    let ledger_id = deposit.get("ledger_id")
+    let ledger_id = deposit
+        .get("ledger_id")
         .and_then(|v| v.as_str())
         .ok_or("Invalid deposit record: missing ledger_id")?;
 
     // Get key for signing
-    let key_index = deposit.get("key_index")
+    let key_index = deposit
+        .get("key_index")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
 
@@ -2630,7 +3063,8 @@ async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let mut payment_hash_bytes = [0u8; 32];
     payment_hash_bytes.copy_from_slice(payment_hash.as_ref());
 
-    let amount_msats = parsed_invoice.amount_milli_satoshis()
+    let amount_msats = parsed_invoice
+        .amount_milli_satoshis()
         .ok_or("Invoice has no amount")?;
 
     // Compute deposit_id from descriptor
@@ -2646,7 +3080,7 @@ async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
     let signature = secp.sign_schnorr(&msg, &keypair);
 
-    let mut transport = NostrTransportBuilder::new(nostr_key)
+    let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
         .await?;
@@ -2664,11 +3098,9 @@ async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!("  Invoice: {}...", &invoice[..40.min(invoice.len())]);
     println!("  Amount: {} msats", amount_msats);
 
-    let request_id = transport.send_ledger_request(
-        ledger_id,
-        "pay_invoice",
-        request_params,
-    ).await?;
+    let request_id = transport
+        .send_ledger_request(ledger_id, "pay_invoice", request_params)
+        .await?;
 
     // Wait for response using real-time subscription (longer timeout for LN payments)
     match transport.wait_for_response(&request_id, 120000).await {
@@ -2687,7 +3119,7 @@ async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 Err(format!("Payment failed: {}", error).into())
             }
         }
-        Err(e) => Err(format!("Timeout waiting for payment confirmation: {}", e).into())
+        Err(e) => Err(format!("Timeout waiting for payment confirmation: {}", e).into()),
     }
 }
 
@@ -2716,11 +3148,18 @@ async fn show_history(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let data = std::fs::read_to_string(&deposits_file)?;
     let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
 
-    let deposit = deposits.iter()
+    let deposit = deposits
+        .iter()
         .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
-        .ok_or_else(|| format!("No deposit found with alias '{}'. Use 'list' to see your deposits.", alias))?;
+        .ok_or_else(|| {
+            format!(
+                "No deposit found with alias '{}'. Use 'list' to see your deposits.",
+                alias
+            )
+        })?;
 
-    let ledger_id = deposit.get("ledger_id")
+    let ledger_id = deposit
+        .get("ledger_id")
         .and_then(|v| v.as_str())
         .ok_or("Invalid deposit record: missing ledger_id")?;
 
@@ -2812,7 +3251,9 @@ async fn fetch_all_events_paginated(
 /// Handle ledger subcommands
 async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-wallet ledger <list|show|validate|custody> [args...] --relay <url>");
+        eprintln!(
+            "Usage: deposits-wallet ledger <list|show|validate|custody> [args...] --relay <url>"
+        );
         return Ok(());
     }
 
@@ -2841,8 +3282,7 @@ fn get_relay_url(args: &[String]) -> Option<String> {
 
 /// List all ledgers on the relay
 async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let relay_url = get_relay_url(args)
-        .ok_or("Missing --relay <url>")?;
+    let relay_url = get_relay_url(args).ok_or("Missing --relay <url>")?;
 
     println!("Fetching ledgers from {}...", relay_url);
     println!();
@@ -2863,7 +3303,8 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     // Group by ledger_id and count
-    let mut ledgers: std::collections::HashMap<String, (u64, usize)> = std::collections::HashMap::new();
+    let mut ledgers: std::collections::HashMap<String, (u64, usize)> =
+        std::collections::HashMap::new();
 
     for event in &events {
         let ledger_id = event.tags.iter().find_map(|tag| {
@@ -2876,13 +3317,17 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
         if let Some(lid) = ledger_id {
             // Get sequence from n tag
-            let seq = event.tags.iter().find_map(|tag| {
-                if tag.kind() == TagKind::SingleLetter(TAG_SEQUENCE) {
-                    tag.content().and_then(|s| s.parse::<u64>().ok())
-                } else {
-                    None
-                }
-            }).unwrap_or(0);
+            let seq = event
+                .tags
+                .iter()
+                .find_map(|tag| {
+                    if tag.kind() == TagKind::SingleLetter(TAG_SEQUENCE) {
+                        tag.content().and_then(|s| s.parse::<u64>().ok())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
 
             let entry = ledgers.entry(lid).or_insert((0, 0));
             if seq > entry.0 {
@@ -2892,11 +3337,15 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
-    println!("Found {} ledger(s) ({} total events):", ledgers.len(), events.len());
+    println!(
+        "Found {} ledger(s) ({} total events):",
+        ledgers.len(),
+        events.len()
+    );
     println!();
 
     let mut sorted: Vec<_> = ledgers.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.0.cmp(&a.1.0)); // Sort by max sequence desc
+    sorted.sort_by(|a, b| b.1 .0.cmp(&a.1 .0)); // Sort by max sequence desc
 
     for (lid, (max_seq, count)) in sorted {
         println!("  {}  seq={:<4} updates={}", lid, max_seq, count);
@@ -2906,7 +3355,10 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 /// Find full ledger ID from partial prefix
-async fn find_ledger_id(client: &Client, prefix: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+async fn find_ledger_id(
+    client: &Client,
+    prefix: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
     // Fetch all updates to find matching ledger_id
     let filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_UPDATE));
     let events = fetch_all_events_paginated(client, filter).await?;
@@ -2929,23 +3381,24 @@ async fn find_ledger_id(client: &Client, prefix: &str) -> Result<Option<String>,
 
 /// Show all updates for a specific ledger
 async fn ledger_show(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let relay_url = get_relay_url(args)
-        .ok_or("Missing --relay <url>")?;
+    let relay_url = get_relay_url(args).ok_or("Missing --relay <url>")?;
 
     // Check for --color-by-pk flag
     let color_by_pk = args.iter().any(|a| a == "--color-by-pk" || a == "--color");
 
     // Get ledger_id prefix (first non-flag arg that isn't after --relay)
-    let ledger_prefix = args.iter()
+    let ledger_prefix = args
+        .iter()
         .enumerate()
-        .find(|(i, a)| {
-            !a.starts_with("--") &&
-            (*i == 0 || args[i - 1] != "--relay")
-        })
+        .find(|(i, a)| !a.starts_with("--") && (*i == 0 || args[i - 1] != "--relay"))
         .map(|(_, a)| a)
         .ok_or("Missing ledger_id")?;
 
-    println!("Fetching ledger {}... from {}...", &ledger_prefix[..16.min(ledger_prefix.len())], relay_url);
+    println!(
+        "Fetching ledger {}... from {}...",
+        &ledger_prefix[..16.min(ledger_prefix.len())],
+        relay_url
+    );
 
     let keys = Keys::generate();
     let client = Client::new(keys);
@@ -2989,11 +3442,16 @@ async fn ledger_show(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     updates.sort_by_key(|u| u.sequence_number);
     updates.dedup_by_key(|u| (u.sequence_number, u.current_hash));
 
-    println!("=== Ledger {} ({} updates) ===", &ledger_id[..16.min(ledger_id.len())], updates.len());
+    println!(
+        "=== Ledger {} ({} updates) ===",
+        &ledger_id[..16.min(ledger_id.len())],
+        updates.len()
+    );
     println!();
 
     // Track deposit_id -> color mapping
-    let mut id_colors: std::collections::HashMap<[u8; 16], usize> = std::collections::HashMap::new();
+    let mut id_colors: std::collections::HashMap<[u8; 16], usize> =
+        std::collections::HashMap::new();
     let mut next_color = 0usize;
 
     for update in &updates {
@@ -3028,11 +3486,15 @@ async fn ledger_show(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 idx
             });
             let color = COLORS[color_idx];
-            println!("{}  [{:>4}] {:<16} {}={} hash={}{}",
-                color, update.sequence_number, op_type, id_label, id_short, hash_short, RESET);
+            println!(
+                "{}  [{:>4}] {:<16} {}={} hash={}{}",
+                color, update.sequence_number, op_type, id_label, id_short, hash_short, RESET
+            );
         } else {
-            println!("  [{:>4}] {:<16} {}={} hash={}",
-                update.sequence_number, op_type, id_label, id_short, hash_short);
+            println!(
+                "  [{:>4}] {:<16} {}={} hash={}",
+                update.sequence_number, op_type, id_label, id_short, hash_short
+            );
         }
     }
 
@@ -3046,19 +3508,45 @@ fn format_operation(op: &LedgerOperation) -> (String, Option<deposits_core::type
         LedgerOperation::QuorumAddMember { .. } => ("QuorumAdd".to_string(), None),
         LedgerOperation::QuorumRemoveMember { .. } => ("QuorumRemove".to_string(), None),
         LedgerOperation::QuorumJoin { .. } => ("QuorumJoin".to_string(), None),
-        LedgerOperation::DepositOpen { deposit_id, .. } => ("DepositOpen".to_string(), Some(*deposit_id)),
-        LedgerOperation::DepositClose { deposit_id, .. } => ("DepositClose".to_string(), Some(*deposit_id)),
-        LedgerOperation::FeeChange { deposit_id, .. } => ("FeeChange".to_string(), Some(*deposit_id)),
-        LedgerOperation::OnchainLock { deposit_id, .. } => ("OnchainLock".to_string(), Some(*deposit_id)),
-        LedgerOperation::OnchainFulfill { deposit_id, .. } => ("OnchainFulfill".to_string(), Some(*deposit_id)),
-        LedgerOperation::OnchainFail { deposit_id, .. } => ("OnchainFail".to_string(), Some(*deposit_id)),
-        LedgerOperation::OnchainCredit { deposit_id, .. } => ("OnchainCredit".to_string(), Some(*deposit_id)),
-        LedgerOperation::InvoiceLock { deposit_id, .. } => ("InvoiceLock".to_string(), Some(*deposit_id)),
-        LedgerOperation::InvoiceFulfill { deposit_id, .. } => ("InvoiceFulfill".to_string(), Some(*deposit_id)),
-        LedgerOperation::InvoiceFail { deposit_id, .. } => ("InvoiceFail".to_string(), Some(*deposit_id)),
-        LedgerOperation::InvoiceCredit { deposit_id, .. } => ("InvoiceCredit".to_string(), Some(*deposit_id)),
-        LedgerOperation::FeeCollect { deposit_id, .. } => ("FeeCollect".to_string(), Some(*deposit_id)),
-        LedgerOperation::CollateralLock { deposit_id, .. } => ("CollateralLock".to_string(), Some(*deposit_id)),
+        LedgerOperation::DepositOpen { deposit_id, .. } => {
+            ("DepositOpen".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::DepositClose { deposit_id, .. } => {
+            ("DepositClose".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::FeeChange { deposit_id, .. } => {
+            ("FeeChange".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::OnchainLock { deposit_id, .. } => {
+            ("OnchainLock".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::OnchainFulfill { deposit_id, .. } => {
+            ("OnchainFulfill".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::OnchainFail { deposit_id, .. } => {
+            ("OnchainFail".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::OnchainCredit { deposit_id, .. } => {
+            ("OnchainCredit".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::InvoiceLock { deposit_id, .. } => {
+            ("InvoiceLock".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::InvoiceFulfill { deposit_id, .. } => {
+            ("InvoiceFulfill".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::InvoiceFail { deposit_id, .. } => {
+            ("InvoiceFail".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::InvoiceCredit { deposit_id, .. } => {
+            ("InvoiceCredit".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::FeeCollect { deposit_id, .. } => {
+            ("FeeCollect".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::CollateralLock { deposit_id, .. } => {
+            ("CollateralLock".to_string(), Some(*deposit_id))
+        }
         LedgerOperation::CollateralAttestation { .. } => ("CollateralAttest".to_string(), None),
         LedgerOperation::QuorumBegin { .. } => ("QuorumBegin".to_string(), None),
         _ => ("Unknown".to_string(), None),
@@ -3067,14 +3555,25 @@ fn format_operation(op: &LedgerOperation) -> (String, Option<deposits_core::type
 
 /// Validate ledger hash chain
 async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let relay_url = get_relay_url(args)
-        .ok_or("Missing --relay <url>")?;
+    let relay_url = get_relay_url(args).ok_or("Missing --relay <url>")?;
 
-    let ledger_prefix = args.iter()
-        .find(|a| !a.starts_with("--") && args.iter().position(|x| x == *a).map(|i| i == 0 || args[i-1] != "--relay").unwrap_or(true))
+    let ledger_prefix = args
+        .iter()
+        .find(|a| {
+            !a.starts_with("--")
+                && args
+                    .iter()
+                    .position(|x| x == *a)
+                    .map(|i| i == 0 || args[i - 1] != "--relay")
+                    .unwrap_or(true)
+        })
         .ok_or("Missing ledger_id")?;
 
-    println!("Validating ledger {}... from {}...", &ledger_prefix[..16.min(ledger_prefix.len())], relay_url);
+    println!(
+        "Validating ledger {}... from {}...",
+        &ledger_prefix[..16.min(ledger_prefix.len())],
+        relay_url
+    );
 
     let keys = Keys::generate();
     let client = Client::new(keys);
@@ -3122,9 +3621,11 @@ async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     let has_genesis = updates.iter().any(|u| u.sequence_number == 0);
     if !has_genesis {
         println!("ERROR: No LedgerOpen found at sequence 0");
-        println!("  Fetched {} updates, min seq = {}",
+        println!(
+            "  Fetched {} updates, min seq = {}",
             updates.len(),
-            updates.first().map(|u| u.sequence_number).unwrap_or(0));
+            updates.first().map(|u| u.sequence_number).unwrap_or(0)
+        );
         return Ok(());
     }
 
@@ -3139,7 +3640,10 @@ async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         }
 
         if update.previous_hash != prev_hash {
-            println!("  ERROR at seq {}: prev_hash mismatch", update.sequence_number);
+            println!(
+                "  ERROR at seq {}: prev_hash mismatch",
+                update.sequence_number
+            );
             println!("    expected: {}", hex::encode(prev_hash));
             println!("    got:      {}", hex::encode(update.previous_hash));
             errors += 1;
@@ -3148,10 +3652,17 @@ async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     }
 
     if errors == 0 {
-        println!("Hash chain valid: {} updates, final hash {}",
-            updates.len(), &hex::encode(prev_hash)[..16]);
+        println!(
+            "Hash chain valid: {} updates, final hash {}",
+            updates.len(),
+            &hex::encode(prev_hash)[..16]
+        );
     } else {
-        println!("Hash chain INVALID: {} errors in {} updates", errors, updates.len());
+        println!(
+            "Hash chain INVALID: {} errors in {} updates",
+            errors,
+            updates.len()
+        );
     }
 
     Ok(())
@@ -3198,14 +3709,24 @@ enum CustodyEvent {
 
 /// Trace custody chain for a ledger
 async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let relay_url = get_relay_url(args)
-        .ok_or("Missing --relay <url>")?;
+    let relay_url = get_relay_url(args).ok_or("Missing --relay <url>")?;
 
-    let ledger_prefix = args.iter()
-        .find(|a| !a.starts_with("--") && args.iter().position(|x| x == *a).map(|i| i == 0 || args[i-1] != "--relay").unwrap_or(true))
+    let ledger_prefix = args
+        .iter()
+        .find(|a| {
+            !a.starts_with("--")
+                && args
+                    .iter()
+                    .position(|x| x == *a)
+                    .map(|i| i == 0 || args[i - 1] != "--relay")
+                    .unwrap_or(true)
+        })
         .ok_or("Missing ledger_id")?;
 
-    println!("Tracing custody chain for {}...", &ledger_prefix[..16.min(ledger_prefix.len())]);
+    println!(
+        "Tracing custody chain for {}...",
+        &ledger_prefix[..16.min(ledger_prefix.len())]
+    );
     println!();
 
     let keys = Keys::generate();
@@ -3251,8 +3772,8 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     // Track custody state
     let mut current_operator: Option<bitcoin::secp256k1::PublicKey> = None;
-    let mut quorum_members: Vec<(bitcoin::secp256k1::PublicKey, String)> = Vec::new();  // (pubkey, ledger_id)
-    let mut custody_events: Vec<(u64, u32, CustodyEvent)> = Vec::new();  // (seq, block, event)
+    let mut quorum_members: Vec<(bitcoin::secp256k1::PublicKey, String)> = Vec::new(); // (pubkey, ledger_id)
+    let mut custody_events: Vec<(u64, u32, CustodyEvent)> = Vec::new(); // (seq, block, event)
     let mut in_dispute = false;
     let mut processed_seqs: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
@@ -3273,101 +3794,218 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
         // Parse the operation
         if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
             match op {
-                LedgerOperation::LedgerOpen { operator_id, reserves_id, genesis_block, .. } => {
+                LedgerOperation::LedgerOpen {
+                    operator_id,
+                    reserves_id,
+                    genesis_block,
+                    ..
+                } => {
                     current_operator = Some(operator_id);
                     println!("seq {:>4} | block {:>6} | LEDGER OPENED", seq, block);
-                    println!("         |              |   Operator: {}", hex::encode(operator_id.serialize())[..16].to_string() + "...");
-                    println!("         |              |   Reserves: {}...", &reserves_id[..20.min(reserves_id.len())]);
-                    custody_events.push((seq, block, CustodyEvent::LedgerOpened {
-                        operator: operator_id,
-                        reserves_address: reserves_id,
-                        genesis_block,
-                    }));
+                    println!(
+                        "         |              |   Operator: {}",
+                        hex::encode(operator_id.serialize())[..16].to_string() + "..."
+                    );
+                    println!(
+                        "         |              |   Reserves: {}...",
+                        &reserves_id[..20.min(reserves_id.len())]
+                    );
+                    custody_events.push((
+                        seq,
+                        block,
+                        CustodyEvent::LedgerOpened {
+                            operator: operator_id,
+                            reserves_address: reserves_id,
+                            genesis_block,
+                        },
+                    ));
                 }
-                LedgerOperation::QuorumAddMember { quorum_member, member_ledger_id, .. } => {
+                LedgerOperation::QuorumAddMember {
+                    quorum_member,
+                    member_ledger_id,
+                    ..
+                } => {
                     // Check if already a member
                     if !quorum_members.iter().any(|(pk, _)| pk == &quorum_member) {
                         quorum_members.push((quorum_member, member_ledger_id.clone()));
                         println!("seq {:>4} | block {:>6} | QUORUM MEMBER ADDED", seq, block);
-                        println!("         |              |   Member: {}...", &hex::encode(quorum_member.serialize())[..16]);
-                        println!("         |              |   Member's ledger: {}...", &member_ledger_id[..16.min(member_ledger_id.len())]);
-                        custody_events.push((seq, block, CustodyEvent::QuorumMemberAdded {
-                            member: quorum_member,
-                            member_ledger_id,
-                        }));
+                        println!(
+                            "         |              |   Member: {}...",
+                            &hex::encode(quorum_member.serialize())[..16]
+                        );
+                        println!(
+                            "         |              |   Member's ledger: {}...",
+                            &member_ledger_id[..16.min(member_ledger_id.len())]
+                        );
+                        custody_events.push((
+                            seq,
+                            block,
+                            CustodyEvent::QuorumMemberAdded {
+                                member: quorum_member,
+                                member_ledger_id,
+                            },
+                        ));
                     }
                 }
-                LedgerOperation::QuorumBegin { reserves_id, amount, quorum_expiry, quorum_members, .. } => {
+                LedgerOperation::QuorumBegin {
+                    reserves_id,
+                    amount,
+                    quorum_expiry,
+                    quorum_members,
+                    ..
+                } => {
                     // Verify signer is current operator
                     let signer_valid = current_operator.map(|op| op == signer).unwrap_or(false);
                     let signer_status = if signer_valid { "✓" } else { "⚠" };
 
-                    println!("seq {:>4} | block {:>6} | QUORUM BEGIN {}", seq, block, signer_status);
-                    println!("         |              |   New address: {}...", &reserves_id[..24.min(reserves_id.len())]);
+                    println!(
+                        "seq {:>4} | block {:>6} | QUORUM BEGIN {}",
+                        seq, block, signer_status
+                    );
+                    println!(
+                        "         |              |   New address: {}...",
+                        &reserves_id[..24.min(reserves_id.len())]
+                    );
                     println!("         |              |   Amount: {} sats", amount);
                     if !quorum_members.is_empty() {
-                        println!("         |              |   Quorum: {} members, expires block {}", quorum_members.len(), quorum_expiry);
+                        println!(
+                            "         |              |   Quorum: {} members, expires block {}",
+                            quorum_members.len(),
+                            quorum_expiry
+                        );
                     }
                     if !signer_valid {
-                        println!("         |              |   ⚠ Signer {}... != expected operator", &hex::encode(signer.serialize())[..12]);
+                        println!(
+                            "         |              |   ⚠ Signer {}... != expected operator",
+                            &hex::encode(signer.serialize())[..12]
+                        );
                     }
-                    custody_events.push((seq, block, CustodyEvent::QuorumBegun {
-                        new_address: reserves_id,
-                        amount,
-                        quorum_member_count: quorum_members.len(),
-                        quorum_expiry,
-                    }));
+                    custody_events.push((
+                        seq,
+                        block,
+                        CustodyEvent::QuorumBegun {
+                            new_address: reserves_id,
+                            amount,
+                            quorum_member_count: quorum_members.len(),
+                            quorum_expiry,
+                        },
+                    ));
                 }
-                LedgerOperation::DisputeEnter { last_valid_sequence, reason } => {
+                LedgerOperation::DisputeEnter {
+                    last_valid_sequence,
+                    reason,
+                } => {
                     in_dispute = true;
                     // Check if signer was a quorum member
                     let is_quorum_member = quorum_members.iter().any(|(pk, _)| pk == &signer);
-                    let signer_status = if is_quorum_member { "✓ quorum member" } else { "⚠ unknown" };
+                    let signer_status = if is_quorum_member {
+                        "✓ quorum member"
+                    } else {
+                        "⚠ unknown"
+                    };
 
-                    println!("seq {:>4} | block {:>6} | ⚡ CUSTODY DISPUTE ({})", seq, block, signer_status);
-                    println!("         |              |   Last valid seq: {}", last_valid_sequence);
+                    println!(
+                        "seq {:>4} | block {:>6} | ⚡ CUSTODY DISPUTE ({})",
+                        seq, block, signer_status
+                    );
+                    println!(
+                        "         |              |   Last valid seq: {}",
+                        last_valid_sequence
+                    );
                     println!("         |              |   Reason: {}", reason);
-                    println!("         |              |   Initiated by: {}...", &hex::encode(signer.serialize())[..16]);
-                    custody_events.push((seq, block, CustodyEvent::DisputeStarted {
-                        last_valid_sequence,
-                        reason,
-                    }));
+                    println!(
+                        "         |              |   Initiated by: {}...",
+                        &hex::encode(signer.serialize())[..16]
+                    );
+                    custody_events.push((
+                        seq,
+                        block,
+                        CustodyEvent::DisputeStarted {
+                            last_valid_sequence,
+                            reason,
+                        },
+                    ));
                 }
-                LedgerOperation::DisputeArmed { armed_block, target_reserves, .. } => {
+                LedgerOperation::DisputeArmed {
+                    armed_block,
+                    target_reserves,
+                    ..
+                } => {
                     let is_quorum_member = quorum_members.iter().any(|(pk, _)| pk == &signer);
                     let signer_status = if is_quorum_member { "✓" } else { "⚠" };
 
-                    println!("seq {:>4} | block {:>6} | 🎯 CANDIDATE ARMED {}", seq, block, signer_status);
-                    println!("         |              |   Candidate: {}...", &hex::encode(signer.serialize())[..16]);
-                    println!("         |              |   Armed at block: {}", armed_block);
-                    println!("         |              |   Target: {}...", &target_reserves[..20.min(target_reserves.len())]);
-                    custody_events.push((seq, block, CustodyEvent::CandidateArmed {
-                        armed_block,
-                        target_reserves,
-                    }));
+                    println!(
+                        "seq {:>4} | block {:>6} | 🎯 CANDIDATE ARMED {}",
+                        seq, block, signer_status
+                    );
+                    println!(
+                        "         |              |   Candidate: {}...",
+                        &hex::encode(signer.serialize())[..16]
+                    );
+                    println!(
+                        "         |              |   Armed at block: {}",
+                        armed_block
+                    );
+                    println!(
+                        "         |              |   Target: {}...",
+                        &target_reserves[..20.min(target_reserves.len())]
+                    );
+                    custody_events.push((
+                        seq,
+                        block,
+                        CustodyEvent::CandidateArmed {
+                            armed_block,
+                            target_reserves,
+                        },
+                    ));
                 }
-                LedgerOperation::DisputeAcquire { new_custodian, entropy_block_height, new_reserves_address, .. } => {
-                    let is_quorum_member = quorum_members.iter().any(|(pk, _)| pk == &new_custodian);
+                LedgerOperation::DisputeAcquire {
+                    new_custodian,
+                    entropy_block_height,
+                    new_reserves_address,
+                    ..
+                } => {
+                    let is_quorum_member =
+                        quorum_members.iter().any(|(pk, _)| pk == &new_custodian);
                     let valid = if is_quorum_member { "✓" } else { "⚠" };
 
-                    println!("seq {:>4} | block {:>6} | 👑 CUSTODY ACQUIRED {}", seq, block, valid);
-                    println!("         |              |   New custodian: {}...", &hex::encode(new_custodian.serialize())[..16]);
-                    println!("         |              |   Entropy block: {}", entropy_block_height);
-                    println!("         |              |   New reserves: {}...", &new_reserves_address[..24.min(new_reserves_address.len())]);
+                    println!(
+                        "seq {:>4} | block {:>6} | 👑 CUSTODY ACQUIRED {}",
+                        seq, block, valid
+                    );
+                    println!(
+                        "         |              |   New custodian: {}...",
+                        &hex::encode(new_custodian.serialize())[..16]
+                    );
+                    println!(
+                        "         |              |   Entropy block: {}",
+                        entropy_block_height
+                    );
+                    println!(
+                        "         |              |   New reserves: {}...",
+                        &new_reserves_address[..24.min(new_reserves_address.len())]
+                    );
 
                     // Update current operator
                     current_operator = Some(new_custodian);
                     in_dispute = false;
 
-                    custody_events.push((seq, block, CustodyEvent::DisputeAcquired {
-                        new_custodian,
-                        entropy_block: entropy_block_height,
-                        new_reserves_address,
-                    }));
+                    custody_events.push((
+                        seq,
+                        block,
+                        CustodyEvent::DisputeAcquired {
+                            new_custodian,
+                            entropy_block: entropy_block_height,
+                            new_reserves_address,
+                        },
+                    ));
                 }
                 LedgerOperation::DisputeYield => {
                     println!("seq {:>4} | block {:>6} | 🏳️ CUSTODY YIELDED", seq, block);
-                    println!("         |              |   Candidate: {}...", &hex::encode(signer.serialize())[..16]);
+                    println!(
+                        "         |              |   Candidate: {}...",
+                        &hex::encode(signer.serialize())[..16]
+                    );
                 }
                 _ => {
                     // Skip non-custody operations
@@ -3382,12 +4020,20 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!();
 
     if let Some(op) = current_operator {
-        println!("Current custodian: {}...", &hex::encode(op.serialize())[..16]);
+        println!(
+            "Current custodian: {}...",
+            &hex::encode(op.serialize())[..16]
+        );
     }
 
     println!("Quorum members ({}):", quorum_members.len());
     for (i, (pk, lid)) in quorum_members.iter().enumerate() {
-        println!("  {}. {}... (ledger: {}...)", i + 1, &hex::encode(pk.serialize())[..16], &lid[..12.min(lid.len())]);
+        println!(
+            "  {}. {}... (ledger: {}...)",
+            i + 1,
+            &hex::encode(pk.serialize())[..16],
+            &lid[..12.min(lid.len())]
+        );
     }
 
     if in_dispute {
@@ -3396,7 +4042,8 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 
     // Count custody transitions
-    let transitions: Vec<_> = custody_events.iter()
+    let transitions: Vec<_> = custody_events
+        .iter()
         .filter(|(_, _, e)| matches!(e, CustodyEvent::DisputeAcquired { .. }))
         .collect();
 
@@ -3454,12 +4101,15 @@ fn load_batch_deposits(
         let descriptor = format!("pk({})", hex::encode(pubkey.serialize()));
         let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
 
-        map.insert(alias, BatchDepositInfo {
-            ledger_id,
-            key_index,
-            keypair,
-            deposit_id,
-        });
+        map.insert(
+            alias,
+            BatchDepositInfo {
+                ledger_id,
+                key_index,
+                keypair,
+                deposit_id,
+            },
+        );
     }
 
     Ok(map)
@@ -3467,8 +4117,6 @@ fn load_batch_deposits(
 
 /// Batch mode: persistent Nostr connection, JSON commands on stdin, JSON responses on stdout
 async fn batch_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use bitcoin::secp256k1::rand::rngs::OsRng;
-    use bitcoin::secp256k1::rand::RngCore;
     use std::io::{BufRead, Write};
 
     let config = parse_config(args)?;
@@ -3491,7 +4139,8 @@ async fn batch_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     // Set response filter for relay-side #l tag filtering (reduces fan-out)
     {
-        let ledger_ids: Vec<String> = deposits.values()
+        let ledger_ids: Vec<String> = deposits
+            .values()
             .map(|d| d.ledger_id.clone())
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
@@ -3526,19 +4175,28 @@ async fn batch_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => {
                 let out = std::io::stdout();
                 let mut out = out.lock();
-                let _ = writeln!(out, r#"{{"id":null,"success":false,"error":"Invalid JSON: {}"}}"#,
-                    e.to_string().replace('"', "'"));
+                let _ = writeln!(
+                    out,
+                    r#"{{"id":null,"success":false,"error":"Invalid JSON: {}"}}"#,
+                    e.to_string().replace('"', "'")
+                );
                 let _ = out.flush();
                 continue;
             }
         };
 
-        let id = cmd.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let id = cmd
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let action = cmd.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
 
         // Reload deposits periodically
         if last_reload.elapsed() > std::time::Duration::from_secs(5) {
-            if let Ok(new_deposits) = load_batch_deposits(&config.data_dir, &config.seed, config.network) {
+            if let Ok(new_deposits) =
+                load_batch_deposits(&config.data_dir, &config.seed, config.network)
+            {
                 deposits = new_deposits;
             }
             last_reload = std::time::Instant::now();
@@ -3555,7 +4213,9 @@ async fn batch_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             false
         };
         if needs_alias_reload {
-            if let Ok(new_deposits) = load_batch_deposits(&config.data_dir, &config.seed, config.network) {
+            if let Ok(new_deposits) =
+                load_batch_deposits(&config.data_dir, &config.seed, config.network)
+            {
                 deposits = new_deposits;
             }
             last_reload = std::time::Instant::now();
@@ -3565,9 +4225,7 @@ async fn batch_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "transfer_lock" => {
                 batch_transfer_lock(&cmd, &deposits, &mut transport, &secp, &config).await
             }
-            "transfer_complete" => {
-                batch_transfer_complete(&cmd, &mut transport, &config).await
-            }
+            "transfer_complete" => batch_transfer_complete(&cmd, &mut transport, &config).await,
             _ => {
                 serde_json::json!({"success": false, "error": format!("Unknown command: {}", action)})
             }
@@ -3575,7 +4233,8 @@ async fn batch_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
         // Merge id into response
         let mut resp = response;
-        resp.as_object_mut().map(|m| m.insert("id".to_string(), serde_json::Value::String(id)));
+        resp.as_object_mut()
+            .map(|m| m.insert("id".to_string(), serde_json::Value::String(id)));
 
         let out = std::io::stdout();
         let mut out = out.lock();
@@ -3608,7 +4267,9 @@ async fn batch_transfer_lock(
     };
     let dest_hex = match cmd.get("to").and_then(|v| v.as_str()) {
         Some(d) => d,
-        None => return serde_json::json!({"success": false, "error": "Missing 'to' (destination deposit_id)"}),
+        None => {
+            return serde_json::json!({"success": false, "error": "Missing 'to' (destination deposit_id)"})
+        }
     };
     let hash_hex = match cmd.get("hash").and_then(|v| v.as_str()) {
         Some(h) => h,
@@ -3623,7 +4284,9 @@ async fn batch_transfer_lock(
     // Look up deposit
     let info = match deposits.get(alias) {
         Some(i) => i,
-        None => return serde_json::json!({"success": false, "error": format!("Unknown alias: {}", alias)}),
+        None => {
+            return serde_json::json!({"success": false, "error": format!("Unknown alias: {}", alias)})
+        }
     };
 
     // Parse destination
@@ -3633,7 +4296,9 @@ async fn batch_transfer_lock(
             arr.copy_from_slice(&b);
             arr
         }
-        _ => return serde_json::json!({"success": false, "error": "Invalid destination deposit_id"}),
+        _ => {
+            return serde_json::json!({"success": false, "error": "Invalid destination deposit_id"})
+        }
     };
 
     let completion_script = format!("sha256({})", hash_hex);
@@ -3675,13 +4340,14 @@ async fn batch_transfer_lock(
     });
 
     // Send request
-    let request_id = match transport.send_ledger_request(
-        &info.ledger_id,
-        "transfer_lock",
-        request_params,
-    ).await {
+    let request_id = match transport
+        .send_ledger_request(&info.ledger_id, "transfer_lock", request_params)
+        .await
+    {
         Ok(id) => id,
-        Err(e) => return serde_json::json!({"success": false, "error": format!("Send failed: {}", e)}),
+        Err(e) => {
+            return serde_json::json!({"success": false, "error": format!("Send failed: {}", e)})
+        }
     };
 
     // Wait for response
@@ -3693,7 +4359,9 @@ async fn batch_transfer_lock(
                     "transfer_id": hex::encode(transfer_id),
                 })
             } else {
-                let error = response.error.unwrap_or_else(|| "Unknown error".to_string());
+                let error = response
+                    .error
+                    .unwrap_or_else(|| "Unknown error".to_string());
                 let mut resp = serde_json::json!({
                     "success": false,
                     "error": error,
@@ -3701,10 +4369,12 @@ async fn batch_transfer_lock(
                 // Include balance_msats from result if available
                 if let Some(result) = response.result {
                     if let Some(balance) = result.get("balance_msats").and_then(|v| v.as_i64()) {
-                        resp.as_object_mut().map(|m| m.insert(
-                            "balance_msats".to_string(),
-                            serde_json::Value::Number(balance.into()),
-                        ));
+                        resp.as_object_mut().map(|m| {
+                            m.insert(
+                                "balance_msats".to_string(),
+                                serde_json::Value::Number(balance.into()),
+                            )
+                        });
                     }
                 }
                 resp
@@ -3738,13 +4408,14 @@ async fn batch_transfer_complete(
     });
 
     // Send request
-    let request_id = match transport.send_ledger_request(
-        ledger_id,
-        "transfer_complete",
-        request_params,
-    ).await {
+    let request_id = match transport
+        .send_ledger_request(ledger_id, "transfer_complete", request_params)
+        .await
+    {
         Ok(id) => id,
-        Err(e) => return serde_json::json!({"success": false, "error": format!("Send failed: {}", e)}),
+        Err(e) => {
+            return serde_json::json!({"success": false, "error": format!("Send failed: {}", e)})
+        }
     };
 
     // Wait for response
@@ -3753,7 +4424,9 @@ async fn batch_transfer_complete(
             if response.success {
                 serde_json::json!({"success": true})
             } else {
-                let error = response.error.unwrap_or_else(|| "Unknown error".to_string());
+                let error = response
+                    .error
+                    .unwrap_or_else(|| "Unknown error".to_string());
                 serde_json::json!({"success": false, "error": error})
             }
         }

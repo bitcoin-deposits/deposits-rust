@@ -12,11 +12,11 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use bdk_wallet::bitcoin::bip32::{DerivationPath, Xpriv};
-use bdk_wallet::bitcoin::hashes::{sha256, Hash};
-use bdk_wallet::bitcoin::secp256k1::{Message, Secp256k1};
-use bdk_wallet::bitcoin::sighash::SighashCache;
-use bdk_wallet::bitcoin::{
+use bitcoin::bip32::{DerivationPath, Xpriv};
+use bitcoin::hashes::{sha256, Hash};
+use bitcoin::secp256k1::{Message, Secp256k1};
+use bitcoin::sighash::SighashCache;
+use bitcoin::{
     absolute, transaction, Address, Amount, CompressedPublicKey, Network, OutPoint, PrivateKey,
     ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
@@ -78,7 +78,9 @@ fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  treasury-send <address> <amount_sats>  - Send to a single address");
     eprintln!("  treasury-send --fund-nodes             - Auto-fund all nodes");
-    eprintln!("  treasury-send --reclaim-seeds          - Sweep from all historical seed addresses");
+    eprintln!(
+        "  treasury-send --reclaim-seeds          - Sweep from all historical seed addresses"
+    );
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  treasury-send tb1q... 10000000        - Send 0.1 BTC");
@@ -118,7 +120,10 @@ fn fund_nodes() -> Result<(), Box<dyn std::error::Error>> {
             println!("  {}: already funded ({} sat on-chain)", name, balance);
         } else {
             let needed = FUNDING_AMOUNT;
-            println!("  {}: needs funding ({} sat -> {} sat)", name, balance, needed);
+            println!(
+                "  {}: needs funding ({} sat -> {} sat)",
+                name, balance, needed
+            );
             nodes_to_fund.push((name.to_string(), address, needed));
         }
     }
@@ -143,8 +148,10 @@ fn fund_nodes() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn send_to_address(address_str: &str, amount_sats: u64) -> Result<String, Box<dyn std::error::Error>>
-{
+fn send_to_address(
+    address_str: &str,
+    amount_sats: u64,
+) -> Result<String, Box<dyn std::error::Error>> {
     let network = Network::Signet;
 
     // Load treasury key
@@ -182,7 +189,10 @@ fn send_to_address(address_str: &str, amount_sats: u64) -> Result<String, Box<dy
 
     for utxo in &utxos {
         inputs.push(TxIn {
-            previous_output: OutPoint { txid: utxo.txid, vout: utxo.vout },
+            previous_output: OutPoint {
+                txid: utxo.txid,
+                vout: utxo.vout,
+            },
             script_sig: ScriptBuf::new(), // Empty for segwit
             sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
             witness: Witness::default(),
@@ -267,12 +277,16 @@ fn load_treasury_key(
     let seed_hex = fs::read_to_string(&seed_path)?.trim().to_string();
 
     if seed_hex.len() != 64 {
-        return Err(format!("Invalid seed length: expected 64 hex chars, got {}", seed_hex.len())
-            .into());
+        return Err(format!(
+            "Invalid seed length: expected 64 hex chars, got {}",
+            seed_hex.len()
+        )
+        .into());
     }
 
-    let seed_bytes: [u8; 32] =
-        hex::decode(&seed_hex)?.try_into().map_err(|_| "Invalid seed length")?;
+    let seed_bytes: [u8; 32] = hex::decode(&seed_hex)?
+        .try_into()
+        .map_err(|_| "Invalid seed length")?;
 
     // Extend to 64 bytes (same as treasury-address)
     let mut extended_seed = [0u8; 64];
@@ -329,7 +343,16 @@ fn broadcast_tx(tx: &Transaction) -> Result<String, Box<dyn std::error::Error>> 
 
     // Use curl command for broadcast
     let output = std::process::Command::new("curl")
-        .args(["-s", "-X", "POST", "-H", "Content-Type: text/plain", "-d", &tx_hex, &url])
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: text/plain",
+            "-d",
+            &tx_hex,
+            &url,
+        ])
         .output()?;
 
     let body = String::from_utf8_lossy(&output.stdout);
@@ -451,7 +474,8 @@ fn sweep_from_seed(
     let mut all_utxos: Vec<UtxoWithKey> = Vec::new();
 
     // Scan both external (receive) and internal (change) addresses
-    for chain in [0, 1] { // 0 = external, 1 = change
+    for chain in [0, 1] {
+        // 0 = external, 1 = change
         let chain_name = if chain == 0 { "external" } else { "change" };
         let mut empty_streak = 0;
 
@@ -468,8 +492,10 @@ fn sweep_from_seed(
                 }
             } else {
                 let balance: u64 = utxos.iter().map(|u| u.value).sum();
-                eprintln!("    FOUND: m/84'/1'/0'/{}/{} ({}) = {} sat @ {}",
-                         chain, index, chain_name, balance, address);
+                eprintln!(
+                    "    FOUND: m/84'/1'/0'/{}/{} ({}) = {} sat @ {}",
+                    chain, index, chain_name, balance, address
+                );
                 empty_streak = 0;
                 for utxo in utxos {
                     all_utxos.push(UtxoWithKey {
@@ -504,7 +530,10 @@ fn sweep_from_seed(
     let inputs: Vec<TxIn> = all_utxos
         .iter()
         .map(|u| TxIn {
-            previous_output: OutPoint { txid: u.utxo.txid, vout: u.utxo.vout },
+            previous_output: OutPoint {
+                txid: u.utxo.txid,
+                vout: u.utxo.vout,
+            },
             script_sig: ScriptBuf::new(),
             sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
             witness: Witness::default(),
@@ -658,7 +687,9 @@ fn find_address(target_address: &str) -> Result<(), Box<dyn std::error::Error>> 
             let chain_name = if chain == 0 { "external" } else { "change" };
 
             for index in 0..200 {
-                if let Ok((_, address, _)) = load_key_from_seed_hex_at_path(seed_hex, network, chain, index) {
+                if let Ok((_, address, _)) =
+                    load_key_from_seed_hex_at_path(seed_hex, network, chain, index)
+                {
                     if address.to_string() == target_address {
                         println!("FOUND!");
                         println!("  Seed: {} ({})", &seed_hex[..32], name);

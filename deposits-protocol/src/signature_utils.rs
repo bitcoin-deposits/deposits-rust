@@ -11,8 +11,8 @@
 //! messages without performing any cryptographic operations. Actual signing
 //! and verification lives in `deposits_core::signing`.
 
+use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::hashes::{Hash, sha256};
 
 /// Get the withdrawal authorization message that should be signed.
 ///
@@ -129,7 +129,8 @@ mod tests {
         let dest_id = compute_deposit_id("pk(dest)");
         let amount = 100_000u64;
         let fee = 1_000u64;
-        let completion_script = "sha256(0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)";
+        let completion_script =
+            "sha256(0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)";
         let timeout_height = 850_000u32;
 
         // Generate signing message
@@ -153,7 +154,10 @@ mod tests {
             completion_script,
             timeout_height,
         );
-        assert_eq!(msg1, msg2, "Same inputs should produce same signing message");
+        assert_eq!(
+            msg1, msg2,
+            "Same inputs should produce same signing message"
+        );
 
         // Different nonce should produce different message
         let different_nonce = [0x02u8; 32];
@@ -166,7 +170,10 @@ mod tests {
             completion_script,
             timeout_height,
         );
-        assert_ne!(msg1, msg3, "Different nonce should produce different message");
+        assert_ne!(
+            msg1, msg3,
+            "Different nonce should produce different message"
+        );
 
         // Different amount should produce different message
         let msg4 = transfer_lock_signing_message(
@@ -178,7 +185,10 @@ mod tests {
             completion_script,
             timeout_height,
         );
-        assert_ne!(msg1, msg4, "Different amount should produce different message");
+        assert_ne!(
+            msg1, msg4,
+            "Different amount should produce different message"
+        );
 
         // Different fee should produce different message
         let msg5 = transfer_lock_signing_message(

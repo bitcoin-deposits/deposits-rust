@@ -9,13 +9,13 @@ mod tests {
 
     // V2 message types from deposits-core
     use deposits_core::messages::{
-        DepositsMessage, LedgerUpdateResponseMsg,
-        HandshakeMsg, HandshakeResponseMsg, CoordinationMsg, CoordinationResponseMsg,
+        CoordinationMsg, CoordinationResponseMsg, DepositsMessage, HandshakeMsg,
+        HandshakeResponseMsg, LedgerUpdateResponseMsg,
     };
     // Wire message structs from deposits-core for struct construction
     use deposits_core::wire_messages::{
+        CollateralAttestationMsg, CollateralConsentRequestMsg, CollateralConsentResponseMsg,
         QuorumAddMemberMsg, QuorumRemoveMemberMsg,
-        CollateralConsentRequestMsg, CollateralConsentResponseMsg, CollateralAttestationMsg,
     };
 
     /// Generate a deterministic test public key
@@ -208,22 +208,25 @@ mod tests {
         use deposits_core::messages::{COORDINATION, COORDINATION_RESPONSE};
 
         // CollateralConsentRequest is now Coordination with CoordinationMsg::CollateralConsentRequest
-        let consent_request = DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
-            operator_id: generate_test_pubkey(1),
-            reserves_id: "test_reserves".to_string(),
-            operator_signature: [0u8; 64],
-        });
+        let consent_request =
+            DepositsMessage::Coordination(CoordinationMsg::CollateralConsentRequest {
+                operator_id: generate_test_pubkey(1),
+                reserves_id: "test_reserves".to_string(),
+                operator_signature: [0u8; 64],
+            });
         assert_eq!(consent_request.message_type(), COORDINATION);
         assert_eq!(consent_request.message_type(), 0x8011);
 
         // CollateralConsentResponse is now CoordinationResponse with CoordinationResponseMsg::CollateralConsentResponse
-        let consent_response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
-            request_hash: [0u8; 32],
-            operator_id: generate_test_pubkey(1),
-            reserves_id: "test_reserves".to_string(),
-            consent_granted: true,
-            quorum_member_signature: [0u8; 64],
-        });
+        let consent_response = DepositsMessage::CoordinationResponse(
+            CoordinationResponseMsg::CollateralConsentResponse {
+                request_hash: [0u8; 32],
+                operator_id: generate_test_pubkey(1),
+                reserves_id: "test_reserves".to_string(),
+                consent_granted: true,
+                quorum_member_signature: [0u8; 64],
+            },
+        );
         assert_eq!(consent_response.message_type(), COORDINATION_RESPONSE);
         assert_eq!(consent_response.message_type(), 0x8013);
     }
@@ -242,13 +245,15 @@ mod tests {
         });
         assert_eq!(request.variant_name(), "Coordination");
 
-        let response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
-            request_hash: [0u8; 32],
-            operator_id: generate_test_pubkey(1),
-            reserves_id: "test_reserves".to_string(),
-            consent_granted: true,
-            quorum_member_signature: [0u8; 64],
-        });
+        let response = DepositsMessage::CoordinationResponse(
+            CoordinationResponseMsg::CollateralConsentResponse {
+                request_hash: [0u8; 32],
+                operator_id: generate_test_pubkey(1),
+                reserves_id: "test_reserves".to_string(),
+                consent_granted: true,
+                quorum_member_signature: [0u8; 64],
+            },
+        );
         assert_eq!(response.variant_name(), "CoordinationResponse");
 
         println!("Consent message variant names test passed!");
@@ -268,13 +273,15 @@ mod tests {
         // Coordination messages expose reserves_id from inner variant
         assert_eq!(request.reserves_id(), Some(reserves_id.clone()));
 
-        let response = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
-            request_hash: [0u8; 32],
-            operator_id: generate_test_pubkey(1),
-            reserves_id: reserves_id.clone(),
-            consent_granted: false,
-            quorum_member_signature: [0u8; 64],
-        });
+        let response = DepositsMessage::CoordinationResponse(
+            CoordinationResponseMsg::CollateralConsentResponse {
+                request_hash: [0u8; 32],
+                operator_id: generate_test_pubkey(1),
+                reserves_id: reserves_id.clone(),
+                consent_granted: false,
+                quorum_member_signature: [0u8; 64],
+            },
+        );
         assert_eq!(response.reserves_id(), Some(reserves_id.clone()));
 
         println!("Consent messages reserves_id test passed!");
@@ -319,12 +326,16 @@ mod tests {
         assert_eq!(msg.message_type(), 0x8011);
 
         // V2: Coordination and CoordinationResponse messages should be skipped from broadcast
-        let should_skip = matches!(msg,
-            DepositsMessage::LedgerUpdateResponse(_) |
-            DepositsMessage::Coordination(_) |
-            DepositsMessage::CoordinationResponse(_)
+        let should_skip = matches!(
+            msg,
+            DepositsMessage::LedgerUpdateResponse(_)
+                | DepositsMessage::Coordination(_)
+                | DepositsMessage::CoordinationResponse(_)
         );
-        assert!(should_skip, "Coordination (CollateralConsentRequest) should be in the skip list");
+        assert!(
+            should_skip,
+            "Coordination (CollateralConsentRequest) should be in the skip list"
+        );
 
         println!("CollateralConsentRequest skip broadcast queue test passed!");
     }
@@ -333,24 +344,30 @@ mod tests {
     /// These are coordination messages, NOT ledger updates
     #[test]
     fn test_consent_response_should_skip_broadcast_queue() {
-        let msg = DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
-            request_hash: [0u8; 32],
-            operator_id: generate_test_pubkey(1),
-            reserves_id: "test_reserves".to_string(),
-            consent_granted: true,
-            quorum_member_signature: [0u8; 64],
-        });
+        let msg = DepositsMessage::CoordinationResponse(
+            CoordinationResponseMsg::CollateralConsentResponse {
+                request_hash: [0u8; 32],
+                operator_id: generate_test_pubkey(1),
+                reserves_id: "test_reserves".to_string(),
+                consent_granted: true,
+                quorum_member_signature: [0u8; 64],
+            },
+        );
 
         // V2: CoordinationResponse messages use COORDINATION_RESPONSE type (0x8013)
         assert_eq!(msg.message_type(), 0x8013);
 
         // V2: Coordination and CoordinationResponse messages should be skipped from broadcast
-        let should_skip = matches!(msg,
-            DepositsMessage::LedgerUpdateResponse(_) |
-            DepositsMessage::Coordination(_) |
-            DepositsMessage::CoordinationResponse(_)
+        let should_skip = matches!(
+            msg,
+            DepositsMessage::LedgerUpdateResponse(_)
+                | DepositsMessage::Coordination(_)
+                | DepositsMessage::CoordinationResponse(_)
         );
-        assert!(should_skip, "CoordinationResponse (CollateralConsentResponse) should be in the skip list");
+        assert!(
+            should_skip,
+            "CoordinationResponse (CollateralConsentResponse) should be in the skip list"
+        );
 
         println!("CollateralConsentResponse skip broadcast queue test passed!");
     }
@@ -392,22 +409,29 @@ mod tests {
                 operator_signature: [0u8; 64],
             }),
             // CoordinationResponse (includes CollateralConsentResponse, InvoiceCosigned, etc.)
-            DepositsMessage::CoordinationResponse(CoordinationResponseMsg::CollateralConsentResponse {
-                request_hash: [0u8; 32],
-                operator_id: generate_test_pubkey(1),
-                reserves_id: "test_reserves".to_string(),
-                consent_granted: true,
-                quorum_member_signature: [0u8; 64],
-            }),
+            DepositsMessage::CoordinationResponse(
+                CoordinationResponseMsg::CollateralConsentResponse {
+                    request_hash: [0u8; 32],
+                    operator_id: generate_test_pubkey(1),
+                    reserves_id: "test_reserves".to_string(),
+                    consent_granted: true,
+                    quorum_member_signature: [0u8; 64],
+                },
+            ),
         ];
 
         for msg in skip_messages {
-            let should_skip = matches!(msg,
-                DepositsMessage::LedgerUpdateResponse(_) |
-                DepositsMessage::Coordination(_) |
-                DepositsMessage::CoordinationResponse(_)
+            let should_skip = matches!(
+                msg,
+                DepositsMessage::LedgerUpdateResponse(_)
+                    | DepositsMessage::Coordination(_)
+                    | DepositsMessage::CoordinationResponse(_)
             );
-            assert!(should_skip, "Message {:?} should be in the skip list", msg.variant_name());
+            assert!(
+                should_skip,
+                "Message {:?} should be in the skip list",
+                msg.variant_name()
+            );
         }
 
         println!("All broadcast skip list messages test passed!");
@@ -457,12 +481,13 @@ mod tests {
         assert_eq!(msg.message_type(), 0x8005);
 
         // Verify Handshake messages are in the broadcast skip list
-        let should_skip = matches!(msg,
-            DepositsMessage::LedgerUpdateResponse(_) |
-            DepositsMessage::Handshake(_) |
-            DepositsMessage::HandshakeResponse(_) |
-            DepositsMessage::Coordination(_) |
-            DepositsMessage::CoordinationResponse(_)
+        let should_skip = matches!(
+            msg,
+            DepositsMessage::LedgerUpdateResponse(_)
+                | DepositsMessage::Handshake(_)
+                | DepositsMessage::HandshakeResponse(_)
+                | DepositsMessage::Coordination(_)
+                | DepositsMessage::CoordinationResponse(_)
         );
         assert!(should_skip, "Handshake should be in the skip list");
 
@@ -484,12 +509,13 @@ mod tests {
         assert_eq!(msg.message_type(), 0x8007);
 
         // Verify HandshakeResponse messages are in the broadcast skip list
-        let should_skip = matches!(msg,
-            DepositsMessage::LedgerUpdateResponse(_) |
-            DepositsMessage::Handshake(_) |
-            DepositsMessage::HandshakeResponse(_) |
-            DepositsMessage::Coordination(_) |
-            DepositsMessage::CoordinationResponse(_)
+        let should_skip = matches!(
+            msg,
+            DepositsMessage::LedgerUpdateResponse(_)
+                | DepositsMessage::Handshake(_)
+                | DepositsMessage::HandshakeResponse(_)
+                | DepositsMessage::Coordination(_)
+                | DepositsMessage::CoordinationResponse(_)
         );
         assert!(should_skip, "HandshakeResponse should be in the skip list");
 

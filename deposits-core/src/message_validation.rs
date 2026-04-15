@@ -53,24 +53,37 @@ use std::sync::{Arc, RwLock};
 use crate::ledger::Ledger;
 use crate::messages::LedgerOperation;
 use crate::operation_validation::{
-    validate_deposit_add, validate_deposit_close, validate_fee_change,
-    validate_payment_lock, validate_payment_fulfill, validate_payment_fail,
-    validate_credit_payment, validate_reserves_add, validate_fee_collect,
-    validate_cosign_invoice, validate_ledger_close,
+    validate_cosign_invoice,
+    validate_credit_payment,
+    validate_credit_payment_by_id,
+    validate_deposit_add,
     // DepositId-based validation functions
-    validate_deposit_add_by_id, validate_deposit_close_by_id, validate_fee_change_by_id,
-    validate_payment_lock_by_id, validate_payment_fulfill_by_id, validate_credit_payment_by_id,
-    validate_fee_collect_by_id, validate_deposit_key_rotate, validate_onchain_lock_by_id,
+    validate_deposit_add_by_id,
+    validate_deposit_close,
+    validate_deposit_close_by_id,
+    validate_deposit_key_rotate,
+    validate_fee_change,
+    validate_fee_change_by_id,
+    validate_fee_collect,
+    validate_fee_collect_by_id,
+    validate_ledger_close,
+    validate_onchain_lock_by_id,
+    validate_payment_fail,
+    validate_payment_fulfill,
+    validate_payment_fulfill_by_id,
+    validate_payment_lock,
+    validate_payment_lock_by_id,
+    validate_reserves_add,
+    validate_transfer_complete,
     // Transfer validation functions
-    validate_transfer_lock, validate_transfer_complete,
+    validate_transfer_lock,
     ValidationResult,
 };
 use crate::wire_messages::{
-    DepositOpenMsg, DepositCloseMsg, FeeChangeMsg,
-    SendingLockPaymentMsg, SendingFulfillPaymentMsg, SendingFailPaymentMsg,
-    ReceivingCreditPaymentMsg, ReservesAddOutputMsg, ReservesRemoveOutputMsg,
-    FeeCollectMsg,
-    ReceivingCosignInvoiceMsg, LedgerCloseMsg,
+    DepositCloseMsg, DepositOpenMsg, FeeChangeMsg, FeeCollectMsg, LedgerCloseMsg,
+    ReceivingCosignInvoiceMsg, ReceivingCreditPaymentMsg, ReservesAddOutputMsg,
+    ReservesRemoveOutputMsg, SendingFailPaymentMsg, SendingFulfillPaymentMsg,
+    SendingLockPaymentMsg,
 };
 
 // ============================================================================
@@ -127,19 +140,25 @@ pub trait HandlerContext: ValidationContext {
     fn recovery_manager(&self) -> Option<Arc<Mutex<RecoveryManager>>>;
 
     /// Get claim manager access for recovery claims
-    fn claim_manager(&self) -> Option<Arc<Mutex<ClaimManager>>> { None }
+    fn claim_manager(&self) -> Option<Arc<Mutex<ClaimManager>>> {
+        None
+    }
 
     /// Get quorum manager access (returns reference, not Arc since it's not behind Mutex)
-    fn quorum_manager(&self) -> Option<&QuorumManager> { None }
+    fn quorum_manager(&self) -> Option<&QuorumManager> {
+        None
+    }
 
     /// Get our secret key for signing (optional, for handlers that need it)
-    fn our_secret_key(&self) -> Option<SecretKey> { None }
+    fn our_secret_key(&self) -> Option<SecretKey> {
+        None
+    }
 
     /// Sign arbitrary message content with our node key (Schnorr/BIP-340).
     /// Returns 64-byte signature or None if signing unavailable.
     fn sign_message(&self, content: &[u8]) -> Option<[u8; 64]> {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message, Keypair};
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
 
         let secret_key = self.our_secret_key()?;
         let hash = sha256::Hash::hash(content);
@@ -154,7 +173,7 @@ pub trait HandlerContext: ValidationContext {
     /// Sign a sighash with Schnorr (BIP340) for recovery claims.
     /// Returns 64-byte Schnorr signature or None if signing unavailable.
     fn sign_schnorr(&self, sighash: &[u8; 32]) -> Option<[u8; 64]> {
-        use bitcoin::secp256k1::{Secp256k1, Message, Keypair};
+        use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
 
         let secret_key = self.our_secret_key()?;
         let secp = Secp256k1::new();
@@ -165,7 +184,9 @@ pub trait HandlerContext: ValidationContext {
     }
 
     /// Get the current block height
-    fn current_block_height(&self) -> u32 { 0 }
+    fn current_block_height(&self) -> u32 {
+        0
+    }
 
     /// Sign a ledger update as partner (porcupine dance).
     /// Returns the 64-byte signature or None if signing is not available.
@@ -189,7 +210,13 @@ pub trait HandlerContext: ValidationContext {
     }
 
     /// Sync quorum membership after quorum member change.
-    fn sync_quorum_member(&self, operator: PublicKey, reserves_id: &str, quorum_member: PublicKey, add: bool) {
+    fn sync_quorum_member(
+        &self,
+        operator: PublicKey,
+        reserves_id: &str,
+        quorum_member: PublicKey,
+        add: bool,
+    ) {
         let _ = (operator, reserves_id, quorum_member, add);
         // Default: no-op
     }
@@ -209,7 +236,17 @@ pub trait HandlerContext: ValidationContext {
         new_hash: [u8; 32],
         cosign_signature: Option<[u8; 64]>,
     ) -> Result<(), HandlerError> {
-        let _ = (peer, message_hash, message_type, success, error_message, sequence, prev_hash, new_hash, cosign_signature);
+        let _ = (
+            peer,
+            message_hash,
+            message_type,
+            success,
+            error_message,
+            sequence,
+            prev_hash,
+            new_hash,
+            cosign_signature,
+        );
         Ok(()) // Default: no-op
     }
 
@@ -266,7 +303,10 @@ pub trait HandlerContext: ValidationContext {
 
     /// Verify and store a signed update received from a peer.
     /// Used by third-party auditors to validate and store audit records.
-    fn verify_and_store_signed_update(&self, update: crate::SignedLedgerUpdate) -> Result<(), String> {
+    fn verify_and_store_signed_update(
+        &self,
+        update: crate::SignedLedgerUpdate,
+    ) -> Result<(), String> {
         let _ = update;
         Ok(()) // Default: no-op
     }
@@ -291,13 +331,21 @@ pub trait HandlerContext: ValidationContext {
     }
 
     /// Complete broadcast after ACK received, returns the tracked info if found.
-    fn complete_broadcast(&self, msg_hash: [u8; 32], partner_sig: Option<[u8; 64]>) -> Result<(), String> {
+    fn complete_broadcast(
+        &self,
+        msg_hash: [u8; 32],
+        partner_sig: Option<[u8; 64]>,
+    ) -> Result<(), String> {
         let _ = (msg_hash, partner_sig);
         Ok(()) // Default: no-op
     }
 
     /// Get quorum members for broadcast (excluding the direct partner).
-    fn get_broadcast_recipients(&self, operator: &PublicKey, partner: &PublicKey) -> Vec<PublicKey> {
+    fn get_broadcast_recipients(
+        &self,
+        operator: &PublicKey,
+        partner: &PublicKey,
+    ) -> Vec<PublicKey> {
         let _ = (operator, partner);
         vec![] // Default: none
     }
@@ -475,8 +523,18 @@ pub trait HandlerContext: ValidationContext {
         fee_rate_sat_vbyte: u64,
         threshold: usize,
     ) -> bool {
-        let _ = (vote_round_id, operator, reserves_id, sequence_number, state_hash,
-                 claimed_reserves, reserves_outpoint, destination_script, fee_rate_sat_vbyte, threshold);
+        let _ = (
+            vote_round_id,
+            operator,
+            reserves_id,
+            sequence_number,
+            state_hash,
+            claimed_reserves,
+            reserves_outpoint,
+            destination_script,
+            fee_rate_sat_vbyte,
+            threshold,
+        );
         false // Default: not implemented
     }
 
@@ -517,7 +575,9 @@ pub fn validate_ledger_operation<C: ValidationContext>(
     match operation {
         // LedgerOpen is the first operation - always valid
         LedgerOperation::LedgerOpen { .. } => Ok(()),
-        LedgerOperation::DepositOpen { deposit_id, fees, .. } => {
+        LedgerOperation::DepositOpen {
+            deposit_id, fees, ..
+        } => {
             // Validate deposit doesn't exist and fees are valid
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
                 let ledger = ledger_arc.read().unwrap();
@@ -535,7 +595,11 @@ pub fn validate_ledger_operation<C: ValidationContext>(
                 Err(format!("No channel ledger found for sender {}", sender))
             }
         }
-        LedgerOperation::FeeChange { deposit_id, new_fees, .. } => {
+        LedgerOperation::FeeChange {
+            deposit_id,
+            new_fees,
+            ..
+        } => {
             // Validate deposit exists and new fees are valid
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
                 let ledger = ledger_arc.read().unwrap();
@@ -544,7 +608,11 @@ pub fn validate_ledger_operation<C: ValidationContext>(
                 Err(format!("No channel ledger found for sender {}", sender))
             }
         }
-        LedgerOperation::DepositKeyRotate { deposit_id, new_descriptor, witness } => {
+        LedgerOperation::DepositKeyRotate {
+            deposit_id,
+            new_descriptor,
+            witness,
+        } => {
             // Validate deposit exists and witness satisfies current descriptor
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
                 let ledger = ledger_arc.read().unwrap();
@@ -553,7 +621,13 @@ pub fn validate_ledger_operation<C: ValidationContext>(
                 Err(format!("No channel ledger found for sender {}", sender))
             }
         }
-        LedgerOperation::InvoiceLock { deposit_id, amount, payment_id, witness, .. } => {
+        LedgerOperation::InvoiceLock {
+            deposit_id,
+            amount,
+            payment_id,
+            witness,
+            ..
+        } => {
             // Validate payment lock with descriptor witness
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
                 let ledger = ledger_arc.read().unwrap();
@@ -562,7 +636,14 @@ pub fn validate_ledger_operation<C: ValidationContext>(
                 Err(format!("No channel ledger found for sender {}", sender))
             }
         }
-        LedgerOperation::InvoiceFulfill { deposit_id, amount, payment_id, witness, preimage, .. } => {
+        LedgerOperation::InvoiceFulfill {
+            deposit_id,
+            amount,
+            payment_id,
+            witness,
+            preimage,
+            ..
+        } => {
             // Validate payment fulfill with descriptor witness
             validate_payment_fulfill_by_id(deposit_id, *amount, payment_id, witness, preimage)
         }
@@ -570,32 +651,63 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             // Basic validation for payment fail
             validate_payment_fail(*amount)
         }
-        LedgerOperation::InvoiceCredit { payment_hash, deposit_id, amount, invoice_id, .. } => {
+        LedgerOperation::InvoiceCredit {
+            payment_hash,
+            deposit_id,
+            amount,
+            invoice_id,
+            ..
+        } => {
             // Validate credit payment
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
                 let ledger = ledger_arc.read().unwrap();
-                validate_credit_payment_by_id(&ledger, deposit_id, *amount, payment_hash, invoice_id)
+                validate_credit_payment_by_id(
+                    &ledger,
+                    deposit_id,
+                    *amount,
+                    payment_hash,
+                    invoice_id,
+                )
             } else {
                 Err(format!("No channel ledger found for sender {}", sender))
             }
         }
         // Onchain operations
-        LedgerOperation::OnchainCredit { .. } |
-        LedgerOperation::OnchainFail { .. } |
-        LedgerOperation::OnchainFulfill { .. } => {
+        LedgerOperation::OnchainCredit { .. }
+        | LedgerOperation::OnchainFail { .. }
+        | LedgerOperation::OnchainFulfill { .. } => {
             // These onchain operations are validated in message_handlers
             Ok(())
         }
-        LedgerOperation::OnchainLock { deposit_id, amount, fee_sats, destination_address, withdrawal_id, witness } => {
+        LedgerOperation::OnchainLock {
+            deposit_id,
+            amount,
+            fee_sats,
+            destination_address,
+            withdrawal_id,
+            witness,
+        } => {
             // Validate withdrawal lock with descriptor witness
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
                 let ledger = ledger_arc.read().unwrap();
-                validate_onchain_lock_by_id(&ledger, deposit_id, *amount, *fee_sats, destination_address, withdrawal_id, witness)
+                validate_onchain_lock_by_id(
+                    &ledger,
+                    deposit_id,
+                    *amount,
+                    *fee_sats,
+                    destination_address,
+                    withdrawal_id,
+                    witness,
+                )
             } else {
                 Err(format!("No channel ledger found for sender {}", sender))
             }
         }
-        LedgerOperation::FeeCollect { deposit_id, amount, block_height } => {
+        LedgerOperation::FeeCollect {
+            deposit_id,
+            amount,
+            block_height,
+        } => {
             // Validate fee collection
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
                 let ledger = ledger_arc.read().unwrap();
@@ -611,8 +723,15 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             validate_ledger_close_msg(ctx, &msg, sender)
         }
         LedgerOperation::TransferLock {
-            nonce, source_deposit_id, destination_deposit_id, amount, fee,
-            completion_script, timeout_height, transfer_id, witness
+            nonce,
+            source_deposit_id,
+            destination_deposit_id,
+            amount,
+            fee,
+            completion_script,
+            timeout_height,
+            transfer_id,
+            witness,
         } => {
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
                 let ledger = ledger_arc.read().unwrap();
@@ -632,7 +751,10 @@ pub fn validate_ledger_operation<C: ValidationContext>(
                 Err(format!("No channel ledger found for sender {}", sender))
             }
         }
-        LedgerOperation::TransferComplete { transfer_id, script_witness } => {
+        LedgerOperation::TransferComplete {
+            transfer_id,
+            script_witness,
+        } => {
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
                 let ledger = ledger_arc.read().unwrap();
                 validate_transfer_complete(&ledger, transfer_id, script_witness)
@@ -640,14 +762,21 @@ pub fn validate_ledger_operation<C: ValidationContext>(
                 Err(format!("No channel ledger found for sender {}", sender))
             }
         }
-        LedgerOperation::TransferFail { transfer_id, block_hash: _, .. } => {
+        LedgerOperation::TransferFail {
+            transfer_id,
+            block_hash: _,
+            ..
+        } => {
             // For timeout, we need current block height - use 0 as placeholder
             // Real validation happens in the handler with actual block context
             if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
                 let ledger = ledger_arc.read().unwrap();
                 // Check pending transfer exists (block height check done elsewhere)
                 if !ledger.state.pending_transfers.contains_key(transfer_id) {
-                    return Err(format!("Pending transfer {} does not exist", hex::encode(transfer_id)));
+                    return Err(format!(
+                        "Pending transfer {} does not exist",
+                        hex::encode(transfer_id)
+                    ));
                 }
                 Ok(())
             } else {
@@ -655,17 +784,17 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             }
         }
         // Operations without specific validation (validated in ledger.rs or by construction)
-        LedgerOperation::CollateralAttestation { .. } |
-        LedgerOperation::QuorumAddMember { .. } |
-        LedgerOperation::QuorumRemoveMember { .. } |
-        LedgerOperation::CollateralLock { .. } |
-        LedgerOperation::QuorumJoin { .. } |
-        LedgerOperation::QuorumBegin { .. } |
-        LedgerOperation::DisputeEnter { .. } |
-        LedgerOperation::DisputeArmed { .. } |
-        LedgerOperation::DisputeAcquire { .. } |
-        LedgerOperation::DisputeYield |
-        LedgerOperation::DeliveryEmbed { .. } => Ok(()),
+        LedgerOperation::CollateralAttestation { .. }
+        | LedgerOperation::QuorumAddMember { .. }
+        | LedgerOperation::QuorumRemoveMember { .. }
+        | LedgerOperation::CollateralLock { .. }
+        | LedgerOperation::QuorumJoin { .. }
+        | LedgerOperation::QuorumBegin { .. }
+        | LedgerOperation::DisputeEnter { .. }
+        | LedgerOperation::DisputeArmed { .. }
+        | LedgerOperation::DisputeAcquire { .. }
+        | LedgerOperation::DisputeYield
+        | LedgerOperation::DeliveryEmbed { .. } => Ok(()),
     }
 }
 
@@ -768,12 +897,7 @@ pub fn validate_receiving_credit_payment_msg<C: ValidationContext>(
 
     if let Some(ledger_arc) = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()) {
         let ledger = ledger_arc.read().unwrap();
-        validate_credit_payment(
-            &ledger,
-            msg.deposit_pubkey,
-            msg.amount,
-            &msg.payment_hash,
-        )
+        validate_credit_payment(&ledger, msg.deposit_pubkey, msg.amount, &msg.payment_hash)
     } else {
         Err(format!("No channel ledger found for sender {}", sender))
     }
@@ -791,7 +915,9 @@ pub fn validate_reserves_remove_msg<C: ValidationContext>(
     sender: PublicKey,
 ) -> ValidationResult {
     // First check if we have a ledger for this sender
-    let has_ledger = ctx.get_ledger(&sender, &ctx.our_node_id().to_string()).is_some();
+    let has_ledger = ctx
+        .get_ledger(&sender, &ctx.our_node_id().to_string())
+        .is_some();
 
     if has_ledger {
         // As the partner, use commitment tx reserves amount (not ledger's declared amount)
@@ -862,7 +988,8 @@ pub fn validate_ledger_close_msg<C: ValidationContext>(
         if msg.reserves_id != ctx.our_node_id().to_string() {
             return Err(format!(
                 "LedgerClose reserves_id {} does not match our node {}",
-                msg.reserves_id, ctx.our_node_id()
+                msg.reserves_id,
+                ctx.our_node_id()
             ));
         }
 
@@ -880,10 +1007,10 @@ pub fn validate_ledger_close_msg<C: ValidationContext>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use crate::ledger::LedgerRole;
     use crate::types::Deposit;
+    use bitcoin::secp256k1::{Secp256k1, SecretKey};
+    use std::collections::HashMap;
 
     /// Test implementation of ValidationContext
     struct TestContext {
@@ -900,13 +1027,20 @@ mod tests {
         }
 
         fn add_ledger(&mut self, operator: PublicKey, reserves_id: String, ledger: Ledger) {
-            self.ledgers.insert((operator, reserves_id), Arc::new(RwLock::new(ledger)));
+            self.ledgers
+                .insert((operator, reserves_id), Arc::new(RwLock::new(ledger)));
         }
     }
 
     impl ValidationContext for TestContext {
-        fn get_ledger(&self, operator: &PublicKey, reserves_id: &str) -> Option<Arc<RwLock<Ledger>>> {
-            self.ledgers.get(&(*operator, reserves_id.to_string())).cloned()
+        fn get_ledger(
+            &self,
+            operator: &PublicKey,
+            reserves_id: &str,
+        ) -> Option<Arc<RwLock<Ledger>>> {
+            self.ledgers
+                .get(&(*operator, reserves_id.to_string()))
+                .cloned()
         }
 
         fn our_node_id(&self) -> PublicKey {
@@ -917,7 +1051,9 @@ mod tests {
     fn create_test_pubkey(seed: u8) -> PublicKey {
         let secp = Secp256k1::new();
         let mut bytes = [seed; 32];
-        if seed == 0 { bytes[0] = 1; }
+        if seed == 0 {
+            bytes[0] = 1;
+        }
         let secret = SecretKey::from_slice(&bytes).unwrap();
         PublicKey::from_secret_key(&secp, &secret)
     }
@@ -1053,7 +1189,10 @@ mod tests {
         };
 
         let result = validate_ledger_close_msg(&ctx, &msg, operator);
-        assert!(result.is_err(), "Should reject close with outstanding balance");
+        assert!(
+            result.is_err(),
+            "Should reject close with outstanding balance"
+        );
         assert!(result.unwrap_err().contains("outstanding"));
     }
 
@@ -1077,6 +1216,10 @@ mod tests {
         };
 
         let result = validate_ledger_close_msg(&ctx, &msg, operator);
-        assert!(result.is_ok(), "Valid close of empty ledger should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Valid close of empty ledger should succeed: {:?}",
+            result
+        );
     }
 }

@@ -21,7 +21,9 @@ use bdk_wallet::bitcoin::{
 };
 use bdk_wallet::chain::spk_client::SyncRequest;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet as BdkWallet};
-use deposits_core::{TapscriptReservesBuilder, TaprootReservesOutput, VoterSet, ThresholdConfig, ThresholdTier};
+use deposits_core::{
+    TaprootReservesOutput, TapscriptReservesBuilder, ThresholdConfig, ThresholdTier, VoterSet,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -148,8 +150,8 @@ struct TaprootReservesInfoSerde {
     operator: String,
     quorum_members: Vec<String>,
     quorum_expiry: u32,
-    ledger_hash: String,  // hex encoded
-    address: String,      // Taproot address
+    ledger_hash: String, // hex encoded
+    address: String,     // Taproot address
     confirmed: bool,
 }
 
@@ -275,7 +277,8 @@ impl Wallet {
 
         // Load existing reserves from disk
         let reserves = Self::load_reserves_from_disk(&data_dir)?;
-        let taproot_reserves = Self::load_taproot_reserves_from_disk(&data_dir, operator_pubkey, network)?;
+        let taproot_reserves =
+            Self::load_taproot_reserves_from_disk(&data_dir, operator_pubkey, network)?;
 
         Ok(Self {
             inner: Mutex::new(wallet),
@@ -305,7 +308,8 @@ impl Wallet {
         if trimmed.is_empty() {
             return Ok(0);
         }
-        trimmed.parse()
+        trimmed
+            .parse()
             .map_err(|e| Error::Wallet(format!("Failed to parse address index: {}", e)))
     }
 
@@ -318,7 +322,9 @@ impl Wallet {
     }
 
     /// Load reserves from disk
-    fn load_reserves_from_disk(data_dir: &PathBuf) -> Result<HashMap<OutPoint, ReservesInfo>, Error> {
+    fn load_reserves_from_disk(
+        data_dir: &PathBuf,
+    ) -> Result<HashMap<OutPoint, ReservesInfo>, Error> {
         let reserves_file = data_dir.join("reserves.json");
         if !reserves_file.exists() {
             return Ok(HashMap::new());
@@ -356,10 +362,8 @@ impl Wallet {
     fn save_reserves_to_disk(&self) -> Result<(), Error> {
         // Save legacy P2WSH reserves
         let reserves = self.reserves.read().unwrap();
-        let serde_list: Vec<ReservesInfoSerde> = reserves
-            .values()
-            .map(ReservesInfoSerde::from)
-            .collect();
+        let serde_list: Vec<ReservesInfoSerde> =
+            reserves.values().map(ReservesInfoSerde::from).collect();
 
         let contents = serde_json::to_string_pretty(&serde_list)
             .map_err(|e| Error::Wallet(format!("Failed to serialize reserves: {}", e)))?;
@@ -410,8 +414,8 @@ impl Wallet {
                 .iter()
                 .map(|p| PublicKey::from_str(p))
                 .collect();
-            let quorum_members =
-                quorum_members.map_err(|e| Error::Wallet(format!("Invalid quorum member pubkey: {}", e)))?;
+            let quorum_members = quorum_members
+                .map_err(|e| Error::Wallet(format!("Invalid quorum member pubkey: {}", e)))?;
             let ledger_hash_bytes = hex::decode(&serde_info.ledger_hash)
                 .map_err(|e| Error::Wallet(format!("Invalid ledger hash hex: {}", e)))?;
             let mut ledger_hash = [0u8; 32];
@@ -426,7 +430,8 @@ impl Wallet {
             };
 
             let builder = TapscriptReservesBuilder::new(voter_set, config, network, ledger_hash);
-            let taproot_output = builder.build()
+            let taproot_output = builder
+                .build()
                 .map_err(|e| Error::Wallet(format!("Failed to rebuild Taproot output: {:?}", e)))?;
 
             let info = TaprootReservesInfo {
@@ -478,8 +483,7 @@ impl Wallet {
 
     /// Fetch current block info from esplora and update cache
     pub fn fetch_block_info(&self) -> Result<(u32, [u8; 32]), Error> {
-        let client = EsploraBuilder::new(&self.electrum_url)
-            .build_blocking();
+        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
 
         let height = client
             .get_height()
@@ -570,8 +574,7 @@ impl Wallet {
     /// Lightweight sync: just update block height and hash (2 HTTP requests).
     /// Call this frequently (e.g. every 5s) to keep block info fresh.
     pub fn sync_block_height(&self) -> Result<(), Error> {
-        let client = EsploraBuilder::new(&self.electrum_url)
-            .build_blocking();
+        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
 
         let height = client
             .get_height()
@@ -593,8 +596,7 @@ impl Wallet {
         // First update block info
         self.sync_block_height()?;
 
-        let client = EsploraBuilder::new(&self.electrum_url)
-            .build_blocking();
+        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
         let height = *self.block_height.lock().unwrap();
 
         // Sync all wallet script pubkeys
@@ -647,7 +649,7 @@ impl Wallet {
             .push_int(timeout_height as i64)
             .push_opcode(opcodes::all::OP_CLTV)
             .push_opcode(opcodes::all::OP_DROP)
-            .push_slice(&operator.serialize())
+            .push_slice(operator.serialize())
             .push_opcode(opcodes::all::OP_CHECKSIG);
 
         // OP_ELSE branch: partners can spend via multisig
@@ -656,13 +658,13 @@ impl Wallet {
         if partners.is_empty() {
             // No partners yet - just require operator sig (fallback)
             builder = builder
-                .push_slice(&operator.serialize())
+                .push_slice(operator.serialize())
                 .push_opcode(opcodes::all::OP_CHECKSIG);
         } else {
             // threshold-of-n multisig
             builder = builder.push_int(threshold as i64);
             for partner in partners {
-                builder = builder.push_slice(&partner.serialize());
+                builder = builder.push_slice(partner.serialize());
             }
             builder = builder
                 .push_int(partners.len() as i64)
@@ -790,7 +792,7 @@ impl Wallet {
     ) -> Result<TaprootReservesCreateResult, Error> {
         if quorum_members.len() != member_expiries.len() {
             return Err(Error::Wallet(
-                "Quorum members and expiries must have same length".to_string()
+                "Quorum members and expiries must have same length".to_string(),
             ));
         }
 
@@ -811,20 +813,21 @@ impl Wallet {
         // Use default threshold configuration to ensure custody transfer can rebuild the same address
         // This uses: Tier 0 (majority+operator), Tier 1 (2-of-n quorum override), Tier 2 (emergency)
         let config = if quorum_members.is_empty() {
-            ThresholdConfig::custom(vec![ThresholdTier::new(1, true, 0, "Operator only (no quorum)")])
+            ThresholdConfig::custom(vec![ThresholdTier::new(
+                1,
+                true,
+                0,
+                "Operator only (no quorum)",
+            )])
         } else {
             ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
         };
 
         // Build the Taproot reserves output
-        let builder = TapscriptReservesBuilder::new(
-            voter_set,
-            config,
-            self.network,
-            ledger_hash,
-        );
+        let builder = TapscriptReservesBuilder::new(voter_set, config, self.network, ledger_hash);
 
-        let taproot_output = builder.build()
+        let taproot_output = builder
+            .build()
             .map_err(|e| Error::Wallet(format!("Failed to build Taproot reserves: {:?}", e)))?;
 
         // Get the P2TR script pubkey
@@ -877,7 +880,10 @@ impl Wallet {
         };
 
         drop(wallet); // Release lock before acquiring write lock
-        self.taproot_reserves.write().unwrap().insert(outpoint, info);
+        self.taproot_reserves
+            .write()
+            .unwrap()
+            .insert(outpoint, info);
 
         tracing::info!(
             "Created Taproot reserves at {} with {} quorum members, first expiry at block {}",
@@ -899,17 +905,17 @@ impl Wallet {
 
     /// Get all tracked Taproot reserves
     pub fn get_taproot_reserves(&self) -> Vec<TaprootReservesInfo> {
-        self.taproot_reserves.read().unwrap().values().cloned().collect()
+        self.taproot_reserves
+            .read()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Get the first/primary Taproot reserves outpoint
     pub fn get_taproot_reserves_outpoint(&self) -> Option<OutPoint> {
-        self.taproot_reserves
-            .read()
-            .unwrap()
-            .keys()
-            .next()
-            .copied()
+        self.taproot_reserves.read().unwrap().keys().next().copied()
     }
 
     /// Mark a Taproot reserves output as confirmed
@@ -944,20 +950,23 @@ impl Wallet {
         member_expiries: Vec<u32>,
         ledger_hash: [u8; 32],
     ) -> Result<TaprootReservesCreateResult, Error> {
-        use bitcoin::sighash::{SighashCache, EcdsaSighashType};
         use bitcoin::ecdsa::Signature as EcdsaSignature;
+        use bitcoin::sighash::{EcdsaSighashType, SighashCache};
         use bitcoin::Witness;
 
         if quorum_members.len() != member_expiries.len() {
             return Err(Error::Wallet(
-                "Quorum members and expiries must have same length".to_string()
+                "Quorum members and expiries must have same length".to_string(),
             ));
         }
 
         // Get existing reserves info
         let reserves_info = {
             let reserves = self.reserves.read().unwrap();
-            reserves.values().next().cloned()
+            reserves
+                .values()
+                .next()
+                .cloned()
                 .ok_or_else(|| Error::Wallet("No existing reserves to rotate".to_string()))?
         };
 
@@ -967,27 +976,28 @@ impl Wallet {
 
         // Find the minimum expiry (first quorum member timeout)
         let first_expiry = *member_expiries.iter().min().unwrap_or(&0);
-        let current_height = self.get_block_height()?;
+        let _current_height = self.get_block_height()?;
 
         // Create VoterSet: operator is tie-breaker, quorum members are primary voters
         let voter_set = VoterSet::new(self.operator_pubkey, quorum_members.clone());
 
         // Use default threshold configuration to ensure custody transfer can rebuild the same address
         let config = if quorum_members.is_empty() {
-            ThresholdConfig::custom(vec![ThresholdTier::new(1, true, 0, "Operator only (no quorum)")])
+            ThresholdConfig::custom(vec![ThresholdTier::new(
+                1,
+                true,
+                0,
+                "Operator only (no quorum)",
+            )])
         } else {
             ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
         };
 
         // Build the Taproot reserves output
-        let builder = TapscriptReservesBuilder::new(
-            voter_set,
-            config,
-            self.network,
-            ledger_hash,
-        );
+        let builder = TapscriptReservesBuilder::new(voter_set, config, self.network, ledger_hash);
 
-        let taproot_output = builder.build()
+        let taproot_output = builder
+            .build()
             .map_err(|e| Error::Wallet(format!("Failed to build Taproot reserves: {:?}", e)))?;
 
         let new_script_pubkey = taproot_output.script_pubkey();
@@ -1087,8 +1097,7 @@ impl Wallet {
 
     /// Broadcast a transaction
     pub fn broadcast(&self, tx: &Transaction) -> Result<Txid, Error> {
-        let client = EsploraBuilder::new(&self.electrum_url)
-            .build_blocking();
+        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
 
         client
             .broadcast(tx)
@@ -1102,7 +1111,10 @@ impl Wallet {
     /// Find an unspent UTXO for a given script pubkey
     ///
     /// Returns (OutPoint, amount) if found, None if no unspent output exists.
-    pub fn find_utxo_for_script(&self, script: &bitcoin::ScriptBuf) -> Result<Option<(OutPoint, u64)>, Error> {
+    pub fn find_utxo_for_script(
+        &self,
+        script: &bitcoin::ScriptBuf,
+    ) -> Result<Option<(OutPoint, u64)>, Error> {
         use bitcoin::hashes::{sha256, Hash};
 
         // Compute the scripthash in non-reversed format for esplora API.
@@ -1119,7 +1131,8 @@ impl Wallet {
             .build()
             .map_err(|e| Error::Wallet(format!("Failed to create HTTP client: {}", e)))?;
 
-        let response = http.get(&url)
+        let response = http
+            .get(&url)
             .send()
             .map_err(|e| Error::Wallet(format!("Failed to query esplora: {}", e)))?;
 
@@ -1127,15 +1140,17 @@ impl Wallet {
             return Err(Error::Wallet(format!(
                 "Esplora returned status {}: {}",
                 response.status(),
-                response.text().unwrap_or_else(|_| "unknown error".to_string())
+                response
+                    .text()
+                    .unwrap_or_else(|_| "unknown error".to_string())
             )));
         }
 
-        let txs: Vec<bdk_esplora::esplora_client::Tx> = response.json()
+        let txs: Vec<bdk_esplora::esplora_client::Tx> = response
+            .json()
             .map_err(|e| Error::Wallet(format!("Failed to parse esplora response: {}", e)))?;
 
-        let esplora = EsploraBuilder::new(&self.electrum_url)
-            .build_blocking();
+        let esplora = EsploraBuilder::new(&self.electrum_url).build_blocking();
 
         for tx in &txs {
             for (vout, output) in tx.vout.iter().enumerate() {
@@ -1161,20 +1176,16 @@ impl Wallet {
 
     /// Get the first/primary reserves outpoint
     pub fn get_reserves_outpoint(&self) -> Option<OutPoint> {
-        self.reserves
-            .read()
-            .unwrap()
-            .keys()
-            .next()
-            .copied()
+        self.reserves.read().unwrap().keys().next().copied()
     }
 
     /// Get the reserves address (P2WSH address of the primary reserves)
     pub fn get_reserves_address(&self) -> Option<Address> {
         let reserves = self.reserves.read().unwrap();
-        reserves.values().next().map(|info| {
-            Address::p2wsh(&info.redeem_script, self.network)
-        })
+        reserves
+            .values()
+            .next()
+            .map(|info| Address::p2wsh(&info.redeem_script, self.network))
     }
 
     /// Mark a reserves output as confirmed
@@ -1243,7 +1254,9 @@ impl Wallet {
         withdrawal: &deposits_core::types::OnChainWithdrawal,
     ) -> Result<String, Error> {
         // Parse the destination address
-        let dest_address = withdrawal.destination_address.parse::<Address<_>>()
+        let dest_address = withdrawal
+            .destination_address
+            .parse::<Address<_>>()
             .map_err(|e| Error::Wallet(format!("Invalid destination address: {}", e)))?
             .require_network(self.network)
             .map_err(|e| Error::Wallet(format!("Address network mismatch: {}", e)))?;
@@ -1262,7 +1275,10 @@ impl Wallet {
             let mut builder = wallet.build_tx();
             builder
                 // Main payment output
-                .add_recipient(dest_address.script_pubkey(), Amount::from_sat(withdrawal.amount_sats))
+                .add_recipient(
+                    dest_address.script_pubkey(),
+                    Amount::from_sat(withdrawal.amount_sats),
+                )
                 // OP_RETURN commitment output (0 value)
                 .add_recipient(op_return_script, Amount::ZERO)
                 .fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
@@ -1284,8 +1300,7 @@ impl Wallet {
         drop(wallet);
 
         // Broadcast the transaction
-        let client = EsploraBuilder::new(&self.electrum_url)
-            .build_blocking();
+        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
 
         client
             .broadcast(&tx)
@@ -1332,7 +1347,8 @@ impl Wallet {
             .build()
             .map_err(|e| Error::Wallet(format!("Failed to create HTTP client: {}", e)))?;
 
-        let response = client.get(&url)
+        let response = client
+            .get(&url)
             .send()
             .map_err(|e| Error::Wallet(format!("Failed to query esplora: {}", e)))?;
 
@@ -1340,12 +1356,15 @@ impl Wallet {
             return Err(Error::Wallet(format!(
                 "Esplora returned status {}: {}",
                 response.status(),
-                response.text().unwrap_or_else(|_| "unknown error".to_string())
+                response
+                    .text()
+                    .unwrap_or_else(|_| "unknown error".to_string())
             )));
         }
 
         // Parse the JSON response
-        let txs: Vec<bdk_esplora::esplora_client::Tx> = response.json()
+        let txs: Vec<bdk_esplora::esplora_client::Tx> = response
+            .json()
             .map_err(|e| Error::Wallet(format!("Failed to parse esplora response: {}", e)))?;
 
         // Look for confirmed transactions that have outputs to this address
@@ -1395,21 +1414,30 @@ impl Wallet {
             reserves
                 .get(&request.reserves_outpoint)
                 .cloned()
-                .ok_or_else(|| Error::Wallet(format!(
-                    "Taproot reserves not found: {}",
-                    request.reserves_outpoint
-                )))?
+                .ok_or_else(|| {
+                    Error::Wallet(format!(
+                        "Taproot reserves not found: {}",
+                        request.reserves_outpoint
+                    ))
+                })?
         };
 
         // Find the quorum-override tier: one that doesn't require tie-breaker (operator)
         // and has threshold > 1 (not emergency single-sig). This allows quorum members
         // to spend without the operator's cooperation.
-        let (tier_index, tier) = reserves_info.taproot_output.config.tiers.iter()
+        let (tier_index, tier) = reserves_info
+            .taproot_output
+            .config
+            .tiers
+            .iter()
             .enumerate()
             .find(|(_, t)| !t.requires_tie_breaker && t.threshold > 1)
-            .ok_or_else(|| Error::Wallet(
-                "No quorum-override tier found (requires_tie_breaker=false, threshold>1)".to_string()
-            ))?;
+            .ok_or_else(|| {
+                Error::Wallet(
+                    "No quorum-override tier found (requires_tie_breaker=false, threshold>1)"
+                        .to_string(),
+                )
+            })?;
 
         // Rebuild the leaf script for this tier
         let builder = deposits_core::TapscriptReservesBuilder::new(
@@ -1419,11 +1447,14 @@ impl Wallet {
             reserves_info.ledger_hash,
         );
 
-        let leaf_script = builder.build_threshold_leaf(tier)
+        let leaf_script = builder
+            .build_threshold_leaf(tier)
             .map_err(|e| Error::Wallet(format!("Failed to build spending script: {:?}", e)))?;
 
         // Get the control block
-        let control_block = reserves_info.taproot_output.control_block_for_tier(tier_index)
+        let control_block = reserves_info
+            .taproot_output
+            .control_block_for_tier(tier_index)
             .ok_or_else(|| Error::Wallet("Failed to get control block for tier".to_string()))?;
 
         // Build the spend transaction parameters
@@ -1437,10 +1468,9 @@ impl Wallet {
         let reserves_script_pubkey = reserves_info.taproot_output.script_pubkey();
 
         // Build the unsigned transaction
-        let unsigned_tx = ReservesSpendBuilder::build_spend_transaction(
-            &spend_params,
-            &reserves_script_pubkey,
-        ).map_err(|e| Error::Wallet(format!("Failed to build spend tx: {:?}", e)))?;
+        let unsigned_tx =
+            ReservesSpendBuilder::build_spend_transaction(&spend_params, &reserves_script_pubkey)
+                .map_err(|e| Error::Wallet(format!("Failed to build spend tx: {:?}", e)))?;
 
         // Compute the sighash
         let sighash = ReservesSpendBuilder::compute_sighash(
@@ -1449,10 +1479,13 @@ impl Wallet {
             reserves_info.amount,
             &reserves_script_pubkey,
             &leaf_script,
-        ).map_err(|e| Error::Wallet(format!("Failed to compute sighash: {:?}", e)))?;
+        )
+        .map_err(|e| Error::Wallet(format!("Failed to compute sighash: {:?}", e)))?;
 
         // Get sorted voter pubkeys (signature order must match)
-        let voter_pubkeys: Vec<PublicKey> = reserves_info.taproot_output.voter_set
+        let voter_pubkeys: Vec<PublicKey> = reserves_info
+            .taproot_output
+            .voter_set
             .all_voters()
             .into_iter()
             .collect();
@@ -1473,8 +1506,11 @@ impl Wallet {
     ///
     /// Returns a 64-byte Schnorr signature if our key is in the voter set,
     /// or None if we're not a voter.
-    pub fn sign_custody_transfer_sighash(&self, sighash: &[u8; 32]) -> Result<Option<[u8; 64]>, Error> {
-        use bitcoin::secp256k1::{Secp256k1, Message, Keypair};
+    pub fn sign_custody_transfer_sighash(
+        &self,
+        sighash: &[u8; 32],
+    ) -> Result<Option<[u8; 64]>, Error> {
+        use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
 
         let secp = Secp256k1::new();
         let msg = Message::from_digest(*sighash);
@@ -1508,11 +1544,14 @@ impl Wallet {
 
         // Build the signature array in the correct order (matching voter pubkey order)
         // For CHECKSIGADD, we need signatures in the order of keys in the script
-        let sorted_pubkeys = spend.voter_pubkeys.iter()
+        let sorted_pubkeys = spend
+            .voter_pubkeys
+            .iter()
             .map(|pk| pk.x_only_public_key().0)
             .collect::<Vec<_>>();
 
-        let sorted_keys_with_sigs: Vec<_> = sorted_pubkeys.iter()
+        let sorted_keys_with_sigs: Vec<_> = sorted_pubkeys
+            .iter()
             .map(|xonly| {
                 // Find the full pubkey and its signature
                 for (pk, sig) in signatures.iter() {
@@ -1525,14 +1564,15 @@ impl Wallet {
             .collect();
 
         // Sort by x-only pubkey (same order as script construction)
-        let mut indexed: Vec<_> = sorted_pubkeys.iter().zip(sorted_keys_with_sigs.iter())
+        let mut indexed: Vec<_> = sorted_pubkeys
+            .iter()
+            .zip(sorted_keys_with_sigs.iter())
             .enumerate()
             .collect();
-        indexed.sort_by(|a, b| a.1.0.serialize().cmp(&b.1.0.serialize()));
+        indexed.sort_by(|a, b| a.1 .0.serialize().cmp(&b.1 .0.serialize()));
 
-        let ordered_sigs: Vec<Option<[u8; 64]>> = indexed.iter()
-            .map(|(_, (_, sig))| **sig)
-            .collect();
+        let ordered_sigs: Vec<Option<[u8; 64]>> =
+            indexed.iter().map(|(_, (_, sig))| **sig).collect();
 
         // Create the witness
         let signed_tx = ReservesSpendBuilder::finalize_spend_transaction(
@@ -1544,10 +1584,7 @@ impl Wallet {
 
         let txid = signed_tx.compute_txid();
 
-        Ok(DisputeAcquireResult {
-            signed_tx,
-            txid,
-        })
+        Ok(DisputeAcquireResult { signed_tx, txid })
     }
 
     /// Execute a complete custody transfer (for testing/single-node scenarios)
@@ -1561,7 +1598,8 @@ impl Wallet {
         fee_rate: u64,
     ) -> Result<DisputeAcquireResult, Error> {
         // Get the first Taproot reserves
-        let reserves_outpoint = self.get_taproot_reserves_outpoint()
+        let reserves_outpoint = self
+            .get_taproot_reserves_outpoint()
             .ok_or_else(|| Error::Wallet("No Taproot reserves found".to_string()))?;
 
         let request = DisputeAcquireRequest {
@@ -1574,7 +1612,8 @@ impl Wallet {
         let spend = self.create_custody_transfer_spend(&request)?;
 
         // Sign with our key
-        let our_sig = self.sign_custody_transfer_sighash(&spend.sighash)?
+        let our_sig = self
+            .sign_custody_transfer_sighash(&spend.sighash)?
             .ok_or_else(|| Error::Wallet("Failed to sign".to_string()))?;
 
         // For a proper custody transfer, we need 2 signatures (Tier 2 threshold)

@@ -16,8 +16,8 @@ use deposits_core::validation::LedgerExport;
 use deposits_core::SignedLedgerUpdate;
 
 use crate::nostr::{
-    NostrTransportBuilder, KIND_LEDGER_DISPUTE, KIND_LEDGER_REQUEST, KIND_LEDGER_RESPONSE,
-    KIND_LEDGER_UPDATE, KIND_RECOVERY_AGREE, ledger_tag,
+    ledger_tag, NostrTransportBuilder, KIND_LEDGER_DISPUTE, KIND_LEDGER_REQUEST,
+    KIND_LEDGER_RESPONSE, KIND_LEDGER_UPDATE, KIND_RECOVERY_AGREE,
 };
 use crate::Node;
 
@@ -41,7 +41,9 @@ async fn get_or_create_client(relay_url: &str) -> Result<Client, Box<dyn std::er
     // Create new client
     let keys = Keys::generate();
     let client = Client::new(keys);
-    client.add_relay(relay_url).await
+    client
+        .add_relay(relay_url)
+        .await
         .map_err(|e| format!("Failed to add relay: {}", e))?;
     client.connect().await;
 
@@ -149,7 +151,9 @@ pub async fn nostr_list(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let client = get_or_create_client(relay_url).await?;
 
     // Fetch all ledger update events (high limit to get all history)
-    let filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_UPDATE)).limit(50000);
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .limit(50000);
 
     let events = client
         .fetch_events(vec![filter], None)
@@ -278,13 +282,15 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let client = get_or_create_client(relay_url).await?;
 
     // Fetch all deposits protocol events (high limit to ensure we get everything)
-    let filter = Filter::new().kinds([
-        Kind::Custom(KIND_LEDGER_UPDATE),
-        Kind::Custom(KIND_LEDGER_REQUEST),
-        Kind::Custom(KIND_LEDGER_RESPONSE),
-        Kind::Custom(KIND_LEDGER_DISPUTE),
-        Kind::Custom(KIND_RECOVERY_AGREE),
-    ]).limit(50000);
+    let filter = Filter::new()
+        .kinds([
+            Kind::Custom(KIND_LEDGER_UPDATE),
+            Kind::Custom(KIND_LEDGER_REQUEST),
+            Kind::Custom(KIND_LEDGER_RESPONSE),
+            Kind::Custom(KIND_LEDGER_DISPUTE),
+            Kind::Custom(KIND_RECOVERY_AGREE),
+        ])
+        .limit(50000);
 
     let events = client
         .fetch_events(vec![filter], None)
@@ -368,7 +374,8 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
         let event_id = event.id.to_string();
 
         // Try to extract deposit_pubkey from request params for coloring
-        let wallet_pk = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&event.content) {
+        let wallet_pk = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&event.content)
+        {
             json.get("params")
                 .and_then(|p| p.get("deposit_pubkey"))
                 .and_then(|pk| pk.as_str())
@@ -427,9 +434,7 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
                     .tags
                     .iter()
                     .find_map(|tag| {
-                        if tag.kind()
-                            == TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF)
-                        {
+                        if tag.kind() == TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF) {
                             tag.content().map(|s| s.to_string())
                         } else {
                             None
@@ -529,7 +534,7 @@ pub async fn nostr_events(args: &[String]) -> Result<(), Box<dyn std::error::Err
 pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
-    let mut limit: usize = 10000;  // High default to ensure we get all events including LedgerOpen
+    let mut _limit: usize = 10000; // High default to ensure we get all events including LedgerOpen
     let mut dry_run = false;
     let mut color_by_pk = false;
 
@@ -538,7 +543,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
         if args[i] == "--limit" {
             i += 1;
             if i < args.len() {
-                limit = args[i].parse().unwrap_or(10000);
+                _limit = args[i].parse().unwrap_or(10000);
             }
         } else if args[i] == "--dry-run" {
             dry_run = true;
@@ -574,8 +579,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let client = get_or_create_client(relay_url).await?;
 
     // Build base filter (without limit - pagination handles it)
-    let mut filter = Filter::new()
-        .kind(Kind::Custom(KIND_LEDGER_UPDATE));
+    let mut filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_UPDATE));
 
     if let Some(ref lid) = ledger_id {
         filter = filter.custom_tag(crate::nostr::TAG_LEDGER_ID, [ledger_tag(lid.as_str())]);
@@ -711,7 +715,10 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
         let mut by_prev: std::collections::HashMap<[u8; 32], Vec<&SignedLedgerUpdate>> =
             std::collections::HashMap::new();
         for update in updates {
-            by_prev.entry(update.previous_hash).or_default().push(update);
+            by_prev
+                .entry(update.previous_hash)
+                .or_default()
+                .push(update);
         }
 
         // Check if a chain contains DisputeAcquire
@@ -732,7 +739,9 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
             let mut chain: Vec<&SignedLedgerUpdate> = Vec::new();
             let mut current_hash = [0u8; 32];
             loop {
-                let Some(children) = by_prev.get(&current_hash) else { break; };
+                let Some(children) = by_prev.get(&current_hash) else {
+                    break;
+                };
                 let next = if children.len() == 1 {
                     children[0]
                 } else {
@@ -770,12 +779,17 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
             }
             chain
         };
-        let filtered_updates: Vec<SignedLedgerUpdate> = longest_chain.iter().map(|u| (*u).clone()).collect();
+        let filtered_updates: Vec<SignedLedgerUpdate> =
+            longest_chain.iter().map(|u| (*u).clone()).collect();
 
         if filtered_updates.len() < updates.len() {
             let has_acquire = chain_has_custody_acquire(&longest_chain);
-            println!("  Note: Filtered {} updates to {} (branches detected, has DisputeAcquire: {})",
-                updates.len(), filtered_updates.len(), has_acquire);
+            println!(
+                "  Note: Filtered {} updates to {} (branches detected, has DisputeAcquire: {})",
+                updates.len(),
+                filtered_updates.len(),
+                has_acquire
+            );
 
             // Show final operation type
             if let Some(last) = longest_chain.last() {
@@ -801,7 +815,10 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
             // Build tree structure: map from previous_hash to children
             let mut children: HashMap<[u8; 32], Vec<&SignedLedgerUpdate>> = HashMap::new();
             for update in updates {
-                children.entry(update.previous_hash).or_default().push(update);
+                children
+                    .entry(update.previous_hash)
+                    .or_default()
+                    .push(update);
             }
 
             // Sort children by sequence number, then by operator
@@ -919,7 +936,10 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
             // Inject invalid updates at the branch point so they appear in the tree (with blinking!)
             if let Some(branch_hash) = branch_point_hash {
                 for invalid_update in &invalid_updates {
-                    children.entry(branch_hash).or_default().push(invalid_update);
+                    children
+                        .entry(branch_hash)
+                        .or_default()
+                        .push(invalid_update);
                 }
                 // Re-sort that branch's children
                 if let Some(kids) = children.get_mut(&branch_hash) {
@@ -945,8 +965,11 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                         };
                         // Follow same operator's chain (DisputeEnter can branch but we track by operator)
                         if child.operator_id == operator || is_cd {
-                            let depth =
-                                1 + get_chain_depth(children, child.current_hash, child.operator_id);
+                            let depth = 1 + get_chain_depth(
+                                children,
+                                child.current_hash,
+                                child.operator_id,
+                            );
                             max_depth = max_depth.max(depth);
                         }
                     }
@@ -1006,7 +1029,8 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                     // so invalid updates are visible and surviving chains come last
                     filtered_kids.sort_by_key(|update| {
                         let is_invalid = invalid_hashes.contains(&update.current_hash);
-                        let depth = get_chain_depth(children, update.current_hash, update.operator_id);
+                        let depth =
+                            get_chain_depth(children, update.current_hash, update.operator_id);
                         // Invalid updates get priority 0, others get their depth + 1000
                         if is_invalid {
                             0
@@ -1054,7 +1078,8 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                         // Get color for this update (by wallet pk or operator), add blink if invalid
                         let color_key = get_color_key(update);
                         let color = if color_by_pk {
-                            pk_colors.get(&color_key)
+                            pk_colors
+                                .get(&color_key)
                                 .map(|idx| colors[idx % colors.len()])
                                 .unwrap_or("")
                         } else {
@@ -1092,7 +1117,9 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                         );
 
                         // Check how many children this update has (considering operator continuity)
-                        let child_count = if let Some(child_kids) = children.get(&update.current_hash) {
+                        let child_count = if let Some(child_kids) =
+                            children.get(&update.current_hash)
+                        {
                             child_kids
                                 .iter()
                                 .filter(|c| {
@@ -1216,9 +1243,8 @@ pub async fn nostr_updates(args: &[String]) -> Result<(), Box<dyn std::error::Er
         i += 1;
     }
 
-    let ledger_id = ledger_id.ok_or(
-        "Usage: deposits-node nostr updates <ledger_id> [--dry-run] [--limit N]",
-    )?;
+    let ledger_id = ledger_id
+        .ok_or("Usage: deposits-node nostr updates <ledger_id> [--dry-run] [--limit N]")?;
 
     let config = parse_config(&config_args)?;
 
@@ -1232,21 +1258,19 @@ pub async fn nostr_updates(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let node = Node::new(config.clone()).await?;
 
     // Find the local ledger
-    let (reserves_id, local_ledger) = node.get_ledger_by_ledger_id(&ledger_id).ok_or_else(|| {
-        format!(
-            "Ledger {} not found locally. Use 'nostr import' first.",
-            &ledger_id[..16.min(ledger_id.len())]
-        )
-    })?;
+    let (reserves_id, local_ledger) =
+        node.get_ledger_by_ledger_id(&ledger_id).ok_or_else(|| {
+            format!(
+                "Ledger {} not found locally. Use 'nostr import' first.",
+                &ledger_id[..16.min(ledger_id.len())]
+            )
+        })?;
 
     let local_seq = local_ledger.sequence();
     let local_hash = local_ledger.tail_hash();
 
     println!("Fetching updates for ledger from Nostr...");
-    println!(
-        "  Ledger: {}...",
-        &ledger_id[..16.min(ledger_id.len())]
-    );
+    println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
     println!(
         "  Reserves: {}...",
         &reserves_id[..16.min(reserves_id.len())]
@@ -1430,7 +1454,10 @@ pub async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::E
             && a.current_hash == b.current_hash
     });
 
-    println!("Found {} update(s), validating hash chain...", updates.len());
+    println!(
+        "Found {} update(s), validating hash chain...",
+        updates.len()
+    );
     println!();
 
     // Validate hash chain
@@ -1441,17 +1468,15 @@ pub async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::E
 
     for update in &updates {
         // Check sequence continuity
-        if update.sequence_number != (last_valid_seq + 1) as u64 {
-            if last_valid_seq >= 0 {
-                let err = format!(
-                    "Sequence gap: expected {}, got {}",
-                    last_valid_seq + 1,
-                    update.sequence_number
-                );
-                errors.push(err.clone());
-                println!("  [FAIL] seq={}: {}", update.sequence_number, err);
-                valid = false;
-            }
+        if update.sequence_number != (last_valid_seq + 1) as u64 && last_valid_seq >= 0 {
+            let err = format!(
+                "Sequence gap: expected {}, got {}",
+                last_valid_seq + 1,
+                update.sequence_number
+            );
+            errors.push(err.clone());
+            println!("  [FAIL] seq={}: {}", update.sequence_number, err);
+            valid = false;
         }
 
         // Check previous hash linkage
@@ -1489,10 +1514,7 @@ pub async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::E
         println!("Valid: YES");
         println!("  Updates: {}", updates.len());
         println!("  Sequence: 0..{}", last_valid_seq);
-        println!(
-            "  Tail hash: {}...",
-            &hex::encode(expected_prev_hash)[..16]
-        );
+        println!("  Tail hash: {}...", &hex::encode(expected_prev_hash)[..16]);
     } else {
         println!("Valid: NO");
         println!("  Updates: {}", updates.len());
@@ -1584,7 +1606,10 @@ pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::er
                         if msg_type == 0x0037 {
                             has_custody_acquire = true;
                             if let Ok(op) = LedgerOperation::tlv_decode(&message_bytes) {
-                                if let LedgerOperation::DisputeAcquire { new_custodian: nc, .. } = op {
+                                if let LedgerOperation::DisputeAcquire {
+                                    new_custodian: nc, ..
+                                } = op
+                                {
                                     new_custodian = Some(hex::encode(nc.serialize()));
                                 }
                             }
@@ -1603,7 +1628,10 @@ pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::er
     }
 
     // Found DisputeEnter - check if resolved
-    println!("  Found DisputeEnter from {} quorum member(s):", disputers.len());
+    println!(
+        "  Found DisputeEnter from {} quorum member(s):",
+        disputers.len()
+    );
     for d in &disputers {
         println!("    - {}...", &d[..16.min(d.len())]);
     }
@@ -1620,7 +1648,10 @@ pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::er
         println!();
         println!("DISPUTE_STATUS: DISPUTED");
         println!("  WARNING: Active custody dispute with NO resolution!");
-        println!("  Found {} DisputeEnter(s) but no DisputeAcquire.", disputers.len());
+        println!(
+            "  Found {} DisputeEnter(s) but no DisputeAcquire.",
+            disputers.len()
+        );
         println!();
         println!("  DO NOT DEPOSIT until custody is resolved.");
         println!("  Wait for DisputeAcquire from the winning candidate.");
@@ -1822,8 +1853,7 @@ pub async fn nostr_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
                             // Extract tags
                             for tag in event.tags.iter() {
-                                if tag.kind()
-                                    == TagKind::SingleLetter(crate::nostr::TAG_LEDGER_REQ)
+                                if tag.kind() == TagKind::SingleLetter(crate::nostr::TAG_LEDGER_REQ)
                                 {
                                     if let Some(v) = tag.content() {
                                         println!("  Ledger: {}", v);
@@ -2222,7 +2252,7 @@ pub async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Er
     transport.subscribe_to_response(&event_id).await?;
 
     // Wait for response with timeout, using both subscription and polling
-    let mut transport = transport;
+    let transport = transport;
     let timeout = tokio::time::Duration::from_secs(30);
     let start = std::time::Instant::now();
     let mut last_poll = std::time::Instant::now();
@@ -2345,9 +2375,11 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("  Loaded {} ledger(s) from disk", ledgers.len());
     for (lid, ledger_arc) in ledgers.iter() {
         let ledger = ledger_arc.read().unwrap();
-        println!("    - key={}..., state_id={}...",
+        println!(
+            "    - key={}..., state_id={}...",
             &lid[..16.min(lid.len())],
-            &ledger.ledger_id_hex()[..16.min(ledger.ledger_id_hex().len())]);
+            &ledger.ledger_id_hex()[..16.min(ledger.ledger_id_hex().len())]
+        );
     }
 
     let ledger_id = if let Some(lid) = ledger_id {
@@ -2356,12 +2388,10 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
         // First, try to match by reserves_key (bcrt1q...)
         if lid.starts_with("bcrt1") || lid.starts_with("bc1") || lid.starts_with("tb1") {
-            let found = ledgers
-                .iter()
-                .find(|(_lid, ledger_arc)| {
-                    let ledger = ledger_arc.read().unwrap();
-                    ledger.reserves_key() == lid || ledger.reserves_key().starts_with(&lid)
-                });
+            let found = ledgers.iter().find(|(_lid, ledger_arc)| {
+                let ledger = ledger_arc.read().unwrap();
+                ledger.reserves_key() == lid || ledger.reserves_key().starts_with(&lid)
+            });
             if let Some((_, ledger_arc)) = found {
                 let ledger = ledger_arc.read().unwrap();
                 println!("  Matched by reserves_key");
@@ -2392,7 +2422,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         if ledgers.is_empty() {
             return Err("No ledgers found. Specify a ledger ID or open a ledger first.".into());
         }
-        let (ledger_id, ledger_arc) = ledgers.into_iter().next().unwrap();
+        let (_ledger_id, ledger_arc) = ledgers.into_iter().next().unwrap();
         let ledger = ledger_arc.read().unwrap();
         ledger.ledger_id_hex()
     };
@@ -2436,10 +2466,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("  Relay: {}", relay_url);
     println!("  Ledger: {}", ledger_id);
     if !joined_ledger_ids.is_empty() {
-        println!(
-            "  Also joined {} other ledger(s):",
-            joined_ledger_ids.len()
-        );
+        println!("  Also joined {} other ledger(s):", joined_ledger_ids.len());
         for jid in &joined_ledger_ids {
             println!("    - {}...", &jid[..40.min(jid.len())]);
         }
@@ -2461,7 +2488,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         transport.subscribe_to_disputes(joined_id).await?;
     }
 
-    let mut transport = transport;
+    let transport = transport;
     let mut last_join_scan = std::time::Instant::now();
 
     loop {
@@ -2536,9 +2563,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
     if !message.is_empty() {
         if let Ok(op) = LedgerOperation::tlv_decode(message) {
             let (name, details) = match op {
-                LedgerOperation::LedgerOpen {
-                    reserves_id, ..
-                } => {
+                LedgerOperation::LedgerOpen { reserves_id, .. } => {
                     let id_short = if reserves_id.len() > 20 {
                         format!(
                             "{}..{}",
@@ -2570,46 +2595,42 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         "QuorumBegin",
                         format!(
                             "addr:{}  amt:{} sat  quorum:{}/{}  expiry:{}",
-                            addr_short, amount, quorum_members.len(), quorum_members.len(), quorum_expiry
+                            addr_short,
+                            amount,
+                            quorum_members.len(),
+                            quorum_members.len(),
+                            quorum_expiry
                         ),
                     )
                 }
-                LedgerOperation::DepositOpen { deposit_id, .. } => {
-                    (
-                        "DepositOpen",
-                        format!(
-                            "id:{:02x}{:02x}{:02x}{:02x}",
-                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
-                        ),
-                    )
-                }
-                LedgerOperation::DepositClose { deposit_id, .. } => {
-                    (
-                        "DepositClose",
-                        format!(
-                            "id:{:02x}{:02x}{:02x}{:02x}",
-                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
-                        ),
-                    )
-                }
-                LedgerOperation::FeeChange { deposit_id, .. } => {
-                    (
-                        "FeeChange",
-                        format!(
-                            "id:{:02x}{:02x}{:02x}{:02x}",
-                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
-                        ),
-                    )
-                }
-                LedgerOperation::DepositKeyRotate { deposit_id, .. } => {
-                    (
-                        "DepositKeyRotate",
-                        format!(
-                            "id:{:02x}{:02x}{:02x}{:02x}",
-                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
-                        ),
-                    )
-                }
+                LedgerOperation::DepositOpen { deposit_id, .. } => (
+                    "DepositOpen",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                    ),
+                ),
+                LedgerOperation::DepositClose { deposit_id, .. } => (
+                    "DepositClose",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                    ),
+                ),
+                LedgerOperation::FeeChange { deposit_id, .. } => (
+                    "FeeChange",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                    ),
+                ),
+                LedgerOperation::DepositKeyRotate { deposit_id, .. } => (
+                    "DepositKeyRotate",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                    ),
+                ),
                 LedgerOperation::QuorumAddMember { quorum_member, .. } => {
                     let pk_bytes = quorum_member.serialize();
                     (
@@ -2646,7 +2667,12 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         "QuorumJoin",
                         format!(
                             "op:{:02x}{:02x}{:02x}{:02x}  ledger:{}  expires:{}",
-                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], ledger_short, membership_expires
+                            pk_bytes[0],
+                            pk_bytes[1],
+                            pk_bytes[2],
+                            pk_bytes[3],
+                            ledger_short,
+                            membership_expires
                         ),
                     )
                 }
@@ -2661,7 +2687,12 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         "CollateralAttestation",
                         format!(
                             "from:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
-                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount, lock_until_block
+                            pk_bytes[0],
+                            pk_bytes[1],
+                            pk_bytes[2],
+                            pk_bytes[3],
+                            amount,
+                            lock_until_block
                         ),
                     )
                 }
@@ -2670,15 +2701,18 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     amount,
                     lock_until_block,
                     ..
-                } => {
-                    (
-                        "CollateralLock",
-                        format!(
-                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
-                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount, lock_until_block
-                        ),
-                    )
-                }
+                } => (
+                    "CollateralLock",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
+                        deposit_id[0],
+                        deposit_id[1],
+                        deposit_id[2],
+                        deposit_id[3],
+                        amount,
+                        lock_until_block
+                    ),
+                ),
                 LedgerOperation::OnchainCredit {
                     deposit_id,
                     amount,
@@ -2698,7 +2732,12 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         "OnchainCredit",
                         format!(
                             "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  addr:{}",
-                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount, addr_short
+                            deposit_id[0],
+                            deposit_id[1],
+                            deposit_id[2],
+                            deposit_id[3],
+                            amount,
+                            addr_short
                         ),
                     )
                 }
@@ -2736,64 +2775,54 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     deposit_id,
                     withdrawal_id,
                     ..
-                } => {
-                    (
-                        "OnchainFail",
-                        format!(
-                            "id:{:02x}{:02x}{:02x}{:02x}  wdrl:{}",
-                            deposit_id[0],
-                            deposit_id[1],
-                            deposit_id[2],
-                            deposit_id[3],
-                            hex::encode(&withdrawal_id[..4])
-                        ),
-                    )
-                }
+                } => (
+                    "OnchainFail",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  wdrl:{}",
+                        deposit_id[0],
+                        deposit_id[1],
+                        deposit_id[2],
+                        deposit_id[3],
+                        hex::encode(&withdrawal_id[..4])
+                    ),
+                ),
                 LedgerOperation::OnchainFulfill {
                     deposit_id,
                     withdrawal_id,
                     amount,
                     txid,
                     ..
-                } => {
-                    (
-                        "OnchainFulfill",
-                        format!(
-                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  txn:{}",
-                            deposit_id[0],
-                            deposit_id[1],
-                            deposit_id[2],
-                            deposit_id[3],
-                            amount,
-                            hex::encode(&withdrawal_id[..4]),
-                            hex::encode(&txid[..4])
-                        ),
-                    )
-                }
+                } => (
+                    "OnchainFulfill",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  txn:{}",
+                        deposit_id[0],
+                        deposit_id[1],
+                        deposit_id[2],
+                        deposit_id[3],
+                        amount,
+                        hex::encode(&withdrawal_id[..4]),
+                        hex::encode(&txid[..4])
+                    ),
+                ),
                 LedgerOperation::InvoiceCredit {
-                    deposit_id,
-                    amount,
-                    ..
-                } => {
-                    (
-                        "InvoiceCredit",
-                        format!(
-                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
-                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount
-                        ),
-                    )
-                }
+                    deposit_id, amount, ..
+                } => (
+                    "InvoiceCredit",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount
+                    ),
+                ),
                 LedgerOperation::InvoiceLock {
                     deposit_id, amount, ..
-                } => {
-                    (
-                        "InvoiceLock",
-                        format!(
-                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
-                            deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount
-                        ),
-                    )
-                }
+                } => (
+                    "InvoiceLock",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount
+                    ),
+                ),
                 LedgerOperation::InvoiceFail { .. } => ("InvoiceFail", String::new()),
                 LedgerOperation::InvoiceFulfill { .. } => ("InvoiceFulfill", String::new()),
                 LedgerOperation::FeeCollect { .. } => ("FeeCollect", String::new()),
@@ -2854,11 +2883,21 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     )
                 }
                 LedgerOperation::DisputeYield => ("DisputeYield", String::new()),
-                LedgerOperation::DeliveryEmbed { target_ledger_id, .. } => {
-                    ("DeliveryEmbed", format!("target_ledger={}...", &hex::encode(target_ledger_id)[..16]))
-                }
+                LedgerOperation::DeliveryEmbed {
+                    target_ledger_id, ..
+                } => (
+                    "DeliveryEmbed",
+                    format!("target_ledger={}...", &hex::encode(target_ledger_id)[..16]),
+                ),
                 LedgerOperation::LedgerClose => ("LedgerClose", String::new()),
-                LedgerOperation::TransferLock { source_deposit_id, destination_deposit_id, amount, fee, timeout_height, .. } => (
+                LedgerOperation::TransferLock {
+                    source_deposit_id,
+                    destination_deposit_id,
+                    amount,
+                    fee,
+                    timeout_height,
+                    ..
+                } => (
                     "TransferLock",
                     format!(
                         "{}→{} amt={} fee={} timeout={}",

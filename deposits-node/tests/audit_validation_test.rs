@@ -102,11 +102,11 @@ mod tests {
     fn obligation_limit_rejects_when_total_collateral_is_binding() {
         // total_collateral = 500_000 is the tightest constraint
         let result = check_obligation_limit(
-            1_000_000, // reserves
-            500_000,   // total_collateral (binding)
+            1_000_000,     // reserves
+            500_000,       // total_collateral (binding)
             Some(400_000), // min_member_collateral -> 2x = 800_000
-            400_000,   // current obligations
-            200_000,   // additional (total = 600_000 > 500_000)
+            400_000,       // current obligations
+            200_000,       // additional (total = 600_000 > 500_000)
         );
         assert!(result.is_some(), "should reject: exceeds total_collateral");
         assert!(
@@ -120,11 +120,11 @@ mod tests {
     fn obligation_limit_rejects_when_2x_collateral_is_binding() {
         // 2x min_member_collateral = 600_000 is the tightest constraint
         let result = check_obligation_limit(
-            1_000_000, // reserves
-            900_000,   // total_collateral
+            1_000_000,     // reserves
+            900_000,       // total_collateral
             Some(300_000), // min_member_collateral -> 2x = 600_000 (binding)
-            500_000,   // current obligations
-            200_000,   // additional (total = 700_000 > 600_000)
+            500_000,       // current obligations
+            200_000,       // additional (total = 700_000 > 600_000)
         );
         assert!(result.is_some(), "should reject: exceeds 2x collateral");
         assert!(
@@ -138,11 +138,11 @@ mod tests {
     fn obligation_limit_rejects_when_reserves_is_binding() {
         // reserves = 400_000 is the tightest constraint
         let result = check_obligation_limit(
-            400_000,   // reserves (binding)
-            900_000,   // total_collateral
+            400_000,       // reserves (binding)
+            900_000,       // total_collateral
             Some(400_000), // min_member_collateral -> 2x = 800_000
-            300_000,   // current obligations
-            200_000,   // additional (total = 500_000 > 400_000)
+            300_000,       // current obligations
+            200_000,       // additional (total = 500_000 > 400_000)
         );
         assert!(result.is_some(), "should reject: exceeds reserves");
         assert!(
@@ -156,11 +156,11 @@ mod tests {
     fn obligation_limit_accepts_when_all_limits_satisfied() {
         // total = 400_000, all limits >= 800_000
         let result = check_obligation_limit(
-            1_000_000, // reserves
-            900_000,   // total_collateral
+            1_000_000,     // reserves
+            900_000,       // total_collateral
             Some(400_000), // min_member_collateral -> 2x = 800_000
-            300_000,   // current obligations
-            100_000,   // additional (total = 400_000, under all limits)
+            300_000,       // current obligations
+            100_000,       // additional (total = 400_000, under all limits)
         );
         assert!(result.is_none(), "should accept: under all limits");
     }

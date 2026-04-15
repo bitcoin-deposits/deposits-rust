@@ -13,12 +13,12 @@ use bitcoin::secp256k1::{PublicKey, SecretKey};
 use deposits_core::error::HandlerError;
 use deposits_core::event_store::EventStore;
 use deposits_core::ledger::Ledger;
-use deposits_core::types::{SignedLedgerUpdate, LedgerState};
 use deposits_core::ledger::LedgerRole;
 use deposits_core::message_validation::{HandlerContext, ValidationContext};
-use deposits_core::validation::{LedgerConformanceValidator, LedgerExport, ValidationReport};
 use deposits_core::messages::DepositsMessage;
 use deposits_core::traits::ProtocolEvent;
+use deposits_core::types::{LedgerState, SignedLedgerUpdate};
+use deposits_core::validation::{LedgerConformanceValidator, LedgerExport, ValidationReport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -26,8 +26,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 
-use crate::wallet::Wallet;
 use crate::metrics;
+use crate::wallet::Wallet;
 use crate::Error;
 
 /// Outbound message to be sent via Nostr
@@ -155,8 +155,15 @@ impl DepositsHandler {
             .unwrap_or(50_000);
         let event_store = {
             let mut store = EventStore::with_max_events(max_events);
-            tracing::info!("Event store max capacity: {}", if max_events == 0 { "unlimited".to_string() } else { max_events.to_string() });
-            for (_id, arc) in &ledgers {
+            tracing::info!(
+                "Event store max capacity: {}",
+                if max_events == 0 {
+                    "unlimited".to_string()
+                } else {
+                    max_events.to_string()
+                }
+            );
+            for arc in ledgers.values() {
                 let ledger = arc.read().unwrap();
                 for update in &ledger.history {
                     store.insert(update.clone());
@@ -196,7 +203,11 @@ impl DepositsHandler {
     /// Format: `{ledger_id}_{fork_seq:06}_{operator_prefix_16hex}`
     /// where `fork_seq` is the last valid sequence (divergence point)
     /// and `operator_prefix` is the first 16 hex chars of the fork operator's pubkey.
-    pub fn fork_tracking_key(ledger_id: &str, fork_seq: u64, operator_pubkey: &PublicKey) -> String {
+    pub fn fork_tracking_key(
+        ledger_id: &str,
+        fork_seq: u64,
+        operator_pubkey: &PublicKey,
+    ) -> String {
         format!(
             "{}_{:06}_{}",
             ledger_id,
@@ -248,7 +259,10 @@ impl DepositsHandler {
             reserves_total += reserves_sats; // reserves_total is in sats for display
 
             // Get deposits amount from the ledger state (HashMap<DepositId, Deposit>)
-            let deposits_msats = ledger.state.deposits.values()
+            let deposits_msats = ledger
+                .state
+                .deposits
+                .values()
                 .map(|d| d.balance)
                 .sum::<u64>();
             // Convert to satoshis (divide by 1000)
@@ -309,7 +323,8 @@ impl DepositsHandler {
         // Take a snapshot while holding the mutex (fast - just clones the data)
         let ledgers_snapshot = {
             let ledgers = self.ledgers.lock().unwrap();
-            ledgers.iter()
+            ledgers
+                .iter()
                 .map(|(id, arc)| {
                     let ledger = arc.read().unwrap();
                     (id.clone(), ledger.clone())
@@ -344,10 +359,7 @@ impl DepositsHandler {
     }
 
     /// Implementation of save_ledgers_to_disk (full rewrite / compaction)
-    fn save_ledgers_to_disk_impl(
-        ledgers: &[(String, Ledger)],
-        data_dir: &PathBuf,
-    ) {
+    fn save_ledgers_to_disk_impl(ledgers: &[(String, Ledger)], data_dir: &PathBuf) {
         // Ensure data directory exists
         if !data_dir.exists() {
             if let Err(e) = fs::create_dir_all(data_dir) {
@@ -355,7 +367,7 @@ impl DepositsHandler {
                 return;
             }
         }
-        
+
         // Create ledgers subdirectory for JSONL files
         let ledgers_dir = data_dir.join("ledgers");
         if !ledgers_dir.exists() {
@@ -368,22 +380,21 @@ impl DepositsHandler {
         let mut saved_count = 0;
 
         for (ledger_id, ledger) in ledgers.iter() {
-            
             // Serialize to JSONL: first line is role, second is state, rest are updates
             let mut lines = Vec::with_capacity(2 + ledger.history.len());
-            
+
             // First line: role
             let role_row = LedgerLogRow::Role { role: ledger.role };
             if let Ok(line) = serde_json::to_string(&role_row) {
                 lines.push(line);
             }
-            
+
             // Second line: current state
             let state_row = LedgerLogRow::State(ledger.state.clone());
             if let Ok(line) = serde_json::to_string(&state_row) {
                 lines.push(line);
             }
-            
+
             // Subsequent lines: each update
             for update in &ledger.history {
                 let update_row = LedgerLogRow::Update(update.clone());
@@ -391,7 +402,7 @@ impl DepositsHandler {
                     lines.push(line);
                 }
             }
-            
+
             // Write to file
             let ledger_file = ledgers_dir.join(format!("{}.jsonl", ledger_id));
             let contents = lines.join("\n");
@@ -399,7 +410,7 @@ impl DepositsHandler {
                 tracing::error!("Failed to write ledger file {}: {}", ledger_id, e);
                 continue;
             }
-            
+
             saved_count += 1;
         }
 
@@ -412,12 +423,12 @@ impl DepositsHandler {
     fn load_ledgers_from_disk(data_dir: &PathBuf) -> HashMap<String, Arc<RwLock<Ledger>>> {
         // First, check for new JSONL format directory
         let ledgers_dir = data_dir.join("ledgers");
-        
+
         if ledgers_dir.exists() && ledgers_dir.is_dir() {
             // Load from new JSONL format
             return Self::load_ledgers_from_jsonl(&ledgers_dir);
         }
-        
+
         // Fall back to legacy JSON format
         let ledgers_file = data_dir.join("ledgers.json");
         if !ledgers_file.exists() {
@@ -449,10 +460,12 @@ impl DepositsHandler {
         ledgers
     }
 
-    /// Load ledgers from new append-only JSONL format
-    /// File: {ledger_id}.jsonl where:
-    /// - First line: LedgerState (type: "State")
-    /// - Subsequent lines: SignedLedgerUpdate (type: "Update")
+    /// Load ledgers from new append-only JSONL format.
+    ///
+    /// File: `{ledger_id}.jsonl` where:
+    ///  - First line: LedgerState (type: "State")
+    ///  - Subsequent lines: SignedLedgerUpdate (type: "Update")
+    ///
     /// Parse a single JSONL file into a Ledger.
     fn load_single_ledger_from_jsonl(ledger_id: &str, path: &std::path::Path) -> Option<Ledger> {
         let contents = match fs::read_to_string(path) {
@@ -492,7 +505,10 @@ impl DepositsHandler {
         }
 
         let ledger_role = role.unwrap_or_else(|| {
-            tracing::warn!("Ledger {} missing role in JSONL, defaulting to Partner", ledger_id);
+            tracing::warn!(
+                "Ledger {} missing role in JSONL, defaulting to Partner",
+                ledger_id
+            );
             LedgerRole::Partner
         });
 
@@ -508,7 +524,7 @@ impl DepositsHandler {
         let state_sequence = ledger_state.sequence;
 
         if let Some(last_update) = updates.last() {
-            ledger_state.sequence = last_update.sequence_number as u64;
+            ledger_state.sequence = last_update.sequence_number;
             // Use chain_hash (SHA256(current_hash || operator_signature)) so the next
             // append_operation sets prev_hash = chain_hash, matching the protocol spec.
             ledger_state.chain_tip_hash = last_update.chain_hash();
@@ -523,15 +539,19 @@ impl DepositsHandler {
 
         // Replay operations that came after the State line.
         use deposits_core::tlv::TlvDecode;
-        let ops_to_replay: Vec<_> = ledger.history.iter()
-            .filter(|u| (u.sequence_number as u64) > state_sequence)
+        let ops_to_replay: Vec<_> = ledger
+            .history
+            .iter()
+            .filter(|u| u.sequence_number > state_sequence)
             .filter_map(|u| {
                 match deposits_core::messages::LedgerOperation::tlv_decode(&u.message) {
                     Ok(op) => Some((u.sequence_number, op)),
                     Err(e) => {
                         tracing::warn!(
                             "Ledger {} seq {}: failed to decode operation for replay: {}",
-                            ledger_id, u.sequence_number, e
+                            ledger_id,
+                            u.sequence_number,
+                            e
                         );
                         None
                     }
@@ -544,7 +564,9 @@ impl DepositsHandler {
             if let Err(e) = ledger.apply_state_changes(operation) {
                 tracing::warn!(
                     "Ledger {} seq {}: failed to replay state change: {}",
-                    ledger_id, seq, e
+                    ledger_id,
+                    seq,
+                    e
                 );
             } else {
                 replayed += 1;
@@ -554,10 +576,16 @@ impl DepositsHandler {
         if replayed > 0 {
             tracing::debug!(
                 "Loaded ledger {} with {} updates ({} state changes replayed)",
-                ledger_id, ledger.history.len(), replayed
+                ledger_id,
+                ledger.history.len(),
+                replayed
             );
         } else {
-            tracing::debug!("Loaded ledger {} with {} updates", ledger_id, ledger.history.len());
+            tracing::debug!(
+                "Loaded ledger {} with {} updates",
+                ledger_id,
+                ledger.history.len()
+            );
         }
 
         Some(ledger)
@@ -592,7 +620,11 @@ impl DepositsHandler {
 
         let total_elapsed = t0.elapsed();
         if total_elapsed.as_millis() > 5 {
-            tracing::info!("[PROFILE] load_ledgers_from_jsonl: {} ledgers in {:?}", ledgers.len(), total_elapsed);
+            tracing::info!(
+                "[PROFILE] load_ledgers_from_jsonl: {} ledgers in {:?}",
+                ledgers.len(),
+                total_elapsed
+            );
         } else {
             tracing::debug!("Loaded {} ledgers from JSONL", ledgers.len());
         }
@@ -633,11 +665,12 @@ impl DepositsHandler {
                         Some(s) => s.to_string(),
                         None => continue,
                     };
-                    let current_mtime = path.metadata().ok()
-                        .and_then(|m| m.modified().ok());
+                    let current_mtime = path.metadata().ok().and_then(|m| m.modified().ok());
                     match (modtimes.get(&stem), current_mtime) {
                         (Some(prev), Some(curr)) if *prev == curr => {}
-                        _ => { changed.push((stem, path)); }
+                        _ => {
+                            changed.push((stem, path));
+                        }
                     }
                 }
             }
@@ -653,7 +686,8 @@ impl DepositsHandler {
         // may be truncated (history.len()=2000 but actual tip=50000).
         let known: std::collections::HashMap<String, u64> = {
             let ledgers = self.ledgers.lock().unwrap();
-            changed_files.iter()
+            changed_files
+                .iter()
                 .filter_map(|(stem, _)| {
                     ledgers.get(stem).map(|arc| {
                         let l = arc.read().unwrap();
@@ -730,7 +764,9 @@ impl DepositsHandler {
             if inserted > 0 {
                 tracing::debug!(
                     "Event store: +{} events from disk (total {}, {} unknown)",
-                    inserted, store.len(), store.unknown_count(),
+                    inserted,
+                    store.len(),
+                    store.unknown_count(),
                 );
             }
         }
@@ -747,9 +783,18 @@ impl DepositsHandler {
 
         let elapsed = t0.elapsed();
         if changes > 0 {
-            tracing::debug!("[PROFILE] discover_new_ledgers: {} changes in {:?} ({} files re-read)", changes, elapsed, changed_files.len());
+            tracing::debug!(
+                "[PROFILE] discover_new_ledgers: {} changes in {:?} ({} files re-read)",
+                changes,
+                elapsed,
+                changed_files.len()
+            );
         } else if elapsed.as_millis() > 10 {
-            tracing::debug!("[PROFILE] discover_new_ledgers: no changes from {} files in {:?}", changed_files.len(), elapsed);
+            tracing::debug!(
+                "[PROFILE] discover_new_ledgers: no changes from {} files in {:?}",
+                changed_files.len(),
+                elapsed
+            );
         }
 
         changes
@@ -821,7 +866,8 @@ impl DepositsHandler {
             let id_bytes = LedgerState::compute_ledger_id(&operator, &combined, genesis_block);
             hex::encode(id_bytes)
         } else {
-            let id_bytes = LedgerState::compute_ledger_id(&operator, &reserves_address, genesis_block);
+            let id_bytes =
+                LedgerState::compute_ledger_id(&operator, &reserves_address, genesis_block);
             hex::encode(id_bytes)
         };
 
@@ -849,8 +895,12 @@ impl DepositsHandler {
         if is_new && operator == self.our_node_id {
             // Get reserves balance in msats — use specific amount if provided (already msats),
             // else convert total wallet balance from sats to msats
-            let reserves_balance = specific_reserves_balance
-                .unwrap_or_else(|| self.wallet.get_reserves_balance().unwrap_or(0).saturating_mul(1000));
+            let reserves_balance = specific_reserves_balance.unwrap_or_else(|| {
+                self.wallet
+                    .get_reserves_balance()
+                    .unwrap_or(0)
+                    .saturating_mul(1000)
+            });
 
             // Add LedgerOpen operation
             {
@@ -861,9 +911,7 @@ impl DepositsHandler {
                     genesis_block,
                     reserves_amount: reserves_balance,
                 };
-                if let Err(e) = ledger_guard.append_operation(
-                    operation,
-                ) {
+                if let Err(e) = ledger_guard.append_operation(operation) {
                     tracing::error!("Failed to append LedgerOpen: {:?}", e);
                 } else {
                     self.sign_ledger_update(&mut ledger_guard);
@@ -890,7 +938,10 @@ impl DepositsHandler {
     ///
     /// Returns None if the file doesn't exist or has no Update lines.
     pub fn read_disk_chain_tip(&self, ledger_id: &str) -> Option<(u64, [u8; 32])> {
-        let ledger_file = self.data_dir.join("ledgers").join(format!("{}.jsonl", ledger_id));
+        let ledger_file = self
+            .data_dir
+            .join("ledgers")
+            .join(format!("{}.jsonl", ledger_id));
         let contents = fs::read_to_string(&ledger_file).ok()?;
 
         let mut best_seq: Option<u64> = None;
@@ -940,13 +991,19 @@ impl DepositsHandler {
 
         // Read counts snapshot, then release lock immediately to avoid holding
         // it across I/O (which deadlocks with background compact_ledger).
-        let previously_saved = self.persisted_update_counts.lock().unwrap()
-            .get(ledger_id).copied().unwrap_or(0);
+        let previously_saved = self
+            .persisted_update_counts
+            .lock()
+            .unwrap()
+            .get(ledger_id)
+            .copied()
+            .unwrap_or(0);
 
         // Get Arc clone
         let ledger_arc = {
             let ledgers = self.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
+            ledgers
+                .get(ledger_id)
                 .ok_or_else(|| format!("Ledger not found: {}", ledger_id))?
                 .clone()
         };
@@ -956,20 +1013,33 @@ impl DepositsHandler {
             let ledger = ledger_arc.read().unwrap();
             let history_len = ledger.history.len();
             Self::save_ledger_to_disk_streaming(
-                ledger_id, &ledger, &self.data_dir, Some(Self::HISTORY_RETAIN),
+                ledger_id,
+                &ledger,
+                &self.data_dir,
+                Some(Self::HISTORY_RETAIN),
             );
             drop(ledger);
 
             let final_len = Self::truncate_history(&ledger_arc, Self::HISTORY_RETAIN);
 
             // Re-lock to update counts after I/O
-            self.persisted_update_counts.lock().unwrap().insert(ledger_id.to_string(), final_len);
-            self.appends_since_compaction.lock().unwrap().insert(ledger_id.to_string(), 0);
+            self.persisted_update_counts
+                .lock()
+                .unwrap()
+                .insert(ledger_id.to_string(), final_len);
+            self.appends_since_compaction
+                .lock()
+                .unwrap()
+                .insert(ledger_id.to_string(), 0);
 
             let total_elapsed = t0.elapsed();
             if total_elapsed.as_millis() > 1 {
-                tracing::info!("[PROFILE] persist_ledger_to_disk: {}/{} entries, total={:?}, mode=full_write",
-                    final_len.min(Self::HISTORY_RETAIN), history_len, total_elapsed);
+                tracing::info!(
+                    "[PROFILE] persist_ledger_to_disk: {}/{} entries, total={:?}, mode=full_write",
+                    final_len.min(Self::HISTORY_RETAIN),
+                    history_len,
+                    total_elapsed
+                );
             }
         } else {
             // Check if there are new entries to persist
@@ -980,11 +1050,20 @@ impl DepositsHandler {
             };
 
             if new_count > 0 {
-                let appends = self.appends_since_compaction.lock().unwrap()
-                    .get(ledger_id).copied().unwrap_or(0);
+                let appends = self
+                    .appends_since_compaction
+                    .lock()
+                    .unwrap()
+                    .get(ledger_id)
+                    .copied()
+                    .unwrap_or(0);
                 let ledger = ledger_arc.read().unwrap();
                 let write_state = appends % 100 == 0;
-                let state_clone = if write_state { Some(ledger.state.clone()) } else { None };
+                let state_clone = if write_state {
+                    Some(ledger.state.clone())
+                } else {
+                    None
+                };
                 let new_updates: Vec<_> = ledger.history[previously_saved..].to_vec();
                 drop(ledger);
 
@@ -996,9 +1075,16 @@ impl DepositsHandler {
                 );
 
                 // Re-lock to update counts after I/O
-                self.persisted_update_counts.lock().unwrap().insert(ledger_id.to_string(), history_len);
-                *self.appends_since_compaction.lock().unwrap()
-                    .entry(ledger_id.to_string()).or_insert(0) += new_count;
+                self.persisted_update_counts
+                    .lock()
+                    .unwrap()
+                    .insert(ledger_id.to_string(), history_len);
+                *self
+                    .appends_since_compaction
+                    .lock()
+                    .unwrap()
+                    .entry(ledger_id.to_string())
+                    .or_insert(0) += new_count;
 
                 let total_elapsed = t0.elapsed();
                 if total_elapsed.as_millis() > 1 {
@@ -1010,9 +1096,15 @@ impl DepositsHandler {
         }
 
         // Update modtime so discover_new_ledgers() doesn't re-read our own writes
-        let ledger_file = self.data_dir.join("ledgers").join(format!("{}.jsonl", ledger_id));
+        let ledger_file = self
+            .data_dir
+            .join("ledgers")
+            .join(format!("{}.jsonl", ledger_id));
         if let Ok(mtime) = ledger_file.metadata().and_then(|m| m.modified()) {
-            self.last_file_modtimes.lock().unwrap().insert(ledger_id.to_string(), mtime);
+            self.last_file_modtimes
+                .lock()
+                .unwrap()
+                .insert(ledger_id.to_string(), mtime);
         }
 
         crate::metrics::record_persist_ledger_duration(t0.elapsed());
@@ -1022,7 +1114,8 @@ impl DepositsHandler {
     /// Returns ledger IDs that need compaction (>= 1000 appends since last compaction).
     pub fn ledgers_needing_compaction(&self) -> Vec<String> {
         let compaction = self.appends_since_compaction.lock().unwrap();
-        compaction.iter()
+        compaction
+            .iter()
             .filter(|(_, &count)| count >= 1000)
             .map(|(id, _)| id.clone())
             .collect()
@@ -1034,7 +1127,8 @@ impl DepositsHandler {
 
         let ledger_arc = {
             let ledgers = self.ledgers.lock().unwrap();
-            ledgers.get(ledger_id)
+            ledgers
+                .get(ledger_id)
                 .ok_or_else(|| format!("Ledger not found: {}", ledger_id))?
                 .clone()
         };
@@ -1042,25 +1136,44 @@ impl DepositsHandler {
         let history_len = {
             let ledger = ledger_arc.read().unwrap();
             Self::save_ledger_to_disk_streaming(
-                ledger_id, &ledger, &self.data_dir, Some(Self::HISTORY_RETAIN),
+                ledger_id,
+                &ledger,
+                &self.data_dir,
+                Some(Self::HISTORY_RETAIN),
             );
             ledger.history.len()
         };
 
         let final_len = Self::truncate_history(&ledger_arc, Self::HISTORY_RETAIN);
 
-        self.persisted_update_counts.lock().unwrap().insert(ledger_id.to_string(), final_len);
-        self.appends_since_compaction.lock().unwrap().insert(ledger_id.to_string(), 0);
+        self.persisted_update_counts
+            .lock()
+            .unwrap()
+            .insert(ledger_id.to_string(), final_len);
+        self.appends_since_compaction
+            .lock()
+            .unwrap()
+            .insert(ledger_id.to_string(), 0);
         crate::metrics::record_ledger_compaction();
 
         // Update modtime
-        let ledger_file = self.data_dir.join("ledgers").join(format!("{}.jsonl", ledger_id));
+        let ledger_file = self
+            .data_dir
+            .join("ledgers")
+            .join(format!("{}.jsonl", ledger_id));
         if let Ok(mtime) = ledger_file.metadata().and_then(|m| m.modified()) {
-            self.last_file_modtimes.lock().unwrap().insert(ledger_id.to_string(), mtime);
+            self.last_file_modtimes
+                .lock()
+                .unwrap()
+                .insert(ledger_id.to_string(), mtime);
         }
 
-        tracing::info!("[PROFILE] compact_ledger: {}/{} entries, total={:?}",
-            final_len.min(Self::HISTORY_RETAIN), history_len, t0.elapsed());
+        tracing::info!(
+            "[PROFILE] compact_ledger: {}/{} entries, total={:?}",
+            final_len.min(Self::HISTORY_RETAIN),
+            history_len,
+            t0.elapsed()
+        );
 
         Ok(())
     }
@@ -1155,16 +1268,17 @@ impl DepositsHandler {
 
         let total_elapsed = t0.elapsed();
         if total_elapsed.as_millis() > 1 {
-            tracing::info!("[PROFILE] save_ledger_to_disk_streaming: {}/{} entries, total={:?}",
-                written, history_len, total_elapsed);
+            tracing::info!(
+                "[PROFILE] save_ledger_to_disk_streaming: {}/{} entries, total={:?}",
+                written,
+                history_len,
+                total_elapsed
+            );
         }
     }
 
     // Keep old signature for callers that pass owned data
-    fn save_single_ledger_to_disk(
-        (ledger_id, ledger): (String, Ledger),
-        data_dir: &PathBuf,
-    ) {
+    fn save_single_ledger_to_disk((ledger_id, ledger): (String, Ledger), data_dir: &PathBuf) {
         Self::save_ledger_to_disk_streaming(&ledger_id, &ledger, data_dir, None);
     }
 
@@ -1221,8 +1335,8 @@ impl DepositsHandler {
 
     /// Sign the last update in a ledger with our operator key
     fn sign_ledger_update(&self, ledger: &mut Ledger) {
+        use bitcoin::hashes::{sha256, Hash};
         use bitcoin::secp256k1::Message;
-        use bitcoin::hashes::{Hash, sha256};
 
         if let Some(update) = ledger.history.last_mut() {
             // Compute signature over update content
@@ -1256,7 +1370,10 @@ impl DepositsHandler {
     /// from the export instead of failing. This is essential for custody recovery
     /// scenarios where a quorum member already has the ledger but needs the
     /// DisputeAcquire updates to become the new operator.
-    pub fn import_ledger(&self, export: LedgerExport) -> Result<(ValidationReport, Arc<RwLock<Ledger>>), String> {
+    pub fn import_ledger(
+        &self,
+        export: LedgerExport,
+    ) -> Result<(ValidationReport, Arc<RwLock<Ledger>>), String> {
         // Check if this is our own ledger (not allowed to import our own)
         if export.operator_id == self.our_node_id {
             return Err("Cannot import your own ledger. Use 'ledger open' instead.".to_string());
@@ -1299,7 +1416,9 @@ impl DepositsHandler {
             };
 
             // Find updates that are newer than our local copy
-            let new_updates: Vec<_> = export.updates.iter()
+            let new_updates: Vec<_> = export
+                .updates
+                .iter()
                 .filter(|u| u.sequence_number > local_seq)
                 .cloned()
                 .collect();
@@ -1432,7 +1551,10 @@ impl ValidationContext for DepositsHandler {
     fn get_commitment_tx_reserves_amount(&self, _operator: PublicKey) -> Option<u64> {
         // In BDK implementation, reserves are on-chain UTXOs, not commitment tx outputs
         // Return the wallet balance for reserves, converted from sats to msats
-        self.wallet.get_reserves_balance().ok().map(|sats| sats.saturating_mul(1000))
+        self.wallet
+            .get_reserves_balance()
+            .ok()
+            .map(|sats| sats.saturating_mul(1000))
     }
 }
 
@@ -1453,9 +1575,7 @@ impl HandlerContext for DepositsHandler {
         events.push(event);
     }
 
-    fn recovery_manager(
-        &self,
-    ) -> Option<Arc<Mutex<deposits_core::recovery::RecoveryManager>>> {
+    fn recovery_manager(&self) -> Option<Arc<Mutex<deposits_core::recovery::RecoveryManager>>> {
         // TODO: Implement recovery manager
         None
     }
@@ -1472,7 +1592,8 @@ impl HandlerContext for DepositsHandler {
         // Find the ledger_id for this operator/reserves_id pair
         let ledger_id = {
             let ledgers = self.ledgers.lock().unwrap();
-            ledgers.iter()
+            ledgers
+                .iter()
                 .find(|(_, arc)| {
                     let l = arc.read().unwrap();
                     l.operator_key() == *operator && l.reserves_key() == reserves_id
@@ -1483,7 +1604,7 @@ impl HandlerContext for DepositsHandler {
         if let Some(id) = ledger_id {
             self.persist_ledger_to_disk(&id)
         } else {
-            Err(format!("Ledger not found for operator/reserves_id"))
+            Err("Ledger not found for operator/reserves_id".to_string())
         }
     }
 }
@@ -1534,12 +1655,8 @@ mod tests {
 
         // Create handler and ledger
         {
-            let (handler, _rx) = DepositsHandler::new(
-                test_secret_key(),
-                wallet.clone(),
-                data_dir.clone(),
-                false,
-            );
+            let (handler, _rx) =
+                DepositsHandler::new(test_secret_key(), wallet.clone(), data_dir.clone(), false);
 
             // Create a ledger (as partner, so we control when it's created)
             let other_pk = {
@@ -1557,12 +1674,7 @@ mod tests {
 
         // Reload and verify
         {
-            let (handler, _rx) = DepositsHandler::new(
-                test_secret_key(),
-                wallet,
-                data_dir,
-                false,
-            );
+            let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir, false);
 
             let ledgers = handler.ledgers.lock().unwrap();
             assert_eq!(ledgers.len(), 1);

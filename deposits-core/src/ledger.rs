@@ -10,13 +10,13 @@
 //! The ledger maintains a hash chain of all state transitions, ensuring
 //! both parties have cryptographic proof of the ledger history.
 
-use std::collections::HashMap;
 use bitcoin::secp256k1::PublicKey;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 use crate::error::{DepositsError, DepositsResult};
 use crate::messages::LedgerOperation;
-use crate::types::{Deposit, DisputeState, PendingInvoice, QuorumState, LedgerState, SignedLedgerUpdate};
+use crate::types::{DisputeState, LedgerState, PendingInvoice, QuorumState, SignedLedgerUpdate};
 
 /// An update that has been validated and serialized but NOT applied to the ledger.
 /// The ledger state is unchanged until `commit_staged` is called.
@@ -74,11 +74,7 @@ pub struct LedgerUpdate {
 
 impl LedgerUpdate {
     /// Create a new ledger update.
-    pub fn new(
-        sequence_number: u64,
-        operation: LedgerOperation,
-        previous_hash: [u8; 32],
-    ) -> Self {
+    pub fn new(sequence_number: u64, operation: LedgerOperation, previous_hash: [u8; 32]) -> Self {
         let mut update = Self {
             sequence_number,
             operation,
@@ -92,10 +88,10 @@ impl LedgerUpdate {
     /// Compute the hash of this update.
     pub fn compute_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update(&self.sequence_number.to_le_bytes());
-        hasher.update(&self.previous_hash);
+        hasher.update(self.sequence_number.to_le_bytes());
+        hasher.update(self.previous_hash);
         // Hash the operation discriminant and key fields
-        hasher.update(&[self.operation.discriminant()]);
+        hasher.update([self.operation.discriminant()]);
 
         let result = hasher.finalize();
         let mut hash = [0u8; 32];
@@ -177,11 +173,7 @@ impl Ledger {
         quorum_members: Vec<crate::types::QuorumMember>,
         genesis_block: u32,
     ) -> Self {
-        let mut state = LedgerState::new(
-            operator_key,
-            reserves_key,
-            genesis_block,
-        );
+        let mut state = LedgerState::new(operator_key, reserves_key, genesis_block);
         state.quorum_members = quorum_members;
         Self {
             state,
@@ -261,7 +253,9 @@ impl Ledger {
         }
 
         // Out of order (seq > expected_seq) - queue for later
-        self.protocol.pending_updates.insert(update.sequence_number, update);
+        self.protocol
+            .pending_updates
+            .insert(update.sequence_number, update);
         0
     }
 
@@ -310,21 +304,26 @@ impl Ledger {
         let signer = &update.operator_id;
 
         // Decode the operation to check if it's DisputeEnter
-        let operation = LedgerOperation::tlv_decode(&update.message)
-            .map_err(|e| DepositsError::InvalidMessage { reason: format!("Failed to decode operation: {}", e) })?;
+        let operation = LedgerOperation::tlv_decode(&update.message).map_err(|e| {
+            DepositsError::InvalidMessage {
+                reason: format!("Failed to decode operation: {}", e),
+            }
+        })?;
 
         // DisputeEnter exception: can be signed by any quorum member at fork point
         if matches!(operation, LedgerOperation::DisputeEnter { .. }) {
             // For the first DisputeEnter (entering disputed state from normal),
             // the signer must be in the current quorum
             if self.state.dispute_state == DisputeState::Normal {
-                if !self.state.quorum_members.iter().any(|m| m.pubkey == *signer) {
+                if !self
+                    .state
+                    .quorum_members
+                    .iter()
+                    .any(|m| m.pubkey == *signer)
+                {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "custody_dispute_unauthorized".to_string(),
-                        details: format!(
-                            "DisputeEnter signer {} is not a quorum member",
-                            signer
-                        ),
+                        details: format!("DisputeEnter signer {} is not a quorum member", signer),
                     });
                 }
                 // Valid - quorum member can open dispute
@@ -362,7 +361,8 @@ impl Ledger {
         partner_pubkey: Option<&PublicKey>,
     ) -> DepositsResult<()> {
         // 1. Verify signatures
-        update.verify_signatures(partner_pubkey)
+        update
+            .verify_signatures(partner_pubkey)
             .map_err(|e| DepositsError::ProtocolViolation {
                 violation_type: "invalid_signature".to_string(),
                 details: e,
@@ -379,7 +379,9 @@ impl Ledger {
             let next_seq = self.next_sequence();
 
             if update.sequence_number == next_seq {
-                let tip_hash = self.history.last()
+                let tip_hash = self
+                    .history
+                    .last()
                     .map(|u| u.current_hash)
                     .unwrap_or([0u8; 32]);
                 if update.previous_hash != tip_hash {
@@ -398,8 +400,11 @@ impl Ledger {
 
         // 4. Decode and validate operation against dispute state
         use crate::tlv::TlvDecode;
-        let operation = LedgerOperation::tlv_decode(&update.message)
-            .map_err(|e| DepositsError::InvalidMessage { reason: format!("Failed to decode operation: {}", e) })?;
+        let operation = LedgerOperation::tlv_decode(&update.message).map_err(|e| {
+            DepositsError::InvalidMessage {
+                reason: format!("Failed to decode operation: {}", e),
+            }
+        })?;
 
         let discriminant = operation.discriminant();
         if !self.state.dispute_state.allows_operation(discriminant) {
@@ -416,16 +421,16 @@ impl Ledger {
         // Use quorum_state (derived from apply_state_changes) instead of scanning history
         if self.state.quorum_state == QuorumState::Active {
             // Exception: DisputeEnter can be signed by any quorum member
-            if !matches!(operation, LedgerOperation::DisputeEnter { .. }) {
-                if !update.has_cosign_signature() {
-                    return Err(DepositsError::ProtocolViolation {
-                        violation_type: "missing_cosignature".to_string(),
-                        details: format!(
-                            "Co-signature required after QuorumBegin (seq {})",
-                            update.sequence_number
-                        ),
-                    });
-                }
+            if !matches!(operation, LedgerOperation::DisputeEnter { .. })
+                && !update.has_cosign_signature()
+            {
+                return Err(DepositsError::ProtocolViolation {
+                    violation_type: "missing_cosignature".to_string(),
+                    details: format!(
+                        "Co-signature required after QuorumBegin (seq {})",
+                        update.sequence_number
+                    ),
+                });
             }
         }
 
@@ -456,7 +461,9 @@ impl Ledger {
             if update.sequence_number == next_seq {
                 // Expected next update — previous_hash must match our tip's chain_hash
                 // chain_hash = SHA256(current_hash || operator_signature)
-                let tip_hash = self.history.last()
+                let tip_hash = self
+                    .history
+                    .last()
                     .map(|u| u.chain_hash())
                     .unwrap_or([0u8; 32]);
                 if update.previous_hash != tip_hash {
@@ -498,7 +505,11 @@ impl Ledger {
         use crate::types::{is_entropy_winner, select_entropy_winner};
 
         match operation {
-            LedgerOperation::DisputeAcquire { new_custodian, entropy_block_hash, .. } => {
+            LedgerOperation::DisputeAcquire {
+                new_custodian,
+                entropy_block_hash,
+                ..
+            } => {
                 // The new_custodian must be the entropy-selected winner
                 if !is_entropy_winner(entropy_block_hash, new_custodian, candidates) {
                     let actual_winner = select_entropy_winner(entropy_block_hash, candidates);
@@ -605,7 +616,9 @@ impl Ledger {
     /// Get all quorum participants for this ledger.
     /// Returns: operator + active members + pending members. For LDK, also includes reserves partner.
     pub fn quorum_participants(&self) -> Vec<PublicKey> {
-        let mut participants = Vec::with_capacity(2 + self.state.quorum_members.len() + self.state.next_quorum_members.len());
+        let mut participants = Vec::with_capacity(
+            2 + self.state.quorum_members.len() + self.state.next_quorum_members.len(),
+        );
         participants.push(self.state.operator_key);
         // Include reserves partner if it's a valid pubkey (LDK)
         if let Some(reserves_pubkey) = self.reserves_key_as_pubkey() {
@@ -619,7 +632,9 @@ impl Ledger {
     /// Get all partners (channel partner + active + pending quorum members).
     /// This is the set of nodes the operator broadcasts updates to.
     pub fn all_partners(&self) -> Vec<PublicKey> {
-        let mut partners = Vec::with_capacity(1 + self.state.quorum_members.len() + self.state.next_quorum_members.len());
+        let mut partners = Vec::with_capacity(
+            1 + self.state.quorum_members.len() + self.state.next_quorum_members.len(),
+        );
         // Include reserves partner if it's a valid pubkey (LDK)
         if let Some(reserves_pubkey) = self.reserves_key_as_pubkey() {
             partners.push(reserves_pubkey);
@@ -630,39 +645,54 @@ impl Ledger {
     }
 
     /// Add a quorum member to this ledger with their collateral ledger ID.
-    pub fn add_quorum_member(&mut self, partner: PublicKey, member_ledger_id: String) -> DepositsResult<()> {
+    pub fn add_quorum_member(
+        &mut self,
+        partner: PublicKey,
+        member_ledger_id: String,
+    ) -> DepositsResult<()> {
         if partner == self.state.operator_key {
             return Err(DepositsError::InvalidState(
-                "Operator cannot be a quorum member".to_string()
+                "Operator cannot be a quorum member".to_string(),
             ));
         }
         // Compare with reserves_key (which is a String)
         if partner.to_string() == self.state.reserves_key {
             return Err(DepositsError::InvalidState(
-                "Channel partner is already part of the quorum".to_string()
+                "Channel partner is already part of the quorum".to_string(),
             ));
         }
-        if self.state.quorum_members.iter().any(|m| m.pubkey == partner)
-            || self.state.next_quorum_members.iter().any(|m| m.pubkey == partner)
+        if self
+            .state
+            .quorum_members
+            .iter()
+            .any(|m| m.pubkey == partner)
+            || self
+                .state
+                .next_quorum_members
+                .iter()
+                .any(|m| m.pubkey == partner)
         {
-            return Err(DepositsError::InvalidState(
-                format!("Quorum member {} already exists", partner)
-            ));
+            return Err(DepositsError::InvalidState(format!(
+                "Quorum member {} already exists",
+                partner
+            )));
         }
-        self.state.next_quorum_members.push(crate::types::QuorumMember {
-            pubkey: partner,
-            ledger_id: member_ledger_id,
-            min_fee_bps: None,
-            min_fee_fixed: None,
-            max_fee_period: None,
-            collateral_lock_amount: None,
-            collateral_lock_until: None,
-            dispute_response_blocks: None,
-            dispute_arm_blocks: None,
-            service_response_blocks: None,
-            max_transfer_timeout_blocks: None,
-            max_descriptor_bytes: None,
-        });
+        self.state
+            .next_quorum_members
+            .push(crate::types::QuorumMember {
+                pubkey: partner,
+                ledger_id: member_ledger_id,
+                min_fee_bps: None,
+                min_fee_fixed: None,
+                max_fee_period: None,
+                collateral_lock_amount: None,
+                collateral_lock_until: None,
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
+            });
         Ok(())
     }
 
@@ -676,7 +706,8 @@ impl Ledger {
     /// chain_hash = SHA256(current_hash || operator_signature), which is
     /// the value the next update must use as its previous_hash.
     pub fn tail_hash(&self) -> [u8; 32] {
-        self.history.last()
+        self.history
+            .last()
             .map(|u| u.chain_hash())
             .unwrap_or([0u8; 32])
     }
@@ -685,7 +716,8 @@ impl Ledger {
     /// Derived from the last history entry, not from `history.len()`,
     /// so it remains correct after history truncation.
     pub fn next_sequence(&self) -> u64 {
-        self.history.last()
+        self.history
+            .last()
             .map(|u| u.sequence_number + 1)
             .unwrap_or(0)
     }
@@ -706,7 +738,11 @@ impl Ledger {
     }
 
     /// Check if a hash is valid for reserves (exists and is at or after committed hash).
-    pub fn is_valid_reserves_hash(&self, target_hash: &[u8; 32], committed_hash: &[u8; 32]) -> bool {
+    pub fn is_valid_reserves_hash(
+        &self,
+        target_hash: &[u8; 32],
+        committed_hash: &[u8; 32],
+    ) -> bool {
         let is_zero_committed = committed_hash == &[0u8; 32];
         let target_seq = match self.find_hash_sequence(target_hash) {
             Some(seq) => seq,
@@ -749,7 +785,10 @@ impl Ledger {
         for update in &self.history {
             if update.message_type == crate::messages::consts::RECEIVING_CREDIT_PAYMENT {
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                    if let LedgerOperation::InvoiceCredit { payment_hash: hash, .. } = op {
+                    if let LedgerOperation::InvoiceCredit {
+                        payment_hash: hash, ..
+                    } = op
+                    {
                         if &hash == payment_hash {
                             return true;
                         }
@@ -802,7 +841,8 @@ impl Ledger {
 
     /// Get total available collateral from attestations.
     pub fn total_available_collateral(&self, current_block: u32, max_age_blocks: u32) -> u64 {
-        self.state.total_available_collateral(current_block, max_age_blocks)
+        self.state
+            .total_available_collateral(current_block, max_age_blocks)
     }
 
     /// Get available collateral from a specific partner.
@@ -812,14 +852,17 @@ impl Ledger {
 
     /// Get list of partners with missing or stale attestations.
     pub fn missing_attestations(&self, current_block: u32, max_age_blocks: u32) -> Vec<PublicKey> {
-        self.state.missing_attestations(current_block, max_age_blocks)
+        self.state
+            .missing_attestations(current_block, max_age_blocks)
     }
 
     /// Get total collateral pledged by deposit holders.
     ///
     /// Only counts pledges that haven't expired (lock_until_block > current_block).
     pub fn total_deposit_pledged_collateral(&self, current_block: u32) -> u64 {
-        self.state.deposits.values()
+        self.state
+            .deposits
+            .values()
             .filter(|d| d.collateral_lock_expires > current_block)
             .map(|d| d.collateral_lock_amount)
             .sum()
@@ -842,12 +885,14 @@ impl Ledger {
 
         // Requirement 2: attestations >= deposit_liability (if quorum is active)
         if self.state.quorum_state == QuorumState::Active {
-            let total_collateral = self.total_available_collateral(current_block, max_attestation_age_blocks);
+            let total_collateral =
+                self.total_available_collateral(current_block, max_attestation_age_blocks);
             if total_collateral < deposit_liability {
                 return Err(DepositsError::InsufficientCollateral {
                     required: deposit_liability,
                     available: total_collateral,
-                    missing_attestations: self.missing_attestations(current_block, max_attestation_age_blocks),
+                    missing_attestations: self
+                        .missing_attestations(current_block, max_attestation_age_blocks),
                 });
             }
         }
@@ -909,7 +954,7 @@ impl Ledger {
         block_hash: [u8; 32],
     ) -> DepositsResult<([u8; 32], [u8; 32], u64)> {
         use crate::tlv::TlvEncode;
-        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::hashes::{sha256, Hash};
 
         // Check if ledger is closed
         if self.is_closed() {
@@ -922,10 +967,20 @@ impl Ledger {
         self.validate_operation(&operation)?;
 
         // Validate fee change constraints (needs block_height context)
-        if let LedgerOperation::FeeChange { deposit_id, new_fees, effective_block } = &operation {
+        if let LedgerOperation::FeeChange {
+            deposit_id,
+            new_fees,
+            effective_block,
+        } = &operation
+        {
             crate::operation_validation::validate_deposit_fee_change(
-                self, deposit_id, new_fees, *effective_block, block_height,
-            ).map_err(|e| DepositsError::ProtocolViolation {
+                self,
+                deposit_id,
+                new_fees,
+                *effective_block,
+                block_height,
+            )
+            .map_err(|e| DepositsError::ProtocolViolation {
                 violation_type: "fee_change_violation".to_string(),
                 details: e,
             })?;
@@ -1004,7 +1059,7 @@ impl Ledger {
         block_hash: [u8; 32],
     ) -> DepositsResult<StagedUpdate> {
         use crate::tlv::TlvEncode;
-        use bitcoin::hashes::{Hash, sha256};
+        use bitcoin::hashes::{sha256, Hash};
 
         if self.is_closed() {
             return Err(DepositsError::InvalidState(
@@ -1014,10 +1069,20 @@ impl Ledger {
 
         self.validate_operation(&operation)?;
 
-        if let LedgerOperation::FeeChange { deposit_id, new_fees, effective_block } = &operation {
+        if let LedgerOperation::FeeChange {
+            deposit_id,
+            new_fees,
+            effective_block,
+        } = &operation
+        {
             crate::operation_validation::validate_deposit_fee_change(
-                self, deposit_id, new_fees, *effective_block, block_height,
-            ).map_err(|e| DepositsError::ProtocolViolation {
+                self,
+                deposit_id,
+                new_fees,
+                *effective_block,
+                block_height,
+            )
+            .map_err(|e| DepositsError::ProtocolViolation {
                 violation_type: "fee_change_violation".to_string(),
                 details: e,
             })?;
@@ -1102,7 +1167,11 @@ impl Ledger {
     /// Update the signature on the last history entry.
     ///
     /// This is used after `append_operation` to add signatures from the porcupine dance.
-    pub fn sign_last_update(&mut self, operator_sig: Option<[u8; 64]>, cosign_sig: Option<[u8; 64]>) {
+    pub fn sign_last_update(
+        &mut self,
+        operator_sig: Option<[u8; 64]>,
+        cosign_sig: Option<[u8; 64]>,
+    ) {
         if let Some(update) = self.history.last_mut() {
             if let Some(sig) = operator_sig {
                 update.operator_signature = sig;
@@ -1139,7 +1208,11 @@ impl Ledger {
     /// Entries are sorted by pubkey for deterministic hashing.
     /// Must be called BEFORE operator signing.
     pub fn apply_cosignatures(&mut self, mut entries: Vec<crate::types::CosignEntry>) {
-        entries.sort_by(|a, b| a.cosigner_pubkey.serialize().cmp(&b.cosigner_pubkey.serialize()));
+        entries.sort_by(|a, b| {
+            a.cosigner_pubkey
+                .serialize()
+                .cmp(&b.cosigner_pubkey.serialize())
+        });
         if let Some(update) = self.history.last_mut() {
             update.cosignatures = entries;
             // Clear deprecated single-cosig fields
@@ -1194,8 +1267,12 @@ impl Ledger {
                     });
                 }
             }
-            LedgerOperation::InvoiceLock { deposit_id, amount, .. } |
-            LedgerOperation::OnchainLock { deposit_id, amount, .. } => {
+            LedgerOperation::InvoiceLock {
+                deposit_id, amount, ..
+            }
+            | LedgerOperation::OnchainLock {
+                deposit_id, amount, ..
+            } => {
                 let deposit = self
                     .state
                     .deposits
@@ -1267,20 +1344,28 @@ impl Ledger {
                     });
                 }
             }
-            LedgerOperation::QuorumJoin { operator_id, ledger_id, membership_expires } => {
+            LedgerOperation::QuorumJoin {
+                operator_id,
+                ledger_id,
+                membership_expires,
+            } => {
                 // 1. Must be on operator's own ledger (we are the operator)
                 if !self.is_operator() {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "quorum_join_wrong_role".to_string(),
-                        details: "QuorumJoin can only be added to operator's own ledger".to_string(),
+                        details: "QuorumJoin can only be added to operator's own ledger"
+                            .to_string(),
                     });
                 }
                 // Note: Signature verification should be done at the message handler level
                 // where the signing key is available. Here we just validate the operation structure.
                 // 2. Ratchet check: if renewing, new expiration must be >= existing
-                if let Some(existing) = self.state.joined_quorums.iter().find(|m|
-                    &m.operator_id == operator_id && &m.ledger_id == ledger_id
-                ) {
+                if let Some(existing) = self
+                    .state
+                    .joined_quorums
+                    .iter()
+                    .find(|m| &m.operator_id == operator_id && &m.ledger_id == ledger_id)
+                {
                     if *membership_expires < existing.membership_expires {
                         return Err(DepositsError::ProtocolViolation {
                             violation_type: "quorum_join_ratchet".to_string(),
@@ -1308,7 +1393,11 @@ impl Ledger {
                     });
                 }
             }
-            LedgerOperation::DisputeAcquire { entropy_block_height, entropy_block_hash, .. } => {
+            LedgerOperation::DisputeAcquire {
+                entropy_block_height,
+                entropy_block_hash,
+                ..
+            } => {
                 // Basic validation: entropy block must be specified
                 if *entropy_block_height == 0 && *entropy_block_hash == [0u8; 32] {
                     return Err(DepositsError::ProtocolViolation {
@@ -1319,11 +1408,22 @@ impl Ledger {
                 // Winner validation is done via validate_custody_resolution()
                 // which requires knowing all candidates (from Nostr observation)
             }
-            LedgerOperation::CollateralAttestation { collateral_operator, .. } => {
+            LedgerOperation::CollateralAttestation {
+                collateral_operator,
+                ..
+            } => {
                 // Verify the collateral_operator is a quorum member (active or pending).
                 // Attestations can arrive before QuorumBegin (during setup) or after.
-                let is_member = self.state.quorum_members.iter().any(|m| m.pubkey == *collateral_operator)
-                    || self.state.next_quorum_members.iter().any(|m| m.pubkey == *collateral_operator);
+                let is_member = self
+                    .state
+                    .quorum_members
+                    .iter()
+                    .any(|m| m.pubkey == *collateral_operator)
+                    || self
+                        .state
+                        .next_quorum_members
+                        .iter()
+                        .any(|m| m.pubkey == *collateral_operator);
                 if !is_member {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "collateral_attestation_from_non_member".to_string(),
@@ -1385,7 +1485,9 @@ impl Ledger {
     /// Import and validate a ledger from an export.
     ///
     /// Validates the export and reconstructs the ledger state by replaying all updates.
-    pub fn from_export(export: crate::validation::LedgerExport) -> Result<Self, crate::validation::ValidationError> {
+    pub fn from_export(
+        export: crate::validation::LedgerExport,
+    ) -> Result<Self, crate::validation::ValidationError> {
         crate::validation::LedgerConformanceValidator::from_export(export)
     }
 
@@ -1393,8 +1495,9 @@ impl Ledger {
     ///
     /// Parses JSON and validates the ledger export.
     pub fn from_export_json(json: &str) -> Result<Self, crate::validation::ValidationError> {
-        let export = crate::validation::LedgerExport::from_json(json)
-            .map_err(|e| crate::validation::ValidationError::DecodeError(format!("JSON decode failed: {}", e)))?;
+        let export = crate::validation::LedgerExport::from_json(json).map_err(|e| {
+            crate::validation::ValidationError::DecodeError(format!("JSON decode failed: {}", e))
+        })?;
         Self::from_export(export)
     }
 
@@ -1414,14 +1517,11 @@ impl Ledger {
     ///
     /// The state should be the CURRENT state after all updates have been applied.
     /// This method rebuilds the ledger by verifying the chain and storing history.
-    pub fn reconstruct(
-        initial_state: LedgerState,
-        updates: Vec<SignedLedgerUpdate>,
-    ) -> Self {
+    pub fn reconstruct(initial_state: LedgerState, updates: Vec<SignedLedgerUpdate>) -> Self {
         // Validate and apply each update to reconstruct the state chain
         // The stored state should already be the final state, but we verify continuity
         let mut current_hash = initial_state.chain_tip_hash;
-        
+
         for update in &updates {
             // Verify this update continues the chain
             if update.previous_hash != current_hash {
@@ -1433,7 +1533,7 @@ impl Ledger {
             // Update current_hash to this update's hash for next iteration
             current_hash = update.current_hash;
         }
-        
+
         // Return ledger with the final state and all history
         Self {
             state: initial_state,
@@ -1468,7 +1568,10 @@ impl LedgerValidator {
                 if ledger.state.deposits.contains_key(deposit_id) {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "duplicate_deposit".to_string(),
-                        details: format!("Deposit already exists for id {}", hex::encode(deposit_id)),
+                        details: format!(
+                            "Deposit already exists for id {}",
+                            hex::encode(deposit_id)
+                        ),
                     });
                 }
             }
@@ -1540,7 +1643,12 @@ impl LedgerValidator {
 
     /// Get total locked balance across all deposits.
     pub fn total_locked_balance(ledger: &Ledger) -> u64 {
-        ledger.state.deposits.values().map(|d| d.locked_balance).sum()
+        ledger
+            .state
+            .deposits
+            .values()
+            .map(|d| d.locked_balance)
+            .sum()
     }
 
     /// Calculate minimum required reserves.
@@ -1580,7 +1688,9 @@ impl LedgerValidator {
         current_block: u32,
         max_age_blocks: u32,
     ) -> u64 {
-        ledger.state.total_available_collateral(current_block, max_age_blocks)
+        ledger
+            .state
+            .total_available_collateral(current_block, max_age_blocks)
     }
 
     /// Get collateral from a specific partner.
@@ -1594,7 +1704,9 @@ impl LedgerValidator {
         current_block: u32,
         max_age_blocks: u32,
     ) -> Vec<PublicKey> {
-        ledger.state.missing_attestations(current_block, max_age_blocks)
+        ledger
+            .state
+            .missing_attestations(current_block, max_age_blocks)
     }
 
     /// Validate collateral is sufficient for a given deposit liability.
@@ -1755,7 +1867,11 @@ impl LedgerManager {
         reserves_key: String,
         genesis_block: u32,
     ) -> Self {
-        Self::new(Ledger::new_as_operator(operator_key, reserves_key, genesis_block))
+        Self::new(Ledger::new_as_operator(
+            operator_key,
+            reserves_key,
+            genesis_block,
+        ))
     }
 
     /// Create a new ledger as partner.
@@ -1764,7 +1880,11 @@ impl LedgerManager {
         reserves_key: String,
         genesis_block: u32,
     ) -> Self {
-        Self::new(Ledger::new_as_partner(operator_key, reserves_key, genesis_block))
+        Self::new(Ledger::new_as_partner(
+            operator_key,
+            reserves_key,
+            genesis_block,
+        ))
     }
 
     /// Get a reference to the underlying ledger.
@@ -1825,8 +1945,16 @@ impl LedgerManager {
     /// Check if collateral decrease is allowed.
     ///
     /// Decreases are not allowed within the reporting period after an increase.
-    pub fn can_decrease_collateral(&self, current_block: u32, reporting_period_blocks: u32) -> bool {
-        LedgerValidator::can_decrease_collateral(&self.ledger, current_block, reporting_period_blocks)
+    pub fn can_decrease_collateral(
+        &self,
+        current_block: u32,
+        reporting_period_blocks: u32,
+    ) -> bool {
+        LedgerValidator::can_decrease_collateral(
+            &self.ledger,
+            current_block,
+            reporting_period_blocks,
+        )
     }
 
     /// Validate collateral is sufficient for current deposits.
@@ -1876,11 +2004,7 @@ impl LedgerManager {
     /// Validate a hash for reserves update.
     pub fn is_valid_reserves_hash(&self, target_hash: &[u8; 32]) -> bool {
         // No commitment tracking — any valid hash in the chain is acceptable
-        LedgerValidator::is_valid_reserves_hash(
-            &self.ledger,
-            target_hash,
-            &[0u8; 32],
-        )
+        LedgerValidator::is_valid_reserves_hash(&self.ledger, target_hash, &[0u8; 32])
     }
 
     // ========================================================================
@@ -1977,7 +2101,11 @@ impl LedgerManager {
         let credit_amount = match &credit_operation {
             LedgerOperation::InvoiceCredit { amount, .. } => *amount,
             LedgerOperation::OnchainCredit { amount, .. } => *amount,
-            _ => return Err(DepositsError::InvalidReservesDecrease("Expected InvoiceCredit or OnchainCredit operation".to_string())),
+            _ => {
+                return Err(DepositsError::InvalidReservesDecrease(
+                    "Expected InvoiceCredit or OnchainCredit operation".to_string(),
+                ))
+            }
         };
 
         let mut hashes = Vec::new();
@@ -2088,7 +2216,10 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(ledger.state.deposits.get(&deposit_id).unwrap().balance, 50_000);
+        assert_eq!(
+            ledger.state.deposits.get(&deposit_id).unwrap().balance,
+            50_000
+        );
     }
 
     #[test]
@@ -2159,7 +2290,9 @@ mod tests {
         let ledger = Ledger::new_as_operator(op_key, partner.to_string(), 0);
 
         // Export to JSON
-        let json = ledger.export_json(1000).expect("JSON export should succeed");
+        let json = ledger
+            .export_json(1000)
+            .expect("JSON export should succeed");
 
         assert!(json.contains("\"version\": 1"));
         assert!(json.contains("reserves_id"));
@@ -2179,7 +2312,7 @@ mod tests {
 
     #[test]
     fn test_transfer_lock_complete_flow() {
-        use crate::types::{compute_deposit_id, DescriptorWitness, Deposit, TransferFeeSchedule};
+        use crate::types::{compute_deposit_id, Deposit, DescriptorWitness, TransferFeeSchedule};
 
         let op_key = test_pubkey();
         let partner = test_pubkey_2();
@@ -2199,9 +2332,15 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
-            transfer_fees: TransferFeeSchedule::default(), is_collateral: false, receive_requires_sig: false,
-            fee_change_after_blocks: None, fee_change_notice_blocks: None, fee_change_limit_bps: None,
-            opened_at_block: 0, pending_fee_change: None,
+            transfer_fees: TransferFeeSchedule::default(),
+            is_collateral: false,
+            receive_requires_sig: false,
+            fee_change_after_blocks: None,
+            fee_change_notice_blocks: None,
+            fee_change_limit_bps: None,
+            opened_at_block: 0,
+            pending_fee_change: None,
+            collateral_locks: Vec::new(),
         };
         let dest_deposit = Deposit {
             deposit_id: dest_id,
@@ -2213,9 +2352,15 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
-            transfer_fees: TransferFeeSchedule::default(), is_collateral: false, receive_requires_sig: false,
-            fee_change_after_blocks: None, fee_change_notice_blocks: None, fee_change_limit_bps: None,
-            opened_at_block: 0, pending_fee_change: None,
+            transfer_fees: TransferFeeSchedule::default(),
+            is_collateral: false,
+            receive_requires_sig: false,
+            fee_change_after_blocks: None,
+            fee_change_notice_blocks: None,
+            fee_change_limit_bps: None,
+            opened_at_block: 0,
+            pending_fee_change: None,
+            collateral_locks: Vec::new(),
         };
         ledger.state.deposits.insert(source_id, source_deposit);
         ledger.state.deposits.insert(dest_id, dest_deposit);
@@ -2235,7 +2380,9 @@ mod tests {
             completion_script: "sha256(deadbeef)".to_string(),
             timeout_height: 900_000,
             transfer_id,
-            witness: DescriptorWitness { stack: vec![[0x11u8; 64].to_vec()] },
+            witness: DescriptorWitness {
+                stack: vec![[0x11u8; 64].to_vec()],
+            },
         };
 
         ledger.apply_operation(&lock_op).unwrap();
@@ -2256,7 +2403,9 @@ mod tests {
         // Complete the transfer
         let complete_op = LedgerOperation::TransferComplete {
             transfer_id,
-            script_witness: DescriptorWitness { stack: vec![[0x22u8; 32].to_vec()] }, // preimage
+            script_witness: DescriptorWitness {
+                stack: vec![[0x22u8; 32].to_vec()],
+            }, // preimage
         };
 
         ledger.apply_operation(&complete_op).unwrap();
@@ -2276,7 +2425,7 @@ mod tests {
 
     #[test]
     fn test_transfer_lock_timeout_flow() {
-        use crate::types::{compute_deposit_id, DescriptorWitness, Deposit, TransferFeeSchedule};
+        use crate::types::{compute_deposit_id, Deposit, DescriptorWitness, TransferFeeSchedule};
 
         let op_key = test_pubkey();
         let partner = test_pubkey_2();
@@ -2296,9 +2445,15 @@ mod tests {
             last_fee_assessment: 0,
             collateral_lock_amount: 0,
             collateral_lock_expires: 0,
-            transfer_fees: TransferFeeSchedule::default(), is_collateral: false, receive_requires_sig: false,
-            fee_change_after_blocks: None, fee_change_notice_blocks: None, fee_change_limit_bps: None,
-            opened_at_block: 0, pending_fee_change: None,
+            transfer_fees: TransferFeeSchedule::default(),
+            is_collateral: false,
+            receive_requires_sig: false,
+            fee_change_after_blocks: None,
+            fee_change_notice_blocks: None,
+            fee_change_limit_bps: None,
+            opened_at_block: 0,
+            pending_fee_change: None,
+            collateral_locks: Vec::new(),
         };
         ledger.state.deposits.insert(source_id, source_deposit);
 
@@ -2316,7 +2471,9 @@ mod tests {
             completion_script: "sha256(cafebabe)".to_string(),
             timeout_height: 850_000,
             transfer_id,
-            witness: DescriptorWitness { stack: vec![[0x33u8; 64].to_vec()] },
+            witness: DescriptorWitness {
+                stack: vec![[0x33u8; 64].to_vec()],
+            },
         };
 
         ledger.apply_operation(&lock_op).unwrap();

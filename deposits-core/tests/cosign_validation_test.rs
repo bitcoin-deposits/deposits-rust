@@ -4,9 +4,9 @@
 
 use deposits_core::ledger::{Ledger, LedgerRole};
 use deposits_core::messages::LedgerOperation;
+use deposits_core::tlv::{TlvDecode, TlvEncode};
 use deposits_core::types::DescriptorWitness;
 use deposits_core::types::{compute_deposit_id, FeeStructure, LedgerState};
-use deposits_core::tlv::{TlvEncode, TlvDecode};
 
 fn test_pubkey() -> bitcoin::secp256k1::PublicKey {
     use std::str::FromStr;
@@ -66,7 +66,10 @@ fn credit_deposit(ledger: &mut Ledger, deposit_id: [u8; 16], amount: u64) {
 #[test]
 fn cosign_rejects_invoice_lock_insufficient_balance() {
     let mut ledger = make_ledger();
-    let dep = open_deposit(&mut ledger, "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)");
+    let dep = open_deposit(
+        &mut ledger,
+        "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)",
+    );
     credit_deposit(&mut ledger, dep, 1000);
 
     // Lock more than available — should fail
@@ -83,7 +86,10 @@ fn cosign_rejects_invoice_lock_insufficient_balance() {
 #[test]
 fn cosign_accepts_invoice_lock_within_balance() {
     let mut ledger = make_ledger();
-    let dep = open_deposit(&mut ledger, "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)");
+    let dep = open_deposit(
+        &mut ledger,
+        "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)",
+    );
     credit_deposit(&mut ledger, dep, 5000);
 
     let result = ledger.state.apply(&LedgerOperation::InvoiceLock {
@@ -99,17 +105,22 @@ fn cosign_accepts_invoice_lock_within_balance() {
 #[test]
 fn cosign_rejects_double_lock_exceeding_available() {
     let mut ledger = make_ledger();
-    let dep = open_deposit(&mut ledger, "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)");
+    let dep = open_deposit(
+        &mut ledger,
+        "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)",
+    );
     credit_deposit(&mut ledger, dep, 5000);
 
     // First lock succeeds
-    ledger.apply_state_changes(&LedgerOperation::InvoiceLock {
-        deposit_id: dep,
-        amount: 3000,
-        payment_id: [1u8; 32],
-        sequence_number: 0,
-        witness: DescriptorWitness { stack: vec![] },
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::InvoiceLock {
+            deposit_id: dep,
+            amount: 3000,
+            payment_id: [1u8; 32],
+            sequence_number: 0,
+            witness: DescriptorWitness { stack: vec![] },
+        })
+        .unwrap();
 
     // Second lock exceeds remaining available (5000 - 3000 = 2000 available)
     let result = ledger.state.apply(&LedgerOperation::InvoiceLock {
@@ -119,7 +130,10 @@ fn cosign_rejects_double_lock_exceeding_available() {
         sequence_number: 0,
         witness: DescriptorWitness { stack: vec![] },
     });
-    assert!(result.is_err(), "Should reject second lock exceeding available balance");
+    assert!(
+        result.is_err(),
+        "Should reject second lock exceeding available balance"
+    );
 }
 
 // =========================================================================
@@ -144,12 +158,16 @@ fn cosign_rejects_lock_on_nonexistent_deposit() {
 #[test]
 fn cosign_rejects_duplicate_deposit_open() {
     let mut ledger = make_ledger();
-    let dep = open_deposit(&mut ledger, "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)");
+    let dep = open_deposit(
+        &mut ledger,
+        "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)",
+    );
 
     // Opening same deposit again should fail
     let result = ledger.state.apply(&LedgerOperation::DepositOpen {
         deposit_id: dep,
-        descriptor: "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)".to_string(),
+        descriptor: "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)"
+            .to_string(),
         fees: Some(FeeStructure::default()),
         transfer_fees: None,
         payment_hash: None,
@@ -167,12 +185,15 @@ fn cosign_rejects_duplicate_deposit_open() {
 #[test]
 fn cosign_rejects_close_with_balance() {
     let mut ledger = make_ledger();
-    let dep = open_deposit(&mut ledger, "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)");
+    let dep = open_deposit(
+        &mut ledger,
+        "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)",
+    );
     credit_deposit(&mut ledger, dep, 1000);
 
-    let result = ledger.state.apply(&LedgerOperation::DepositClose {
-        deposit_id: dep,
-    });
+    let result = ledger
+        .state
+        .apply(&LedgerOperation::DepositClose { deposit_id: dep });
     assert!(result.is_err(), "Should reject close with non-zero balance");
 }
 
@@ -183,8 +204,14 @@ fn cosign_rejects_close_with_balance() {
 #[test]
 fn cosign_rejects_transfer_lock_insufficient_balance() {
     let mut ledger = make_ledger();
-    let src = open_deposit(&mut ledger, "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)");
-    let dst = open_deposit(&mut ledger, "pk(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5)");
+    let src = open_deposit(
+        &mut ledger,
+        "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)",
+    );
+    let dst = open_deposit(
+        &mut ledger,
+        "pk(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5)",
+    );
     credit_deposit(&mut ledger, src, 1000);
 
     let result = ledger.state.apply(&LedgerOperation::TransferLock {
@@ -193,12 +220,16 @@ fn cosign_rejects_transfer_lock_insufficient_balance() {
         destination_deposit_id: dst,
         amount: 2000,
         fee: 0,
-        completion_script: "sha256(0000000000000000000000000000000000000000000000000000000000000001)".to_string(),
+        completion_script:
+            "sha256(0000000000000000000000000000000000000000000000000000000000000001)".to_string(),
         timeout_height: 900_000,
         transfer_id: [0u8; 32],
         witness: DescriptorWitness { stack: vec![] },
     });
-    assert!(result.is_err(), "Should reject transfer lock exceeding balance");
+    assert!(
+        result.is_err(),
+        "Should reject transfer lock exceeding balance"
+    );
 }
 
 // =========================================================================
@@ -208,7 +239,10 @@ fn cosign_rejects_transfer_lock_insufficient_balance() {
 #[test]
 fn cosign_rejects_fee_collect_exceeding_balance() {
     let mut ledger = make_ledger();
-    let dep = open_deposit(&mut ledger, "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)");
+    let dep = open_deposit(
+        &mut ledger,
+        "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)",
+    );
     credit_deposit(&mut ledger, dep, 1000);
 
     // Collecting more than balance — apply doesn't error but saturates to 0
@@ -231,71 +265,97 @@ fn cosign_rejects_fee_collect_exceeding_balance() {
 #[test]
 fn open_invoice_locks_tracked_through_lifecycle() {
     let mut ledger = make_ledger();
-    let dep = open_deposit(&mut ledger, "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)");
+    let dep = open_deposit(
+        &mut ledger,
+        "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)",
+    );
     credit_deposit(&mut ledger, dep, 10_000);
 
     let payment_id = [42u8; 32];
 
     // Lock — should appear in open_invoice_locks
-    ledger.apply_state_changes(&LedgerOperation::InvoiceLock {
-        deposit_id: dep,
-        amount: 5000,
-        payment_id,
-        sequence_number: 0,
-        witness: DescriptorWitness { stack: vec![] },
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::InvoiceLock {
+            deposit_id: dep,
+            amount: 5000,
+            payment_id,
+            sequence_number: 0,
+            witness: DescriptorWitness { stack: vec![] },
+        })
+        .unwrap();
 
-    assert!(ledger.state.open_invoice_locks.contains_key(&payment_id),
-        "Lock should be tracked");
+    assert!(
+        ledger.state.open_invoice_locks.contains_key(&payment_id),
+        "Lock should be tracked"
+    );
     assert_eq!(ledger.state.open_invoice_locks[&payment_id].amount, 5000);
     assert_eq!(ledger.state.open_invoice_locks[&payment_id].deposit_id, dep);
 
     // Fulfill — should remove from open_invoice_locks
-    ledger.apply_state_changes(&LedgerOperation::InvoiceFulfill {
-        deposit_id: dep,
-        amount: 5000,
-        payment_id,
-        sequence_number: 1,
-        witness: DescriptorWitness { stack: vec![] },
-        preimage: [0u8; 32],
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::InvoiceFulfill {
+            deposit_id: dep,
+            amount: 5000,
+            payment_id,
+            sequence_number: 1,
+            witness: DescriptorWitness { stack: vec![] },
+            preimage: [0u8; 32],
+        })
+        .unwrap();
 
-    assert!(!ledger.state.open_invoice_locks.contains_key(&payment_id),
-        "Fulfill should clear the lock");
+    assert!(
+        !ledger.state.open_invoice_locks.contains_key(&payment_id),
+        "Fulfill should clear the lock"
+    );
 }
 
 #[test]
 fn open_invoice_lock_cleared_on_fail() {
     let mut ledger = make_ledger();
-    let dep = open_deposit(&mut ledger, "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)");
+    let dep = open_deposit(
+        &mut ledger,
+        "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)",
+    );
     credit_deposit(&mut ledger, dep, 10_000);
 
     let payment_id = [99u8; 32];
 
-    ledger.apply_state_changes(&LedgerOperation::InvoiceLock {
-        deposit_id: dep,
-        amount: 3000,
-        payment_id,
-        sequence_number: 0,
-        witness: DescriptorWitness { stack: vec![] },
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::InvoiceLock {
+            deposit_id: dep,
+            amount: 3000,
+            payment_id,
+            sequence_number: 0,
+            witness: DescriptorWitness { stack: vec![] },
+        })
+        .unwrap();
 
     assert!(ledger.state.open_invoice_locks.contains_key(&payment_id));
 
     // Fail — should remove and unlock balance
-    ledger.apply_state_changes(&LedgerOperation::InvoiceFail {
-        deposit_id: dep,
-        amount: 3000,
-        payment_id,
-        sequence_number: 1,
-    }).unwrap();
+    ledger
+        .apply_state_changes(&LedgerOperation::InvoiceFail {
+            deposit_id: dep,
+            amount: 3000,
+            payment_id,
+            sequence_number: 1,
+        })
+        .unwrap();
 
-    assert!(!ledger.state.open_invoice_locks.contains_key(&payment_id),
-        "Fail should clear the lock");
+    assert!(
+        !ledger.state.open_invoice_locks.contains_key(&payment_id),
+        "Fail should clear the lock"
+    );
     // Balance should be restored
     let deposit = ledger.state.deposits.get(&dep).unwrap();
-    assert_eq!(deposit.balance, 10_000, "Balance should be restored after fail");
-    assert_eq!(deposit.locked_balance, 0, "Locked balance should be zero after fail");
+    assert_eq!(
+        deposit.balance, 10_000,
+        "Balance should be restored after fail"
+    );
+    assert_eq!(
+        deposit.locked_balance, 0,
+        "Locked balance should be zero after fail"
+    );
 }
 
 // =========================================================================
@@ -305,7 +365,10 @@ fn open_invoice_lock_cleared_on_fail() {
 #[test]
 fn cosign_data_contains_decodable_operation() {
     let mut ledger = make_ledger();
-    let dep = open_deposit(&mut ledger, "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)");
+    let dep = open_deposit(
+        &mut ledger,
+        "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)",
+    );
     credit_deposit(&mut ledger, dep, 10_000);
 
     let operation = LedgerOperation::InvoiceLock {
@@ -330,11 +393,17 @@ fn cosign_data_contains_decodable_operation() {
     assert!(cosign_data.len() > 40);
     let extracted_message = &cosign_data[40..];
     let decoded = LedgerOperation::tlv_decode(extracted_message);
-    assert!(decoded.is_ok(), "Should be able to decode operation from cosign_data");
+    assert!(
+        decoded.is_ok(),
+        "Should be able to decode operation from cosign_data"
+    );
 
     // Validate against state — should succeed
     let result = ledger.state.apply(&decoded.unwrap());
-    assert!(result.is_ok(), "Valid operation should pass cosign validation");
+    assert!(
+        result.is_ok(),
+        "Valid operation should pass cosign validation"
+    );
 }
 
 #[test]
@@ -362,5 +431,8 @@ fn cosign_data_invalid_operation_rejected() {
 
     // Validate against state — should fail (deposit doesn't exist)
     let result = ledger.state.apply(&decoded);
-    assert!(result.is_err(), "Invalid operation should be rejected by cosign validation");
+    assert!(
+        result.is_err(),
+        "Invalid operation should be rejected by cosign validation"
+    );
 }

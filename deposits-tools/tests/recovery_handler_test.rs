@@ -9,8 +9,8 @@
 
 #![cfg(feature = "bitcoin-deposits")]
 
-use ldk_node::bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey, Message, Keypair};
 use ldk_node::bitcoin::hashes::Hash;
+use ldk_node::bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
 
 // Test helper to generate keys
 fn generate_test_keypair(seed: u8) -> (SecretKey, PublicKey) {
@@ -45,17 +45,18 @@ fn test_recovery_manager_vote_submission() {
     let ledger_id = (operator, partner);
 
     // Start recovery process
-    manager.start_recovery(
-        operator,
-        partner,
-        100,  // force close block
-        [1u8; 32],  // force close txid
-        [2u8; 32],  // on chain ledger hash
-    ).expect("Should start recovery");
+    manager
+        .start_recovery(
+            operator, partner, 100,       // force close block
+            [1u8; 32], // force close txid
+            [2u8; 32], // on chain ledger hash
+        )
+        .expect("Should start recovery");
 
     // Transition to evaluating phase
     let entropy = [42u8; 32];
-    manager.on_entropy_block(ledger_id, entropy)
+    manager
+        .on_entropy_block(ledger_id, entropy)
         .expect("Should transition to evaluating");
 
     // Create signed vote
@@ -97,9 +98,9 @@ fn test_recovery_manager_vote_submission() {
 /// Test ClaimManager signature aggregation
 #[test]
 fn test_claim_manager_peer_signature_aggregation() {
-    use deposits_core::recovery_claim::{ClaimManager, ClaimConfig, ClaimableReserves};
     use deposits_core::recovery::ClaimEligibility;
-    use deposits_core::tapscript_reserves::{VoterSet, ThresholdConfig, TapscriptReservesBuilder};
+    use deposits_core::recovery_claim::{ClaimConfig, ClaimManager, ClaimableReserves};
+    use deposits_core::tapscript_reserves::{TapscriptReservesBuilder, ThresholdConfig, VoterSet};
     use ldk_node::bitcoin::{Network, OutPoint, Txid};
 
     let (sk1, pk1) = generate_test_keypair(1);
@@ -107,7 +108,8 @@ fn test_claim_manager_peer_signature_aggregation() {
 
     let voter_set = VoterSet::new(pk1, vec![pk2]);
     let ledger_hash = [0xAA; 32];
-    let builder = TapscriptReservesBuilder::with_defaults(voter_set.clone(), Network::Regtest, ledger_hash);
+    let builder =
+        TapscriptReservesBuilder::with_defaults(voter_set.clone(), Network::Regtest, ledger_hash);
     let output = builder.build().expect("Should build reserves");
 
     let reserves = ClaimableReserves {
@@ -131,12 +133,9 @@ fn test_claim_manager_peer_signature_aggregation() {
     let eligibility = ClaimEligibility::SelectedPartnerOnly { partner: pk1 };
 
     // Initiate claim
-    manager.initiate_claim(
-        ledger_id,
-        vec![pk1],
-        eligibility,
-        reserves,
-    ).expect("Should initiate claim");
+    manager
+        .initiate_claim(ledger_id, vec![pk1], eligibility, reserves)
+        .expect("Should initiate claim");
 
     // Sign with our key first
     manager.sign_claim(&ledger_id).expect("Should sign");
@@ -151,7 +150,8 @@ fn test_claim_manager_peer_signature_aggregation() {
     let sig2 = secp.sign_schnorr(&msg, &keypair2);
 
     // This simulates what the handler does
-    let has_sufficient = manager.add_peer_signature(&ledger_id, &pk2, sig2.serialize())
+    let has_sufficient = manager
+        .add_peer_signature(&ledger_id, &pk2, sig2.serialize())
         .expect("Should add signature");
 
     // With AnySinglePartner tier, 2 voters may or may not need both signatures
@@ -165,9 +165,9 @@ fn test_claim_manager_peer_signature_aggregation() {
 /// Test ClaimManager remove_claim for RecoveryClaimComplete handling
 #[test]
 fn test_claim_manager_claim_removal() {
-    use deposits_core::recovery_claim::{ClaimManager, ClaimConfig, ClaimableReserves};
     use deposits_core::recovery::ClaimEligibility;
-    use deposits_core::tapscript_reserves::{VoterSet, ThresholdConfig, TapscriptReservesBuilder};
+    use deposits_core::recovery_claim::{ClaimConfig, ClaimManager, ClaimableReserves};
+    use deposits_core::tapscript_reserves::{TapscriptReservesBuilder, ThresholdConfig, VoterSet};
     use ldk_node::bitcoin::{Network, OutPoint, Txid};
 
     let (sk1, pk1) = generate_test_keypair(1);
@@ -175,7 +175,8 @@ fn test_claim_manager_claim_removal() {
 
     let voter_set = VoterSet::new(pk1, vec![pk2]);
     let ledger_hash = [0xAA; 32];
-    let builder = TapscriptReservesBuilder::with_defaults(voter_set.clone(), Network::Regtest, ledger_hash);
+    let builder =
+        TapscriptReservesBuilder::with_defaults(voter_set.clone(), Network::Regtest, ledger_hash);
     let output = builder.build().expect("Should build reserves");
 
     let reserves = ClaimableReserves {
@@ -199,12 +200,9 @@ fn test_claim_manager_claim_removal() {
     let eligibility = ClaimEligibility::SelectedPartnerOnly { partner: pk1 };
 
     // Initiate claim
-    manager.initiate_claim(
-        ledger_id,
-        vec![pk1],
-        eligibility,
-        reserves,
-    ).expect("Should initiate claim");
+    manager
+        .initiate_claim(ledger_id, vec![pk1], eligibility, reserves)
+        .expect("Should initiate claim");
 
     // Verify claim exists
     assert!(manager.get_claim(&ledger_id).is_some());
@@ -233,32 +231,42 @@ fn test_recovery_phase_detection() {
     assert!(manager.get_recovery(&ledger_id).is_none());
 
     // Start recovery
-    manager.start_recovery(
-        operator,
-        partner,
-        100,
-        [1u8; 32],
-        [2u8; 32],
-    ).expect("Should start recovery");
+    manager
+        .start_recovery(operator, partner, 100, [1u8; 32], [2u8; 32])
+        .expect("Should start recovery");
 
     // Should be in WaitingForEntropy phase
-    let state = manager.get_recovery(&ledger_id).expect("Should have recovery");
-    assert!(matches!(state.phase, RecoveryPhase::WaitingForEntropy { .. }));
+    let state = manager
+        .get_recovery(&ledger_id)
+        .expect("Should have recovery");
+    assert!(matches!(
+        state.phase,
+        RecoveryPhase::WaitingForEntropy { .. }
+    ));
 
     // Transition to evaluating
-    manager.on_entropy_block(ledger_id, [42u8; 32])
+    manager
+        .on_entropy_block(ledger_id, [42u8; 32])
         .expect("Should transition");
 
-    let state = manager.get_recovery(&ledger_id).expect("Should have recovery");
+    let state = manager
+        .get_recovery(&ledger_id)
+        .expect("Should have recovery");
     assert!(matches!(state.phase, RecoveryPhase::Evaluating { .. }));
 
     // Directly transition to non-compliant (for testing handler logic)
     // transition_to_non_compliant takes: ledger_id, force_close_block, channel_partners
-    manager.transition_to_non_compliant(ledger_id, 100, vec![partner])
+    manager
+        .transition_to_non_compliant(ledger_id, 100, vec![partner])
         .expect("Should transition to non-compliant");
 
-    let state = manager.get_recovery(&ledger_id).expect("Should have recovery");
-    assert!(matches!(state.phase, RecoveryPhase::NonCompliantRecovery { .. }));
+    let state = manager
+        .get_recovery(&ledger_id)
+        .expect("Should have recovery");
+    assert!(matches!(
+        state.phase,
+        RecoveryPhase::NonCompliantRecovery { .. }
+    ));
 }
 
 /// Test vote result tracking
@@ -279,7 +287,9 @@ fn test_recovery_vote_result_tracking() {
     let ledger_id = (operator, partner);
 
     // Start recovery and transition to evaluating
-    manager.start_recovery(operator, partner, 100, [1u8; 32], [2u8; 32]).unwrap();
+    manager
+        .start_recovery(operator, partner, 100, [1u8; 32], [2u8; 32])
+        .unwrap();
     manager.on_entropy_block(ledger_id, [42u8; 32]).unwrap();
 
     let secp = Secp256k1::new();
@@ -291,7 +301,8 @@ fn test_recovery_vote_result_tracking() {
     vote_data1.push(1u8); // conforming
     vote_data1.extend_from_slice(&[2u8; 32]); // validated_hash
     vote_data1.extend_from_slice(&[0u8; 33]); // substitute_nomination = None (zeros)
-    let msg1 = Message::from_digest(*ldk_node::bitcoin::hashes::sha256::Hash::hash(&vote_data1).as_ref());
+    let msg1 =
+        Message::from_digest(*ldk_node::bitcoin::hashes::sha256::Hash::hash(&vote_data1).as_ref());
     let sig1 = secp.sign_schnorr(&msg1, &keypair1);
 
     let vote1 = RecoveryVote {
@@ -304,7 +315,9 @@ fn test_recovery_vote_result_tracking() {
         signature: sig1.serialize(),
     };
 
-    let result1 = manager.submit_vote(ledger_id, vote1).expect("Vote 1 should succeed");
+    let result1 = manager
+        .submit_vote(ledger_id, vote1)
+        .expect("Vote 1 should succeed");
     assert_eq!(result1.conforming_votes, 1);
     assert_eq!(result1.non_conforming_votes, 0);
 
@@ -315,7 +328,8 @@ fn test_recovery_vote_result_tracking() {
     vote_data2.push(0u8); // non-conforming
     vote_data2.extend_from_slice(&[2u8; 32]); // validated_hash
     vote_data2.extend_from_slice(&our_node.serialize()); // substitute_nomination = Some(our_node)
-    let msg2 = Message::from_digest(*ldk_node::bitcoin::hashes::sha256::Hash::hash(&vote_data2).as_ref());
+    let msg2 =
+        Message::from_digest(*ldk_node::bitcoin::hashes::sha256::Hash::hash(&vote_data2).as_ref());
     let sig2 = secp.sign_schnorr(&msg2, &keypair2);
 
     let vote2 = RecoveryVote {
@@ -328,7 +342,9 @@ fn test_recovery_vote_result_tracking() {
         signature: sig2.serialize(),
     };
 
-    let result2 = manager.submit_vote(ledger_id, vote2).expect("Vote 2 should succeed");
+    let result2 = manager
+        .submit_vote(ledger_id, vote2)
+        .expect("Vote 2 should succeed");
     assert_eq!(result2.total_votes, 2);
     assert_eq!(result2.conforming_votes, 1);
     assert_eq!(result2.non_conforming_votes, 1);

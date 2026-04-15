@@ -4,9 +4,9 @@
 //! The `pk()` case is optimized as a fast path (direct Schnorr verification),
 //! but any valid miniscript descriptor is supported.
 
-use bitcoin::secp256k1::{Secp256k1, Message};
 use crate::types::DescriptorWitness;
 use crate::DepositsError;
+use bitcoin::secp256k1::{Message, Secp256k1};
 
 /// Verify that a witness satisfies a descriptor for a given message hash.
 ///
@@ -52,11 +52,12 @@ fn try_verify_pk(
         details: "Invalid pubkey hex in pk() descriptor".to_string(),
     })?;
 
-    let pubkey = bitcoin::secp256k1::PublicKey::from_slice(&pubkey_bytes)
-        .map_err(|_| DepositsError::ProtocolViolation {
+    let pubkey = bitcoin::secp256k1::PublicKey::from_slice(&pubkey_bytes).map_err(|_| {
+        DepositsError::ProtocolViolation {
             violation_type: "invalid_descriptor".to_string(),
             details: "Invalid pubkey in pk() descriptor".to_string(),
-        })?;
+        }
+    })?;
 
     // Need exactly one 64-byte signature
     if witness.stack.len() != 1 || witness.stack[0].len() != 64 {
@@ -90,18 +91,22 @@ fn verify_miniscript(
 
     // Try to parse as a miniscript descriptor
     // Deposits use raw key hex, so wrap in a bare wsh context for parsing
-    let desc_str = if descriptor.starts_with("wsh(") || descriptor.starts_with("sh(") || descriptor.starts_with("tr(") {
+    let desc_str = if descriptor.starts_with("wsh(")
+        || descriptor.starts_with("sh(")
+        || descriptor.starts_with("tr(")
+    {
         descriptor.to_string()
     } else {
         // Bare policy — wrap in wsh() for miniscript parsing
         format!("wsh({})", descriptor)
     };
 
-    let desc = Descriptor::<DescriptorPublicKey>::from_str(&desc_str)
-        .map_err(|e| DepositsError::ProtocolViolation {
+    let desc = Descriptor::<DescriptorPublicKey>::from_str(&desc_str).map_err(|e| {
+        DepositsError::ProtocolViolation {
             violation_type: "invalid_descriptor".to_string(),
             details: format!("Failed to parse descriptor '{}': {}", descriptor, e),
-        })?;
+        }
+    })?;
 
     // For each key in the descriptor, check if the witness contains a valid
     // Schnorr signature for that key over the message_hash
@@ -115,7 +120,9 @@ fn verify_miniscript(
     // Verify each signature in the witness against the known keys
     let mut valid_sigs = 0usize;
     for sig_bytes in &witness.stack {
-        if sig_bytes.len() != 64 { continue; }
+        if sig_bytes.len() != 64 {
+            continue;
+        }
         if let Ok(sig) = bitcoin::secp256k1::schnorr::Signature::from_slice(sig_bytes) {
             for key in &keys {
                 let x_only = key.x_only_public_key().0;
@@ -140,39 +147,37 @@ fn extract_keys(
 ) {
     use miniscript::ForEachKey;
     desc.for_each_key(|key| {
-        match key {
-            miniscript::DescriptorPublicKey::Single(single) => {
-                match &single.key {
-                    miniscript::descriptor::SinglePubKey::FullKey(pk) => {
-                        keys.push(pk.inner);
-                    }
-                    miniscript::descriptor::SinglePubKey::XOnly(xonly) => {
-                        // Convert x-only to compressed (assume even y)
-                        let mut bytes = [0u8; 33];
-                        bytes[0] = 0x02;
-                        bytes[1..].copy_from_slice(&xonly.serialize());
-                        if let Ok(pk) = bitcoin::secp256k1::PublicKey::from_slice(&bytes) {
-                            keys.push(pk);
-                        }
+        if let miniscript::DescriptorPublicKey::Single(single) = key {
+            match &single.key {
+                miniscript::descriptor::SinglePubKey::FullKey(pk) => {
+                    keys.push(pk.inner);
+                }
+                miniscript::descriptor::SinglePubKey::XOnly(xonly) => {
+                    // Convert x-only to compressed (assume even y)
+                    let mut bytes = [0u8; 33];
+                    bytes[0] = 0x02;
+                    bytes[1..].copy_from_slice(&xonly.serialize());
+                    if let Ok(pk) = bitcoin::secp256k1::PublicKey::from_slice(&bytes) {
+                        keys.push(pk);
                     }
                 }
             }
-            _ => {} // Multi-path keys etc — skip for now
         }
         true // continue iterating
     });
 }
 
 /// Determine the minimum number of signatures required by a descriptor.
-fn required_sigs(
-    desc: &miniscript::Descriptor<miniscript::DescriptorPublicKey>,
-) -> usize {
+fn required_sigs(desc: &miniscript::Descriptor<miniscript::DescriptorPublicKey>) -> usize {
     // Simple heuristic: count keys in the descriptor
     // For pk(): 1, for multi(k,..): k, for and(pk,pk): 2
     // A full implementation would walk the miniscript tree
     let mut key_count = 0usize;
     use miniscript::ForEachKey;
-    desc.for_each_key(|_| { key_count += 1; true });
+    desc.for_each_key(|_| {
+        key_count += 1;
+        true
+    });
 
     // For threshold descriptors, we'd need to inspect the structure
     // For now, assume all keys are required (conservative)
@@ -183,7 +188,7 @@ fn required_sigs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::secp256k1::{Secp256k1, SecretKey, Keypair};
+    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
 
     fn make_keypair() -> (SecretKey, bitcoin::secp256k1::PublicKey) {
         let secp = Secp256k1::new();
@@ -205,7 +210,9 @@ mod tests {
         let descriptor = format!("pk({})", hex::encode(pk.serialize()));
         let msg_hash = [0xAA; 32];
         let sig = sign_message(&sk, &msg_hash);
-        let witness = DescriptorWitness { stack: vec![sig.to_vec()] };
+        let witness = DescriptorWitness {
+            stack: vec![sig.to_vec()],
+        };
 
         assert!(verify_witness(&descriptor, &witness, &msg_hash).unwrap());
     }
@@ -215,7 +222,9 @@ mod tests {
         let (_, pk) = make_keypair();
         let descriptor = format!("pk({})", hex::encode(pk.serialize()));
         let msg_hash = [0xAA; 32];
-        let witness = DescriptorWitness { stack: vec![vec![0xBB; 64]] };
+        let witness = DescriptorWitness {
+            stack: vec![vec![0xBB; 64]],
+        };
 
         assert!(!verify_witness(&descriptor, &witness, &msg_hash).unwrap());
     }
@@ -227,7 +236,9 @@ mod tests {
         let msg_hash = [0xAA; 32];
         let wrong_hash = [0xBB; 32];
         let sig = sign_message(&sk, &msg_hash);
-        let witness = DescriptorWitness { stack: vec![sig.to_vec()] };
+        let witness = DescriptorWitness {
+            stack: vec![sig.to_vec()],
+        };
 
         assert!(!verify_witness(&descriptor, &witness, &wrong_hash).unwrap());
     }
@@ -245,7 +256,9 @@ mod tests {
     #[test]
     fn invalid_descriptor_rejected() {
         let msg_hash = [0xAA; 32];
-        let witness = DescriptorWitness { stack: vec![vec![0xBB; 64]] };
+        let witness = DescriptorWitness {
+            stack: vec![vec![0xBB; 64]],
+        };
 
         let result = verify_witness("not_a_descriptor", &witness, &msg_hash);
         assert!(result.is_err());

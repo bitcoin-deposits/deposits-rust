@@ -56,9 +56,9 @@
 // Protocol definitions (re-exported from deposits-protocol for backward compatibility)
 pub use deposits_protocol::constants;
 pub use deposits_protocol::error;
+pub use deposits_protocol::fraud;
 pub use deposits_protocol::messages;
 pub use deposits_protocol::signature_utils;
-pub use deposits_protocol::fraud;
 pub use deposits_protocol::tlv;
 pub use deposits_protocol::types;
 pub use deposits_protocol::wire_messages;
@@ -67,14 +67,16 @@ pub use deposits_protocol::wire_messages;
 pub mod channel_manager_ops;
 pub mod descriptor;
 pub mod event_store;
-pub mod signing;
 pub mod handler;
 pub mod handler_traits;
 pub mod handler_types;
 pub mod ledger;
+pub mod signing;
 #[macro_use]
 pub mod logging;
+pub mod message_handlers;
 pub mod message_processor;
+pub mod message_validation;
 pub mod operation_validation;
 pub mod payment_tracker;
 pub mod quorum;
@@ -85,194 +87,291 @@ pub mod tapscript_reserves;
 pub mod time_utils;
 pub mod traits;
 pub mod validation;
-pub mod message_validation;
-pub mod message_handlers;
 
 // Re-exports for convenience
+pub use channel_manager_ops::{ChannelDetails, ChannelManagerOps, NullChannelManager};
 pub use constants::{
-    MIN_RESERVES_OUTPUT_SATS, MAX_RESERVES_OUTPUT_SATS, DEFAULT_EMERGENCY_TIMEOUT_BLOCKS,
-    MIN_EMERGENCY_TIMEOUT_BLOCKS, MAX_EMERGENCY_TIMEOUT_BLOCKS, MIN_RESERVES_RATIO_PERCENT,
-    COLLATERAL_REPORTING_PERIOD_BLOCKS, DEPOSITS_PROTOCOL_VERSION,
+    COLLATERAL_REPORTING_PERIOD_BLOCKS, DEFAULT_EMERGENCY_TIMEOUT_BLOCKS,
+    DEPOSITS_PROTOCOL_VERSION, MAX_EMERGENCY_TIMEOUT_BLOCKS, MAX_RESERVES_OUTPUT_SATS,
+    MIN_EMERGENCY_TIMEOUT_BLOCKS, MIN_RESERVES_OUTPUT_SATS, MIN_RESERVES_RATIO_PERCENT,
 };
 pub use error::{DepositsError, DepositsResult, HandlerError};
-pub use messages::{DepositsMessage, LedgerOperation, HashStrategy};
-pub use recovery::{
-    RecoveryManager, RecoveryPhase, RecoveryVote, RecoveryOutcome, RecoveryError,
-    ClaimEligibility, RecoveryPool, RecoveryCandidate, select_recovery_partner,
-};
-pub use time_utils::{now_unix_timestamp, is_expired};
-pub use traits::{
-    Broadcaster, ChainSource, ChannelRegistry, EventEmitter, MessageHandler,
-    PaymentTracker, PeerTransport, SignatureProvider, Storage, StorageError,
-    Logger, LogLevel, NullLogger,
-    // Channel operations traits
-    ChannelInfo, ChannelOperations, ReservesOperations,
-    // Storage provider
-    DepositsStorage, DefaultStorageProvider,
-};
-pub use tapscript_reserves::{
-    TapscriptReservesBuilder, TaprootReservesOutput, VoterSet, Voter,
-    ThresholdConfig, ThresholdTier, verify_taproot_reserves, build_taproot_reserves_script,
-    ReservesSpendBuilder, SpendTxParams,
-};
-pub use types::{
-    Deposit, FeeStructure, TransferFeeSchedule, PendingInvoice, ReservesOutput, Invoice,
-    LedgerState, LedgerUpdate, SignedLedgerUpdate, SignedLedgerUpdateLog, CosignEntry,
-    // Deposit identifier types
-    DepositId, DescriptorWitness, compute_deposit_id,
-    // Quorum and dispute protocol types
-    QuorumState, DisputeState, entropy_selection_score, select_entropy_winner, is_entropy_winner,
-    DepositInfo, InvoiceInfo, ReservesStatus, CollateralAttestation,
-    AuditResult, Violation, CrossLedgerViolation, LedgerStateUpdate,
-    QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumVoteMsg,
-    // On-chain deposit funding
-    DepositOffer, DepositOfferStatus,
-    // On-chain withdrawal
-    OnChainWithdrawal, OnChainWithdrawalStatus,
-    WithdrawalLockResult, WithdrawalCompleteResult,
-    // Channel types
-    CommitmentExtraOutput, ChannelId,
-    // Serde helper modules for serializing/deserializing Bitcoin types
-    serde_pubkey, serde_32, serde_64, serde_opt_64, serde_pubkey_map, serde_pubkey_vec,
-};
-pub use channel_manager_ops::{
-    ChannelManagerOps, ChannelDetails, NullChannelManager,
-};
-pub use validation::{
-    ValidationRules, OperationValidator, LedgerConformanceValidator,
-    ConformanceResult, ConformanceViolation,
-    // Export and validation API types
-    LedgerExport, ValidationReport, ValidationError,
-    LedgerStateSnapshot, ChainStatus, SignatureReport, RuleCheck,
-};
-pub use ledger::{
-    Ledger, LedgerRole, LedgerProtocolState, LedgerValidator, LedgerManager, StagedUpdate,
-};
 pub use handler::{Handler, PendingAck};
-pub use message_processor::{
-    QuorumProcessor, QuorumMessageResult, QuorumResponse,
-    QuorumJoinRequest, QuorumStateSync, QuorumVote,
-    CollateralProcessor, CollateralMessageResult,
-    RecoveryProcessor, RecoveryMessageResult,
-};
-pub use handler_types::{
-    // Pending operation tracking
-    PendingPayment,
-    // Protocol state types
-    CosignedInvoice, VoteRoundState, ProtocolStats,
-    LedgerSummary, ReservesSummary, QuorumMemberInfo, CollateralInfo,
-};
 pub use handler_traits::{
     // Pure protocol traits (no LDK dependencies)
-    CollateralOperations, DepositOperations, PaymentTracking, ReservesQueryOps,
+    CollateralOperations,
+    DepositOperations,
+    PaymentTracking,
+    ReservesQueryOps,
     // Note: LedgerOperations and RecoveryOperations stay in ldk-node
     // as they have LDK-specific types (Arc<RwLock<Ledger>>, BroadcasterInterface)
 };
+pub use handler_types::{
+    CollateralInfo,
+    // Protocol state types
+    CosignedInvoice,
+    LedgerSummary,
+    // Pending operation tracking
+    PendingPayment,
+    ProtocolStats,
+    QuorumMemberInfo,
+    ReservesSummary,
+    VoteRoundState,
+};
+pub use ledger::{
+    Ledger, LedgerManager, LedgerProtocolState, LedgerRole, LedgerValidator, StagedUpdate,
+};
+pub use message_processor::{
+    CollateralMessageResult, CollateralProcessor, QuorumJoinRequest, QuorumMessageResult,
+    QuorumProcessor, QuorumResponse, QuorumStateSync, QuorumVote, RecoveryMessageResult,
+    RecoveryProcessor,
+};
+pub use messages::{DepositsMessage, HashStrategy, LedgerOperation};
 pub use payment_tracker::DepositInvoiceIndex;
+pub use recovery::{
+    select_recovery_partner, ClaimEligibility, RecoveryCandidate, RecoveryError, RecoveryManager,
+    RecoveryOutcome, RecoveryPhase, RecoveryPool, RecoveryVote,
+};
 pub use reserves_proposal::{
-    ReservesOutputProposal, SpendingPolicy, EmergencyRecovery, ProposalStatus,
-    serde_arrays,
+    serde_arrays, EmergencyRecovery, ProposalStatus, ReservesOutputProposal, SpendingPolicy,
+};
+pub use tapscript_reserves::{
+    build_taproot_reserves_script, verify_taproot_reserves, ReservesSpendBuilder, SpendTxParams,
+    TaprootReservesOutput, TapscriptReservesBuilder, ThresholdConfig, ThresholdTier, Voter,
+    VoterSet,
+};
+pub use time_utils::{is_expired, now_unix_timestamp};
+pub use traits::{
+    Broadcaster,
+    ChainSource,
+    // Channel operations traits
+    ChannelInfo,
+    ChannelOperations,
+    ChannelRegistry,
+    DefaultStorageProvider,
+    // Storage provider
+    DepositsStorage,
+    EventEmitter,
+    LogLevel,
+    Logger,
+    MessageHandler,
+    NullLogger,
+    PaymentTracker,
+    PeerTransport,
+    ReservesOperations,
+    SignatureProvider,
+    Storage,
+    StorageError,
+};
+pub use types::{
+    compute_deposit_id,
+    entropy_selection_score,
+    is_entropy_winner,
+    select_entropy_winner,
+    serde_32,
+    serde_64,
+    serde_opt_64,
+    // Serde helper modules for serializing/deserializing Bitcoin types
+    serde_pubkey,
+    serde_pubkey_map,
+    serde_pubkey_vec,
+    AuditResult,
+    ChannelId,
+    CollateralAttestation,
+    // Channel types
+    CommitmentExtraOutput,
+    CosignEntry,
+    CrossLedgerViolation,
+    Deposit,
+    // Deposit identifier types
+    DepositId,
+    DepositInfo,
+    // On-chain deposit funding
+    DepositOffer,
+    DepositOfferStatus,
+    DescriptorWitness,
+    DisputeState,
+    FeeStructure,
+    Invoice,
+    InvoiceInfo,
+    LedgerState,
+    LedgerStateUpdate,
+    LedgerUpdate,
+    // On-chain withdrawal
+    OnChainWithdrawal,
+    OnChainWithdrawalStatus,
+    PendingInvoice,
+    QuorumJoinRequestMsg,
+    QuorumJoinResponseMsg,
+    // Quorum and dispute protocol types
+    QuorumState,
+    QuorumVoteMsg,
+    ReservesOutput,
+    ReservesStatus,
+    SignedLedgerUpdate,
+    SignedLedgerUpdateLog,
+    TransferFeeSchedule,
+    Violation,
+    WithdrawalCompleteResult,
+    WithdrawalLockResult,
+};
+pub use validation::{
+    ChainStatus,
+    ConformanceResult,
+    ConformanceViolation,
+    LedgerConformanceValidator,
+    // Export and validation API types
+    LedgerExport,
+    LedgerStateSnapshot,
+    OperationValidator,
+    RuleCheck,
+    SignatureReport,
+    ValidationError,
+    ValidationReport,
+    ValidationRules,
 };
 // Re-export signing message builders from signature_utils (pure data construction)
 pub use signature_utils::{
-    withdrawal_signing_message, collateral_lock_signing_message,
-    invoice_lock_signing_message, transfer_lock_signing_message,
-    compute_transfer_id,
+    collateral_lock_signing_message, compute_transfer_id, invoice_lock_signing_message,
+    transfer_lock_signing_message, withdrawal_signing_message,
 };
 // Re-export crypto operations from signing module
-pub use signing::{
-    create_deposit_guarantee_signature, verify_deposit_guarantee_signature,
-    create_payment_authorization_signature, verify_payment_signature,
-    create_payment_signature,
-    create_deposit_offer_signature, verify_deposit_offer_signature,
-    verify_withdrawal_witness, verify_collateral_lock_witness,
-    create_withdrawal_signature, create_collateral_lock_signature,
-    verify_invoice_lock_witness, verify_transfer_lock_witness,
-    verify_transfer_complete_witness,
-};
-pub use tlv::{
-    TlvEncode, TlvDecode, TlvStream, TlvBuilder, TlvReader,
-    TlvError, TlvResult,
-};
-pub use operation_validation::{
-    // Reserves validations
-    validate_reserves_add,
-    // Payment validations
-    validate_credit_payment, validate_payment_lock, validate_payment_fulfill, validate_payment_fail,
-    // Fee validations
-    validate_fee_collect,
-    // Deposit validations
-    validate_deposit_add, validate_deposit_close, validate_fee_change, validate_deposit_fee_change,
-    // Invoice validations
-    validate_cosign_invoice,
-    // Ledger validations
-    validate_ledger_close,
-    // Constants
-    MAX_FEE_RATE_BPS,
-    // Result type
-    ValidationResult,
-};
-pub use wire_messages::{
-    // Traits
-    WireEncode, WireDecode, WireError,
-    // Reserves messages
-    ReservesAddOutputMsg,
-    ReservesRemoveOutputMsg, ReservesUpdateOutputMsg,
-    UpdateReservesMsg, AcceptReservesMsg,
-    // Deposit messages
-    DepositOpenMsg, DepositCloseMsg, FeeChangeMsg,
-    // Collateral messages
-    QuorumAddMemberMsg, QuorumRemoveMemberMsg,
-    CollateralAttestationMsg,
-    CollateralConsentRequestMsg, CollateralConsentResponseMsg,
-    // Fee and lifecycle messages
-    FeeCollectMsg, LedgerCloseMsg,
-    // Payment messages
-    ReceivingCreditPaymentMsg, SendingLockPaymentMsg,
-    SendingFailPaymentMsg, SendingFulfillPaymentMsg,
-    ReceivingCosignInvoiceMsg, UncreditedPaymentMsg,
-    // Sync messages
-    SyncRequestMsg,
-    // Quorum messages (wire-specific versions with Wire suffix)
-    QuorumJoinRequestMsgWire, QuorumJoinResponseMsgWire, QuorumVoteMsgWire,
-    QuorumMembershipChangeMsg, QuorumStateSyncMsg, QuorumVoteRequestMsg,
-    // Recovery messages
-    RecoveryVoteMsg, RecoveryClaimRequestMsg, RecoveryClaimSignatureMsg, RecoveryClaimCompleteMsg,
-    // Ledger export messages
-    LedgerExportRequestMsg, LedgerExportResponseMsg,
-};
-pub use message_validation::{
-    // ValidationContext trait for implementing message validation
-    ValidationContext,
-    // HandlerContext trait for implementing message handlers (extends ValidationContext)
-    HandlerContext,
-    // LedgerOperation validation
-    validate_ledger_operation,
-    // Message validation functions (with _msg suffix to distinguish from operation_validation)
-    validate_add_deposit_msg, validate_remove_deposit_msg, validate_update_deposit_msg,
-    validate_sending_lock_payment_msg, validate_sending_fulfill_payment_msg, validate_sending_fail_payment_msg,
-    validate_receiving_credit_payment_msg, validate_reserves_add_output_msg, validate_reserves_remove_msg,
-    validate_fee_collect_msg,
-    validate_receiving_cosign_invoice_msg, validate_ledger_close_msg,
-};
 pub use message_handlers::{
-    // Handler result types
-    HandlerResult, ResponseData,
-    // Core handler functions
-    handle_quorum_join_request, handle_quorum_vote_request, handle_quorum_vote, handle_quorum_state_sync,
-    handle_recovery_vote, handle_recovery_claim_request, handle_recovery_claim_signature, handle_recovery_claim_complete,
-    handle_collateral_consent_request, handle_collateral_consent_response,
-    handle_collateral_add_partner, handle_collateral_remove_partner,
-    handle_collateral_attestation, handle_uncredited_payment,
-    // Payment handler functions
-    handle_receiving_credit_payment, handle_sending_lock_payment,
-    handle_sending_fulfill_payment, handle_sending_fail_payment,
+    handle_collateral_add_partner,
+    handle_collateral_attestation,
+    handle_collateral_consent_request,
+    handle_collateral_consent_response,
+    handle_collateral_remove_partner,
     // Fee and lifecycle handler functions
-    handle_fee_collect, handle_ledger_close, handle_receiving_cosign_invoice,
+    handle_fee_collect,
+    handle_ledger_close,
+    // Ledger export handlers
+    handle_ledger_export_request,
     // Generic ledger update handler
     handle_ledger_update,
-    // Ledger export handlers
-    handle_ledger_export_request, validate_ledger_export_response,
+    // Core handler functions
+    handle_quorum_join_request,
+    handle_quorum_state_sync,
+    handle_quorum_vote,
+    handle_quorum_vote_request,
+    handle_receiving_cosign_invoice,
+    // Payment handler functions
+    handle_receiving_credit_payment,
+    handle_recovery_claim_complete,
+    handle_recovery_claim_request,
+    handle_recovery_claim_signature,
+    handle_recovery_vote,
+    handle_sending_fail_payment,
+    handle_sending_fulfill_payment,
+    handle_sending_lock_payment,
+    handle_uncredited_payment,
     // Helper functions
     make_ledger_id,
+    validate_ledger_export_response,
+    // Handler result types
+    HandlerResult,
+    ResponseData,
+};
+pub use message_validation::{
+    // Message validation functions (with _msg suffix to distinguish from operation_validation)
+    validate_add_deposit_msg,
+    validate_fee_collect_msg,
+    validate_ledger_close_msg,
+    // LedgerOperation validation
+    validate_ledger_operation,
+    validate_receiving_cosign_invoice_msg,
+    validate_receiving_credit_payment_msg,
+    validate_remove_deposit_msg,
+    validate_reserves_add_output_msg,
+    validate_reserves_remove_msg,
+    validate_sending_fail_payment_msg,
+    validate_sending_fulfill_payment_msg,
+    validate_sending_lock_payment_msg,
+    validate_update_deposit_msg,
+    // HandlerContext trait for implementing message handlers (extends ValidationContext)
+    HandlerContext,
+    // ValidationContext trait for implementing message validation
+    ValidationContext,
+};
+pub use operation_validation::{
+    // Invoice validations
+    validate_cosign_invoice,
+    // Payment validations
+    validate_credit_payment,
+    // Deposit validations
+    validate_deposit_add,
+    validate_deposit_close,
+    validate_deposit_fee_change,
+    validate_fee_change,
+    // Fee validations
+    validate_fee_collect,
+    // Ledger validations
+    validate_ledger_close,
+    validate_payment_fail,
+    validate_payment_fulfill,
+    validate_payment_lock,
+    // Reserves validations
+    validate_reserves_add,
+    // Result type
+    ValidationResult,
+    // Constants
+    MAX_FEE_RATE_BPS,
+};
+pub use signing::{
+    create_collateral_lock_signature, create_deposit_guarantee_signature,
+    create_deposit_offer_signature, create_payment_authorization_signature,
+    create_payment_signature, create_withdrawal_signature, verify_collateral_lock_witness,
+    verify_deposit_guarantee_signature, verify_deposit_offer_signature,
+    verify_invoice_lock_witness, verify_payment_signature, verify_transfer_complete_witness,
+    verify_transfer_lock_witness, verify_withdrawal_witness,
+};
+pub use tlv::{TlvBuilder, TlvDecode, TlvEncode, TlvError, TlvReader, TlvResult, TlvStream};
+pub use wire_messages::{
+    AcceptReservesMsg,
+    CollateralAttestationMsg,
+    CollateralConsentRequestMsg,
+    CollateralConsentResponseMsg,
+    DepositCloseMsg,
+    // Deposit messages
+    DepositOpenMsg,
+    FeeChangeMsg,
+    // Fee and lifecycle messages
+    FeeCollectMsg,
+    LedgerCloseMsg,
+    // Ledger export messages
+    LedgerExportRequestMsg,
+    LedgerExportResponseMsg,
+    // Collateral messages
+    QuorumAddMemberMsg,
+    // Quorum messages (wire-specific versions with Wire suffix)
+    QuorumJoinRequestMsgWire,
+    QuorumJoinResponseMsgWire,
+    QuorumMembershipChangeMsg,
+    QuorumRemoveMemberMsg,
+    QuorumStateSyncMsg,
+    QuorumVoteMsgWire,
+    QuorumVoteRequestMsg,
+    ReceivingCosignInvoiceMsg,
+    // Payment messages
+    ReceivingCreditPaymentMsg,
+    RecoveryClaimCompleteMsg,
+    RecoveryClaimRequestMsg,
+    RecoveryClaimSignatureMsg,
+    // Recovery messages
+    RecoveryVoteMsg,
+    // Reserves messages
+    ReservesAddOutputMsg,
+    ReservesRemoveOutputMsg,
+    ReservesUpdateOutputMsg,
+    SendingFailPaymentMsg,
+    SendingFulfillPaymentMsg,
+    SendingLockPaymentMsg,
+    // Sync messages
+    SyncRequestMsg,
+    UncreditedPaymentMsg,
+    UpdateReservesMsg,
+    WireDecode,
+    // Traits
+    WireEncode,
+    WireError,
 };

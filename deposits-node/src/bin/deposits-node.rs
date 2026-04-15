@@ -17,11 +17,11 @@ use tikv_jemallocator::Jemalloc;
 static GLOBAL: Jemalloc = Jemalloc;
 
 use base64::Engine;
-use bitcoin::secp256k1::{PublicKey, SecretKey, Secp256k1};
 use bitcoin::bip32::{DerivationPath, Xpriv};
+use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::Network;
-use deposits_node::{Node, NodeConfig};
 use deposits_node::cli::{nostr_commands, recovery};
+use deposits_node::{Node, NodeConfig};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -46,8 +46,7 @@ fn derive_operator_secret(seed: &[u8; 32], network: Network) -> Result<SecretKey
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Install ring as the default rustls crypto provider.
-    // Required when building against stock nostr-sdk (without our patched nostr-relay-pool).
+    // Install ring as the default rustls crypto provider (required by nostr-sdk).
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -93,9 +92,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "recovery" => recovery::recovery_command(&args[2..]).await?,
         "health" => health_command(&args[2..]).await?,
         "version" | "--version" | "-V" => {
-            println!("deposits-node {} (built {})",
+            println!(
+                "deposits-node {} (built {})",
                 env!("CARGO_PKG_VERSION"),
-                env!("BUILD_TIMESTAMP"));
+                env!("BUILD_TIMESTAMP")
+            );
         }
         "keygen" => keygen(),
         "derive-deposit-key" => derive_deposit_key(&args[2..])?,
@@ -408,8 +409,7 @@ fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     });
 
     // Create data directory
-    std::fs::create_dir_all(&data_dir)
-        .map_err(|e| format!("Failed to create data dir: {}", e))?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create data dir: {}", e))?;
 
     Ok(NodeConfig {
         seed,
@@ -474,7 +474,9 @@ async fn send_daemon_request(
                 if response.success {
                     return Ok(response.result.unwrap_or(serde_json::Value::Null));
                 } else {
-                    let err_msg = response.error.unwrap_or_else(|| "Unknown error".to_string());
+                    let err_msg = response
+                        .error
+                        .unwrap_or_else(|| "Unknown error".to_string());
                     return Err(err_msg.into());
                 }
             }
@@ -492,7 +494,9 @@ async fn send_daemon_request(
                     if response.success {
                         return Ok(response.result.unwrap_or(serde_json::Value::Null));
                     } else {
-                        let err_msg = response.error.unwrap_or_else(|| "Unknown error".to_string());
+                        let err_msg = response
+                            .error
+                            .unwrap_or_else(|| "Unknown error".to_string());
                         return Err(err_msg.into());
                     }
                 }
@@ -578,17 +582,22 @@ async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     {
         let data_dir = node.data_dir().to_path_buf();
-        let profiling_enabled = std::env::var("ENABLE_PROFILING").map(|v| v == "1").unwrap_or(false);
+        let profiling_enabled = std::env::var("ENABLE_PROFILING")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         tokio::spawn(async move {
             use tokio::signal::unix::{signal, SignalKind};
 
-            let mut sig = signal(SignalKind::user_defined1())
-                .expect("Failed to register SIGUSR1 handler");
+            let mut sig =
+                signal(SignalKind::user_defined1()).expect("Failed to register SIGUSR1 handler");
 
             if !profiling_enabled {
                 tracing::info!("CPU profiling disabled (set ENABLE_PROFILING=1 to enable)");
                 // Still handle SIGUSR1 to avoid killing the process
-                loop { sig.recv().await; tracing::info!("SIGUSR1 received but profiling disabled"); }
+                loop {
+                    sig.recv().await;
+                    tracing::info!("SIGUSR1 received but profiling disabled");
+                }
             }
 
             use pprof::ProfilerGuardBuilder;
@@ -635,9 +644,12 @@ async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
                             for (frames, count) in report.data.iter() {
                                 // Frames.frames is Vec<Vec<Symbol>> — flatten inline frames
-                                let names: Vec<String> = frames.frames.iter().rev().flat_map(|syms| {
-                                    syms.iter().map(|s| s.name())
-                                }).collect();
+                                let names: Vec<String> = frames
+                                    .frames
+                                    .iter()
+                                    .rev()
+                                    .flat_map(|syms| syms.iter().map(|s| s.name()))
+                                    .collect();
                                 if !names.is_empty() {
                                     *stacks.entry(names.join(";")).or_insert(0) += *count;
                                 }
@@ -655,7 +667,9 @@ async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 tracing::info!(
                                     "Profile dump #{}: {} samples, {} unique stacks",
-                                    dump_count, total, sorted.len()
+                                    dump_count,
+                                    total,
+                                    sorted.len()
                                 );
                             } else {
                                 tracing::debug!("Profile dump #{}: no samples", dump_count);
@@ -720,7 +734,6 @@ async fn show_address(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Generate a new secp256k1 keypair for deposits
 // ============================================================================
 // Health Commands
 // ============================================================================
@@ -763,7 +776,10 @@ async fn health_ping(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         return Ok(());
     }
 
-    println!("Pinging quorum via daemon on ledger {}...\n", &ledger_id[..16]);
+    println!(
+        "Pinging quorum via daemon on ledger {}...\n",
+        &ledger_id[..16]
+    );
 
     let rounds = 3;
     for round in 1..=rounds {
@@ -775,10 +791,20 @@ async fn health_ping(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         match send_daemon_request(&config, &ledger_id, "health_ping", serde_json::json!({})).await {
             Ok(result) => {
                 let rtt = start.elapsed();
-                let member = result.get("cosigner").and_then(|v| v.as_str()).unwrap_or("?");
-                let cosign_ms = result.get("cosign_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                println!("{}... {:.0}ms (cosign: {:.0}ms)",
-                    &member[..12.min(member.len())], rtt.as_secs_f64() * 1000.0, cosign_ms);
+                let member = result
+                    .get("cosigner")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let cosign_ms = result
+                    .get("cosign_ms")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                println!(
+                    "{}... {:.0}ms (cosign: {:.0}ms)",
+                    &member[..12.min(member.len())],
+                    rtt.as_secs_f64() * 1000.0,
+                    cosign_ms
+                );
             }
             Err(e) => {
                 let rtt = start.elapsed();
@@ -807,7 +833,8 @@ async fn health_relays(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         return Ok(());
     }
 
-    let result = send_daemon_request(&config, &ledger_id, "health_status", serde_json::json!({})).await?;
+    let result =
+        send_daemon_request(&config, &ledger_id, "health_status", serde_json::json!({})).await?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
@@ -834,9 +861,15 @@ async fn health_chains(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
         println!("=== {} [{}] ===", short_lid, role);
         println!("  Sequence:   {}", ledger.state.sequence);
-        println!("  Hash:       {}", hex::encode(&ledger.state.chain_tip_hash[..8]));
+        println!(
+            "  Hash:       {}",
+            hex::encode(&ledger.state.chain_tip_hash[..8])
+        );
         println!("  Deposits:   {}", ledger.state.deposits.len());
-        println!("  Quorum:     {} members", ledger.state.quorum_members.len());
+        println!(
+            "  Quorum:     {} members",
+            ledger.state.quorum_members.len()
+        );
 
         // Validate hash chain
         let history_len = ledger.history.len();
@@ -854,15 +887,22 @@ async fn health_chains(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         for (i, update) in ledger.history.iter().enumerate() {
             // Check sequence
             if update.sequence_number != i as u64 {
-                println!("  Chain:      BREAK at seq {} (expected {})", update.sequence_number, i);
+                println!(
+                    "  Chain:      BREAK at seq {} (expected {})",
+                    update.sequence_number, i
+                );
                 chain_ok = false;
                 break;
             }
 
             // Check previous hash linkage
             if update.previous_hash != prev_hash {
-                println!("  Chain:      BREAK at seq {} (prev_hash mismatch: expected {}... got {}...)",
-                    i, hex::encode(&prev_hash[..4]), hex::encode(&update.previous_hash[..4]));
+                println!(
+                    "  Chain:      BREAK at seq {} (prev_hash mismatch: expected {}... got {}...)",
+                    i,
+                    hex::encode(&prev_hash[..4]),
+                    hex::encode(&update.previous_hash[..4])
+                );
                 chain_ok = false;
                 break;
             }
@@ -870,8 +910,12 @@ async fn health_chains(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             // Verify the update's own hash
             let computed = update.compute_hash();
             if computed != update.current_hash {
-                println!("  Chain:      BREAK at seq {} (hash mismatch: computed {}... stored {}...)",
-                    i, hex::encode(&computed[..4]), hex::encode(&update.current_hash[..4]));
+                println!(
+                    "  Chain:      BREAK at seq {} (hash mismatch: computed {}... stored {}...)",
+                    i,
+                    hex::encode(&computed[..4]),
+                    hex::encode(&update.current_hash[..4])
+                );
                 chain_ok = false;
                 break;
             }
@@ -884,8 +928,11 @@ async fn health_chains(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             if prev_hash == ledger.state.chain_tip_hash {
                 println!("  Chain:      OK ({} updates verified)", history_len);
             } else {
-                println!("  Chain:      DIVERGED (history tip {}... != state {}...)",
-                    hex::encode(&prev_hash[..4]), hex::encode(&ledger.state.chain_tip_hash[..4]));
+                println!(
+                    "  Chain:      DIVERGED (history tip {}... != state {}...)",
+                    hex::encode(&prev_hash[..4]),
+                    hex::encode(&ledger.state.chain_tip_hash[..4])
+                );
             }
         }
 
@@ -894,8 +941,12 @@ async fn health_chains(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             println!("  Joined quorums:");
             for jq in &ledger.state.joined_quorums {
                 let op_short = hex::encode(jq.operator_id.serialize());
-                println!("    {}... ledger:{}... expires:{}",
-                    &op_short[..12], &jq.ledger_id[..16.min(jq.ledger_id.len())], jq.membership_expires);
+                println!(
+                    "    {}... ledger:{}... expires:{}",
+                    &op_short[..12],
+                    &jq.ledger_id[..16.min(jq.ledger_id.len())],
+                    jq.membership_expires
+                );
             }
         }
 
@@ -957,7 +1008,8 @@ fn derive_deposit_key(args: &[String]) -> Result<(), String> {
                 if i >= args.len() {
                     return Err("--index requires a value".to_string());
                 }
-                index = args[i].parse::<u32>()
+                index = args[i]
+                    .parse::<u32>()
                     .map_err(|e| format!("Invalid index: {}", e))?;
             }
             _ => {}
@@ -983,7 +1035,10 @@ fn derive_deposit_key(args: &[String]) -> Result<(), String> {
     // Output compressed pubkey on stdout (for use with deposit open)
     // Secret key on stderr (for signing operations)
     println!("{}", pubkey);
-    eprintln!("secret: {}", hex::encode(deposit_xpriv.private_key.secret_bytes()));
+    eprintln!(
+        "secret: {}",
+        hex::encode(deposit_xpriv.private_key.secret_bytes())
+    );
 
     Ok(())
 }
@@ -1128,12 +1183,10 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                     .ok_or_else(|| format!("Ledger not found for: {}", id))?
             }
         }
-        None => {
-            match node.get_primary_ledger() {
-                Some((lid, _)) => lid,
-                None => return Err("No ledger found. Open a ledger first with 'ledger open'.".into()),
-            }
-        }
+        None => match node.get_primary_ledger() {
+            Some((lid, _)) => lid,
+            None => return Err("No ledger found. Open a ledger first with 'ledger open'.".into()),
+        },
     };
     drop(node);
 
@@ -1216,12 +1269,21 @@ async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         if let Some(merkle_root) = info.taproot_output.merkle_root() {
             println!("    Merkle Root: {}", merkle_root);
         }
-        println!("    ScriptPubKey: {}", hex::encode(info.taproot_output.script_pubkey().as_bytes()));
+        println!(
+            "    ScriptPubKey: {}",
+            hex::encode(info.taproot_output.script_pubkey().as_bytes())
+        );
         println!();
         println!("    === Spending Tiers (Script Leaves) ===");
         for (i, tier) in info.taproot_output.config.tiers.iter().enumerate() {
-            println!("    Tier {}: {} (threshold={}, tie_breaker={}, timelock={})",
-                i, tier.description, tier.threshold, tier.requires_tie_breaker, tier.timelock_blocks);
+            println!(
+                "    Tier {}: {} (threshold={}, tie_breaker={}, timelock={})",
+                i,
+                tier.description,
+                tier.threshold,
+                tier.requires_tie_breaker,
+                tier.timelock_blocks
+            );
 
             // Get the control block for this tier
             if let Some(cb) = info.taproot_output.control_block_for_tier(i) {
@@ -1364,7 +1426,9 @@ async fn auto_advertise_ledger(
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
     if ad.access_control {
-        if let Ok(domains) = std::fs::read_to_string(node.data_dir().join("deposit_domain_allowlist.txt")) {
+        if let Ok(domains) =
+            std::fs::read_to_string(node.data_dir().join("deposit_domain_allowlist.txt"))
+        {
             ad.allowed_domains = domains
                 .lines()
                 .map(|l| l.trim().to_lowercase())
@@ -1385,7 +1449,9 @@ async fn auto_advertise_ledger(
     // Calculate headroom
     let total_obligations_msats = ledger.total_deposit_balance();
     ad.total_obligations_msats = total_obligations_msats;
-    ad.available_headroom_msats = ad.reserves_amount_msats.saturating_sub(total_obligations_msats);
+    ad.available_headroom_msats = ad
+        .reserves_amount_msats
+        .saturating_sub(total_obligations_msats);
 
     // Use the node's existing transport — avoids ephemeral connection race where
     // a new transport disconnects before the relay processes the write.
@@ -1463,17 +1529,21 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let secp = Secp256k1::new();
 
     // Parse destination address
-    let dest_addr = destination.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+    let dest_addr = destination
+        .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
         .map_err(|e| format!("Invalid destination address: {}", e))?
         .require_network(config.network)
         .map_err(|e| format!("Address network mismatch: {}", e))?;
     let dest_script = dest_addr.script_pubkey();
 
     // Collect secret keys from --key flags
-    let mut secret_keys: Vec<SecretKey> = keys.iter().map(|hex_str| {
-        let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid key hex: {}", e))?;
-        SecretKey::from_slice(&bytes).map_err(|e| format!("Invalid secret key: {}", e))
-    }).collect::<Result<Vec<_>, String>>()?;
+    let mut secret_keys: Vec<SecretKey> = keys
+        .iter()
+        .map(|hex_str| {
+            let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid key hex: {}", e))?;
+            SecretKey::from_slice(&bytes).map_err(|e| format!("Invalid secret key: {}", e))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
     // Auto-discover keys from --seed-dir: find all files named "seed", derive operator key
     if let Some(ref dir) = seed_dir {
@@ -1501,18 +1571,25 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 Ok(s) => s.trim().to_string(),
                 Err(_) => continue,
             };
-            if seed_hex.len() != 64 { continue; }
+            if seed_hex.len() != 64 {
+                continue;
+            }
             if let Ok(seed_bytes) = hex::decode(&seed_hex) {
                 if seed_bytes.len() == 32 {
                     let mut seed = [0u8; 32];
                     seed.copy_from_slice(&seed_bytes);
                     if let Ok(sk) = derive_operator_secret(&seed, config.network) {
                         let pk = PublicKey::from_secret_key(&secp, &sk);
-                        let label = seed_file.parent()
+                        let label = seed_file
+                            .parent()
                             .and_then(|p| p.file_name())
                             .and_then(|n| n.to_str())
                             .unwrap_or("?");
-                        println!("  Found seed: {} -> {}...", label, &hex::encode(pk.serialize())[..16]);
+                        println!(
+                            "  Found seed: {} -> {}...",
+                            label,
+                            &hex::encode(pk.serialize())[..16]
+                        );
                         secret_keys.push(sk);
                     }
                 }
@@ -1540,16 +1617,32 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("  Outpoint:    {}", outpoint);
     println!("  Amount:      {} sats", amount);
     println!("  Destination: {}", destination);
-    println!("  Tier:        {} ({})", tier,
-        reserves.taproot_output.config.tiers.get(tier)
-            .map(|t| t.description.as_str()).unwrap_or("?"));
+    println!(
+        "  Tier:        {} ({})",
+        tier,
+        reserves
+            .taproot_output
+            .config
+            .tiers
+            .get(tier)
+            .map(|t| t.description.as_str())
+            .unwrap_or("?")
+    );
     println!("  Fee rate:    {} sat/vb", fee_rate);
     println!("  Keys:        {}", keys.len());
     println!();
 
     // Get tier info
-    let tier_info = reserves.taproot_output.config.tiers.get(tier)
-        .ok_or(format!("Tier {} does not exist (max: {})", tier, reserves.taproot_output.config.tiers.len() - 1))?;
+    let tier_info = reserves
+        .taproot_output
+        .config
+        .tiers
+        .get(tier)
+        .ok_or(format!(
+            "Tier {} does not exist (max: {})",
+            tier,
+            reserves.taproot_output.config.tiers.len() - 1
+        ))?;
 
     // Build the leaf script for this tier
     let builder = TapscriptReservesBuilder::new(
@@ -1558,11 +1651,14 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         config.network,
         reserves.ledger_hash,
     );
-    let leaf_script = builder.build_threshold_leaf(tier_info)
+    let leaf_script = builder
+        .build_threshold_leaf(tier_info)
         .map_err(|e| format!("Failed to build leaf script: {:?}", e))?;
 
     // Get control block
-    let control_block = reserves.taproot_output.control_block_for_tier(tier)
+    let control_block = reserves
+        .taproot_output
+        .control_block_for_tier(tier)
         .ok_or("Failed to get control block for tier")?;
 
     // Build unsigned transaction
@@ -1573,11 +1669,18 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         destination_script: dest_script.clone(),
         fee_rate_sat_vbyte: fee_rate,
     };
-    let mut tx = deposits_core::tapscript_reserves::ReservesSpendBuilder::build_spend_transaction(&params, &reserves_script_pubkey)?;
+    let mut tx = deposits_core::tapscript_reserves::ReservesSpendBuilder::build_spend_transaction(
+        &params,
+        &reserves_script_pubkey,
+    )?;
 
     // Compute sighash
     let sighash = deposits_core::tapscript_reserves::ReservesSpendBuilder::compute_sighash(
-        &tx, 0, amount, &reserves_script_pubkey, &leaf_script,
+        &tx,
+        0,
+        amount,
+        &reserves_script_pubkey,
+        &leaf_script,
     )?;
 
     let sighash_bytes: &[u8] = sighash.as_ref();
@@ -1597,26 +1700,40 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         if let Some(slot) = voter_pubkeys.iter().position(|pk| *pk == xonly) {
             let sig = secp.sign_schnorr(&msg, &keypair);
             signatures[slot] = Some(sig.serialize());
-            println!("  Signed slot {} ({}...)", slot, &hex::encode(xonly.serialize())[..16]);
+            println!(
+                "  Signed slot {} ({}...)",
+                slot,
+                &hex::encode(xonly.serialize())[..16]
+            );
         } else {
-            eprintln!("  WARNING: Key {}... is not in the voter set", &hex::encode(xonly.serialize())[..16]);
+            eprintln!(
+                "  WARNING: Key {}... is not in the voter set",
+                &hex::encode(xonly.serialize())[..16]
+            );
         }
     }
 
     let signed_count = signatures.iter().filter(|s| s.is_some()).count();
-    println!("\n  Signed: {}/{} required", signed_count, tier_info.threshold);
+    println!(
+        "\n  Signed: {}/{} required",
+        signed_count, tier_info.threshold
+    );
 
     if signed_count < tier_info.threshold {
         return Err(format!(
             "Not enough signatures: {} of {} required for tier {}",
             signed_count, tier_info.threshold, tier
-        ).into());
+        )
+        .into());
     }
 
     // Build witness
-    let witness = deposits_core::tapscript_reserves::ReservesSpendBuilder::create_checksigadd_witness(
-        &signatures, &leaf_script, &control_block,
-    );
+    let witness =
+        deposits_core::tapscript_reserves::ReservesSpendBuilder::create_checksigadd_witness(
+            &signatures,
+            &leaf_script,
+            &control_block,
+        );
     tx.input[0].witness = witness;
 
     // Serialize and display
@@ -1654,8 +1771,13 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let mut advertise_relay: Option<String> = None;
 
     let fee_flags = [
-        "--annual-fee-bps", "--min-fee-sats", "--fee-period-blocks", "--fee-period",
-        "--transfer-fee-fixed-msats", "--transfer-fee-fixed", "--transfer-fee-rate-bps",
+        "--annual-fee-bps",
+        "--min-fee-sats",
+        "--fee-period-blocks",
+        "--fee-period",
+        "--transfer-fee-fixed-msats",
+        "--transfer-fee-fixed",
+        "--transfer-fee-rate-bps",
     ];
 
     let mut i = 0;
@@ -1663,23 +1785,43 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         if args[i].starts_with("--") {
             match args[i].as_str() {
                 "--annual-fee-bps" if i + 1 < args.len() => {
-                    annual_fee_bps = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
+                    annual_fee_bps = Some(
+                        args[i + 1]
+                            .parse()
+                            .map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?,
+                    );
                     i += 1;
                 }
                 "--min-fee-sats" if i + 1 < args.len() => {
-                    min_fee_sats = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
+                    min_fee_sats = Some(
+                        args[i + 1]
+                            .parse()
+                            .map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?,
+                    );
                     i += 1;
                 }
                 "--fee-period-blocks" | "--fee-period" if i + 1 < args.len() => {
-                    fee_period_blocks = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
+                    fee_period_blocks = Some(
+                        args[i + 1]
+                            .parse()
+                            .map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?,
+                    );
                     i += 1;
                 }
                 "--transfer-fee-fixed-msats" | "--transfer-fee-fixed" if i + 1 < args.len() => {
-                    transfer_fee_fixed = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
+                    transfer_fee_fixed = Some(
+                        args[i + 1]
+                            .parse()
+                            .map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?,
+                    );
                     i += 1;
                 }
                 "--transfer-fee-rate-bps" if i + 1 < args.len() => {
-                    transfer_fee_rate_bps = Some(args[i + 1].parse().map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?);
+                    transfer_fee_rate_bps = Some(
+                        args[i + 1]
+                            .parse()
+                            .map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?,
+                    );
                     i += 1;
                 }
                 "--advertise-relay" if i + 1 < args.len() => {
@@ -1711,7 +1853,7 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     };
 
     let config = parse_config(&config_args)?;
-    let seed = config.seed.clone();
+    let seed = config.seed;
     let network = config.network;
     let relays = config.relays.clone();
     let operator_name = config.operator_name.clone();
@@ -1753,7 +1895,11 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     if fee_schedule.has_any() {
         println!("  Fee schedule:");
         if let Some(bps) = fee_schedule.annual_fee_bps {
-            println!("    Annual custody fee: {} bps ({:.2}%)", bps, bps as f64 / 100.0);
+            println!(
+                "    Annual custody fee: {} bps ({:.2}%)",
+                bps,
+                bps as f64 / 100.0
+            );
         }
         if let Some(sats) = fee_schedule.min_fee_sats {
             println!("    Minimum fee per period: {} sats", sats);
@@ -1765,12 +1911,25 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             println!("    Transfer fee (fixed): {} sats", fixed);
         }
         if let Some(bps) = fee_schedule.transfer_fee_rate_bps {
-            println!("    Transfer fee (rate): {} bps ({:.2}%)", bps, bps as f64 / 100.0);
+            println!(
+                "    Transfer fee (rate): {} bps ({:.2}%)",
+                bps,
+                bps as f64 / 100.0
+            );
         }
     }
 
     // Auto-advertise ledger for wallet discovery
-    auto_advertise_ledger(&node, &reserves_key, &seed, network, &relays, operator_name.as_deref(), &fee_schedule).await;
+    auto_advertise_ledger(
+        &node,
+        &reserves_key,
+        &seed,
+        network,
+        &relays,
+        operator_name.as_deref(),
+        &fee_schedule,
+    )
+    .await;
     if let Err(e) = node.subscribe_to_ledger(&ledger_id).await {
         eprintln!("  Warning: Failed to subscribe to ledger events: {}", e);
     } else {
@@ -1810,9 +1969,11 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         println!("    Operator: {}", operator);
         println!("    Reserves Key: {}", reserves_key);
         println!("    Sequence: {}", ledger.state.sequence);
-        println!("    Deposits: {} total, {} msats balance",
+        println!(
+            "    Deposits: {} total, {} msats balance",
             ledger.state.deposits.len(),
-            ledger.total_deposit_balance());
+            ledger.total_deposit_balance()
+        );
         println!("    Reserves: {} sats", ledger.reserves_amount() / 1000);
         println!();
     }
@@ -1874,7 +2035,8 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
         // Determine signature status and signer
         let has_partner_sig = update.cosign_signature != [0u8; 64];
         let has_operator_sig = update.operator_signature != [0u8; 64];
-        let sig_status = format!("[{}{}]",
+        let sig_status = format!(
+            "[{}{}]",
             if has_operator_sig { "O" } else { "·" },
             if has_partner_sig { "P" } else { "·" }
         );
@@ -1906,17 +2068,24 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
         let (op_name, op_details) = format_operation(update.message_type, &update.message);
 
         // Truncated hash: last 2 bytes of prev, last 2 bytes of curr
-        println!("{:>4} ↑{:<6} [{:02x}{:02x}~{:02x}{:02x}] {} {} {} {} {}{}",
+        println!(
+            "{:>4} ↑{:<6} [{:02x}{:02x}~{:02x}{:02x}] {} {} {} {} {}{}",
             seq,
             update.block_height,
-            prev[30], prev[31],
-            curr[30], curr[31],
+            prev[30],
+            prev[31],
+            curr[30],
+            curr[31],
             sig_status,
             signer,
             cosigner,
             member_hash,
             op_name,
-            if op_details.is_empty() { String::new() } else { format!("  {}", op_details) }
+            if op_details.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", op_details)
+            }
         );
     }
 
@@ -1981,8 +2150,14 @@ async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
             // Hash chain status
             println!("Hash Chain:");
-            println!("  Valid length: {}/{}", report.hash_chain.valid_length, report.hash_chain.total_length);
-            println!("  Genesis hash: {:02x?}", &report.hash_chain.genesis_hash[..8]);
+            println!(
+                "  Valid length: {}/{}",
+                report.hash_chain.valid_length, report.hash_chain.total_length
+            );
+            println!(
+                "  Genesis hash: {:02x?}",
+                &report.hash_chain.genesis_hash[..8]
+            );
             println!("  Tail hash: {:02x?}", &report.hash_chain.tail_hash[..8]);
             println!();
 
@@ -2004,7 +2179,11 @@ async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             println!("Business Rules:");
             for rule in &report.business_rules {
                 let status = if rule.passed { "PASS" } else { "FAIL" };
-                let details = rule.details.as_ref().map(|d| format!(" ({})", d)).unwrap_or_default();
+                let details = rule
+                    .details
+                    .as_ref()
+                    .map(|d| format!(" ({})", d))
+                    .unwrap_or_default();
                 println!("  [{}] {}{}", status, rule.rule, details);
             }
             println!();
@@ -2013,8 +2192,14 @@ async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             println!("Final State:");
             println!("  Sequence: {}", report.final_state.sequence);
             println!("  Hash: {:02x?}", &report.final_state.hash[..8]);
-            println!("  Total deposits: {} msat", report.final_state.total_deposits);
-            println!("  Reserves: {} sats", report.final_state.reserves_amount / 1000);
+            println!(
+                "  Total deposits: {} msat",
+                report.final_state.total_deposits
+            );
+            println!(
+                "  Reserves: {} sats",
+                report.final_state.reserves_amount / 1000
+            );
             println!("  Deposit count: {}", report.final_state.deposit_count);
             println!();
 
@@ -2097,24 +2282,26 @@ async fn ledger_health(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     println!();
 
     // Collect ledgers to report on
-    let ledger_snapshots: Vec<(String, deposits_core::ledger::Ledger)> = if let Some(id_str) = ledger_id_str {
-        let (lid, ledger) = node.get_ledger_with_id(&id_str)
-            .ok_or_else(|| format!("Ledger not found: {}", id_str))?;
-        vec![(lid, ledger)]
-    } else {
-        let all = node.list_ledgers();
-        if all.is_empty() {
-            println!("No ledgers found.");
-            return Ok(());
-        }
-        let mut result = Vec::new();
-        for (lid, arc) in &all {
-            let ledger = arc.read().unwrap().clone();
-            result.push((lid.clone(), ledger));
-        }
-        result.sort_by(|a, b| a.0.cmp(&b.0));
-        result
-    };
+    let ledger_snapshots: Vec<(String, deposits_core::ledger::Ledger)> =
+        if let Some(id_str) = ledger_id_str {
+            let (lid, ledger) = node
+                .get_ledger_with_id(&id_str)
+                .ok_or_else(|| format!("Ledger not found: {}", id_str))?;
+            vec![(lid, ledger)]
+        } else {
+            let all = node.list_ledgers();
+            if all.is_empty() {
+                println!("No ledgers found.");
+                return Ok(());
+            }
+            let mut result = Vec::new();
+            for (lid, arc) in &all {
+                let ledger = arc.read().unwrap().clone();
+                result.push((lid.clone(), ledger));
+            }
+            result.sort_by(|a, b| a.0.cmp(&b.0));
+            result
+        };
 
     for (ledger_id, ledger) in &ledger_snapshots {
         let short_id = &ledger_id[..16.min(ledger_id.len())];
@@ -2133,14 +2320,19 @@ async fn ledger_health(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         // Reserves status - use derived quorum_state instead of scanning history
         let has_rotation = ledger.state.quorum_state == deposits_core::QuorumState::Active;
         let reserves_sats = ledger.reserves_amount() / 1000;
-        println!("  Reserves:      {} sats (rotated: {})",
-            reserves_sats, if has_rotation { "yes" } else { "no" });
+        println!(
+            "  Reserves:      {} sats (rotated: {})",
+            reserves_sats,
+            if has_rotation { "yes" } else { "no" }
+        );
 
         // Deposits
         let total_balance_msat = ledger.total_deposit_balance();
         let deposit_count = ledger.state.deposits.len();
-        println!("  Deposits:      {} msat across {} accounts",
-            total_balance_msat, deposit_count);
+        println!(
+            "  Deposits:      {} msat across {} accounts",
+            total_balance_msat, deposit_count
+        );
 
         // Quorum members (partners backing this ledger)
         let quorum_count = ledger.state.quorum_members.len();
@@ -2156,15 +2348,25 @@ async fn ledger_health(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             // Check attestation status
             let attestation = ledger.state.collateral_attestations.get(&member.pubkey);
             let attest_info = match attestation {
-                Some(a) => format!("attested {} sats, expires block {}", a.amount / 1000, a.lock_until_block),
+                Some(a) => format!(
+                    "attested {} sats, expires block {}",
+                    a.amount / 1000,
+                    a.lock_until_block
+                ),
                 None => "no attestation".to_string(),
             };
-            println!("    - {} (ledger: {}..., {})", short_pubkey, short_lid, attest_info);
+            println!(
+                "    - {} (ledger: {}..., {})",
+                short_pubkey, short_lid, attest_info
+            );
         }
 
         // Joined quorums (ledgers we are backing as partner)
         if !ledger.state.joined_quorums.is_empty() {
-            println!("  Backing:       {} operator ledgers", ledger.state.joined_quorums.len());
+            println!(
+                "  Backing:       {} operator ledgers",
+                ledger.state.joined_quorums.len()
+            );
             for membership in &ledger.state.joined_quorums {
                 let op_hex = hex::encode(membership.operator_id.serialize());
                 let short_lid = if membership.ledger_id.len() >= 12 {
@@ -2172,8 +2374,12 @@ async fn ledger_health(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                 } else {
                     &membership.ledger_id
                 };
-                println!("    - operator {}... (ledger: {}..., expires block {})",
-                    &op_hex[..16], short_lid, membership.membership_expires);
+                println!(
+                    "    - operator {}... (ledger: {}..., expires block {})",
+                    &op_hex[..16],
+                    short_lid,
+                    membership.membership_expires
+                );
             }
         }
 
@@ -2207,13 +2413,18 @@ async fn ledger_health(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                     } else {
                         println!("  Conformance:   FAIL");
                         if report.hash_chain.valid_length < report.hash_chain.total_length {
-                            println!("    - Hash chain: {}/{} valid",
-                                report.hash_chain.valid_length, report.hash_chain.total_length);
+                            println!(
+                                "    - Hash chain: {}/{} valid",
+                                report.hash_chain.valid_length, report.hash_chain.total_length
+                            );
                         }
                         for rule in &report.business_rules {
                             if !rule.passed {
-                                let details = rule.details.as_ref()
-                                    .map(|d| format!(" ({})", d)).unwrap_or_default();
+                                let details = rule
+                                    .details
+                                    .as_ref()
+                                    .map(|d| format!(" ({})", d))
+                                    .unwrap_or_default();
                                 println!("    - {}{}", rule.rule, details);
                             }
                         }
@@ -2227,7 +2438,10 @@ async fn ledger_health(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
         // Sequence/hash
         let hash_hex = hex::encode(&ledger.state.chain_tip_hash[..8]);
-        println!("  Sequence:      {} (hash: {}...)", ledger.state.sequence, hash_hex);
+        println!(
+            "  Sequence:      {} (hash: {}...)",
+            ledger.state.sequence, hash_hex
+        );
         println!();
     }
 
@@ -2289,7 +2503,8 @@ async fn ledger_export(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     match format {
         "json" => {
             let json = export.to_json()?;
-            let filename = output_path.unwrap_or_else(|| format!("ledger_export_{}.json", short_id));
+            let filename =
+                output_path.unwrap_or_else(|| format!("ledger_export_{}.json", short_id));
             std::fs::write(&filename, &json)?;
             println!("Exported ledger to {}", filename);
             println!("  Updates: {}", export.updates.len());
@@ -2331,7 +2546,8 @@ async fn ledger_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         i += 1;
     }
 
-    let file_path = file_path.ok_or("Usage: deposits-node ledger import <file_path> [--data-dir <dir>]")?;
+    let file_path =
+        file_path.ok_or("Usage: deposits-node ledger import <file_path> [--data-dir <dir>]")?;
 
     // Read the file
     let data = std::fs::read(&file_path)?;
@@ -2368,19 +2584,27 @@ async fn ledger_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
             // Print validation report
             println!("Validation Report:");
-            println!("  Hash chain: {} of {} updates valid",
-                report.hash_chain.valid_length, report.hash_chain.total_length);
-            println!("  Signatures: {} fully signed, {} operator-only, {} unsigned",
+            println!(
+                "  Hash chain: {} of {} updates valid",
+                report.hash_chain.valid_length, report.hash_chain.total_length
+            );
+            println!(
+                "  Signatures: {} fully signed, {} operator-only, {} unsigned",
                 report.signatures.fully_signed,
                 report.signatures.operator_only,
-                report.signatures.unsigned);
+                report.signatures.unsigned
+            );
             println!();
 
             // Business rules
             println!("Business Rules:");
             for rule in &report.business_rules {
                 let status = if rule.passed { "PASS" } else { "FAIL" };
-                let details = rule.details.as_ref().map(|d| format!(" ({})", d)).unwrap_or_default();
+                let details = rule
+                    .details
+                    .as_ref()
+                    .map(|d| format!(" ({})", d))
+                    .unwrap_or_default();
                 println!("  [{}] {}{}", status, rule.rule, details);
             }
             println!();
@@ -2431,22 +2655,40 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--name" | "--operator-name" if i + 1 < args.len() => { operator_name = Some(args[i + 1].clone()); i += 1; }
-            "--description" if i + 1 < args.len() => { description = Some(args[i + 1].clone()); i += 1; }
-            "--advertise-relay" if i + 1 < args.len() => { advertise_relay_url = Some(args[i + 1].clone()); i += 1; }
-            "--annual-fee" if i + 1 < args.len() => {
-                annual_fee_bps = args[i + 1].parse().map_err(|e| {
-                    format!("Invalid --annual-fee value '{}': {}", args[i + 1], e)
-                })?;
+            "--name" | "--operator-name" if i + 1 < args.len() => {
+                operator_name = Some(args[i + 1].clone());
                 i += 1;
             }
-            "--deposit-fee" if i + 1 < args.len() => { deposit_fee_bps = args[i + 1].parse()?; i += 1; }
-            "--withdrawal-fee" if i + 1 < args.len() => { withdrawal_fee_bps = args[i + 1].parse()?; i += 1; }
-            "--invoice-fee" if i + 1 < args.len() => { invoice_fee_bps = args[i + 1].parse()?; i += 1; }
+            "--description" if i + 1 < args.len() => {
+                description = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--advertise-relay" if i + 1 < args.len() => {
+                advertise_relay_url = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--annual-fee" if i + 1 < args.len() => {
+                annual_fee_bps = args[i + 1]
+                    .parse()
+                    .map_err(|e| format!("Invalid --annual-fee value '{}': {}", args[i + 1], e))?;
+                i += 1;
+            }
+            "--deposit-fee" if i + 1 < args.len() => {
+                deposit_fee_bps = args[i + 1].parse()?;
+                i += 1;
+            }
+            "--withdrawal-fee" if i + 1 < args.len() => {
+                withdrawal_fee_bps = args[i + 1].parse()?;
+                i += 1;
+            }
+            "--invoice-fee" if i + 1 < args.len() => {
+                invoice_fee_bps = args[i + 1].parse()?;
+                i += 1;
+            }
             "--min-fee" if i + 1 < args.len() => {
-                min_fee_sats = args[i + 1].parse().map_err(|e| {
-                    format!("Invalid --min-fee value '{}': {}", args[i + 1], e)
-                })?;
+                min_fee_sats = args[i + 1]
+                    .parse()
+                    .map_err(|e| format!("Invalid --min-fee value '{}': {}", args[i + 1], e))?;
                 i += 1;
             }
             "--fee-period-blocks" | "--fee-period" if i + 1 < args.len() => {
@@ -2455,8 +2697,14 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 })?;
                 i += 1;
             }
-            "--max-deposit" if i + 1 < args.len() => { max_deposit_msats = args[i + 1].parse()?; i += 1; }
-            "--min-deposit" if i + 1 < args.len() => { min_deposit_msats = args[i + 1].parse()?; i += 1; }
+            "--max-deposit" if i + 1 < args.len() => {
+                max_deposit_msats = args[i + 1].parse()?;
+                i += 1;
+            }
+            "--min-deposit" if i + 1 < args.len() => {
+                min_deposit_msats = args[i + 1].parse()?;
+                i += 1;
+            }
             s if s.starts_with("--") => {
                 config_args.push(args[i].clone());
                 if i + 1 < args.len() && !args[i + 1].starts_with("--") {
@@ -2478,12 +2726,14 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     // If no reserves_id given, advertise all operator ledgers
     let ledger_ids: Vec<(String, String)> = if let Some(rid) = reserves_id {
-        let (_, ledger) = node.get_ledger_with_id(&rid)
+        let (_, ledger) = node
+            .get_ledger_with_id(&rid)
             .ok_or_else(|| format!("Ledger not found: {}", rid))?;
         vec![(ledger.ledger_id_hex(), rid)]
     } else {
         let ledgers = node.handler.ledgers.lock().unwrap();
-        ledgers.iter()
+        ledgers
+            .iter()
             .filter(|(_, arc)| {
                 let l = arc.read().unwrap();
                 matches!(l.role, deposits_core::ledger::LedgerRole::Operator)
@@ -2501,77 +2751,88 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     }
 
     for (ledger_id_hex, rid) in &ledger_ids {
-    let (_, ledger) = node.get_ledger_with_id(ledger_id_hex)
-        .ok_or_else(|| format!("Ledger not found: {}", ledger_id_hex))?;
+        let (_, ledger) = node
+            .get_ledger_with_id(ledger_id_hex)
+            .ok_or_else(|| format!("Ledger not found: {}", ledger_id_hex))?;
 
-    let ledger_id = ledger.ledger_id_hex();
-    let operator_pubkey = hex::encode(ledger.operator_key().serialize());
+        let ledger_id = ledger.ledger_id_hex();
+        let operator_pubkey = hex::encode(ledger.operator_key().serialize());
 
-    let network = match config.network {
-        bitcoin::Network::Bitcoin => "bitcoin",
-        bitcoin::Network::Testnet => "testnet",
-        bitcoin::Network::Signet => "signet",
-        bitcoin::Network::Regtest => "regtest",
-        _ => "unknown",
-    };
+        let network = match config.network {
+            bitcoin::Network::Bitcoin => "bitcoin",
+            bitcoin::Network::Testnet => "testnet",
+            bitcoin::Network::Signet => "signet",
+            bitcoin::Network::Regtest => "regtest",
+            _ => "unknown",
+        };
 
-    let mut ad = LedgerAdvertisement::new(
-        ledger_id.clone(),
-        operator_pubkey,
-        rid.clone(),
-        network.to_string(),
-    );
+        let mut ad = LedgerAdvertisement::new(
+            ledger_id.clone(),
+            operator_pubkey,
+            rid.clone(),
+            network.to_string(),
+        );
 
-    ad.operator_name = operator_name.clone();
-    ad.description = description.clone();
-    ad.relay_url = advertise_relay_url.clone();
-    ad.annual_fee_bps = annual_fee_bps;
-    ad.deposit_fee_bps = deposit_fee_bps;
-    ad.withdrawal_fee_bps = withdrawal_fee_bps;
-    ad.invoice_fee_bps = invoice_fee_bps;
-    ad.min_fee_sats = min_fee_sats;
-    ad.fee_period_blocks = fee_period_blocks;
-    ad.max_deposit_msats = max_deposit_msats;
-    ad.min_deposit_msats = min_deposit_msats;
-    ad.reserves_amount_msats = ledger.reserves_amount();
+        ad.operator_name = operator_name.clone();
+        ad.description = description.clone();
+        ad.relay_url = advertise_relay_url.clone();
+        ad.annual_fee_bps = annual_fee_bps;
+        ad.deposit_fee_bps = deposit_fee_bps;
+        ad.withdrawal_fee_bps = withdrawal_fee_bps;
+        ad.invoice_fee_bps = invoice_fee_bps;
+        ad.min_fee_sats = min_fee_sats;
+        ad.fee_period_blocks = fee_period_blocks;
+        ad.max_deposit_msats = max_deposit_msats;
+        ad.min_deposit_msats = min_deposit_msats;
+        ad.reserves_amount_msats = ledger.reserves_amount();
 
-    // Calculate obligations and headroom
-    let total_obligations_msats = ledger.total_deposit_balance();
-    ad.total_obligations_msats = total_obligations_msats;
+        // Calculate obligations and headroom
+        let total_obligations_msats = ledger.total_deposit_balance();
+        ad.total_obligations_msats = total_obligations_msats;
 
-    ad.available_headroom_msats = ad.reserves_amount_msats.saturating_sub(total_obligations_msats);
+        ad.available_headroom_msats = ad
+            .reserves_amount_msats
+            .saturating_sub(total_obligations_msats);
 
-    // Collateral
-    ad.received_collateral_msats = ledger.state.total_collateral();
-    ad.attested_collateral_msats = ledger.state.total_collateral();
-    ad.held_collateral_msats = ledger.total_held_collateral();
+        // Collateral
+        ad.received_collateral_msats = ledger.state.total_collateral();
+        ad.attested_collateral_msats = ledger.state.total_collateral();
+        ad.held_collateral_msats = ledger.total_held_collateral();
 
-    println!("Publishing ledger advertisement...");
-    println!("  Ledger ID: {}...", &ledger_id[..16]);
-    println!("  Reserves: {} msats", ad.reserves_amount_msats);
-    println!("  Obligations: {} msats", ad.total_obligations_msats);
-    println!("  Available headroom: {} msats", ad.available_headroom_msats);
-    println!("  Attested collateral: {} msats", ad.attested_collateral_msats);
-    println!("  Held collateral: {} msats", ad.held_collateral_msats);
-    let periods_per_year = 52560u64 / ad.fee_period_blocks.max(1) as u64;
-    let annualized_msats = ad.min_fee_sats.saturating_mul(periods_per_year);
-    let annual_pct = ad.annual_fee_bps as f64 / 100.0;
-    let fee_str = match (ad.annual_fee_bps > 0, annualized_msats > 0) {
-        (true, true) => format!("{}% and {} sats per year", annual_pct, annualized_msats),
-        (true, false) => format!("{}% per year", annual_pct),
-        (false, true) => format!("{} sats per year", annualized_msats),
-        (false, false) => "None".to_string(),
-    };
-    println!("  Fees: {} (period: {} blocks, {}bps deposit, {}bps withdrawal)",
-        fee_str, ad.fee_period_blocks, ad.deposit_fee_bps, ad.withdrawal_fee_bps);
-    println!();
+        println!("Publishing ledger advertisement...");
+        println!("  Ledger ID: {}...", &ledger_id[..16]);
+        println!("  Reserves: {} msats", ad.reserves_amount_msats);
+        println!("  Obligations: {} msats", ad.total_obligations_msats);
+        println!(
+            "  Available headroom: {} msats",
+            ad.available_headroom_msats
+        );
+        println!(
+            "  Attested collateral: {} msats",
+            ad.attested_collateral_msats
+        );
+        println!("  Held collateral: {} msats", ad.held_collateral_msats);
+        let periods_per_year = 52560u64 / ad.fee_period_blocks.max(1) as u64;
+        let annualized_msats = ad.min_fee_sats.saturating_mul(periods_per_year);
+        let annual_pct = ad.annual_fee_bps as f64 / 100.0;
+        let fee_str = match (ad.annual_fee_bps > 0, annualized_msats > 0) {
+            (true, true) => format!("{}% and {} sats per year", annual_pct, annualized_msats),
+            (true, false) => format!("{}% per year", annual_pct),
+            (false, true) => format!("{} sats per year", annualized_msats),
+            (false, false) => "None".to_string(),
+        };
+        println!(
+            "  Fees: {} (period: {} blocks, {}bps deposit, {}bps withdrawal)",
+            fee_str, ad.fee_period_blocks, ad.deposit_fee_bps, ad.withdrawal_fee_bps
+        );
+        println!();
 
-    // Use the node's existing transport to avoid ephemeral connection race
-    // where a new transport disconnects before the relay processes the write.
-    let event_id = node.nostr.publish_ledger_advertisement(&ad).await?;
-    println!("Advertisement published!");
-    println!("  Event ID: {}", event_id);
-    println!();
+        // Use the node's existing transport to avoid ephemeral connection race
+        // where a new transport disconnects before the relay processes the write.
+        let event_id = node.nostr.publish_ledger_advertisement(&ad).await?;
+        println!("Advertisement published!");
+        println!("  Event ID: {}", event_id);
+        println!();
     } // end for each ledger
 
     Ok(())
@@ -2605,19 +2866,26 @@ async fn ledger_republish(args: &[String]) -> Result<(), Box<dyn std::error::Err
         Some(lid) => lid,
         None => {
             let ledgers = node.handler.ledgers.lock().unwrap();
-            ledgers.keys().next()
-                .ok_or("No ledgers found")?
-                .clone()
+            ledgers.keys().next().ok_or("No ledgers found")?.clone()
         }
     };
 
-    println!("Re-publishing ledger {}... to relays", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "Re-publishing ledger {}... to relays",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
 
     let params = serde_json::json!({ "from_seq": 0 });
     let result = send_daemon_request(&config, &ledger_id, "resync", params).await?;
 
-    let count = result.get("rebroadcast_count").and_then(|v| v.as_u64()).unwrap_or(0);
-    let through = result.get("through_seq").and_then(|v| v.as_u64()).unwrap_or(0);
+    let count = result
+        .get("rebroadcast_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let through = result
+        .get("through_seq")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     println!("Re-published {} updates (through seq {})", count, through);
 
     Ok(())
@@ -2641,7 +2909,9 @@ async fn ledger_discover(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     }
 
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -2674,16 +2944,30 @@ async fn ledger_discover(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
     for ad in ads {
         let operator_name = ad.operator_name.as_deref().unwrap_or("Anonymous");
-        println!("{} ({}...):", operator_name, &ad.operator_pubkey[..12.min(ad.operator_pubkey.len())]);
-        println!("  Ledger ID: {}...", &ad.ledger_id[..16.min(ad.ledger_id.len())]);
+        println!(
+            "{} ({}...):",
+            operator_name,
+            &ad.operator_pubkey[..12.min(ad.operator_pubkey.len())]
+        );
+        println!(
+            "  Ledger ID: {}...",
+            &ad.ledger_id[..16.min(ad.ledger_id.len())]
+        );
         println!("  Capacity:");
         println!("    Reserves: {} msats", ad.reserves_amount_msats);
         println!("    Obligations: {} msats", ad.total_obligations_msats);
         println!("    Available: {} msats", ad.available_headroom_msats);
-        println!("  Attested collateral: {} msats", ad.attested_collateral_msats);
+        println!(
+            "  Attested collateral: {} msats",
+            ad.attested_collateral_msats
+        );
         println!("  Held collateral: {} msats", ad.held_collateral_msats);
         println!("  Fees:");
-        println!("    Annual: {}bps ({}%)", ad.annual_fee_bps, ad.annual_fee_bps as f64 / 100.0);
+        println!(
+            "    Annual: {}bps ({}%)",
+            ad.annual_fee_bps,
+            ad.annual_fee_bps as f64 / 100.0
+        );
         println!("    Deposit: {}bps", ad.deposit_fee_bps);
         println!("    Withdrawal: {}bps", ad.withdrawal_fee_bps);
         println!("    Invoice: {}bps", ad.invoice_fee_bps);
@@ -2717,121 +3001,306 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
             let (name, details) = match op {
                 LedgerOperation::LedgerOpen { reserves_id, .. } => {
                     let id_short = if reserves_id.len() > 20 {
-                        format!("{}..{}", &reserves_id[..8], &reserves_id[reserves_id.len()-6..])
+                        format!(
+                            "{}..{}",
+                            &reserves_id[..8],
+                            &reserves_id[reserves_id.len() - 6..]
+                        )
                     } else {
                         reserves_id.clone()
                     };
                     ("LedgerOpen", format!("reserves:{}", id_short))
                 }
-                LedgerOperation::QuorumBegin { reserves_id, amount, quorum_expiry, quorum_members, .. } => {
+                LedgerOperation::QuorumBegin {
+                    reserves_id,
+                    amount,
+                    quorum_expiry,
+                    quorum_members,
+                    ..
+                } => {
                     let addr_short = if reserves_id.len() > 20 {
-                        format!("{}..{}", &reserves_id[..8], &reserves_id[reserves_id.len()-6..])
+                        format!(
+                            "{}..{}",
+                            &reserves_id[..8],
+                            &reserves_id[reserves_id.len() - 6..]
+                        )
                     } else {
                         reserves_id.clone()
                     };
-                    ("QuorumBegin", format!("addr:{}  amt:{} sat  quorum:{}/{}  expiry:{}",
-                        addr_short, amount, quorum_members.len(), quorum_members.len(), quorum_expiry))
+                    (
+                        "QuorumBegin",
+                        format!(
+                            "addr:{}  amt:{} sat  quorum:{}/{}  expiry:{}",
+                            addr_short,
+                            amount,
+                            quorum_members.len(),
+                            quorum_members.len(),
+                            quorum_expiry
+                        ),
+                    )
                 }
-                LedgerOperation::DepositOpen { deposit_id, .. } => {
-                    ("DepositOpen", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))
-                }
-                LedgerOperation::DepositClose { deposit_id, .. } => {
-                    ("DepositClose", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))
-                }
-                LedgerOperation::FeeChange { deposit_id, .. } => {
-                    ("FeeChange", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))
-                }
-                LedgerOperation::DepositKeyRotate { deposit_id, .. } => {
-                    ("DepositKeyRotate", format!("id:{:02x}{:02x}{:02x}{:02x}", deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]))
-                }
+                LedgerOperation::DepositOpen { deposit_id, .. } => (
+                    "DepositOpen",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                    ),
+                ),
+                LedgerOperation::DepositClose { deposit_id, .. } => (
+                    "DepositClose",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                    ),
+                ),
+                LedgerOperation::FeeChange { deposit_id, .. } => (
+                    "FeeChange",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                    ),
+                ),
+                LedgerOperation::DepositKeyRotate { deposit_id, .. } => (
+                    "DepositKeyRotate",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                    ),
+                ),
                 LedgerOperation::QuorumAddMember { quorum_member, .. } => {
                     let pk_bytes = quorum_member.serialize();
-                    ("QuorumAddMember", format!("member:{:02x}{:02x}{:02x}{:02x}", pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3]))
+                    (
+                        "QuorumAddMember",
+                        format!(
+                            "member:{:02x}{:02x}{:02x}{:02x}",
+                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3]
+                        ),
+                    )
                 }
                 LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
                     let pk_bytes = quorum_member.serialize();
-                    ("QuorumRemoveMember", format!("member:{:02x}{:02x}{:02x}{:02x}", pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3]))
+                    (
+                        "QuorumRemoveMember",
+                        format!(
+                            "member:{:02x}{:02x}{:02x}{:02x}",
+                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3]
+                        ),
+                    )
                 }
-                LedgerOperation::QuorumJoin { operator_id, ledger_id, membership_expires, .. } => {
+                LedgerOperation::QuorumJoin {
+                    operator_id,
+                    ledger_id,
+                    membership_expires,
+                    ..
+                } => {
                     let pk_bytes = operator_id.serialize();
                     let ledger_short = if ledger_id.len() > 16 {
                         format!("{}...", &ledger_id[..16])
                     } else {
                         ledger_id.clone()
                     };
-                    ("QuorumJoin", format!("op:{:02x}{:02x}{:02x}{:02x}  ledger:{}  expires:{}",
-                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], ledger_short, membership_expires))
+                    (
+                        "QuorumJoin",
+                        format!(
+                            "op:{:02x}{:02x}{:02x}{:02x}  ledger:{}  expires:{}",
+                            pk_bytes[0],
+                            pk_bytes[1],
+                            pk_bytes[2],
+                            pk_bytes[3],
+                            ledger_short,
+                            membership_expires
+                        ),
+                    )
                 }
-                LedgerOperation::CollateralAttestation { collateral_operator, amount, lock_until_block, .. } => {
+                LedgerOperation::CollateralAttestation {
+                    collateral_operator,
+                    amount,
+                    lock_until_block,
+                    ..
+                } => {
                     let pk_bytes = collateral_operator.serialize();
-                    ("CollateralAttestation", format!("from:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
-                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3], amount, lock_until_block))
+                    (
+                        "CollateralAttestation",
+                        format!(
+                            "from:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
+                            pk_bytes[0],
+                            pk_bytes[1],
+                            pk_bytes[2],
+                            pk_bytes[3],
+                            amount,
+                            lock_until_block
+                        ),
+                    )
                 }
-                LedgerOperation::CollateralLock { deposit_id, amount, lock_until_block, .. } => {
-                    ("CollateralLock", format!("id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
-                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount, lock_until_block))
-                }
-                LedgerOperation::OnchainCredit { deposit_id, amount, funding_address, .. } => {
+                LedgerOperation::CollateralLock {
+                    deposit_id,
+                    amount,
+                    lock_until_block,
+                    ..
+                } => (
+                    "CollateralLock",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
+                        deposit_id[0],
+                        deposit_id[1],
+                        deposit_id[2],
+                        deposit_id[3],
+                        amount,
+                        lock_until_block
+                    ),
+                ),
+                LedgerOperation::OnchainCredit {
+                    deposit_id,
+                    amount,
+                    funding_address,
+                    ..
+                } => {
                     let addr_short = if funding_address.len() > 20 {
-                        format!("{}..{}", &funding_address[..8], &funding_address[funding_address.len()-6..])
+                        format!(
+                            "{}..{}",
+                            &funding_address[..8],
+                            &funding_address[funding_address.len() - 6..]
+                        )
                     } else {
                         funding_address.clone()
                     };
-                    ("OnchainCredit", format!("id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  addr:{}",
-                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount, addr_short))
+                    (
+                        "OnchainCredit",
+                        format!(
+                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  addr:{}",
+                            deposit_id[0],
+                            deposit_id[1],
+                            deposit_id[2],
+                            deposit_id[3],
+                            amount,
+                            addr_short
+                        ),
+                    )
                 }
-                LedgerOperation::OnchainLock { deposit_id, amount, destination_address, withdrawal_id, .. } => {
+                LedgerOperation::OnchainLock {
+                    deposit_id,
+                    amount,
+                    destination_address,
+                    withdrawal_id,
+                    ..
+                } => {
                     let addr_short = if destination_address.len() > 20 {
-                        format!("{}..{}", &destination_address[..8], &destination_address[destination_address.len()-6..])
+                        format!(
+                            "{}..{}",
+                            &destination_address[..8],
+                            &destination_address[destination_address.len() - 6..]
+                        )
                     } else {
                         destination_address.clone()
                     };
-                    ("OnchainLock", format!("id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  addr:{}",
-                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount,
-                        hex::encode(&withdrawal_id[..4]), addr_short))
+                    (
+                        "OnchainLock",
+                        format!(
+                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  addr:{}",
+                            deposit_id[0],
+                            deposit_id[1],
+                            deposit_id[2],
+                            deposit_id[3],
+                            amount,
+                            hex::encode(&withdrawal_id[..4]),
+                            addr_short
+                        ),
+                    )
                 }
-                LedgerOperation::OnchainFail { deposit_id, withdrawal_id, .. } => {
-                    ("OnchainFail", format!("id:{:02x}{:02x}{:02x}{:02x}  wdrl:{}",
-                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3],
-                        hex::encode(&withdrawal_id[..4])))
-                }
-                LedgerOperation::OnchainFulfill { deposit_id, withdrawal_id, amount, txid, .. } => {
-                    ("OnchainFulfill", format!("id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  txn:{}",
-                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3],
+                LedgerOperation::OnchainFail {
+                    deposit_id,
+                    withdrawal_id,
+                    ..
+                } => (
+                    "OnchainFail",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  wdrl:{}",
+                        deposit_id[0],
+                        deposit_id[1],
+                        deposit_id[2],
+                        deposit_id[3],
+                        hex::encode(&withdrawal_id[..4])
+                    ),
+                ),
+                LedgerOperation::OnchainFulfill {
+                    deposit_id,
+                    withdrawal_id,
+                    amount,
+                    txid,
+                    ..
+                } => (
+                    "OnchainFulfill",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  txn:{}",
+                        deposit_id[0],
+                        deposit_id[1],
+                        deposit_id[2],
+                        deposit_id[3],
                         amount,
                         hex::encode(&withdrawal_id[..4]),
-                        hex::encode(&txid[..4])))
-                }
-                LedgerOperation::InvoiceCredit { deposit_id, amount, .. } => {
-                    ("InvoiceCredit", format!("id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
-                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount))
-                }
-                LedgerOperation::InvoiceLock { deposit_id, amount, .. } => {
-                    ("InvoiceLock", format!("id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
-                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount))
-                }
-                LedgerOperation::InvoiceFail { .. } => {
-                    ("InvoiceFail", String::new())
-                }
-                LedgerOperation::InvoiceFulfill { .. } => {
-                    ("InvoiceFulfill", String::new())
-                }
-                LedgerOperation::FeeCollect { .. } => {
-                    ("FeeCollect", String::new())
-                }
-                LedgerOperation::DisputeEnter { last_valid_sequence, reason } => {
-                    ("DisputeEnter", format!("last_valid_seq:{}  reason:{}", last_valid_sequence, reason))
-                }
-                LedgerOperation::DisputeArmed { armed_block, commitment_hash, target_reserves } => {
+                        hex::encode(&txid[..4])
+                    ),
+                ),
+                LedgerOperation::InvoiceCredit {
+                    deposit_id, amount, ..
+                } => (
+                    "InvoiceCredit",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount
+                    ),
+                ),
+                LedgerOperation::InvoiceLock {
+                    deposit_id, amount, ..
+                } => (
+                    "InvoiceLock",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount
+                    ),
+                ),
+                LedgerOperation::InvoiceFail { .. } => ("InvoiceFail", String::new()),
+                LedgerOperation::InvoiceFulfill { .. } => ("InvoiceFulfill", String::new()),
+                LedgerOperation::FeeCollect { .. } => ("FeeCollect", String::new()),
+                LedgerOperation::DisputeEnter {
+                    last_valid_sequence,
+                    reason,
+                } => (
+                    "DisputeEnter",
+                    format!("last_valid_seq:{}  reason:{}", last_valid_sequence, reason),
+                ),
+                LedgerOperation::DisputeArmed {
+                    armed_block,
+                    commitment_hash,
+                    target_reserves,
+                } => {
                     let hash_hex = hex::encode(commitment_hash);
                     let target_short = if target_reserves.len() > 16 {
-                        format!("{}..{}", &target_reserves[..8], &target_reserves[target_reserves.len()-6..])
+                        format!(
+                            "{}..{}",
+                            &target_reserves[..8],
+                            &target_reserves[target_reserves.len() - 6..]
+                        )
                     } else {
                         target_reserves.clone()
                     };
-                    ("DisputeArmed", format!("armed_block:{}  commit:{}..  target:{}", armed_block, &hash_hex[..8], target_short))
+                    (
+                        "DisputeArmed",
+                        format!(
+                            "armed_block:{}  commit:{}..  target:{}",
+                            armed_block,
+                            &hash_hex[..8],
+                            target_short
+                        ),
+                    )
                 }
-                LedgerOperation::DisputeAcquire { new_custodian, entropy_block_height, spend_txid, new_reserves_address, .. } => {
+                LedgerOperation::DisputeAcquire {
+                    new_custodian,
+                    entropy_block_height,
+                    spend_txid,
+                    new_reserves_address,
+                    ..
+                } => {
                     let pk_bytes = new_custodian.serialize();
                     let txid_hex = hex::encode(spend_txid);
                     ("DisputeAcquire", format!("to:{:02x}{:02x}{:02x}{:02x}  entropy_block:{}  txid:{}..  reserves:{}..{}",
@@ -2841,16 +3310,22 @@ fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         &new_reserves_address[..10.min(new_reserves_address.len())],
                         &new_reserves_address[new_reserves_address.len().saturating_sub(6)..]))
                 }
-                LedgerOperation::DisputeYield => {
-                    ("DisputeYield", String::new())
-                }
-                LedgerOperation::DeliveryEmbed { target_ledger_id, .. } => {
-                    ("DeliveryEmbed", format!("target_ledger={}...", &hex::encode(target_ledger_id)[..16]))
-                }
-                LedgerOperation::LedgerClose => {
-                    ("LedgerClose", String::new())
-                }
-                LedgerOperation::TransferLock { source_deposit_id, destination_deposit_id, amount, fee, timeout_height, .. } => (
+                LedgerOperation::DisputeYield => ("DisputeYield", String::new()),
+                LedgerOperation::DeliveryEmbed {
+                    target_ledger_id, ..
+                } => (
+                    "DeliveryEmbed",
+                    format!("target_ledger={}...", &hex::encode(target_ledger_id)[..16]),
+                ),
+                LedgerOperation::LedgerClose => ("LedgerClose", String::new()),
+                LedgerOperation::TransferLock {
+                    source_deposit_id,
+                    destination_deposit_id,
+                    amount,
+                    fee,
+                    timeout_height,
+                    ..
+                } => (
                     "TransferLock",
                     format!(
                         "{}→{} amt={} fee={} timeout={}",
@@ -2900,8 +3375,8 @@ async fn quorum_request(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 
     let peer_pubkey_str = peer_pubkey_str.ok_or("Peer pubkey required")?;
-    let peer_pubkey = PublicKey::from_str(&peer_pubkey_str)
-        .map_err(|e| format!("Invalid peer pubkey: {}", e))?;
+    let peer_pubkey =
+        PublicKey::from_str(&peer_pubkey_str).map_err(|e| format!("Invalid peer pubkey: {}", e))?;
 
     let config = parse_config(&config_args)?;
     let node = Node::new(config).await?;
@@ -2945,7 +3420,8 @@ async fn quorum_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     let reserves_id = reserves_id.ok_or("Reserves ID required")?;
     let quorum_member_str = quorum_member_str.ok_or("Quorum member pubkey required")?;
-    let member_ledger_id = member_ledger_id.ok_or("Member ledger ID required (64-char hex hash of member's ledger)")?;
+    let member_ledger_id = member_ledger_id
+        .ok_or("Member ledger ID required (64-char hex hash of member's ledger)")?;
     let quorum_member = PublicKey::from_str(&quorum_member_str)
         .map_err(|e| format!("Invalid quorum member pubkey: {}", e))?;
 
@@ -2958,7 +3434,8 @@ async fn quorum_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     // Load state from disk to resolve ledger_id
     let node = Node::new(config.clone()).await?;
-    let ledger_id = if reserves_id.len() == 64 && reserves_id.chars().all(|c| c.is_ascii_hexdigit()) {
+    let ledger_id = if reserves_id.len() == 64 && reserves_id.chars().all(|c| c.is_ascii_hexdigit())
+    {
         reserves_id.clone()
     } else {
         node.get_ledger_with_id(&reserves_id)
@@ -2970,22 +3447,30 @@ async fn quorum_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("Adding quorum member (requesting consent from member)...");
     println!("  Ledger:   {}...", &ledger_id[..16]);
     println!("  Member:   {}", quorum_member);
-    println!("  Member's collateral ledger: {}...", &member_ledger_id[..16]);
+    println!(
+        "  Member's collateral ledger: {}...",
+        &member_ledger_id[..16]
+    );
 
     // Extract fee limit flags
-    let min_fee_bps: Option<u64> = config_args.windows(2)
+    let min_fee_bps: Option<u64> = config_args
+        .windows(2)
         .find(|w| w[0] == "--min-fee-bps")
         .and_then(|w| w[1].parse().ok());
-    let min_fee_fixed: Option<u64> = config_args.windows(2)
+    let min_fee_fixed: Option<u64> = config_args
+        .windows(2)
         .find(|w| w[0] == "--min-fee-fixed")
         .and_then(|w| w[1].parse().ok());
-    let max_fee_period: Option<u64> = config_args.windows(2)
+    let max_fee_period: Option<u64> = config_args
+        .windows(2)
         .find(|w| w[0] == "--max-fee-period")
         .and_then(|w| w[1].parse().ok());
-    let collateral_lock_amount: Option<u64> = config_args.windows(2)
+    let collateral_lock_amount: Option<u64> = config_args
+        .windows(2)
         .find(|w| w[0] == "--collateral-amount")
         .and_then(|w| w[1].parse().ok());
-    let collateral_lock_until: Option<u64> = config_args.windows(2)
+    let collateral_lock_until: Option<u64> = config_args
+        .windows(2)
         .find(|w| w[0] == "--collateral-lock-until")
         .and_then(|w| w[1].parse().ok());
 
@@ -2993,11 +3478,21 @@ async fn quorum_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "member_pubkey": quorum_member_str,
         "member_ledger_id": member_ledger_id,
     });
-    if let Some(v) = min_fee_bps { params["min_fee_bps"] = v.into(); }
-    if let Some(v) = min_fee_fixed { params["min_fee_fixed"] = v.into(); }
-    if let Some(v) = max_fee_period { params["max_fee_period"] = v.into(); }
-    if let Some(v) = collateral_lock_amount { params["collateral_lock_amount"] = v.into(); }
-    if let Some(v) = collateral_lock_until { params["collateral_lock_until"] = v.into(); }
+    if let Some(v) = min_fee_bps {
+        params["min_fee_bps"] = v.into();
+    }
+    if let Some(v) = min_fee_fixed {
+        params["min_fee_fixed"] = v.into();
+    }
+    if let Some(v) = max_fee_period {
+        params["max_fee_period"] = v.into();
+    }
+    if let Some(v) = collateral_lock_amount {
+        params["collateral_lock_amount"] = v.into();
+    }
+    if let Some(v) = collateral_lock_until {
+        params["collateral_lock_until"] = v.into();
+    }
 
     let result = send_daemon_request(&config, &ledger_id, "quorum_add", params).await?;
 
@@ -3044,7 +3539,10 @@ async fn quorum_remove(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
     println!("Removing quorum member...");
     println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
-    println!("  Member: {}...", &member_pubkey[..16.min(member_pubkey.len())]);
+    println!(
+        "  Member: {}...",
+        &member_pubkey[..16.min(member_pubkey.len())]
+    );
 
     let params = serde_json::json!({
         "member_pubkey": member_pubkey,
@@ -3081,8 +3579,7 @@ async fn quorum_join_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         } else if target_id.is_none() {
             target_id = Some(args[i].clone());
         } else if expires_block.is_none() {
-            expires_block = Some(args[i].parse()
-                .map_err(|_| "Invalid expires_block")?);
+            expires_block = Some(args[i].parse().map_err(|_| "Invalid expires_block")?);
         }
         i += 1;
     }
@@ -3109,11 +3606,16 @@ async fn quorum_join_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     drop(node);
 
     // Target must be a ledger_id hash (64 hex chars)
-    let target_ledger_id = if target_id.len() == 64 && target_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        target_id.clone()
-    } else {
-        return Err(format!("Target ledger ID must be a 64-char hex hash, got: {}", target_id).into());
-    };
+    let target_ledger_id =
+        if target_id.len() == 64 && target_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            target_id.clone()
+        } else {
+            return Err(format!(
+                "Target ledger ID must be a 64-char hex hash, got: {}",
+                target_id
+            )
+            .into());
+        };
 
     println!("Recording quorum join via daemon...");
     println!("  Our ledger:       {}...", &our_ledger_id[..16]);
@@ -3181,8 +3683,12 @@ async fn quorum_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         for (our_ledger_id, memberships) in &joined {
             println!("  via {}:", lid_short(our_ledger_id));
             for (operator, their_ledger, expires) in memberships {
-                println!("    operator {} ledger {} (expires block {})",
-                    pk_short(operator), lid_short(their_ledger), expires);
+                println!(
+                    "    operator {} ledger {} (expires block {})",
+                    pk_short(operator),
+                    lid_short(their_ledger),
+                    expires
+                );
             }
         }
     }
@@ -3221,7 +3727,7 @@ async fn collateral_command(args: &[String]) -> Result<(), Box<dyn std::error::E
 ///   collateral lock <reserves_id> <deposit_secret> <amount_msats> <lock_blocks> [requesting_operator]
 ///       Uses explicit deposit secret (legacy mode)
 async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use bitcoin::bip32::{Xpriv, DerivationPath};
+    use bitcoin::bip32::{DerivationPath, Xpriv};
     use std::str::FromStr as _;
 
     let mut config_args = Vec::new();
@@ -3255,12 +3761,20 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     // Wallet mode: <ledger_id> <amount_msats> <lock_blocks> [--index N]
     // Legacy mode: <reserves_id> <deposit_secret> <amount_msats> <lock_blocks>
     let (ledger_id, deposit_secret, amount_msats, lock_blocks, requesting_operator_hex) =
-        if positional_args.len() >= 4 && positional_args[1].len() == 64 && hex::decode(&positional_args[1]).is_ok() && explicit_index.is_none() {
+        if positional_args.len() >= 4
+            && positional_args[1].len() == 64
+            && hex::decode(&positional_args[1]).is_ok()
+            && explicit_index.is_none()
+        {
             // Legacy mode: second arg looks like a hex secret
             let reserves_id = positional_args[0].clone();
             let secret_hex = positional_args[1].clone();
-            let amount: u64 = positional_args[2].parse().map_err(|_| "Invalid amount_msats")?;
-            let blocks: u32 = positional_args[3].parse().map_err(|_| "Invalid lock_blocks")?;
+            let amount: u64 = positional_args[2]
+                .parse()
+                .map_err(|_| "Invalid amount_msats")?;
+            let blocks: u32 = positional_args[3]
+                .parse()
+                .map_err(|_| "Invalid lock_blocks")?;
             let req_op = positional_args.get(4).cloned();
 
             let secret_bytes = hex::decode(&secret_hex)
@@ -3272,8 +3786,12 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         } else if positional_args.len() >= 3 {
             // Wallet mode: derive key from seed
             let ledger_id = positional_args[0].clone();
-            let amount: u64 = positional_args[1].parse().map_err(|_| "Invalid amount_msats")?;
-            let blocks: u32 = positional_args[2].parse().map_err(|_| "Invalid lock_blocks")?;
+            let amount: u64 = positional_args[1]
+                .parse()
+                .map_err(|_| "Invalid amount_msats")?;
+            let blocks: u32 = positional_args[2]
+                .parse()
+                .map_err(|_| "Invalid lock_blocks")?;
             let req_op = positional_args.get(3).cloned();
 
             // Use explicit --index if provided, otherwise look up from deposits.json
@@ -3284,12 +3802,16 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 let deposits_file = wallet_dir.join("deposits.json");
                 if deposits_file.exists() {
                     let data = std::fs::read_to_string(&deposits_file)?;
-                    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
-                    deposits.iter()
+                    let deposits: Vec<serde_json::Value> =
+                        serde_json::from_str(&data).unwrap_or_default();
+                    deposits
+                        .iter()
                         .find(|d| d.get("ledger_id").and_then(|v| v.as_str()) == Some(&ledger_id))
                         .and_then(|d| d.get("key_index").and_then(|v| v.as_u64()))
                         .unwrap_or(0) as u32
-                } else { 0 }
+                } else {
+                    0
+                }
             };
 
             let xpriv = Xpriv::new_master(config.network, &config.seed)?;
@@ -3298,7 +3820,11 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             let derived = xpriv.derive_priv(&secp, &path)?;
             let secret = derived.private_key;
 
-            println!("(Using wallet key index {} for ledger {}...)", key_index, &ledger_id[..16.min(ledger_id.len())]);
+            println!(
+                "(Using wallet key index {} for ledger {}...)",
+                key_index,
+                &ledger_id[..16.min(ledger_id.len())]
+            );
 
             (ledger_id, secret, amount, blocks, req_op)
         } else {
@@ -3325,7 +3851,10 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("  Ledger: {}", ledger_id);
     println!("  Deposit: {}", deposit_pubkey);
     println!("  Amount: {} msats", amount_msats);
-    println!("  Lock until block: {} (current: {}, +{} blocks)", lock_until_block, current_block, lock_blocks);
+    println!(
+        "  Lock until block: {} (current: {}, +{} blocks)",
+        lock_until_block, current_block, lock_blocks
+    );
     println!("  Requesting operator: {}", requesting_operator);
 
     // Send collateral_lock request via Nostr
@@ -3338,11 +3867,10 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         "requesting_operator": hex::encode(requesting_operator.serialize()),
     });
 
-    let request_id = node.nostr.send_ledger_request(
-        &ledger_id,
-        "collateral_lock",
-        request_params,
-    ).await?;
+    let request_id = node
+        .nostr
+        .send_ledger_request(&ledger_id, "collateral_lock", request_params)
+        .await?;
 
     println!("  Request ID: {}...", &request_id[..16]);
 
@@ -3353,7 +3881,9 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 if let Some(result) = &response.result {
                     println!("\nCollateral locked!");
                     // Extract attestation JSON for auto-recording
-                    let att_json = if let Some(att_b64) = result.get("attestation_b64").and_then(|v| v.as_str()) {
+                    let att_json = if let Some(att_b64) =
+                        result.get("attestation_b64").and_then(|v| v.as_str())
+                    {
                         use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
                         String::from_utf8(BASE64.decode(att_b64).unwrap_or_default()).ok()
                     } else {
@@ -3361,7 +3891,13 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                         Some(result.to_string())
                     };
                     if let Some(ref json) = att_json {
-                        println!("  attestation_b64: {}", result.get("attestation_b64").and_then(|v| v.as_str()).unwrap_or(""));
+                        println!(
+                            "  attestation_b64: {}",
+                            result
+                                .get("attestation_b64")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                        );
                     }
                     att_json
                 } else {
@@ -3373,14 +3909,17 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 return Err(format!("Collateral lock failed: {}", error).into());
             }
         }
-        Err(e) => return Err(format!("Timeout waiting for collateral_lock response: {}", e).into()),
+        Err(e) => {
+            return Err(format!("Timeout waiting for collateral_lock response: {}", e).into())
+        }
     };
 
     // Auto-record attestation on all our own ledgers
     if let Some(att_json) = attestation_json {
         let our_ledger_ids: Vec<String> = {
             let ledgers = node.handler.ledgers.lock().unwrap();
-            ledgers.iter()
+            ledgers
+                .iter()
                 .filter(|(_, arc)| arc.read().unwrap().operator_key() == node.node_id)
                 .map(|(k, _)| k.clone())
                 .collect()
@@ -3389,7 +3928,10 @@ async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         if our_ledger_ids.is_empty() {
             println!("\n(No own ledgers to record attestation on)");
         } else {
-            println!("\nRecording attestation on {} own ledger(s)...", our_ledger_ids.len());
+            println!(
+                "\nRecording attestation on {} own ledger(s)...",
+                our_ledger_ids.len()
+            );
             for lid in &our_ledger_ids {
                 let params = serde_json::json!({ "attestation": att_json });
                 match send_daemon_request(&config, lid, "collateral_record", params).await {
@@ -3431,20 +3973,22 @@ async fn collateral_record(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let attestation_json = attestation_json.ok_or("attestation_json required")?;
 
     // Parse the attestation
-    let attestation: deposits_core::CollateralAttestationMsg = serde_json::from_str(&attestation_json)
-        .map_err(|e| format!("Invalid attestation JSON: {}", e))?;
+    let attestation: deposits_core::CollateralAttestationMsg =
+        serde_json::from_str(&attestation_json)
+            .map_err(|e| format!("Invalid attestation JSON: {}", e))?;
 
     let config = parse_config(&config_args)?;
 
     // Load state from disk to resolve ledger_id
     let node = Node::new(config.clone()).await?;
-    let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-        reserves_id_arg.clone()
-    } else {
-        node.get_ledger_with_id(&reserves_id_arg)
-            .map(|(lid, _)| lid)
-            .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
-    };
+    let ledger_id =
+        if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
+            reserves_id_arg.clone()
+        } else {
+            node.get_ledger_with_id(&reserves_id_arg)
+                .map(|(lid, _)| lid)
+                .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
+        };
     drop(node);
 
     println!("Recording collateral attestation via daemon...");
@@ -3524,7 +4068,9 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     if positional.len() < 5 {
         eprintln!("Usage: deposits-node deposit offer <ledger_id> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid> [options]");
         eprintln!("\nExample:");
-        eprintln!("  deposits-node deposit offer abc123...ledger_id 02def...deposit 1000000 10000 144");
+        eprintln!(
+            "  deposits-node deposit offer abc123...ledger_id 02def...deposit 1000000 10000 144"
+        );
         eprintln!("\nThe ledger_id is the 64-char hex hash (stable across custody transfers).");
         eprintln!("This creates a signed offer committing to credit the deposit");
         eprintln!("with on-chain funds sent to a new address, up to max_sats,");
@@ -3556,7 +4102,9 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     node.sync_wallet()?;
 
     // Fetch the advertisement to get fee structure
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
     let secret_key = derive_operator_secret(&config.seed, config.network)?;
@@ -3569,8 +4117,10 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         Some(ad) => {
             let fee_struct = ad.to_fee_structure();
             println!("  Using fees from advertisement:");
-            println!("    {} bps/year + {} sats/year (period: {} blocks)",
-                fee_struct.annualized_bps, fee_struct.annualized_msats, fee_struct.frequency_blocks);
+            println!(
+                "    {} bps/year + {} sats/year (period: {} blocks)",
+                fee_struct.annualized_bps, fee_struct.annualized_msats, fee_struct.frequency_blocks
+            );
             Some(fee_struct)
         }
         None => {
@@ -3597,12 +4147,18 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     )?;
 
     println!("\nDeposit offer created!");
-    println!("  Offer ID: {}", hex::encode(&offer.offer_id));
+    println!("  Offer ID: {}", hex::encode(offer.offer_id));
     println!("  Funding address: {}", offer.funding_address);
     println!("  Deadline block: {}", offer.deadline_block);
     println!("  Created at block: {}", offer.created_at_block);
-    println!("  Signature: {}", hex::encode(&offer.operator_signature[..32]));
-    println!("\nSend {} to {} sats to: {}", min_sats, max_sats, offer.funding_address);
+    println!(
+        "  Signature: {}",
+        hex::encode(&offer.operator_signature[..32])
+    );
+    println!(
+        "\nSend {} to {} sats to: {}",
+        min_sats, max_sats, offer.funding_address
+    );
     println!("Before block: {}", offer.deadline_block);
 
     // Output JSON for programmatic use
@@ -3636,7 +4192,9 @@ async fn deposit_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     for (offer, status) in offers {
         let status_str = match &status {
             deposits_core::DepositOfferStatus::Pending => "Pending".to_string(),
-            deposits_core::DepositOfferStatus::FundingReceived { txid, amount_sats, .. } => {
+            deposits_core::DepositOfferStatus::FundingReceived {
+                txid, amount_sats, ..
+            } => {
                 format!("Funding received: {} sats ({})", amount_sats, &txid[..16])
             }
             deposits_core::DepositOfferStatus::Completed { amount_sats, .. } => {
@@ -3651,9 +4209,15 @@ async fn deposit_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         println!("  Offer: {}", hex::encode(&offer.offer_id[..8]));
         println!("    Status: {}", status_str);
         println!("    Address: {}", offer.funding_address);
-        println!("    Amount: {} - {} sats", offer.min_amount_sats, offer.max_amount_sats);
+        println!(
+            "    Amount: {} - {} sats",
+            offer.min_amount_sats, offer.max_amount_sats
+        );
         println!("    Deadline: block {}", offer.deadline_block);
-        println!("    Ledger: {}...", &offer.ledger_id[..16.min(offer.ledger_id.len())]);
+        println!(
+            "    Ledger: {}...",
+            &offer.ledger_id[..16.min(offer.ledger_id.len())]
+        );
         println!("    Deposit ID: {}", hex::encode(offer.deposit_id));
         println!();
     }
@@ -3743,7 +4307,10 @@ async fn deposit_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     let ledger_id = &positional[0];
     let deposit_pubkey = &positional[1];
     let amount_sats: u64 = positional[2].parse().map_err(|_| "Invalid amount_sats")?;
-    let description = positional.get(3).map(|s| s.as_str()).unwrap_or("Deposit credit");
+    let description = positional
+        .get(3)
+        .map(|s| s.as_str())
+        .unwrap_or("Deposit credit");
 
     let config = parse_config(&config_args)?;
 
@@ -3780,7 +4347,10 @@ async fn deposit_pending(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         } else {
             println!("Pending invoices ({}):", invoices.len());
             for inv in &invoices {
-                let hash = inv.get("payment_hash_hex").and_then(|v| v.as_str()).unwrap_or("?");
+                let hash = inv
+                    .get("payment_hash_hex")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 let ledger = inv.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("?");
                 let amount = inv.get("amount_msat").and_then(|v| v.as_u64()).unwrap_or(0);
                 let created = inv.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -3789,8 +4359,13 @@ async fn deposit_pending(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                     .map(|d| d.as_secs().saturating_sub(created))
                     .unwrap_or(0);
                 let age_min = age_secs / 60;
-                println!("  hash:{:.16}  ledger:{:.16}  {} sats  {}m ago",
-                    hash, ledger, amount / 1000, age_min);
+                println!(
+                    "  hash:{:.16}  ledger:{:.16}  {} sats  {}m ago",
+                    hash,
+                    ledger,
+                    amount / 1000,
+                    age_min
+                );
             }
         }
     } else {
@@ -3802,7 +4377,8 @@ async fn deposit_pending(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     if offers_file.exists() {
         let contents = std::fs::read_to_string(&offers_file)?;
         let offers: Vec<serde_json::Value> = serde_json::from_str(&contents).unwrap_or_default();
-        let pending: Vec<&serde_json::Value> = offers.iter()
+        let pending: Vec<&serde_json::Value> = offers
+            .iter()
             .filter(|o| {
                 o.get(1).and_then(|s| s.as_str()) == Some("Pending")
                     || o.get(1).and_then(|v| v.get("FundingReceived")).is_some()
@@ -3851,7 +4427,10 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     // Check for --collateral flag
     let is_collateral = config_args.iter().any(|a| a == "--collateral");
-    let config_args: Vec<String> = config_args.into_iter().filter(|a| a != "--collateral").collect();
+    let config_args: Vec<String> = config_args
+        .into_iter()
+        .filter(|a| a != "--collateral")
+        .collect();
 
     if positional.len() < 2 {
         eprintln!("Usage: deposits-node deposit open <reserves_id> <deposit_pubkey> [--collateral] [options]");
@@ -3921,13 +4500,14 @@ async fn deposit_ls(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let node = Node::new(config).await?;
 
     // Resolve reserves_id to ledger_id
-    let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-        reserves_id_arg.clone()
-    } else {
-        node.get_ledger_with_id(&reserves_id_arg)
-            .map(|(lid, _)| lid)
-            .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
-    };
+    let ledger_id =
+        if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
+            reserves_id_arg.clone()
+        } else {
+            node.get_ledger_with_id(&reserves_id_arg)
+                .map(|(lid, _)| lid)
+                .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
+        };
 
     let deposits = node.list_deposits(&ledger_id);
 
@@ -3936,16 +4516,26 @@ async fn deposit_ls(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("Deposits in ledger {} ({} total):", ledger_id, deposits.len());
+    println!(
+        "Deposits in ledger {} ({} total):",
+        ledger_id,
+        deposits.len()
+    );
     println!();
 
     for (deposit_id, deposit) in deposits {
         println!("  Deposit ID: {}", hex::encode(deposit_id));
-        println!("    Balance: {} msats ({} sats)", deposit.balance, deposit.balance / 1000);
+        println!(
+            "    Balance: {} msats ({} sats)",
+            deposit.balance,
+            deposit.balance / 1000
+        );
         println!("    Locked: {} msats", deposit.locked_balance);
         let fees = &deposit.fees;
-        println!("    Fees: {} fixed + {} bps every {} blocks",
-            fees.annualized_msats, fees.annualized_bps, fees.frequency_blocks);
+        println!(
+            "    Fees: {} fixed + {} bps every {} blocks",
+            fees.annualized_msats, fees.annualized_bps, fees.frequency_blocks
+        );
         println!();
     }
 
@@ -3996,19 +4586,24 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let config = parse_config(&config_args)?;
 
     // Resolve reserves_id to ledger_id
-    let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-        reserves_id_arg.clone()
-    } else {
-        let node = Node::new(config.clone()).await?;
-        node.get_ledger_with_id(reserves_id_arg)
-            .map(|(lid, _)| lid)
-            .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
-    };
+    let ledger_id =
+        if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
+            reserves_id_arg.clone()
+        } else {
+            let node = Node::new(config.clone()).await?;
+            node.get_ledger_with_id(reserves_id_arg)
+                .map(|(lid, _)| lid)
+                .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
+        };
 
     println!("Crediting deposit via daemon...");
     println!("  Ledger ID: {}", ledger_id);
     println!("  Deposit ID: {}", hex::encode(deposit_id));
-    println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
+    println!(
+        "  Amount: {} msats ({} sats)",
+        amount_msats,
+        amount_msats / 1000
+    );
     println!("  Invoice ID: {}", invoice_id);
 
     let params = serde_json::json!({
@@ -4019,11 +4614,20 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     let result = send_daemon_request(&config, &ledger_id, "deposit_credit", params).await?;
 
-    let new_balance_msats = result.get("new_balance_msats").and_then(|v| v.as_u64()).unwrap_or(0);
-    let new_balance_sats = result.get("new_balance_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+    let new_balance_msats = result
+        .get("new_balance_msats")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let new_balance_sats = result
+        .get("new_balance_sats")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     println!("\nDeposit credited!");
-    println!("  New balance: {} msats ({} sats)", new_balance_msats, new_balance_sats);
+    println!(
+        "  New balance: {} msats ({} sats)",
+        new_balance_msats, new_balance_sats
+    );
 
     Ok(())
 }
@@ -4049,8 +4653,8 @@ async fn deposit_check(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
 
     let offer_id_str = offer_id_str.ok_or("Offer ID required")?;
-    let offer_id_bytes = hex::decode(&offer_id_str)
-        .map_err(|e| format!("Invalid offer ID hex: {}", e))?;
+    let offer_id_bytes =
+        hex::decode(&offer_id_str).map_err(|e| format!("Invalid offer ID hex: {}", e))?;
 
     if offer_id_bytes.len() != 32 {
         return Err("Offer ID must be 32 bytes (64 hex characters)".into());
@@ -4071,7 +4675,10 @@ async fn deposit_check(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     // First check if already completed
     if let Some((_, status)) = node.get_deposit_offer(&offer_id) {
         use deposits_core::types::DepositOfferStatus;
-        if let DepositOfferStatus::Completed { txid, amount_sats, .. } = status {
+        if let DepositOfferStatus::Completed {
+            txid, amount_sats, ..
+        } = status
+        {
             println!("\nFunding detected! (already completed)");
             println!("  Transaction: {}", txid);
             println!("  Amount: {} sats", amount_sats);
@@ -4085,13 +4692,18 @@ async fn deposit_check(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             println!("\nFunding detected!");
             println!("  Transaction: {}", txid);
             println!("  Amount: {} sats", amount_sats);
-            println!("\nUse 'deposit complete <offer_id> <txid> <amount_sats>' to credit the deposit.");
+            println!(
+                "\nUse 'deposit complete <offer_id> <txid> <amount_sats>' to credit the deposit."
+            );
         }
         None => {
             println!("\nNo funding detected yet.");
             if let Some((offer, _)) = node.get_deposit_offer(&offer_id) {
                 println!("  Funding address: {}", offer.funding_address);
-                println!("  Waiting for payment of {} - {} sats", offer.min_amount_sats, offer.max_amount_sats);
+                println!(
+                    "  Waiting for payment of {} - {} sats",
+                    offer.min_amount_sats, offer.max_amount_sats
+                );
             }
         }
     }
@@ -4120,7 +4732,9 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
     }
 
     if positional.len() < 3 {
-        eprintln!("Usage: deposits-node deposit complete <offer_id> <txid> <amount_sats> [options]");
+        eprintln!(
+            "Usage: deposits-node deposit complete <offer_id> <txid> <amount_sats> [options]"
+        );
         eprintln!("\nExample:");
         eprintln!("  deposits-node deposit complete abc123...offerid tx123...txid 100000");
         eprintln!("\nThis marks the deposit offer as complete and credits the deposit.");
@@ -4128,8 +4742,8 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
     }
 
     let offer_id_hex = &positional[0];
-    let offer_id_bytes = hex::decode(offer_id_hex)
-        .map_err(|e| format!("Invalid offer ID hex: {}", e))?;
+    let offer_id_bytes =
+        hex::decode(offer_id_hex).map_err(|e| format!("Invalid offer ID hex: {}", e))?;
 
     if offer_id_bytes.len() != 32 {
         return Err("Offer ID must be 32 bytes (64 hex characters)".into());
@@ -4167,11 +4781,20 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     let result = send_daemon_request(&config, &ledger_id, "complete_offer", params).await?;
 
-    let new_balance_msats = result.get("new_balance_msats").and_then(|v| v.as_u64()).unwrap_or(0);
-    let new_balance_sats = result.get("new_balance_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+    let new_balance_msats = result
+        .get("new_balance_msats")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let new_balance_sats = result
+        .get("new_balance_sats")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     println!("\nDeposit offer completed!");
-    println!("  New balance: {} msats ({} sats)", new_balance_msats, new_balance_sats);
+    println!(
+        "  New balance: {} msats ({} sats)",
+        new_balance_msats, new_balance_sats
+    );
 
     Ok(())
 }
@@ -4182,8 +4805,8 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
 /// custodian is, takes the majority response, and reports the result.
 /// Use this before funding a deposit offer to ensure you're sending to the legitimate custodian.
 async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use nostr_sdk::prelude::*;
     use deposits_node::nostr::{TAG_EVENT_REF, TAG_LEDGER_REQ};
+    use nostr_sdk::prelude::*;
     use std::collections::HashMap;
 
     let mut ledger_id: Option<String> = None;
@@ -4203,10 +4826,13 @@ async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::er
         i += 1;
     }
 
-    let ledger_id = ledger_id.ok_or("Usage: deposits-node deposit verify-custodian <ledger_id> [options]")?;
+    let ledger_id =
+        ledger_id.ok_or("Usage: deposits-node deposit verify-custodian <ledger_id> [options]")?;
 
     let config = parse_config(&config_args)?;
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -4236,13 +4862,19 @@ async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::er
         Kind::Custom(deposits_node::nostr::KIND_LEDGER_REQUEST),
         request_content.to_string(),
     )
-    .tag(Tag::custom(TagKind::SingleLetter(TAG_LEDGER_REQ), [ledger_id.as_str()]))
+    .tag(Tag::custom(
+        TagKind::SingleLetter(TAG_LEDGER_REQ),
+        [ledger_id.as_str()],
+    ))
     .tag(Tag::custom(TagKind::custom("action"), ["custodian_query"]))
     .sign_with_keys(&keys)?;
 
     let request_event_id = request_event.id.to_hex();
     client.send_event(request_event).await?;
-    println!("Sent custodian_query request: {}...", &request_event_id[..16]);
+    println!(
+        "Sent custodian_query request: {}...",
+        &request_event_id[..16]
+    );
 
     // Wait for responses (poll for a few seconds)
     println!("Waiting for quorum attestations...");
@@ -4254,7 +4886,12 @@ async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::er
         .custom_tag(TAG_EVENT_REF, [request_event_id.as_str()])
         .limit(20);
 
-    let events = client.fetch_events(vec![response_filter], Some(std::time::Duration::from_secs(5))).await?;
+    let events = client
+        .fetch_events(
+            vec![response_filter],
+            Some(std::time::Duration::from_secs(5)),
+        )
+        .await?;
 
     // Collect attestations
     let mut attestations: HashMap<String, Vec<String>> = HashMap::new(); // custodian -> list of attesters
@@ -4267,7 +4904,8 @@ async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::er
                 result.get("custodian").and_then(|v| v.as_str()),
                 result.get("attester").and_then(|v| v.as_str()),
             ) {
-                attestations.entry(custodian.to_string())
+                attestations
+                    .entry(custodian.to_string())
                     .or_default()
                     .push(attester.to_string());
             }
@@ -4307,7 +4945,10 @@ async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::er
     if let Some((majority_custodian, majority_attesters)) = sorted.first() {
         let percentage = (majority_attesters.len() * 100) / total_responses;
         if percentage > 50 {
-            println!("MAJORITY CUSTODIAN ({}%): {}", percentage, majority_custodian);
+            println!(
+                "MAJORITY CUSTODIAN ({}%): {}",
+                percentage, majority_custodian
+            );
             // Machine-parseable output for scripts
             println!("VERIFIED_CUSTODIAN: {}", majority_custodian);
             println!();
@@ -4349,10 +4990,20 @@ async fn deposit_collect_fees(args: &[String]) -> Result<(), Box<dyn std::error:
             let fee_due = deposit.calculate_fees_due(current_block);
             println!("  Deposit {}...:", &hex::encode(deposit_id)[..16]);
             println!("    Balance: {} msats", deposit.balance);
-            println!("    Fee structure: {} bps, {} fixed, {} block period",
-                deposit.fees.annualized_bps, deposit.fees.annualized_msats, deposit.fees.frequency_blocks);
-            println!("    Last fee assessment: block {}", deposit.last_fee_assessment);
-            println!("    Blocks since assessment: {}", current_block.saturating_sub(deposit.last_fee_assessment));
+            println!(
+                "    Fee structure: {} bps, {} fixed, {} block period",
+                deposit.fees.annualized_bps,
+                deposit.fees.annualized_msats,
+                deposit.fees.frequency_blocks
+            );
+            println!(
+                "    Last fee assessment: block {}",
+                deposit.last_fee_assessment
+            );
+            println!(
+                "    Blocks since assessment: {}",
+                current_block.saturating_sub(deposit.last_fee_assessment)
+            );
             println!("    Fee due: {} msats", fee_due);
         }
     }
@@ -4383,7 +5034,9 @@ async fn withdraw_command(args: &[String]) -> Result<(), Box<dyn std::error::Err
         "list" => withdraw_list(&args[1..]).await,
         cmd => {
             eprintln!("Unknown withdraw subcommand: {}", cmd);
-            eprintln!("Usage: deposits-node withdraw <request|lock|complete|cancel|list> [args...]");
+            eprintln!(
+                "Usage: deposits-node withdraw <request|lock|complete|cancel|list> [args...]"
+            );
             Ok(())
         }
     }
@@ -4423,7 +5076,9 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     if positional.len() < 5 {
         eprintln!("Usage: deposits-node withdraw request <reserves_id> <deposit_secret_hex> <address> <amount_sats> <fee_sats> [--memo <text>] [options]");
-        eprintln!("\nThis command generates a nonce, signs the withdrawal request, and locks the funds.");
+        eprintln!(
+            "\nThis command generates a nonce, signs the withdrawal request, and locks the funds."
+        );
         return Ok(());
     }
 
@@ -4438,13 +5093,12 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .map_err(|_| format!("Invalid fee_sats: {}", positional[4]))?;
 
     // Parse secret key
-    let secret_bytes = hex::decode(secret_hex)
-        .map_err(|e| format!("Invalid secret hex: {}", e))?;
+    let secret_bytes = hex::decode(secret_hex).map_err(|e| format!("Invalid secret hex: {}", e))?;
     if secret_bytes.len() != 32 {
         return Err("Secret key must be 32 bytes".into());
     }
-    let secret_key = SecretKey::from_slice(&secret_bytes)
-        .map_err(|e| format!("Invalid secret key: {}", e))?;
+    let secret_key =
+        SecretKey::from_slice(&secret_bytes).map_err(|e| format!("Invalid secret key: {}", e))?;
 
     // Derive public key
     let secp = Secp256k1::new();
@@ -4464,19 +5118,21 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
         &destination_address,
         amount_sats,
         fee_sats,
-    ).map_err(|e| format!("Failed to create signature: {:?}", e))?;
+    )
+    .map_err(|e| format!("Failed to create signature: {:?}", e))?;
 
     let config = parse_config(&config_args)?;
     let mut node = Node::new(config).await?;
 
     // Resolve reserves_id to ledger_id
-    let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-        reserves_id_arg.clone()
-    } else {
-        node.get_ledger_with_id(reserves_id_arg)
-            .map(|(lid, _)| lid)
-            .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
-    };
+    let ledger_id =
+        if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
+            reserves_id_arg.clone()
+        } else {
+            node.get_ledger_with_id(reserves_id_arg)
+                .map(|(lid, _)| lid)
+                .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
+        };
 
     // Sync wallet
     node.sync_wallet()?;
@@ -4499,25 +5155,37 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
     }
 
     // Lock the withdrawal with co-signing
-    let result = node.lock_withdrawal(
-        &ledger_id,
-        deposit_id,
-        destination_address,
-        amount_sats,
-        fee_sats,
-        nonce,
-        depositor_witness,
-        memo,
-    ).await?;
+    let result = node
+        .lock_withdrawal(
+            &ledger_id,
+            deposit_id,
+            destination_address,
+            amount_sats,
+            fee_sats,
+            nonce,
+            depositor_witness,
+            memo,
+        )
+        .await?;
 
     println!("\nWithdrawal locked!");
-    println!("  Withdrawal ID: {}", hex::encode(&result.withdrawal.withdrawal_id));
+    println!(
+        "  Withdrawal ID: {}",
+        hex::encode(result.withdrawal.withdrawal_id)
+    );
     println!("  Nonce: {}", hex::encode(&result.withdrawal.nonce[..8]));
     println!("  Total debit: {} sats", result.withdrawal.total_debit());
-    println!("  Previous balance: {} msats", result.previous_balance_msats);
+    println!(
+        "  Previous balance: {} msats",
+        result.previous_balance_msats
+    );
     println!("  New balance: {} msats", result.new_balance_msats);
     println!("\nThe withdrawal can now be completed with:");
-    println!("  deposits-node withdraw complete {} {}", ledger_id, hex::encode(&result.withdrawal.withdrawal_id));
+    println!(
+        "  deposits-node withdraw complete {} {}",
+        ledger_id,
+        hex::encode(result.withdrawal.withdrawal_id)
+    );
 
     Ok(())
 }
@@ -4571,8 +5239,7 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let signature_hex = &positional[6];
 
     // Parse nonce
-    let nonce_bytes = hex::decode(nonce_hex)
-        .map_err(|e| format!("Invalid nonce hex: {}", e))?;
+    let nonce_bytes = hex::decode(nonce_hex).map_err(|e| format!("Invalid nonce hex: {}", e))?;
     if nonce_bytes.len() != 32 {
         return Err("Nonce must be 32 bytes".into());
     }
@@ -4580,8 +5247,8 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     nonce.copy_from_slice(&nonce_bytes);
 
     // Parse signature
-    let sig_bytes = hex::decode(signature_hex)
-        .map_err(|e| format!("Invalid signature hex: {}", e))?;
+    let sig_bytes =
+        hex::decode(signature_hex).map_err(|e| format!("Invalid signature hex: {}", e))?;
     if sig_bytes.len() != 64 {
         return Err("Signature must be 64 bytes".into());
     }
@@ -4592,13 +5259,14 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let mut node = Node::new(config).await?;
 
     // Resolve reserves_id to ledger_id
-    let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-        reserves_id_arg.clone()
-    } else {
-        node.get_ledger_with_id(reserves_id_arg)
-            .map(|(lid, _)| lid)
-            .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
-    };
+    let ledger_id =
+        if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
+            reserves_id_arg.clone()
+        } else {
+            node.get_ledger_with_id(reserves_id_arg)
+                .map(|(lid, _)| lid)
+                .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
+        };
 
     // Sync wallet
     node.sync_wallet()?;
@@ -4621,25 +5289,37 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
 
     // Lock the withdrawal with co-signing
-    let result = node.lock_withdrawal(
-        &ledger_id,
-        deposit_id,
-        destination_address,
-        amount_sats,
-        fee_sats,
-        nonce,
-        depositor_witness,
-        memo,
-    ).await?;
+    let result = node
+        .lock_withdrawal(
+            &ledger_id,
+            deposit_id,
+            destination_address,
+            amount_sats,
+            fee_sats,
+            nonce,
+            depositor_witness,
+            memo,
+        )
+        .await?;
 
     println!("\nWithdrawal locked!");
-    println!("  Withdrawal ID: {}", hex::encode(&result.withdrawal.withdrawal_id));
+    println!(
+        "  Withdrawal ID: {}",
+        hex::encode(result.withdrawal.withdrawal_id)
+    );
     println!("  Nonce: {}", hex::encode(&result.withdrawal.nonce[..8]));
     println!("  Total debit: {} sats", result.withdrawal.total_debit());
-    println!("  Previous balance: {} msats", result.previous_balance_msats);
+    println!(
+        "  Previous balance: {} msats",
+        result.previous_balance_msats
+    );
     println!("  New balance: {} msats", result.new_balance_msats);
     println!("\nThe withdrawal can now be completed with:");
-    println!("  deposits-node withdraw complete {} {}", ledger_id, hex::encode(&result.withdrawal.withdrawal_id));
+    println!(
+        "  deposits-node withdraw complete {} {}",
+        ledger_id,
+        hex::encode(result.withdrawal.withdrawal_id)
+    );
 
     Ok(())
 }
@@ -4670,8 +5350,8 @@ async fn withdraw_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
     let reserves_id_arg = &positional[0];
     let withdrawal_id_hex = &positional[1];
-    let id_bytes = hex::decode(withdrawal_id_hex)
-        .map_err(|e| format!("Invalid withdrawal ID hex: {}", e))?;
+    let id_bytes =
+        hex::decode(withdrawal_id_hex).map_err(|e| format!("Invalid withdrawal ID hex: {}", e))?;
     if id_bytes.len() != 32 {
         return Err("Withdrawal ID must be 32 bytes".into());
     }
@@ -4682,13 +5362,14 @@ async fn withdraw_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let mut node = Node::new(config).await?;
 
     // Resolve reserves_id to ledger_id
-    let ledger_id = if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-        reserves_id_arg.clone()
-    } else {
-        node.get_ledger_with_id(reserves_id_arg)
-            .map(|(lid, _)| lid)
-            .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
-    };
+    let ledger_id =
+        if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
+            reserves_id_arg.clone()
+        } else {
+            node.get_ledger_with_id(reserves_id_arg)
+                .map(|(lid, _)| lid)
+                .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
+        };
 
     // Sync wallet
     node.sync_wallet()?;
@@ -4734,8 +5415,8 @@ async fn withdraw_cancel(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     }
 
     let withdrawal_id_hex = withdrawal_id_hex.ok_or("Withdrawal ID required")?;
-    let id_bytes = hex::decode(&withdrawal_id_hex)
-        .map_err(|e| format!("Invalid withdrawal ID hex: {}", e))?;
+    let id_bytes =
+        hex::decode(&withdrawal_id_hex).map_err(|e| format!("Invalid withdrawal ID hex: {}", e))?;
     if id_bytes.len() != 32 {
         return Err("Withdrawal ID must be 32 bytes".into());
     }
@@ -4775,22 +5456,47 @@ async fn withdraw_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             deposits_core::OnChainWithdrawalStatus::Locked { locked_at_block } => {
                 format!("Locked at block {}", locked_at_block)
             }
-            deposits_core::OnChainWithdrawalStatus::Broadcast { txid, broadcast_at_block } => {
-                format!("Broadcast at block {} (txid: {})", broadcast_at_block, &txid[..16])
+            deposits_core::OnChainWithdrawalStatus::Broadcast {
+                txid,
+                broadcast_at_block,
+            } => {
+                format!(
+                    "Broadcast at block {} (txid: {})",
+                    broadcast_at_block,
+                    &txid[..16]
+                )
             }
-            deposits_core::OnChainWithdrawalStatus::Completed { txid, confirmed_at_block, confirmations } => {
-                format!("Completed at block {} ({} confs, txid: {})", confirmed_at_block, confirmations, &txid[..16])
+            deposits_core::OnChainWithdrawalStatus::Completed {
+                txid,
+                confirmed_at_block,
+                confirmations,
+            } => {
+                format!(
+                    "Completed at block {} ({} confs, txid: {})",
+                    confirmed_at_block,
+                    confirmations,
+                    &txid[..16]
+                )
             }
-            deposits_core::OnChainWithdrawalStatus::Cancelled { cancelled_at_block, reason } => {
+            deposits_core::OnChainWithdrawalStatus::Cancelled {
+                cancelled_at_block,
+                reason,
+            } => {
                 format!("Cancelled at block {}: {}", cancelled_at_block, reason)
             }
         };
 
-        println!("  Withdrawal: {}", hex::encode(&withdrawal.withdrawal_id[..8]));
+        println!(
+            "  Withdrawal: {}",
+            hex::encode(&withdrawal.withdrawal_id[..8])
+        );
         println!("    Status: {}", status_str);
         println!("    Deposit ID: {}", hex::encode(withdrawal.deposit_id));
         println!("    Destination: {}", withdrawal.destination_address);
-        println!("    Amount: {} sats + {} fee", withdrawal.amount_sats, withdrawal.fee_sats);
+        println!(
+            "    Amount: {} sats + {} fee",
+            withdrawal.amount_sats, withdrawal.fee_sats
+        );
         if let Some(ref memo) = withdrawal.memo {
             println!("    Memo: {}", memo);
         }
@@ -4815,7 +5521,9 @@ async fn lightning_command(args: &[String]) -> Result<(), Box<dyn std::error::Er
         eprintln!("  info                                 Show LDK node info");
         eprintln!("  channels                             List Lightning channels");
         eprintln!("  payments                             List payments");
-        eprintln!("  locks    [ledger_id]                  Show open invoice locks awaiting completion");
+        eprintln!(
+            "  locks    [ledger_id]                  Show open invoice locks awaiting completion"
+        );
         eprintln!("\nDeposit Payment Commands:");
         eprintln!("  send     Pay invoice FROM a deposit (lock, pay, fulfill in one step)");
         eprintln!("\nLedger Operation Commands:");
@@ -4859,7 +5567,8 @@ async fn lightning_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Er
         return Ok(());
     }
 
-    let amount_sats: u64 = args[0].parse()
+    let amount_sats: u64 = args[0]
+        .parse()
         .map_err(|_| format!("Invalid amount: {}", args[0]))?;
     let amount_msat = amount_sats * 1000;
     let description = args.get(1).map(|s| s.as_str()).unwrap_or("Deposit invoice");
@@ -4900,10 +5609,22 @@ async fn lightning_balance(_args: &[String]) -> Result<(), Box<dyn std::error::E
     let balances = cli.get_balances()?;
 
     println!("Lightning Wallet Balance:");
-    println!("  On-chain total:     {} sats", balances.total_onchain_balance_sats);
-    println!("  On-chain spendable: {} sats", balances.spendable_onchain_balance_sats);
-    println!("  Lightning balance:  {} sats", balances.total_lightning_balance_sats);
-    println!("  Anchor reserves:    {} sats", balances.total_anchor_channels_reserve_sats);
+    println!(
+        "  On-chain total:     {} sats",
+        balances.total_onchain_balance_sats
+    );
+    println!(
+        "  On-chain spendable: {} sats",
+        balances.spendable_onchain_balance_sats
+    );
+    println!(
+        "  Lightning balance:  {} sats",
+        balances.total_lightning_balance_sats
+    );
+    println!(
+        "  Anchor reserves:    {} sats",
+        balances.total_anchor_channels_reserve_sats
+    );
     Ok(())
 }
 
@@ -4948,7 +5669,10 @@ async fn lightning_channels(_args: &[String]) -> Result<(), Box<dyn std::error::
         };
 
         println!("  Channel: {}...", &channel.channel_id[..16]);
-        println!("    Counterparty: {}...", &channel.counterparty_node_id[..16]);
+        println!(
+            "    Counterparty: {}...",
+            &channel.counterparty_node_id[..16]
+        );
         println!("    Capacity:  {} sats", channel.channel_value_sats);
         println!("    Outbound:  {} msat", channel.outbound_capacity_msat);
         println!("    Inbound:   {} msat", channel.inbound_capacity_msat);
@@ -5007,7 +5731,11 @@ async fn lightning_open_locks(args: &[String]) -> Result<(), Box<dyn std::error:
         for (payment_id, lock) in &ledger.state.open_invoice_locks {
             println!("  Payment: {}", hex::encode(payment_id));
             println!("    Deposit: {}", hex::encode(lock.deposit_id));
-            println!("    Amount:  {} msat ({} sats)", lock.amount, lock.amount / 1000);
+            println!(
+                "    Amount:  {} msat ({} sats)",
+                lock.amount,
+                lock.amount / 1000
+            );
             println!("    Locked at seq: {}", lock.lock_sequence);
             println!();
             total += 1;
@@ -5026,7 +5754,7 @@ async fn lightning_open_locks(args: &[String]) -> Result<(), Box<dyn std::error:
             println!("\nLDK payment status:");
             for (lid, arc) in ledgers.iter() {
                 let ledger = arc.read().unwrap();
-                for (payment_id, _lock) in &ledger.state.open_invoice_locks {
+                for payment_id in ledger.state.open_invoice_locks.keys() {
                     let hex_id = hex::encode(payment_id);
                     let matching = resp.payments.iter().find(|p| p.id == hex_id);
                     let status = match matching {
@@ -5038,8 +5766,12 @@ async fn lightning_open_locks(args: &[String]) -> Result<(), Box<dyn std::error:
                         },
                         None => "NOT FOUND in LDK",
                     };
-                    println!("  {}... on {}...: {}",
-                        &hex_id[..16], &lid[..16.min(lid.len())], status);
+                    println!(
+                        "  {}... on {}...: {}",
+                        &hex_id[..16],
+                        &lid[..16.min(lid.len())],
+                        status
+                    );
                 }
             }
         }
@@ -5084,16 +5816,16 @@ async fn lightning_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error
         .parse()
         .map_err(|_| format!("Invalid amount_msats: {}", positional[2]))?;
 
-    let payment_id_bytes = hex::decode(&positional[3])
-        .map_err(|e| format!("Invalid payment_id hex: {}", e))?;
+    let payment_id_bytes =
+        hex::decode(&positional[3]).map_err(|e| format!("Invalid payment_id hex: {}", e))?;
     if payment_id_bytes.len() != 32 {
         return Err("Payment ID must be 32 bytes (64 hex characters)".into());
     }
     let mut payment_id = [0u8; 32];
     payment_id.copy_from_slice(&payment_id_bytes);
 
-    let signature_bytes = hex::decode(&positional[4])
-        .map_err(|e| format!("Invalid signature hex: {}", e))?;
+    let signature_bytes =
+        hex::decode(&positional[4]).map_err(|e| format!("Invalid signature hex: {}", e))?;
     if signature_bytes.len() != 64 {
         return Err("Signature must be 64 bytes (128 hex characters)".into());
     }
@@ -5113,19 +5845,26 @@ async fn lightning_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("Locking deposit for Lightning payment...");
     println!("  Reserves ID: {}", reserves_id);
     println!("  Deposit ID: {}", hex::encode(deposit_id));
-    println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
-    println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
-
-    let new_locked = node.lock_invoice_payment(
-        reserves_id,
-        deposit_id,
+    println!(
+        "  Amount: {} msats ({} sats)",
         amount_msats,
-        payment_id,
-        witness,
-    ).await?;
+        amount_msats / 1000
+    );
+    println!(
+        "  Payment ID: {}",
+        &positional[3][..16.min(positional[3].len())]
+    );
+
+    let new_locked = node
+        .lock_invoice_payment(reserves_id, deposit_id, amount_msats, payment_id, witness)
+        .await?;
 
     println!("\nPayment locked!");
-    println!("  Locked balance: {} msats ({} sats)", new_locked, new_locked / 1000);
+    println!(
+        "  Locked balance: {} msats ({} sats)",
+        new_locked,
+        new_locked / 1000
+    );
 
     Ok(())
 }
@@ -5154,7 +5893,9 @@ async fn lightning_fail(args: &[String]) -> Result<(), Box<dyn std::error::Error
     if positional.len() < 4 {
         eprintln!("Usage: deposits-node lightning fail <reserves_id> <deposit_pubkey> <amount_msats> <payment_id>");
         eprintln!("\nExample:");
-        eprintln!("  deposits-node lightning fail 02abc...partner 02def...deposit 1000000 abc123...hash");
+        eprintln!(
+            "  deposits-node lightning fail 02abc...partner 02def...deposit 1000000 abc123...hash"
+        );
         eprintln!("\nThis cancels a pending Lightning payment and unlocks the funds.");
         return Ok(());
     }
@@ -5166,8 +5907,8 @@ async fn lightning_fail(args: &[String]) -> Result<(), Box<dyn std::error::Error
         .parse()
         .map_err(|_| format!("Invalid amount_msats: {}", positional[2]))?;
 
-    let payment_id_bytes = hex::decode(&positional[3])
-        .map_err(|e| format!("Invalid payment_id hex: {}", e))?;
+    let payment_id_bytes =
+        hex::decode(&positional[3]).map_err(|e| format!("Invalid payment_id hex: {}", e))?;
     if payment_id_bytes.len() != 32 {
         return Err("Payment ID must be 32 bytes (64 hex characters)".into());
     }
@@ -5184,18 +5925,26 @@ async fn lightning_fail(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("Failing Lightning payment...");
     println!("  Reserves ID: {}", reserves_id);
     println!("  Deposit ID: {}", hex::encode(deposit_id));
-    println!("  Amount to unlock: {} msats ({} sats)", amount_msats, amount_msats / 1000);
-    println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
-
-    let new_balance = node.fail_invoice_payment(
-        reserves_id,
-        deposit_id,
+    println!(
+        "  Amount to unlock: {} msats ({} sats)",
         amount_msats,
-        payment_id,
-    ).await?;
+        amount_msats / 1000
+    );
+    println!(
+        "  Payment ID: {}",
+        &positional[3][..16.min(positional[3].len())]
+    );
+
+    let new_balance = node
+        .fail_invoice_payment(reserves_id, deposit_id, amount_msats, payment_id)
+        .await?;
 
     println!("\nPayment failed/cancelled!");
-    println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
+    println!(
+        "  New balance: {} msats ({} sats)",
+        new_balance,
+        new_balance / 1000
+    );
 
     Ok(())
 }
@@ -5236,24 +5985,24 @@ async fn lightning_fulfill(args: &[String]) -> Result<(), Box<dyn std::error::Er
         .parse()
         .map_err(|_| format!("Invalid amount_msats: {}", positional[2]))?;
 
-    let payment_id_bytes = hex::decode(&positional[3])
-        .map_err(|e| format!("Invalid payment_id hex: {}", e))?;
+    let payment_id_bytes =
+        hex::decode(&positional[3]).map_err(|e| format!("Invalid payment_id hex: {}", e))?;
     if payment_id_bytes.len() != 32 {
         return Err("Payment ID must be 32 bytes (64 hex characters)".into());
     }
     let mut payment_id = [0u8; 32];
     payment_id.copy_from_slice(&payment_id_bytes);
 
-    let preimage_bytes = hex::decode(&positional[4])
-        .map_err(|e| format!("Invalid preimage hex: {}", e))?;
+    let preimage_bytes =
+        hex::decode(&positional[4]).map_err(|e| format!("Invalid preimage hex: {}", e))?;
     if preimage_bytes.len() != 32 {
         return Err("Preimage must be 32 bytes (64 hex characters)".into());
     }
     let mut preimage = [0u8; 32];
     preimage.copy_from_slice(&preimage_bytes);
 
-    let signature_bytes = hex::decode(&positional[5])
-        .map_err(|e| format!("Invalid signature hex: {}", e))?;
+    let signature_bytes =
+        hex::decode(&positional[5]).map_err(|e| format!("Invalid signature hex: {}", e))?;
     if signature_bytes.len() != 64 {
         return Err("Signature must be 64 bytes (128 hex characters)".into());
     }
@@ -5273,20 +6022,33 @@ async fn lightning_fulfill(args: &[String]) -> Result<(), Box<dyn std::error::Er
     println!("Fulfilling Lightning payment...");
     println!("  Reserves ID: {}", reserves_id);
     println!("  Deposit ID: {}", hex::encode(deposit_id));
-    println!("  Amount: {} msats ({} sats)", amount_msats, amount_msats / 1000);
-    println!("  Payment ID: {}", &positional[3][..16.min(positional[3].len())]);
-
-    let new_balance = node.fulfill_invoice_payment(
-        reserves_id,
-        deposit_id,
+    println!(
+        "  Amount: {} msats ({} sats)",
         amount_msats,
-        payment_id,
-        preimage,
-        witness,
-    ).await?;
+        amount_msats / 1000
+    );
+    println!(
+        "  Payment ID: {}",
+        &positional[3][..16.min(positional[3].len())]
+    );
+
+    let new_balance = node
+        .fulfill_invoice_payment(
+            reserves_id,
+            deposit_id,
+            amount_msats,
+            payment_id,
+            preimage,
+            witness,
+        )
+        .await?;
 
     println!("\nPayment fulfilled!");
-    println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
+    println!(
+        "  New balance: {} msats ({} sats)",
+        new_balance,
+        new_balance / 1000
+    );
 
     Ok(())
 }
@@ -5336,13 +6098,12 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let invoice = &positional[2];
 
     // Parse secret key
-    let secret_bytes = hex::decode(secret_hex)
-        .map_err(|e| format!("Invalid secret hex: {}", e))?;
+    let secret_bytes = hex::decode(secret_hex).map_err(|e| format!("Invalid secret hex: {}", e))?;
     if secret_bytes.len() != 32 {
         return Err("Secret key must be 32 bytes".into());
     }
-    let secret_key = SecretKey::from_slice(&secret_bytes)
-        .map_err(|e| format!("Invalid secret key: {}", e))?;
+    let secret_key =
+        SecretKey::from_slice(&secret_bytes).map_err(|e| format!("Invalid secret key: {}", e))?;
 
     // Derive public key and compute deposit_id
     let secp = Secp256k1::new();
@@ -5363,11 +6124,14 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
     // Step 1: Pay the invoice via LDK to get payment_id and check success
     println!("\nStep 1: Paying invoice via Lightning...");
     let payment_id_hex = cli.pay_invoice(invoice)?;
-    println!("  Payment initiated: {}...", &payment_id_hex[..20.min(payment_id_hex.len())]);
+    println!(
+        "  Payment initiated: {}...",
+        &payment_id_hex[..20.min(payment_id_hex.len())]
+    );
 
     // Convert payment_id to bytes
-    let payment_id_bytes = hex::decode(&payment_id_hex)
-        .map_err(|e| format!("Invalid payment_id hex: {}", e))?;
+    let payment_id_bytes =
+        hex::decode(&payment_id_hex).map_err(|e| format!("Invalid payment_id hex: {}", e))?;
     if payment_id_bytes.len() != 32 {
         return Err(format!("Payment ID unexpected length: {}", payment_id_bytes.len()).into());
     }
@@ -5380,7 +6144,9 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     // Check payment status and get preimage
     let payments = cli.list_payments()?;
-    let payment = payments.payments.iter()
+    let payment = payments
+        .payments
+        .iter()
         .find(|p| p.id == payment_id_hex)
         .ok_or("Payment not found in payment list")?;
 
@@ -5388,17 +6154,20 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
         return Err(format!("Payment failed with status: {}", payment.status).into());
     }
 
-    let preimage_hex = payment.preimage.as_ref()
+    let preimage_hex = payment
+        .preimage
+        .as_ref()
         .ok_or("Payment succeeded but no preimage returned")?;
-    let preimage_bytes = hex::decode(preimage_hex)
-        .map_err(|e| format!("Invalid preimage hex: {}", e))?;
+    let preimage_bytes =
+        hex::decode(preimage_hex).map_err(|e| format!("Invalid preimage hex: {}", e))?;
     if preimage_bytes.len() != 32 {
         return Err("Preimage unexpected length".into());
     }
     let mut preimage = [0u8; 32];
     preimage.copy_from_slice(&preimage_bytes);
 
-    let amount_msats = payment.amount_msat
+    let amount_msats = payment
+        .amount_msat
         .ok_or("Payment succeeded but no amount returned")?;
 
     println!("  Payment succeeded!");
@@ -5412,17 +6181,13 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let mut node = Node::new(config).await?;
 
     // Create signatures for lock and fulfill
-    let lock_signature = deposits_core::create_payment_signature(
-        &secret_key,
-        &payment_id,
-        amount_msats,
-    ).map_err(|e| format!("Failed to create lock signature: {:?}", e))?;
+    let lock_signature =
+        deposits_core::create_payment_signature(&secret_key, &payment_id, amount_msats)
+            .map_err(|e| format!("Failed to create lock signature: {:?}", e))?;
 
-    let fulfill_signature = deposits_core::create_payment_signature(
-        &secret_key,
-        &payment_id,
-        amount_msats,
-    ).map_err(|e| format!("Failed to create fulfill signature: {:?}", e))?;
+    let fulfill_signature =
+        deposits_core::create_payment_signature(&secret_key, &payment_id, amount_msats)
+            .map_err(|e| format!("Failed to create fulfill signature: {:?}", e))?;
 
     // Create witnesses from signatures
     let lock_witness = deposits_core::types::DescriptorWitness {
@@ -5434,29 +6199,41 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     // Lock the funds with co-signing
     println!("  Locking {} msats...", amount_msats);
-    let locked_balance = node.lock_invoice_payment(
-        reserves_id,
-        deposit_id,
-        amount_msats,
-        payment_id,
-        lock_witness,
-    ).await?;
+    let locked_balance = node
+        .lock_invoice_payment(
+            reserves_id,
+            deposit_id,
+            amount_msats,
+            payment_id,
+            lock_witness,
+        )
+        .await?;
     println!("  Locked balance: {} msats", locked_balance);
 
     // Fulfill with preimage and co-signing
     println!("  Fulfilling with preimage...");
-    let new_balance = node.fulfill_invoice_payment(
-        reserves_id,
-        deposit_id,
-        amount_msats,
-        payment_id,
-        preimage,
-        fulfill_witness,
-    ).await?;
+    let new_balance = node
+        .fulfill_invoice_payment(
+            reserves_id,
+            deposit_id,
+            amount_msats,
+            payment_id,
+            preimage,
+            fulfill_witness,
+        )
+        .await?;
 
     println!("\nPayment complete!");
-    println!("  Paid: {} msats ({} sats)", amount_msats, amount_msats / 1000);
-    println!("  New balance: {} msats ({} sats)", new_balance, new_balance / 1000);
+    println!(
+        "  Paid: {} msats ({} sats)",
+        amount_msats,
+        amount_msats / 1000
+    );
+    println!(
+        "  New balance: {} msats ({} sats)",
+        new_balance,
+        new_balance / 1000
+    );
 
     Ok(())
 }
@@ -5492,9 +6269,9 @@ async fn danger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
 /// WARNING: This creates non-conforming updates that break protocol rules.
 #[cfg(feature = "dangerous-testing")]
 async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use bitcoin::secp256k1::{Secp256k1, SecretKey, Message};
-    use deposits_node::nostr::NostrTransportBuilder;
+    use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
     use deposits_core::SignedLedgerUpdate;
+    use deposits_node::nostr::NostrTransportBuilder;
     use sha2::{Digest, Sha256};
 
     if args.len() < 2 {
@@ -5517,7 +6294,9 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
 
     let config = parse_config(&config_args)?;
 
-    let relay_url = config.relays.first()
+    let relay_url = config
+        .relays
+        .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
@@ -5528,7 +6307,8 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
     let node = Node::new(config).await?;
 
     // Resolve reserves_id to ledger_id
-    let (ledger_id, ledger) = node.get_ledger_with_id(reserves_id_arg)
+    let (ledger_id, ledger) = node
+        .get_ledger_with_id(reserves_id_arg)
         .ok_or_else(|| format!("Ledger not found: {}", reserves_id_arg))?;
 
     if ledger.history.is_empty() {
@@ -5710,14 +6490,24 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
         }
 
         unknown => {
-            return Err(format!("Unknown violation type: {}. Valid: invalid-hash, skip-sequence, replay", unknown).into());
+            return Err(format!(
+                "Unknown violation type: {}. Valid: invalid-hash, skip-sequence, replay",
+                unknown
+            )
+            .into());
         }
     };
 
     println!("Created invalid update:");
     println!("  Sequence: {}", invalid_update.sequence_number);
-    println!("  Previous hash: {}...", &hex::encode(invalid_update.previous_hash)[..16]);
-    println!("  Current hash: {}...", &hex::encode(invalid_update.current_hash)[..16]);
+    println!(
+        "  Previous hash: {}...",
+        &hex::encode(invalid_update.previous_hash)[..16]
+    );
+    println!(
+        "  Current hash: {}...",
+        &hex::encode(invalid_update.current_hash)[..16]
+    );
 
     // Broadcast to Nostr
     println!();
@@ -5736,7 +6526,10 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
     println!("  Event ID: {}", event_id);
     println!();
     println!("To test recovery, try:");
-    println!("  deposits-node nostr import {}:{}", node.node_id, ledger_id);
+    println!(
+        "  deposits-node nostr import {}:{}",
+        node.node_id, ledger_id
+    );
     println!("  deposits-node ledger validate {}", ledger_id);
 
     Ok(())

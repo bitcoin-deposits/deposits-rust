@@ -22,16 +22,15 @@
 //! This enables signature aggregation without coordination on tx details.
 
 use bitcoin::{
+    secp256k1::{schnorr::Signature, Message, PublicKey, Secp256k1, SecretKey},
     Address, Network, OutPoint, ScriptBuf, Transaction, Txid,
-    secp256k1::{Message, PublicKey, Secp256k1, SecretKey, schnorr::Signature},
 };
 use std::collections::HashMap;
 
 use crate::error::{DepositsError, DepositsResult};
 use crate::recovery::{ClaimEligibility, RecoveryPhase, RecoveryState};
 use crate::tapscript_reserves::{
-    ReservesSpendBuilder, SpendTxParams, TapscriptReservesBuilder,
-    ThresholdConfig, VoterSet,
+    ReservesSpendBuilder, SpendTxParams, TapscriptReservesBuilder, ThresholdConfig, VoterSet,
 };
 use crate::traits::Broadcaster;
 
@@ -109,15 +108,17 @@ impl ClaimAttempt {
             ClaimEligibility::SelectedPartnerOnly { .. } => 0, // majority
             ClaimEligibility::AnyThreePartners => 1,           // minority
             ClaimEligibility::AnySinglePartner => 2,           // single partner (operator tier)
-            ClaimEligibility::CommunityFallback => {           // emergency (last tier)
+            ClaimEligibility::CommunityFallback => {
+                // emergency (last tier)
                 reserves.threshold_config.tiers.len().saturating_sub(1)
             }
         };
 
         if tier_index >= reserves.threshold_config.tiers.len() {
-            return Err(DepositsError::InvalidState(
-                format!("No tier available for eligibility {:?}", eligibility)
-            ));
+            return Err(DepositsError::InvalidState(format!(
+                "No tier available for eligibility {:?}",
+                eligibility
+            )));
         }
 
         // Derive destination address from first claimant (deterministic)
@@ -131,7 +132,8 @@ impl ClaimAttempt {
             config.network,
             reserves.ledger_hash,
         );
-        let leaf_script = builder.build_threshold_leaf(&reserves.threshold_config.tiers[tier_index])?;
+        let leaf_script =
+            builder.build_threshold_leaf(&reserves.threshold_config.tiers[tier_index])?;
 
         // Build the spend transaction parameters
         let spend_params = SpendTxParams {
@@ -141,10 +143,8 @@ impl ClaimAttempt {
             fee_rate_sat_vbyte: config.fee_rate_sat_vbyte,
         };
 
-        let unsigned_tx = ReservesSpendBuilder::build_spend_transaction(
-            &spend_params,
-            &reserves.script_pubkey,
-        )?;
+        let unsigned_tx =
+            ReservesSpendBuilder::build_spend_transaction(&spend_params, &reserves.script_pubkey)?;
 
         Ok(Self {
             claimants,
@@ -166,7 +166,7 @@ impl ClaimAttempt {
             self.reserves.amount_sats,
             &self.reserves.script_pubkey,
             &self.leaf_script,
-        ).map_err(Into::into)
+        )
     }
 
     /// Add a signature from a voter
@@ -190,13 +190,11 @@ impl ClaimAttempt {
     /// Finalize the transaction with collected signatures
     pub fn finalize(&self) -> DepositsResult<Transaction> {
         if !self.has_sufficient_signatures() {
-            return Err(DepositsError::InvalidState(
-                format!(
-                    "Not enough signatures: have {}, need {}",
-                    self.signatures.len(),
-                    self.required_signatures()
-                )
-            ));
+            return Err(DepositsError::InvalidState(format!(
+                "Not enough signatures: have {}, need {}",
+                self.signatures.len(),
+                self.required_signatures()
+            )));
         }
 
         // Get control block for this tier
@@ -205,12 +203,14 @@ impl ClaimAttempt {
             self.reserves.threshold_config.clone(),
             self.reserves.network,
             self.reserves.ledger_hash,
-        ).build()?;
+        )
+        .build()?;
 
-        let control_block = taproot_output.control_block_for_tier(self.tier_index)
-            .ok_or_else(|| DepositsError::InvalidState(
-                "Failed to get control block for tier".to_string()
-            ))?;
+        let control_block = taproot_output
+            .control_block_for_tier(self.tier_index)
+            .ok_or_else(|| {
+                DepositsError::InvalidState("Failed to get control block for tier".to_string())
+            })?;
 
         // Build signature array in correct order
         let voter_count = self.reserves.voter_set.total_count();
@@ -261,7 +261,11 @@ pub struct ClaimManager {
 
 impl ClaimManager {
     /// Create a new claim manager
-    pub fn new(our_pubkey: PublicKey, our_secret_key: Option<SecretKey>, config: ClaimConfig) -> Self {
+    pub fn new(
+        our_pubkey: PublicKey,
+        our_secret_key: Option<SecretKey>,
+        config: ClaimConfig,
+    ) -> Self {
         Self {
             active_claims: HashMap::new(),
             our_secret_key,
@@ -278,31 +282,21 @@ impl ClaimManager {
         eligibility: ClaimEligibility,
         reserves: ClaimableReserves,
     ) -> DepositsResult<&ClaimAttempt> {
-        let attempt = ClaimAttempt::new(
-            claimants,
-            eligibility,
-            reserves,
-            &self.config,
-        )?;
+        let attempt = ClaimAttempt::new(claimants, eligibility, reserves, &self.config)?;
 
         self.active_claims.insert(ledger_id, attempt);
         Ok(self.active_claims.get(&ledger_id).unwrap())
     }
 
     /// Sign a claim with our key
-    pub fn sign_claim(
-        &mut self,
-        ledger_id: &(PublicKey, PublicKey),
-    ) -> DepositsResult<[u8; 64]> {
-        let secret_key = self.our_secret_key
-            .ok_or_else(|| DepositsError::InvalidState(
-                "No secret key configured for signing".to_string()
-            ))?;
+    pub fn sign_claim(&mut self, ledger_id: &(PublicKey, PublicKey)) -> DepositsResult<[u8; 64]> {
+        let secret_key = self.our_secret_key.ok_or_else(|| {
+            DepositsError::InvalidState("No secret key configured for signing".to_string())
+        })?;
 
-        let attempt = self.active_claims.get(ledger_id)
-            .ok_or_else(|| DepositsError::InvalidState(
-                "No active claim for this ledger".to_string()
-            ))?;
+        let attempt = self.active_claims.get(ledger_id).ok_or_else(|| {
+            DepositsError::InvalidState("No active claim for this ledger".to_string())
+        })?;
 
         let sighash = attempt.get_sighash()?;
 
@@ -310,11 +304,12 @@ impl ClaimManager {
         let sorted_keys = attempt.reserves.voter_set.sorted_x_only_pubkeys();
         let our_x_only = self.our_pubkey.x_only_public_key().0;
 
-        let our_index = sorted_keys.iter()
+        let our_index = sorted_keys
+            .iter()
             .position(|k| *k == our_x_only)
-            .ok_or_else(|| DepositsError::InvalidState(
-                "We are not in the voter set".to_string()
-            ))?;
+            .ok_or_else(|| {
+                DepositsError::InvalidState("We are not in the voter set".to_string())
+            })?;
 
         // Create Schnorr signature
         let secp = Secp256k1::new();
@@ -339,34 +334,33 @@ impl ClaimManager {
         voter_pubkey: &PublicKey,
         signature: [u8; 64],
     ) -> DepositsResult<bool> {
-        let attempt = self.active_claims.get_mut(ledger_id)
-            .ok_or_else(|| DepositsError::InvalidState(
-                "No active claim for this ledger".to_string()
-            ))?;
+        let attempt = self.active_claims.get_mut(ledger_id).ok_or_else(|| {
+            DepositsError::InvalidState("No active claim for this ledger".to_string())
+        })?;
 
         // Find the voter's position
         let sorted_keys = attempt.reserves.voter_set.sorted_x_only_pubkeys();
         let voter_x_only = voter_pubkey.x_only_public_key().0;
 
-        let voter_index = sorted_keys.iter()
+        let voter_index = sorted_keys
+            .iter()
             .position(|k| *k == voter_x_only)
-            .ok_or_else(|| DepositsError::InvalidState(
-                "Voter is not in the voter set".to_string()
-            ))?;
+            .ok_or_else(|| {
+                DepositsError::InvalidState("Voter is not in the voter set".to_string())
+            })?;
 
         // Verify signature before adding
         let sighash = attempt.get_sighash()?;
         let secp = Secp256k1::new();
         let msg = Message::from_digest(*sighash.as_ref());
-        let sig = Signature::from_slice(&signature)
-            .map_err(|e| DepositsError::InvalidState(
-                format!("Invalid signature format: {:?}", e)
-            ))?;
+        let sig = Signature::from_slice(&signature).map_err(|e| {
+            DepositsError::InvalidState(format!("Invalid signature format: {:?}", e))
+        })?;
 
         secp.verify_schnorr(&sig, &msg, &voter_x_only)
-            .map_err(|e| DepositsError::InvalidState(
-                format!("Signature verification failed: {:?}", e)
-            ))?;
+            .map_err(|e| {
+                DepositsError::InvalidState(format!("Signature verification failed: {:?}", e))
+            })?;
 
         attempt.add_signature(voter_index, signature);
 
@@ -378,10 +372,9 @@ impl ClaimManager {
         &self,
         ledger_id: &(PublicKey, PublicKey),
     ) -> DepositsResult<Transaction> {
-        let attempt = self.active_claims.get(ledger_id)
-            .ok_or_else(|| DepositsError::InvalidState(
-                "No active claim for this ledger".to_string()
-            ))?;
+        let attempt = self.active_claims.get(ledger_id).ok_or_else(|| {
+            DepositsError::InvalidState("No active claim for this ledger".to_string())
+        })?;
 
         attempt.finalize()
     }
@@ -411,20 +404,17 @@ impl ClaimManager {
         broadcaster: &B,
     ) -> DepositsResult<BroadcastResult> {
         // Check if claim exists
-        let attempt = self.active_claims.get(ledger_id)
-            .ok_or_else(|| DepositsError::InvalidState(
-                "No active claim for this ledger".to_string()
-            ))?;
+        let attempt = self.active_claims.get(ledger_id).ok_or_else(|| {
+            DepositsError::InvalidState("No active claim for this ledger".to_string())
+        })?;
 
         // Verify we have enough signatures
         if !attempt.has_sufficient_signatures() {
-            return Err(DepositsError::InvalidState(
-                format!(
-                    "Not enough signatures to broadcast: have {}, need {}",
-                    attempt.signatures.len(),
-                    attempt.required_signatures()
-                )
-            ));
+            return Err(DepositsError::InvalidState(format!(
+                "Not enough signatures to broadcast: have {}, need {}",
+                attempt.signatures.len(),
+                attempt.required_signatures()
+            )));
         }
 
         // Finalize the transaction
@@ -435,7 +425,8 @@ impl ClaimManager {
         let claimants = attempt.claimants.clone();
 
         // Broadcast the transaction
-        broadcaster.broadcast_transaction(&finalized_tx)
+        broadcaster
+            .broadcast_transaction(&finalized_tx)
             .map_err(|e| DepositsError::BroadcastFailed(format!("{:?}", e)))?;
 
         // Remove from active claims now that it's broadcast
@@ -506,7 +497,7 @@ pub fn build_claim_from_recovery(
         } => (current_eligibility.clone(), recovery_pool.clone()),
         _ => {
             return Err(DepositsError::InvalidState(
-                "Recovery is not in NonCompliantRecovery phase".to_string()
+                "Recovery is not in NonCompliantRecovery phase".to_string(),
             ));
         }
     };
@@ -555,7 +546,10 @@ mod tests {
     }
 
     impl Broadcaster for MockBroadcaster {
-        fn broadcast_transaction(&self, tx: &Transaction) -> Result<(), crate::traits::BroadcastError> {
+        fn broadcast_transaction(
+            &self,
+            tx: &Transaction,
+        ) -> Result<(), crate::traits::BroadcastError> {
             self.broadcast_count.fetch_add(1, Ordering::SeqCst);
             let mut stored = self.broadcast_txs.lock().unwrap();
             stored.push(tx.clone());
@@ -582,7 +576,11 @@ mod tests {
 
     fn create_test_reserves(voter_set: VoterSet) -> ClaimableReserves {
         let test_ledger_hash = [0xAA; 32];
-        let builder = TapscriptReservesBuilder::with_defaults(voter_set.clone(), Network::Regtest, test_ledger_hash);
+        let builder = TapscriptReservesBuilder::with_defaults(
+            voter_set.clone(),
+            Network::Regtest,
+            test_ledger_hash,
+        );
         let output = builder.build().unwrap();
 
         ClaimableReserves {
@@ -617,14 +615,12 @@ mod tests {
         let reserves = create_test_reserves(voter_set);
 
         let config = ClaimConfig::default();
-        let eligibility = ClaimEligibility::SelectedPartnerOnly { partner: tie_breaker };
+        let eligibility = ClaimEligibility::SelectedPartnerOnly {
+            partner: tie_breaker,
+        };
 
-        let attempt = ClaimAttempt::new(
-            vec![tie_breaker],
-            eligibility,
-            reserves,
-            &config,
-        ).expect("Should create claim attempt");
+        let attempt = ClaimAttempt::new(vec![tie_breaker], eligibility, reserves, &config)
+            .expect("Should create claim attempt");
 
         assert_eq!(attempt.claimants.len(), 1);
         assert_eq!(attempt.tier_index, 0);
@@ -640,14 +636,12 @@ mod tests {
         let reserves = create_test_reserves(voter_set);
 
         let config = ClaimConfig::default();
-        let eligibility = ClaimEligibility::SelectedPartnerOnly { partner: tie_breaker };
+        let eligibility = ClaimEligibility::SelectedPartnerOnly {
+            partner: tie_breaker,
+        };
 
-        let attempt = ClaimAttempt::new(
-            vec![tie_breaker],
-            eligibility,
-            reserves,
-            &config,
-        ).expect("Should create claim attempt");
+        let attempt = ClaimAttempt::new(vec![tie_breaker], eligibility, reserves, &config)
+            .expect("Should create claim attempt");
 
         let sighash = attempt.get_sighash().expect("Should compute sighash");
         assert_ne!(sighash.to_byte_array(), [0u8; 32]);
@@ -664,12 +658,9 @@ mod tests {
         let config = ClaimConfig::default();
         let eligibility = ClaimEligibility::SelectedPartnerOnly { partner: pk1 };
 
-        let mut attempt = ClaimAttempt::new(
-            vec![pk1],
-            eligibility.clone(),
-            reserves.clone(),
-            &config,
-        ).expect("Should create claim attempt");
+        let mut attempt =
+            ClaimAttempt::new(vec![pk1], eligibility.clone(), reserves.clone(), &config)
+                .expect("Should create claim attempt");
 
         // Sign with the tie-breaker (should be sufficient for tier 0)
         let sighash = attempt.get_sighash().unwrap();
@@ -718,12 +709,9 @@ mod tests {
         let ledger_id = (pk1, pk2);
         let eligibility = ClaimEligibility::AnySinglePartner;
 
-        manager.initiate_claim(
-            ledger_id,
-            vec![pk1],
-            eligibility,
-            reserves,
-        ).expect("Should initiate claim");
+        manager
+            .initiate_claim(ledger_id, vec![pk1], eligibility, reserves)
+            .expect("Should initiate claim");
 
         // Sign with our key
         let _sig = manager.sign_claim(&ledger_id).expect("Should sign");
@@ -752,18 +740,15 @@ mod tests {
         // Test tier mapping for different eligibilities
         let test_cases = vec![
             (ClaimEligibility::SelectedPartnerOnly { partner: pk1 }, 0), // majority
-            (ClaimEligibility::AnyThreePartners, 1),                    // minority
-            (ClaimEligibility::AnySinglePartner, 2),                    // single partner
-            (ClaimEligibility::CommunityFallback, 3),                   // emergency (last)
+            (ClaimEligibility::AnyThreePartners, 1),                     // minority
+            (ClaimEligibility::AnySinglePartner, 2),                     // single partner
+            (ClaimEligibility::CommunityFallback, 3),                    // emergency (last)
         ];
 
         for (eligibility, expected_tier) in test_cases {
-            let attempt = ClaimAttempt::new(
-                vec![pk1],
-                eligibility.clone(),
-                reserves.clone(),
-                &config,
-            ).expect("Should create claim");
+            let attempt =
+                ClaimAttempt::new(vec![pk1], eligibility.clone(), reserves.clone(), &config)
+                    .expect("Should create claim");
 
             assert_eq!(
                 attempt.tier_index, expected_tier,
@@ -787,12 +772,9 @@ mod tests {
         let ledger_id = (pk1, pk2);
         let eligibility = ClaimEligibility::AnySinglePartner;
 
-        manager.initiate_claim(
-            ledger_id,
-            vec![pk1],
-            eligibility,
-            reserves,
-        ).expect("Should initiate claim");
+        manager
+            .initiate_claim(ledger_id, vec![pk1], eligibility, reserves)
+            .expect("Should initiate claim");
 
         // Without signatures, should not be ready
         assert!(!manager.is_ready_to_broadcast(&ledger_id));
@@ -826,19 +808,19 @@ mod tests {
         let ledger_id = (pk1, pk2);
         let eligibility = ClaimEligibility::AnySinglePartner;
 
-        manager.initiate_claim(
-            ledger_id,
-            vec![pk1],
-            eligibility,
-            reserves,
-        ).expect("Should initiate claim");
+        manager
+            .initiate_claim(ledger_id, vec![pk1], eligibility, reserves)
+            .expect("Should initiate claim");
 
         let broadcaster = MockBroadcaster::new();
 
         // Should fail because no signatures collected
         let result = manager.broadcast_claim(&ledger_id, &broadcaster);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Not enough signatures"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Not enough signatures"));
         assert_eq!(broadcaster.get_broadcast_count(), 0);
     }
 
@@ -879,12 +861,9 @@ mod tests {
         // Use AnySinglePartner - for 2 voters this should be tier 2 with threshold 1
         let eligibility = ClaimEligibility::AnySinglePartner;
 
-        manager.initiate_claim(
-            ledger_id,
-            vec![pk1],
-            eligibility,
-            reserves,
-        ).expect("Should initiate claim");
+        manager
+            .initiate_claim(ledger_id, vec![pk1], eligibility, reserves)
+            .expect("Should initiate claim");
 
         // Sign with our key
         manager.sign_claim(&ledger_id).expect("Should sign");
@@ -902,7 +881,8 @@ mod tests {
             let msg = Message::from_digest(*sighash.as_ref());
             let sig2 = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
 
-            manager.add_peer_signature(&ledger_id, &pk2, sig2.serialize())
+            manager
+                .add_peer_signature(&ledger_id, &pk2, sig2.serialize())
                 .expect("Should add peer signature");
         }
 

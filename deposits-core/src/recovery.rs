@@ -34,9 +34,9 @@
 //!      legitimate technical failures without punishment
 //!    - **Non-Compliant**: Proceed to deterministic selection for reassignment
 
-use bitcoin::hashes::{Hash, sha256};
-use bitcoin::secp256k1::{PublicKey, Secp256k1, Message, Keypair};
+use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::schnorr::Signature as SchnorrSignature;
+use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1};
 use std::collections::HashMap;
 
 /// Block intervals for time-based degradation
@@ -108,9 +108,7 @@ pub enum RecoveryPhase {
     },
 
     /// Recovery complete - deposits transferred to new operator (or returned)
-    Complete {
-        outcome: RecoveryOutcome,
-    },
+    Complete { outcome: RecoveryOutcome },
 }
 
 /// Final outcome of a recovery process
@@ -119,7 +117,10 @@ pub enum RecoveryOutcome {
     /// Funds returned to original operator (was compliant)
     ReturnedToOperator { operator: PublicKey },
     /// Deposits reassigned to a new operator
-    ReassignedTo { new_operator: PublicKey, reason: ReassignmentReason },
+    ReassignedTo {
+        new_operator: PublicKey,
+        reason: ReassignmentReason,
+    },
     /// Recovery failed (shouldn't happen in normal operation)
     Failed { reason: String },
 }
@@ -194,7 +195,7 @@ impl RecoveryVote {
         discovered_violation: bool,
     ) -> Result<Self, RecoveryError> {
         let secp = Secp256k1::new();
-        let voter = PublicKey::from(keypair.public_key());
+        let voter = keypair.public_key();
 
         // Create unsigned vote to compute sighash
         let mut vote = Self {
@@ -282,7 +283,9 @@ impl ClaimEligibility {
     /// Determine eligibility based on blocks since force close
     pub fn from_blocks_elapsed(blocks: u32, selected_partner: PublicKey) -> Self {
         if blocks < DAY_BLOCKS {
-            ClaimEligibility::SelectedPartnerOnly { partner: selected_partner }
+            ClaimEligibility::SelectedPartnerOnly {
+                partner: selected_partner,
+            }
         } else if blocks < WEEK_BLOCKS {
             ClaimEligibility::AnyThreePartners
         } else if blocks < TWO_WEEKS_BLOCKS {
@@ -300,13 +303,11 @@ impl ClaimEligibility {
             }
             ClaimEligibility::AnyThreePartners => {
                 // Need exactly 3, all must be channel partners
-                claimants.len() >= 3 &&
-                claimants.iter().all(|c| channel_partners.contains(c))
+                claimants.len() >= 3 && claimants.iter().all(|c| channel_partners.contains(c))
             }
             ClaimEligibility::AnySinglePartner => {
                 // Any channel partner can claim
-                claimants.len() >= 1 &&
-                claimants.iter().any(|c| channel_partners.contains(c))
+                !claimants.is_empty() && claimants.iter().any(|c| channel_partners.contains(c))
             }
             ClaimEligibility::CommunityFallback => {
                 // Community mechanism - always true for now
@@ -402,7 +403,9 @@ impl RecoveryManager {
         ledger_id: (PublicKey, PublicKey),
         entropy_block_hash: [u8; 32],
     ) -> Result<(), RecoveryError> {
-        let state = self.recoveries.get_mut(&ledger_id)
+        let state = self
+            .recoveries
+            .get_mut(&ledger_id)
             .ok_or(RecoveryError::NotFound)?;
 
         let (force_close_block, on_chain_ledger_hash) = match &state.phase {
@@ -435,7 +438,9 @@ impl RecoveryManager {
         ledger_id: (PublicKey, PublicKey),
         vote: RecoveryVote,
     ) -> Result<VoteResult, RecoveryError> {
-        let state = self.recoveries.get_mut(&ledger_id)
+        let state = self
+            .recoveries
+            .get_mut(&ledger_id)
             .ok_or(RecoveryError::NotFound)?;
 
         let votes = match &mut state.phase {
@@ -469,7 +474,9 @@ impl RecoveryManager {
         operator_substitute: Option<PublicKey>,
         threshold: usize,
     ) -> Result<RecoveryPhase, RecoveryError> {
-        let state = self.recoveries.get_mut(&ledger_id)
+        let state = self
+            .recoveries
+            .get_mut(&ledger_id)
             .ok_or(RecoveryError::NotFound)?;
 
         let (force_close_block, entropy, votes) = match &state.phase {
@@ -494,9 +501,8 @@ impl RecoveryManager {
             };
         } else if non_conforming_count >= threshold {
             // Operator is non-compliant - start deterministic selection
-            let partner_pubkeys: Vec<PublicKey> = channel_partners.iter()
-                .map(|c| c.pubkey)
-                .collect();
+            let partner_pubkeys: Vec<PublicKey> =
+                channel_partners.iter().map(|c| c.pubkey).collect();
 
             let selected = select_recovery_partner(&entropy, &partner_pubkeys);
 
@@ -537,7 +543,9 @@ impl RecoveryManager {
         ledger_id: (PublicKey, PublicKey),
         current_block: u32,
     ) -> Result<ClaimEligibility, RecoveryError> {
-        let state = self.recoveries.get_mut(&ledger_id)
+        let state = self
+            .recoveries
+            .get_mut(&ledger_id)
             .ok_or(RecoveryError::NotFound)?;
 
         let (force_close_block, selected) = match &state.phase {
@@ -546,7 +554,8 @@ impl RecoveryManager {
                 recovery_pool,
                 ..
             } => {
-                let selected = recovery_pool.selected_partner
+                let selected = recovery_pool
+                    .selected_partner
                     .ok_or(RecoveryError::NoSelectedPartner)?;
                 (*force_close_block, selected)
             }
@@ -557,7 +566,11 @@ impl RecoveryManager {
         let new_eligibility = ClaimEligibility::from_blocks_elapsed(blocks_elapsed, selected);
 
         // Update the eligibility in state
-        if let RecoveryPhase::NonCompliantRecovery { current_eligibility, .. } = &mut state.phase {
+        if let RecoveryPhase::NonCompliantRecovery {
+            current_eligibility,
+            ..
+        } = &mut state.phase
+        {
             *current_eligibility = new_eligibility.clone();
         }
 
@@ -574,7 +587,9 @@ impl RecoveryManager {
         // First update eligibility
         self.update_eligibility(ledger_id, current_block)?;
 
-        let state = self.recoveries.get_mut(&ledger_id)
+        let state = self
+            .recoveries
+            .get_mut(&ledger_id)
             .ok_or(RecoveryError::NotFound)?;
 
         let (recovery_pool, eligibility) = match &state.phase {
@@ -586,7 +601,9 @@ impl RecoveryManager {
             _ => return Err(RecoveryError::InvalidPhase),
         };
 
-        let partner_pubkeys: Vec<PublicKey> = recovery_pool.channel_partners.iter()
+        let partner_pubkeys: Vec<PublicKey> = recovery_pool
+            .channel_partners
+            .iter()
             .map(|c| c.pubkey)
             .collect();
 
@@ -606,7 +623,12 @@ impl RecoveryManager {
                     claimants.get(1).copied().unwrap_or(claimants[0]),
                     claimants.get(2).copied().unwrap_or(claimants[0]),
                 ];
-                (claimants[0], ReassignmentReason::ThreePartnerQuorum { claimants: claimant_array })
+                (
+                    claimants[0],
+                    ReassignmentReason::ThreePartnerQuorum {
+                        claimants: claimant_array,
+                    },
+                )
             }
             ClaimEligibility::AnySinglePartner => {
                 (claimants[0], ReassignmentReason::SinglePartnerClaim)
@@ -616,7 +638,10 @@ impl RecoveryManager {
             }
         };
 
-        let outcome = RecoveryOutcome::ReassignedTo { new_operator, reason };
+        let outcome = RecoveryOutcome::ReassignedTo {
+            new_operator,
+            reason,
+        };
 
         state.phase = RecoveryPhase::Complete {
             outcome: outcome.clone(),
@@ -636,7 +661,9 @@ impl RecoveryManager {
         ledger_id: (PublicKey, PublicKey),
         confirmer: PublicKey,
     ) -> Result<Option<RecoveryOutcome>, RecoveryError> {
-        let state = self.recoveries.get_mut(&ledger_id)
+        let state = self
+            .recoveries
+            .get_mut(&ledger_id)
             .ok_or(RecoveryError::NotFound)?;
 
         let (operator, needed, received) = match &mut state.phase {
@@ -644,7 +671,7 @@ impl RecoveryManager {
                 operator,
                 confirmations_needed,
                 confirmations_received,
-            } => (operator.clone(), *confirmations_needed, confirmations_received),
+            } => (*operator, *confirmations_needed, confirmations_received),
             _ => return Err(RecoveryError::InvalidPhase),
         };
 
@@ -659,7 +686,9 @@ impl RecoveryManager {
 
         if received.len() >= needed {
             let outcome = RecoveryOutcome::ReturnedToOperator { operator };
-            state.phase = RecoveryPhase::Complete { outcome: outcome.clone() };
+            state.phase = RecoveryPhase::Complete {
+                outcome: outcome.clone(),
+            };
             Ok(Some(outcome))
         } else {
             Ok(None)
@@ -676,12 +705,16 @@ impl RecoveryManager {
         force_close_block: u32,
         channel_partners: Vec<PublicKey>,
     ) -> Result<RecoveryPhase, RecoveryError> {
-        let state = self.recoveries.get_mut(&ledger_id)
+        let state = self
+            .recoveries
+            .get_mut(&ledger_id)
             .ok_or(RecoveryError::NotFound)?;
 
         // Get entropy from current phase
         let entropy = match &state.phase {
-            RecoveryPhase::Evaluating { entropy_block_hash, .. } => *entropy_block_hash,
+            RecoveryPhase::Evaluating {
+                entropy_block_hash, ..
+            } => *entropy_block_hash,
             _ => return Err(RecoveryError::InvalidPhase),
         };
 
@@ -689,7 +722,8 @@ impl RecoveryManager {
         let selected = select_recovery_partner(&entropy, &channel_partners);
 
         // Build recovery candidates from pubkeys
-        let candidates: Vec<RecoveryCandidate> = channel_partners.iter()
+        let candidates: Vec<RecoveryCandidate> = channel_partners
+            .iter()
             .map(|pk| RecoveryCandidate {
                 pubkey: *pk,
                 is_channel_partner: true,
@@ -846,10 +880,16 @@ mod tests {
 
         // Day 0: Only selected partner
         let elig = ClaimEligibility::from_blocks_elapsed(0, selected);
-        assert_eq!(elig, ClaimEligibility::SelectedPartnerOnly { partner: selected });
+        assert_eq!(
+            elig,
+            ClaimEligibility::SelectedPartnerOnly { partner: selected }
+        );
 
         let elig = ClaimEligibility::from_blocks_elapsed(143, selected);
-        assert_eq!(elig, ClaimEligibility::SelectedPartnerOnly { partner: selected });
+        assert_eq!(
+            elig,
+            ClaimEligibility::SelectedPartnerOnly { partner: selected }
+        );
 
         // Day 1: Any 3 partners
         let elig = ClaimEligibility::from_blocks_elapsed(144, selected);
@@ -910,17 +950,16 @@ mod tests {
         let ledger_id = (operator, partner);
 
         // Start recovery
-        manager.start_recovery(
-            operator,
-            partner,
-            100,
-            [1u8; 32],
-            [2u8; 32],
-        ).unwrap();
+        manager
+            .start_recovery(operator, partner, 100, [1u8; 32], [2u8; 32])
+            .unwrap();
 
         // Verify it's in WaitingForEntropy phase
         let state = manager.get_recovery(&ledger_id).unwrap();
-        assert!(matches!(state.phase, RecoveryPhase::WaitingForEntropy { .. }));
+        assert!(matches!(
+            state.phase,
+            RecoveryPhase::WaitingForEntropy { .. }
+        ));
 
         // Can't start again
         let result = manager.start_recovery(operator, partner, 100, [1u8; 32], [2u8; 32]);
@@ -939,7 +978,9 @@ mod tests {
         let ledger_id = (operator, partner);
 
         // Start and move to evaluating
-        manager.start_recovery(operator, partner, 100, [1u8; 32], [2u8; 32]).unwrap();
+        manager
+            .start_recovery(operator, partner, 100, [1u8; 32], [2u8; 32])
+            .unwrap();
         manager.on_entropy_block(ledger_id, [3u8; 32]).unwrap();
 
         // Submit signed votes
@@ -950,7 +991,8 @@ mod tests {
             100,
             None,
             true, // discovered violation
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = manager.submit_vote(ledger_id, vote1).unwrap();
         assert_eq!(result.total_votes, 1);
@@ -963,7 +1005,8 @@ mod tests {
             100,
             None,
             false,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = manager.submit_vote(ledger_id, vote2).unwrap();
         assert_eq!(result.total_votes, 2);
@@ -982,13 +1025,13 @@ mod tests {
 
         // Create a signed vote
         let vote = RecoveryVote::new_signed(
-            &keypair,
-            false, // non-conforming
+            &keypair, false,     // non-conforming
             [1u8; 32], // validated_hash
-            100, // validated_sequence
-            None, // no substitute
-            true, // discovered violation
-        ).unwrap();
+            100,       // validated_sequence
+            None,      // no substitute
+            true,      // discovered violation
+        )
+        .unwrap();
 
         // Verify the signature is valid
         assert!(vote.verify().is_ok());

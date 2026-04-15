@@ -7,11 +7,10 @@
 use deposits_core::ledger::{Ledger, LedgerRole};
 use deposits_core::messages::LedgerOperation;
 use deposits_core::types::{
-    compute_deposit_id, Deposit, DescriptorWitness, FeeStructure, LedgerState,
-    TransferFeeSchedule,
+    compute_deposit_id, Deposit, DescriptorWitness, FeeStructure, LedgerState, TransferFeeSchedule,
 };
-use deposits_protocol::TlvEncode;
 use deposits_protocol::TlvDecode;
+use deposits_protocol::TlvEncode;
 
 fn test_pubkey() -> bitcoin::secp256k1::PublicKey {
     use std::str::FromStr;
@@ -22,11 +21,7 @@ fn test_pubkey() -> bitcoin::secp256k1::PublicKey {
 }
 
 fn make_ledger() -> Ledger {
-    let state = LedgerState::new(
-        test_pubkey(),
-        "bcrt1qtest".to_string(),
-        0,
-    );
+    let state = LedgerState::new(test_pubkey(), "bcrt1qtest".to_string(), 0);
     Ledger {
         state,
         protocol: Default::default(),
@@ -74,10 +69,7 @@ fn receive_requires_sig_flag_set_on_deposit() {
         deposit.receive_requires_sig,
         "deposit should have receive_requires_sig set"
     );
-    assert!(
-        !deposit.is_collateral,
-        "deposit should not be collateral"
-    );
+    assert!(!deposit.is_collateral, "deposit should not be collateral");
 }
 
 #[test]
@@ -191,6 +183,7 @@ fn deposit_struct_receive_requires_sig_tlv_roundtrip() {
         fee_change_limit_bps: None,
         opened_at_block: 0,
         pending_fee_change: None,
+        collateral_locks: Vec::new(),
     };
 
     let encoded = deposit.tlv_encode();
@@ -225,11 +218,15 @@ fn deposit_struct_without_flag_field_defaults_false() {
         fee_change_limit_bps: None,
         opened_at_block: 0,
         pending_fee_change: None,
+        collateral_locks: Vec::new(),
     };
 
     let encoded = deposit.tlv_encode();
     let decoded = Deposit::tlv_decode(&encoded).unwrap();
-    assert!(!decoded.receive_requires_sig, "missing field should default to false");
+    assert!(
+        !decoded.receive_requires_sig,
+        "missing field should default to false"
+    );
 }
 
 // =========================================================================

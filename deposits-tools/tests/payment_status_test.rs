@@ -9,7 +9,7 @@
 
 use bitcoin::hashes::{sha256, Hash};
 
-use ldk_node::payment::{PaymentStatus, PaymentDirection, PaymentKind};
+use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 
 use lightning::ln::channelmanager::PaymentId;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
@@ -103,7 +103,11 @@ fn test_payment_kind_bolt11_has_preimage() {
 
     // Verify we can extract preimage from PaymentKind
     match kind {
-        PaymentKind::Bolt11 { preimage: Some(pi), hash, .. } => {
+        PaymentKind::Bolt11 {
+            preimage: Some(pi),
+            hash,
+            ..
+        } => {
             assert_eq!(pi.0, preimage_bytes);
             let expected_hash = sha256::Hash::hash(&pi.0);
             assert_eq!(hash.0, *expected_hash.as_byte_array());
@@ -124,9 +128,7 @@ fn test_payment_kind_bolt11_hash_preimage_relationship() {
     let payment_hash = PaymentHash(payment_hash_bytes);
 
     // This is the verification that happens in mark_settled_for_hash
-    let expected_hash = PaymentHash(
-        *sha256::Hash::hash(&preimage.0).as_byte_array()
-    );
+    let expected_hash = PaymentHash(*sha256::Hash::hash(&preimage.0).as_byte_array());
     assert_eq!(payment_hash, expected_hash);
 }
 

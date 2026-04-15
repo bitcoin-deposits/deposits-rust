@@ -13,12 +13,11 @@ deposits-core = { path = "../deposits-core" }
 bitcoin = { version = "0.32", features = ["serde"] }
 bdk_wallet = "1.0"
 bdk_esplora = { version = "0.20", features = ["blocking"] }
-bdk_file_store = "0.18"
 
 # Nostr for peer messaging
 nostr-sdk = { version = "0.37", features = ["nip44", "nip47"] }
 
-# TLS crypto provider — required when the nostr-relay-pool patch is not used
+# TLS crypto provider for nostr-sdk
 rustls = { version = "0.23", features = ["ring"] }
 
 # TLS - pin to fix build on Rust 1.85+
@@ -71,6 +70,9 @@ default = []
 # WARNING: This feature enables commands that can create invalid/malicious ledger updates.
 # Only use for testing recovery mechanisms. Never enable in production builds.
 dangerous-testing = []
+
+[lints]
+workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"

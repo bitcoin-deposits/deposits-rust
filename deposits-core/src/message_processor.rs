@@ -145,9 +145,14 @@ impl QuorumProcessor {
         }
 
         // Try to add the member to the quorum
-        match self.quorum_manager.add_member(&request.ledger_id, request.requester) {
+        match self
+            .quorum_manager
+            .add_member(&request.ledger_id, request.requester)
+        {
             Ok(()) => {
-                let members = self.quorum_manager.list_members(&request.ledger_id)
+                let members = self
+                    .quorum_manager
+                    .list_members(&request.ledger_id)
                     .unwrap_or_default();
 
                 info!(
@@ -202,11 +207,7 @@ impl QuorumProcessor {
     }
 
     /// Process a vote
-    pub fn process_vote(
-        &self,
-        vote: &QuorumVote,
-        sender: PublicKey,
-    ) -> QuorumMessageResult {
+    pub fn process_vote(&self, vote: &QuorumVote, sender: PublicKey) -> QuorumMessageResult {
         debug!(
             sender = %sender,
             operator = %vote.ledger_id.operator_id,
@@ -302,8 +303,8 @@ impl CollateralProcessor {
         signature: &[u8; 64],
         signer: &PublicKey,
     ) -> bool {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message, schnorr::Signature};
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
 
         // Reconstruct the signed message
         let mut preimage = Vec::new();
@@ -337,8 +338,8 @@ impl CollateralProcessor {
         partner: &PublicKey,
         secret_key: &bitcoin::secp256k1::SecretKey,
     ) -> [u8; 64] {
-        use bitcoin::hashes::{Hash, sha256};
-        use bitcoin::secp256k1::{Secp256k1, Message};
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{Message, Secp256k1};
 
         let mut preimage = Vec::new();
         preimage.extend_from_slice(b"COLLATERAL_CONSENT");
@@ -389,7 +390,7 @@ impl RecoveryProcessor {
     /// Calculate voting threshold for recovery
     pub fn calculate_threshold(total_members: usize) -> usize {
         // 2/3 majority required
-        (total_members * 2 + 2) / 3
+        (total_members * 2).div_ceil(3)
     }
 
     /// Check if we should vote for recovery

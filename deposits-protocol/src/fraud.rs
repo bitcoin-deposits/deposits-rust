@@ -19,7 +19,7 @@
 //! to the operator's ledger, confirm each link is a signed update.
 
 use bitcoin::hashes::{sha256, Hash};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // The Proof (hashable, constructed before embedding)
@@ -289,27 +289,52 @@ impl FraudEvidence {
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {
-            Self::UncreditedOnchain { offer_id, txid, amount_sats, confirmed_at_block, .. } => {
+            Self::UncreditedOnchain {
+                offer_id,
+                txid,
+                amount_sats,
+                confirmed_at_block,
+                ..
+            } => {
                 out.extend_from_slice(offer_id.as_bytes());
                 out.extend_from_slice(txid.as_bytes());
                 out.extend_from_slice(&amount_sats.to_le_bytes());
                 out.extend_from_slice(&confirmed_at_block.to_le_bytes());
             }
-            Self::UncreditedLightning { payment_hash, preimage, .. } => {
+            Self::UncreditedLightning {
+                payment_hash,
+                preimage,
+                ..
+            } => {
                 out.extend_from_slice(payment_hash.as_bytes());
                 out.extend_from_slice(preimage.as_bytes());
             }
-            Self::StaleCosign { stale_update_hash, declared_member_hash, member_later_hash, .. } => {
+            Self::StaleCosign {
+                stale_update_hash,
+                declared_member_hash,
+                member_later_hash,
+                ..
+            } => {
                 out.extend_from_slice(stale_update_hash.as_bytes());
                 out.extend_from_slice(declared_member_hash.as_bytes());
                 out.extend_from_slice(member_later_hash.as_bytes());
             }
-            Self::InactiveQuorum { original_fraud_hash, member_pubkey, evidence_available_at_block, .. } => {
+            Self::InactiveQuorum {
+                original_fraud_hash,
+                member_pubkey,
+                evidence_available_at_block,
+                ..
+            } => {
                 out.extend_from_slice(original_fraud_hash.as_bytes());
                 out.extend_from_slice(member_pubkey.as_bytes());
                 out.extend_from_slice(&evidence_available_at_block.to_le_bytes());
             }
-            Self::NonConforming { sequence, update_b64, violation, .. } => {
+            Self::NonConforming {
+                sequence,
+                update_b64,
+                violation,
+                ..
+            } => {
                 out.extend_from_slice(&sequence.to_le_bytes());
                 out.extend_from_slice(update_b64.as_bytes());
                 out.extend_from_slice(violation.as_bytes());
@@ -359,7 +384,11 @@ mod tests {
     fn different_evidence_different_hash() {
         let mut p1 = make_proof();
         let p2 = make_proof();
-        if let FraudEvidence::UncreditedOnchain { ref mut amount_sats, .. } = p1.evidence {
+        if let FraudEvidence::UncreditedOnchain {
+            ref mut amount_sats,
+            ..
+        } = p1.evidence
+        {
             *amount_sats = 200_000;
         }
         assert_ne!(p1.proof_hash(), p2.proof_hash());
@@ -392,15 +421,13 @@ mod tests {
                 update_hash: "22".repeat(32),
                 field: "transfer_nonce".to_string(),
             },
-            causal_chain: vec![
-                CausalLink {
-                    ledger_id: proof.ledger_id.clone(), // operator's ledger
-                    sequence: 55,
-                    update_hash: "33".repeat(32),
-                    member_ledger_hash: "44".repeat(32),
-                    source_ledger_id: member_ledger.clone(), // from member's ledger
-                },
-            ],
+            causal_chain: vec![CausalLink {
+                ledger_id: proof.ledger_id.clone(), // operator's ledger
+                sequence: 55,
+                update_hash: "33".repeat(32),
+                member_ledger_hash: "44".repeat(32),
+                source_ledger_id: member_ledger.clone(), // from member's ledger
+            }],
             proof,
         };
         assert!(broadcast.verify_chain_structure().is_ok());
@@ -432,15 +459,13 @@ mod tests {
                 update_hash: "22".repeat(32),
                 field: "transfer_nonce".to_string(),
             },
-            causal_chain: vec![
-                CausalLink {
-                    ledger_id: "99".repeat(32), // wrong — doesn't reach accused
-                    sequence: 55,
-                    update_hash: "33".repeat(32),
-                    member_ledger_hash: "44".repeat(32),
-                    source_ledger_id: "11".repeat(32),
-                },
-            ],
+            causal_chain: vec![CausalLink {
+                ledger_id: "99".repeat(32), // wrong — doesn't reach accused
+                sequence: 55,
+                update_hash: "33".repeat(32),
+                member_ledger_hash: "44".repeat(32),
+                source_ledger_id: "11".repeat(32),
+            }],
             proof,
         };
         assert!(broadcast.verify_chain_structure().is_err());

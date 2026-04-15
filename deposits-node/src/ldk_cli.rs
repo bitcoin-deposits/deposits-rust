@@ -10,8 +10,8 @@
 //! This module provides a client for ldk-server via the ldk-server-cli binary.
 //! The CLI handles the protobuf encoding and HMAC authentication required by ldk-server.
 
-use std::process::Command;
 use serde::Deserialize;
+use std::process::Command;
 
 use crate::Error;
 
@@ -40,7 +40,9 @@ impl Default for LdkCliConfig {
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(3000),
             api_key: std::env::var("LDK_API_KEY")
-                .or_else(|_| std::fs::read_to_string("/data/ldk_api_key_hex").map(|s| s.trim().to_string()))
+                .or_else(|_| {
+                    std::fs::read_to_string("/data/ldk_api_key_hex").map(|s| s.trim().to_string())
+                })
                 .unwrap_or_else(|_| "test_api_key".to_string()),
             tls_cert: std::env::var("LDK_TLS_CERT").ok(),
         }
@@ -75,7 +77,8 @@ impl LdkCli {
         let mut cmd = Command::new(&self.config.cli_path);
 
         // Add connection arguments
-        cmd.arg("-b").arg(format!("{}:{}", self.config.host, self.config.port));
+        cmd.arg("-b")
+            .arg(format!("{}:{}", self.config.host, self.config.port));
         cmd.arg("-a").arg(&self.config.api_key);
 
         // Add TLS cert if specified
@@ -88,7 +91,8 @@ impl LdkCli {
 
         tracing::debug!("Running ldk-server-cli: {:?}", cmd);
 
-        let output = cmd.output()
+        let output = cmd
+            .output()
             .map_err(|e| Error::Protocol(format!("Failed to execute ldk-server-cli: {}", e)))?;
 
         if !output.status.success() {
@@ -108,85 +112,111 @@ impl LdkCli {
     /// Get node info
     pub fn get_node_info(&self) -> Result<NodeInfo, Error> {
         let output = self.run_command(&["get-node-info"])?;
-        serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse node info: {} (output: {})", e, output)))
+        serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!(
+                "Failed to parse node info: {} (output: {})",
+                e, output
+            ))
+        })
     }
 
     /// Get balances
     pub fn get_balances(&self) -> Result<Balances, Error> {
         let output = self.run_command(&["get-balances"])?;
-        serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse balances: {} (output: {})", e, output)))
+        serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!(
+                "Failed to parse balances: {} (output: {})",
+                e, output
+            ))
+        })
     }
 
     /// Create a BOLT11 invoice
     pub fn create_invoice(&self, amount_msat: u64, description: &str) -> Result<String, Error> {
         tracing::info!("Creating invoice via ldk-server-cli: {} msat", amount_msat);
         let amount_str = format!("{}msat", amount_msat);
-        let output = self.run_command(&[
-            "bolt11-receive",
-            &amount_str,
-            "--description", description,
-        ])?;
+        let output =
+            self.run_command(&["bolt11-receive", &amount_str, "--description", description])?;
 
-        let response: Bolt11ReceiveResponse = serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse invoice response: {} (output: {})", e, output)))?;
+        let response: Bolt11ReceiveResponse = serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!(
+                "Failed to parse invoice response: {} (output: {})",
+                e, output
+            ))
+        })?;
         Ok(response.invoice)
     }
 
     /// Create a variable amount BOLT11 invoice
     pub fn create_invoice_any_amount(&self, description: &str) -> Result<String, Error> {
         tracing::info!("Creating any-amount invoice via ldk-server-cli");
-        let output = self.run_command(&[
-            "bolt11-receive",
-            "--description", description,
-        ])?;
+        let output = self.run_command(&["bolt11-receive", "--description", description])?;
 
-        let response: Bolt11ReceiveResponse = serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse invoice response: {} (output: {})", e, output)))?;
+        let response: Bolt11ReceiveResponse = serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!(
+                "Failed to parse invoice response: {} (output: {})",
+                e, output
+            ))
+        })?;
         Ok(response.invoice)
     }
 
     /// Pay a BOLT11 invoice
     pub fn pay_invoice(&self, invoice: &str) -> Result<String, Error> {
         tracing::info!("Paying invoice via ldk-server-cli");
-        let output = self.run_command(&[
-            "bolt11-send",
-            invoice,
-        ])?;
+        let output = self.run_command(&["bolt11-send", invoice])?;
 
-        let response: Bolt11SendResponse = serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse payment response: {} (output: {})", e, output)))?;
+        let response: Bolt11SendResponse = serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!(
+                "Failed to parse payment response: {} (output: {})",
+                e, output
+            ))
+        })?;
         Ok(response.payment_id)
     }
 
     /// Pay a BOLT11 invoice with a specific amount (for amountless invoices)
-    pub fn pay_invoice_with_amount(&self, invoice: &str, amount_msat: u64) -> Result<String, Error> {
-        tracing::info!("Paying invoice via ldk-server-cli with amount: {} msat", amount_msat);
+    pub fn pay_invoice_with_amount(
+        &self,
+        invoice: &str,
+        amount_msat: u64,
+    ) -> Result<String, Error> {
+        tracing::info!(
+            "Paying invoice via ldk-server-cli with amount: {} msat",
+            amount_msat
+        );
         let amount_str = format!("{}msat", amount_msat);
-        let output = self.run_command(&[
-            "bolt11-send",
-            invoice,
-            &amount_str,
-        ])?;
+        let output = self.run_command(&["bolt11-send", invoice, &amount_str])?;
 
-        let response: Bolt11SendResponse = serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse payment response: {} (output: {})", e, output)))?;
+        let response: Bolt11SendResponse = serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!(
+                "Failed to parse payment response: {} (output: {})",
+                e, output
+            ))
+        })?;
         Ok(response.payment_id)
     }
 
     /// List channels
     pub fn list_channels(&self) -> Result<ListChannelsResponse, Error> {
         let output = self.run_command(&["list-channels"])?;
-        serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse channels: {} (output: {})", e, output)))
+        serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!(
+                "Failed to parse channels: {} (output: {})",
+                e, output
+            ))
+        })
     }
 
     /// List payments
     pub fn list_payments(&self) -> Result<ListPaymentsResponse, Error> {
         let output = self.run_command(&["list-payments"])?;
-        serde_json::from_str(&output)
-            .map_err(|e| Error::Protocol(format!("Failed to parse payments: {} (output: {})", e, output)))
+        serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!(
+                "Failed to parse payments: {} (output: {})",
+                e, output
+            ))
+        })
     }
 }
 
@@ -281,7 +311,7 @@ pub struct PaymentInfo {
     #[serde(alias = "payment_id")]
     pub id: String,
     #[serde(deserialize_with = "deserialize_status")]
-    pub status: u8,  // 0 = pending, 1 = succeeded, 2 = failed
+    pub status: u8, // 0 = pending, 1 = succeeded, 2 = failed
     pub amount_msat: Option<u64>,
     pub preimage: Option<String>,
 }

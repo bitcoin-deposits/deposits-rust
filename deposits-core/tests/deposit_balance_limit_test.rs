@@ -134,7 +134,7 @@ fn existing_balance_counted() {
     credit_deposit(&mut ledger, did, 7_000_000); // 7k sats
 
     let limit = 10_000_000; // 10k sats
-    // 7k + 4k = 11k > 10k limit
+                            // 7k + 4k = 11k > 10k limit
     assert!(check_limit(&ledger, &did, 4_000_000, limit).is_some());
     // 7k + 3k = 10k = limit, ok
     assert!(check_limit(&ledger, &did, 3_000_000, limit).is_none());

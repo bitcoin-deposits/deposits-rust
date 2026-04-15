@@ -20,7 +20,10 @@ pub enum HandlerError {
     /// Validation failed
     ValidationFailed(String),
     /// Ledger not found
-    LedgerNotFound { operator: PublicKey, reserves_id: String },
+    LedgerNotFound {
+        operator: PublicKey,
+        reserves_id: String,
+    },
     /// Invalid state for operation
     InvalidState(String),
     /// Internal error
@@ -31,8 +34,15 @@ impl std::fmt::Display for HandlerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ValidationFailed(msg) => write!(f, "validation failed: {}", msg),
-            Self::LedgerNotFound { operator, reserves_id } => {
-                write!(f, "ledger not found: operator={}, reserves_id={}", operator, reserves_id)
+            Self::LedgerNotFound {
+                operator,
+                reserves_id,
+            } => {
+                write!(
+                    f,
+                    "ledger not found: operator={}, reserves_id={}",
+                    operator, reserves_id
+                )
             }
             Self::InvalidState(msg) => write!(f, "invalid state: {}", msg),
             Self::Internal(msg) => write!(f, "internal error: {}", msg),

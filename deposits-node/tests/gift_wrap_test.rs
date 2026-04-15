@@ -44,8 +44,8 @@ fn gift_wrap_request(
         nip44::Version::V2,
     )?;
 
-    let seal_event = EventBuilder::new(Kind::Custom(13), &seal_content)
-        .sign_with_keys(sender_keys)?;
+    let seal_event =
+        EventBuilder::new(Kind::Custom(13), &seal_content).sign_with_keys(sender_keys)?;
 
     // 3. Build the gift wrap: encrypt seal to recipient, sign with throwaway key
     let throwaway_sk = Keys::generate();
@@ -87,9 +87,8 @@ fn unwrap_request(
     let seal_obj: serde_json::Value = serde_json::from_str(&seal_json_str)?;
 
     // 2. Verify the seal signature
-    let seal_pubkey = PublicKey::from_hex(
-        seal_obj["pubkey"].as_str().ok_or("missing seal pubkey")?
-    )?;
+    let seal_pubkey =
+        PublicKey::from_hex(seal_obj["pubkey"].as_str().ok_or("missing seal pubkey")?)?;
 
     // 3. Decrypt the seal to get the rumor
     let rumor_str = nip44::decrypt(
@@ -100,10 +99,11 @@ fn unwrap_request(
 
     let rumor: serde_json::Value = serde_json::from_str(&rumor_str)?;
     let inner_kind = rumor["kind"].as_u64().ok_or("missing rumor kind")? as u16;
-    let inner_content = rumor["content"].as_str().ok_or("missing rumor content")?.to_string();
-    let sender = PublicKey::from_hex(
-        rumor["pubkey"].as_str().ok_or("missing rumor pubkey")?
-    )?;
+    let inner_content = rumor["content"]
+        .as_str()
+        .ok_or("missing rumor content")?
+        .to_string();
+    let sender = PublicKey::from_hex(rumor["pubkey"].as_str().ok_or("missing rumor pubkey")?)?;
 
     Ok((sender, inner_content, inner_kind))
 }
@@ -119,21 +119,27 @@ fn gift_wrap_round_trip() {
 
     let content = r#"{"deposit_pubkey":"02abc...","amount_sats":1000}"#;
     let tags = vec![
-        Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)), ["abc123"]),
+        Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+            ["abc123"],
+        ),
         Tag::custom(TagKind::custom("action"), ["deposit_open"]),
     ];
 
-    let wrapped = gift_wrap_request(
-        &wallet_keys,
-        &node_keys.public_key(),
-        20101,
-        content,
-        tags,
-    ).unwrap();
+    let wrapped =
+        gift_wrap_request(&wallet_keys, &node_keys.public_key(), 20101, content, tags).unwrap();
 
     // Outer event hides the sender
-    assert_ne!(wrapped.pubkey, wallet_keys.public_key(), "Outer pubkey should be throwaway");
-    assert_eq!(wrapped.kind.as_u16(), 20101, "Outer kind should be ephemeral request");
+    assert_ne!(
+        wrapped.pubkey,
+        wallet_keys.public_key(),
+        "Outer pubkey should be throwaway"
+    );
+    assert_eq!(
+        wrapped.kind.as_u16(),
+        20101,
+        "Outer kind should be ephemeral request"
+    );
 
     // Unwrap
     let (sender, inner_content, inner_kind) = unwrap_request(&node_keys, &wrapped).unwrap();
@@ -155,7 +161,8 @@ fn gift_wrap_wrong_recipient_fails() {
         20101,
         "secret content",
         vec![],
-    ).unwrap();
+    )
+    .unwrap();
 
     // Try to unwrap with wrong key
     let result = unwrap_request(&wrong_keys, &wrapped);
@@ -167,13 +174,8 @@ fn gift_wrap_sender_identity_hidden_from_relay() {
     let wallet_keys = test_keys(0xAA);
     let node_keys = test_keys(0xBB);
 
-    let wrapped = gift_wrap_request(
-        &wallet_keys,
-        &node_keys.public_key(),
-        20101,
-        "test",
-        vec![],
-    ).unwrap();
+    let wrapped =
+        gift_wrap_request(&wallet_keys, &node_keys.public_key(), 20101, "test", vec![]).unwrap();
 
     // The relay sees only:
     // - A random throwaway pubkey (not the wallet)
@@ -183,9 +185,11 @@ fn gift_wrap_sender_identity_hidden_from_relay() {
     assert_ne!(wrapped.pubkey, node_keys.public_key());
 
     // Content is not readable as JSON
-    assert!(serde_json::from_str::<serde_json::Value>(&wrapped.content).is_err()
-        || wrapped.content.len() > 100, // NIP-44 output is base64, not JSON
-        "Content should be encrypted, not plaintext");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&wrapped.content).is_err()
+            || wrapped.content.len() > 100, // NIP-44 output is base64, not JSON
+        "Content should be encrypted, not plaintext"
+    );
 }
 
 #[test]
@@ -193,23 +197,16 @@ fn gift_wrap_different_throwaway_keys_each_time() {
     let wallet_keys = test_keys(0xAA);
     let node_keys = test_keys(0xBB);
 
-    let wrapped1 = gift_wrap_request(
-        &wallet_keys,
-        &node_keys.public_key(),
-        20101,
-        "msg1",
-        vec![],
-    ).unwrap();
+    let wrapped1 =
+        gift_wrap_request(&wallet_keys, &node_keys.public_key(), 20101, "msg1", vec![]).unwrap();
 
-    let wrapped2 = gift_wrap_request(
-        &wallet_keys,
-        &node_keys.public_key(),
-        20101,
-        "msg2",
-        vec![],
-    ).unwrap();
+    let wrapped2 =
+        gift_wrap_request(&wallet_keys, &node_keys.public_key(), 20101, "msg2", vec![]).unwrap();
 
-    assert_ne!(wrapped1.pubkey, wrapped2.pubkey, "Each wrap should use a different throwaway key");
+    assert_ne!(
+        wrapped1.pubkey, wrapped2.pubkey,
+        "Each wrap should use a different throwaway key"
+    );
 }
 
 #[test]
@@ -226,7 +223,8 @@ fn gift_wrap_response_round_trip() {
         20102,
         response_content,
         vec![],
-    ).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(wrapped.kind.as_u16(), 20102, "Response kind");
 
@@ -248,7 +246,8 @@ fn gift_wrap_verification_flow() {
         25500,
         r#"{"lightning_address":"user@example.com"}"#,
         vec![],
-    ).unwrap();
+    )
+    .unwrap();
 
     let (sender, content, kind) = unwrap_request(&verifier_keys, &request).unwrap();
     assert_eq!(kind, 25500);
@@ -262,7 +261,8 @@ fn gift_wrap_verification_flow() {
         25501,
         r#"{"status":"invoice","invoice":"lnbc..."}"#,
         vec![],
-    ).unwrap();
+    )
+    .unwrap();
 
     let (sender, content, kind) = unwrap_request(&wallet_keys, &response).unwrap();
     assert_eq!(kind, 25501);

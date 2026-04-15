@@ -35,6 +35,9 @@ hex = "0.4"
 # Logging
 tracing = "0.1"
 
+[lints]
+workspace = true
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 

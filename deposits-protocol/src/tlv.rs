@@ -26,7 +26,7 @@
 //! - **No LDK dependency**: Pure Rust implementation
 
 use std::collections::BTreeMap;
-use std::io::{self, Read, Write, Cursor};
+use std::io::{self, Cursor, Read, Write};
 
 /// Error types for TLV encoding/decoding
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,13 +106,17 @@ pub fn write_varint<W: Write>(writer: &mut W, value: u64) -> io::Result<()> {
 /// Read a varint (BigEndian, 1/3/5/9 byte encoding)
 pub fn read_varint<R: Read>(reader: &mut R) -> TlvResult<u64> {
     let mut first = [0u8; 1];
-    reader.read_exact(&mut first).map_err(|_| TlvError::UnexpectedEof)?;
+    reader
+        .read_exact(&mut first)
+        .map_err(|_| TlvError::UnexpectedEof)?;
 
     match first[0] {
         0..=0xfc => Ok(first[0] as u64),
         0xfd => {
             let mut buf = [0u8; 2];
-            reader.read_exact(&mut buf).map_err(|_| TlvError::UnexpectedEof)?;
+            reader
+                .read_exact(&mut buf)
+                .map_err(|_| TlvError::UnexpectedEof)?;
             let val = u16::from_be_bytes(buf);
             if val < 0xfd {
                 return Err(TlvError::InvalidVarint);
@@ -121,7 +125,9 @@ pub fn read_varint<R: Read>(reader: &mut R) -> TlvResult<u64> {
         }
         0xfe => {
             let mut buf = [0u8; 4];
-            reader.read_exact(&mut buf).map_err(|_| TlvError::UnexpectedEof)?;
+            reader
+                .read_exact(&mut buf)
+                .map_err(|_| TlvError::UnexpectedEof)?;
             let val = u32::from_be_bytes(buf);
             if val <= 0xffff {
                 return Err(TlvError::InvalidVarint);
@@ -130,7 +136,9 @@ pub fn read_varint<R: Read>(reader: &mut R) -> TlvResult<u64> {
         }
         0xff => {
             let mut buf = [0u8; 8];
-            reader.read_exact(&mut buf).map_err(|_| TlvError::UnexpectedEof)?;
+            reader
+                .read_exact(&mut buf)
+                .map_err(|_| TlvError::UnexpectedEof)?;
             let val = u64::from_be_bytes(buf);
             if val <= 0xffffffff {
                 return Err(TlvError::InvalidVarint);
@@ -154,7 +162,9 @@ pub struct TlvStream {
 impl TlvStream {
     /// Create an empty TLV stream
     pub fn new() -> Self {
-        Self { fields: BTreeMap::new() }
+        Self {
+            fields: BTreeMap::new(),
+        }
     }
 
     /// Insert a field value
@@ -236,11 +246,16 @@ impl TlvStream {
             if length > MAX_TLV_VALUE_LENGTH {
                 return Err(TlvError::InvalidFieldValue {
                     field_type,
-                    reason: format!("TLV value length {} exceeds maximum {}", length, MAX_TLV_VALUE_LENGTH),
+                    reason: format!(
+                        "TLV value length {} exceeds maximum {}",
+                        length, MAX_TLV_VALUE_LENGTH
+                    ),
                 });
             }
             let mut value = vec![0u8; length as usize];
-            reader.read_exact(&mut value).map_err(|_| TlvError::UnexpectedEof)?;
+            reader
+                .read_exact(&mut value)
+                .map_err(|_| TlvError::UnexpectedEof)?;
 
             stream.insert(field_type, value);
         }
@@ -348,8 +363,7 @@ pub fn decode_u64(data: &[u8]) -> TlvResult<u64> {
         });
     }
     Ok(u64::from_be_bytes([
-        data[0], data[1], data[2], data[3],
-        data[4], data[5], data[6], data[7],
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]))
 }
 
@@ -404,9 +418,11 @@ pub fn encode_signature(sig: &bitcoin::secp256k1::ecdsa::Signature) -> Vec<u8> {
 
 /// Decode a Signature (64 bytes)
 pub fn decode_signature(data: &[u8]) -> TlvResult<bitcoin::secp256k1::ecdsa::Signature> {
-    bitcoin::secp256k1::ecdsa::Signature::from_compact(data).map_err(|e| TlvError::InvalidFieldValue {
-        field_type: 0,
-        reason: format!("invalid signature: {}", e),
+    bitcoin::secp256k1::ecdsa::Signature::from_compact(data).map_err(|e| {
+        TlvError::InvalidFieldValue {
+            field_type: 0,
+            reason: format!("invalid signature: {}", e),
+        }
     })
 }
 
@@ -469,7 +485,11 @@ impl TlvBuilder {
     }
 
     /// Add a signature field
-    pub fn signature_field(mut self, field_type: u64, value: &bitcoin::secp256k1::ecdsa::Signature) -> Self {
+    pub fn signature_field(
+        mut self,
+        field_type: u64,
+        value: &bitcoin::secp256k1::ecdsa::Signature,
+    ) -> Self {
         self.stream.insert(field_type, encode_signature(value));
         self
     }
@@ -515,7 +535,11 @@ impl TlvBuilder {
     }
 
     /// Add a descriptor witness field (nested TLV with stack elements)
-    pub fn witness_field(mut self, field_type: u64, witness: &crate::types::DescriptorWitness) -> Self {
+    pub fn witness_field(
+        mut self,
+        field_type: u64,
+        witness: &crate::types::DescriptorWitness,
+    ) -> Self {
         // Encode as: varint(count) || (varint(len) || element)*
         let mut buf = Vec::new();
         write_varint(&mut buf, witness.stack.len() as u64).expect("vec write cannot fail");
@@ -557,56 +581,75 @@ impl TlvReader {
 
     /// Read a required u8 field
     pub fn read_u8(&self, field_type: u64) -> TlvResult<u8> {
-        let data = self.stream.get(field_type)
+        let data = self
+            .stream
+            .get(field_type)
             .ok_or(TlvError::MissingRequiredField { field_type })?;
         decode_u8(data)
     }
 
     /// Read a required u16 field
     pub fn read_u16(&self, field_type: u64) -> TlvResult<u16> {
-        let data = self.stream.get(field_type)
+        let data = self
+            .stream
+            .get(field_type)
             .ok_or(TlvError::MissingRequiredField { field_type })?;
         decode_u16(data)
     }
 
     /// Read a required u32 field
     pub fn read_u32(&self, field_type: u64) -> TlvResult<u32> {
-        let data = self.stream.get(field_type)
+        let data = self
+            .stream
+            .get(field_type)
             .ok_or(TlvError::MissingRequiredField { field_type })?;
         decode_u32(data)
     }
 
     /// Read a required u64 field
     pub fn read_u64(&self, field_type: u64) -> TlvResult<u64> {
-        let data = self.stream.get(field_type)
+        let data = self
+            .stream
+            .get(field_type)
             .ok_or(TlvError::MissingRequiredField { field_type })?;
         decode_u64(data)
     }
 
     /// Read a required string field
     pub fn read_string(&self, field_type: u64) -> TlvResult<String> {
-        let data = self.stream.get(field_type)
+        let data = self
+            .stream
+            .get(field_type)
             .ok_or(TlvError::MissingRequiredField { field_type })?;
         decode_string(data)
     }
 
     /// Read a required bytes field
     pub fn read_bytes<const N: usize>(&self, field_type: u64) -> TlvResult<[u8; N]> {
-        let data = self.stream.get(field_type)
+        let data = self
+            .stream
+            .get(field_type)
             .ok_or(TlvError::MissingRequiredField { field_type })?;
         decode_bytes(data)
     }
 
     /// Read a required pubkey field
     pub fn read_pubkey(&self, field_type: u64) -> TlvResult<bitcoin::secp256k1::PublicKey> {
-        let data = self.stream.get(field_type)
+        let data = self
+            .stream
+            .get(field_type)
             .ok_or(TlvError::MissingRequiredField { field_type })?;
         decode_pubkey(data)
     }
 
     /// Read a required signature field
-    pub fn read_signature(&self, field_type: u64) -> TlvResult<bitcoin::secp256k1::ecdsa::Signature> {
-        let data = self.stream.get(field_type)
+    pub fn read_signature(
+        &self,
+        field_type: u64,
+    ) -> TlvResult<bitcoin::secp256k1::ecdsa::Signature> {
+        let data = self
+            .stream
+            .get(field_type)
             .ok_or(TlvError::MissingRequiredField { field_type })?;
         decode_signature(data)
     }
@@ -652,7 +695,10 @@ impl TlvReader {
     }
 
     /// Read an optional pubkey field
-    pub fn read_pubkey_opt(&self, field_type: u64) -> TlvResult<Option<bitcoin::secp256k1::PublicKey>> {
+    pub fn read_pubkey_opt(
+        &self,
+        field_type: u64,
+    ) -> TlvResult<Option<bitcoin::secp256k1::PublicKey>> {
         match self.stream.get(field_type) {
             Some(data) => Ok(Some(decode_pubkey(data)?)),
             None => Ok(None),
@@ -660,7 +706,10 @@ impl TlvReader {
     }
 
     /// Read an optional signature field
-    pub fn read_signature_opt(&self, field_type: u64) -> TlvResult<Option<bitcoin::secp256k1::ecdsa::Signature>> {
+    pub fn read_signature_opt(
+        &self,
+        field_type: u64,
+    ) -> TlvResult<Option<bitcoin::secp256k1::ecdsa::Signature>> {
         match self.stream.get(field_type) {
             Some(data) => Ok(Some(decode_signature(data)?)),
             None => Ok(None),
@@ -669,7 +718,8 @@ impl TlvReader {
 
     /// Read raw bytes for a field (for nested decoding)
     pub fn read_raw(&self, field_type: u64) -> TlvResult<&[u8]> {
-        self.stream.get(field_type)
+        self.stream
+            .get(field_type)
             .ok_or(TlvError::MissingRequiredField { field_type })
     }
 
@@ -716,7 +766,10 @@ impl TlvReader {
             if len > MAX_ITEM_LENGTH {
                 return Err(TlvError::InvalidFieldValue {
                     field_type,
-                    reason: format!("vector item length {} exceeds maximum {}", len, MAX_ITEM_LENGTH),
+                    reason: format!(
+                        "vector item length {} exceeds maximum {}",
+                        len, MAX_ITEM_LENGTH
+                    ),
                 });
             }
 
@@ -737,7 +790,9 @@ impl TlvReader {
 
     /// Read a required deposit_id field (16 bytes)
     pub fn read_deposit_id(&self, field_type: u64) -> TlvResult<[u8; 16]> {
-        let data = self.stream.get(field_type)
+        let data = self
+            .stream
+            .get(field_type)
             .ok_or(TlvError::MissingRequiredField { field_type })?;
         if data.len() != 16 {
             return Err(TlvError::InvalidFieldValue {
@@ -770,7 +825,9 @@ impl TlvReader {
 
     /// Read a required witness field
     pub fn read_witness(&self, field_type: u64) -> TlvResult<crate::types::DescriptorWitness> {
-        let data = self.stream.get(field_type)
+        let data = self
+            .stream
+            .get(field_type)
             .ok_or(TlvError::MissingRequiredField { field_type })?;
 
         let mut cursor = Cursor::new(data);
@@ -780,7 +837,10 @@ impl TlvReader {
         if count > MAX_STACK_SIZE {
             return Err(TlvError::InvalidFieldValue {
                 field_type,
-                reason: format!("witness stack size {} exceeds maximum {}", count, MAX_STACK_SIZE),
+                reason: format!(
+                    "witness stack size {} exceeds maximum {}",
+                    count, MAX_STACK_SIZE
+                ),
             });
         }
 
@@ -791,7 +851,10 @@ impl TlvReader {
             if len > MAX_ELEMENT_SIZE {
                 return Err(TlvError::InvalidFieldValue {
                     field_type,
-                    reason: format!("witness element size {} exceeds maximum {}", len, MAX_ELEMENT_SIZE),
+                    reason: format!(
+                        "witness element size {} exceeds maximum {}",
+                        len, MAX_ELEMENT_SIZE
+                    ),
                 });
             }
             let mut element = vec![0u8; len];
@@ -803,7 +866,10 @@ impl TlvReader {
     }
 
     /// Read an optional witness field
-    pub fn read_witness_opt(&self, field_type: u64) -> TlvResult<Option<crate::types::DescriptorWitness>> {
+    pub fn read_witness_opt(
+        &self,
+        field_type: u64,
+    ) -> TlvResult<Option<crate::types::DescriptorWitness>> {
         match self.stream.get(field_type) {
             Some(_) => Ok(Some(self.read_witness(field_type)?)),
             None => Ok(None),
@@ -821,7 +887,17 @@ mod tests {
 
     #[test]
     fn test_varint_roundtrip() {
-        let test_values = [0u64, 1, 0xfc, 0xfd, 0xffff, 0x10000, 0xffffffff, 0x100000000, u64::MAX];
+        let test_values = [
+            0u64,
+            1,
+            0xfc,
+            0xfd,
+            0xffff,
+            0x10000,
+            0xffffffff,
+            0x100000000,
+            u64::MAX,
+        ];
 
         for &value in &test_values {
             let mut buf = Vec::new();
@@ -878,9 +954,7 @@ mod tests {
 
     #[test]
     fn test_missing_required_field() {
-        let encoded = TlvBuilder::new()
-            .u64_field(0, 100)
-            .build();
+        let encoded = TlvBuilder::new().u64_field(0, 100).build();
 
         let reader = TlvReader::new(&encoded).unwrap();
         assert!(matches!(
@@ -908,15 +982,13 @@ mod tests {
 
     #[test]
     fn test_pubkey_encoding() {
-        use bitcoin::secp256k1::{Secp256k1, SecretKey, PublicKey};
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 
         let secp = Secp256k1::new();
         let secret = SecretKey::from_slice(&[1u8; 32]).unwrap();
         let pubkey = PublicKey::from_secret_key(&secp, &secret);
 
-        let encoded = TlvBuilder::new()
-            .pubkey_field(0, &pubkey)
-            .build();
+        let encoded = TlvBuilder::new().pubkey_field(0, &pubkey).build();
 
         let reader = TlvReader::new(&encoded).unwrap();
         let decoded = reader.read_pubkey(0).unwrap();

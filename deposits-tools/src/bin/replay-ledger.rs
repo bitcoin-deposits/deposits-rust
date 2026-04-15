@@ -18,12 +18,12 @@
 //   # Common options
 //   replay-ledger <ledger_id_prefix> --verbose                # Print each operation as applied
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use deposits_core::{SignedLedgerUpdate, LedgerState, TlvEncode};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use deposits_core::messages::LedgerOperation;
 use deposits_core::tlv::TlvDecode;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use deposits_core::{LedgerState, SignedLedgerUpdate, TlvEncode};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 const DEFAULT_DATA_ROOT: &str = "data";
 
@@ -32,7 +32,9 @@ const DEFAULT_DATA_ROOT: &str = "data";
 // =========================================================================
 
 fn format_msats(msats: u64) -> String {
-    if msats == 0 { return "0".to_string(); }
+    if msats == 0 {
+        return "0".to_string();
+    }
     let sats = msats / 1000;
     let rem = msats % 1000;
     if rem == 0 {
@@ -46,7 +48,12 @@ fn format_sats(sats: u64) -> String {
     if sats >= 100_000_000 {
         format!("{:.8} BTC", sats as f64 / 100_000_000.0)
     } else if sats >= 1_000_000 {
-        format!("{},{:03},{:03} sat", sats / 1_000_000, (sats / 1_000) % 1_000, sats % 1_000)
+        format!(
+            "{},{:03},{:03} sat",
+            sats / 1_000_000,
+            (sats / 1_000) % 1_000,
+            sats % 1_000
+        )
     } else if sats >= 1_000 {
         format!("{},{:03} sat", sats / 1_000, sats % 1_000)
     } else {
@@ -55,96 +62,276 @@ fn format_sats(sats: u64) -> String {
 }
 
 fn short_hex(bytes: &[u8]) -> String {
-    if bytes.len() >= 4 { format!("{}...", hex::encode(&bytes[..4])) }
-    else { hex::encode(bytes) }
+    if bytes.len() >= 4 {
+        format!("{}...", hex::encode(&bytes[..4]))
+    } else {
+        hex::encode(bytes)
+    }
 }
 
 fn short_pubkey(pk: &bitcoin::secp256k1::PublicKey) -> String {
     let s = hex::encode(pk.serialize());
-    format!("{}..{}", &s[..6], &s[s.len()-4..])
+    format!("{}..{}", &s[..6], &s[s.len() - 4..])
 }
 
-fn deposit_id_hex(id: &[u8; 16]) -> String { hex::encode(id) }
+fn deposit_id_hex(id: &[u8; 16]) -> String {
+    hex::encode(id)
+}
 
 fn short_deposit_id(id: &[u8; 16]) -> String {
     let h = hex::encode(id);
-    format!("{}..{}", &h[..4], &h[h.len()-4..])
+    format!("{}..{}", &h[..4], &h[h.len() - 4..])
 }
 
 /// Format a LedgerOperation into a one-line summary
 fn format_op(op: &LedgerOperation) -> String {
     match op {
-        LedgerOperation::LedgerOpen { reserves_amount, genesis_block, .. } =>
-            format!("LedgerOpen  reserves={} genesis_block={}", format_msats(*reserves_amount), genesis_block),
-        LedgerOperation::QuorumBegin { amount, quorum_expiry, reserves_id, .. } => {
-            let short_res = if reserves_id.len() > 20 { format!("{}...", &reserves_id[..20]) } else { reserves_id.clone() };
-            format!("QuorumBegin  reserves={} expiry={} addr={}", format_msats(*amount), quorum_expiry, short_res)
+        LedgerOperation::LedgerOpen {
+            reserves_amount,
+            genesis_block,
+            ..
+        } => format!(
+            "LedgerOpen  reserves={} genesis_block={}",
+            format_msats(*reserves_amount),
+            genesis_block
+        ),
+        LedgerOperation::QuorumBegin {
+            amount,
+            quorum_expiry,
+            reserves_id,
+            ..
+        } => {
+            let short_res = if reserves_id.len() > 20 {
+                format!("{}...", &reserves_id[..20])
+            } else {
+                reserves_id.clone()
+            };
+            format!(
+                "QuorumBegin  reserves={} expiry={} addr={}",
+                format_msats(*amount),
+                quorum_expiry,
+                short_res
+            )
         }
-        LedgerOperation::QuorumAddMember { quorum_member, member_ledger_id, .. } => {
-            let lid = if member_ledger_id.len() > 16 { format!("{}...", &member_ledger_id[..16]) } else { member_ledger_id.clone() };
-            format!("QuorumAddMember  member={} ledger={}", short_pubkey(quorum_member), lid)
+        LedgerOperation::QuorumAddMember {
+            quorum_member,
+            member_ledger_id,
+            ..
+        } => {
+            let lid = if member_ledger_id.len() > 16 {
+                format!("{}...", &member_ledger_id[..16])
+            } else {
+                member_ledger_id.clone()
+            };
+            format!(
+                "QuorumAddMember  member={} ledger={}",
+                short_pubkey(quorum_member),
+                lid
+            )
         }
-        LedgerOperation::QuorumRemoveMember { quorum_member, .. } =>
-            format!("QuorumRemoveMember  member={}", short_pubkey(quorum_member)),
-        LedgerOperation::QuorumJoin { operator_id, ledger_id, membership_expires, .. } => {
-            let lid = if ledger_id.len() > 16 { format!("{}...", &ledger_id[..16]) } else { ledger_id.clone() };
-            format!("QuorumJoin  operator={} ledger={} expires={}", short_pubkey(operator_id), lid, membership_expires)
+        LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
+            format!("QuorumRemoveMember  member={}", short_pubkey(quorum_member))
         }
-        LedgerOperation::DepositOpen { deposit_id, descriptor, fees, is_collateral, .. } => {
-            let desc = if descriptor.len() > 30 { format!("{}...", &descriptor[..30]) } else { descriptor.clone() };
+        LedgerOperation::QuorumJoin {
+            operator_id,
+            ledger_id,
+            membership_expires,
+            ..
+        } => {
+            let lid = if ledger_id.len() > 16 {
+                format!("{}...", &ledger_id[..16])
+            } else {
+                ledger_id.clone()
+            };
+            format!(
+                "QuorumJoin  operator={} ledger={} expires={}",
+                short_pubkey(operator_id),
+                lid,
+                membership_expires
+            )
+        }
+        LedgerOperation::DepositOpen {
+            deposit_id,
+            descriptor,
+            fees,
+            is_collateral,
+            ..
+        } => {
+            let desc = if descriptor.len() > 30 {
+                format!("{}...", &descriptor[..30])
+            } else {
+                descriptor.clone()
+            };
             let coll = if *is_collateral { " [collateral]" } else { "" };
             let fee_str = match fees {
-                Some(f) => format!("{}bps+{}/yr", f.annualized_bps, format_msats(f.annualized_msats)),
+                Some(f) => format!(
+                    "{}bps+{}/yr",
+                    f.annualized_bps,
+                    format_msats(f.annualized_msats)
+                ),
                 None => "default".to_string(),
             };
-            format!("DepositOpen  id={} desc={} fee={}{}", short_deposit_id(deposit_id), desc, fee_str, coll)
+            format!(
+                "DepositOpen  id={} desc={} fee={}{}",
+                short_deposit_id(deposit_id),
+                desc,
+                fee_str,
+                coll
+            )
         }
-        LedgerOperation::DepositClose { deposit_id } =>
-            format!("DepositClose  id={}", short_deposit_id(deposit_id)),
-        LedgerOperation::FeeChange { deposit_id, new_fees, effective_block } =>
-            format!("FeeChange  id={} new={}bps+{}/yr effective={}", short_deposit_id(deposit_id), new_fees.annualized_bps, format_msats(new_fees.annualized_msats), effective_block),
-        LedgerOperation::DepositKeyRotate { deposit_id, new_descriptor, .. } => {
-            let desc = if new_descriptor.len() > 30 { format!("{}...", &new_descriptor[..30]) } else { new_descriptor.clone() };
-            format!("DepositKeyRotate  id={} new_desc={}", short_deposit_id(deposit_id), desc)
+        LedgerOperation::DepositClose { deposit_id } => {
+            format!("DepositClose  id={}", short_deposit_id(deposit_id))
         }
-        LedgerOperation::InvoiceCredit { deposit_id, amount, .. } =>
-            format!("InvoiceCredit  id={} +{}", short_deposit_id(deposit_id), format_msats(*amount)),
-        LedgerOperation::InvoiceLock { deposit_id, amount, .. } =>
-            format!("InvoiceLock  id={} -{}", short_deposit_id(deposit_id), format_msats(*amount)),
-        LedgerOperation::InvoiceFail { deposit_id, amount, .. } =>
-            format!("InvoiceFail  id={} +{}", short_deposit_id(deposit_id), format_msats(*amount)),
-        LedgerOperation::InvoiceFulfill { deposit_id, amount, .. } =>
-            format!("InvoiceFulfill  id={} -{}", short_deposit_id(deposit_id), format_msats(*amount)),
-        LedgerOperation::OnchainCredit { deposit_id, amount, .. } =>
-            format!("OnchainCredit  id={} +{}", short_deposit_id(deposit_id), format_msats(*amount)),
-        LedgerOperation::OnchainLock { deposit_id, amount, .. } =>
-            format!("OnchainLock  id={} -{}", short_deposit_id(deposit_id), format_msats(*amount)),
-        LedgerOperation::OnchainFail { deposit_id, .. } =>
-            format!("OnchainFail  id={}", short_deposit_id(deposit_id)),
-        LedgerOperation::OnchainFulfill { deposit_id, amount, .. } =>
-            format!("OnchainFulfill  id={} -{}", short_deposit_id(deposit_id), format_msats(*amount)),
-        LedgerOperation::FeeCollect { deposit_id, amount, block_height } =>
-            format!("FeeCollect  id={} {} block={}", short_deposit_id(deposit_id), format_msats(*amount), block_height),
-        LedgerOperation::CollateralAttestation { collateral_operator, amount, block_height, .. } =>
-            format!("CollateralAttest  operator={} amount={} block={}", short_pubkey(collateral_operator), format_msats(*amount), block_height),
-        LedgerOperation::CollateralLock { deposit_id, amount, lock_until_block, .. } =>
-            format!("CollateralLock  id={} amount={} until={}", short_deposit_id(deposit_id), format_msats(*amount), lock_until_block),
-        LedgerOperation::TransferLock { source_deposit_id, destination_deposit_id, amount, timeout_height, .. } =>
-            format!("TransferLock  {} -> {} amount={} timeout={}", short_deposit_id(source_deposit_id), short_deposit_id(destination_deposit_id), format_msats(*amount), timeout_height),
-        LedgerOperation::TransferComplete { transfer_id, .. } =>
-            format!("TransferComplete  id={}", short_hex(transfer_id)),
-        LedgerOperation::TransferFail { transfer_id, .. } =>
-            format!("TransferFail  id={}", short_hex(transfer_id)),
-        LedgerOperation::DisputeEnter { reason, last_valid_sequence, .. } =>
-            format!("DisputeEnter  reason={:?} last_valid_seq={}", reason, last_valid_sequence),
-        LedgerOperation::DisputeAcquire { new_custodian, .. } =>
-            format!("DisputeAcquire  new_custodian={}", short_pubkey(new_custodian)),
+        LedgerOperation::FeeChange {
+            deposit_id,
+            new_fees,
+            effective_block,
+        } => format!(
+            "FeeChange  id={} new={}bps+{}/yr effective={}",
+            short_deposit_id(deposit_id),
+            new_fees.annualized_bps,
+            format_msats(new_fees.annualized_msats),
+            effective_block
+        ),
+        LedgerOperation::DepositKeyRotate {
+            deposit_id,
+            new_descriptor,
+            ..
+        } => {
+            let desc = if new_descriptor.len() > 30 {
+                format!("{}...", &new_descriptor[..30])
+            } else {
+                new_descriptor.clone()
+            };
+            format!(
+                "DepositKeyRotate  id={} new_desc={}",
+                short_deposit_id(deposit_id),
+                desc
+            )
+        }
+        LedgerOperation::InvoiceCredit {
+            deposit_id, amount, ..
+        } => format!(
+            "InvoiceCredit  id={} +{}",
+            short_deposit_id(deposit_id),
+            format_msats(*amount)
+        ),
+        LedgerOperation::InvoiceLock {
+            deposit_id, amount, ..
+        } => format!(
+            "InvoiceLock  id={} -{}",
+            short_deposit_id(deposit_id),
+            format_msats(*amount)
+        ),
+        LedgerOperation::InvoiceFail {
+            deposit_id, amount, ..
+        } => format!(
+            "InvoiceFail  id={} +{}",
+            short_deposit_id(deposit_id),
+            format_msats(*amount)
+        ),
+        LedgerOperation::InvoiceFulfill {
+            deposit_id, amount, ..
+        } => format!(
+            "InvoiceFulfill  id={} -{}",
+            short_deposit_id(deposit_id),
+            format_msats(*amount)
+        ),
+        LedgerOperation::OnchainCredit {
+            deposit_id, amount, ..
+        } => format!(
+            "OnchainCredit  id={} +{}",
+            short_deposit_id(deposit_id),
+            format_msats(*amount)
+        ),
+        LedgerOperation::OnchainLock {
+            deposit_id, amount, ..
+        } => format!(
+            "OnchainLock  id={} -{}",
+            short_deposit_id(deposit_id),
+            format_msats(*amount)
+        ),
+        LedgerOperation::OnchainFail { deposit_id, .. } => {
+            format!("OnchainFail  id={}", short_deposit_id(deposit_id))
+        }
+        LedgerOperation::OnchainFulfill {
+            deposit_id, amount, ..
+        } => format!(
+            "OnchainFulfill  id={} -{}",
+            short_deposit_id(deposit_id),
+            format_msats(*amount)
+        ),
+        LedgerOperation::FeeCollect {
+            deposit_id,
+            amount,
+            block_height,
+        } => format!(
+            "FeeCollect  id={} {} block={}",
+            short_deposit_id(deposit_id),
+            format_msats(*amount),
+            block_height
+        ),
+        LedgerOperation::CollateralAttestation {
+            collateral_operator,
+            amount,
+            block_height,
+            ..
+        } => format!(
+            "CollateralAttest  operator={} amount={} block={}",
+            short_pubkey(collateral_operator),
+            format_msats(*amount),
+            block_height
+        ),
+        LedgerOperation::CollateralLock {
+            deposit_id,
+            amount,
+            lock_until_block,
+            ..
+        } => format!(
+            "CollateralLock  id={} amount={} until={}",
+            short_deposit_id(deposit_id),
+            format_msats(*amount),
+            lock_until_block
+        ),
+        LedgerOperation::TransferLock {
+            source_deposit_id,
+            destination_deposit_id,
+            amount,
+            timeout_height,
+            ..
+        } => format!(
+            "TransferLock  {} -> {} amount={} timeout={}",
+            short_deposit_id(source_deposit_id),
+            short_deposit_id(destination_deposit_id),
+            format_msats(*amount),
+            timeout_height
+        ),
+        LedgerOperation::TransferComplete { transfer_id, .. } => {
+            format!("TransferComplete  id={}", short_hex(transfer_id))
+        }
+        LedgerOperation::TransferFail { transfer_id, .. } => {
+            format!("TransferFail  id={}", short_hex(transfer_id))
+        }
+        LedgerOperation::DisputeEnter {
+            reason,
+            last_valid_sequence,
+            ..
+        } => format!(
+            "DisputeEnter  reason={:?} last_valid_seq={}",
+            reason, last_valid_sequence
+        ),
+        LedgerOperation::DisputeAcquire { new_custodian, .. } => format!(
+            "DisputeAcquire  new_custodian={}",
+            short_pubkey(new_custodian)
+        ),
         LedgerOperation::DisputeYield => "DisputeYield".to_string(),
-        LedgerOperation::DisputeArmed { armed_block, .. } =>
-            format!("DisputeArmed  block={}", armed_block),
+        LedgerOperation::DisputeArmed { armed_block, .. } => {
+            format!("DisputeArmed  block={}", armed_block)
+        }
         LedgerOperation::LedgerClose => "LedgerClose".to_string(),
-        LedgerOperation::DeliveryEmbed { request_hash, .. } =>
-            format!("DeliveryEmbed  req={}", short_hex(request_hash)),
+        LedgerOperation::DeliveryEmbed { request_hash, .. } => {
+            format!("DeliveryEmbed  req={}", short_hex(request_hash))
+        }
     }
 }
 
@@ -157,7 +344,11 @@ fn print_state(state: &LedgerState) {
     println!("============");
     println!("  ledger_id:   {}", hex::encode(state.ledger_id));
     println!("  operator:    {}", short_pubkey(&state.operator_key));
-    let res = if state.reserves_key.len() > 40 { format!("{}...", &state.reserves_key[..40]) } else { state.reserves_key.clone() };
+    let res = if state.reserves_key.len() > 40 {
+        format!("{}...", &state.reserves_key[..40])
+    } else {
+        state.reserves_key.clone()
+    };
     println!("  reserves:    {}", res);
     println!("  reserves_amt:{}", format_msats(state.reserves_amount));
     println!("  genesis:     block {}", state.genesis_block);
@@ -173,9 +364,20 @@ fn print_state(state: &LedgerState) {
         println!();
         println!("  Quorum Members (active):");
         for m in &state.quorum_members {
-            let mut details = vec![format!("ledger={}", if m.ledger_id.len() > 16 { format!("{}...", &m.ledger_id[..16]) } else { m.ledger_id.clone() })];
-            if let Some(bps) = m.min_fee_bps { details.push(format!("min_fee={}bps", bps)); }
-            if let Some(lock) = m.collateral_lock_amount { details.push(format!("coll_lock={}", format_msats(lock))); }
+            let mut details = vec![format!(
+                "ledger={}",
+                if m.ledger_id.len() > 16 {
+                    format!("{}...", &m.ledger_id[..16])
+                } else {
+                    m.ledger_id.clone()
+                }
+            )];
+            if let Some(bps) = m.min_fee_bps {
+                details.push(format!("min_fee={}bps", bps));
+            }
+            if let Some(lock) = m.collateral_lock_amount {
+                details.push(format!("coll_lock={}", format_msats(lock)));
+            }
             println!("    {}  {}", short_pubkey(&m.pubkey), details.join("  "));
         }
     }
@@ -184,7 +386,15 @@ fn print_state(state: &LedgerState) {
         println!();
         println!("  Next Quorum Members (pending):");
         for m in &state.next_quorum_members {
-            println!("    {}  ledger={}", short_pubkey(&m.pubkey), if m.ledger_id.len() > 16 { format!("{}...", &m.ledger_id[..16]) } else { m.ledger_id.clone() });
+            println!(
+                "    {}  ledger={}",
+                short_pubkey(&m.pubkey),
+                if m.ledger_id.len() > 16 {
+                    format!("{}...", &m.ledger_id[..16])
+                } else {
+                    m.ledger_id.clone()
+                }
+            );
         }
     }
 
@@ -192,7 +402,13 @@ fn print_state(state: &LedgerState) {
         println!();
         println!("  Collateral Attestations:");
         for (pk, att) in &state.collateral_attestations {
-            println!("    {}  amount={}  block={}  lock_until={}", short_pubkey(pk), format_msats(att.amount), att.block_height, att.lock_until_block);
+            println!(
+                "    {}  amount={}  block={}  lock_until={}",
+                short_pubkey(pk),
+                format_msats(att.amount),
+                att.block_height,
+                att.lock_until_block
+            );
         }
     }
 
@@ -202,17 +418,43 @@ fn print_state(state: &LedgerState) {
         let mut deposits: Vec<_> = state.deposits.iter().collect();
         deposits.sort_by_key(|(id, _)| **id);
         for (id, dep) in deposits {
-            let coll = if dep.is_collateral { " [collateral]" } else { "" };
+            let coll = if dep.is_collateral {
+                " [collateral]"
+            } else {
+                ""
+            };
             println!("    {}{}", deposit_id_hex(id), coll);
-            let desc = if dep.descriptor.len() > 50 { format!("{}...", &dep.descriptor[..50]) } else { dep.descriptor.clone() };
+            let desc = if dep.descriptor.len() > 50 {
+                format!("{}...", &dep.descriptor[..50])
+            } else {
+                dep.descriptor.clone()
+            };
             println!("      descriptor: {}", desc);
-            println!("      balance:    {}  locked: {}", format_msats(dep.balance), format_msats(dep.locked_balance));
-            println!("      fees:       {}bps + {}/yr  (every {} blocks)", dep.fees.annualized_bps, format_msats(dep.fees.annualized_msats), dep.fees.frequency_blocks);
+            println!(
+                "      balance:    {}  locked: {}",
+                format_msats(dep.balance),
+                format_msats(dep.locked_balance)
+            );
+            println!(
+                "      fees:       {}bps + {}/yr  (every {} blocks)",
+                dep.fees.annualized_bps,
+                format_msats(dep.fees.annualized_msats),
+                dep.fees.frequency_blocks
+            );
             if dep.collateral_lock_amount > 0 {
-                println!("      coll_lock:  {} until block {}", format_msats(dep.collateral_lock_amount), dep.collateral_lock_expires);
+                println!(
+                    "      coll_lock:  {} until block {}",
+                    format_msats(dep.collateral_lock_amount),
+                    dep.collateral_lock_expires
+                );
             }
             if let Some((ref new_fees, eff)) = dep.pending_fee_change {
-                println!("      pending_fee: {}bps + {}/yr at block {}", new_fees.annualized_bps, format_msats(new_fees.annualized_msats), eff);
+                println!(
+                    "      pending_fee: {}bps + {}/yr at block {}",
+                    new_fees.annualized_bps,
+                    format_msats(new_fees.annualized_msats),
+                    eff
+                );
             }
         }
     }
@@ -221,9 +463,14 @@ fn print_state(state: &LedgerState) {
         println!();
         println!("  Pending Transfers:");
         for (id, t) in &state.pending_transfers {
-            println!("    {}  {} -> {}  amount={}  timeout={}",
-                short_hex(id), short_deposit_id(&t.source_deposit_id), short_deposit_id(&t.destination_deposit_id),
-                format_msats(t.amount), t.timeout_height);
+            println!(
+                "    {}  {} -> {}  amount={}  timeout={}",
+                short_hex(id),
+                short_deposit_id(&t.source_deposit_id),
+                short_deposit_id(&t.destination_deposit_id),
+                format_msats(t.amount),
+                t.timeout_height
+            );
         }
     }
 
@@ -231,23 +478,40 @@ fn print_state(state: &LedgerState) {
         println!();
         println!("  Joined Quorums (as member):");
         for m in &state.joined_quorums {
-            let lid = if m.ledger_id.len() > 16 { format!("{}...", &m.ledger_id[..16]) } else { m.ledger_id.clone() };
-            println!("    operator={}  ledger={}  expires={}  joined_at_seq={}",
-                short_pubkey(&m.operator_id), lid, m.membership_expires, m.joined_at_sequence);
+            let lid = if m.ledger_id.len() > 16 {
+                format!("{}...", &m.ledger_id[..16])
+            } else {
+                m.ledger_id.clone()
+            };
+            println!(
+                "    operator={}  ledger={}  expires={}  joined_at_seq={}",
+                short_pubkey(&m.operator_id),
+                lid,
+                m.membership_expires,
+                m.joined_at_sequence
+            );
         }
     }
 
     let total_balance: u64 = state.deposits.values().map(|d| d.balance).sum();
     let total_locked: u64 = state.deposits.values().map(|d| d.locked_balance).sum();
-    let total_collateral: u64 = state.collateral_attestations.values().map(|a| a.available_collateral()).sum();
+    let total_collateral: u64 = state
+        .collateral_attestations
+        .values()
+        .map(|a| a.available_collateral())
+        .sum();
 
     println!();
     println!("  Summary:");
     println!("    deposits:    {}", state.deposits.len());
     println!("    total_bal:   {}", format_msats(total_balance));
-    if total_locked > 0 { println!("    total_lock:  {}", format_msats(total_locked)); }
+    if total_locked > 0 {
+        println!("    total_lock:  {}", format_msats(total_locked));
+    }
     println!("    reserves:    {}", format_msats(state.reserves_amount));
-    if total_collateral > 0 { println!("    collateral:  {}", format_msats(total_collateral)); }
+    if total_collateral > 0 {
+        println!("    collateral:  {}", format_msats(total_collateral));
+    }
     let solvent = state.reserves_amount >= total_balance + total_locked;
     println!("    solvent:     {}", if solvent { "YES" } else { "NO" });
 }
@@ -258,14 +522,23 @@ fn print_state(state: &LedgerState) {
 
 /// Given an ordered chain of updates (genesis first), replay through LedgerState.
 /// If `until_hash` is set, stop when we reach a chain_hash matching that prefix.
-fn replay_chain(chain: &[SignedLedgerUpdate], verbose: bool, until_hash: Option<&str>) -> (LedgerState, Vec<String>) {
+fn replay_chain(
+    chain: &[SignedLedgerUpdate],
+    verbose: bool,
+    until_hash: Option<&str>,
+) -> (LedgerState, Vec<String>) {
     let mut errors = Vec::new();
 
     if chain.is_empty() {
-        return (LedgerState::new(
-            bitcoin::secp256k1::PublicKey::from_slice(&[2; 33]).unwrap_or_else(|_| unreachable!()),
-            String::new(), 0,
-        ), vec!["Empty chain".to_string()]);
+        return (
+            LedgerState::new(
+                bitcoin::secp256k1::PublicKey::from_slice(&[2; 33])
+                    .unwrap_or_else(|_| unreachable!()),
+                String::new(),
+                0,
+            ),
+            vec!["Empty chain".to_string()],
+        );
     }
 
     // Bootstrap from first operation
@@ -274,13 +547,20 @@ fn replay_chain(chain: &[SignedLedgerUpdate], verbose: bool, until_hash: Option<
         Ok(op) => op,
         Err(e) => {
             errors.push(format!("seq=0: decode failed: {:?}", e));
-            return (LedgerState::new(first.operator_id, String::new(), 0), errors);
+            return (
+                LedgerState::new(first.operator_id, String::new(), 0),
+                errors,
+            );
         }
     };
 
     let (operator_key, reserves_key, genesis_block) = match &first_op {
-        LedgerOperation::LedgerOpen { operator_id, reserves_id, genesis_block, .. } =>
-            (*operator_id, reserves_id.clone(), *genesis_block),
+        LedgerOperation::LedgerOpen {
+            operator_id,
+            reserves_id,
+            genesis_block,
+            ..
+        } => (*operator_id, reserves_id.clone(), *genesis_block),
         _ => (first.operator_id, String::new(), 0),
     };
 
@@ -290,23 +570,40 @@ fn replay_chain(chain: &[SignedLedgerUpdate], verbose: bool, until_hash: Option<
     for update in chain {
         // Validate chain linkage
         if update.previous_hash != expected_prev {
-            errors.push(format!("seq={}: chain break (prev={} expected={})",
-                update.sequence_number, short_hex(&update.previous_hash), short_hex(&expected_prev)));
+            errors.push(format!(
+                "seq={}: chain break (prev={} expected={})",
+                update.sequence_number,
+                short_hex(&update.previous_hash),
+                short_hex(&expected_prev)
+            ));
         }
 
         // Validate hash
         let computed = update.compute_hash();
         if computed != update.current_hash {
-            errors.push(format!("seq={}: hash mismatch (computed={} stored={})",
-                update.sequence_number, short_hex(&computed), short_hex(&update.current_hash)));
+            errors.push(format!(
+                "seq={}: hash mismatch (computed={} stored={})",
+                update.sequence_number,
+                short_hex(&computed),
+                short_hex(&update.current_hash)
+            ));
         }
 
         // Decode and apply
         match LedgerOperation::tlv_decode(&update.message) {
             Ok(op) => {
                 if verbose {
-                    let cosigned = if update.cosigner_pubkey.is_some() { " [cosigned]" } else { "" };
-                    println!("  {:>4}  {}{}", update.sequence_number, format_op(&op), cosigned);
+                    let cosigned = if update.cosigner_pubkey.is_some() {
+                        " [cosigned]"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "  {:>4}  {}{}",
+                        update.sequence_number,
+                        format_op(&op),
+                        cosigned
+                    );
                 }
                 match state.apply(&op) {
                     Ok(next) => {
@@ -315,14 +612,20 @@ fn replay_chain(chain: &[SignedLedgerUpdate], verbose: bool, until_hash: Option<
                         state.chain_tip_hash = update.chain_hash();
                     }
                     Err(e) => {
-                        errors.push(format!("seq={}: apply failed: {:?}", update.sequence_number, e));
+                        errors.push(format!(
+                            "seq={}: apply failed: {:?}",
+                            update.sequence_number, e
+                        ));
                         state.sequence = update.sequence_number;
                         state.chain_tip_hash = update.chain_hash();
                     }
                 }
             }
             Err(e) => {
-                errors.push(format!("seq={}: decode failed: {:?}", update.sequence_number, e));
+                errors.push(format!(
+                    "seq={}: decode failed: {:?}",
+                    update.sequence_number, e
+                ));
                 state.sequence = update.sequence_number;
                 state.chain_tip_hash = update.chain_hash();
             }
@@ -334,19 +637,25 @@ fn replay_chain(chain: &[SignedLedgerUpdate], verbose: bool, until_hash: Option<
         if let Some(prefix) = until_hash {
             let h = hex::encode(update.chain_hash());
             if h.starts_with(prefix) {
-                if verbose { println!("  -- stopped at chain_hash {}...", &h[..16]); }
+                if verbose {
+                    println!("  -- stopped at chain_hash {}...", &h[..16]);
+                }
                 break;
             }
         }
     }
 
-    if verbose { println!(); }
+    if verbose {
+        println!();
+    }
     (state, errors)
 }
 
 /// Build an ordered chain from a set of updates by walking backward from the tip.
 fn build_chain(updates: &[SignedLedgerUpdate]) -> Vec<usize> {
-    if updates.is_empty() { return vec![]; }
+    if updates.is_empty() {
+        return vec![];
+    }
 
     // Map chain_hash -> index for backward walking
     let mut by_chain_hash: HashMap<[u8; 32], usize> = HashMap::new();
@@ -361,7 +670,9 @@ fn build_chain(updates: &[SignedLedgerUpdate]) -> Vec<usize> {
 
     loop {
         let u = &updates[current_idx];
-        if u.previous_hash == [0u8; 32] { break; }
+        if u.previous_hash == [0u8; 32] {
+            break;
+        }
 
         if let Some(&prev_idx) = by_chain_hash.get(&u.previous_hash) {
             chain_indices.push(prev_idx);
@@ -369,13 +680,20 @@ fn build_chain(updates: &[SignedLedgerUpdate]) -> Vec<usize> {
         } else {
             // Sequence-based fallback
             if u.sequence_number > 0 {
-                if let Some(pos) = updates.iter().position(|x| x.sequence_number == u.sequence_number - 1) {
+                if let Some(pos) = updates
+                    .iter()
+                    .position(|x| x.sequence_number == u.sequence_number - 1)
+                {
                     chain_indices.push(pos);
                     current_idx = pos;
                     continue;
                 }
             }
-            eprintln!("Warning: chain breaks at seq={}, prev_hash={}", u.sequence_number, short_hex(&u.previous_hash));
+            eprintln!(
+                "Warning: chain breaks at seq={}, prev_hash={}",
+                u.sequence_number,
+                short_hex(&u.previous_hash)
+            );
             break;
         }
     }
@@ -391,7 +709,9 @@ fn build_chain(updates: &[SignedLedgerUpdate]) -> Vec<usize> {
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "type")]
 enum LedgerLogRow {
-    Role { role: String },
+    Role {
+        role: String,
+    },
     #[allow(dead_code)]
     State(LedgerState),
     Update(SignedLedgerUpdate),
@@ -418,7 +738,11 @@ struct LedgerMatch {
     role: String,
 }
 
-fn find_ledger_files(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>) -> Vec<LedgerMatch> {
+fn find_ledger_files(
+    data_root: &PathBuf,
+    prefix: &str,
+    node_filter: Option<&str>,
+) -> Vec<LedgerMatch> {
     let mut results = Vec::new();
     let entries = match std::fs::read_dir(data_root) {
         Ok(e) => e,
@@ -427,23 +751,46 @@ fn find_ledger_files(data_root: &PathBuf, prefix: &str, node_filter: Option<&str
 
     for entry in entries.flatten() {
         let node_dir = entry.path();
-        if !node_dir.is_dir() { continue; }
+        if !node_dir.is_dir() {
+            continue;
+        }
         let node_name = entry.file_name().to_string_lossy().to_string();
-        if node_name == "relays" || node_name == "self-pay" || node_name == "htlc-agent" { continue; }
+        if node_name == "relays" || node_name == "self-pay" || node_name == "htlc-agent" {
+            continue;
+        }
         if let Some(filter) = node_filter {
-            if node_name != filter { continue; }
+            if node_name != filter {
+                continue;
+            }
         }
 
         let ledgers_dir = node_dir.join("wallet").join("ledgers");
-        if !ledgers_dir.exists() { continue; }
+        if !ledgers_dir.exists() {
+            continue;
+        }
 
-        for ledger_file in std::fs::read_dir(&ledgers_dir).into_iter().flatten().flatten() {
+        for ledger_file in std::fs::read_dir(&ledgers_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let path = ledger_file.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") { continue; }
-            let ledger_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let ledger_id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
             if ledger_id.starts_with(prefix) || prefix.is_empty() {
                 let role = read_role(&path);
-                results.push(LedgerMatch { node_name: node_name.clone(), ledger_id, path, role });
+                results.push(LedgerMatch {
+                    node_name: node_name.clone(),
+                    ledger_id,
+                    path,
+                    role,
+                });
             }
         }
     }
@@ -453,7 +800,9 @@ fn find_ledger_files(data_root: &PathBuf, prefix: &str, node_filter: Option<&str
 /// Deduplicate ledger matches: prefer the Operator copy of each ledger_id.
 /// When a node_filter is active, skip deduplication (show what the user asked for).
 fn dedup_ledger_files(matches: Vec<LedgerMatch>, has_node_filter: bool) -> Vec<LedgerMatch> {
-    if has_node_filter { return matches; }
+    if has_node_filter {
+        return matches;
+    }
 
     let mut by_ledger: HashMap<String, Vec<LedgerMatch>> = HashMap::new();
     for m in matches {
@@ -470,11 +819,25 @@ fn dedup_ledger_files(matches: Vec<LedgerMatch>, has_node_filter: bool) -> Vec<L
         });
         results.push(copies.into_iter().next().unwrap());
     }
-    results.sort_by(|a, b| a.node_name.cmp(&b.node_name).then(a.ledger_id.cmp(&b.ledger_id)));
+    results.sort_by(|a, b| {
+        a.node_name
+            .cmp(&b.node_name)
+            .then(a.ledger_id.cmp(&b.ledger_id))
+    });
     results
 }
 
-fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbose: bool, until_hash: Option<&str>, decode_seq: Option<u64>, dump_seq: Option<u64>, browse: bool, graph: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn run_jsonl(
+    data_root: &PathBuf,
+    prefix: &str,
+    node_filter: Option<&str>,
+    verbose: bool,
+    until_hash: Option<&str>,
+    decode_seq: Option<u64>,
+    dump_seq: Option<u64>,
+    browse: bool,
+    graph: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let all_matches = find_ledger_files(data_root, prefix, node_filter);
     let matches = dedup_ledger_files(all_matches, node_filter.is_some());
 
@@ -482,7 +845,11 @@ fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbo
         if prefix.is_empty() {
             eprintln!("No ledger files found in {}", data_root.display());
         } else {
-            eprintln!("No ledger matching '{}' found in {}", prefix, data_root.display());
+            eprintln!(
+                "No ledger matching '{}' found in {}",
+                prefix,
+                data_root.display()
+            );
         }
         std::process::exit(1);
     }
@@ -490,11 +857,18 @@ fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbo
     if prefix.is_empty() || matches.len() > 1 {
         println!("Available ledgers:");
         for m in &matches {
-            let short_id = if m.ledger_id.len() > 16 { &m.ledger_id[..16] } else { &m.ledger_id };
+            let short_id = if m.ledger_id.len() > 16 {
+                &m.ledger_id[..16]
+            } else {
+                &m.ledger_id
+            };
             println!("  {}  {}  ({})", short_id, m.node_name, m.role);
         }
         if matches.len() > 1 && !prefix.is_empty() {
-            eprintln!("\nMultiple matches for '{}'. Provide a longer prefix or --node.", prefix);
+            eprintln!(
+                "\nMultiple matches for '{}'. Provide a longer prefix or --node.",
+                prefix
+            );
         }
         return Ok(());
     }
@@ -505,10 +879,11 @@ fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbo
     let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
 
     for line in contents.lines() {
-        if line.trim().is_empty() { continue; }
-        match serde_json::from_str::<LedgerLogRow>(line) {
-            Ok(LedgerLogRow::Update(u)) => { updates.push(u); }
-            _ => {}
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(LedgerLogRow::Update(u)) = serde_json::from_str::<LedgerLogRow>(line) {
+            updates.push(u);
         }
     }
 
@@ -529,7 +904,10 @@ fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbo
 
     if let Some(seq) = decode_seq {
         match updates.iter().find(|u| u.sequence_number == seq) {
-            Some(update) => { decode_update(update); return Ok(()); }
+            Some(update) => {
+                decode_update(update);
+                return Ok(());
+            }
             None => {
                 eprintln!("No update with sequence {} in {}", seq, m.path.display());
                 std::process::exit(1);
@@ -552,17 +930,24 @@ fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbo
     }
 
     let chain_indices = build_chain(&updates);
-    let chain: Vec<SignedLedgerUpdate> = chain_indices.iter().map(|&i| updates[i].clone()).collect();
+    let chain: Vec<SignedLedgerUpdate> =
+        chain_indices.iter().map(|&i| updates[i].clone()).collect();
 
     println!("{}/{}  (role: {})", m.node_name, m.ledger_id, m.role);
-    println!("{} updates in chain (of {} total in file)", chain.len(), updates.len());
+    println!(
+        "{} updates in chain (of {} total in file)",
+        chain.len(),
+        updates.len()
+    );
     println!();
 
     let (state, errors) = replay_chain(&chain, verbose, until_hash);
 
     if !errors.is_empty() {
         println!("Errors ({}):", errors.len());
-        for e in &errors { println!("  {}", e); }
+        for e in &errors {
+            println!("  {}", e);
+        }
         println!();
     }
 
@@ -576,12 +961,16 @@ fn run_jsonl(data_root: &PathBuf, prefix: &str, node_filter: Option<&str>, verbo
 
 /// List all ledgers available on a relay, optionally filtered by prefix.
 /// Returns the full ledger_id of a single match (for auto-selection), or None.
-async fn list_relay_ledgers(relay_url: &str, prefix: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    use tokio_tungstenite::tungstenite::Message;
+async fn list_relay_ledgers(
+    relay_url: &str,
+    prefix: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
     use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
 
     eprintln!("Connecting to {}...", relay_url);
-    let (mut ws, _) = tokio_tungstenite::connect_async(relay_url).await
+    let (mut ws, _) = tokio_tungstenite::connect_async(relay_url)
+        .await
         .map_err(|e| format!("Failed to connect to {}: {}", relay_url, e))?;
 
     let sub_id = "list";
@@ -597,8 +986,14 @@ async fn list_relay_ledgers(relay_url: &str, prefix: &str) -> Result<Option<Stri
             Ok(Some(Ok(Message::Text(text)))) => text,
             Ok(Some(Ok(Message::Close(_)))) | Ok(None) => break,
             Ok(Some(Ok(_))) => continue,
-            Ok(Some(Err(e))) => { eprintln!("WebSocket error: {}", e); break; }
-            Err(_) => { eprintln!("Timeout waiting for relay response"); break; }
+            Ok(Some(Err(e))) => {
+                eprintln!("WebSocket error: {}", e);
+                break;
+            }
+            Err(_) => {
+                eprintln!("Timeout waiting for relay response");
+                break;
+            }
         };
 
         let arr: serde_json::Value = match serde_json::from_str(&msg) {
@@ -613,15 +1008,29 @@ async fn list_relay_ledgers(relay_url: &str, prefix: &str) -> Result<Option<Stri
         match arr.first().and_then(|v| v.as_str()) {
             Some("EVENT") => {
                 if let Some(event) = arr.get(2) {
-                    let pubkey = event.get("pubkey").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let pubkey = event
+                        .get("pubkey")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
                     if let Some(tags) = event.get("tags").and_then(|v| v.as_array()) {
                         let mut lid = None;
                         let mut seq = 0u64;
                         for tag in tags {
                             if let Some(tag_arr) = tag.as_array() {
                                 match tag_arr.first().and_then(|v| v.as_str()) {
-                                    Some("d") => lid = tag_arr.get(1).and_then(|v| v.as_str()).map(|s| s.to_string()),
-                                    Some("n") => seq = tag_arr.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0),
+                                    Some("d") => {
+                                        lid = tag_arr
+                                            .get(1)
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string())
+                                    }
+                                    Some("n") => {
+                                        seq = tag_arr
+                                            .get(1)
+                                            .and_then(|v| v.as_str())
+                                            .and_then(|s| s.parse().ok())
+                                            .unwrap_or(0)
+                                    }
                                     _ => {}
                                 }
                             }
@@ -629,9 +1038,13 @@ async fn list_relay_ledgers(relay_url: &str, prefix: &str) -> Result<Option<Stri
                         if let Some(id) = lid {
                             if prefix.is_empty() || id.starts_with(prefix) {
                                 let entry = ledgers.entry(id).or_insert((0, 0, None));
-                                if seq > entry.0 { entry.0 = seq; }
+                                if seq > entry.0 {
+                                    entry.0 = seq;
+                                }
                                 entry.1 += 1;
-                                if entry.2.is_none() { entry.2 = pubkey; }
+                                if entry.2.is_none() {
+                                    entry.2 = pubkey;
+                                }
                             }
                         }
                     }
@@ -671,29 +1084,43 @@ async fn list_relay_ledgers(relay_url: &str, prefix: &str) -> Result<Option<Stri
 
     println!("Ledgers on {}:", relay_url);
     for (lid, (max_seq, count, pubkey)) in &sorted {
-        let short_id = if lid.len() > 16 { &lid[..16] } else { lid.as_str() };
+        let short_id = if lid.len() > 16 {
+            &lid[..16]
+        } else {
+            lid.as_str()
+        };
         let pk_str = match pubkey {
             Some(pk) if pk.len() >= 12 => format!("  pk={}...", &pk[..12]),
             _ => String::new(),
         };
-        println!("  {}  seq={:<4}  updates={}{}", short_id, max_seq, count, pk_str);
+        println!(
+            "  {}  seq={:<4}  updates={}{}",
+            short_id, max_seq, count, pk_str
+        );
     }
 
     if !prefix.is_empty() {
-        eprintln!("\nMultiple matches for '{}'. Provide a longer prefix.", prefix);
+        eprintln!(
+            "\nMultiple matches for '{}'. Provide a longer prefix.",
+            prefix
+        );
     }
 
     Ok(None)
 }
 
-async fn fetch_updates_from_relay(relay_url: &str, ledger_id: &str) -> Result<Vec<SignedLedgerUpdate>, Box<dyn std::error::Error>> {
-    use tokio_tungstenite::tungstenite::Message;
+async fn fetch_updates_from_relay(
+    relay_url: &str,
+    ledger_id: &str,
+) -> Result<Vec<SignedLedgerUpdate>, Box<dyn std::error::Error>> {
     use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
 
     let ledger_tag = &ledger_id[..16.min(ledger_id.len())];
 
     eprintln!("Connecting to {}...", relay_url);
-    let (mut ws, _) = tokio_tungstenite::connect_async(relay_url).await
+    let (mut ws, _) = tokio_tungstenite::connect_async(relay_url)
+        .await
         .map_err(|e| format!("Failed to connect to {}: {}", relay_url, e))?;
 
     // Send REQ with filter for Kind 9100 + ledger_id tag
@@ -714,8 +1141,14 @@ async fn fetch_updates_from_relay(relay_url: &str, ledger_id: &str) -> Result<Ve
             Ok(Some(Ok(Message::Text(text)))) => text,
             Ok(Some(Ok(Message::Close(_)))) | Ok(None) => break,
             Ok(Some(Ok(_))) => continue,
-            Ok(Some(Err(e))) => { eprintln!("WebSocket error: {}", e); break; }
-            Err(_) => { eprintln!("Timeout waiting for relay response"); break; }
+            Ok(Some(Err(e))) => {
+                eprintln!("WebSocket error: {}", e);
+                break;
+            }
+            Err(_) => {
+                eprintln!("Timeout waiting for relay response");
+                break;
+            }
         };
 
         let arr: serde_json::Value = match serde_json::from_str(&msg) {
@@ -759,21 +1192,40 @@ async fn fetch_updates_from_relay(relay_url: &str, ledger_id: &str) -> Result<Ve
     ws.send(Message::Text(close.to_string())).await.ok();
     ws.close(None).await.ok();
 
-    eprintln!("Received {} events, decoded {} updates", event_count, updates.len());
+    eprintln!(
+        "Received {} events, decoded {} updates",
+        event_count,
+        updates.len()
+    );
     Ok(updates)
 }
 
-async fn run_nostr(relay_url: &str, ledger_id: &str, verbose: bool, until_hash: Option<&str>, decode_seq: Option<u64>, dump_seq: Option<u64>, browse: bool, graph: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_nostr(
+    relay_url: &str,
+    ledger_id: &str,
+    verbose: bool,
+    until_hash: Option<&str>,
+    decode_seq: Option<u64>,
+    dump_seq: Option<u64>,
+    browse: bool,
+    graph: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut updates = fetch_updates_from_relay(relay_url, ledger_id).await?;
 
     if updates.is_empty() {
-        eprintln!("No updates found for ledger {}... on {}", &ledger_id[..16.min(ledger_id.len())], relay_url);
+        eprintln!(
+            "No updates found for ledger {}... on {}",
+            &ledger_id[..16.min(ledger_id.len())],
+            relay_url
+        );
         std::process::exit(1);
     }
 
     // Sort by sequence, dedup by content hash (keep different chains)
     updates.sort_by_key(|u| u.sequence_number);
-    updates.dedup_by(|a, b| a.sequence_number == b.sequence_number && a.current_hash == b.current_hash);
+    updates.dedup_by(|a, b| {
+        a.sequence_number == b.sequence_number && a.current_hash == b.current_hash
+    });
 
     if graph {
         return print_chain_graph(&updates);
@@ -785,7 +1237,10 @@ async fn run_nostr(relay_url: &str, ledger_id: &str, verbose: bool, until_hash: 
 
     if let Some(seq) = decode_seq {
         match updates.iter().find(|u| u.sequence_number == seq) {
-            Some(update) => { decode_update(update); return Ok(()); }
+            Some(update) => {
+                decode_update(update);
+                return Ok(());
+            }
             None => {
                 eprintln!("No update with sequence {} from relay", seq);
                 std::process::exit(1);
@@ -809,17 +1264,28 @@ async fn run_nostr(relay_url: &str, ledger_id: &str, verbose: bool, until_hash: 
 
     // Walk backward from tip to build chain
     let chain_indices = build_chain(&updates);
-    let chain: Vec<SignedLedgerUpdate> = chain_indices.iter().map(|&i| updates[i].clone()).collect();
+    let chain: Vec<SignedLedgerUpdate> =
+        chain_indices.iter().map(|&i| updates[i].clone()).collect();
 
-    println!("nostr:{} ledger={}", relay_url, &ledger_id[..16.min(ledger_id.len())]);
-    println!("{} updates in chain (of {} fetched)", chain.len(), updates.len());
+    println!(
+        "nostr:{} ledger={}",
+        relay_url,
+        &ledger_id[..16.min(ledger_id.len())]
+    );
+    println!(
+        "{} updates in chain (of {} fetched)",
+        chain.len(),
+        updates.len()
+    );
     println!();
 
     let (state, errors) = replay_chain(&chain, verbose, until_hash);
 
     if !errors.is_empty() {
         println!("Errors ({}):", errors.len());
-        for e in &errors { println!("  {}", e); }
+        for e in &errors {
+            println!("  {}", e);
+        }
         println!();
     }
 
@@ -833,37 +1299,75 @@ async fn run_nostr(relay_url: &str, ledger_id: &str, verbose: bool, until_hash: 
 
 #[cfg(unix)]
 fn use_color() -> bool {
-    extern "C" { fn isatty(fd: i32) -> i32; }
+    extern "C" {
+        fn isatty(fd: i32) -> i32;
+    }
     std::env::var("NO_COLOR").is_err() && unsafe { isatty(1) != 0 }
 }
 
 #[cfg(not(unix))]
-fn use_color() -> bool { false }
+fn use_color() -> bool {
+    false
+}
 
 struct Col(bool);
 impl Col {
-    fn dim(&self, s: &str) -> String { if self.0 { format!("\x1b[2m{}\x1b[0m", s) } else { s.to_string() } }
-    fn bold(&self, s: &str) -> String { if self.0 { format!("\x1b[1m{}\x1b[0m", s) } else { s.to_string() } }
-    fn cyan(&self, s: &str) -> String { if self.0 { format!("\x1b[36m{}\x1b[0m", s) } else { s.to_string() } }
-    fn green(&self, s: &str) -> String { if self.0 { format!("\x1b[32m{}\x1b[0m", s) } else { s.to_string() } }
-    fn yellow(&self, s: &str) -> String { if self.0 { format!("\x1b[33m{}\x1b[0m", s) } else { s.to_string() } }
+    fn dim(&self, s: &str) -> String {
+        if self.0 {
+            format!("\x1b[2m{}\x1b[0m", s)
+        } else {
+            s.to_string()
+        }
+    }
+    fn bold(&self, s: &str) -> String {
+        if self.0 {
+            format!("\x1b[1m{}\x1b[0m", s)
+        } else {
+            s.to_string()
+        }
+    }
+    fn cyan(&self, s: &str) -> String {
+        if self.0 {
+            format!("\x1b[36m{}\x1b[0m", s)
+        } else {
+            s.to_string()
+        }
+    }
+    fn green(&self, s: &str) -> String {
+        if self.0 {
+            format!("\x1b[32m{}\x1b[0m", s)
+        } else {
+            s.to_string()
+        }
+    }
+    fn yellow(&self, s: &str) -> String {
+        if self.0 {
+            format!("\x1b[33m{}\x1b[0m", s)
+        } else {
+            s.to_string()
+        }
+    }
 }
 
 /// Read a BigEndian varint from a byte slice at `offset`. Returns (value, bytes_consumed).
 fn read_varint_at(data: &[u8], offset: usize) -> Option<(u64, usize)> {
-    if offset >= data.len() { return None; }
+    if offset >= data.len() {
+        return None;
+    }
     match data[offset] {
         b @ 0..=0xfc => Some((b as u64, 1)),
-        0xfd if offset + 3 <= data.len() =>
-            Some((u16::from_be_bytes([data[offset+1], data[offset+2]]) as u64, 3)),
+        0xfd if offset + 3 <= data.len() => Some((
+            u16::from_be_bytes([data[offset + 1], data[offset + 2]]) as u64,
+            3,
+        )),
         0xfe if offset + 5 <= data.len() => {
             let mut buf = [0u8; 4];
-            buf.copy_from_slice(&data[offset+1..offset+5]);
+            buf.copy_from_slice(&data[offset + 1..offset + 5]);
             Some((u32::from_be_bytes(buf) as u64, 5))
         }
         0xff if offset + 9 <= data.len() => {
             let mut buf = [0u8; 8];
-            buf.copy_from_slice(&data[offset+1..offset+9]);
+            buf.copy_from_slice(&data[offset + 1..offset + 9]);
             Some((u64::from_be_bytes(buf), 9))
         }
         _ => None,
@@ -871,15 +1375,29 @@ fn read_varint_at(data: &[u8], offset: usize) -> Option<(u64, usize)> {
 }
 
 #[derive(Copy, Clone, PartialEq)]
-enum Enc { U8, U16, U32, U64, Pubkey, Hash, Sig, DepId, Str, Bytes, OpTlv, FeeTlv, Witness }
+enum Enc {
+    U8,
+    U16,
+    U32,
+    U64,
+    Pubkey,
+    Hash,
+    Sig,
+    DepId,
+    Str,
+    Bytes,
+    OpTlv,
+    FeeTlv,
+    Witness,
+}
 
 fn lookup_slu_field(tag: u64) -> (&'static str, Enc) {
     match tag {
-        0  => ("operator_id", Enc::Pubkey),
-        2  => ("ledger_id", Enc::Hash),
-        4  => ("sequence_number", Enc::U64),
-        6  => ("previous_hash", Enc::Hash),
-        8  => ("message", Enc::OpTlv),
+        0 => ("operator_id", Enc::Pubkey),
+        2 => ("ledger_id", Enc::Hash),
+        4 => ("sequence_number", Enc::U64),
+        6 => ("previous_hash", Enc::Hash),
+        8 => ("message", Enc::OpTlv),
         10 => ("block_height", Enc::U32),
         12 => ("block_hash", Enc::Hash),
         14 => ("cosigner_pubkey", Enc::Pubkey),
@@ -887,50 +1405,50 @@ fn lookup_slu_field(tag: u64) -> (&'static str, Enc) {
         18 => ("cosign_signature", Enc::Sig),
         20 => ("operator_signature", Enc::Sig),
         22 => ("cosignatures", Enc::Bytes),
-        _  => ("unknown", Enc::Bytes),
+        _ => ("unknown", Enc::Bytes),
     }
 }
 
 fn lookup_op_field(tag: u64) -> (&'static str, Enc) {
     match tag {
-        0   => ("discriminant", Enc::U8),
-        2   => ("amount", Enc::U64),
-        4   => ("spend_to", Enc::Pubkey),
-        6   => ("quorum_members", Enc::Bytes),
-        12  => ("fees", Enc::FeeTlv),
-        14  => ("payment_hash", Enc::Hash),
-        16  => ("invoice", Enc::Str),
-        18  => ("cosigner_sig", Enc::Sig),
-        20  => ("new_fees", Enc::FeeTlv),
-        24  => ("deposit_pubkey", Enc::Pubkey),
-        26  => ("invoice_id", Enc::Str),
-        28  => ("sequence_number", Enc::U64),
-        30  => ("payment_id", Enc::Hash),
-        34  => ("preimage", Enc::Hash),
-        36  => ("block_height", Enc::U32),
-        38  => ("collateral_operator", Enc::Pubkey),
-        40  => ("signature", Enc::Sig),
-        42  => ("ledger_hash", Enc::Hash),
-        44  => ("quorum_member", Enc::Pubkey),
-        46  => ("quorum_member_sig", Enc::Sig),
-        48  => ("operator_sig", Enc::Sig),
-        56  => ("operator_id", Enc::Pubkey),
-        58  => ("reserves_id", Enc::Str),
-        62  => ("reserves_amount", Enc::U64),
-        66  => ("txid", Enc::Hash),
-        68  => ("vout", Enc::U32),
-        70  => ("destination_address", Enc::Str),
-        72  => ("withdrawal_id", Enc::Hash),
-        74  => ("funding_address", Enc::Str),
-        76  => ("lock_until_block", Enc::U32),
+        0 => ("discriminant", Enc::U8),
+        2 => ("amount", Enc::U64),
+        4 => ("spend_to", Enc::Pubkey),
+        6 => ("quorum_members", Enc::Bytes),
+        12 => ("fees", Enc::FeeTlv),
+        14 => ("payment_hash", Enc::Hash),
+        16 => ("invoice", Enc::Str),
+        18 => ("cosigner_sig", Enc::Sig),
+        20 => ("new_fees", Enc::FeeTlv),
+        24 => ("deposit_pubkey", Enc::Pubkey),
+        26 => ("invoice_id", Enc::Str),
+        28 => ("sequence_number", Enc::U64),
+        30 => ("payment_id", Enc::Hash),
+        34 => ("preimage", Enc::Hash),
+        36 => ("block_height", Enc::U32),
+        38 => ("collateral_operator", Enc::Pubkey),
+        40 => ("signature", Enc::Sig),
+        42 => ("ledger_hash", Enc::Hash),
+        44 => ("quorum_member", Enc::Pubkey),
+        46 => ("quorum_member_sig", Enc::Sig),
+        48 => ("operator_sig", Enc::Sig),
+        56 => ("operator_id", Enc::Pubkey),
+        58 => ("reserves_id", Enc::Str),
+        62 => ("reserves_amount", Enc::U64),
+        66 => ("txid", Enc::Hash),
+        68 => ("vout", Enc::U32),
+        70 => ("destination_address", Enc::Str),
+        72 => ("withdrawal_id", Enc::Hash),
+        74 => ("funding_address", Enc::Str),
+        76 => ("lock_until_block", Enc::U32),
         // tag 80 (our_signature) removed from QuorumJoin
-        82  => ("membership_expires", Enc::U32),
-        84  => ("new_outpoint_txid", Enc::Hash),
-        86  => ("quorum_expiry", Enc::U32),
-        88  => ("total_collateral", Enc::U64),
-        90  => ("spending_txid", Enc::Hash),
-        92  => ("new_outpoint_vout", Enc::U32),
-        96  => ("genesis_block", Enc::U32),
+        82 => ("membership_expires", Enc::U32),
+        84 => ("new_outpoint_txid", Enc::Hash),
+        86 => ("quorum_expiry", Enc::U32),
+        88 => ("total_collateral", Enc::U64),
+        90 => ("spending_txid", Enc::Hash),
+        92 => ("new_outpoint_vout", Enc::U32),
+        96 => ("genesis_block", Enc::U32),
         100 => ("reason", Enc::Str),
         102 => ("last_valid_sequence", Enc::U64),
         106 => ("entropy_block_hash", Enc::Hash),
@@ -976,7 +1494,7 @@ fn lookup_op_field(tag: u64) -> (&'static str, Enc) {
         270 => ("request_hash", Enc::Hash),
         272 => ("target_ledger_id", Enc::Hash),
         274 => ("target_operator", Enc::Pubkey),
-        _   => ("unknown", Enc::Bytes),
+        _ => ("unknown", Enc::Bytes),
     }
 }
 
@@ -991,22 +1509,36 @@ fn lookup_fee_field(tag: u64) -> (&'static str, Enc) {
 
 fn discriminant_name(disc: u8) -> &'static str {
     match disc {
-        1  => "LedgerOpen",        12 => "QuorumBegin",
-        20 => "DepositOpen",       21 => "DepositClose",
-        22 => "FeeChange",         23 => "DepositKeyRotate",
-        30 => "InvoiceCredit",     31 => "InvoiceLock",
-        32 => "InvoiceFail",       33 => "InvoiceFulfill",
-        35 => "OnchainCredit",     36 => "OnchainLock",
-        37 => "OnchainFail",       38 => "OnchainFulfill",
-        42 => "CollateralAttestation", 43 => "QuorumAddMember",
-        44 => "QuorumRemoveMember",45 => "CollateralLock",
-        46 => "QuorumJoin",        50 => "FeeCollect",
-        54 => "DisputeEnter",      55 => "DisputeAcquire",
-        56 => "DisputeYield",      57 => "DisputeArmed",
-        60 => "LedgerClose",       70 => "TransferLock",
-        71 => "TransferComplete",  72 => "TransferFail",
+        1 => "LedgerOpen",
+        12 => "QuorumBegin",
+        20 => "DepositOpen",
+        21 => "DepositClose",
+        22 => "FeeChange",
+        23 => "DepositKeyRotate",
+        30 => "InvoiceCredit",
+        31 => "InvoiceLock",
+        32 => "InvoiceFail",
+        33 => "InvoiceFulfill",
+        35 => "OnchainCredit",
+        36 => "OnchainLock",
+        37 => "OnchainFail",
+        38 => "OnchainFulfill",
+        42 => "CollateralAttestation",
+        43 => "QuorumAddMember",
+        44 => "QuorumRemoveMember",
+        45 => "CollateralLock",
+        46 => "QuorumJoin",
+        50 => "FeeCollect",
+        54 => "DisputeEnter",
+        55 => "DisputeAcquire",
+        56 => "DisputeYield",
+        57 => "DisputeArmed",
+        60 => "LedgerClose",
+        70 => "TransferLock",
+        71 => "TransferComplete",
+        72 => "TransferFail",
         80 => "DeliveryEmbed",
-        _  => "unknown",
+        _ => "unknown",
     }
 }
 
@@ -1025,57 +1557,86 @@ fn format_field_value(val: &[u8], enc: Enc, name: &str, col: &Col) -> String {
         Enc::U16 => {
             if val.len() >= 2 {
                 format!("{}", u16::from_be_bytes([val[0], val[1]]))
-            } else { "0".into() }
+            } else {
+                "0".into()
+            }
         }
         Enc::U32 => {
             if val.len() >= 4 {
                 let v = u32::from_be_bytes([val[0], val[1], val[2], val[3]]);
                 format!("{} {}", v, col.dim(&format!("(0x{:x})", v)))
-            } else { "0".into() }
+            } else {
+                "0".into()
+            }
         }
         Enc::U64 => {
             if val.len() >= 8 {
-                let v = u64::from_be_bytes([val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7]]);
-                if v == 0 { return "0".into(); }
+                let v = u64::from_be_bytes([
+                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+                ]);
+                if v == 0 {
+                    return "0".into();
+                }
                 let hint = if v >= 1_000_000_000 {
                     let sats = v / 1000;
                     let rem = v % 1000;
-                    if rem == 0 { format!("({})", format_sats(sats)) }
-                    else { format!("({}.{:03} sat)", format_sats(sats), rem) }
+                    if rem == 0 {
+                        format!("({})", format_sats(sats))
+                    } else {
+                        format!("({}.{:03} sat)", format_sats(sats), rem)
+                    }
                 } else if v >= 1000 {
                     format!("({})", format_sats(v))
-                } else { String::new() };
-                if hint.is_empty() { format!("{}", v) }
-                else { format!("{} {}", v, col.dim(&hint)) }
-            } else { "0".into() }
+                } else {
+                    String::new()
+                };
+                if hint.is_empty() {
+                    format!("{}", v)
+                } else {
+                    format!("{} {}", v, col.dim(&hint))
+                }
+            } else {
+                "0".into()
+            }
         }
         Enc::Pubkey => col.yellow(&hex::encode(val)),
         Enc::Hash | Enc::Sig => {
-            if val.iter().all(|&b| b == 0) { col.dim("(zero)") }
-            else {
+            if val.iter().all(|&b| b == 0) {
+                col.dim("(zero)")
+            } else {
                 let h = hex::encode(val);
-                if h.len() > 20 { col.yellow(&format!("{}...", &h[..16])) }
-                else { col.yellow(&h) }
+                if h.len() > 20 {
+                    col.yellow(&format!("{}...", &h[..16]))
+                } else {
+                    col.yellow(&h)
+                }
             }
         }
         Enc::DepId => col.yellow(&hex::encode(val)),
-        Enc::Str => {
-            match std::str::from_utf8(val) {
-                Ok(s) if s.len() > 60 => col.yellow(&format!("\"{}...\"", &s[..57])),
-                Ok(s) => col.yellow(&format!("\"{}\"", s)),
-                Err(_) => hex::encode(val),
-            }
-        }
+        Enc::Str => match std::str::from_utf8(val) {
+            Ok(s) if s.len() > 60 => col.yellow(&format!("\"{}...\"", &s[..57])),
+            Ok(s) => col.yellow(&format!("\"{}\"", s)),
+            Err(_) => hex::encode(val),
+        },
         Enc::Bytes => {
             let h = hex::encode(val);
-            if h.len() > 40 { format!("{} {}", &h[..40], col.dim(&format!("...{} bytes total", val.len()))) }
-            else { h }
+            if h.len() > 40 {
+                format!(
+                    "{} {}",
+                    &h[..40],
+                    col.dim(&format!("...{} bytes total", val.len()))
+                )
+            } else {
+                h
+            }
         }
         Enc::OpTlv | Enc::FeeTlv => col.dim(&format!("({} bytes, nested TLV)", val.len())),
         Enc::Witness => {
             if let Some((count, _)) = read_varint_at(val, 0) {
                 col.dim(&format!("({} element(s))", count))
-            } else { col.dim("(witness)") }
+            } else {
+                col.dim("(witness)")
+            }
         }
     }
 }
@@ -1094,12 +1655,14 @@ fn print_tlv_annotated(
         let record_start = offset;
 
         let (tag, tag_sz) = match read_varint_at(data, offset) {
-            Some(v) => v, None => break,
+            Some(v) => v,
+            None => break,
         };
         offset += tag_sz;
 
         let (length, _len_sz) = match read_varint_at(data, offset) {
-            Some(v) => v, None => break,
+            Some(v) => v,
+            None => break,
         };
         offset += _len_sz;
 
@@ -1114,31 +1677,64 @@ fn print_tlv_annotated(
 
         // Header line: tag + length bytes
         let hdr = &data[record_start..val_start];
-        let hdr_hex: String = hdr.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-        println!("  {}{}  {:<51}  {}{}  {}",
-            col.dim(&format!("{:04x}", abs_off)), indent,
+        let hdr_hex: String = hdr
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "  {}{}  {:<51}  {}{}  {}",
+            col.dim(&format!("{:04x}", abs_off)),
+            indent,
             hdr_hex,
             col.cyan(&format!("tag={}", tag)),
             col.dim(&format!(" len={}", length)),
-            col.bold(name));
+            col.bold(name)
+        );
 
         // Value lines — skip raw hex for nested types that we destructure below
         let nested = matches!(enc, Enc::OpTlv | Enc::FeeTlv | Enc::Witness);
         if !nested {
             let display = format_field_value(val, enc, name, col);
             if val.len() <= 17 {
-                let val_hex: String = val.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-                println!("  {}{}  {:<51}  {}",
-                    col.dim(&format!("{:04x}", abs_val)), indent, val_hex, display);
+                let val_hex: String = val
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!(
+                    "  {}{}  {:<51}  {}",
+                    col.dim(&format!("{:04x}", abs_val)),
+                    indent,
+                    val_hex,
+                    display
+                );
             } else {
-                let first: String = val[..17].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-                println!("  {}{}  {:<51}  {}",
-                    col.dim(&format!("{:04x}", abs_val)), indent, first, display);
+                let first: String = val[..17]
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!(
+                    "  {}{}  {:<51}  {}",
+                    col.dim(&format!("{:04x}", abs_val)),
+                    indent,
+                    first,
+                    display
+                );
                 for i in (17..val.len()).step_by(17) {
                     let end = (i + 17).min(val.len());
-                    let line: String = val[i..end].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-                    println!("  {}{}  {}",
-                        col.dim(&format!("{:04x}", abs_val + i)), indent, line);
+                    let line: String = val[i..end]
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    println!(
+                        "  {}{}  {}",
+                        col.dim(&format!("{:04x}", abs_val + i)),
+                        indent,
+                        line
+                    );
                 }
             }
         }
@@ -1157,10 +1753,19 @@ fn print_tlv_annotated(
                             let eend = (woff + elen as usize).min(val.len());
                             let elem = &val[woff..eend];
                             let eh = hex::encode(elem);
-                            let display = if eh.len() > 40 { format!("{}...", &eh[..40]) } else { eh };
-                            println!("  {}{}    elem[{}]: {} {}",
-                                col.dim(&format!("{:04x}", abs_val + woff)), indent,
-                                i, col.yellow(&display), col.dim(&format!("({} bytes)", elen)));
+                            let display = if eh.len() > 40 {
+                                format!("{}...", &eh[..40])
+                            } else {
+                                eh
+                            };
+                            println!(
+                                "  {}{}    elem[{}]: {} {}",
+                                col.dim(&format!("{:04x}", abs_val + woff)),
+                                indent,
+                                i,
+                                col.yellow(&display),
+                                col.dim(&format!("({} bytes)", elen))
+                            );
                             woff = eend;
                         }
                     }
@@ -1175,7 +1780,11 @@ fn decode_update(update: &SignedLedgerUpdate) {
     let bytes = update.tlv_encode();
     let col = Col(use_color());
 
-    println!("\n{}  ({} bytes)\n", col.bold("SignedLedgerUpdate"), bytes.len());
+    println!(
+        "\n{}  ({} bytes)\n",
+        col.bold("SignedLedgerUpdate"),
+        bytes.len()
+    );
     print_tlv_annotated(&bytes, 0, lookup_slu_field, 0, &col);
 
     // Derived values
@@ -1199,12 +1808,20 @@ fn tlv_to_json(data: &[u8], lookup: fn(u64) -> (&'static str, Enc)) -> Vec<serde
     let mut records = Vec::new();
     let mut off = 0;
     while off < data.len() {
-        let (tag, tlen) = match read_varint_at(data, off) { Some(v) => v, None => break };
+        let (tag, tlen) = match read_varint_at(data, off) {
+            Some(v) => v,
+            None => break,
+        };
         off += tlen;
-        let (len, llen) = match read_varint_at(data, off) { Some(v) => v, None => break };
+        let (len, llen) = match read_varint_at(data, off) {
+            Some(v) => v,
+            None => break,
+        };
         off += llen;
         let end = off + len as usize;
-        if end > data.len() { break; }
+        if end > data.len() {
+            break;
+        }
         let val = &data[off..end];
         off = end;
 
@@ -1213,11 +1830,13 @@ fn tlv_to_json(data: &[u8], lookup: fn(u64) -> (&'static str, Enc)) -> Vec<serde
             Enc::U8 if val.len() == 1 => serde_json::json!(val[0]),
             Enc::U16 if val.len() == 2 => serde_json::json!(u16::from_be_bytes([val[0], val[1]])),
             Enc::U32 if val.len() == 4 => {
-                let mut buf = [0u8; 4]; buf.copy_from_slice(val);
+                let mut buf = [0u8; 4];
+                buf.copy_from_slice(val);
                 serde_json::json!(u32::from_be_bytes(buf))
             }
             Enc::U64 if val.len() == 8 => {
-                let mut buf = [0u8; 8]; buf.copy_from_slice(val);
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(val);
                 serde_json::json!(u64::from_be_bytes(buf))
             }
             Enc::Str => serde_json::json!(String::from_utf8_lossy(val)),
@@ -1275,7 +1894,8 @@ fn dump_update_json(update: &SignedLedgerUpdate) -> String {
         "content_base64": content_b64,
         "envelope_tlv": envelope_tlv,
         "operation_tlv": operation_tlv,
-    }).to_string()
+    })
+    .to_string()
 }
 
 fn dump_update_to_file(update: &SignedLedgerUpdate) -> Result<String, Box<dyn std::error::Error>> {
@@ -1291,7 +1911,7 @@ fn dump_update_to_file(update: &SignedLedgerUpdate) -> Result<String, Box<dyn st
 // =========================================================================
 
 fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::error::Error>> {
-    use std::collections::{HashMap, BTreeMap};
+    use std::collections::HashMap;
 
     if updates.is_empty() {
         println!("No updates.");
@@ -1299,7 +1919,10 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
     }
 
     // Assign colors to authors (operator pubkeys)
-    let colors = ["\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[31m", "\x1b[37m", "\x1b[91m"];
+    let colors = [
+        "\x1b[32m", "\x1b[33m", "\x1b[34m", "\x1b[35m", "\x1b[36m", "\x1b[31m", "\x1b[37m",
+        "\x1b[91m",
+    ];
     let reset = "\x1b[0m";
     let dim = "\x1b[2m";
     let bold = "\x1b[1m";
@@ -1312,7 +1935,7 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
         author_colors.entry(author.clone()).or_insert(next_idx);
         author_names.entry(author).or_insert_with(|| {
             let s = hex::encode(u.operator_id.serialize());
-            format!("{}..{}", &s[..6], &s[s.len()-4..])
+            format!("{}..{}", &s[..6], &s[s.len() - 4..])
         });
     }
 
@@ -1321,8 +1944,8 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
     let mut next_branch = 0usize;
     for u in updates {
         let author = hex::encode(u.operator_id.serialize());
-        if !op_to_branch.contains_key(&author) {
-            op_to_branch.insert(author, next_branch);
+        if let std::collections::hash_map::Entry::Vacant(e) = op_to_branch.entry(author) {
+            e.insert(next_branch);
             next_branch += 1;
         }
     }
@@ -1335,8 +1958,14 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
         let author = hex::encode(u.operator_id.serialize());
         let b = op_to_branch[&author];
         let seq = u.sequence_number;
-        branch_first.entry(b).and_modify(|v| *v = (*v).min(seq)).or_insert(seq);
-        branch_last.entry(b).and_modify(|v| *v = (*v).max(seq)).or_insert(seq);
+        branch_first
+            .entry(b)
+            .and_modify(|v| *v = (*v).min(seq))
+            .or_insert(seq);
+        branch_last
+            .entry(b)
+            .and_modify(|v| *v = (*v).max(seq))
+            .or_insert(seq);
     }
 
     // Print legend
@@ -1346,12 +1975,17 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
     for (author, &branch) in &branches_sorted {
         let color = colors[branch % colors.len()];
         let name = &author_names[*author];
-        let count = updates.iter().filter(|u| hex::encode(u.operator_id.serialize()) == **author).count();
+        let count = updates
+            .iter()
+            .filter(|u| hex::encode(u.operator_id.serialize()) == **author)
+            .count();
         let first = branch_first.get(&branch).copied().unwrap_or(0);
         let last = branch_last.get(&branch).copied().unwrap_or(0);
         let label = if branch == 0 { "operator" } else { "fork" };
-        println!("  {}│{} {} {} ({} updates, seq {}-{}, {})",
-            color, reset, label, branch, count, first, last, name);
+        println!(
+            "  {}│{} {} {} ({} updates, seq {}-{}, {})",
+            color, reset, label, branch, count, first, last, name
+        );
     }
     println!();
 
@@ -1363,12 +1997,19 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
         per_branch[branch].push((u.sequence_number, idx));
     }
     // Sort each branch newest first
-    for v in &mut per_branch { v.sort_by(|a, b| b.0.cmp(&a.0)); }
+    for v in &mut per_branch {
+        v.sort_by(|a, b| b.0.cmp(&a.0));
+    }
 
     // Layout: operator entries above fork point, then each fork branch, then operator below fork
     let fork_start_seq = if num_branches > 1 {
-        (1..num_branches).filter_map(|b| branch_first.get(&b).copied()).min().unwrap_or(0)
-    } else { 0 };
+        (1..num_branches)
+            .filter_map(|b| branch_first.get(&b).copied())
+            .min()
+            .unwrap_or(0)
+    } else {
+        0
+    };
 
     // Each entry: (seq, branch, update_idx, visible_branches)
     let mut all: Vec<(u64, usize, usize, Vec<usize>)> = Vec::new();
@@ -1376,7 +2017,9 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
     if num_branches > 1 {
         // Operator entries at/after fork point — only operator visible
         for &(seq, idx) in &per_branch[0] {
-            if seq >= fork_start_seq { all.push((seq, 0, idx, vec![0])); }
+            if seq >= fork_start_seq {
+                all.push((seq, 0, idx, vec![0]));
+            }
         }
         // Each fork branch, longest first (shortest last, closest to pre-fork)
         let mut fork_order: Vec<usize> = (1..num_branches).collect();
@@ -1389,7 +2032,9 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
         }
         // Operator entries before fork point — only operator visible
         for &(seq, idx) in &per_branch[0] {
-            if seq < fork_start_seq { all.push((seq, 0, idx, vec![0])); }
+            if seq < fork_start_seq {
+                all.push((seq, 0, idx, vec![0]));
+            }
         }
     } else {
         for &(seq, idx) in &per_branch[0] {
@@ -1430,11 +2075,10 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
         };
 
         let hash_short = &hex::encode(u.chain_hash())[..8];
-        println!("{} {}{:3}{} {} {}{}{}",
-            prefix,
-            dim, seq, reset,
-            hash_short,
-            color, op_name, reset);
+        println!(
+            "{} {}{:3}{} {} {}{}{}",
+            prefix, dim, seq, reset, hash_short, color, op_name, reset
+        );
     }
 
     Ok(())
@@ -1444,22 +2088,28 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
 // TUI Browse Mode
 // =========================================================================
 
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEventKind};
 use ratatui::{
-    DefaultTerminal,
     layout::{Constraint, Layout},
     style::{Color, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, List, ListItem, ListState, Paragraph},
+    DefaultTerminal,
 };
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEventKind};
 
 /// Short label for the left panel list.
 fn update_label(update: &SignedLedgerUpdate) -> String {
-    let cosigned = if update.cosigner_pubkey.is_some() { " *" } else { "" };
+    let cosigned = if update.cosigner_pubkey.is_some() {
+        " *"
+    } else {
+        ""
+    };
     // Peek at discriminant byte directly: tag=0, len=1, disc_byte
     let name = if update.message.len() >= 3 && update.message[0] == 0 && update.message[1] == 1 {
         discriminant_name(update.message[2])
-    } else { "unknown" };
+    } else {
+        "unknown"
+    };
     format!("{:>4}  {}{}", update.sequence_number, name, cosigned)
 }
 
@@ -1473,35 +2123,68 @@ fn format_field_spans(val: &[u8], enc: Enc, name: &str) -> Vec<Span<'static>> {
         Enc::U8 => {
             let v = val.first().copied().unwrap_or(0);
             if name == "discriminant" {
-                vec![Span::raw(format!("{} = ", v)), Span::styled(discriminant_name(v).to_string(), green)]
+                vec![
+                    Span::raw(format!("{} = ", v)),
+                    Span::styled(discriminant_name(v).to_string(), green),
+                ]
             } else if name == "is_collateral" || name == "receive_requires_sig" {
-                vec![Span::raw(format!("{} ({})", v, if v != 0 { "true" } else { "false" }))]
+                vec![Span::raw(format!(
+                    "{} ({})",
+                    v,
+                    if v != 0 { "true" } else { "false" }
+                ))]
             } else {
                 vec![Span::raw(format!("{}", v))]
             }
         }
         Enc::U16 => {
-            let v = if val.len() >= 2 { u16::from_be_bytes([val[0], val[1]]) } else { 0 };
+            let v = if val.len() >= 2 {
+                u16::from_be_bytes([val[0], val[1]])
+            } else {
+                0
+            };
             vec![Span::raw(format!("{}", v))]
         }
         Enc::U32 => {
-            let v = if val.len() >= 4 { u32::from_be_bytes([val[0], val[1], val[2], val[3]]) } else { 0 };
-            vec![Span::raw(format!("{} ", v)), Span::styled(format!("(0x{:x})", v), dim)]
+            let v = if val.len() >= 4 {
+                u32::from_be_bytes([val[0], val[1], val[2], val[3]])
+            } else {
+                0
+            };
+            vec![
+                Span::raw(format!("{} ", v)),
+                Span::styled(format!("(0x{:x})", v), dim),
+            ]
         }
         Enc::U64 => {
             let v = if val.len() >= 8 {
-                u64::from_be_bytes([val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7]])
-            } else { 0 };
-            if v == 0 { return vec![Span::raw("0".to_string())]; }
+                u64::from_be_bytes([
+                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+                ])
+            } else {
+                0
+            };
+            if v == 0 {
+                return vec![Span::raw("0".to_string())];
+            }
             let hint = if v >= 1_000_000_000 {
-                let sats = v / 1000; let rem = v % 1000;
-                if rem == 0 { format!("({})", format_sats(sats)) }
-                else { format!("({}.{:03} sat)", format_sats(sats), rem) }
+                let sats = v / 1000;
+                let rem = v % 1000;
+                if rem == 0 {
+                    format!("({})", format_sats(sats))
+                } else {
+                    format!("({}.{:03} sat)", format_sats(sats), rem)
+                }
             } else if v >= 1000 {
                 format!("({})", format_sats(v))
-            } else { String::new() };
-            if hint.is_empty() { vec![Span::raw(format!("{}", v))] }
-            else { vec![Span::raw(format!("{} ", v)), Span::styled(hint, dim)] }
+            } else {
+                String::new()
+            };
+            if hint.is_empty() {
+                vec![Span::raw(format!("{}", v))]
+            } else {
+                vec![Span::raw(format!("{} ", v)), Span::styled(hint, dim)]
+            }
         }
         Enc::Pubkey => vec![Span::styled(hex::encode(val), yellow)],
         Enc::Hash | Enc::Sig => {
@@ -1509,8 +2192,11 @@ fn format_field_spans(val: &[u8], enc: Enc, name: &str) -> Vec<Span<'static>> {
                 vec![Span::styled("(zero)".to_string(), dim)]
             } else {
                 let h = hex::encode(val);
-                if h.len() > 20 { vec![Span::styled(format!("{}...", &h[..16]), yellow)] }
-                else { vec![Span::styled(h, yellow)] }
+                if h.len() > 20 {
+                    vec![Span::styled(format!("{}...", &h[..16]), yellow)]
+                } else {
+                    vec![Span::styled(h, yellow)]
+                }
             }
         }
         Enc::DepId => vec![Span::styled(hex::encode(val), yellow)],
@@ -1521,22 +2207,35 @@ fn format_field_spans(val: &[u8], enc: Enc, name: &str) -> Vec<Span<'static>> {
         },
         Enc::Bytes => {
             let h = hex::encode(val);
-            if h.len() > 40 { vec![Span::raw(format!("{} ", &h[..40])), Span::styled(format!("...{} bytes total", val.len()), dim)] }
-            else { vec![Span::raw(h)] }
+            if h.len() > 40 {
+                vec![
+                    Span::raw(format!("{} ", &h[..40])),
+                    Span::styled(format!("...{} bytes total", val.len()), dim),
+                ]
+            } else {
+                vec![Span::raw(h)]
+            }
         }
-        Enc::OpTlv | Enc::FeeTlv => vec![Span::styled(format!("({} bytes, nested TLV)", val.len()), dim)],
+        Enc::OpTlv | Enc::FeeTlv => vec![Span::styled(
+            format!("({} bytes, nested TLV)", val.len()),
+            dim,
+        )],
         Enc::Witness => {
             if let Some((count, _)) = read_varint_at(val, 0) {
                 vec![Span::styled(format!("({} element(s))", count), dim)]
-            } else { vec![Span::styled("(witness)".to_string(), dim)] }
+            } else {
+                vec![Span::styled("(witness)".to_string(), dim)]
+            }
         }
     }
 }
 
 /// Styled variant of print_tlv_annotated — returns Lines for ratatui.
 fn tlv_lines(
-    data: &[u8], base_offset: usize,
-    lookup: fn(u64) -> (&'static str, Enc), depth: usize,
+    data: &[u8],
+    base_offset: usize,
+    lookup: fn(u64) -> (&'static str, Enc),
+    depth: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let indent = "  ".repeat(depth);
@@ -1548,9 +2247,15 @@ fn tlv_lines(
 
     while offset < data.len() {
         let record_start = offset;
-        let (tag, tsz) = match read_varint_at(data, offset) { Some(v) => v, None => break };
+        let (tag, tsz) = match read_varint_at(data, offset) {
+            Some(v) => v,
+            None => break,
+        };
         offset += tsz;
-        let (length, lsz) = match read_varint_at(data, offset) { Some(v) => v, None => break };
+        let (length, lsz) = match read_varint_at(data, offset) {
+            Some(v) => v,
+            None => break,
+        };
         offset += lsz;
         let val_start = offset;
         let val_end = (offset + length as usize).min(data.len());
@@ -1563,14 +2268,19 @@ fn tlv_lines(
 
         // Header line
         let hdr = &data[record_start..val_start];
-        let hdr_hex: String = hdr.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+        let hdr_hex: String = hdr
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ");
         lines.push(Line::from(vec![
             Span::styled(format!("  {:04x}", abs_off), dim),
             Span::raw(indent.clone()),
             Span::raw(format!("  {:<51}  ", hdr_hex)),
             Span::styled(format!("tag={}", tag), cyan),
             Span::styled(format!(" len={}", length), dim),
-            Span::raw("  "), Span::styled(name.to_string(), bold_s),
+            Span::raw("  "),
+            Span::styled(name.to_string(), bold_s),
         ]));
 
         // Value line(s) — skip raw hex for nested types that we destructure below
@@ -1578,7 +2288,11 @@ fn tlv_lines(
         if !nested {
             let display = format_field_spans(val, enc, name);
             if val.len() <= 17 {
-                let vh: String = val.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                let vh: String = val
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let mut s = vec![
                     Span::styled(format!("  {:04x}", abs_val), dim),
                     Span::raw(indent.clone()),
@@ -1587,7 +2301,11 @@ fn tlv_lines(
                 s.extend(display);
                 lines.push(Line::from(s));
             } else {
-                let first: String = val[..17].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                let first: String = val[..17]
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let mut s = vec![
                     Span::styled(format!("  {:04x}", abs_val), dim),
                     Span::raw(indent.clone()),
@@ -1597,10 +2315,15 @@ fn tlv_lines(
                 lines.push(Line::from(s));
                 for i in (17..val.len()).step_by(17) {
                     let end = (i + 17).min(val.len());
-                    let ch: String = val[i..end].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                    let ch: String = val[i..end]
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     lines.push(Line::from(vec![
                         Span::styled(format!("  {:04x}", abs_val + i), dim),
-                        Span::raw(indent.clone()), Span::raw(format!("  {}", ch)),
+                        Span::raw(indent.clone()),
+                        Span::raw(format!("  {}", ch)),
                     ]));
                 }
             }
@@ -1620,7 +2343,11 @@ fn tlv_lines(
                             let eend = (woff + elen as usize).min(val.len());
                             let elem = &val[woff..eend];
                             let eh = hex::encode(elem);
-                            let d = if eh.len() > 40 { format!("{}...", &eh[..40]) } else { eh };
+                            let d = if eh.len() > 40 {
+                                format!("{}...", &eh[..40])
+                            } else {
+                                eh
+                            };
                             lines.push(Line::from(vec![
                                 Span::styled(format!("  {:04x}", abs_val + woff), dim),
                                 Span::raw(format!("{}    ", indent)),
@@ -1655,10 +2382,20 @@ fn decode_lines(update: &SignedLedgerUpdate) -> Vec<Line<'static>> {
 
     lines.push(Line::raw(""));
     lines.push(Line::styled("--- Derived ---".to_string(), bold_s));
-    lines.push(Line::raw(format!("  current_hash:  {}", hex::encode(update.current_hash))));
-    lines.push(Line::raw(format!("  chain_hash:    {}", hex::encode(update.chain_hash()))));
+    lines.push(Line::raw(format!(
+        "  current_hash:  {}",
+        hex::encode(update.current_hash)
+    )));
+    lines.push(Line::raw(format!(
+        "  chain_hash:    {}",
+        hex::encode(update.chain_hash())
+    )));
     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-        lines.push(Line::raw(format!("  seq={}  op={}", update.sequence_number, format_op(&op))));
+        lines.push(Line::raw(format!(
+            "  seq={}  op={}",
+            update.sequence_number,
+            format_op(&op)
+        )));
     }
     lines.push(Line::raw(""));
     lines
@@ -1676,7 +2413,9 @@ struct BrowseState {
 fn refresh_right(state: &mut BrowseState, updates: &[SignedLedgerUpdate]) {
     if let Some(idx) = state.list_state.selected() {
         if idx >= updates.len() {
-            state.list_state.select(Some(updates.len().saturating_sub(1)));
+            state
+                .list_state
+                .select(Some(updates.len().saturating_sub(1)));
             return refresh_right(state, updates);
         }
         if state.cached_idx != Some(idx) {
@@ -1694,13 +2433,13 @@ fn browse_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         terminal.draw(|frame| {
-            let [left, right] = Layout::horizontal([
-                Constraint::Length(32),
-                Constraint::Fill(1),
-            ]).areas(frame.area());
+            let [left, right] = Layout::horizontal([Constraint::Length(32), Constraint::Fill(1)])
+                .areas(frame.area());
 
             // Left: update list
-            let items: Vec<ListItem> = state.labels.iter()
+            let items: Vec<ListItem> = state
+                .labels
+                .iter()
                 .map(|l| ListItem::new(l.as_str()))
                 .collect();
             let list = List::new(items)
@@ -1714,7 +2453,9 @@ fn browse_loop(
                 format!(" {} ", msg)
             } else if let Some(idx) = state.list_state.selected() {
                 format!(" seq {} [d=dump] ", updates[idx].sequence_number)
-            } else { " Decode ".to_string() };
+            } else {
+                " Decode ".to_string()
+            };
             let para = Paragraph::new(state.right_lines.clone())
                 .block(Block::bordered().title(title))
                 .scroll((state.right_scroll, 0));
@@ -1724,7 +2465,9 @@ fn browse_loop(
         if event::poll(std::time::Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
-                    if key.kind != KeyEventKind::Press { continue; }
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
                     state.status_msg = None; // clear on any key
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
@@ -1754,8 +2497,12 @@ fn browse_loop(
                             if let Some(idx) = state.list_state.selected() {
                                 if idx < updates.len() {
                                     match dump_update_to_file(&updates[idx]) {
-                                        Ok(path) => state.status_msg = Some(format!("Dumped to {}", path)),
-                                        Err(e) => state.status_msg = Some(format!("Dump failed: {}", e)),
+                                        Ok(path) => {
+                                            state.status_msg = Some(format!("Dumped to {}", path))
+                                        }
+                                        Err(e) => {
+                                            state.status_msg = Some(format!("Dump failed: {}", e))
+                                        }
                                     }
                                 }
                             }
@@ -1804,7 +2551,10 @@ fn browse_loop(
     Ok(())
 }
 
-fn browse_updates(updates: &[SignedLedgerUpdate], start_seq: Option<u64>) -> Result<(), Box<dyn std::error::Error>> {
+fn browse_updates(
+    updates: &[SignedLedgerUpdate],
+    start_seq: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if updates.is_empty() {
         eprintln!("No updates to browse");
         std::process::exit(1);
@@ -1830,9 +2580,8 @@ fn browse_updates(updates: &[SignedLedgerUpdate], start_seq: Option<u64>) -> Res
     };
     refresh_right(&mut state, updates);
 
-    let mut terminal = ratatui::try_init().map_err(|e| {
-        format!("--browse requires a terminal: {}", e)
-    })?;
+    let mut terminal =
+        ratatui::try_init().map_err(|e| format!("--browse requires a terminal: {}", e))?;
     // Don't capture mouse — allows text selection in the terminal.
     // Mouse scroll won't work but keyboard navigation (j/k/PgUp/PgDn) does.
     let result = browse_loop(&mut terminal, &mut state, updates);
@@ -1915,17 +2664,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 2;
             }
             "--decode" if i + 1 < args.len() => {
-                decode_seq = Some(args[i + 1].parse().expect("--decode requires a sequence number"));
+                decode_seq = Some(
+                    args[i + 1]
+                        .parse()
+                        .expect("--decode requires a sequence number"),
+                );
                 i += 2;
             }
             "--dump" if i + 1 < args.len() => {
-                dump_seq = Some(args[i + 1].parse().expect("--dump requires a sequence number"));
+                dump_seq = Some(
+                    args[i + 1]
+                        .parse()
+                        .expect("--dump requires a sequence number"),
+                );
                 i += 2;
             }
-            "--browse" => { browse = true; i += 1; }
-            "--graph" => { graph = true; i += 1; }
-            "--verbose" | "-v" => { verbose = true; i += 1; }
-            "--help" | "-h" => { print_help(); return Ok(()); }
+            "--browse" => {
+                browse = true;
+                i += 1;
+            }
+            "--graph" => {
+                graph = true;
+                i += 1;
+            }
+            "--verbose" | "-v" => {
+                verbose = true;
+                i += 1;
+            }
+            "--help" | "-h" => {
+                print_help();
+                return Ok(());
+            }
             other => {
                 if prefix.is_empty() && !other.starts_with('-') {
                     prefix = other.to_string();
@@ -1942,18 +2711,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if prefix.is_empty() || prefix.len() < 16 {
             let selected = rt.block_on(list_relay_ledgers(&url, &prefix))?;
             match selected {
-                Some(lid) => rt.block_on(run_nostr(&url, &lid, verbose, until_hash.as_deref(), decode_seq, dump_seq, browse, graph)),
+                Some(lid) => rt.block_on(run_nostr(
+                    &url,
+                    &lid,
+                    verbose,
+                    until_hash.as_deref(),
+                    decode_seq,
+                    dump_seq,
+                    browse,
+                    graph,
+                )),
                 None => Ok(()),
             }
         } else {
-            rt.block_on(run_nostr(&url, &prefix, verbose, until_hash.as_deref(), decode_seq, dump_seq, browse, graph))
+            rt.block_on(run_nostr(
+                &url,
+                &prefix,
+                verbose,
+                until_hash.as_deref(),
+                decode_seq,
+                dump_seq,
+                browse,
+                graph,
+            ))
         }
     } else {
         // JSONL mode
         if !data_root.exists() {
-            eprintln!("Data root not found: {}. Use --data-root or --relay.", data_root.display());
+            eprintln!(
+                "Data root not found: {}. Use --data-root or --relay.",
+                data_root.display()
+            );
             std::process::exit(1);
         }
-        run_jsonl(&data_root, &prefix, node_filter.as_deref(), verbose, until_hash.as_deref(), decode_seq, dump_seq, browse, graph)
+        run_jsonl(
+            &data_root,
+            &prefix,
+            node_filter.as_deref(),
+            verbose,
+            until_hash.as_deref(),
+            decode_seq,
+            dump_seq,
+            browse,
+            graph,
+        )
     }
 }

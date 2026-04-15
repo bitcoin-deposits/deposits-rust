@@ -62,7 +62,8 @@ pub trait WireEncode {
     /// Encode to bytes
     fn to_wire_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        self.wire_encode(&mut bytes).expect("Vec write should never fail");
+        self.wire_encode(&mut bytes)
+            .expect("Vec write should never fail");
         bytes
     }
 }
@@ -182,10 +183,15 @@ fn read_string<R: Read>(reader: &mut R) -> Result<String, WireError> {
     let len = read_u16(reader)? as usize;
     let mut bytes = vec![0u8; len];
     reader.read_exact(&mut bytes)?;
-    String::from_utf8(bytes).map_err(|_| WireError::InvalidValue("Invalid UTF-8 string".to_string()))
+    String::from_utf8(bytes)
+        .map_err(|_| WireError::InvalidValue("Invalid UTF-8 string".to_string()))
 }
 
-fn write_optional<W: Write, T, F>(writer: &mut W, opt: &Option<T>, write_fn: F) -> Result<(), WireError>
+fn write_optional<W: Write, T, F>(
+    writer: &mut W,
+    opt: &Option<T>,
+    write_fn: F,
+) -> Result<(), WireError>
 where
     F: FnOnce(&mut W, &T) -> Result<(), WireError>,
 {
@@ -311,7 +317,9 @@ impl WireEncode for QuorumVoteMsg {
         })?;
         write_bytes64(writer, &self.signature)?;
         // Write spend_signature as optional
-        write_optional(writer, &self.spend_signature, |w, sig| write_bytes64(w, sig))?;
+        write_optional(writer, &self.spend_signature, |w, sig| {
+            write_bytes64(w, sig)
+        })?;
         Ok(())
     }
 }
@@ -539,7 +547,9 @@ impl WireEncode for DepositOpenMsg {
         write_optional(writer, &self.fees, |w, f| f.wire_encode(w))?;
         write_optional(writer, &self.payment_hash, |w, h| write_bytes32(w, h))?;
         write_optional(writer, &self.invoice, |w, s| write_string(w, s))?;
-        write_optional(writer, &self.cosigner_guarantee_signature, |w, s| write_bytes64(w, s))?;
+        write_optional(writer, &self.cosigner_guarantee_signature, |w, s| {
+            write_bytes64(w, s)
+        })?;
         Ok(())
     }
 }
@@ -1320,7 +1330,9 @@ impl WireEncode for QuorumVoteMsgWire {
         })?;
         write_bytes64(writer, &self.signature)?;
         // Write spend_signature as optional
-        write_optional(writer, &self.spend_signature, |w, sig| write_bytes64(w, sig))?;
+        write_optional(writer, &self.spend_signature, |w, sig| {
+            write_bytes64(w, sig)
+        })?;
         Ok(())
     }
 }
@@ -1381,7 +1393,9 @@ impl WireEncode for RecoveryVoteMsg {
         write_u8(writer, self.is_conforming as u8)?;
         write_bytes32(writer, &self.validated_hash)?;
         write_u64(writer, self.validated_sequence)?;
-        write_optional(writer, &self.substitute_nomination, |w, pk| write_pubkey(w, pk))?;
+        write_optional(writer, &self.substitute_nomination, |w, pk| {
+            write_pubkey(w, pk)
+        })?;
         write_u8(writer, self.discovered_violation as u8)?;
         write_bytes64(writer, &self.signature)?;
         Ok(())
@@ -1704,7 +1718,9 @@ mod tests {
     fn test_pubkey(seed: u8) -> PublicKey {
         let secp = Secp256k1::new();
         let mut bytes = [seed; 32];
-        if seed == 0 { bytes[0] = 1; }
+        if seed == 0 {
+            bytes[0] = 1;
+        }
         let secret = SecretKey::from_slice(&bytes).unwrap();
         PublicKey::from_secret_key(&secp, &secret)
     }

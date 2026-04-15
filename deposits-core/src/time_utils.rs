@@ -2,7 +2,7 @@
 //!
 //! Provides consistent time handling across the protocol implementation.
 
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Get current Unix timestamp in seconds
 pub fn now_unix_timestamp() -> u64 {
@@ -37,7 +37,7 @@ pub fn is_systemtime_expired(time: SystemTime) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, Duration};
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn test_now_unix_timestamp() {
@@ -45,7 +45,10 @@ mod tests {
         assert!(timestamp > 0);
 
         // Should be roughly current time (within a few seconds)
-        let system_now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let system_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         assert!((timestamp as i64 - system_now as i64).abs() < 5);
     }
 
@@ -56,7 +59,8 @@ mod tests {
         let converted_back = unix_timestamp_to_systemtime(timestamp);
 
         // Should be within 1 second due to precision loss
-        let diff = now.duration_since(converted_back)
+        let diff = now
+            .duration_since(converted_back)
             .unwrap_or_else(|_| converted_back.duration_since(now).unwrap());
         assert!(diff < Duration::from_secs(1));
     }

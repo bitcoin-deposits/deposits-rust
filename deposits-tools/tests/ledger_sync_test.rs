@@ -17,7 +17,9 @@ mod tests {
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_identical_updates_produce_identical_hashes() {
-        todo!("Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed");
+        todo!(
+            "Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed"
+        );
     }
 
     /// Test that divergent ledgers can be detected by comparing hashes.
@@ -25,7 +27,9 @@ mod tests {
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_divergent_ledgers_have_different_hashes() {
-        todo!("Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed");
+        todo!(
+            "Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed"
+        );
     }
 
     /// Test that multiple attestations from different quorum members
@@ -33,7 +37,9 @@ mod tests {
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_multiple_attestations_maintain_sync() {
-        todo!("Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed");
+        todo!(
+            "Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed"
+        );
     }
 
     /// Test that the partner's own attestation (sent to operator in response
@@ -42,7 +48,9 @@ mod tests {
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_partner_attestation_self_application() {
-        todo!("Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed");
+        todo!(
+            "Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed"
+        );
     }
 
     /// Test full synchronization flow:
@@ -54,7 +62,9 @@ mod tests {
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_full_sync_flow() {
-        todo!("Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed");
+        todo!(
+            "Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed"
+        );
     }
 
     /// Test that hash chain is deterministic - same messages in same order
@@ -62,7 +72,9 @@ mod tests {
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_hash_chain_determinism() {
-        todo!("Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed");
+        todo!(
+            "Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed"
+        );
     }
 
     // =========================================================================
@@ -79,7 +91,9 @@ mod tests {
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_quorum_member_receives_add_message() {
-        todo!("Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed");
+        todo!(
+            "Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed"
+        );
     }
 
     /// Test that auditors must receive updates starting from sequence 0.
@@ -90,6 +104,8 @@ mod tests {
     #[test]
     #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_auditor_chain_must_start_from_zero() {
-        todo!("Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed");
+        todo!(
+            "Update for V2 Ledger API - Ledger::new_as_operator, append_mut, updates field changed"
+        );
     }
 }
