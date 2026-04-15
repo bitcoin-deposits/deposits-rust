@@ -2150,13 +2150,13 @@ impl Node {
                                     let action = req.action.clone();
                                     let event_id = req.event_id.clone();
                                     match tokio::time::timeout(
-                                        std::time::Duration::from_secs(5),
+                                        std::time::Duration::from_secs(30),
                                         node.handle_ledger_request(req),
                                     ).await {
                                         Ok(()) => {},
                                         Err(_) => {
                                             tracing::warn!(
-                                                "Request timed out after 5s: ledger={}... action={}, event={}...",
+                                                "Request timed out after 30s: ledger={}... action={}, event={}...",
                                                 &lid_for_task[..16.min(lid_for_task.len())],
                                                 action, &event_id[..16.min(event_id.len())]
                                             );
