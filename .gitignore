@@ -1,6 +1,7 @@
 /target
 Cargo.lock
 deposits-tools/certs/
+deposits-tools/bin/strfry
 __pycache__/
 simulator-ledger.db
 simulator-ledger.db-wal

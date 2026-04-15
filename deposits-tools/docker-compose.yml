@@ -171,7 +171,7 @@ services:
       - ./certs:/certs:ro
       - ./secrets:/run/secrets:ro
       - ./bin/ldk-cli-wrapper.sh:/app/ldk-cli-wrapper.sh:ro
-      - ./bin/lightning-verify-entrypoint.sh:/app/entrypoint.sh:ro
+      - ./docker/lightning-verify-entrypoint.sh:/app/entrypoint.sh:ro
       - self_pay_data:/self-pay
     depends_on:
       lightning:
@@ -204,7 +204,7 @@ services:
     volumes:
       - ./lnurl-server.py:/app/lnurl-server.py:ro
       - ./bin/ldk-cli-wrapper.sh:/app/ldk-cli-wrapper.sh:ro
-      - ./bin/lnurl-server-entrypoint.sh:/app/entrypoint.sh:ro
+      - ./docker/lnurl-server-entrypoint.sh:/app/entrypoint.sh:ro
       - ./certs:/certs:ro
       - nip05_data:/data
       - ldk_cli:/ldk-cli:ro
@@ -263,7 +263,7 @@ services:
         condition: service_healthy
     entrypoint: ["/bin/sh", "/app/entrypoint.sh"]
     volumes:
-      - ./bin/miner-entrypoint.sh:/app/entrypoint.sh:ro
+      - ./docker/miner-entrypoint.sh:/app/entrypoint.sh:ro
     networks:
       - regtest
 
