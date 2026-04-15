@@ -185,6 +185,51 @@ fn required_sigs(desc: &miniscript::Descriptor<miniscript::DescriptorPublicKey>)
     key_count.max(1)
 }
 
+/// Witness verifier implementation using real cryptographic verification.
+///
+/// This implements the `WitnessVerifier` trait from deposits-protocol,
+/// providing descriptor-based witness verification (Schnorr/miniscript)
+/// and ECDSA/Schnorr signature verification.
+pub struct CoreWitnessVerifier;
+
+impl deposits_protocol::WitnessVerifier for CoreWitnessVerifier {
+    fn verify_witness(
+        &self,
+        descriptor: &str,
+        witness: &DescriptorWitness,
+        message_hash: &[u8; 32],
+    ) -> bool {
+        verify_witness(descriptor, witness, message_hash).unwrap_or(false)
+    }
+
+    fn verify_signature(
+        &self,
+        pubkey: &bitcoin::secp256k1::PublicKey,
+        message: &[u8; 32],
+        signature: &[u8; 64],
+    ) -> bool {
+        let secp = Secp256k1::verification_only();
+        let msg = Message::from_digest(*message);
+
+        // Try Schnorr first (64-byte signatures)
+        if let Ok(sig) = bitcoin::secp256k1::schnorr::Signature::from_slice(signature) {
+            let x_only = pubkey.x_only_public_key().0;
+            if secp.verify_schnorr(&sig, &msg, &x_only).is_ok() {
+                return true;
+            }
+        }
+
+        // Try ECDSA (DER-encoded inside 64 bytes — compact format)
+        if let Ok(sig) = bitcoin::secp256k1::ecdsa::Signature::from_compact(signature) {
+            if secp.verify_ecdsa(&msg, &sig, pubkey).is_ok() {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
