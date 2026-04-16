@@ -17,8 +17,8 @@ COPY deposits-node/ deposits-node/
 COPY deposits-tools/Cargo.toml deposits-tools/Cargo.toml
 RUN mkdir -p deposits-tools/src && echo "" > deposits-tools/src/lib.rs && \
     mkdir -p deposits-tools/src/bin && \
-    for bin in deposits-admin network-init status decode-updates treasury-address \
-               treasury-send standalone_reserves_demo discover replay-ledger; do \
+    for bin in decode-updates treasury-address \
+               treasury-send standalone_reserves_demo discover replay-ledger deposits-lnurl; do \
         echo "fn main() {}" > deposits-tools/src/bin/$bin.rs; \
     done
 

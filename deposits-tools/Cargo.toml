@@ -5,18 +5,6 @@ edition = "2021"
 description = "Bitcoin Deposits tooling and test binaries"
 
 [[bin]]
-name = "deposits-admin"
-path = "src/bin/deposits-admin.rs"
-
-[[bin]]
-name = "network-init"
-path = "src/bin/network-init.rs"
-
-[[bin]]
-name = "status"
-path = "src/bin/status.rs"
-
-[[bin]]
 name = "decode-updates"
 path = "src/bin/decode-updates.rs"
 

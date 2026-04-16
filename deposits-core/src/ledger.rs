@@ -868,37 +868,6 @@ impl Ledger {
             .sum()
     }
 
-    /// Validate collateral is sufficient for a given deposit liability.
-    pub fn validate_collateral_for_liability(
-        &self,
-        deposit_liability: u64,
-        current_block: u32,
-        max_attestation_age_blocks: u32,
-    ) -> DepositsResult<()> {
-        // Requirement 1: reserves >= deposit_liability
-        if self.state.reserves_amount < deposit_liability {
-            return Err(DepositsError::InsufficientReserves {
-                required: deposit_liability,
-                available: self.state.reserves_amount,
-            });
-        }
-
-        // Requirement 2: attestations >= deposit_liability (if quorum is active)
-        if self.state.quorum_state == QuorumState::Active {
-            let total_collateral =
-                self.total_available_collateral(current_block, max_attestation_age_blocks);
-            if total_collateral < deposit_liability {
-                return Err(DepositsError::InsufficientCollateral {
-                    required: deposit_liability,
-                    available: total_collateral,
-                    missing_attestations: self
-                        .missing_attestations(current_block, max_attestation_age_blocks),
-                });
-            }
-        }
-        Ok(())
-    }
-
     // ========================================================================
     // Operation Application
     // ========================================================================

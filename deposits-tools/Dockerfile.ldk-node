@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y ca-certificates openssl curl jq && rm -
 COPY --from=builder /build/ldk-server/target/release/ldk-server /usr/local/bin/ldk-server
 COPY --from=builder /build/ldk-server/target/release/ldk-server-cli /usr/local/bin/ldk-server-cli
 
-COPY deposits-rust/deposits-tools/ldk-server-entrypoint.sh /entrypoint.sh
+COPY deposits-rust/deposits-tools/docker/ldk-server-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENV LDK_DATA_DIR=/ldk

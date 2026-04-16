@@ -128,7 +128,7 @@ services:
     volumes:
       - ldk_data:/ldk
       - ldk_cli:/ldk-cli
-      - ./ldk-server-entrypoint.sh:/entrypoint.sh:ro
+      - ./docker/ldk-server-entrypoint.sh:/entrypoint.sh:ro
     depends_on:
       bitcoin:
         condition: service_healthy

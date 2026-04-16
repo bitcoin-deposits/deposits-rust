@@ -15,7 +15,7 @@
 //! The deposits protocol is split into two crates:
 //!
 //! - **deposits-core** (this crate): Core protocol logic, types, validation
-//! - **deposits-ldk** (or other adapters): Lightning implementation bindings
+//! - **deposits-node**: BDK wallet + Nostr transport implementation
 //!
 //! This separation allows the protocol to work with any Lightning implementation
 //! (LDK, CLN, Eclair, etc.) through adapter traits.
