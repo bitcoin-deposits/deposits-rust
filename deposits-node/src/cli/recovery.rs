@@ -116,8 +116,6 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         "agree" => recovery_agree(&args[1..]).await,
         "prepare" => recovery_prepare(&args[1..]).await,
         "release" => recovery_release(&args[1..]).await,
-        "complete" => recovery_complete(&args[1..]).await,
-        "publish-transfer" => recovery_publish_transfer(&args[1..]).await,
         cmd => {
             eprintln!("Unknown recovery subcommand: {}", cmd);
             eprintln!(
@@ -552,50 +550,6 @@ pub async fn recovery_status(args: &[String]) -> Result<(), Box<dyn std::error::
     println!(
         "  4. Claim if eligible: deposits-node recovery claim {}",
         ledger_id
-    );
-
-    Ok(())
-}
-
-/// Execute a custody transfer for a non-conforming ledger
-///
-/// DEPRECATED: Use the new dispute protocol commands instead:
-///   recovery dispute -> recovery rebuild -> recovery arm -> recovery claim -> recovery spend
-pub async fn recovery_complete(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("WARNING: 'recovery complete' is deprecated and uses the old protocol.");
-    eprintln!("Please use the new dispute protocol commands instead:");
-    eprintln!("  1. recovery dispute <ledger_id>   - Open dispute with DisputeEnter");
-    eprintln!("  2. recovery rebuild <ledger_id>   - Rebuild quorum");
-    eprintln!("  3. recovery arm <ledger_id>       - Publish DisputeArmed pre-commitment");
-    eprintln!("  4. recovery claim <ledger_id>     - Claim with DisputeAcquire/DisputeYield");
-    eprintln!("  5. recovery spend <ledger_id>     - Execute on-chain spend");
-    eprintln!();
-
-    let ledger_id = args.first().ok_or("Missing ledger_id")?;
-    println!(
-        "To complete recovery for ledger {}..., use the new dispute protocol:",
-        &ledger_id[..16.min(ledger_id.len())]
-    );
-    println!("  deposits-node recovery dispute {}", ledger_id);
-
-    Ok(())
-}
-
-/// DEPRECATED: Use the new dispute protocol commands instead
-pub async fn recovery_publish_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("WARNING: 'recovery publish-transfer' is deprecated and uses the old protocol.");
-    eprintln!("Please use the new dispute protocol commands instead:");
-    eprintln!("  1. recovery dispute <ledger_id>   - Open dispute with DisputeEnter");
-    eprintln!("  2. recovery rebuild <ledger_id>   - Rebuild quorum");
-    eprintln!("  3. recovery arm <ledger_id>       - Publish DisputeArmed pre-commitment");
-    eprintln!("  4. recovery claim <ledger_id>     - Claim with DisputeAcquire/DisputeYield");
-    eprintln!("  5. recovery spend <ledger_id>     - Execute on-chain spend");
-    eprintln!();
-
-    let ledger_id = args.first().ok_or("Missing ledger_id")?;
-    println!(
-        "To publish transfer for ledger {}..., use the new dispute protocol:",
-        &ledger_id[..16.min(ledger_id.len())]
     );
 
     Ok(())

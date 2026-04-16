@@ -1,0 +1,1250 @@
+// This file is Copyright its original authors, visible in version control history.
+//
+// This file is licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
+// http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
+// accordance with one or both of these licenses.
+
+//! CLI command modules for deposits-node.
+
+pub mod deposit;
+pub mod health;
+pub mod keys;
+pub mod ledger;
+pub mod lightning;
+pub mod quorum;
+pub mod reserves;
+pub mod run;
+pub mod withdraw;
+
+#[cfg(feature = "dangerous-testing")]
+pub mod danger;
+
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::Network;
+use deposits_node::{Node, NodeConfig};
+use std::path::PathBuf;
+
+pub fn print_usage(program: &str) {
+    println!(
+        r#"deposits-node - Bitcoin Deposits Protocol Node (BDK + Nostr)
+
+USAGE:
+    {} <COMMAND> [OPTIONS]
+
+COMMANDS:
+    run             Run the deposits node
+    info            Show node info
+    address         Generate a new receiving address
+    keygen          Generate a new secp256k1 keypair for deposits
+    derive-deposit-key
+                    Derive wallet deposit secret key from seed (for collateral lock)
+    reserves        Manage reserves UTXOs (create, list)
+    quorum          Manage quorum (add, join, begin, request, list)
+    ledger          Manage ledgers (open, list)
+    collateral      Manage collateral pledges
+    deposit         Manage deposit offers for on-chain funding
+    withdraw        Manage on-chain withdrawals
+    lightning (ln)  Lightning invoice payment operations (lock, fail, fulfill)
+    nostr           Nostr relay operations (updates, broadcast)
+    help            Show this help message
+
+RESERVES SUBCOMMANDS:
+    reserves create [amount_sats]
+                    Create a new reserves UTXO (default: 100M sats / 1 BTC)
+    reserves list   List all reserves outputs
+
+QUORUM SUBCOMMANDS:
+    quorum add <ledger_id> <member_pubkey> <member_ledger_id>
+                    Add a quorum member to your ledger (requests consent, records QuorumAddMember)
+    quorum join <our_ledger_id> <target_operator> <target_ledger_id> <expires_block>
+                    Record that you joined another operator's quorum (records QuorumJoin)
+    quorum begin [reserves_id]
+                    Activate quorum-based Taproot spending (rotates reserves into multisig)
+    quorum request <pubkey>
+                    Send quorum membership request
+    quorum list     List all quorum relationships
+
+LEDGER SUBCOMMANDS:
+    ledger open [fee options]
+                    Open a ledger backed by your reserves UTXO.
+                    Fee options set advertised minimums for deposit negotiation:
+                      --annual-fee-bps <N>             Annual custody fee in basis points
+                      --min-fee-sats <N>               Minimum fee per period in sats
+                      --fee-period-blocks <N>          Fee collection period in blocks (default: 2016)
+                      --transfer-fee-fixed-msats <N>   Fixed per-transfer fee in msats
+                      --transfer-fee-rate-bps <N>      Proportional per-transfer fee in basis points
+    ledger list     List all ledgers
+    ledger history [reserves_id]
+                    Show hash chain history for a ledger (default: primary ledger)
+    ledger validate [reserves_id]
+                    Validate a ledger's conformance to the Bitcoin Deposits Protocol.
+                    Checks hash chain integrity, sequence continuity, and business rules.
+    ledger export [reserves_id] [--json|--binary]
+                    Export a ledger for external validation or backup
+
+COLLATERAL SUBCOMMANDS:
+    collateral lock <ledger_id> <amount_msats> <lock_blocks>
+                    Lock deposit balance as collateral (derives key from seed).
+    collateral lock <reserves_id> <deposit_secret> <amount_msats> <lock_blocks>
+                    Lock deposit balance as collateral (explicit secret).
+                    lock_blocks is how many blocks from now until the lock expires.
+
+DEPOSIT SUBCOMMANDS:
+    deposit offer <reserves_id> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid>
+                    Create a signed deposit offer for on-chain funding
+    deposit list    List all deposit offers
+    deposit open <reserves_id> <deposit_pubkey>
+                    Open a new deposit in a ledger
+    deposit ls <reserves_id>
+                    List all deposits in a ledger
+    deposit credit <reserves_id> <deposit_pubkey> <amount_msats> <invoice_id>
+                    Manually credit a deposit
+    deposit check <offer_id>
+                    Check if a deposit offer has been funded
+    deposit complete <offer_id> <txid> <amount_sats>
+                    Complete a funded deposit offer and credit the deposit
+
+WITHDRAW SUBCOMMANDS:
+    withdraw request <partner_id> <deposit_secret> <address> <amount_sats> <fee_sats>
+                    Request withdrawal (generates nonce, signs, and locks in one step)
+    withdraw lock <partner_id> <deposit_pubkey> <address> <amount_sats> <fee_sats> <nonce> <signature>
+                    Lock funds for withdrawal (operator-side, requires pre-signed request)
+    withdraw complete <partner_id> <withdrawal_id>
+                    Complete a withdrawal by broadcasting the transaction
+    withdraw cancel <withdrawal_id>
+                    Cancel a pending withdrawal (only before broadcast)
+    withdraw list   List all withdrawals
+
+LIGHTNING SUBCOMMANDS (alias: ln):
+  LDK Sidecar (via ldk-server-cli):
+    lightning invoice <amount_sats> [description]
+                    Create a Lightning invoice via LDK sidecar
+    lightning pay <bolt11_invoice>
+                    Pay a Lightning invoice via LDK sidecar
+    lightning balance
+                    Show Lightning wallet balance
+    lightning info  Show LDK node info
+    lightning channels
+                    List Lightning channels
+    lightning payments
+                    List Lightning payments
+  Ledger Operations:
+    lightning lock <reserves_id> <deposit_pubkey> <amount_msats> <payment_id> <signature>
+                    Lock deposit funds for an outgoing Lightning payment
+    lightning fail <reserves_id> <deposit_pubkey> <amount_msats> <payment_id>
+                    Fail/cancel a pending Lightning payment and unlock funds
+    lightning fulfill <reserves_id> <deposit_pubkey> <amount_msats> <payment_id> <preimage> <signature>
+                    Complete a Lightning payment with the preimage
+
+NOSTR SUBCOMMANDS:
+    nostr list      List all ledgers available on the Nostr relay
+    nostr export [operator:reserves_id]
+                    Broadcast ledger updates to Nostr relay (all local ledgers if no ID given)
+    nostr import [operator:reserves_id]
+                    Fetch ledger updates from Nostr relay (all ledgers if no ID given)
+    nostr validate <operator:reserves_id>
+                    Fetch and validate a ledger's hash chain directly from Nostr
+    nostr request <ledger_id> <action> [params...]
+                    Send a request to a ledger. Actions:
+                      deposit_open <pubkey> [fee_fixed] [fee_bps] [fee_frequency]
+                      make_offer <pubkey> <max_sats> <min_sats> <blocks_valid>
+                      collateral_lock <secret> <amount_msats> <lock_blocks> [requesting_op]
+    nostr watch <ledger_id>
+                    Watch for requests and disputes for a ledger
+    nostr dispute publish <ledger_id> <reason> <details>
+                    Publish a dispute for a non-conforming ledger
+    nostr dispute listen [ledger_id]
+                    Listen for disputes (all ledgers or specific)
+
+RECOVERY SUBCOMMANDS:
+    recovery start <ledger_id> [--reason <text>]
+                    Start recovery - validates ledger and publishes dispute
+    recovery agree <ledger_id>
+                    Agree to recovery - independently validate and sign
+    recovery status <ledger_id>
+                    Show current recovery status
+    recovery claim <ledger_id>
+                    Execute a claim if eligible
+    recovery complete <ledger_id> [--new-custodian <pubkey>]
+                    Complete recovery once quorum agrees
+"#,
+        program
+    );
+
+    #[cfg(feature = "dangerous-testing")]
+    println!(
+        r#"
+DANGER SUBCOMMANDS (testing only - DO NOT USE IN PRODUCTION):
+    danger publish-invalid <reserves_id> <violation_type>
+                    Publish an invalid ledger update to test recovery.
+                    Violation types:
+                      invalid-hash     - Wrong previous_hash linkage
+                      skip-sequence    - Skip ahead in sequence numbers
+                      double-spend     - Spend more than available balance
+                      replay           - Replay an old sequence number
+"#
+    );
+
+    println!(
+        r#"OPTIONS:
+    --seed <hex>       Seed for wallet/identity (64 hex chars)
+    --network <net>    Bitcoin network: mainnet, testnet, signet, regtest (default: signet)
+    --esplora <url>    Esplora server URL (default: https://mempool.space/signet/api)
+    --relay <url>      Nostr relay URL (can be specified multiple times)
+    --data-dir <path>  Data directory (default: ~/.deposits-node)
+    --metrics-port <port>  Port for Prometheus metrics endpoint (run command only)
+
+EXAMPLES:
+    # Run a node on signet
+    {} run --network signet
+
+    # Run with custom esplora and relay
+    {} run --esplora http://localhost:3002 --relay ws://localhost:7777
+
+    # Show node info
+    {} info
+
+    # Create reserves (1 BTC default)
+    {} reserves 100000000 --network regtest
+
+    # Open a ledger with bootstrap phase (enforcement at block 1000)
+    {} ledger open 1000 --network regtest
+
+"#,
+        program, program, program, program, program
+    );
+}
+
+pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
+    let mut seed: Option<[u8; 32]> = None;
+    let mut network = Network::Signet;
+    let mut electrum_url = "https://mempool.space/signet/api".to_string();
+    let mut relays = Vec::new();
+    let mut slow_relays = Vec::new();
+    let mut operator_name = None;
+    let mut fast_poll = false;
+    let mut skip_nostr_verify = false;
+    let mut data_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".deposits-node");
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--name" | "--operator-name" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--name requires a value".to_string());
+                }
+                operator_name = Some(args[i].clone());
+            }
+            "--seed" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--seed requires a value".to_string());
+                }
+                let hex = &args[i];
+                if hex.len() != 64 {
+                    return Err("Seed must be 64 hex characters".to_string());
+                }
+                let bytes = hex::decode(hex).map_err(|e| format!("Invalid hex: {}", e))?;
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                seed = Some(arr);
+            }
+            "--network" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--network requires a value".to_string());
+                }
+                network = match args[i].as_str() {
+                    "mainnet" | "bitcoin" => Network::Bitcoin,
+                    "testnet" | "testnet3" => Network::Testnet,
+                    "signet" => Network::Signet,
+                    "regtest" => Network::Regtest,
+                    n => return Err(format!("Unknown network: {}", n)),
+                };
+            }
+            "--electrum" | "--esplora" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--esplora requires a value".to_string());
+                }
+                electrum_url = args[i].clone();
+            }
+            "--relay" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--relay requires a value".to_string());
+                }
+                relays.push(args[i].clone());
+            }
+            "--slow-relay" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--slow-relay requires a value".to_string());
+                }
+                slow_relays.push(args[i].clone());
+            }
+            "--data-dir" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--data-dir requires a value".to_string());
+                }
+                data_dir = PathBuf::from(&args[i]);
+            }
+            "--fast-poll" => {
+                fast_poll = true;
+            }
+            "--skip-nostr-verify" => {
+                skip_nostr_verify = true;
+            }
+            arg => {
+                return Err(format!("Unknown argument: {}", arg));
+            }
+        }
+        i += 1;
+    }
+
+    // Generate random seed if not provided
+    let seed = seed.unwrap_or_else(|| {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let mut s = [0u8; 32];
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        s[0..16].copy_from_slice(&now.to_le_bytes());
+        // In production, use proper random source
+        tracing::warn!("Using timestamp-based seed. In production, provide --seed");
+        s
+    });
+
+    // Create data directory
+    std::fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create data dir: {}", e))?;
+
+    Ok(NodeConfig {
+        seed,
+        network,
+        electrum_url,
+        relays,
+        slow_relays,
+        data_dir,
+        operator_name,
+        fast_poll,
+        skip_nostr_verify,
+    })
+}
+
+/// Send a Nostr request to the daemon and wait for a response.
+///
+/// This is used by CLI commands that delegate ledger mutations to the running daemon.
+/// Returns the response result JSON on success, or an error string on failure.
+pub async fn send_daemon_request(
+    config: &NodeConfig,
+    ledger_id: &str,
+    action: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    use deposits_node::nostr::NostrTransportBuilder;
+
+    if config.relays.is_empty() {
+        return Err("No relay configured. Use --relay <url>".into());
+    }
+
+    let secret_key = super::derive_operator_secret(&config.seed, config.network)?;
+
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relays(config.relays.iter().cloned())
+        .build()
+        .await?;
+
+    let event_id = transport
+        .send_ledger_request(ledger_id, action, params)
+        .await?;
+
+    transport.subscribe_to_response(&event_id).await?;
+
+    let mut transport = transport;
+    let timeout = tokio::time::Duration::from_secs(30);
+    let start = std::time::Instant::now();
+    let mut last_poll = std::time::Instant::now();
+    let mut poll_count = 0;
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err("No response from daemon. Ensure 'deposits-node run' is running.".into());
+        }
+
+        tokio::select! {
+            _ = transport.process_events() => {}
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {}
+        }
+
+        if let Some(response) = transport.try_recv_response() {
+            if response.request_id == event_id {
+                if response.success {
+                    return Ok(response.result.unwrap_or(serde_json::Value::Null));
+                } else {
+                    let err_msg = response
+                        .error
+                        .unwrap_or_else(|| "Unknown error".to_string());
+                    return Err(err_msg.into());
+                }
+            }
+        }
+
+        let poll_interval = if poll_count < 5 {
+            std::time::Duration::from_millis(500)
+        } else {
+            std::time::Duration::from_secs(2)
+        };
+
+        if last_poll.elapsed() > poll_interval {
+            match transport.fetch_response(&event_id).await {
+                Ok(Some(response)) => {
+                    if response.success {
+                        return Ok(response.result.unwrap_or(serde_json::Value::Null));
+                    } else {
+                        let err_msg = response
+                            .error
+                            .unwrap_or_else(|| "Unknown error".to_string());
+                        return Err(err_msg.into());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!("Poll error: {}", e);
+                }
+            }
+            last_poll = std::time::Instant::now();
+            poll_count += 1;
+        }
+    }
+}
+
+/// Fee schedule arguments parsed from CLI flags
+#[derive(Default)]
+pub struct FeeScheduleArgs {
+    pub annual_fee_bps: Option<u32>,
+    pub min_fee_sats: Option<u64>,
+    pub fee_period_blocks: Option<u32>,
+    pub transfer_fee_fixed: Option<u64>,
+    pub transfer_fee_rate_bps: Option<u16>,
+    pub advertise_relay: Option<String>,
+}
+
+impl FeeScheduleArgs {
+    pub fn has_any(&self) -> bool {
+        self.annual_fee_bps.is_some()
+            || self.min_fee_sats.is_some()
+            || self.fee_period_blocks.is_some()
+            || self.transfer_fee_fixed.is_some()
+            || self.transfer_fee_rate_bps.is_some()
+    }
+}
+
+/// Helper to auto-advertise a ledger for wallet discovery
+/// Accepts either reserves_key (bcrt1q...) or ledger_id (64-char hex)
+/// Uses the node's existing transport to avoid ephemeral connection race conditions.
+pub async fn auto_advertise_ledger(
+    node: &Node,
+    identifier: &str,
+    _seed: &[u8; 32],
+    network: bitcoin::Network,
+    _relays: &[String],
+    operator_name: Option<&str>,
+    fee_schedule: &FeeScheduleArgs,
+) {
+    use deposits_node::nostr::LedgerAdvertisement;
+
+    // Resolve identifier to ledger (supports both ledger_id and reserves_key)
+    let ledger = match node.get_ledger_with_id(identifier) {
+        Some((_, l)) => l,
+        None => return,
+    };
+
+    let ledger_id_hex = ledger.ledger_id_hex();
+    let reserves_key = ledger.reserves_key().to_string();
+    let operator_pubkey = hex::encode(ledger.operator_key().serialize());
+    let network_str = match network {
+        bitcoin::Network::Bitcoin => "bitcoin",
+        bitcoin::Network::Testnet => "testnet",
+        bitcoin::Network::Signet => "signet",
+        bitcoin::Network::Regtest => "regtest",
+        _ => "unknown",
+    };
+
+    let mut ad = LedgerAdvertisement::new(
+        ledger_id_hex.clone(),
+        operator_pubkey,
+        reserves_key,
+        network_str.to_string(),
+    );
+    ad.operator_name = operator_name.map(|s| s.to_string());
+    ad.relay_url = fee_schedule.advertise_relay.clone();
+    ad.reserves_amount_msats = ledger.reserves_amount();
+    ad.received_collateral_msats = ledger.state.total_collateral();
+    ad.attested_collateral_msats = ledger.state.total_collateral();
+    ad.held_collateral_msats = ledger.total_held_collateral();
+
+    // Apply fee schedule from CLI flags
+    if let Some(bps) = fee_schedule.annual_fee_bps {
+        ad.annual_fee_bps = bps;
+    }
+    if let Some(sats) = fee_schedule.min_fee_sats {
+        ad.min_fee_sats = sats;
+    }
+    if let Some(blocks) = fee_schedule.fee_period_blocks {
+        ad.fee_period_blocks = blocks;
+    }
+    if let Some(fixed) = fee_schedule.transfer_fee_fixed {
+        ad.transfer_fee_fixed_msats = fixed;
+    }
+    if let Some(bps) = fee_schedule.transfer_fee_rate_bps {
+        ad.transfer_fee_rate_bps = bps;
+    }
+
+    // Access control policy
+    ad.access_control = std::env::var("DEPOSIT_ACCESS_CONTROL")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if ad.access_control {
+        if let Ok(domains) =
+            std::fs::read_to_string(node.data_dir().join("deposit_domain_allowlist.txt"))
+        {
+            ad.allowed_domains = domains
+                .lines()
+                .map(|l| l.trim().to_lowercase())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .collect();
+        }
+    }
+
+    // Per-deposit balance limit
+    if let Ok(limit) = std::env::var("MAX_DEPOSIT_BALANCE_MSATS") {
+        if let Ok(v) = limit.parse::<u64>() {
+            if v > 0 {
+                ad.max_deposit_msats = v;
+            }
+        }
+    }
+
+    // Calculate headroom
+    let total_obligations_msats = ledger.total_deposit_balance();
+    ad.total_obligations_msats = total_obligations_msats;
+    ad.available_headroom_msats = ad
+        .reserves_amount_msats
+        .saturating_sub(total_obligations_msats);
+
+    // Use the node's existing transport — avoids ephemeral connection race where
+    // a new transport disconnects before the relay processes the write.
+    match node.nostr.publish_ledger_advertisement(&ad).await {
+        Ok(_) => println!("  Advertised ledger for wallet discovery"),
+        Err(e) => eprintln!("  Warning: Failed to advertise ledger: {}", e),
+    }
+}
+
+/// Format an operation type and extract details from the message
+pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tlv::TlvDecode;
+
+    // First try to decode the operation from message bytes - this gives us the actual operation
+    if !message.is_empty() {
+        if let Ok(op) = LedgerOperation::tlv_decode(message) {
+            let (name, details) = match op {
+                LedgerOperation::LedgerOpen { reserves_id, .. } => {
+                    let id_short = if reserves_id.len() > 20 {
+                        format!(
+                            "{}..{}",
+                            &reserves_id[..8],
+                            &reserves_id[reserves_id.len() - 6..]
+                        )
+                    } else {
+                        reserves_id.clone()
+                    };
+                    ("LedgerOpen", format!("reserves:{}", id_short))
+                }
+                LedgerOperation::QuorumBegin {
+                    reserves_id,
+                    amount,
+                    quorum_expiry,
+                    quorum_members,
+                    ..
+                } => {
+                    let addr_short = if reserves_id.len() > 20 {
+                        format!(
+                            "{}..{}",
+                            &reserves_id[..8],
+                            &reserves_id[reserves_id.len() - 6..]
+                        )
+                    } else {
+                        reserves_id.clone()
+                    };
+                    (
+                        "QuorumBegin",
+                        format!(
+                            "addr:{}  amt:{} sat  quorum:{}/{}  expiry:{}",
+                            addr_short,
+                            amount,
+                            quorum_members.len(),
+                            quorum_members.len(),
+                            quorum_expiry
+                        ),
+                    )
+                }
+                LedgerOperation::DepositOpen { deposit_id, .. } => (
+                    "DepositOpen",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                    ),
+                ),
+                LedgerOperation::DepositClose { deposit_id, .. } => (
+                    "DepositClose",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                    ),
+                ),
+                LedgerOperation::FeeChange { deposit_id, .. } => (
+                    "FeeChange",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                    ),
+                ),
+                LedgerOperation::DepositKeyRotate { deposit_id, .. } => (
+                    "DepositKeyRotate",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                    ),
+                ),
+                LedgerOperation::QuorumAddMember { quorum_member, .. } => {
+                    let pk_bytes = quorum_member.serialize();
+                    (
+                        "QuorumAddMember",
+                        format!(
+                            "member:{:02x}{:02x}{:02x}{:02x}",
+                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3]
+                        ),
+                    )
+                }
+                LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
+                    let pk_bytes = quorum_member.serialize();
+                    (
+                        "QuorumRemoveMember",
+                        format!(
+                            "member:{:02x}{:02x}{:02x}{:02x}",
+                            pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3]
+                        ),
+                    )
+                }
+                LedgerOperation::QuorumJoin {
+                    operator_id,
+                    ledger_id,
+                    membership_expires,
+                    ..
+                } => {
+                    let pk_bytes = operator_id.serialize();
+                    let ledger_short = if ledger_id.len() > 16 {
+                        format!("{}...", &ledger_id[..16])
+                    } else {
+                        ledger_id.clone()
+                    };
+                    (
+                        "QuorumJoin",
+                        format!(
+                            "op:{:02x}{:02x}{:02x}{:02x}  ledger:{}  expires:{}",
+                            pk_bytes[0],
+                            pk_bytes[1],
+                            pk_bytes[2],
+                            pk_bytes[3],
+                            ledger_short,
+                            membership_expires
+                        ),
+                    )
+                }
+                LedgerOperation::CollateralAttestation {
+                    collateral_operator,
+                    amount,
+                    lock_until_block,
+                    ..
+                } => {
+                    let pk_bytes = collateral_operator.serialize();
+                    (
+                        "CollateralAttestation",
+                        format!(
+                            "from:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
+                            pk_bytes[0],
+                            pk_bytes[1],
+                            pk_bytes[2],
+                            pk_bytes[3],
+                            amount,
+                            lock_until_block
+                        ),
+                    )
+                }
+                LedgerOperation::CollateralLock {
+                    deposit_id,
+                    amount,
+                    lock_until_block,
+                    ..
+                } => (
+                    "CollateralLock",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
+                        deposit_id[0],
+                        deposit_id[1],
+                        deposit_id[2],
+                        deposit_id[3],
+                        amount,
+                        lock_until_block
+                    ),
+                ),
+                LedgerOperation::OnchainCredit {
+                    deposit_id,
+                    amount,
+                    funding_address,
+                    ..
+                } => {
+                    let addr_short = if funding_address.len() > 20 {
+                        format!(
+                            "{}..{}",
+                            &funding_address[..8],
+                            &funding_address[funding_address.len() - 6..]
+                        )
+                    } else {
+                        funding_address.clone()
+                    };
+                    (
+                        "OnchainCredit",
+                        format!(
+                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  addr:{}",
+                            deposit_id[0],
+                            deposit_id[1],
+                            deposit_id[2],
+                            deposit_id[3],
+                            amount,
+                            addr_short
+                        ),
+                    )
+                }
+                LedgerOperation::OnchainLock {
+                    deposit_id,
+                    amount,
+                    destination_address,
+                    withdrawal_id,
+                    ..
+                } => {
+                    let addr_short = if destination_address.len() > 20 {
+                        format!(
+                            "{}..{}",
+                            &destination_address[..8],
+                            &destination_address[destination_address.len() - 6..]
+                        )
+                    } else {
+                        destination_address.clone()
+                    };
+                    (
+                        "OnchainLock",
+                        format!(
+                            "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  addr:{}",
+                            deposit_id[0],
+                            deposit_id[1],
+                            deposit_id[2],
+                            deposit_id[3],
+                            amount,
+                            hex::encode(&withdrawal_id[..4]),
+                            addr_short
+                        ),
+                    )
+                }
+                LedgerOperation::OnchainFail {
+                    deposit_id,
+                    withdrawal_id,
+                    ..
+                } => (
+                    "OnchainFail",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  wdrl:{}",
+                        deposit_id[0],
+                        deposit_id[1],
+                        deposit_id[2],
+                        deposit_id[3],
+                        hex::encode(&withdrawal_id[..4])
+                    ),
+                ),
+                LedgerOperation::OnchainFulfill {
+                    deposit_id,
+                    withdrawal_id,
+                    amount,
+                    txid,
+                    ..
+                } => (
+                    "OnchainFulfill",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  wdrl:{}  txn:{}",
+                        deposit_id[0],
+                        deposit_id[1],
+                        deposit_id[2],
+                        deposit_id[3],
+                        amount,
+                        hex::encode(&withdrawal_id[..4]),
+                        hex::encode(&txid[..4])
+                    ),
+                ),
+                LedgerOperation::InvoiceCredit {
+                    deposit_id, amount, ..
+                } => (
+                    "InvoiceCredit",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount
+                    ),
+                ),
+                LedgerOperation::InvoiceLock {
+                    deposit_id, amount, ..
+                } => (
+                    "InvoiceLock",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount
+                    ),
+                ),
+                LedgerOperation::InvoiceFail { .. } => ("InvoiceFail", String::new()),
+                LedgerOperation::InvoiceFulfill { .. } => ("InvoiceFulfill", String::new()),
+                LedgerOperation::FeeCollect { .. } => ("FeeCollect", String::new()),
+                LedgerOperation::DisputeEnter {
+                    last_valid_sequence,
+                    reason,
+                } => (
+                    "DisputeEnter",
+                    format!("last_valid_seq:{}  reason:{}", last_valid_sequence, reason),
+                ),
+                LedgerOperation::DisputeArmed {
+                    armed_block,
+                    commitment_hash,
+                    target_reserves,
+                } => {
+                    let hash_hex = hex::encode(commitment_hash);
+                    let target_short = if target_reserves.len() > 16 {
+                        format!(
+                            "{}..{}",
+                            &target_reserves[..8],
+                            &target_reserves[target_reserves.len() - 6..]
+                        )
+                    } else {
+                        target_reserves.clone()
+                    };
+                    (
+                        "DisputeArmed",
+                        format!(
+                            "armed_block:{}  commit:{}..  target:{}",
+                            armed_block,
+                            &hash_hex[..8],
+                            target_short
+                        ),
+                    )
+                }
+                LedgerOperation::DisputeAcquire {
+                    new_custodian,
+                    entropy_block_height,
+                    spend_txid,
+                    new_reserves_address,
+                    ..
+                } => {
+                    let pk_bytes = new_custodian.serialize();
+                    let txid_hex = hex::encode(spend_txid);
+                    ("DisputeAcquire", format!("to:{:02x}{:02x}{:02x}{:02x}  entropy_block:{}  txid:{}..  reserves:{}..{}",
+                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3],
+                        entropy_block_height,
+                        &txid_hex[..8],
+                        &new_reserves_address[..10.min(new_reserves_address.len())],
+                        &new_reserves_address[new_reserves_address.len().saturating_sub(6)..]))
+                }
+                LedgerOperation::DisputeYield => ("DisputeYield", String::new()),
+                LedgerOperation::DeliveryEmbed {
+                    target_ledger_id, ..
+                } => (
+                    "DeliveryEmbed",
+                    format!("target_ledger={}...", &hex::encode(target_ledger_id)[..16]),
+                ),
+                LedgerOperation::LedgerClose => ("LedgerClose", String::new()),
+                LedgerOperation::TransferLock {
+                    source_deposit_id,
+                    destination_deposit_id,
+                    amount,
+                    fee,
+                    timeout_height,
+                    ..
+                } => (
+                    "TransferLock",
+                    format!(
+                        "{}→{} amt={} fee={} timeout={}",
+                        hex::encode(&source_deposit_id[..4]),
+                        hex::encode(&destination_deposit_id[..4]),
+                        amount,
+                        fee,
+                        timeout_height
+                    ),
+                ),
+                LedgerOperation::TransferComplete { transfer_id, .. } => (
+                    "TransferComplete",
+                    format!("id={}", hex::encode(&transfer_id[..8])),
+                ),
+                LedgerOperation::TransferFail { transfer_id, .. } => (
+                    "TransferFail",
+                    format!("id={}", hex::encode(&transfer_id[..8])),
+                ),
+            };
+            return (name.to_string(), details);
+        }
+    }
+
+    // Fallback: couldn't decode operation, show message type
+    (format!("Unknown(0x{:04X})", msg_type), String::new())
+}
+
+pub async fn show_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_config(args)?;
+    let node = Node::new(config).await?;
+
+    println!("Node ID: {}", node.node_id);
+    println!("Nostr pubkey: {}", node.nostr.nostr_pubkey());
+
+    if let Err(e) = node.sync_wallet() {
+        println!("Wallet sync failed: {}", e);
+    } else {
+        println!("Wallet balance: {} sats", node.wallet_balance()?);
+        println!("Reserves balance: {} sats", node.reserves_balance()?);
+        if let Some(addr) = node.wallet.get_reserves_address() {
+            println!("Reserves address: {}", addr);
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn show_address(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_config(args)?;
+    let node = Node::new(config).await?;
+
+    let address = node.new_address()?;
+    println!("{}", address);
+
+    Ok(())
+}
+
+pub async fn collateral_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.is_empty() {
+        eprintln!("Usage: deposits-node collateral <lock> [args...]");
+        return Ok(());
+    }
+
+    match args[0].as_str() {
+        "lock" | "pledge" => collateral_lock(&args[1..]).await,
+        "record" => collateral_record(&args[1..]).await,
+        cmd => {
+            eprintln!("Unknown collateral subcommand: {}", cmd);
+            eprintln!("Usage: deposits-node collateral <lock|record> [args...]");
+            Ok(())
+        }
+    }
+}
+
+/// Lock deposit balance as collateral backing for the operator
+/// Returns a signed attestation that the requesting operator can record on their ledger
+///
+/// Usage:
+///   collateral lock <ledger_id> <amount_msats> <lock_blocks> [requesting_operator]
+///       Derives deposit key from seed (wallet mode)
+///   collateral lock <reserves_id> <deposit_secret> <amount_msats> <lock_blocks> [requesting_operator]
+///       Uses explicit deposit secret (legacy mode)
+async fn collateral_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::bip32::{DerivationPath, Xpriv};
+    use bitcoin::secp256k1::Secp256k1;
+    use std::str::FromStr as _;
+
+    let mut config_args = Vec::new();
+    let mut positional_args = Vec::new();
+    let mut explicit_index: Option<u32> = None;
+
+    // Separate config args from positional args
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--index" && i + 1 < args.len() {
+            explicit_index = Some(args[i + 1].parse().map_err(|_| "Invalid --index value")?);
+            i += 2;
+            continue;
+        }
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            positional_args.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&config_args)?;
+    let mut node = Node::new(config.clone()).await?;
+
+    // Determine if we're in wallet mode (3 positional args) or legacy mode (4+ positional args)
+    // Wallet mode: <ledger_id> <amount_msats> <lock_blocks> [--index N]
+    // Legacy mode: <reserves_id> <deposit_secret> <amount_msats> <lock_blocks>
+    let (ledger_id, deposit_secret, amount_msats, lock_blocks, requesting_operator_hex) =
+        if positional_args.len() >= 4
+            && positional_args[1].len() == 64
+            && hex::decode(&positional_args[1]).is_ok()
+            && explicit_index.is_none()
+        {
+            // Legacy mode: second arg looks like a hex secret
+            let reserves_id = positional_args[0].clone();
+            let secret_hex = positional_args[1].clone();
+            let amount: u64 = positional_args[2]
+                .parse()
+                .map_err(|_| "Invalid amount_msats")?;
+            let blocks: u32 = positional_args[3]
+                .parse()
+                .map_err(|_| "Invalid lock_blocks")?;
+            let req_op = positional_args.get(4).cloned();
+
+            let secret_bytes = hex::decode(&secret_hex)
+                .map_err(|e| format!("Invalid deposit secret hex: {}", e))?;
+            let secret = bitcoin::secp256k1::SecretKey::from_slice(&secret_bytes)
+                .map_err(|e| format!("Invalid deposit secret: {}", e))?;
+
+            (reserves_id, secret, amount, blocks, req_op)
+        } else if positional_args.len() >= 3 {
+            // Wallet mode: derive key from seed
+            let ledger_id = positional_args[0].clone();
+            let amount: u64 = positional_args[1]
+                .parse()
+                .map_err(|_| "Invalid amount_msats")?;
+            let blocks: u32 = positional_args[2]
+                .parse()
+                .map_err(|_| "Invalid lock_blocks")?;
+            let req_op = positional_args.get(3).cloned();
+
+            // Use explicit --index if provided, otherwise look up from deposits.json
+            let key_index: u32 = if let Some(idx) = explicit_index {
+                idx
+            } else {
+                let wallet_dir = config.data_dir.join("wallet");
+                let deposits_file = wallet_dir.join("deposits.json");
+                if deposits_file.exists() {
+                    let data = std::fs::read_to_string(&deposits_file)?;
+                    let deposits: Vec<serde_json::Value> =
+                        serde_json::from_str(&data).unwrap_or_default();
+                    deposits
+                        .iter()
+                        .find(|d| d.get("ledger_id").and_then(|v| v.as_str()) == Some(&ledger_id))
+                        .and_then(|d| d.get("key_index").and_then(|v| v.as_u64()))
+                        .unwrap_or(0) as u32
+                } else {
+                    0
+                }
+            };
+
+            let xpriv = Xpriv::new_master(config.network, &config.seed)?;
+            let secp = Secp256k1::new();
+            let path = DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", key_index))?;
+            let derived = xpriv.derive_priv(&secp, &path)?;
+            let secret = derived.private_key;
+
+            println!(
+                "(Using wallet key index {} for ledger {}...)",
+                key_index,
+                &ledger_id[..16.min(ledger_id.len())]
+            );
+
+            (ledger_id, secret, amount, blocks, req_op)
+        } else {
+            return Err("Usage: collateral lock <ledger_id> <amount_msats> <lock_blocks> [requesting_op] [--index N]\n       collateral lock <reserves_id> <deposit_secret> <amount_msats> <lock_blocks> [requesting_op]".into());
+        };
+
+    // Derive the deposit pubkey from the secret and create descriptor
+    let secp = Secp256k1::new();
+    let deposit_pubkey = PublicKey::from_secret_key(&secp, &deposit_secret);
+    let _descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
+
+    // Get current block height and compute lock_until_block
+    let current_block = node.wallet.get_block_height()?;
+    let lock_until_block = current_block + lock_blocks;
+
+    // Parse requesting operator (defaults to self if not specified)
+    let requesting_operator = if let Some(hex_str) = requesting_operator_hex {
+        PublicKey::from_str(&hex_str).map_err(|e| format!("Invalid requesting_operator: {}", e))?
+    } else {
+        node.node_id
+    };
+
+    println!("Creating collateral lock via Nostr...");
+    println!("  Ledger: {}", ledger_id);
+    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Amount: {} msats", amount_msats);
+    println!(
+        "  Lock until block: {} (current: {}, +{} blocks)",
+        lock_until_block, current_block, lock_blocks
+    );
+    println!("  Requesting operator: {}", requesting_operator);
+
+    // Send collateral_lock request via Nostr
+    // NOTE: current handler expects deposit_secret (private key) — this is a known
+    // security concern that should be replaced with signature-based auth in the future.
+    let request_params = serde_json::json!({
+        "deposit_secret": hex::encode(deposit_secret.secret_bytes()),
+        "amount_msats": amount_msats,
+        "lock_blocks": lock_blocks,
+        "requesting_operator": hex::encode(requesting_operator.serialize()),
+    });
+
+    let request_id = node
+        .nostr
+        .send_ledger_request(&ledger_id, "collateral_lock", request_params)
+        .await?;
+
+    println!("  Request ID: {}...", &request_id[..16]);
+
+    // Wait for response
+    let attestation_json = match node.nostr.wait_for_response(&request_id, 30000).await {
+        Ok(response) => {
+            if response.success {
+                if let Some(result) = &response.result {
+                    println!("\nCollateral locked!");
+                    // Extract attestation JSON for auto-recording
+                    let att_json = if let Some(att_b64) =
+                        result.get("attestation_b64").and_then(|v| v.as_str())
+                    {
+                        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+                        String::from_utf8(BASE64.decode(att_b64).unwrap_or_default()).ok()
+                    } else {
+                        // Try raw JSON
+                        Some(result.to_string())
+                    };
+                    if let Some(ref _json) = att_json {
+                        println!(
+                            "  attestation_b64: {}",
+                            result
+                                .get("attestation_b64")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                        );
+                    }
+                    att_json
+                } else {
+                    println!("\nCollateral locked! (no attestation in response)");
+                    None
+                }
+            } else {
+                let error = response.error.as_deref().unwrap_or("Unknown error");
+                return Err(format!("Collateral lock failed: {}", error).into());
+            }
+        }
+        Err(e) => {
+            return Err(format!("Timeout waiting for collateral_lock response: {}", e).into())
+        }
+    };
+
+    // Auto-record attestation on all our own ledgers
+    if let Some(att_json) = attestation_json {
+        let our_ledger_ids: Vec<String> = {
+            let ledgers = node.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter(|(_, arc)| arc.read().unwrap().operator_key() == node.node_id)
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+
+        if our_ledger_ids.is_empty() {
+            println!("\n(No own ledgers to record attestation on)");
+        } else {
+            println!(
+                "\nRecording attestation on {} own ledger(s)...",
+                our_ledger_ids.len()
+            );
+            for lid in &our_ledger_ids {
+                let params = serde_json::json!({ "attestation": att_json });
+                match send_daemon_request(&config, lid, "collateral_record", params).await {
+                    Ok(_) => println!("  Recorded on {}...", &lid[..16.min(lid.len())]),
+                    Err(e) => eprintln!("  Failed on {}...: {}", &lid[..16.min(lid.len())], e),
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Record a received CollateralAttestation on our own ledger
+async fn collateral_record(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse positional arguments: <reserves_id> <attestation_json>
+    let mut reserves_id: Option<String> = None;
+    let mut attestation_json: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if reserves_id.is_none() {
+            reserves_id = Some(args[i].clone());
+        } else if attestation_json.is_none() {
+            // Take just this arg as the JSON (should be a single quoted string from shell)
+            attestation_json = Some(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let reserves_id_arg = reserves_id.ok_or("reserves_id required")?;
+    let attestation_json = attestation_json.ok_or("attestation_json required")?;
+
+    // Parse the attestation
+    let attestation: deposits_core::CollateralAttestationMsg =
+        serde_json::from_str(&attestation_json)
+            .map_err(|e| format!("Invalid attestation JSON: {}", e))?;
+
+    let config = parse_config(&config_args)?;
+
+    // Load state from disk to resolve ledger_id
+    let node = Node::new(config.clone()).await?;
+    let ledger_id =
+        if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
+            reserves_id_arg.clone()
+        } else {
+            node.get_ledger_with_id(&reserves_id_arg)
+                .map(|(lid, _)| lid)
+                .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
+        };
+    drop(node);
+
+    println!("Recording collateral attestation via daemon...");
+    println!("  Ledger ID: {}...", &ledger_id[..16]);
+    println!("  From operator: {}", attestation.operator);
+    println!("  Amount: {} msats", attestation.amount);
+    println!("  Lock until: block {}", attestation.lock_until_block);
+
+    let params = serde_json::json!({
+        "attestation": attestation_json,
+    });
+
+    send_daemon_request(&config, &ledger_id, "collateral_record", params).await?;
+
+    println!("\nCollateral attestation recorded!");
+    println!("  Operator: {}", attestation.operator);
+    println!("  Amount: {} msats", attestation.amount);
+
+    Ok(())
+}
