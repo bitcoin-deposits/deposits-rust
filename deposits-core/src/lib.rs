@@ -370,8 +370,4 @@ pub use wire_messages::{
     SyncRequestMsg,
     UncreditedPaymentMsg,
     UpdateReservesMsg,
-    WireDecode,
-    // Traits
-    WireEncode,
-    WireError,
 };
