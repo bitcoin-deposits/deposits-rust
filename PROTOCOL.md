@@ -164,6 +164,25 @@ Full wire format: DEP-02. On-chain transactions: DEP-03.
 
 Every operation must pass validation before being applied. Invalid operations are rejected. Validation occurs at two levels: global constraints that apply to all operations, and per-operation checks specific to each type.
 
+### Conformance Checking
+
+Conformance violations are detected after an operation is applied by inspecting the resulting state. Unlike validation errors (which prevent application), conformance violations indicate the operator produced a structurally valid but rule-violating update.
+
+**Operator path** (`check_and_apply`): Refuses to produce non-conforming state. Used when the operator creates their own updates.
+
+**Watcher path** (`apply_with_verifier`): Applies the operation and returns violations. Used by quorum members and wallets monitoring a partner's ledger. The state is always updated so the watcher can continue tracking even a misbehaving operator.
+
+Conformance checks performed after each operation:
+
+| Check | Triggered By | Rule |
+|-------|-------------|------|
+| Reserve sufficiency | `InvoiceCredit`, `OnchainCredit`, `TransferComplete` | `reserves_amount >= sum(deposits.balance)` |
+| Witness verification | `InvoiceLock`, `InvoiceFulfill`, `OnchainLock`, `TransferLock`, `CollateralLock` | Witness satisfies the deposit descriptor for the operation's signing message |
+| Key rotation authorization | `DepositKeyRotate` | Witness satisfies the **old** descriptor (pre-rotation) with `message = SHA256(new_descriptor)` |
+| Preimage validity | `InvoiceFulfill` | `SHA256(preimage) == payment_hash` |
+
+Conformance violations are evidence of misbehavior and may be used to initiate disputes.
+
 ### Global Constraints
 
 **Dispute State Gate:**

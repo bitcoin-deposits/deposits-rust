@@ -1809,7 +1809,7 @@ impl LedgerState {
         verifier: &impl WitnessVerifier,
     ) -> crate::DepositsResult<(Self, Vec<ConformanceViolation>)> {
         let next = self.apply(operation)?;
-        let violations = next.check_conformance(operation, verifier);
+        let violations = next.check_conformance(operation, Some(self), verifier);
         Ok((next, violations))
     }
 
@@ -1834,10 +1834,15 @@ impl LedgerState {
 
     /// Check the conformance of this state after an operation was applied.
     ///
+    /// `pre_state` is the state before apply() — needed for DepositKeyRotate
+    /// where the witness must satisfy the old descriptor. Pass `None` to skip
+    /// pre-state-dependent checks.
+    ///
     /// Returns an empty vec if the state is conforming.
     pub fn check_conformance(
         &self,
         operation: &crate::messages::LedgerOperation,
+        pre_state: Option<&LedgerState>,
         verifier: &impl WitnessVerifier,
     ) -> Vec<ConformanceViolation> {
         use crate::messages::LedgerOperation;
@@ -1995,10 +2000,20 @@ impl LedgerState {
                 witness,
             } => {
                 // The witness must satisfy the OLD descriptor (proving authorization to rotate).
-                // But apply() already updated the descriptor, so we can't check it here.
-                // This verification must be done before apply() or by checking the pre-state.
-                // For now, skip — this is a known limitation.
-                let _ = (deposit_id, new_descriptor, witness);
+                // apply() already updated the descriptor, so we use pre_state to get the old one.
+                if let Some(pre) = pre_state {
+                    if let Some(old_deposit) = pre.deposits.get(deposit_id) {
+                        // Message is SHA256(new_descriptor)
+                        let msg = sha256::Hash::hash(new_descriptor.as_bytes()).to_byte_array();
+                        if !verifier.verify_witness(&old_deposit.descriptor, witness, &msg) {
+                            violations.push(ConformanceViolation::InvalidWitness {
+                                operation: "DepositKeyRotate",
+                                detail: "witness does not satisfy old deposit descriptor"
+                                    .to_string(),
+                            });
+                        }
+                    }
+                }
             }
             _ => {}
         }

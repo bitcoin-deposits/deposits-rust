@@ -153,7 +153,28 @@ impl Node {
                         && update.update.previous_hash == tip_hash
                     {
                         if let Ok(op) = LedgerOperation::tlv_decode(&update.update.message) {
-                            let _ = ledger.apply_state_changes(&op);
+                            match ledger.apply_and_check(
+                                &op,
+                                &deposits_core::descriptor::CoreWitnessVerifier,
+                            ) {
+                                Ok(violations) if !violations.is_empty() => {
+                                    tracing::warn!(
+                                        ledger_id = %update.ledger_id,
+                                        seq = update.update.sequence_number,
+                                        "Conformance violations on joined ledger: {:?}",
+                                        violations
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        ledger_id = %update.ledger_id,
+                                        seq = update.update.sequence_number,
+                                        "Failed to apply state change on joined ledger: {}",
+                                        e
+                                    );
+                                }
+                                _ => {}
+                            }
                         }
                         ledger.state.sequence = update.update.sequence_number;
                         ledger.state.chain_tip_hash = update.update.chain_hash();
@@ -589,9 +610,29 @@ impl Node {
                 if inbound.update.sequence_number == expected_seq
                     && inbound.update.previous_hash == tip_hash
                 {
-                    // Apply state changes so our state stays current with history
+                    // Apply state changes with conformance checking
                     if let Ok(op) = LedgerOperation::tlv_decode(&inbound.update.message) {
-                        let _ = ledger.apply_state_changes(&op);
+                        match ledger
+                            .apply_and_check(&op, &deposits_core::descriptor::CoreWitnessVerifier)
+                        {
+                            Ok(violations) if !violations.is_empty() => {
+                                tracing::warn!(
+                                    ledger_id = %inbound.ledger_id,
+                                    seq = inbound.update.sequence_number,
+                                    "Conformance violations on watched ledger: {:?}",
+                                    violations
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    ledger_id = %inbound.ledger_id,
+                                    seq = inbound.update.sequence_number,
+                                    "Failed to apply state change on watched ledger: {}",
+                                    e
+                                );
+                            }
+                            _ => {}
+                        }
                     }
                     ledger.state.sequence = inbound.update.sequence_number;
                     ledger.state.chain_tip_hash = inbound.update.chain_hash();

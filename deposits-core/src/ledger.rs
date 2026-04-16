@@ -1110,8 +1110,8 @@ impl Ledger {
             ));
         }
 
-        // Apply state changes
-        self.apply_state_changes(&staged.operation)?;
+        // Apply state changes with conformance check (operator must not produce non-conforming state)
+        self.checked_apply(&staged.operation, &crate::descriptor::CoreWitnessVerifier)?;
 
         // Update chain state — chain_tip uses chain_hash() which folds in the operator signature
         self.state.chain_tip_hash = staged.update.chain_hash();
@@ -1417,6 +1417,33 @@ impl Ledger {
     pub fn apply_state_changes(&mut self, operation: &LedgerOperation) -> DepositsResult<()> {
         self.state = self.state.apply(operation)?;
         Ok(())
+    }
+
+    /// Apply state changes with conformance checking (operator path).
+    ///
+    /// Returns `Err` if the operation would produce a non-conforming state.
+    /// Use this when the operator is creating their own updates.
+    pub fn checked_apply(
+        &mut self,
+        operation: &LedgerOperation,
+        verifier: &impl deposits_protocol::WitnessVerifier,
+    ) -> DepositsResult<()> {
+        self.state = self.state.check_and_apply(operation, verifier)?;
+        Ok(())
+    }
+
+    /// Apply state changes and return any conformance violations (watcher path).
+    ///
+    /// Always applies the operation (even if non-conforming) so the watcher
+    /// can continue tracking the ledger. Returns violations for logging/dispute.
+    pub fn apply_and_check(
+        &mut self,
+        operation: &LedgerOperation,
+        verifier: &impl deposits_protocol::WitnessVerifier,
+    ) -> DepositsResult<Vec<deposits_protocol::ConformanceViolation>> {
+        let (new_state, violations) = self.state.apply_with_verifier(operation, verifier)?;
+        self.state = new_state;
+        Ok(violations)
     }
 
     // ========================================================================
