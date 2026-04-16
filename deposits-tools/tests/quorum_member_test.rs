@@ -8,9 +8,10 @@ mod tests {
     use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 
     // V2 message types from deposits-core
+    use deposits_core::ledger::Ledger;
     use deposits_core::messages::{
         CoordinationMsg, CoordinationResponseMsg, DepositsMessage, HandshakeMsg,
-        HandshakeResponseMsg, LedgerUpdateResponseMsg,
+        HandshakeResponseMsg, LedgerOperation, LedgerUpdateResponseMsg,
     };
     // Wire message structs from deposits-core for struct construction
     use deposits_core::wire_messages::{
@@ -154,39 +155,291 @@ mod tests {
     // =========================================================================
 
     #[test]
-    #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_ledger_add_quorum_member_via_message() {
-        todo!("Update test for V2 Ledger API");
+        let operator_key = generate_test_pubkey(1);
+        let member_key = generate_test_pubkey(2);
+        let mut ledger = Ledger::new_as_operator(operator_key, "bcrt1qtest".to_string(), 0);
+
+        ledger
+            .apply_state_changes(&LedgerOperation::QuorumAddMember {
+                quorum_member: member_key,
+                quorum_member_signature: [0xAA; 64],
+                member_ledger_id: "member_collateral_ledger".to_string(),
+                min_fee_bps: None,
+                min_fee_fixed: None,
+                max_fee_period: None,
+                collateral_lock_amount: None,
+                collateral_lock_until: None,
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
+            })
+            .unwrap();
+
+        assert!(ledger
+            .state
+            .next_quorum_members
+            .iter()
+            .any(|m| m.pubkey == member_key));
     }
 
     #[test]
-    #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_ledger_remove_quorum_member_via_message() {
-        todo!("Update test for V2 Ledger API");
+        let operator_key = generate_test_pubkey(1);
+        let member_key = generate_test_pubkey(2);
+        let mut ledger = Ledger::new_as_operator(operator_key, "bcrt1qtest".to_string(), 0);
+
+        // Add a member
+        ledger
+            .apply_state_changes(&LedgerOperation::QuorumAddMember {
+                quorum_member: member_key,
+                quorum_member_signature: [0xAA; 64],
+                member_ledger_id: "member_collateral_ledger".to_string(),
+                min_fee_bps: None,
+                min_fee_fixed: None,
+                max_fee_period: None,
+                collateral_lock_amount: None,
+                collateral_lock_until: None,
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
+            })
+            .unwrap();
+        assert!(ledger
+            .state
+            .next_quorum_members
+            .iter()
+            .any(|m| m.pubkey == member_key));
+
+        // Remove the member
+        ledger
+            .apply_state_changes(&LedgerOperation::QuorumRemoveMember {
+                quorum_member: member_key,
+                operator_signature: [0xBB; 64],
+            })
+            .unwrap();
+
+        assert!(!ledger
+            .state
+            .next_quorum_members
+            .iter()
+            .any(|m| m.pubkey == member_key));
     }
 
     #[test]
-    #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_ledger_collateral_attestation_from_channel_partner() {
-        todo!("Update test for V2 Ledger API");
+        let operator_key = generate_test_pubkey(1);
+        let member_key = generate_test_pubkey(2);
+        let mut ledger = Ledger::new_as_operator(operator_key, "bcrt1qtest".to_string(), 0);
+
+        // Add member, promote via QuorumBegin, then attest
+        ledger
+            .apply_state_changes(&LedgerOperation::QuorumAddMember {
+                quorum_member: member_key,
+                quorum_member_signature: [0xAA; 64],
+                member_ledger_id: "member_collateral_ledger".to_string(),
+                min_fee_bps: None,
+                min_fee_fixed: None,
+                max_fee_period: None,
+                collateral_lock_amount: None,
+                collateral_lock_until: None,
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
+            })
+            .unwrap();
+
+        ledger
+            .apply_state_changes(&LedgerOperation::QuorumBegin {
+                reserves_id: "bcrt1qtest_rotated".to_string(),
+                spending_txid: [0x11; 32],
+                new_outpoint_txid: [0x22; 32],
+                new_outpoint_vout: 0,
+                amount: 100_000_000,
+                quorum_expiry: 1_000_000,
+                ledger_hash: [0x33; 32],
+                quorum_members: vec![member_key],
+                total_collateral: 50_000,
+            })
+            .unwrap();
+
+        ledger
+            .apply_state_changes(&LedgerOperation::CollateralAttestation {
+                collateral_operator: member_key,
+                quorum_member: member_key,
+                collateral_ledger_id: "member_collateral_ledger".to_string(),
+                amount: 50_000,
+                block_height: 800_000,
+                lock_until_block: 900_000,
+                signature: [0xEF; 64],
+                ledger_hash: [0u8; 32],
+            })
+            .unwrap();
+
+        assert!(ledger
+            .state
+            .collateral_attestations
+            .contains_key(&member_key));
     }
 
     #[test]
-    #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_ledger_collateral_attestation_from_quorum_member() {
-        todo!("Update test for V2 Ledger API");
+        let operator_key = generate_test_pubkey(1);
+        let member_key = generate_test_pubkey(3);
+        let mut ledger = Ledger::new_as_operator(operator_key, "bcrt1qtest".to_string(), 0);
+
+        // Add member, promote via QuorumBegin, then attest
+        ledger
+            .apply_state_changes(&LedgerOperation::QuorumAddMember {
+                quorum_member: member_key,
+                quorum_member_signature: [0xAA; 64],
+                member_ledger_id: "quorum_member_ledger".to_string(),
+                min_fee_bps: None,
+                min_fee_fixed: None,
+                max_fee_period: None,
+                collateral_lock_amount: None,
+                collateral_lock_until: None,
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
+            })
+            .unwrap();
+
+        ledger
+            .apply_state_changes(&LedgerOperation::QuorumBegin {
+                reserves_id: "bcrt1qtest_rotated".to_string(),
+                spending_txid: [0x11; 32],
+                new_outpoint_txid: [0x22; 32],
+                new_outpoint_vout: 0,
+                amount: 100_000_000,
+                quorum_expiry: 1_000_000,
+                ledger_hash: [0x33; 32],
+                quorum_members: vec![member_key],
+                total_collateral: 50_000,
+            })
+            .unwrap();
+
+        ledger
+            .apply_state_changes(&LedgerOperation::CollateralAttestation {
+                collateral_operator: member_key,
+                quorum_member: member_key,
+                collateral_ledger_id: "quorum_member_ledger".to_string(),
+                amount: 75_000,
+                block_height: 800_000,
+                lock_until_block: 900_000,
+                signature: [0xEF; 64],
+                ledger_hash: [0u8; 32],
+            })
+            .unwrap();
+
+        assert!(ledger
+            .state
+            .collateral_attestations
+            .contains_key(&member_key));
+        assert_eq!(
+            ledger.state.collateral_attestations[&member_key].amount,
+            75_000
+        );
     }
 
     #[test]
-    #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_ledger_collateral_attestation_from_unknown_rejected() {
-        todo!("Update test for V2 Ledger API");
+        let operator_key = generate_test_pubkey(1);
+        let unknown_key = generate_test_pubkey(99);
+        let mut ledger = Ledger::new_as_operator(operator_key, "bcrt1qtest".to_string(), 0);
+
+        // Attempt attestation from a key that is not a quorum member
+        // Use apply_operation which runs validate_operation
+        let result = ledger.apply_operation(&LedgerOperation::CollateralAttestation {
+            collateral_operator: unknown_key,
+            quorum_member: unknown_key,
+            collateral_ledger_id: "unknown_ledger".to_string(),
+            amount: 50_000,
+            block_height: 800_000,
+            lock_until_block: 900_000,
+            signature: [0xEF; 64],
+            ledger_hash: [0u8; 32],
+        });
+
+        assert!(result.is_err());
     }
 
     #[test]
-    #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_remove_quorum_member_clears_attestation() {
-        todo!("Update test for V2 Ledger API");
+        let operator_key = generate_test_pubkey(1);
+        let member_key = generate_test_pubkey(2);
+        let mut ledger = Ledger::new_as_operator(operator_key, "bcrt1qtest".to_string(), 0);
+
+        // Add member, promote, attest
+        ledger
+            .apply_state_changes(&LedgerOperation::QuorumAddMember {
+                quorum_member: member_key,
+                quorum_member_signature: [0xAA; 64],
+                member_ledger_id: "member_collateral_ledger".to_string(),
+                min_fee_bps: None,
+                min_fee_fixed: None,
+                max_fee_period: None,
+                collateral_lock_amount: None,
+                collateral_lock_until: None,
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
+            })
+            .unwrap();
+
+        ledger
+            .apply_state_changes(&LedgerOperation::QuorumBegin {
+                reserves_id: "bcrt1qtest_rotated".to_string(),
+                spending_txid: [0x11; 32],
+                new_outpoint_txid: [0x22; 32],
+                new_outpoint_vout: 0,
+                amount: 100_000_000,
+                quorum_expiry: 1_000_000,
+                ledger_hash: [0x33; 32],
+                quorum_members: vec![member_key],
+                total_collateral: 50_000,
+            })
+            .unwrap();
+
+        ledger
+            .apply_state_changes(&LedgerOperation::CollateralAttestation {
+                collateral_operator: member_key,
+                quorum_member: member_key,
+                collateral_ledger_id: "member_collateral_ledger".to_string(),
+                amount: 50_000,
+                block_height: 800_000,
+                lock_until_block: 900_000,
+                signature: [0xEF; 64],
+                ledger_hash: [0u8; 32],
+            })
+            .unwrap();
+        assert!(ledger
+            .state
+            .collateral_attestations
+            .contains_key(&member_key));
+
+        // Remove the member — attestation should be cleared
+        ledger
+            .apply_state_changes(&LedgerOperation::QuorumRemoveMember {
+                quorum_member: member_key,
+                operator_signature: [0xBB; 64],
+            })
+            .unwrap();
+
+        assert!(!ledger
+            .state
+            .collateral_attestations
+            .contains_key(&member_key));
     }
 
     // =========================================================================
@@ -194,9 +447,69 @@ mod tests {
     // =========================================================================
 
     #[test]
-    #[ignore = "TODO: Update for V2 Ledger API"]
     fn test_quorum_member_messages_update_hash_chain() {
-        todo!("Update test for V2 Ledger API");
+        let operator_key = generate_test_pubkey(1);
+        let member_key = generate_test_pubkey(2);
+        let mut ledger = Ledger::new_as_operator(operator_key, "bcrt1qtest".to_string(), 0);
+
+        let hash_before = ledger.state.chain_tip_hash;
+
+        // Add a quorum member — hash should change
+        let update = ledger
+            .apply_operation(&LedgerOperation::QuorumAddMember {
+                quorum_member: member_key,
+                quorum_member_signature: [0xAA; 64],
+                member_ledger_id: "member_collateral_ledger".to_string(),
+                min_fee_bps: None,
+                min_fee_fixed: None,
+                max_fee_period: None,
+                collateral_lock_amount: None,
+                collateral_lock_until: None,
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
+            })
+            .unwrap();
+        let hash_after_add = update.current_hash;
+        assert_ne!(
+            hash_before, hash_after_add,
+            "Hash should change after QuorumAddMember"
+        );
+
+        // QuorumBegin — hash should change again
+        let update = ledger
+            .apply_operation(&LedgerOperation::QuorumBegin {
+                reserves_id: "bcrt1qtest_rotated".to_string(),
+                spending_txid: [0x11; 32],
+                new_outpoint_txid: [0x22; 32],
+                new_outpoint_vout: 0,
+                amount: 100_000_000,
+                quorum_expiry: 1_000_000,
+                ledger_hash: [0x33; 32],
+                quorum_members: vec![member_key],
+                total_collateral: 50_000,
+            })
+            .unwrap();
+        let hash_after_begin = update.current_hash;
+        assert_ne!(
+            hash_after_add, hash_after_begin,
+            "Hash should change after QuorumBegin"
+        );
+
+        // Remove member — hash should change yet again
+        let update = ledger
+            .apply_operation(&LedgerOperation::QuorumRemoveMember {
+                quorum_member: member_key,
+                operator_signature: [0xBB; 64],
+            })
+            .unwrap();
+        let hash_after_remove = update.current_hash;
+        assert_ne!(
+            hash_after_begin, hash_after_remove,
+            "Hash should change after QuorumRemoveMember"
+        );
     }
 
     // =========================================================================

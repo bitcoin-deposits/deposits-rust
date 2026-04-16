@@ -6,12 +6,11 @@
 //! 3. Handler rejects invalid accusations
 //! 4. Ledger correctly identifies missing credits
 
-#![cfg(feature = "bitcoin-deposits")]
-
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 
-use deposits_core::messages::{DepositsMessage, RecoveryMsg};
+use deposits_core::messages::{DepositsMessage, LedgerOperation, RecoveryMsg};
+use deposits_core::types::LedgerState;
 use deposits_core::wire_messages::UncreditedPaymentMsg;
 
 /// Generate a test public key from a seed byte
@@ -26,6 +25,30 @@ fn generate_test_pubkey(seed: u8) -> PublicKey {
 /// Generate a valid payment hash from a preimage
 fn generate_payment_hash(preimage: &[u8; 32]) -> [u8; 32] {
     *sha256::Hash::hash(preimage).as_byte_array()
+}
+
+/// Create a test LedgerState with a single open deposit, returning (state, deposit_id).
+fn create_test_ledger_with_deposit() -> (LedgerState, [u8; 16]) {
+    let state = LedgerState::new(generate_test_pubkey(1), "bcrt1qtest".to_string(), 0);
+    let descriptor = "wpkh(test_descriptor)";
+    let deposit_id = deposits_core::types::compute_deposit_id(descriptor);
+    let state = state
+        .apply(&LedgerOperation::DepositOpen {
+            deposit_id,
+            descriptor: descriptor.to_string(),
+            fees: None,
+            transfer_fees: None,
+            payment_hash: None,
+            invoice: None,
+            cosigner_guarantee_signature: None,
+            is_collateral: false,
+            receive_requires_sig: false,
+            fee_change_after_blocks: None,
+            fee_change_notice_blocks: None,
+            fee_change_limit_bps: None,
+        })
+        .unwrap();
+    (state, deposit_id)
 }
 
 // =============================================================================
@@ -77,12 +100,6 @@ fn test_preimage_verification_known_vectors() {
 // =============================================================================
 
 #[test]
-#[ignore = "TODO: Update for V2 message codec - UncreditedPayment encoding changed"]
-fn test_uncredited_payment_msg_roundtrip() {
-    todo!("Update for V2 message codec - UncreditedPayment is now encoded differently");
-}
-
-#[test]
 fn test_uncredited_payment_msg_type() {
     use deposits_core::messages::RECOVERY;
 
@@ -110,21 +127,71 @@ fn test_uncredited_payment_msg_type() {
 // =============================================================================
 
 #[test]
-#[ignore = "TODO: Update for V2 Ledger API"]
 fn test_ledger_has_no_credit_initially() {
-    todo!("Update for V2 Ledger API - Ledger constructor and has_credit_for_payment changed");
+    let (state, _deposit_id) = create_test_ledger_with_deposit();
+    assert!(state.credited_payments.is_empty());
 }
 
 #[test]
-#[ignore = "TODO: Update for V2 Ledger API"]
 fn test_ledger_detects_existing_credit() {
-    todo!("Update for V2 Ledger API - Ledger constructor, updates field, and has_credit_for_payment changed");
+    let (state, deposit_id) = create_test_ledger_with_deposit();
+
+    let payment_hash = [0xAA; 32];
+    let state = state
+        .apply(&LedgerOperation::InvoiceCredit {
+            payment_hash,
+            deposit_id,
+            amount: 100_000,
+            invoice_id: "inv1".to_string(),
+            sequence_number: 1,
+        })
+        .unwrap();
+
+    assert!(state.credited_payments.contains(&hex::encode(payment_hash)));
 }
 
 #[test]
-#[ignore = "TODO: Update for V2 Ledger API"]
 fn test_ledger_multiple_credits() {
-    todo!("Update for V2 Ledger API - Ledger constructor, updates field, and has_credit_for_payment changed");
+    let (state, deposit_id) = create_test_ledger_with_deposit();
+
+    let hash1 = [0xAA; 32];
+    let hash2 = [0xBB; 32];
+    let hash3 = [0xCC; 32];
+
+    let state = state
+        .apply(&LedgerOperation::InvoiceCredit {
+            payment_hash: hash1,
+            deposit_id,
+            amount: 100_000,
+            invoice_id: "inv1".to_string(),
+            sequence_number: 1,
+        })
+        .unwrap();
+
+    let state = state
+        .apply(&LedgerOperation::InvoiceCredit {
+            payment_hash: hash2,
+            deposit_id,
+            amount: 200_000,
+            invoice_id: "inv2".to_string(),
+            sequence_number: 2,
+        })
+        .unwrap();
+
+    let state = state
+        .apply(&LedgerOperation::InvoiceCredit {
+            payment_hash: hash3,
+            deposit_id,
+            amount: 300_000,
+            invoice_id: "inv3".to_string(),
+            sequence_number: 3,
+        })
+        .unwrap();
+
+    assert!(state.credited_payments.contains(&hex::encode(hash1)));
+    assert!(state.credited_payments.contains(&hex::encode(hash2)));
+    assert!(state.credited_payments.contains(&hex::encode(hash3)));
+    assert_eq!(state.credited_payments.len(), 3);
 }
 
 // =============================================================================
@@ -182,15 +249,32 @@ fn test_accusation_with_invalid_preimage() {
 }
 
 #[test]
-#[ignore = "TODO: Update for V2 Ledger API"]
 fn test_accusation_against_ledger_with_credit() {
-    todo!("Update for V2 Ledger API - Ledger constructor, updates field, and has_credit_for_payment changed");
+    let (state, deposit_id) = create_test_ledger_with_deposit();
+
+    let payment_hash = [0xAA; 32];
+    let state = state
+        .apply(&LedgerOperation::InvoiceCredit {
+            payment_hash,
+            deposit_id,
+            amount: 100_000,
+            invoice_id: "inv1".to_string(),
+            sequence_number: 1,
+        })
+        .unwrap();
+
+    // The payment hash IS credited — accusation would be invalid
+    assert!(state.credited_payments.contains(&hex::encode(payment_hash)));
 }
 
 #[test]
-#[ignore = "TODO: Update for V2 Ledger API"]
 fn test_accusation_against_ledger_without_credit() {
-    todo!("Update for V2 Ledger API - Ledger constructor and has_credit_for_payment changed");
+    let (state, _deposit_id) = create_test_ledger_with_deposit();
+
+    let payment_hash = [0xAA; 32];
+
+    // The payment hash is NOT credited — accusation would be valid
+    assert!(!state.credited_payments.contains(&hex::encode(payment_hash)));
 }
 
 // =============================================================================
@@ -246,7 +330,7 @@ fn test_preimage_all_ones() {
 }
 
 #[test]
-#[ignore = "TODO: Update for V2 Ledger API"]
 fn test_empty_ledger_updates() {
-    todo!("Update for V2 Ledger API - Ledger constructor, updates field, and has_credit_for_payment changed");
+    let state = LedgerState::new(generate_test_pubkey(1), "bcrt1qtest".to_string(), 0);
+    assert!(state.credited_payments.is_empty());
 }
