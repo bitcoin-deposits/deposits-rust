@@ -64,10 +64,8 @@ pub use deposits_protocol::types;
 pub use deposits_protocol::wire_messages;
 
 // Core modules (state machine, handlers, validation)
-pub mod channel_manager_ops;
 pub mod descriptor;
 pub mod event_store;
-pub mod handler;
 pub mod handler_traits;
 pub mod handler_types;
 pub mod ledger;
@@ -75,28 +73,24 @@ pub mod signing;
 #[macro_use]
 pub mod logging;
 pub mod message_handlers;
-pub mod message_processor;
 pub mod message_validation;
 pub mod operation_validation;
 pub mod payment_tracker;
 pub mod quorum;
 pub mod recovery;
 pub mod recovery_claim;
-pub mod reserves_proposal;
 pub mod tapscript_reserves;
 pub mod time_utils;
 pub mod traits;
 pub mod validation;
 
 // Re-exports for convenience
-pub use channel_manager_ops::{ChannelDetails, ChannelManagerOps, NullChannelManager};
 pub use constants::{
     COLLATERAL_REPORTING_PERIOD_BLOCKS, DEFAULT_EMERGENCY_TIMEOUT_BLOCKS,
     DEPOSITS_PROTOCOL_VERSION, MAX_EMERGENCY_TIMEOUT_BLOCKS, MAX_RESERVES_OUTPUT_SATS,
     MIN_EMERGENCY_TIMEOUT_BLOCKS, MIN_RESERVES_OUTPUT_SATS, MIN_RESERVES_RATIO_PERCENT,
 };
 pub use error::{DepositsError, DepositsResult, HandlerError};
-pub use handler::{Handler, PendingAck};
 pub use handler_traits::{
     // Pure protocol traits (no LDK dependencies)
     CollateralOperations,
@@ -121,19 +115,11 @@ pub use handler_types::{
 pub use ledger::{
     Ledger, LedgerManager, LedgerProtocolState, LedgerRole, LedgerValidator, StagedUpdate,
 };
-pub use message_processor::{
-    CollateralMessageResult, CollateralProcessor, QuorumJoinRequest, QuorumMessageResult,
-    QuorumProcessor, QuorumResponse, QuorumStateSync, QuorumVote, RecoveryMessageResult,
-    RecoveryProcessor,
-};
 pub use messages::{DepositsMessage, HashStrategy, LedgerOperation};
 pub use payment_tracker::DepositInvoiceIndex;
 pub use recovery::{
     select_recovery_partner, ClaimEligibility, RecoveryCandidate, RecoveryError, RecoveryManager,
     RecoveryOutcome, RecoveryPhase, RecoveryPool, RecoveryVote,
-};
-pub use reserves_proposal::{
-    serde_arrays, EmergencyRecovery, ProposalStatus, ReservesOutputProposal, SpendingPolicy,
 };
 pub use tapscript_reserves::{
     build_taproot_reserves_script, verify_taproot_reserves, ReservesSpendBuilder, SpendTxParams,
@@ -236,42 +222,7 @@ pub use signature_utils::{
     transfer_lock_signing_message, withdrawal_signing_message,
 };
 // Re-export crypto operations from signing module
-pub use message_handlers::{
-    handle_collateral_add_partner,
-    handle_collateral_attestation,
-    handle_collateral_consent_request,
-    handle_collateral_consent_response,
-    handle_collateral_remove_partner,
-    // Fee and lifecycle handler functions
-    handle_fee_collect,
-    handle_ledger_close,
-    // Ledger export handlers
-    handle_ledger_export_request,
-    // Generic ledger update handler
-    handle_ledger_update,
-    // Core handler functions
-    handle_quorum_join_request,
-    handle_quorum_state_sync,
-    handle_quorum_vote,
-    handle_quorum_vote_request,
-    handle_receiving_cosign_invoice,
-    // Payment handler functions
-    handle_receiving_credit_payment,
-    handle_recovery_claim_complete,
-    handle_recovery_claim_request,
-    handle_recovery_claim_signature,
-    handle_recovery_vote,
-    handle_sending_fail_payment,
-    handle_sending_fulfill_payment,
-    handle_sending_lock_payment,
-    handle_uncredited_payment,
-    // Helper functions
-    make_ledger_id,
-    validate_ledger_export_response,
-    // Handler result types
-    HandlerResult,
-    ResponseData,
-};
+pub use message_handlers::{handle_ledger_update, HandlerResult, ResponseData};
 pub use message_validation::{
     // Message validation functions (with _msg suffix to distinguish from operation_validation)
     validate_add_deposit_msg,

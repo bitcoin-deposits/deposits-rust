@@ -86,6 +86,15 @@ use crate::wire_messages::{
     SendingLockPaymentMsg,
 };
 
+/// Pending acknowledgment for a sent message.
+#[derive(Clone, Debug)]
+pub struct PendingAck {
+    /// The message type that was sent
+    pub message_type: u16,
+    /// When the message was sent (Unix timestamp)
+    pub sent_at: u64,
+}
+
 // ============================================================================
 // Validation Context Trait
 // ============================================================================
@@ -263,14 +272,14 @@ pub trait HandlerContext: ValidationContext {
 
     /// Complete a pending ACK, returning the pending ack info if found.
     /// Called when an ACK is received for a previously sent message.
-    fn complete_pending_ack(&self, hash: &[u8; 32]) -> Option<crate::PendingAck> {
+    fn complete_pending_ack(&self, hash: &[u8; 32]) -> Option<PendingAck> {
         let _ = hash;
         None // Default: not found
     }
 
     /// Check for timed-out ACKs.
     /// Returns list of (hash, pending_ack) pairs that have exceeded the threshold.
-    fn get_timed_out_acks(&self, threshold_secs: u64) -> Vec<([u8; 32], crate::PendingAck)> {
+    fn get_timed_out_acks(&self, threshold_secs: u64) -> Vec<([u8; 32], PendingAck)> {
         let _ = threshold_secs;
         vec![] // Default: none
     }

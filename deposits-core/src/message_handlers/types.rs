@@ -1,4 +1,4 @@
-use super::*;
+use bitcoin::secp256k1::PublicKey;
 
 // ============================================================================
 // Handler Result Types
