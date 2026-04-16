@@ -32,7 +32,30 @@ use crate::recovery::{ClaimEligibility, RecoveryPhase, RecoveryState};
 use crate::tapscript_reserves::{
     ReservesSpendBuilder, SpendTxParams, TapscriptReservesBuilder, ThresholdConfig, VoterSet,
 };
-use crate::traits::Broadcaster;
+/// Error type for transaction broadcasting.
+#[derive(Debug, Clone)]
+pub enum BroadcastError {
+    InvalidTransaction(String),
+    NetworkError(String),
+    Rejected(String),
+    Other(String),
+}
+
+impl std::fmt::Display for BroadcastError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidTransaction(e) => write!(f, "invalid transaction: {}", e),
+            Self::NetworkError(e) => write!(f, "network error: {}", e),
+            Self::Rejected(e) => write!(f, "rejected: {}", e),
+            Self::Other(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+/// Trait for broadcasting transactions to the Bitcoin network.
+pub trait Broadcaster: Send + Sync {
+    fn broadcast_transaction(&self, tx: &bitcoin::Transaction) -> Result<(), BroadcastError>;
+}
 
 /// Default fee rate for claim transactions (sat/vbyte)
 pub const DEFAULT_CLAIM_FEE_RATE: u64 = 10;
@@ -546,10 +569,7 @@ mod tests {
     }
 
     impl Broadcaster for MockBroadcaster {
-        fn broadcast_transaction(
-            &self,
-            tx: &Transaction,
-        ) -> Result<(), crate::traits::BroadcastError> {
+        fn broadcast_transaction(&self, tx: &Transaction) -> Result<(), BroadcastError> {
             self.broadcast_count.fetch_add(1, Ordering::SeqCst);
             let mut stored = self.broadcast_txs.lock().unwrap();
             stored.push(tx.clone());

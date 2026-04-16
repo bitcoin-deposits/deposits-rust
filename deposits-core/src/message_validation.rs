@@ -95,6 +95,22 @@ pub struct PendingAck {
     pub sent_at: u64,
 }
 
+/// Protocol events emitted by handlers for monitoring and metrics.
+#[derive(Clone, Debug)]
+pub enum ProtocolEvent {
+    LedgerSynced {
+        operator: PublicKey,
+        reserves_id: String,
+        sequence: u64,
+        hash: [u8; 32],
+    },
+    Error {
+        operator: PublicKey,
+        reserves_id: String,
+        error: String,
+    },
+}
+
 // ============================================================================
 // Validation Context Trait
 // ============================================================================
@@ -130,7 +146,6 @@ pub trait ValidationContext: Send + Sync {
 
 use crate::error::HandlerError;
 use crate::messages::DepositsMessage;
-use crate::quorum::QuorumManager;
 use crate::recovery::RecoveryManager;
 use crate::recovery_claim::ClaimManager;
 use bitcoin::secp256k1::SecretKey;
@@ -143,18 +158,13 @@ pub trait HandlerContext: ValidationContext {
     fn queue_message(&self, peer: PublicKey, msg: DepositsMessage) -> Result<(), HandlerError>;
 
     /// Emit a protocol event (deposit event, recovery event, etc.)
-    fn emit_event(&self, event: crate::traits::ProtocolEvent);
+    fn emit_event(&self, event: ProtocolEvent);
 
     /// Get recovery manager access
     fn recovery_manager(&self) -> Option<Arc<Mutex<RecoveryManager>>>;
 
     /// Get claim manager access for recovery claims
     fn claim_manager(&self) -> Option<Arc<Mutex<ClaimManager>>> {
-        None
-    }
-
-    /// Get quorum manager access (returns reference, not Arc since it's not behind Mutex)
-    fn quorum_manager(&self) -> Option<&QuorumManager> {
         None
     }
 

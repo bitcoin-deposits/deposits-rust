@@ -66,8 +66,6 @@ pub use deposits_protocol::wire_messages;
 // Core modules (state machine, handlers, validation)
 pub mod descriptor;
 pub mod event_store;
-pub mod handler_traits;
-pub mod handler_types;
 pub mod ledger;
 pub mod signing;
 #[macro_use]
@@ -75,13 +73,10 @@ pub mod logging;
 pub mod message_handlers;
 pub mod message_validation;
 pub mod operation_validation;
-pub mod payment_tracker;
-pub mod quorum;
 pub mod recovery;
 pub mod recovery_claim;
 pub mod tapscript_reserves;
 pub mod time_utils;
-pub mod traits;
 pub mod validation;
 
 // Re-exports for convenience
@@ -91,32 +86,10 @@ pub use constants::{
     MIN_EMERGENCY_TIMEOUT_BLOCKS, MIN_RESERVES_OUTPUT_SATS, MIN_RESERVES_RATIO_PERCENT,
 };
 pub use error::{DepositsError, DepositsResult, HandlerError};
-pub use handler_traits::{
-    // Pure protocol traits (no LDK dependencies)
-    CollateralOperations,
-    DepositOperations,
-    PaymentTracking,
-    ReservesQueryOps,
-    // Note: LedgerOperations and RecoveryOperations stay in ldk-node
-    // as they have LDK-specific types (Arc<RwLock<Ledger>>, BroadcasterInterface)
-};
-pub use handler_types::{
-    CollateralInfo,
-    // Protocol state types
-    CosignedInvoice,
-    LedgerSummary,
-    // Pending operation tracking
-    PendingPayment,
-    ProtocolStats,
-    QuorumMemberInfo,
-    ReservesSummary,
-    VoteRoundState,
-};
 pub use ledger::{
     Ledger, LedgerManager, LedgerProtocolState, LedgerRole, LedgerValidator, StagedUpdate,
 };
 pub use messages::{DepositsMessage, HashStrategy, LedgerOperation};
-pub use payment_tracker::DepositInvoiceIndex;
 pub use recovery::{
     select_recovery_partner, ClaimEligibility, RecoveryCandidate, RecoveryError, RecoveryManager,
     RecoveryOutcome, RecoveryPhase, RecoveryPool, RecoveryVote,
@@ -127,28 +100,6 @@ pub use tapscript_reserves::{
     VoterSet,
 };
 pub use time_utils::{is_expired, now_unix_timestamp};
-pub use traits::{
-    Broadcaster,
-    ChainSource,
-    // Channel operations traits
-    ChannelInfo,
-    ChannelOperations,
-    ChannelRegistry,
-    DefaultStorageProvider,
-    // Storage provider
-    DepositsStorage,
-    EventEmitter,
-    LogLevel,
-    Logger,
-    MessageHandler,
-    NullLogger,
-    PaymentTracker,
-    PeerTransport,
-    ReservesOperations,
-    SignatureProvider,
-    Storage,
-    StorageError,
-};
 pub use types::{
     compute_deposit_id,
     entropy_selection_score,
