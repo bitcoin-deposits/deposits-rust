@@ -64,7 +64,7 @@ fn make_collateral_attestation() -> LedgerOperation {
     LedgerOperation::CollateralAttestation {
         collateral_operator: test_pubkey_2(),
         quorum_member: test_pubkey_2(),
-        collateral_ledger_id: "collateral_ledger".to_string(),
+        collateral_ledger_id: "member_ledger".to_string(),
         amount: 100_000,
         block_height: 800_000,
         lock_until_block: 900_000,
@@ -165,7 +165,7 @@ fn test_multiple_attestations_maintain_sync() {
     let att2 = LedgerOperation::CollateralAttestation {
         collateral_operator: test_pubkey_2(),
         quorum_member: test_pubkey_2(),
-        collateral_ledger_id: "collateral_ledger".to_string(),
+        collateral_ledger_id: "member_ledger".to_string(),
         amount: 200_000,
         block_height: 801_000,
         lock_until_block: 901_000,

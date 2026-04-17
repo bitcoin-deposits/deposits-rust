@@ -251,10 +251,13 @@ impl Operator {
 
     /// Record a collateral attestation from a quorum member.
     pub fn record_attestation(&mut self, member: &Operator, amount: u64) {
+        // Use the member's actual ledger_id as the collateral_ledger_id.
+        // This must match the member_ledger_id declared in QuorumAddMember.
+        let collateral_ledger_id = hex::encode(member.ledger.state.ledger_id);
         let op = LedgerOperation::CollateralAttestation {
             collateral_operator: member.public_key,
             quorum_member: member.public_key,
-            collateral_ledger_id: "collateral_ledger".to_string(),
+            collateral_ledger_id,
             amount,
             block_height: 800_000,
             lock_until_block: 900_000,

@@ -130,7 +130,7 @@ mod tests {
         let msg = CollateralAttestationMsg {
             operator,
             quorum_member,
-            collateral_ledger_id: "collateral_ledger".to_string(),
+            collateral_ledger_id: "member_collateral_ledger".to_string(),
             amount: 100_000,
             block_height: 800_000,
             lock_until_block: 0,
