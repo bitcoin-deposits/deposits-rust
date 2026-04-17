@@ -1,175 +1,212 @@
-# Adversarial Testing Architecture
+# Adversarial Testing
 
-## Purpose
+## How it works
 
-Systematically attempt to steal funds from the deposits protocol. Each attack
-targets a specific security property. The output is not pass/fail but a
-structured assessment: what invariant held (or broke), minimum adversary
-capability, cost/extraction ratio, and whether the defense is protocol-level,
-implementation-level, or wallet-policy.
+Three layers, each building on the last:
 
-## Output Structure
+**Layer 1 — Protocol invariants** (`tests/tests/invariants.rs`, `adversarial.rs`, `adversarial_spec.rs`)
+In-process tests against `LedgerState::apply()`. No Docker, no network. Tests that the state machine rejects invalid transitions. Every test targets a named invariant and produces structured output.
 
-Every attack produces:
+**Layer 2 — Boundary search** (`tests/tests/boundary_search.rs`)
+Binary search over protocol parameters to find the exact threshold where an attack flips from deterred to profitable. Pure computation — models the economics, doesn't run nodes.
+
+**Layer 3 — Docker live tests** (`tests/tests/docker_adversarial.rs`, `docker_expiry_boundary.rs`)
+Tests against a running 4-operator regtest network. Verify invariants hold in the real system, measure actual cascade timing, track balance sheets across operators.
+
+## Writing a test
+
+### Step 1: Pick an invariant
+
+Every test targets one invariant from the registry:
+
+| ID | Invariant | What it means |
+|----|-----------|---------------|
+| E1 | ReserveBacking | reserves >= deposits at all times |
+| E2 | CollateralBacking | collateral >= obligations backed |
+| E3 | SlashingDeterrence | slashing extraction >= maximum theft |
+| E4 | NegativeExpectedValue | expected value of attack < 0 |
+| C1 | WitnessValidity | witness must satisfy descriptor |
+| C2 | PaymentUniqueness | unique payment_hash per credit |
+| C3 | SignatureBinding | signatures bound to (ledger, op, context) |
+| C4 | NUMSPoint | Taproot internal key is unspendable |
+| C5 | TaprootTreeIntegrity | Taproot tree matches announced quorum |
+| S1 | DisputeStateGate | dispute state blocks normal ops |
+| S2 | HashChainIntegrity | hash chain is append-only |
+| S3 | BalanceNonNegative | balance cannot go negative |
+| S4 | CollateralRatchet | collateral locks only increase |
+| L1 | DisputeLiveness | disputes resolve in bounded time |
+| L2 | LotteryLiveness | lottery completes even with withholding |
+| L3 | WalletEmbedding | wallet can force evidence onto ledger |
+| L4 | RelayCensorshipResistance | relay censorship can't suppress disputes |
+
+### Step 2: Write the test
+
+Every test produces an `AttackResult` via the `AttackLog`:
+
+```rust
+use deposits_integration_tests::adversarial::*;
+
+#[test]
+fn attack_my_new_vector() {
+    let mut log = AttackLog::new();
+
+    // -- set up the scenario --
+    // Use TestNetwork for in-process, or Docker harness for live
+
+    // -- attempt the attack --
+    // Construct the malicious operation and apply it
+
+    // -- measure the result --
+    let blocked = /* did the protocol prevent it? */;
+
+    log.record(AttackResult {
+        name: "Description of the attack".into(),
+        invariant: Invariant::ReserveBacking,  // which property was tested
+        adversary: AdversaryCapability::single_operator(4),  // what attacker controls
+        cost_sats: 500_000,      // what attacker spends/risks
+        extraction_sats: 1_000_000,  // what attacker gains if successful
+        blocked,
+        defense: DefenseLayer::Protocol,  // where the defense lives
+        scaling: Scaling::Linear,  // how cost scales with network size
+        notes: "Explanation of why it was blocked or exploitable".into(),
+    });
+
+    // Assert if the invariant MUST hold (protocol-level defense)
+    // Don't assert if it's a wallet-policy gap (document instead)
+    assert!(blocked, "This invariant must hold at protocol level");
+}
+```
+
+### Step 3: Choose the right layer
+
+**Use Layer 1 (in-process) when:**
+- Testing state machine transitions (apply succeeds/fails)
+- Testing conformance detection (watcher catches violation)
+- Testing cryptographic properties (witness verification)
+- Testing balance arithmetic (overflow, underflow)
+
+```rust
+// Layer 1: direct state manipulation
+let mut net = TestNetwork::new(&["alice", "bob", "charlie", "diana"], 1_000_000);
+let user = net.create_depositor("victim", 10);
+let deposit_id = net.op_mut("alice").open_deposit(&user);
+net.op_mut("alice").credit_deposit(deposit_id, 2_000_000, [0xAA; 32]); // over-reserve
+
+let mut watcher = net.create_watcher("alice");
+let violations = net.op("alice").sync_to_checked(&mut watcher);
+assert!(!violations.is_empty()); // watcher caught it
+```
+
+**Use Layer 2 (boundary search) when:**
+- Finding the parameter threshold where an attack becomes profitable
+- Modeling economic incentives (cost vs extraction)
+- Comparing analytical solutions to empirical results
+
+```rust
+// Layer 2: binary search over parameters
+let search = InvariantBoundarySearch::new("collateral_ratio", 0.0, 1.0, 0.01);
+let threshold = search.find_boundary(|ratio| {
+    let collateral = (reserves as f64 * ratio) as u64 * quorum_size;
+    reserves as f64 - collateral as f64  // positive = profitable
+});
+// threshold ≈ 0.33 (1/N members)
+```
+
+**Use Layer 3 (Docker) when:**
+- Testing real Nostr relay propagation timing
+- Testing actual Bitcoin transaction confirmation
+- Measuring dispute cascade latency
+- Verifying UTXO state matches ledger claims
+
+```rust
+// Layer 3: live infrastructure (mark with #[ignore])
+#[test]
+#[ignore = "requires Docker infrastructure"]
+fn docker_my_live_test() {
+    if !infra_available() { return; }
+    // Use node_cmd() to interact with running operators
+    // Use mine_blocks() to control block timing
+    // Use get_block_height() to measure time
+}
+```
+
+### Step 4: Record findings
+
+Tests that find exploitable conditions should NOT assert failure — they should document the finding:
+
+```rust
+// EXPLOITABLE finding — document, don't assert
+log.record(AttackResult {
+    blocked: false,  // this IS exploitable
+    defense: DefenseLayer::WalletPolicy,  // defense is outside protocol
+    notes: "Wallets must check X before depositing".into(),
+});
+// No assert! — the test passes, the finding is logged
+```
+
+Tests that verify protocol-level defenses SHOULD assert:
+
+```rust
+// Protocol defense — assert it holds
+assert!(result.is_err(), "Protocol must reject this");
+```
+
+## Running tests
+
+```bash
+# Layer 1+2: in-process (no Docker needed)
+cargo test -p deposits-integration-tests
+
+# Layer 3: Docker (requires running environment)
+cd deposits-tools && ./bin/reinit.sh --nodes 4
+cargo test -p deposits-integration-tests -- --ignored --nocapture
+```
+
+## File layout
 
 ```
-Attack: <name>
-Invariant tested: <which property must hold to prevent this>
-Adversary capability: <what the attacker controls>
-Cost to attacker: <what they spend/risk>
-Extraction: <what they gain if successful>
-Result: BLOCKED at <layer> | EXPLOITABLE under <conditions>
-Defense: protocol | implementation | wallet-policy
-Scales: constant | linear | super-linear with network size
+tests/
+├── src/
+│   ├── lib.rs              # TestNetwork harness
+│   ├── adversarial.rs      # AttackResult, AttackLog, Invariant enum
+│   └── docker.rs           # NetworkSpec, TestEnvironment, InvariantBoundarySearch
+├── tests/
+│   ├── deposit_lifecycle.rs       # 6 tests — open/credit/lock/fulfill/close
+│   ├── quorum_formation.rs        # 4 tests — add/begin/attest/full setup
+│   ├── dispute_resolution.rs      # 6 tests — enter/arm/acquire/yield/gates
+│   ├── transfer_protocol.rs       # 3 tests — lock/complete/fail
+│   ├── conformance_detection.rs   # 4 tests — reserve/witness violations
+│   ├── operation_coverage.rs      # 10 tests — previously untested operations
+│   ├── adversarial.rs             # 10 tests — attack vectors (forgery, replay, etc.)
+│   ├── adversarial_spec.rs        # 8 tests — spec probes (NUMS, taproot, overflow)
+│   ├── invariants.rs              # 13 tests — one per security invariant
+│   ├── boundary_search.rs         # 6 tests — parameter threshold search
+│   ├── docker_adversarial.rs      # 4 tests — live invariant verification
+│   └── docker_expiry_boundary.rs  # 2 tests — near-expiry timing measurement
+└── docker/
+    ├── README.md
+    └── harness.sh           # Shell orchestration for Docker environments
 ```
 
-## Invariant Registry
+## Findings so far
 
-Each test that fails records which invariant prevented the attack. This builds
-the empirical security model — the actual properties the protocol depends on.
+| Finding | Severity | Defense | Action |
+|---------|----------|---------|--------|
+| Near-expiry extraction window | High | Wallet-policy | Wallets must check remaining_lock > cascade_time |
+| Collateral can be < deposits | Medium | Wallet-policy | Wallets must check total_collateral >= total_deposits |
+| Attestation not ledger-bound | Medium | Node-policy | Watchers verify collateral_ledger_id |
+| NUMS point | Needs audit | Implementation | Verify BIP-341 construction |
+| Deposit ID 128-bit collision | Low | Protocol | 2^64 birthday — infeasible but not 256-bit |
+| Lottery liveness (all withhold) | Low | Node-policy | Liveness proofs + quorum slashing for non-reveals |
 
-### Economic Invariants
-- **E1**: reserves_amount >= sum(deposits.balance) at all times
-- **E2**: collateral locked on member ledgers >= obligations they back
-- **E3**: slashing extraction >= attacker's maximum possible theft
-- **E4**: expected value of attack < 0 for rational adversary
+## Adding a new attack tier
 
-### Cryptographic Invariants
-- **C1**: operations with witnesses are only valid if witness satisfies descriptor
-- **C2**: payment credits require unique payment_hash (no double-credit)
-- **C3**: signatures are bound to specific (ledger_id, operation, context)
-- **C4**: Taproot internal key is unspendable (NUMS point)
-- **C5**: Taproot tree structure matches announced quorum composition
+The tiers from the adversarial testing roadmap:
 
-### State Machine Invariants
-- **S1**: dispute state gates block all normal operations
-- **S2**: hash chain is append-only, no forks without DisputeEnter
-- **S3**: balance cannot go negative (available_balance checked before lock)
-- **S4**: collateral locks are ratchet-only (amount and expiry only increase)
+- **Tier 1**: Load-bearing informal arguments (sybil topology, expiry extraction, slash racing, lightning theft)
+- **Tier 2**: Spec-level ambiguities (NUMS, taproot tree, cosigner scope, proof embedding)
+- **Tier 3**: Protocol-level games (censorship via rotation, collateral double-counting, lottery griefing, entropy MEV)
+- **Tier 4**: Integration attacks (relay censorship, wallet state exfiltration, recovery confusion, verifier compromise)
+- **Tier 5**: Implementation attacks (signature malleability, timing oracles, integer overflow, cross-ledger replay, descriptor fuzzing)
 
-### Liveness Invariants
-- **L1**: disputes resolve within bounded time
-- **L2**: lottery completes even if participants withhold reveals
-- **L3**: wallet can always force evidence onto the ledger (DeliveryEmbed)
-- **L4**: relay censorship cannot suppress dispute detection
-
-## Tier 1: Load-Bearing Informal Arguments
-
-### 1.1 Sybil-with-Plausible-Topology
-- **Target invariant**: Wallet discovery heuristics reject insufficient diversity
-- **Attack**: Construct sybil cluster that passes wallet topology checks
-- **Methodology**: Parameterize wallet heuristics (min cosign paths, diversity
-  requirements), then search for minimum sybil cluster that passes
-- **Key question**: What's the minimum cluster size/topology that's undetectable?
-- **Implementation**: Graph-based simulation with configurable wallet policies
-
-### 1.2 Near-Expiry Extraction
-- **Target invariant**: E3 (slashing >= theft), E2 (collateral covers obligations)
-- **Attack**: Time extraction to exploit window where collateral_lock < cascade_time
-- **Formula**: extraction_window = min(remaining_collateral_lock, diameter × dispute_response_blocks)
-- **Key question**: Is there a profitable window, and do wallets refuse deposits in it?
-- **Implementation**: Time-parameterized simulation varying quorum_expiry and lock_until_block
-
-### 1.3 Race-to-Slash Exploitation
-- **Target invariant**: E4 (negative expected value)
-- **Attack**: Induce premature or strategic slashing via fake fraud proofs
-- **Key question**: Can an attacker trick honest members into slashing innocents?
-- **Implementation**: Game-theoretic model with configurable defector behavior
-
-### 1.4 Lightning-Layer Bounded Theft
-- **Target invariant**: E3, E4
-- **Attack**: Steal payments below wallet detection threshold, extract indefinitely
-- **Key question**: What's the maximum sustainable theft rate?
-- **Implementation**: Population simulation with varying wallet preimage-reporting
-
-## Tier 2: Spec-Level Ambiguities
-
-### 2.1 NUMS Point Not Mandated
-- **Target invariant**: C4
-- **Attack**: Operator picks internal key whose discrete log they know
-- **Test**: Check that implementation uses BIP-341 NUMS, wallets verify it
-- **Implementation**: Direct code inspection + test with non-NUMS internal key
-
-### 2.2 Taproot Tree Not Verified by Wallets
-- **Target invariant**: C5
-- **Attack**: Extra leaf in Taproot tree granting operator solo spend
-- **Test**: Construct tree with hidden leaf, verify wallet detects mismatch
-- **Implementation**: Build TaprootReservesOutput with extra leaf, test verification
-
-### 2.3 Cosigner Validation Scope
-- **Target invariant**: S2 (no forks without dispute)
-- **Attack**: Present abbreviated history to new quorum joiners, hiding equivocation
-- **Test**: New member joins, receives partial history, check if they validate from genesis
-- **Implementation**: Simulate QuorumJoin with truncated event store
-
-### 2.4 Proof Hash Embedding Ambiguity
-- **Target invariant**: C3 (signatures bound to context)
-- **Attack**: Embed proof in non-canonical location that verifiers miss
-- **Test**: Check if implementation accepts proofs from any field vs only canonical
-- **Implementation**: Construct fraud proof with non-standard embedding
-
-## Tier 3: Protocol-Level Games
-
-### 3.1 Censorship-via-Quorum-Rotation
-- **Target invariant**: L3 (wallet can force evidence)
-- **Attack**: Operator rotates quorum to evade DeliveryEmbed
-- **Key question**: Is rotation cheaper than embedding?
-- **Implementation**: Cost model comparing rotation vs embed fees
-
-### 3.2 Collateral Double-Counting
-- **Target invariant**: E2
-- **Attack**: Simultaneous non-conformance across multiple backed ledgers
-- **Key question**: Does slashing math hold when multiple ledgers fail at once?
-- **Implementation**: Multi-ledger simulation with concurrent disputes
-
-### 3.3 Dispute-Lottery Griefing
-- **Target invariant**: L1, L2
-- **Attack**: Commit to lottery preimage, refuse to reveal
-- **Key question**: Can dispute resolution be stalled indefinitely?
-- **Implementation**: Simulate lottery with non-revealing participant, check timeouts
-
-### 3.4 Entropy Block MEV
-- **Target invariant**: E4
-- **Attack**: Miner withholds block to manipulate lottery outcome
-- **Key question**: At what deposit size does MEV become profitable?
-- **Implementation**: Probabilistic model of mining advantage
-
-## Tier 4: Integration and Ecosystem
-
-### 4.1 Relay-Level Censorship
-- **Target invariant**: L4
-- **Test**: Suppress specific event kinds, verify degradation mode
-
-### 4.2 Wallet State Exfiltration
-- **Target invariant**: Privacy (not fund safety)
-- **Test**: Correlate relay metadata to deanonymize users
-
-### 4.3 Recovery Ambiguity
-- **Target invariant**: Wallet correctness
-- **Test**: Publish fake Kind 9100 events matching victim's derived pubkeys
-
-### 4.4 Domain Attestation Verifier Compromise
-- **Target invariant**: Access control trust root
-- **Test**: Forge attestations with compromised verifier key
-
-## Tier 5: Implementation Attacks
-
-### 5.1 Signature Malleability
-- **Target invariant**: C1, C3
-- **Test**: Accept malleated signature encodings
-
-### 5.2 Timing Attacks on Crypto
-- **Target invariant**: C1 (key secrecy)
-- **Test**: Timing oracle against signing operations
-
-### 5.3 Integer Overflow in Fee Arithmetic
-- **Target invariant**: S3 (balance non-negative)
-- **Test**: balance=2^63-1, bps=10000, blocks=52560
-
-### 5.4 Replay Across Ledgers
-- **Target invariant**: C3
-- **Test**: Cosigner attestation from ledger A replayed on ledger B
-
-### 5.5 Descriptor Parsing Complexity
-- **Target invariant**: C1
-- **Test**: Pathological descriptors, deposit_id collisions (16-byte truncated SHA256)
+For each attack: state the hypothesis, pick the invariant, choose the layer, write the test, record the result.
