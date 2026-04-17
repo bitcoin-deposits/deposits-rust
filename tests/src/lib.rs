@@ -4,6 +4,7 @@
 //! without external services (no Nostr relays, no Bitcoin network).
 
 pub mod adversarial;
+pub mod docker;
 
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
 use deposits_core::descriptor::CoreWitnessVerifier;
