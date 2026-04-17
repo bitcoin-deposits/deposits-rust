@@ -94,6 +94,7 @@ fn attack_fee_overflow() {
                 .map(|d| d.balance.to_string())
                 .unwrap_or("error".into())
         ),
+        steps: vec![],
     });
 
     // The real concern: can fee collection drive balance below zero?
@@ -196,6 +197,7 @@ fn attack_replay_attestation_across_ledgers() {
              specific collateral lock (which is on a specific ledger)."
                 .into()
         },
+        steps: vec![],
     });
 
     // This is a KNOWN property: attestations pass quorum membership check
@@ -264,6 +266,7 @@ fn attack_deposit_id_collision_space() {
                 SHA256 computations — infeasible but not 256-bit. \
                 Could be strengthened by using full 32-byte hash."
             .into(),
+        steps: vec![],
     });
 }
 
@@ -320,6 +323,7 @@ fn attack_non_nums_internal_key() {
              If operator can choose internal key, they can key-path-spend reserves.",
             &address[..20]
         ),
+        steps: vec![],
     });
 }
 
@@ -384,6 +388,7 @@ fn attack_taproot_tree_extra_leaf() {
             &attacker_output.address.to_string()[..20],
             !addresses_differ
         ),
+        steps: vec![],
     });
 
     assert!(
@@ -442,6 +447,7 @@ fn attack_near_expiry_extraction() {
              does not enforce this — it's a wallet-policy defense.",
             cascade_time, quorum_diameter, dispute_response_blocks
         ),
+        steps: vec![],
     });
 
     // This attack IS exploitable — it's a wallet-policy gap
@@ -515,6 +521,7 @@ fn attack_collateral_double_counting() {
             total_collateral,
             total_deposits.saturating_sub(total_collateral)
         ),
+        steps: vec![],
     });
 }
 

@@ -171,7 +171,44 @@ impl fmt::Display for Scaling {
     }
 }
 
+/// What actually happened at each step of the attack.
+#[derive(Debug, Clone)]
+pub struct AttackStep {
+    pub action: String,
+    pub outcome: StepOutcome,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StepOutcome {
+    /// Action succeeded (attacker progresses)
+    Succeeded,
+    /// Action was rejected by the protocol (Err returned)
+    Rejected,
+    /// Action succeeded but was detected by a watcher
+    Detected,
+    /// Action succeeded and was not detected
+    Undetected,
+    /// Not tested — model/analysis only
+    Modeled,
+}
+
+impl fmt::Display for StepOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Succeeded => write!(f, "succeeded"),
+            Self::Rejected => write!(f, "REJECTED"),
+            Self::Detected => write!(f, "detected"),
+            Self::Undetected => write!(f, "undetected"),
+            Self::Modeled => write!(f, "modeled"),
+        }
+    }
+}
+
 /// Result of an adversarial test.
+///
+/// Use `AttackResult::new()` for the builder pattern, or construct directly
+/// with `steps: vec![]` for tests that don't track steps.
 pub struct AttackResult {
     pub name: String,
     pub invariant: Invariant,
@@ -182,6 +219,99 @@ pub struct AttackResult {
     pub defense: DefenseLayer,
     pub scaling: Scaling,
     pub notes: String,
+    /// Step-by-step record of what happened.
+    /// Empty for tests that don't track individual steps.
+    #[doc(hidden)]
+    pub steps: Vec<AttackStep>,
+}
+
+impl AttackResult {
+    /// Convenience constructor — steps default to empty.
+    pub fn build(
+        name: impl Into<String>,
+        invariant: Invariant,
+        adversary: AdversaryCapability,
+    ) -> AttackResultBuilder {
+        AttackResultBuilder {
+            name: name.into(),
+            invariant,
+            adversary,
+            cost_sats: 0,
+            extraction_sats: 0,
+            blocked: true,
+            defense: DefenseLayer::Protocol,
+            scaling: Scaling::Constant,
+            notes: String::new(),
+            steps: Vec::new(),
+        }
+    }
+}
+
+pub struct AttackResultBuilder {
+    name: String,
+    invariant: Invariant,
+    adversary: AdversaryCapability,
+    cost_sats: u64,
+    extraction_sats: u64,
+    blocked: bool,
+    defense: DefenseLayer,
+    scaling: Scaling,
+    notes: String,
+    steps: Vec<AttackStep>,
+}
+
+impl AttackResultBuilder {
+    pub fn cost(mut self, sats: u64) -> Self {
+        self.cost_sats = sats;
+        self
+    }
+    pub fn extraction(mut self, sats: u64) -> Self {
+        self.extraction_sats = sats;
+        self
+    }
+    pub fn blocked(mut self, b: bool) -> Self {
+        self.blocked = b;
+        self
+    }
+    pub fn defense(mut self, d: DefenseLayer) -> Self {
+        self.defense = d;
+        self
+    }
+    pub fn scaling(mut self, s: Scaling) -> Self {
+        self.scaling = s;
+        self
+    }
+    pub fn notes(mut self, n: impl Into<String>) -> Self {
+        self.notes = n.into();
+        self
+    }
+    pub fn step(
+        mut self,
+        action: impl Into<String>,
+        outcome: StepOutcome,
+        detail: impl Into<String>,
+    ) -> Self {
+        self.steps.push(AttackStep {
+            action: action.into(),
+            outcome,
+            detail: detail.into(),
+        });
+        self
+    }
+    pub fn finish(self) -> AttackResult {
+        AttackResult {
+            name: self.name,
+            invariant: self.invariant,
+            adversary: self.adversary,
+            cost_sats: self.cost_sats,
+            extraction_sats: self.extraction_sats,
+            blocked: self.blocked,
+            defense: self.defense,
+            scaling: self.scaling,
+            notes: self.notes,
+            steps: self.steps,
+        }
+    }
 }
 
 impl fmt::Display for AttackResult {
@@ -197,6 +327,19 @@ impl fmt::Display for AttackResult {
             writeln!(f, "  Result: EXPLOITABLE (defense: {})", self.defense)?;
         }
         writeln!(f, "  Scales: {}", self.scaling)?;
+        if !self.steps.is_empty() {
+            writeln!(f, "  Steps:")?;
+            for (i, step) in self.steps.iter().enumerate() {
+                writeln!(
+                    f,
+                    "    {}. {} → {} ({})",
+                    i + 1,
+                    step.action,
+                    step.outcome,
+                    step.detail
+                )?;
+            }
+        }
         if !self.notes.is_empty() {
             writeln!(f, "  Notes: {}", self.notes)?;
         }

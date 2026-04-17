@@ -130,6 +130,7 @@ fn docker_verify_reserve_backing_invariant() {
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
         notes: "Verified live reserve backing across all operators".into(),
+        steps: vec![],
     });
 
     assert!(all_backed, "All operators must have reserves >= deposits");

@@ -62,6 +62,7 @@ fn boundary_collateral_ratio() {
             (reserves as f64 * threshold) as u64 * quorum_size,
             50.0 * quorum_size as f64
         ),
+        steps: vec![],
     });
 
     // With 3 quorum members, threshold should be ~33% (1/3)
@@ -122,6 +123,7 @@ fn boundary_expiry_window() {
              Wallets MUST refuse deposits when lock expires within this window.",
             threshold, quorum_diameter, dispute_response_blocks, cascade_time as u32
         ),
+        steps: vec![],
     });
 
     assert!(
@@ -183,6 +185,7 @@ fn boundary_detection_probability() {
             analytical * 100.0,
             0.99 / threshold
         ),
+        steps: vec![],
     });
 
     assert!(
@@ -250,6 +253,7 @@ fn boundary_deposit_collateral_gap() {
              Wallet policy: refuse deposits when total > collateral.",
             threshold, threshold, reserves, collateral, collateral
         ),
+        steps: vec![],
     });
 
     // Threshold should be ~1.0 (gap appears when deposits exceed collateral)
@@ -314,6 +318,7 @@ fn boundary_quorum_size() {
             collateral_per_member / 1000 * (threshold.ceil() as u64 - 1),
             reserves / 1000
         ),
+        steps: vec![],
     });
 
     // With 500k per member, need R/C + 1 = 1M/500k + 1 = 3 operators

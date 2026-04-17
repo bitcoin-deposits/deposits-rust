@@ -73,6 +73,7 @@ fn invariant_e1_reserve_backing() {
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
         notes: "check_conformance detects InsufficientReserves after credit".into(),
+        steps: vec![],
     });
 }
 
@@ -161,6 +162,7 @@ fn invariant_e3_slashing_deterrence() {
             collateral_at_risk as f64 / max_theft as f64,
             deterred
         ),
+        steps: vec![],
     });
 
     assert!(deterred, "E3: collateral at risk must exceed maximum theft");
@@ -209,6 +211,7 @@ fn invariant_e4_negative_expected_value() {
             ev_loss,
             detection_probability * 100.0
         ),
+        steps: vec![],
     });
 
     assert!(deterred, "E4: expected value of attack must be negative");
@@ -302,6 +305,7 @@ fn invariant_c1_witness_validity() {
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
         notes: "CoreWitnessVerifier catches wrong-key Schnorr signatures".into(),
+        steps: vec![],
     });
 }
 
@@ -339,6 +343,7 @@ fn invariant_c2_payment_uniqueness() {
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
         notes: "credited_payments HashSet prevents duplicate payment_hash".into(),
+        steps: vec![],
     });
 
     assert!(
@@ -399,6 +404,7 @@ fn invariant_c3_signature_binding() {
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
         notes: "Signing messages include deposit_id, operation type, and parameters".into(),
+        steps: vec![],
     });
 }
 
@@ -524,6 +530,7 @@ fn invariant_s1_dispute_state_gate() {
             blocked_ops.len(),
             allowed
         ),
+        steps: vec![],
     });
 
     assert!(
@@ -607,6 +614,7 @@ fn invariant_s2_hash_chain_integrity() {
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
         notes: "Unique hashes per update, linked chain, watcher sync matches".into(),
+        steps: vec![],
     });
 }
 
@@ -650,6 +658,7 @@ fn invariant_s3_balance_non_negative() {
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
         notes: "InvoiceLock checks available_balance() before locking".into(),
+        steps: vec![],
     });
 
     assert!(
@@ -797,6 +806,7 @@ fn invariant_s4_collateral_ratchet() {
                 "BLOCKED"
             }
         ),
+        steps: vec![],
     });
 
     assert!(all_ratcheted, "S4: collateral locks must be ratchet-only");
@@ -847,6 +857,7 @@ fn invariant_l1_dispute_liveness() {
         notes: "State machine: Normal->Disputed->Armed->Acquired|Yielded|Tombstoned. \
                 Each non-terminal state has outgoing transitions. Timeouts force progression."
             .into(),
+        steps: vec![],
     });
 }
 
@@ -955,6 +966,7 @@ fn invariant_l2_lottery_liveness() {
              Degrading Taproot timelocks provide emergency recovery path.",
             acquire_ok, yield_ok
         ),
+        steps: vec![],
     });
 
     assert!(

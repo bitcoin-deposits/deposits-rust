@@ -134,6 +134,7 @@ fn tier2_1_nums_point_audit() {
                 .map(|l| l.trim())
                 .collect::<Vec<_>>()
         ),
+        steps: vec![],
     });
 
     // This is an audit finding — report what was found
@@ -236,6 +237,7 @@ fn tier2_3_cosigner_abbreviated_history() {
              full-chain validation for new members.",
             full_balance, partial_balance, states_match
         ),
+        steps: vec![],
     });
 
     // The finding: abbreviated history produces different state.
@@ -332,6 +334,7 @@ fn tier5_1_signature_malleability() {
         notes: "BIP-340 Schnorr: canonical verified, short rejected, \
                 bit-flip rejected, zero rejected, wrong-message rejected."
             .into(),
+        steps: vec![],
     });
 }
 
@@ -419,6 +422,7 @@ fn tier5_5_descriptor_parsing_edge_cases() {
             if null_safe { "safe" } else { "UNSAFE" },
             if unicode_safe { "safe" } else { "UNSAFE" },
         ),
+        steps: vec![],
     });
 }
 
@@ -471,6 +475,7 @@ fn tier5_5_deposit_id_collision_resistance() {
             sample_size,
             collisions
         ),
+        steps: vec![],
     });
 
     assert_eq!(collisions, 0, "No collisions expected in 10k sample");
@@ -603,6 +608,7 @@ fn tier3_3_lottery_griefing() {
                 "STALLED — cannot proceed"
             }
         ),
+        steps: vec![],
     });
 
     assert!(
@@ -672,6 +678,7 @@ fn tier3_4_entropy_mev_model() {
             block_reward_sats as f64 / 100_000_000.0,
             threshold_reserves as f64 / 100_000_000.0,
         ),
+        steps: vec![],
     });
 }
 
@@ -721,5 +728,6 @@ fn tier2_4_proof_hash_embedding() {
             accepts_multiple,
             source.lines().count()
         ),
+        steps: vec![],
     });
 }

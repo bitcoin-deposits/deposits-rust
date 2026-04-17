@@ -191,6 +191,7 @@ fn tier1_1_sybil_topology() {
                 "not achievable".into()
             },
         ),
+        steps: vec![],
     });
 }
 
@@ -307,6 +308,7 @@ fn tier1_3_race_to_slash() {
              No pathological equilibrium found — honest behavior is still dominant.",
             first.blocks_to_slash, first.slasher_revenue, others_get_nothing, false_slash_possible,
         ),
+        steps: vec![],
     });
 }
 
@@ -464,6 +466,7 @@ fn tier1_4_lightning_bounded_theft() {
                 * 12.0) as u64,
             collateral,
         ),
+        steps: vec![],
     });
 }
 
@@ -554,5 +557,6 @@ fn tier3_1_censorship_via_rotation() {
             (rotation_on_chain_cost + rotation_collateral_cost) / embed_cost_sats.max(1),
             rotations_to_exhaust_operator,
         ),
+        steps: vec![],
     });
 }

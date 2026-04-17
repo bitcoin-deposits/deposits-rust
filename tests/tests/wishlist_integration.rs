@@ -84,6 +84,7 @@ fn tier4_1_relay_censorship() {
              censorship — wallet can't tell 'relay down' from 'operator silent'. \
              Defense: wallet should use diverse relay sets and flag stale operators."
         ),
+        steps: vec![],
     });
 }
 
@@ -155,6 +156,7 @@ fn tier4_2_wallet_state_exfiltration() {
              Protocol explicitly trades privacy for verifiability. \
              NOT a bug — but users must understand deposits are not private."
         ),
+        steps: vec![],
     });
 }
 
@@ -225,6 +227,7 @@ fn tier4_3_recovery_ambiguity() {
              wallet must filter by chain validity, not just tag match. \
              Recovery should start from known-good checkpoint, not from relay scan."
         ),
+        steps: vec![],
     });
 }
 
@@ -295,6 +298,7 @@ fn tier4_4_verifier_compromise() {
              combine attestation with allowlist for defense in depth.",
             configurable, optional, access_control_optional, blast_radius,
         ),
+        steps: vec![],
     });
 }
 
@@ -439,5 +443,6 @@ fn tier5_2_timing_attacks() {
             desc_cv,
             threshold * 100.0,
         ),
+        steps: vec![],
     });
 }

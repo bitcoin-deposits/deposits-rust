@@ -389,6 +389,7 @@ fn docker_expiry_boundary_search() {
              Wallets must verify remaining_lock > {} before depositing.",
             safe_minimum, boundary, lock_expiry, live_height, safe_minimum
         ),
+        steps: vec![],
     });
 
     println!("\n=== Wallet Requirement ===");
