@@ -8,18 +8,17 @@ cd "$(dirname "$0")/.."
 RESULTS_DIR=$(mktemp -d)
 trap "rm -rf $RESULTS_DIR" EXIT
 
-# Run tests with results dir set — each AttackResult appends to results.jsonl
 ADVERSARIAL_RESULTS_DIR="$RESULTS_DIR" \
   cargo test -p deposits-integration-tests -- --test-threads=1 2>/dev/null
 
 RESULTS_FILE="$RESULTS_DIR/results.jsonl"
 if [ ! -f "$RESULTS_FILE" ]; then
-    echo "No adversarial results found. Run tests with ADVERSARIAL_RESULTS_DIR set."
+    echo "No adversarial results found."
     exit 1
 fi
 
 python3 -c "
-import json, sys
+import json
 
 results = []
 with open('$RESULTS_FILE') as f:
@@ -31,7 +30,6 @@ with open('$RESULTS_FILE') as f:
             except:
                 pass
 
-# Deduplicate by name
 seen = {}
 for r in results:
     seen[r['name']] = r
@@ -55,22 +53,20 @@ for n, r in seen.items():
                 by_layer[layer]['exploitable'] += 1
 
 print()
-print('By defense layer:')
 for layer in ['protocol', 'implementation', 'wallet-policy', 'node-policy', 'UNDEFENDED']:
     if layer in by_layer:
         d = by_layer[layer]
         print(f'  {layer:20s}  {d[\"blocked\"]} blocked, {d[\"exploitable\"]} exploitable')
 
-print()
-print('--- EXPLOITABLE ---')
-for name in sorted(exploitable):
-    r = exploitable[name]
-    res = r.get('result', '?')
-    layer = res.split('(')[1].split(')')[0] if '(' in res else '?'
-    print(f'  [{layer:20s}]  {name}')
-    notes = r.get('notes', '')
-    if notes:
-        print(f'    {notes[:140]}')
+if exploitable:
+    print()
+    print('--- EXPLOITABLE ---')
+    for name in sorted(exploitable):
+        r = exploitable[name]
+        notes = r.get('notes', '')[:140]
+        print(f'  {name}')
+        if notes:
+            print(f'    {notes}')
 
 print()
 print('--- BLOCKED ---')

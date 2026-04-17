@@ -316,16 +316,16 @@ impl AttackResultBuilder {
 
 impl fmt::Display for AttackResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Attack: {}", self.name)?;
+        // Result first so it's never truncated
+        if self.blocked {
+            writeln!(f, "[BLOCKED at {}] {}", self.defense, self.name)?;
+        } else {
+            writeln!(f, "[EXPLOITABLE ({})] {}", self.defense, self.name)?;
+        }
         writeln!(f, "  Invariant: {}", self.invariant)?;
         writeln!(f, "  Adversary: {}", self.adversary)?;
         writeln!(f, "  Cost: {} sats", self.cost_sats)?;
         writeln!(f, "  Extraction: {} sats", self.extraction_sats)?;
-        if self.blocked {
-            writeln!(f, "  Result: BLOCKED at {}", self.defense)?;
-        } else {
-            writeln!(f, "  Result: EXPLOITABLE (defense: {})", self.defense)?;
-        }
         writeln!(f, "  Scales: {}", self.scaling)?;
         if !self.steps.is_empty() {
             writeln!(f, "  Steps:")?;
