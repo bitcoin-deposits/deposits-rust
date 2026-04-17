@@ -26,6 +26,29 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{DepositsError, DepositsResult};
 
+/// BIP-341 recommended NUMS (Nothing Up My Sleeve) point for Taproot internal keys.
+///
+/// This is `lift_x(0x50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0)`,
+/// which has no known discrete log. Using this as the internal key makes key-path
+/// spending impossible — all spends must use a Tapscript leaf.
+///
+/// Wallets MUST verify that reserves outputs use this exact point as their
+/// internal key. Any other internal key allows the holder to key-path spend,
+/// bypassing all quorum and timelock protections.
+pub const TAPROOT_NUMS_POINT: [u8; 32] = [
+    0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e,
+    0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
+];
+
+/// Verify that a Taproot reserves output uses the canonical NUMS internal key.
+///
+/// Returns `true` if the output's internal key matches `TAPROOT_NUMS_POINT`.
+/// Wallets should call this on every QuorumBegin to reject reserves addresses
+/// where the operator could key-path spend.
+pub fn verify_nums_internal_key(output: &TaprootReservesOutput) -> bool {
+    output.spend_info.internal_key().serialize() == TAPROOT_NUMS_POINT
+}
+
 /// A voter in the reserves multisig
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Voter {
@@ -360,12 +383,16 @@ impl TapscriptReservesBuilder {
         // Add the commitment leaf (embeds ledger hash, unspendable)
         let commitment_leaf = self.build_commitment_leaf();
 
-        // Create internal key from tie-breaker (enables key-path spending if all agree)
-        let internal_key = self
-            .voter_set
-            .tie_breaker()
-            .map(|v| v.x_only())
-            .unwrap_or_else(|| self.voter_set.sorted_x_only_pubkeys()[0]);
+        // Use BIP-341 NUMS point as internal key (provably unspendable key path).
+        // This prevents any party from key-path spending reserves — all spends
+        // must go through the Tapscript leaves (quorum threshold, timelocks).
+        // NUMS = lift_x(SHA256("TapTweak")) — no known discrete log.
+        let internal_key = XOnlyPublicKey::from_slice(&[
+            0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9,
+            0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a,
+            0xce, 0x80, 0x3a, 0xc0,
+        ])
+        .map_err(|_| DepositsError::InvalidState("Invalid NUMS point".to_string()))?;
 
         // Build Taproot tree
         // Structure: spending tiers at shallow depths, commitment leaf at deepest

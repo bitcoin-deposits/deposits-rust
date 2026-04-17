@@ -114,45 +114,44 @@ fn attack_nums_keypath_spend_attempt() {
             detail: format!("Signature valid against output key: {}", sig_valid),
         });
 
-        // Step 4: Could a wallet detect this?
-        // A wallet that reconstructs the tree and verifies the internal key
-        // would see that the internal key is the operator's pubkey, not NUMS.
-        // But the CURRENT spec doesn't require this check.
-
+        // Step 4: Verify the internal key is NUMS
+        let is_nums = deposits_core::tapscript_reserves::verify_nums_internal_key(&output);
         steps.push(AttackStep {
-            action: "Wallet verification of internal key".into(),
-            outcome: StepOutcome::Undetected,
-            detail: "Current spec does not require wallets to verify NUMS. \
-                     Wallet sees valid Taproot address, doesn't check internal key."
-                .into(),
+            action: "Verify internal key is NUMS".into(),
+            outcome: if is_nums {
+                StepOutcome::Rejected
+            } else {
+                StepOutcome::Undetected
+            },
+            detail: format!("Internal key matches BIP-341 NUMS: {}", is_nums),
         });
 
         log.record(AttackResult {
-            name: "NUMS key-path spend: operator can sign".into(),
+            name: "NUMS key-path spend: operator cannot sign (FIXED)".into(),
             invariant: Invariant::NUMSPoint,
             adversary: AdversaryCapability::single_operator(4),
             cost_sats: 0,
-            extraction_sats: 0, // % of reserves — topology-dependent
-            blocked: false,
-            defense: DefenseLayer::Undefended,
+            extraction_sats: 0,
+            blocked: !sig_valid && is_nums,
+            defense: DefenseLayer::Implementation,
             scaling: Scaling::Constant,
             notes: format!(
-                "CONFIRMED: operator can derive tweaked secret key and produce \
-                 valid key-path signature. The internal key is the operator's \
-                 tie-breaker pubkey. Any operator can key-path spend their own \
-                 reserves, bypassing all Taproot script paths (quorum, timelocks). \
-                 Extraction: 100% of reserves for any operator at any time. \
-                 Fix: use BIP-341 NUMS point as internal key, require wallets \
-                 to verify on QuorumBegin."
+                "FIXED: Internal key is now BIP-341 NUMS point. \
+                 Operator can compute tweak from their own key but the resulting \
+                 signature does NOT validate against the output key (which uses NUMS). \
+                 Key-path spend is impossible. All spends must use Tapscript leaves. \
+                 sig_valid={}, is_nums={}",
+                sig_valid, is_nums
             ),
             steps,
         });
 
-        // This is the most critical finding. The operator can steal at any time.
+        // The fix works: operator CANNOT key-path spend
         assert!(
-            sig_valid,
-            "Operator CAN key-path spend — this confirms the finding"
+            !sig_valid,
+            "Operator must NOT be able to key-path spend after NUMS fix"
         );
+        assert!(is_nums, "Internal key must be BIP-341 NUMS point");
     }
 }
 
