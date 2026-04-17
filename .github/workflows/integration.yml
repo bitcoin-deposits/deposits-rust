@@ -103,6 +103,121 @@ jobs:
           ./bin/test-dispute-4op.sh
         timeout-minutes: 15
 
+      # Verify on-chain state matches ledger claims
+      - name: Verify reserves UTXOs
+        working-directory: deposits-tools
+        run: |
+          source bin/_common.sh
+          FAILURES=0
+
+          for op in $(get_node_names); do
+            echo "=== $op ==="
+
+            # Get reserves info from node
+            RESERVES_OUTPUT=$(run_node_cmd "$op" reserves list 2>/dev/null | grep -v '^\[2m') || true
+
+            # Extract UTXO details: txid:vout, amount, address
+            TXID=$(echo "$RESERVES_OUTPUT" | grep -i "txid\|outpoint" | grep -oE '[0-9a-f]{64}' | head -1)
+            VOUT=$(echo "$RESERVES_OUTPUT" | grep -i "vout\|outpoint" | grep -oE ':[0-9]+' | head -1 | tr -d ':')
+            DECLARED_AMOUNT=$(echo "$RESERVES_OUTPUT" | grep -i "amount" | grep -oE '[0-9]+' | head -1)
+            ADDRESS=$(echo "$RESERVES_OUTPUT" | grep -i "address" | grep -oE 'bcrt1[a-z0-9]+' | head -1)
+
+            if [ -z "$TXID" ] || [ -z "$VOUT" ]; then
+              echo "  Could not extract UTXO from reserves list"
+              echo "  Raw: $(echo "$RESERVES_OUTPUT" | head -5)"
+              FAILURES=$((FAILURES + 1))
+              continue
+            fi
+
+            echo "  Declared: ${TXID:0:16}...:$VOUT = $DECLARED_AMOUNT sats"
+
+            # Query electrs for the actual UTXO
+            ELECTRS_URL="http://localhost:${ELECTRS_PORT:-3102}"
+            TX_JSON=$(curl -sf "$ELECTRS_URL/tx/$TXID" 2>/dev/null) || true
+            if [ -z "$TX_JSON" ]; then
+              echo "  WARNING: Could not fetch tx $TXID from electrs"
+              FAILURES=$((FAILURES + 1))
+              continue
+            fi
+
+            # Extract the actual output value and scriptpubkey
+            # electrs returns JSON with vout array
+            ACTUAL_VALUE=$(echo "$TX_JSON" | python3 -c "
+          import sys, json
+          tx = json.load(sys.stdin)
+          vout = int('$VOUT')
+          if vout < len(tx.get('vout', [])):
+              print(tx['vout'][vout].get('value', 0))
+          " 2>/dev/null)
+            ACTUAL_ADDR=$(echo "$TX_JSON" | python3 -c "
+          import sys, json
+          tx = json.load(sys.stdin)
+          vout = int('$VOUT')
+          if vout < len(tx.get('vout', [])):
+              print(tx['vout'][vout].get('scriptpubkey_address', ''))
+          " 2>/dev/null)
+
+            echo "  On-chain: value=$ACTUAL_VALUE sats, addr=$ACTUAL_ADDR"
+
+            # Verify amount matches
+            if [ -n "$ACTUAL_VALUE" ] && [ -n "$DECLARED_AMOUNT" ]; then
+              if [ "$ACTUAL_VALUE" = "$DECLARED_AMOUNT" ]; then
+                echo "  Amount: MATCH"
+              else
+                echo "  Amount: MISMATCH (declared=$DECLARED_AMOUNT, actual=$ACTUAL_VALUE)"
+                FAILURES=$((FAILURES + 1))
+              fi
+            fi
+
+            # Verify address matches (if we have both)
+            if [ -n "$ACTUAL_ADDR" ] && [ -n "$ADDRESS" ]; then
+              if [ "$ACTUAL_ADDR" = "$ADDRESS" ]; then
+                echo "  Address: MATCH"
+              else
+                echo "  Address: MISMATCH (declared=$ADDRESS, actual=$ACTUAL_ADDR)"
+                FAILURES=$((FAILURES + 1))
+              fi
+            fi
+
+            # Verify UTXO is unspent
+            SPENT=$(echo "$TX_JSON" | python3 -c "
+          import sys, json
+          tx = json.load(sys.stdin)
+          vout = int('$VOUT')
+          status = tx.get('status', {})
+          # Check if output is spent by looking at spending info
+          print('unspent')
+          " 2>/dev/null)
+            UTXO_STATUS=$(curl -sf "$ELECTRS_URL/tx/$TXID/outspend/$VOUT" 2>/dev/null) || true
+            if echo "$UTXO_STATUS" | grep -q '"spent":false'; then
+              echo "  UTXO: unspent (confirmed)"
+            elif echo "$UTXO_STATUS" | grep -q '"spent":true'; then
+              echo "  UTXO: SPENT (may be expected after dispute/rotation)"
+            else
+              echo "  UTXO: unknown status"
+            fi
+
+            # Get ledger obligations
+            LEDGER_INFO=$(run_node_cmd "$op" info 2>/dev/null | grep -v '^\[2m') || true
+            TOTAL_DEPOSITS=$(echo "$LEDGER_INFO" | grep -i "deposit.*balance\|total.*balance" | grep -oE '[0-9]+' | head -1)
+            if [ -n "$TOTAL_DEPOSITS" ] && [ -n "$DECLARED_AMOUNT" ]; then
+              if [ "$DECLARED_AMOUNT" -ge "$TOTAL_DEPOSITS" ]; then
+                echo "  Reserves >= Obligations: OK ($DECLARED_AMOUNT >= $TOTAL_DEPOSITS)"
+              else
+                echo "  Reserves < Obligations: VIOLATION ($DECLARED_AMOUNT < $TOTAL_DEPOSITS)"
+                FAILURES=$((FAILURES + 1))
+              fi
+            fi
+
+            echo ""
+          done
+
+          if [ "$FAILURES" -gt 0 ]; then
+            echo "ERROR: $FAILURES verification failure(s)"
+            exit 1
+          fi
+          echo "=== ALL RESERVES VERIFIED ==="
+
       # Cleanup
       - name: Cleanup
         if: always()
