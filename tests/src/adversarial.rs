@@ -367,6 +367,41 @@ impl AttackLog {
 
     pub fn record(&mut self, result: AttackResult) {
         println!("{}", result);
+
+        // Also append to results file for summary.sh
+        if let Ok(dir) = std::env::var("ADVERSARIAL_RESULTS_DIR") {
+            let path = std::path::PathBuf::from(&dir).join("results.jsonl");
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                use std::io::Write;
+                let json = format!(
+                    "{{\"name\":{:?},\"result\":{:?},\"notes\":{:?},\"blocked\":{}}}",
+                    result.name,
+                    format!(
+                        "{}",
+                        if result.blocked {
+                            format!("BLOCKED at {}", result.defense)
+                        } else {
+                            format!("EXPLOITABLE (defense: {})", result.defense)
+                        }
+                    ),
+                    {
+                        let s = &result.notes;
+                        let end = (0..=200.min(s.len()))
+                            .rev()
+                            .find(|&i| s.is_char_boundary(i))
+                            .unwrap_or(0);
+                        &s[..end]
+                    },
+                    result.blocked,
+                );
+                let _ = writeln!(f, "{}", json);
+            }
+        }
+
         self.results.push(result);
     }
 
