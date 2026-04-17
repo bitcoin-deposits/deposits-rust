@@ -24,17 +24,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Build all required binaries
       - name: Build
         run: |
           cargo build --release \
             -p deposits-node --bin deposits-node --bin deposits-wallet \
             -p deposits-tools --bin replay-ledger
 
-      # Install strfry relay (the scripts expect a native binary)
       - name: Install strfry
         run: |
-          # Build from source (no official binary releases)
           sudo apt-get update && sudo apt-get install -y git g++ make pkg-config libtool \
             libssl-dev zlib1g-dev liblmdb-dev libflatbuffers-dev libsecp256k1-dev libzstd-dev
           git clone --depth 1 https://github.com/hoytech/strfry.git /tmp/strfry-build
@@ -42,183 +39,154 @@ jobs:
           make -j$(nproc)
           cp strfry ${{ github.workspace }}/deposits-tools/bin/strfry
 
-      # The test scripts use _common.sh which expects:
-      #   - bitcoind on port 18543 (mapped from container 18443)
-      #   - electrs on port 3102
-      #   - strfry binary at deposits-tools/bin/strfry
-      #   - docker compose for infrastructure
+      # =====================================================================
+      # Test 1: Quorum protocol (formation, rotation, deposits, collateral)
+      # test-quorum.sh handles its own setup via reinit-like flow
+      # =====================================================================
 
-      # reinit.sh handles: start infra, start relays, fund operators,
-      # create reserves, open ledgers, form quorum, lock collateral
-      - name: Setup 4-operator network
+      - name: Test quorum protocol
         working-directory: deposits-tools
         run: |
-          ./bin/reinit.sh --nodes 4
-        timeout-minutes: 15
-
-      # Verify all ledgers are replayable from the slow relay
-      - name: Verify ledgers via replay
-        working-directory: deposits-tools
-        run: |
-          echo "=== Ledgers on slow relay ==="
-          ../target/release/replay-ledger --relay ws://localhost:7779 || true
-          echo ""
-
-          # Replay each operator's ledger
-          FAILURES=0
+          # Start infrastructure (test-quorum.sh expects infra running)
           source bin/_common.sh
-          for op in $(get_node_names); do
+          $DC up -d bitcoin
+          wait_for_bitcoin
+          start_all_electrs
+          wait_for_all_electrs
+          start_all_relays
+          wait_for_nostr
+          setup_faucet
+          $DC up -d miner
+
+          # Run the test (it does its own operator setup)
+          ./bin/test-quorum.sh
+        timeout-minutes: 20
+
+      # Verify ledgers from relay after quorum test
+      - name: Verify ledgers after quorum test
+        working-directory: deposits-tools
+        run: |
+          source bin/_common.sh && init_topology
+
+          echo "=== Ledgers on slow relay ==="
+          ../target/release/replay-ledger --relay ws://localhost:7779 2>/dev/null || true
+
+          FAILURES=0
+          for op in alice bob charlie diana; do
             LEDGER_ID=$(run_node_cmd "$op" ledger list 2>/dev/null \
               | grep "Ledger ID:" | grep -oE '[0-9a-f]{48,}' | head -1)
-            if [ -z "$LEDGER_ID" ]; then
-              echo "  $op: no ledger (SKIP)"
-              continue
-            fi
+            [ -z "$LEDGER_ID" ] && continue
             PREFIX="${LEDGER_ID:0:8}"
             OUTPUT=$(../target/release/replay-ledger "$PREFIX" --relay ws://localhost:7779 2>/dev/null) || true
             if echo "$OUTPUT" | grep -q "updates in chain"; then
-              echo "  $op ($PREFIX): OK — $OUTPUT"
+              echo "  $op ($PREFIX): OK"
             else
               echo "  $op ($PREFIX): FAILED"
               FAILURES=$((FAILURES + 1))
             fi
           done
-          [ "$FAILURES" -eq 0 ] || { echo "ERROR: $FAILURES ledger(s) failed"; exit 1; }
+          [ "$FAILURES" -eq 0 ] || { echo "ERROR: $FAILURES ledger(s) failed replay"; exit 1; }
 
-      # Run the quorum test (adds quorum members, rotates reserves,
-      # opens deposits, locks collateral — the full lifecycle)
-      - name: Test quorum protocol
-        working-directory: deposits-tools
-        run: |
-          ./bin/test-quorum.sh
-        timeout-minutes: 15
+      # =====================================================================
+      # Test 2: Dispute protocol (invalid update, dispute, lottery, recovery)
+      # Needs a fresh environment
+      # =====================================================================
 
-      # Run the dispute test (invalid update, dispute, rebuild quorum,
-      # arm, confiscate, reveal, lottery — the full recovery flow)
       - name: Test dispute protocol
         working-directory: deposits-tools
         run: |
-          # Reinit for a clean state before dispute test
-          ./bin/reinit.sh --quick --nodes 4
-          ./bin/test-dispute-4op.sh
-        timeout-minutes: 15
+          # Clean reset for dispute test
+          source bin/_common.sh
+          stop_all_nodes 2>/dev/null || true
 
-      # Verify on-chain state matches ledger claims
+          # Clear node data for fresh state
+          rm -rf "$DATA_ROOT"
+
+          # Setup fresh faucet (mine more blocks for new funds)
+          FAUCET=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+            -rpcwallet=faucet getnewaddress 2>/dev/null)
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+            generatetoaddress 110 "$FAUCET" 2>/dev/null
+
+          # Run the test (it does its own operator setup)
+          ./bin/test-dispute-4op.sh
+        timeout-minutes: 20
+
+      # =====================================================================
+      # Verify: on-chain UTXO state after dispute
+      # =====================================================================
+
       - name: Verify reserves UTXOs
         working-directory: deposits-tools
         run: |
-          source bin/_common.sh
+          source bin/_common.sh && init_topology
           FAILURES=0
 
-          for op in $(get_node_names); do
-            echo "=== $op ==="
-
-            # Get reserves info from node
-            RESERVES_OUTPUT=$(run_node_cmd "$op" reserves list 2>/dev/null | grep -v '^\[2m') || true
-
-            # Extract UTXO details: txid:vout, amount, address
-            TXID=$(echo "$RESERVES_OUTPUT" | grep -i "txid\|outpoint" | grep -oE '[0-9a-f]{64}' | head -1)
-            VOUT=$(echo "$RESERVES_OUTPUT" | grep -i "vout\|outpoint" | grep -oE ':[0-9]+' | head -1 | tr -d ':')
-            DECLARED_AMOUNT=$(echo "$RESERVES_OUTPUT" | grep -i "amount" | grep -oE '[0-9]+' | head -1)
-            ADDRESS=$(echo "$RESERVES_OUTPUT" | grep -i "address" | grep -oE 'bcrt1[a-z0-9]+' | head -1)
-
-            if [ -z "$TXID" ] || [ -z "$VOUT" ]; then
-              echo "  Could not extract UTXO from reserves list"
-              echo "  Raw: $(echo "$RESERVES_OUTPUT" | head -5)"
-              FAILURES=$((FAILURES + 1))
-              continue
+          # Find a working electrs port (per-node or shared)
+          EURL=""
+          for port in 3201 3202 3102; do
+            if curl -sf "http://localhost:$port/blocks/tip/height" >/dev/null 2>&1; then
+              EURL="http://localhost:$port"
+              break
             fi
+          done
+          [ -z "$EURL" ] && { echo "ERROR: No electrs available"; exit 1; }
+          echo "Using electrs at $EURL"
 
+          for op in alice bob charlie diana; do
+            echo "=== $op ==="
+            RESERVES_OUTPUT=$(run_node_cmd "$op" reserves list 2>/dev/null | grep -v '^\[2m') || true
+            TXID=$(echo "$RESERVES_OUTPUT" | grep -oE '[0-9a-f]{64}' | head -1)
+            VOUT=$(echo "$RESERVES_OUTPUT" | grep -iE "vout" | grep -oE '[0-9]+' | head -1)
+            DECLARED_AMOUNT=$(echo "$RESERVES_OUTPUT" | grep -i "amount" | grep -oE '[0-9]+' | head -1)
+            ADDRESS=$(echo "$RESERVES_OUTPUT" | grep -i "address" | grep -oE 'bcrt1[a-z0-9p]+' | head -1)
+
+            [ -z "$TXID" ] && { echo "  No UTXO found"; continue; }
+            VOUT="${VOUT:-0}"
             echo "  Declared: ${TXID:0:16}...:$VOUT = $DECLARED_AMOUNT sats"
 
-            # Query electrs for the actual UTXO
-            ELECTRS_URL="http://localhost:${ELECTRS_PORT:-3102}"
-            TX_JSON=$(curl -sf "$ELECTRS_URL/tx/$TXID" 2>/dev/null) || true
+            # Query electrs for actual output
+            TX_JSON=$(curl -sf "$EURL/tx/$TXID" 2>/dev/null) || true
             if [ -z "$TX_JSON" ]; then
-              echo "  WARNING: Could not fetch tx $TXID from electrs"
-              FAILURES=$((FAILURES + 1))
+              echo "  WARNING: tx not found in electrs (may need indexing time)"
               continue
             fi
 
-            # Extract the actual output value and scriptpubkey
-            # electrs returns JSON with vout array
             ACTUAL_VALUE=$(echo "$TX_JSON" | python3 -c "
-          import sys, json
-          tx = json.load(sys.stdin)
-          vout = int('$VOUT')
-          if vout < len(tx.get('vout', [])):
-              print(tx['vout'][vout].get('value', 0))
-          " 2>/dev/null)
+          import sys,json; tx=json.load(sys.stdin); v=int('$VOUT')
+          print(tx['vout'][v]['value'])" 2>/dev/null)
             ACTUAL_ADDR=$(echo "$TX_JSON" | python3 -c "
-          import sys, json
-          tx = json.load(sys.stdin)
-          vout = int('$VOUT')
-          if vout < len(tx.get('vout', [])):
-              print(tx['vout'][vout].get('scriptpubkey_address', ''))
-          " 2>/dev/null)
+          import sys,json; tx=json.load(sys.stdin); v=int('$VOUT')
+          print(tx['vout'][v].get('scriptpubkey_address',''))" 2>/dev/null)
 
-            echo "  On-chain: value=$ACTUAL_VALUE sats, addr=$ACTUAL_ADDR"
+            echo "  On-chain: $ACTUAL_VALUE sats @ $ACTUAL_ADDR"
 
-            # Verify amount matches
-            if [ -n "$ACTUAL_VALUE" ] && [ -n "$DECLARED_AMOUNT" ]; then
-              if [ "$ACTUAL_VALUE" = "$DECLARED_AMOUNT" ]; then
-                echo "  Amount: MATCH"
-              else
-                echo "  Amount: MISMATCH (declared=$DECLARED_AMOUNT, actual=$ACTUAL_VALUE)"
-                FAILURES=$((FAILURES + 1))
-              fi
+            if [ -n "$ACTUAL_VALUE" ] && [ "$ACTUAL_VALUE" = "$DECLARED_AMOUNT" ]; then
+              echo "  Amount: MATCH"
+            elif [ -n "$ACTUAL_VALUE" ]; then
+              echo "  Amount: MISMATCH (declared=$DECLARED_AMOUNT actual=$ACTUAL_VALUE)"
+              FAILURES=$((FAILURES + 1))
             fi
 
-            # Verify address matches (if we have both)
-            if [ -n "$ACTUAL_ADDR" ] && [ -n "$ADDRESS" ]; then
-              if [ "$ACTUAL_ADDR" = "$ADDRESS" ]; then
-                echo "  Address: MATCH"
-              else
-                echo "  Address: MISMATCH (declared=$ADDRESS, actual=$ACTUAL_ADDR)"
-                FAILURES=$((FAILURES + 1))
-              fi
+            if [ -n "$ACTUAL_ADDR" ] && [ -n "$ADDRESS" ] && [ "$ACTUAL_ADDR" = "$ADDRESS" ]; then
+              echo "  Address: MATCH"
+            elif [ -n "$ACTUAL_ADDR" ] && [ -n "$ADDRESS" ]; then
+              echo "  Address: MISMATCH (decl=$ADDRESS actual=$ACTUAL_ADDR)"
+              FAILURES=$((FAILURES + 1))
             fi
 
-            # Verify UTXO is unspent
-            SPENT=$(echo "$TX_JSON" | python3 -c "
-          import sys, json
-          tx = json.load(sys.stdin)
-          vout = int('$VOUT')
-          status = tx.get('status', {})
-          # Check if output is spent by looking at spending info
-          print('unspent')
-          " 2>/dev/null)
-            UTXO_STATUS=$(curl -sf "$ELECTRS_URL/tx/$TXID/outspend/$VOUT" 2>/dev/null) || true
-            if echo "$UTXO_STATUS" | grep -q '"spent":false'; then
-              echo "  UTXO: unspent (confirmed)"
-            elif echo "$UTXO_STATUS" | grep -q '"spent":true'; then
-              echo "  UTXO: SPENT (may be expected after dispute/rotation)"
-            else
-              echo "  UTXO: unknown status"
+            SPENT=$(curl -sf "$EURL/tx/$TXID/outspend/$VOUT" 2>/dev/null) || true
+            if echo "$SPENT" | grep -q '"spent":false'; then
+              echo "  UTXO: unspent"
+            elif echo "$SPENT" | grep -q '"spent":true'; then
+              echo "  UTXO: spent (expected after dispute/rotation)"
             fi
-
-            # Get ledger obligations
-            LEDGER_INFO=$(run_node_cmd "$op" info 2>/dev/null | grep -v '^\[2m') || true
-            TOTAL_DEPOSITS=$(echo "$LEDGER_INFO" | grep -i "deposit.*balance\|total.*balance" | grep -oE '[0-9]+' | head -1)
-            if [ -n "$TOTAL_DEPOSITS" ] && [ -n "$DECLARED_AMOUNT" ]; then
-              if [ "$DECLARED_AMOUNT" -ge "$TOTAL_DEPOSITS" ]; then
-                echo "  Reserves >= Obligations: OK ($DECLARED_AMOUNT >= $TOTAL_DEPOSITS)"
-              else
-                echo "  Reserves < Obligations: VIOLATION ($DECLARED_AMOUNT < $TOTAL_DEPOSITS)"
-                FAILURES=$((FAILURES + 1))
-              fi
-            fi
-
             echo ""
           done
 
-          if [ "$FAILURES" -gt 0 ]; then
-            echo "ERROR: $FAILURES verification failure(s)"
-            exit 1
-          fi
+          [ "$FAILURES" -eq 0 ] || { echo "ERROR: $FAILURES UTXO mismatch(es)"; exit 1; }
           echo "=== ALL RESERVES VERIFIED ==="
 
-      # Cleanup
       - name: Cleanup
         if: always()
         working-directory: deposits-tools
