@@ -1259,7 +1259,7 @@ impl Ledger {
                 amount,
                 lock_until_block,
                 operator_id,
-                for_ledger_id: _,
+                for_ledger_id,
                 witness: _,
             } => {
                 // 1. Deposit must exist
@@ -1280,23 +1280,29 @@ impl Ledger {
                     });
                 }
 
-                // 4. Ratchet check: if existing lock, new must have (amount >= existing) AND (lock >= existing)
-                if deposit.collateral_lock_amount > 0 {
-                    if *amount < deposit.collateral_lock_amount {
+                // 4. Per-ledger ratchet check: if updating an existing lock for
+                // this ledger_id, new amount >= existing AND new expiry >= existing.
+                // New ledger_ids are allowed at any amount (no ratchet for first lock).
+                if let Some(existing) = deposit
+                    .collateral_locks
+                    .iter()
+                    .find(|e| e.for_ledger_id == *for_ledger_id)
+                {
+                    if *amount < existing.amount {
                         return Err(DepositsError::ProtocolViolation {
                             violation_type: "collateral_lock_ratchet_violation".to_string(),
                             details: format!(
-                                "New lock amount {} must be >= existing amount {}",
-                                amount, deposit.collateral_lock_amount
+                                "New lock amount {} must be >= existing amount {} for ledger {}",
+                                amount, existing.amount, for_ledger_id
                             ),
                         });
                     }
-                    if *lock_until_block < deposit.collateral_lock_expires {
+                    if *lock_until_block < existing.lock_until_block {
                         return Err(DepositsError::ProtocolViolation {
                             violation_type: "collateral_lock_ratchet_violation".to_string(),
                             details: format!(
-                                "New lock expiry {} must be >= existing expiry {}",
-                                lock_until_block, deposit.collateral_lock_expires
+                                "New lock expiry {} must be >= existing expiry {} for ledger {}",
+                                lock_until_block, existing.lock_until_block, for_ledger_id
                             ),
                         });
                     }
