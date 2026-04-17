@@ -145,31 +145,28 @@ fn attack_replay_attestation_across_ledgers() {
         .apply_operation(&attestation_op)
         .unwrap();
 
-    // Stronger test: give bob a quorum that includes alice's operator,
-    // so the attestation's public key IS a member — but the attestation
-    // was created for alice's ledger, not bob's.
+    // Stronger test: give bob a quorum that includes bob as a member,
+    // but with a DIFFERENT member_ledger_id than the attestation references.
+    // This tests that the collateral_ledger_id must match the member's
+    // declared ledger_id from QuorumAddMember.
     let alice_snap = Operator {
         name: "alice".into(),
         secret_key: net.op("alice").secret_key,
         public_key: net.op("alice").public_key,
         ledger: net.op("alice").ledger.clone(),
     };
-    // Add bob's operator key as a quorum member on bob's own ledger
-    // and begin quorum, so bob has an active quorum
-    net.op_mut("bob").add_quorum_member(&bob_snap, &bob_lid);
+    // Add bob as quorum member on bob's ledger, but with a DIFFERENT ledger_id
+    // than what the attestation uses
+    let alice_lid = hex::encode(alice_snap.ledger.state.ledger_id);
+    net.op_mut("bob").add_quorum_member(&bob_snap, &alice_lid); // different ledger_id!
     net.op_mut("bob").begin_quorum(1_000_000);
 
     // Now try to replay alice's attestation on bob's ledger.
-    // The attestation's collateral_operator IS bob (a quorum member on bob's ledger),
-    // so the quorum membership check passes — but the attestation was created
-    // for a different ledger context. The question: does the protocol catch this?
+    // The attestation has collateral_ledger_id = bob_lid,
+    // but bob's quorum member entry on bob's ledger has member_ledger_id = alice_lid.
+    // The new validation should catch the mismatch.
     let replay_result = net.op_mut("bob").ledger.apply_operation(&attestation_op);
 
-    // The attestation's collateral_operator (bob) IS in bob's quorum,
-    // so the quorum membership check passes. The attestation is accepted.
-    // This means attestations are NOT strongly bound to a specific target ledger.
-    // The defense is that the collateral_ledger_id field in the attestation
-    // identifies which ledger the collateral is on, and watchers verify this.
     let blocked = replay_result.is_err();
 
     log.record(AttackResult {
@@ -186,7 +183,9 @@ fn attack_replay_attestation_across_ledgers() {
         },
         scaling: Scaling::Constant,
         notes: if blocked {
-            "Attestation rejected: bound to specific ledger".into()
+            "Attestation rejected: collateral_ledger_id doesn't match member's \
+             announced ledger_id. Cross-ledger replay blocked."
+                .into()
         } else {
             "Attestation accepted on different ledger. Protocol allows this \
              because CollateralAttestation only checks quorum membership, \

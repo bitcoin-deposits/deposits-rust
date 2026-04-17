@@ -1385,26 +1385,44 @@ impl Ledger {
             }
             LedgerOperation::CollateralAttestation {
                 collateral_operator,
+                collateral_ledger_id,
                 ..
             } => {
-                // Verify the collateral_operator is a quorum member (active or pending).
-                // Attestations can arrive before QuorumBegin (during setup) or after.
-                let is_member = self
+                // 1. Verify the collateral_operator is a quorum member (active or pending).
+                let member = self
                     .state
                     .quorum_members
                     .iter()
-                    .any(|m| m.pubkey == *collateral_operator)
-                    || self
-                        .state
-                        .next_quorum_members
-                        .iter()
-                        .any(|m| m.pubkey == *collateral_operator);
-                if !is_member {
+                    .find(|m| m.pubkey == *collateral_operator)
+                    .or_else(|| {
+                        self.state
+                            .next_quorum_members
+                            .iter()
+                            .find(|m| m.pubkey == *collateral_operator)
+                    });
+
+                let Some(member) = member else {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "collateral_attestation_from_non_member".to_string(),
                         details: format!(
                             "Attestation from {} who is not a quorum member",
                             collateral_operator
+                        ),
+                    });
+                };
+
+                // 2. Verify collateral_ledger_id matches the member's announced ledger.
+                // The member_ledger_id was declared when the member was added via
+                // QuorumAddMember — the attestation must reference that same ledger.
+                if !member.ledger_id.is_empty()
+                    && !collateral_ledger_id.is_empty()
+                    && member.ledger_id != *collateral_ledger_id
+                {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "collateral_attestation_wrong_ledger".to_string(),
+                        details: format!(
+                            "Attestation references ledger {} but member announced {}",
+                            collateral_ledger_id, member.ledger_id
                         ),
                     });
                 }
