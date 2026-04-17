@@ -83,9 +83,12 @@ jobs:
           DATA_ROOT=$(mktemp -d)
           for name in alice bob charlie diana; do
             mkdir -p "$DATA_ROOT/$name"
-            # Deterministic seeds (reproducible across runs)
-            printf '%s' "${name}000000000000000000000000000000000000000000000000000000000000" | head -c 64 > "$DATA_ROOT/$name/seed"
           done
+          # Deterministic hex seeds (reproducible across runs)
+          echo "a11ce00000000000000000000000000000000000000000000000000000000001" > "$DATA_ROOT/alice/seed"
+          echo "b0b0000000000000000000000000000000000000000000000000000000000002" > "$DATA_ROOT/bob/seed"
+          echo "c0a1e00000000000000000000000000000000000000000000000000000000003" > "$DATA_ROOT/charlie/seed"
+          echo "d1a0a00000000000000000000000000000000000000000000000000000000004" > "$DATA_ROOT/diana/seed"
           echo "DATA_ROOT=$DATA_ROOT" >> $GITHUB_ENV
           echo "NODE=$PWD/target/release/deposits-node" >> $GITHUB_ENV
           echo "REPLAY=$PWD/target/release/replay-ledger" >> $GITHUB_ENV
@@ -189,21 +192,23 @@ jobs:
           FAILURES=0
           for name in alice bob charlie diana; do
             SEED=$(cat "$DATA_ROOT/$name/seed")
-            # Get the ledger ID from the node
+            # Extract ledger ID from "Ledger ID: <hex>" line
             LEDGER_ID=$($NODE ledger list \
               --seed "$SEED" $COMMON_ARGS --data-dir "$DATA_ROOT/$name" 2>/dev/null \
-              | grep -oE '[0-9a-f]{16,}' | head -1)
+              | grep "Ledger ID:" | grep -oE '[0-9a-f]{48,}' | head -1)
             if [ -z "$LEDGER_ID" ]; then
               echo "  $name: no ledger found (SKIP)"
+              FAILURES=$((FAILURES + 1))
               continue
             fi
             PREFIX="${LEDGER_ID:0:8}"
-            echo "  $name: replaying $PREFIX..."
+            echo -n "  $name ($PREFIX): "
             OUTPUT=$($REPLAY "$PREFIX" --relay ws://localhost:7779 2>/dev/null) || true
-            if echo "$OUTPUT" | grep -q "sequence"; then
-              echo "    OK: $(echo "$OUTPUT" | grep -c "sequence") updates verified"
+            if echo "$OUTPUT" | grep -q "updates in chain"; then
+              echo "OK — $OUTPUT"
             else
-              echo "    FAILED: could not replay ledger"
+              echo "FAILED"
+              echo "    $OUTPUT" | head -3
               FAILURES=$((FAILURES + 1))
             fi
           done
@@ -211,6 +216,7 @@ jobs:
             echo "ERROR: $FAILURES ledger(s) failed verification"
             exit 1
           fi
+          echo "=== ALL LEDGERS VERIFIED ==="
 
       # =====================================================================
       # Cleanup
