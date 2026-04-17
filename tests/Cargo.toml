@@ -1,0 +1,14 @@
+[package]
+name = "deposits-integration-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+deposits-protocol = { path = "../deposits-protocol" }
+deposits-core = { path = "../deposits-core" }
+bitcoin = { version = "0.32", features = ["serde"] }
+hex = "0.4"
+
+[lints]
+workspace = true

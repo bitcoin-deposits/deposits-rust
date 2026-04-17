@@ -4,6 +4,7 @@ members = [
     "deposits-core",
     "deposits-node",
     "deposits-tools",
+    "tests",
 ]
 resolver = "2"
 
