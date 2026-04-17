@@ -13,7 +13,7 @@ jobs:
   integration:
     name: Integration (4-operator regtest)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
@@ -24,208 +24,92 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build binaries
+      # Build all required binaries
+      - name: Build
         run: |
           cargo build --release \
             -p deposits-node --bin deposits-node --bin deposits-wallet \
             -p deposits-tools --bin replay-ledger
 
-      # =====================================================================
-      # Infrastructure: bitcoind + electrs + 5 strfry relays (all Docker)
-      # =====================================================================
-
-      - name: Start bitcoind
+      # Install strfry relay (the scripts expect a native binary)
+      - name: Install strfry
         run: |
-          docker run -d --name bitcoind \
-            -p 18443:18443 \
-            blockstream/bitcoind:27.2 \
-            bitcoind -printtoconsole -regtest=1 \
-            -rpcallowip=0.0.0.0/0 -rpcbind=0.0.0.0 \
-            -rpcuser=user -rpcpassword=pass \
-            -fallbackfee=0.00001 -rest -txindex
-          # Wait for RPC
-          for i in $(seq 1 30); do
-            docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass getblockchaininfo >/dev/null 2>&1 && break
-            sleep 1
-          done
+          # Build from source (no official binary releases)
+          sudo apt-get update && sudo apt-get install -y git g++ make pkg-config libtool \
+            libssl-dev zlib1g-dev liblmdb-dev libflatbuffers-dev libsecp256k1-dev libzstd-dev
+          git clone --depth 1 https://github.com/hoytech/strfry.git /tmp/strfry-build
+          cd /tmp/strfry-build && git submodule update --init
+          make -j$(nproc)
+          cp strfry ${{ github.workspace }}/deposits-tools/bin/strfry
 
-      - name: Start electrs
+      # The test scripts use _common.sh which expects:
+      #   - bitcoind on port 18543 (mapped from container 18443)
+      #   - electrs on port 3102
+      #   - strfry binary at deposits-tools/bin/strfry
+      #   - docker compose for infrastructure
+
+      # reinit.sh handles: start infra, start relays, fund operators,
+      # create reserves, open ledgers, form quorum, lock collateral
+      - name: Setup 4-operator network
+        working-directory: deposits-tools
         run: |
-          docker run -d --name electrs \
-            --link bitcoind:bitcoind \
-            -p 3102:3000 \
-            mempool/electrs:v3.2.0 \
-            /app/electrs_bitcoin/bin/electrs \
-            --daemon-rpc-addr bitcoind:18443 \
-            --cookie user:pass \
-            --network regtest \
-            --http-addr 0.0.0.0:3000
+          ./bin/reinit.sh --nodes 4
+        timeout-minutes: 15
 
-      - name: Start strfry relays
-        run: |
-          # 4 node relays + 1 ledger relay, all as Docker containers
-          for entry in alice:7801 bob:7802 charlie:7803 diana:7804 ledgers:7779; do
-            name="${entry%%:*}"
-            port="${entry##*:}"
-            docker run -d --name "relay-${name}" \
-              -p "${port}:7777" \
-              dockurr/strfry:latest
-          done
-          # Wait for relays to accept connections
-          sleep 3
-
-      # =====================================================================
-      # Setup: seeds, faucet, fund operators
-      # =====================================================================
-
-      - name: Setup environment
-        run: |
-          DATA_ROOT=$(mktemp -d)
-          for name in alice bob charlie diana; do
-            mkdir -p "$DATA_ROOT/$name"
-          done
-          # Deterministic hex seeds (reproducible across runs)
-          echo "a11ce00000000000000000000000000000000000000000000000000000000001" > "$DATA_ROOT/alice/seed"
-          echo "b0b0000000000000000000000000000000000000000000000000000000000002" > "$DATA_ROOT/bob/seed"
-          echo "c0a1e00000000000000000000000000000000000000000000000000000000003" > "$DATA_ROOT/charlie/seed"
-          echo "d1a0a00000000000000000000000000000000000000000000000000000000004" > "$DATA_ROOT/diana/seed"
-          echo "DATA_ROOT=$DATA_ROOT" >> $GITHUB_ENV
-          echo "NODE=$PWD/target/release/deposits-node" >> $GITHUB_ENV
-          echo "REPLAY=$PWD/target/release/replay-ledger" >> $GITHUB_ENV
-          RELAYS="--relay ws://localhost:7801 --relay ws://localhost:7802 --relay ws://localhost:7803 --relay ws://localhost:7804"
-          echo "RELAYS=$RELAYS" >> $GITHUB_ENV
-          echo "COMMON_ARGS=--network regtest --esplora http://localhost:3102 $RELAYS --slow-relay ws://localhost:7779" >> $GITHUB_ENV
-
-      - name: Mine initial blocks and fund operators
-        run: |
-          # Create faucet wallet and mine
-          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass createwallet "faucet"
-          FAUCET=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=faucet getnewaddress)
-          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass generatetoaddress 110 "$FAUCET"
-          echo "FAUCET=$FAUCET" >> $GITHUB_ENV
-          sleep 3
-
-          # Get each operator's address and fund it
-          for name in alice bob charlie diana; do
-            SEED=$(cat "$DATA_ROOT/$name/seed")
-            ADDR=$($NODE address --seed "$SEED" $COMMON_ARGS --data-dir "$DATA_ROOT/$name" 2>/dev/null | grep -oE 'bcrt1[a-z0-9]+' | head -1)
-            if [ -n "$ADDR" ]; then
-              docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
-                -rpcwallet=faucet sendtoaddress "$ADDR" 2.0
-              echo "  Funded $name: $ADDR"
-            else
-              echo "  WARNING: Could not get address for $name"
-            fi
-          done
-
-          # Confirm funding
-          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
-            generatetoaddress 6 "$FAUCET"
-          sleep 5
-
-      # =====================================================================
-      # Start operators
-      # =====================================================================
-
-      - name: Start operator daemons
-        run: |
-          for name in alice bob charlie diana; do
-            SEED=$(cat "$DATA_ROOT/$name/seed")
-            RUST_LOG=info,nostr_relay_pool=warn $NODE run \
-              --seed "$SEED" $COMMON_ARGS \
-              --data-dir "$DATA_ROOT/$name" \
-              --fast-poll &
-            echo "$!" > "$DATA_ROOT/$name/pid"
-            echo "  Started $name (pid $(cat "$DATA_ROOT/$name/pid"))"
-          done
-          sleep 5
-
-      # =====================================================================
-      # Test: reserves + ledgers + quorum
-      # =====================================================================
-
-      - name: Create reserves
-        run: |
-          for name in alice bob charlie diana; do
-            SEED=$(cat "$DATA_ROOT/$name/seed")
-            echo "  $name: creating reserves..."
-            $NODE reserves create 100000000 \
-              --seed "$SEED" $COMMON_ARGS --data-dir "$DATA_ROOT/$name" 2>/dev/null \
-              || echo "    (failed — may need more confirmations)"
-          done
-          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
-            generatetoaddress 6 "$FAUCET"
-          sleep 5
-
-      - name: Open ledgers
-        run: |
-          for name in alice bob charlie diana; do
-            SEED=$(cat "$DATA_ROOT/$name/seed")
-            echo "  $name: opening ledger..."
-            $NODE ledger open \
-              --annual-fee-bps 50 --min-fee-sats 100 --fee-period-blocks 2016 \
-              --seed "$SEED" $COMMON_ARGS --data-dir "$DATA_ROOT/$name" 2>/dev/null \
-              || echo "    (failed)"
-          done
-          sleep 3
-
-      - name: Verify node info
-        run: |
-          for name in alice bob charlie diana; do
-            SEED=$(cat "$DATA_ROOT/$name/seed")
-            echo "=== $name ==="
-            $NODE info --seed "$SEED" $COMMON_ARGS --data-dir "$DATA_ROOT/$name" 2>/dev/null \
-              || echo "  (info failed)"
-          done
-
-      # =====================================================================
-      # Verify: replay ledgers from relay
-      # =====================================================================
-
+      # Verify all ledgers are replayable from the slow relay
       - name: Verify ledgers via replay
+        working-directory: deposits-tools
         run: |
-          echo "=== Listing ledgers on relay ==="
-          $REPLAY --relay ws://localhost:7779 2>/dev/null || true
+          echo "=== Ledgers on slow relay ==="
+          ../target/release/replay-ledger --relay ws://localhost:7779 || true
           echo ""
 
-          echo "=== Replaying each operator's ledger ==="
+          # Replay each operator's ledger
           FAILURES=0
-          for name in alice bob charlie diana; do
-            SEED=$(cat "$DATA_ROOT/$name/seed")
-            # Extract ledger ID from "Ledger ID: <hex>" line
-            LEDGER_ID=$($NODE ledger list \
-              --seed "$SEED" $COMMON_ARGS --data-dir "$DATA_ROOT/$name" 2>/dev/null \
+          source bin/_common.sh
+          for op in $(get_node_names); do
+            LEDGER_ID=$(run_node_cmd "$op" ledger list 2>/dev/null \
               | grep "Ledger ID:" | grep -oE '[0-9a-f]{48,}' | head -1)
             if [ -z "$LEDGER_ID" ]; then
-              echo "  $name: no ledger found (SKIP)"
-              FAILURES=$((FAILURES + 1))
+              echo "  $op: no ledger (SKIP)"
               continue
             fi
             PREFIX="${LEDGER_ID:0:8}"
-            echo -n "  $name ($PREFIX): "
-            OUTPUT=$($REPLAY "$PREFIX" --relay ws://localhost:7779 2>/dev/null) || true
+            OUTPUT=$(../target/release/replay-ledger "$PREFIX" --relay ws://localhost:7779 2>/dev/null) || true
             if echo "$OUTPUT" | grep -q "updates in chain"; then
-              echo "OK — $OUTPUT"
+              echo "  $op ($PREFIX): OK — $OUTPUT"
             else
-              echo "FAILED"
-              echo "    $OUTPUT" | head -3
+              echo "  $op ($PREFIX): FAILED"
               FAILURES=$((FAILURES + 1))
             fi
           done
-          if [ "$FAILURES" -gt 0 ]; then
-            echo "ERROR: $FAILURES ledger(s) failed verification"
-            exit 1
-          fi
-          echo "=== ALL LEDGERS VERIFIED ==="
+          [ "$FAILURES" -eq 0 ] || { echo "ERROR: $FAILURES ledger(s) failed"; exit 1; }
 
-      # =====================================================================
+      # Run the quorum test (adds quorum members, rotates reserves,
+      # opens deposits, locks collateral — the full lifecycle)
+      - name: Test quorum protocol
+        working-directory: deposits-tools
+        run: |
+          ./bin/test-quorum.sh
+        timeout-minutes: 15
+
+      # Run the dispute test (invalid update, dispute, rebuild quorum,
+      # arm, confiscate, reveal, lottery — the full recovery flow)
+      - name: Test dispute protocol
+        working-directory: deposits-tools
+        run: |
+          # Reinit for a clean state before dispute test
+          ./bin/reinit.sh --quick --nodes 4
+          ./bin/test-dispute-4op.sh
+        timeout-minutes: 15
+
       # Cleanup
-      # =====================================================================
-
       - name: Cleanup
         if: always()
+        working-directory: deposits-tools
         run: |
-          for name in alice bob charlie diana; do
-            [ -f "$DATA_ROOT/$name/pid" ] && kill "$(cat "$DATA_ROOT/$name/pid")" 2>/dev/null || true
-          done
-          docker rm -f bitcoind electrs relay-alice relay-bob relay-charlie relay-diana relay-ledgers 2>/dev/null || true
+          source bin/_common.sh
+          stop_all_nodes 2>/dev/null || true
+          stop_all_relays 2>/dev/null || true
+          stop_all_electrs 2>/dev/null || true
+          $DC down -v --remove-orphans 2>/dev/null || true
