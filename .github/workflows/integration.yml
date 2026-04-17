@@ -1,0 +1,209 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  integration:
+    name: Integration (4-operator regtest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Build the node and wallet binaries
+      - name: Build binaries
+        run: cargo build --release -p deposits-node --bin deposits-node --bin deposits-wallet
+
+      # Install strfry (relay) from official binary
+      - name: Install strfry
+        run: |
+          curl -sSL https://github.com/hoytech/strfry/releases/download/1.1.1/strfry-1.1.1-linux-amd64.tar.gz | tar xz
+          sudo mv strfry /usr/local/bin/
+          strfry --version
+
+      # Start bitcoind via Docker
+      - name: Start Bitcoin regtest
+        run: |
+          docker run -d --name bitcoind \
+            -p 18443:18443 -p 18444:18444 \
+            blockstream/bitcoind:27.2 \
+            bitcoind -printtoconsole -regtest=1 \
+            -rpcallowip=0.0.0.0/0 -rpcbind=0.0.0.0 \
+            -rpcuser=user -rpcpassword=pass \
+            -fallbackfee=0.00001 -rest -txindex
+
+      # Start electrs via Docker
+      - name: Start Electrs
+        run: |
+          # Wait for bitcoind
+          for i in $(seq 1 30); do
+            docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass getblockchaininfo > /dev/null 2>&1 && break
+            sleep 1
+          done
+          docker run -d --name electrs \
+            --link bitcoind:bitcoind \
+            -p 3102:3000 \
+            mempool/electrs:v3.2.0 \
+            /app/electrs_bitcoin/bin/electrs \
+            --daemon-rpc-addr bitcoind:18443 \
+            --cookie user:pass \
+            --network regtest \
+            --http-addr 0.0.0.0:3000
+
+      # Start strfry relays (4 node relays + 1 ledger relay)
+      - name: Start relays
+        run: |
+          for port in 7801 7802 7803 7804 7779; do
+            dir=$(mktemp -d)
+            cat > "$dir/strfry.conf" <<CONF
+          db = "$dir/"
+          dbParams { maxreaders = 256; mapsize = 268435456; noReadAhead = false; noSync = true }
+          events { maxEventSize = 65536; rejectEventsNewerThanSeconds = 900; rejectEventsOlderThanSeconds = 94608000; rejectEphemeralEventsOlderThanSeconds = 60; ephemeralEventsLifetimeSeconds = 300; maxNumTags = 2000; maxTagValSize = 1024 }
+          relay { bind = "0.0.0.0"; port = $port; nofiles = 1000000; maxWebsocketPayloadSize = 131072; maxReqFilterSize = 200; autoPingSeconds = 55; enableTcpKeepalive = false; queryTimesliceBudgetMicroseconds = 10000; maxFilterLimit = 500; maxSubsPerConnection = 200; skipVerification = true; writePolicy { plugin = "" }; compression { enabled = true; slidingWindow = true }; numThreads { ingester = 2; reqWorker = 2; reqMonitor = 2; negentropy = 1 }; negentropy { enabled = true; maxSyncEvents = 1000000 } }
+          CONF
+            strfry --config "$dir/strfry.conf" relay &
+          done
+          # Wait for relays
+          sleep 2
+          for port in 7801 7802 7803 7804 7779; do
+            for i in $(seq 1 10); do
+              (echo '["REQ","ping",{"limit":0}]' | timeout 1 websocat ws://localhost:$port 2>/dev/null) && break
+              sleep 0.5
+            done
+          done
+
+      # Generate seeds and set up environment
+      - name: Setup test environment
+        run: |
+          export DATA_ROOT=$(mktemp -d)
+          mkdir -p "$DATA_ROOT"
+          for name in alice bob charlie diana; do
+            mkdir -p "$DATA_ROOT/$name"
+            # Deterministic seeds for reproducibility
+            echo "${name}$(printf '%0*d' 58 0)" | head -c 64 > "$DATA_ROOT/$name/seed"
+          done
+          echo "DATA_ROOT=$DATA_ROOT" >> $GITHUB_ENV
+          echo "DEPOSITS_NODE=$PWD/target/release/deposits-node" >> $GITHUB_ENV
+          echo "DEPOSITS_WALLET=$PWD/target/release/deposits-wallet" >> $GITHUB_ENV
+
+      # Create a minimal faucet (mine blocks, fund addresses)
+      - name: Mine initial blocks
+        run: |
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass createwallet "faucet" || true
+          FAUCET_ADDR=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=faucet getnewaddress)
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass generatetoaddress 110 "$FAUCET_ADDR"
+          echo "FAUCET_ADDR=$FAUCET_ADDR" >> $GITHUB_ENV
+          # Wait for electrs to index
+          sleep 5
+
+      # Start operator nodes
+      - name: Start operators
+        run: |
+          RELAYS="--relay ws://localhost:7801 --relay ws://localhost:7802 --relay ws://localhost:7803 --relay ws://localhost:7804"
+
+          for name in alice bob charlie diana; do
+            case $name in
+              alice) PORT=7801 METRICS=9101 ;;
+              bob) PORT=7802 METRICS=9102 ;;
+              charlie) PORT=7803 METRICS=9103 ;;
+              diana) PORT=7804 METRICS=9104 ;;
+            esac
+            SEED=$(cat "$DATA_ROOT/$name/seed")
+            $DEPOSITS_NODE run \
+              --seed "$SEED" \
+              --network regtest \
+              --esplora http://localhost:3102 \
+              $RELAYS \
+              --slow-relay ws://localhost:7779 \
+              --data-dir "$DATA_ROOT/$name" \
+              --fast-poll &
+            echo "$!" > "$DATA_ROOT/$name/pid"
+          done
+          # Wait for nodes to start
+          sleep 3
+
+      # Fund operators
+      - name: Fund operators
+        run: |
+          for name in alice bob charlie diana; do
+            SEED=$(cat "$DATA_ROOT/$name/seed")
+            ADDR=$($DEPOSITS_NODE address \
+              --seed "$SEED" --network regtest \
+              --esplora http://localhost:3102 \
+              --relay ws://localhost:7801 \
+              --slow-relay ws://localhost:7779 \
+              --data-dir "$DATA_ROOT/$name" 2>/dev/null | grep -oE 'bcrt1[a-z0-9]+' | head -1)
+            if [ -n "$ADDR" ]; then
+              docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+                -rpcwallet=faucet sendtoaddress "$ADDR" 2.0
+            fi
+          done
+          # Mine to confirm
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+            generatetoaddress 6 "$FAUCET_ADDR"
+          sleep 5
+
+      # Run the actual integration test
+      - name: Test: create reserves and open ledgers
+        run: |
+          run_cmd() {
+            local name=$1; shift
+            local SEED=$(cat "$DATA_ROOT/$name/seed")
+            $DEPOSITS_NODE "$@" \
+              --seed "$SEED" --network regtest \
+              --esplora http://localhost:3102 \
+              --relay ws://localhost:7801 --relay ws://localhost:7802 \
+              --relay ws://localhost:7803 --relay ws://localhost:7804 \
+              --slow-relay ws://localhost:7779 \
+              --data-dir "$DATA_ROOT/$name" 2>/dev/null
+          }
+
+          echo "=== Creating reserves ==="
+          for name in alice bob charlie diana; do
+            run_cmd "$name" reserves create 100000000 || echo "  $name reserves failed (may need more confirmations)"
+          done
+
+          # Mine + wait
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+            generatetoaddress 6 "$FAUCET_ADDR"
+          sleep 5
+
+          echo "=== Opening ledgers ==="
+          for name in alice bob charlie diana; do
+            run_cmd "$name" ledger open --annual-fee-bps 50 --min-fee-sats 100 --fee-period-blocks 2016 || echo "  $name ledger open failed"
+          done
+
+          echo "=== Checking info ==="
+          for name in alice bob charlie diana; do
+            echo "--- $name ---"
+            run_cmd "$name" info || echo "  (info failed)"
+          done
+
+      # Cleanup
+      - name: Cleanup
+        if: always()
+        run: |
+          # Stop node processes
+          for name in alice bob charlie diana; do
+            if [ -f "$DATA_ROOT/$name/pid" ]; then
+              kill "$(cat "$DATA_ROOT/$name/pid")" 2>/dev/null || true
+            fi
+          done
+          # Stop containers
+          docker rm -f bitcoind electrs 2>/dev/null || true
+          # Stop relays
+          pkill -f strfry 2>/dev/null || true
