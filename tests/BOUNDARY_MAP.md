@@ -57,6 +57,27 @@ Every extraction number has one of three types:
 | Censorship via sybil quorum | enables other attacks | (M) | Composes with near-expiry and lightning theft. |
 | Relay censorship residual | enables delay | (M) | All-relay censorship indistinguishable from operator silence. |
 
+### Topology (wallet ledger selection)
+
+| Finding | Threshold | Type | Notes |
+|---------|-----------|------|-------|
+| Mincut safety threshold | mincut >= 4 | (M) | Below 4, coalition attacks are profitable at any collateral ratio (25%-300%) and any reuse factor (1x-10x). At 4+, no profitable attack found. |
+| Collateral reuse doesn't change threshold | mincut >= 4 stable | (M) | Reuse changes how many nodes are exploitable at each mincut level, but the safe/unsafe boundary stays at 4. |
+| Ring mincut = min(anchors, 2Q) | exact formula | (M) | Ring topology: min-mincut across all nodes equals min(anchor_count, 2×quorum_size). Network size doesn't matter. |
+| 4 anchors + Q=5 sufficient | mincut=4 for all nodes | (M) | Ring topology with 4 evenly-spaced anchors and Q=5 gives every node mincut >= 4. |
+| 6 anchors + Q=5 gives mincut=6 | 50% headroom | (M) | Provides margin above the safety threshold without increasing quorum size. |
+| Dispersed/clustered topologies are weak | mincut < 4 even at N/2 anchors | (M) | Stride-based and cluster topologies can't achieve mincut >= 4. Wallets should flag these. |
+| LConn is always conservative | LConn <= mincut, 100% of cases | (M) | Local connectivity (2-hop neighborhood) never overestimates. But underestimates by 1-3 at larger N. |
+| Sybil island defeats LConn | LConn useless if neighborhood is attacker-controlled | (M) | Attacker fills 2-hop neighborhood with sybils. Wallet must compute true mincut on full graph. |
+
+**Wallet requirements:**
+1. Fetch full topology graph (public via Nostr relay quorum membership data)
+2. Choose trust anchors (operators the wallet trusts)
+3. Compute vertex mincut from candidate operator to anchor set
+4. **Require mincut >= 4** to wallet's anchor set before depositing
+5. Re-check periodically (defend against gradual isolation)
+6. LConn as optional local sanity check (cheap, conservative)
+
 ### Composition Attacks (not yet tested)
 
 | Composition | Components | Expected extraction | Priority |
@@ -89,4 +110,7 @@ These are the properties that actually held under adversarial testing — the em
 | L3 | wallet embed capability | ✓ | **Partial** (sybil quorum blocks embed) |
 | L4 | relay censorship resistance | ✓ | **Partial** (multi-relay mitigates, all-relay fails) |
 
-3 invariants failed (C4, partial E2, partial C3). 4 held partially. 10 held fully.
+| T1 | mincut >= 4 to anchors | ✓ | Yes (safe threshold, stable across reuse ratios) |
+| T2 | ring mincut = min(A, 2Q) | ✓ | Yes (exact formula, network-size independent) |
+
+3 invariants failed (C4, partial E2, partial C3). 4 held partially. 12 held fully.
