@@ -69,8 +69,7 @@ When a quorum member detects fraud (via Kind 9101 broadcast or direct observatio
 
 1. Create a fork of the disputed ledger from the last valid sequence
 2. Append `DisputeEnter` with the reason and last valid sequence
-3. Copy collateral attestations to the fork
-4. Append `DisputeArmed` with a commitment hash (HASH160 of a secret preimage) and target reserves address
+3. Append `DisputeArmed` with a commitment hash (HASH160 of a secret preimage) and target reserves address
 
 ### Lottery
 
@@ -117,13 +116,13 @@ Losers append `DisputeYield` to their forks, transitioning them to Tombstoned st
 
 **Respectful** (unavailability without proven fraud):
 - Only the amount covering the ledger's obligations goes to the winner
-- Change is returned to the original operator's pubkey
-- Collateral on other ledgers is unaffected
+- Change (including collateral) is returned to the original operator's pubkey
 
 **Punitive** (proven non-conformance):
-- The full reserves output goes to the winner
-- Excess above obligations is split equally among quorum members
-- Collateral held on other operators' ledgers may be confiscated by those operators
+- The full UTXO (reserves + collateral) goes to the winner
+- The winner inherits deposit obligations and retains the collateral as compensation
+- Excess reserves (above obligations) are split equally among quorum members
+- If the operator runs multiple ledgers, proof of non-conformance on one ledger can be presented to the other ledgers' quorums, triggering slashing there as well
 
 ### Recovery
 

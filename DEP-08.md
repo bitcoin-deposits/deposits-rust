@@ -21,7 +21,6 @@ A deposit is created with `DepositOpen`, which establishes:
 - **descriptor**: the miniscript spending policy
 - **fees**: periodic custody fee schedule (see DEP-07)
 - **transfer_fees**: per-transfer fee schedule (see DEP-07)
-- **is_collateral**: if true, this deposit is subject to collateral rules (see DEP-05) and cannot be transferred or withdrawn normally
 - **receive_requires_sig**: if true, incoming transfers, offers, and invoices require a witness from the deposit's descriptor
 - **fee_change_after_blocks**: blocks after opening before fees can change (see DEP-07)
 - **fee_change_notice_blocks**: blocks of notice before a fee change takes effect
@@ -63,14 +62,6 @@ When `receive_requires_sig` is true, the operator must verify a witness from the
 - Accepting an incoming transfer
 
 This prevents unsolicited crediting and gives the deposit owner control over what enters the account.
-
-## Collateral Deposits
-
-When `is_collateral` is true:
-- The deposit is subject to `CollateralLock` operations (see DEP-05)
-- Normal transfers and withdrawals are restricted
-- The deposit holds operator capital on a quorum member's ledger, backing the operator's obligations elsewhere
-- If the operator misbehaves, the member operating this ledger may confiscate the locked funds
 
 ## Access Control
 

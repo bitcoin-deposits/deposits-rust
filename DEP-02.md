@@ -146,8 +146,8 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 70 | TransferLock | Transfers |
 | 71 | TransferComplete | Transfers |
 | 72 | TransferFail | Transfers |
-| 42 | CollateralAttestation | Collateral |
-| 45 | CollateralLock | Collateral |
+| 42 | *Reserved* | *Previously CollateralAttestation* |
+| 45 | *Reserved* | *Previously CollateralLock* |
 | 54 | DisputeEnter | Dispute |
 | 55 | DisputeAcquire | Dispute |
 | 56 | DisputeYield | Dispute |
@@ -173,8 +173,8 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 62 | reserves_amount | 8 | LedgerOpen, QuorumBegin |
 | 82 | membership_expires | 4 | QuorumJoin |
 | 84 | new_outpoint_txid | 32 | QuorumBegin |
-| 86 | quorum_expiry | 4 | QuorumBegin (shortest member collateral lock) |
-| 88 | total_collateral | 8 | QuorumBegin (sum of attested collateral, msats) |
+| 86 | quorum_expiry | 4 | QuorumBegin (shortest member membership_until) |
+| 88 | collateral_amount | 8 | QuorumBegin (collateral portion of UTXO, msats) |
 | 90 | spending_txid | 32 | QuorumBegin |
 | 92 | new_outpoint_vout | 4 | QuorumBegin |
 | 96 | genesis_block | 4 | LedgerOpen |
@@ -191,7 +191,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 202 | descriptor | variable | DepositOpen (miniscript) |
 | 204 | witness | variable | TransferLock, DepositKeyRotate (nested) |
 | 208 | new_descriptor | variable | DepositKeyRotate |
-| 230 | is_collateral | 1 | DepositOpen |
+| 230 | *Reserved* | 1 | *Previously is_collateral* |
 | 232 | receive_requires_sig | 1 | DepositOpen |
 
 #### Fees
@@ -240,24 +240,18 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 72 | withdrawal_id | 32 | OnchainLock, OnchainFail, OnchainFulfill |
 | 74 | funding_address | variable | OnchainCredit |
 
-#### Quorum and Collateral
+#### Quorum
 
 | Type | Name | Size | Used by |
 |---|---|---|---|
-| 44 | quorum_member | 33 | QuorumAddMember, QuorumRemoveMember, CollateralAttestation |
-| 38 | collateral_operator | 33 | CollateralAttestation |
-| 40 | signature | 64 | CollateralAttestation |
-| 42 | ledger_hash | 32 | CollateralAttestation |
+| 44 | quorum_member | 33 | QuorumAddMember, QuorumRemoveMember |
 | 46 | quorum_member_sig | 64 | QuorumBegin |
 | 48 | operator_sig | 64 | QuorumBegin |
-| 76 | lock_until_block | 4 | CollateralLock, CollateralAttestation |
-| 114 | member_ledger_id | variable | QuorumAddMember, QuorumJoin, CollateralLock (`for_ledger_id`) |
-| 124 | collateral_ledger_id | variable | CollateralAttestation |
+| 114 | member_ledger_id | variable | QuorumAddMember, QuorumJoin |
 | 234 | min_fee_bps | 2 | QuorumAddMember |
 | 236 | min_fee_fixed | 8 | QuorumAddMember |
 | 238 | max_fee_period | 4 | QuorumAddMember |
-| 240 | collateral_lock_amount | 8 | QuorumAddMember |
-| 242 | collateral_lock_until | 4 | QuorumAddMember |
+| 242 | membership_until | 4 | QuorumAddMember |
 | 252 | dispute_response_blocks | 4 | QuorumAddMember |
 | 254 | dispute_arm_blocks | 4 | QuorumAddMember |
 | 256 | service_response_blocks | 4 | QuorumAddMember |

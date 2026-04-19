@@ -45,7 +45,7 @@ When valid fraud evidence is embedded in the causal chain and a quorum member's 
 `dispute_response_blocks` is a per-quorum parameter recorded in `QuorumAddMember`, so all parties agree on the obligation at join time. Shorter values increase responsiveness requirements; longer values are more forgiving but delay recovery.
 
 ### Collateral Maintenance
-Collateral must remain locked through `collateral_lock_until`. Early withdrawal while listed as a quorum member is provable non-conformance: the `CollateralLock` operation on the member's ledger has a `lock_until_block`, and any operation that reduces the locked amount before that block is evidence.
+The collateral portion of the operator's UTXO must be preserved through `quorum_expiry`. Co-signers MUST reject any operation that would reduce the UTXO value below `reserves_amount + collateral_amount`. If the operator spends the UTXO outside the quorum's control (e.g., via a tiered timeout path) before quorum expiry, this is provable non-conformance.
 
 ## Wallet Obligations
 
@@ -68,7 +68,7 @@ Wallets should distribute funds across operators with non-overlapping quorum mem
 | Withdrawal/transfer processing | Operator signs past `DeliveryEmbed block_height + service_response_blocks` without processing embedded request | Yes |
 | Quorum rotation | Operator signs past `quorum_expiry` without new quorum | Yes |
 | Dispute response | Member active after `evidence_block + dispute_response_blocks` | Yes |
-| Collateral lock | Reduced before `lock_until_block` | Yes |
+| Collateral maintenance | UTXO reduced below reserves + collateral | Yes |
 | Fee collection | Within `frequency_blocks` | No (advisory) |
 | Co-sign response | Timely | No (advisory) |
 | Evidence retention | Until credit or expiry | No (self-interest) |

@@ -6,7 +6,7 @@ This document specifies the on-chain transaction formats used by Bitcoin Deposit
 
 ## Reserves UTXO
 
-A ledger's reserves are held in a single UTXO with an amount greater than or equal to the sum of the ledger's obligations (total deposit balances + locked amounts). The UTXO is spendable by tiered script paths — quorum members first, operator later, with increasing timelocks.
+A ledger's funds are held in a single UTXO containing both reserves and collateral. The reserves portion (deposit capacity) must be greater than or equal to the ledger's total obligations. The collateral portion is the operator's security bond. The UTXO is spendable by tiered script paths — quorum members first, operator later, with increasing timelocks.
 
 ## Tapscript Construction
 
@@ -38,13 +38,15 @@ For the simple 2-party case (n ≤ 2):
 When a quorum is established or refreshed, the operator constructs a new Taproot output and broadcasts a transaction spending the old reserves to the new address. The `QuorumBegin` operation records:
 
 - **reserves_id**: the new Taproot address
-- **reserves_amount**: the amount in the new output (msats)
+- **reserves_amount**: the reserves portion of the UTXO (deposit capacity, msats)
+- **collateral_amount**: the collateral portion of the UTXO (security bond, msats)
 - **spending_txid**: the txid spending the old reserves
 - **new_outpoint_txid**: the txid of the new reserves output
 - **new_outpoint_vout**: the vout index
 - **quorum_members**: the pubkeys included in the new multisig
-- **quorum_expiry**: block height when the quorum expires (shortest member collateral lock)
-- **total_collateral**: sum of attested collateral across all members (msats)
+- **quorum_expiry**: block height when the quorum expires (shortest member commitment)
+
+The on-chain UTXO value MUST equal `reserves_amount + collateral_amount`. Co-signers MUST verify this before signing.
 
 After `QuorumBegin`, co-signatures become required for all subsequent updates. A new `QuorumBegin` MUST be appended before `quorum_expiry` (see DEP-11).
 
@@ -78,9 +80,10 @@ When a ledger becomes unavailable (not provably dishonest), the custody transfer
 
 When proof of non-conformance is provided:
 
-- The full reserves output goes to the lottery
+- The full UTXO (reserves + collateral) goes to the lottery
+- The lottery winner takes over the ledger and inherits deposit obligations
+- The collateral portion is forfeited by the operator — the winner retains it as compensation
 - Excess reserves (above obligations) are split equally among quorum members
-- Collateral on other ledgers may be confiscated by those operators
 
 ## Related DEPs
 
