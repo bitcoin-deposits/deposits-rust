@@ -22,23 +22,27 @@ RUN mkdir -p deposits-tools/src && echo "" > deposits-tools/src/lib.rs && \
         echo "fn main() {}" > deposits-tools/src/bin/$bin.rs; \
     done
 
-RUN cargo build --release --bin deposits-node
+RUN cargo build --release --bin deposits-node --bin deposits-wallet
 
 # Runtime
 FROM debian:bookworm-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    ca-certificates liblmdb0 libflatbuffers2 libsecp256k1-1 libzstd1 && \
+    ca-certificates libsecp256k1-1 && \
     rm -rf /var/lib/apt/lists/*
 
+# Install strfry (bundled relay)
+COPY --from=docker.io/pluja/strfry:latest /app/strfry /usr/local/bin/strfry
+
 COPY --from=builder /build/target/release/deposits-node /usr/local/bin/
+COPY --from=builder /build/target/release/deposits-wallet /usr/local/bin/
 
 COPY deposits-tools/docker/entrypoint.sh /entrypoint.sh
 COPY deposits-tools/docker/strfry.conf.tmpl /etc/strfry.conf.tmpl
 
 RUN mkdir -p /data /config
 
-EXPOSE 7777
+EXPOSE 7777 9100
 
 ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]
