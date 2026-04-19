@@ -1,7 +1,7 @@
 #!/bin/bash
 # Set up the HTLC agent: open deposits on every operator ledger, fund them, start the agent.
 #
-# Can be called standalone or from setup-4op-lightning.sh.
+# Can be called standalone after setup.sh has been run.
 #
 # Usage:
 #   ./bin/setup-htlc-agent.sh                          # Fresh setup (wipes existing agent data)

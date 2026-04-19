@@ -4,7 +4,7 @@
 # Rebuilds the Rust binaries, then restarts the node processes.
 # All data directories and infrastructure services are left untouched.
 #
-# Auto-detects node count from the persisted topology (saved by setup-4op.sh).
+# Auto-detects node count from the persisted topology (saved by setup.sh).
 # Falls back to counting data directories if no topology file exists.
 #
 # Usage:
@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _detect_node_count() {
     local data_root="${SCRIPT_DIR}/../data"
 
-    # Check persisted topology from setup-4op.sh
+    # Check persisted topology from setup.sh
     if [ -f "$data_root/topology.json" ]; then
         local count=$(python3 -c "import json; print(len(json.load(open('$data_root/topology.json'))['nodes']))" 2>/dev/null || echo "")
         if [ -n "$count" ] && [ "$count" -gt 0 ] 2>/dev/null; then
