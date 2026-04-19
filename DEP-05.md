@@ -41,7 +41,7 @@ The strictest (smallest) values across all members apply to the quorum. The oper
 
 ### QuorumBegin (disc 12)
 
-Once members are added, the operator rotates reserves into a new Taproot multisig UTXO (see DEP-03). After `QuorumBegin`, every subsequent update MUST carry co-signatures from a strict majority (`floor(n/2) + 1`) of quorum members. This prevents the operator from maintaining parallel chains — a majority of cosigners will have seen and validated the canonical chain before signing any new update. `QuorumBegin` records the `quorum_expiry` (shortest membership duration) and `collateral_amount`.
+Once members are added, the operator rotates reserves into a new Taproot multisig UTXO (see DEP-03). After `QuorumBegin`, every subsequent update MUST carry co-signatures from a strict majority (`floor(n/2) + 1`) of quorum members. This prevents the operator from maintaining parallel chains — a majority of cosigners will have seen and validated the canonical chain before signing any new update. `QuorumBegin` records the `quorum_expiry` (shortest membership duration) and `collateral_amount_msats`.
 
 ### Removing Members
 
@@ -60,7 +60,7 @@ The operator's UTXO is split into two portions:
 - **Reserves**: the deposit capacity — wallets can deposit up to this amount
 - **Collateral**: the security bond — cannot be used for deposits, at risk of slashing
 
-Both live in the same Taproot output, controlled by the same quorum via tiered spending paths (see DEP-03). Both `reserves_amount` and `collateral_amount` are declared in `LedgerOpen` and `QuorumBegin`. Co-signers MUST verify that `reserves_amount + collateral_amount` equals the on-chain UTXO value (in msats). `QuorumBegin` may update either value (e.g., to adjust the ratio), subject to quorum member agreement via co-signature.
+Both live in the same Taproot output, controlled by the same quorum via tiered spending paths (see DEP-03). Both `reserves_amount_msats` and `collateral_amount_msats` are declared in `LedgerOpen` and `QuorumBegin`. Co-signers MUST verify that `reserves_amount_msats + collateral_amount_msats` equals the on-chain UTXO value (in msats). `QuorumBegin` may update either value (e.g., to adjust the ratio), subject to quorum member agreement via co-signature.
 
 ### Slashing
 
@@ -111,7 +111,7 @@ Quorum members must maintain a full state replica of any ledger they co-sign for
 1. **Chain continuity**: the update's `previous_hash` matches the member's last validated `chain_hash`
 2. **State validity**: the operation can be applied to the member's local state replica without error (deposit exists, sufficient balance, valid fees, etc.)
 3. **Obligation limits**: the running total of obligations does not exceed reserves
-4. **Collateral preservation**: operations do not reduce the collateral portion below `collateral_amount`
+4. **Collateral preservation**: operations do not reduce the collateral portion below `collateral_amount_msats`
 5. **No dispute filed**: the member has not filed a dispute fork for this ledger
 
 If any check fails, the member MUST refuse to co-sign. The chain continuity check (1) is the primary defense against parallel chains — if the operator has published a non-conforming update that the member rejected, subsequent updates will have a different `previous_hash` and the member will refuse.

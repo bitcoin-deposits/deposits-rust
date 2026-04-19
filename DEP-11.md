@@ -45,7 +45,7 @@ When valid fraud evidence is embedded in the causal chain and a quorum member's 
 `dispute_response_blocks` is a per-quorum parameter recorded in `QuorumAddMember`, so all parties agree on the obligation at join time. Shorter values increase responsiveness requirements; longer values are more forgiving but delay recovery.
 
 ### Collateral Maintenance
-The collateral portion of the operator's UTXO must be preserved through `quorum_expiry`. Co-signers MUST reject any operation that would reduce the UTXO value below `reserves_amount + collateral_amount`. If the operator spends the UTXO outside the quorum's control (e.g., via a tiered timeout path) before quorum expiry, this is provable non-conformance.
+The collateral portion of the operator's UTXO must be preserved through `quorum_expiry`. Co-signers MUST reject any operation that would reduce the UTXO value below `reserves_amount_msats + collateral_amount_msats`. If the operator spends the UTXO outside the quorum's control (e.g., via a tiered timeout path) before quorum expiry, this is provable non-conformance.
 
 ## Wallet Obligations
 

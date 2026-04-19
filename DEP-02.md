@@ -170,11 +170,11 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 |---|---|---|---|
 | 56 | operator_id | 33 | LedgerOpen |
 | 58 | reserves_id | variable | LedgerOpen, QuorumBegin, QuorumJoin |
-| 62 | reserves_amount | 8 | LedgerOpen, QuorumBegin (deposit capacity, msats) |
+| 62 | reserves_amount_msats | 8 | LedgerOpen, QuorumBegin (deposit capacity) |
 | 82 | membership_expires | 4 | QuorumJoin |
 | 84 | new_outpoint_txid | 32 | QuorumBegin |
 | 86 | quorum_expiry | 4 | QuorumBegin (shortest member membership_until) |
-| 88 | collateral_amount | 8 | LedgerOpen, QuorumBegin (security bond, msats) |
+| 88 | collateral_amount_msats | 8 | LedgerOpen, QuorumBegin (security bond) |
 | 90 | spending_txid | 32 | QuorumBegin |
 | 92 | new_outpoint_vout | 4 | QuorumBegin |
 | 96 | genesis_block | 4 | LedgerOpen |
