@@ -119,6 +119,44 @@ Values are maximum sybil percentage where 0/500 trials were profitable.
 - Monitoring: detect misbehavior by operators whose quorums include this node
 - Slashing initiation: trigger collateral confiscation on misbehaving operator's own ledger
 
+## Code changes required
+
+~450 occurrences across 50 files reference the old collateral model. The changes group into:
+
+### Remove (old collateral model)
+
+Removed operations and fields:
+- `CollateralLock` (disc 45) — operation and all handling
+- `CollateralAttestation` (disc 42) — operation and all handling
+- `is_collateral` flag on `DepositOpen` — collateral is no longer a deposit type
+- `collateral_lock_amount`, `collateral_lock_until` on `QuorumAddMember`
+- `for_ledger_id` / `collateral_ledger_id` — no cross-ledger collateral
+- `total_collateral` field on `QuorumBegin` (replaced by `collateral_amount_msats`)
+
+Affected crates:
+- `deposits-protocol`: types, messages, TLV codec (~100 occurrences)
+- `deposits-core`: ledger state, validation, operation handling (~80 occurrences)
+- `deposits-node`: operations, coordination, CLI commands (~80 occurrences)
+- tests across all crates (~190 occurrences)
+
+### Add (new collateral model)
+
+- `collateral_amount_msats` field on `LedgerOpen` and `QuorumBegin`
+- Co-signer validation: `reserves_amount_msats + collateral_amount_msats == UTXO value`
+- Co-signer check: reject operations that reduce UTXO below the sum
+- Punitive confiscation path: full UTXO to lottery winner
+- Cross-ledger slashing: present fraud proof from ledger A to quorum on ledger B
+
+### Rename
+
+- `reserves_amount` → `reserves_amount_msats` (consistency with `_msats` convention)
+
+### Test files to remove or rewrite
+
+- `collateral_deposit_test.rs` — collateral deposits no longer exist
+- `attack_collateral_reuse.rs` — reuse model replaced
+- `quorum_fee_limits_test.rs` — collateral lock terms removed from member terms
+
 ## Simulation evidence
 
 All findings derived from Monte Carlo simulations in `tests/tests/`:
