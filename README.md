@@ -111,7 +111,7 @@ Each operator runs a `deposits-node` daemon that:
 - Maintains hash-chained ledgers with co-signatures from quorum members
 - Detects conformance violations on watched ledgers
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design.
+See [WHITEPAPER.md](WHITEPAPER.md) for design rationale.
 
 ## License
 
