@@ -203,7 +203,7 @@ impl Node {
             quorum_expiry,
             ledger_hash,
             quorum_members: quorum_members.clone(),
-            total_collateral,
+            collateral_amount: total_collateral,
         };
 
         let message_bytes = operation.tlv_encode();
@@ -348,7 +348,6 @@ impl Node {
                 payment_hash: None,
                 invoice: None,
                 cosigner_guarantee_signature: None,
-                is_collateral: false,
                 receive_requires_sig: false,
                 fee_change_after_blocks: None,
                 fee_change_notice_blocks: None,
@@ -767,7 +766,7 @@ impl Node {
                 quorum_expiry: result.quorum_expiry,
                 ledger_hash,
                 quorum_members: quorum_members.clone(),
-                total_collateral,
+                collateral_amount: total_collateral,
             };
 
             let mut ledger = ledger_arc.write().unwrap();
@@ -1484,7 +1483,6 @@ impl Node {
                 &offer.descriptor,
                 offer.fees.clone(),
                 offer.transfer_fees.clone(),
-                false,
                 false,
             )
             .await

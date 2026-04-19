@@ -34,7 +34,6 @@ fn make_deposit_open(descriptor: &str) -> LedgerOperation {
         payment_hash: None,
         invoice: None,
         cosigner_guarantee_signature: None,
-        is_collateral: false,
         receive_requires_sig: false,
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
@@ -50,8 +49,7 @@ fn make_quorum_add_member() -> LedgerOperation {
         min_fee_bps: Some(50),
         min_fee_fixed: Some(100),
         max_fee_period: Some(2016),
-        collateral_lock_amount: Some(50_000),
-        collateral_lock_until: Some(900_000),
+        membership_until: Some(900_000),
         dispute_response_blocks: None,
         dispute_arm_blocks: None,
         service_response_blocks: None,
@@ -203,11 +201,8 @@ fn test_partner_attestation_self_application() {
     assert_eq!(partner.state.sequence, initial_seq + 1);
     assert_ne!(partner.state.chain_tip_hash, [0u8; 32]);
 
-    // Verify the attestation is recorded in state
-    assert!(partner
-        .state
-        .collateral_attestations
-        .contains_key(&test_pubkey_2()));
+    // Verify the attestation advanced the state
+    assert_eq!(partner.state.sequence, 2);
 }
 
 /// Test full synchronization flow:
@@ -227,6 +222,7 @@ fn test_full_sync_flow() {
         reserves_id: "bcrt1qtest".to_string(),
         genesis_block: 0,
         reserves_amount: 1_000_000,
+        collateral_amount: 0,
     };
     operator.apply_operation(&ledger_open).unwrap();
     partner.apply_operation(&ledger_open).unwrap();
@@ -266,8 +262,8 @@ fn test_full_sync_flow() {
         partner.state.next_quorum_members.len()
     );
     assert_eq!(
-        operator.state.collateral_attestations.len(),
-        partner.state.collateral_attestations.len()
+        operator.state.collateral_amount,
+        partner.state.collateral_amount
     );
 }
 

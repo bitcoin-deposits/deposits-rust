@@ -95,8 +95,7 @@ fn quorum_add_member_with_timing_params_tlv_roundtrip() {
         min_fee_bps: Some(50),
         min_fee_fixed: Some(1000),
         max_fee_period: Some(2016),
-        collateral_lock_amount: Some(500_000),
-        collateral_lock_until: Some(900_000),
+        membership_until: Some(900_000),
         dispute_response_blocks: Some(144),
         dispute_arm_blocks: Some(144),
         service_response_blocks: Some(72),
@@ -115,8 +114,7 @@ fn quorum_add_member_with_timing_params_tlv_roundtrip() {
             min_fee_bps,
             min_fee_fixed,
             max_fee_period,
-            collateral_lock_amount,
-            collateral_lock_until,
+            membership_until,
             dispute_response_blocks,
             dispute_arm_blocks,
             service_response_blocks,
@@ -129,8 +127,7 @@ fn quorum_add_member_with_timing_params_tlv_roundtrip() {
             assert_eq!(min_fee_bps, Some(50));
             assert_eq!(min_fee_fixed, Some(1000));
             assert_eq!(max_fee_period, Some(2016));
-            assert_eq!(collateral_lock_amount, Some(500_000));
-            assert_eq!(collateral_lock_until, Some(900_000));
+            assert_eq!(membership_until, Some(900_000));
             assert_eq!(dispute_response_blocks, Some(144));
             assert_eq!(dispute_arm_blocks, Some(144));
             assert_eq!(service_response_blocks, Some(72));
@@ -157,8 +154,7 @@ fn quorum_add_member_none_timing_params_tlv_roundtrip() {
         min_fee_bps: None,
         min_fee_fixed: None,
         max_fee_period: None,
-        collateral_lock_amount: None,
-        collateral_lock_until: None,
+        membership_until: None,
         dispute_response_blocks: None,
         dispute_arm_blocks: None,
         service_response_blocks: None,
@@ -177,8 +173,7 @@ fn quorum_add_member_none_timing_params_tlv_roundtrip() {
             min_fee_bps,
             min_fee_fixed,
             max_fee_period,
-            collateral_lock_amount,
-            collateral_lock_until,
+            membership_until,
             dispute_response_blocks,
             dispute_arm_blocks,
             service_response_blocks,
@@ -191,8 +186,7 @@ fn quorum_add_member_none_timing_params_tlv_roundtrip() {
             assert_eq!(min_fee_bps, None);
             assert_eq!(min_fee_fixed, None);
             assert_eq!(max_fee_period, None);
-            assert_eq!(collateral_lock_amount, None);
-            assert_eq!(collateral_lock_until, None);
+            assert_eq!(membership_until, None);
             assert_eq!(dispute_response_blocks, None);
             assert_eq!(dispute_arm_blocks, None);
             assert_eq!(service_response_blocks, None);
@@ -224,8 +218,7 @@ fn quorum_add_member_binary_roundtrip_with_timing_params() {
         min_fee_bps: Some(100),
         min_fee_fixed: Some(2000),
         max_fee_period: Some(4032),
-        collateral_lock_amount: Some(1_000_000),
-        collateral_lock_until: Some(950_000),
+        membership_until: Some(950_000),
         dispute_response_blocks: Some(144),
         dispute_arm_blocks: Some(144),
         service_response_blocks: Some(72),
@@ -245,8 +238,7 @@ fn quorum_add_member_binary_roundtrip_with_timing_params() {
             min_fee_bps,
             min_fee_fixed,
             max_fee_period,
-            collateral_lock_amount,
-            collateral_lock_until,
+            membership_until,
             dispute_response_blocks,
             dispute_arm_blocks,
             service_response_blocks,
@@ -261,8 +253,7 @@ fn quorum_add_member_binary_roundtrip_with_timing_params() {
             assert_eq!(min_fee_bps, None);
             assert_eq!(min_fee_fixed, None);
             assert_eq!(max_fee_period, None);
-            assert_eq!(collateral_lock_amount, None);
-            assert_eq!(collateral_lock_until, None);
+            assert_eq!(membership_until, None);
             assert_eq!(dispute_response_blocks, None);
             assert_eq!(dispute_arm_blocks, None);
             assert_eq!(service_response_blocks, None);

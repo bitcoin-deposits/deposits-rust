@@ -35,7 +35,7 @@ fn open_deposit(state: &LedgerState, descriptor: &str) -> LedgerState {
             payment_hash: None,
             invoice: None,
             cosigner_guarantee_signature: None,
-            is_collateral: false,
+
             receive_requires_sig: false,
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
@@ -221,7 +221,7 @@ fn deposit_open_is_conforming() {
                 payment_hash: None,
                 invoice: None,
                 cosigner_guarantee_signature: None,
-                is_collateral: false,
+    
                 receive_requires_sig: false,
                 fee_change_after_blocks: None,
                 fee_change_notice_blocks: None,

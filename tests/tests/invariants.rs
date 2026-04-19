@@ -241,7 +241,7 @@ fn invariant_c1_witness_validity() {
             payment_hash: None,
             invoice: None,
             cosigner_guarantee_signature: None,
-            is_collateral: false,
+
             receive_requires_sig: false,
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
@@ -465,7 +465,7 @@ fn invariant_s1_dispute_state_gate() {
                 payment_hash: None,
                 invoice: None,
                 cosigner_guarantee_signature: None,
-                is_collateral: false,
+    
                 receive_requires_sig: false,
                 fee_change_after_blocks: None,
                 fee_change_notice_blocks: None,
@@ -505,8 +505,7 @@ fn invariant_s1_dispute_state_gate() {
             min_fee_bps: None,
             min_fee_fixed: None,
             max_fee_period: None,
-            collateral_lock_amount: None,
-            collateral_lock_until: None,
+            membership_until: None,
             dispute_response_blocks: None,
             dispute_arm_blocks: None,
             service_response_blocks: None,
@@ -672,144 +671,37 @@ fn deposit_id_placeholder() -> [u8; 16] {
 }
 
 // =========================================================================
-// S4: collateral locks are ratchet-only
+// S4: collateral preserved in UTXO
 // =========================================================================
 
 #[test]
-fn invariant_s4_collateral_ratchet() {
+fn invariant_s4_collateral_in_utxo() {
     let mut log = AttackLog::new();
     let mut net = TestNetwork::new(&["alice"], 1_000_000);
 
-    // Open a collateral deposit
-    let (_, col_pk) = make_key(50);
-    let col_desc = format!("pk({})", hex::encode(col_pk.serialize()));
-    let col_id = compute_deposit_id(&col_desc);
-    net.op_mut("alice")
-        .ledger
-        .apply_operation(&LedgerOperation::DepositOpen {
-            deposit_id: col_id,
-            descriptor: col_desc,
-            fees: Some(FeeStructure::default()),
-            transfer_fees: None,
-            payment_hash: None,
-            invoice: None,
-            cosigner_guarantee_signature: None,
-            is_collateral: true, // collateral deposit
-            receive_requires_sig: false,
-            fee_change_after_blocks: None,
-            fee_change_notice_blocks: None,
-            fee_change_limit_bps: None,
-        })
-        .unwrap();
-
-    // Credit it
-    net.op_mut("alice")
-        .ledger
-        .apply_operation(&LedgerOperation::InvoiceCredit {
-            payment_hash: [0xAA; 32],
-            deposit_id: col_id,
-            amount: 500_000,
-            invoice_id: "col".into(),
-            sequence_number: 1,
-        })
-        .unwrap();
-
-    let alice_pk = net.op("alice").public_key;
-
-    // Lock collateral at 300k until block 1000
-    net.op_mut("alice")
-        .ledger
-        .apply_operation(&LedgerOperation::CollateralLock {
-            deposit_id: col_id,
-            amount: 300_000,
-            lock_until_block: 1000,
-            operator_id: alice_pk,
-            witness: DescriptorWitness {
-                stack: vec![vec![0xFF; 64]],
-            },
-            for_ledger_id: "target".into(),
-        })
-        .unwrap();
-
-    // Try to REDUCE lock amount (should fail — ratchet)
-    let reduce_result =
-        net.op_mut("alice")
-            .ledger
-            .apply_operation(&LedgerOperation::CollateralLock {
-                deposit_id: col_id,
-                amount: 100_000, // less than 300k
-                lock_until_block: 1000,
-                operator_id: alice_pk,
-                witness: DescriptorWitness {
-                    stack: vec![vec![0xFF; 64]],
-                },
-                for_ledger_id: "target".into(),
-            });
-
-    // Try to REDUCE lock duration (should fail — ratchet)
-    let reduce_time_result =
-        net.op_mut("alice")
-            .ledger
-            .apply_operation(&LedgerOperation::CollateralLock {
-                deposit_id: col_id,
-                amount: 300_000,
-                lock_until_block: 500, // less than 1000
-                operator_id: alice_pk,
-                witness: DescriptorWitness {
-                    stack: vec![vec![0xFF; 64]],
-                },
-                for_ledger_id: "target".into(),
-            });
-
-    // Increase should succeed
-    let increase_result =
-        net.op_mut("alice")
-            .ledger
-            .apply_operation(&LedgerOperation::CollateralLock {
-                deposit_id: col_id,
-                amount: 400_000,
-                lock_until_block: 2000,
-                operator_id: alice_pk,
-                witness: DescriptorWitness {
-                    stack: vec![vec![0xFF; 64]],
-                },
-                for_ledger_id: "target".into(),
-            });
-
-    let all_ratcheted =
-        reduce_result.is_err() && reduce_time_result.is_err() && increase_result.is_ok();
+    // Collateral amount is set at LedgerOpen and preserved
+    let state = &net.op("alice").ledger.state;
+    let collateral_preserved = state.collateral_amount == 1_000_000; // set by test harness
 
     log.record(AttackResult {
-        name: "S4: Collateral ratchet".into(),
+        name: "S4: Collateral in UTXO".into(),
         invariant: Invariant::CollateralRatchet,
         adversary: AdversaryCapability::single_operator(4),
         cost_sats: 0,
-        extraction_sats: 200_000,
-        blocked: all_ratcheted,
+        extraction_sats: 0,
+        blocked: collateral_preserved,
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
-        notes: format!(
-            "Reduce amount: {}, reduce time: {}, increase: {}",
-            if reduce_result.is_err() {
-                "blocked"
-            } else {
-                "ALLOWED"
-            },
-            if reduce_time_result.is_err() {
-                "blocked"
-            } else {
-                "ALLOWED"
-            },
-            if increase_result.is_ok() {
-                "allowed"
-            } else {
-                "BLOCKED"
-            }
-        ),
+        notes: "Collateral is a declared portion of the UTXO, enforced by co-signers. \
+                CollateralLock operations are deprecated no-ops."
+            .into(),
         steps: vec![],
     });
 
-    assert!(all_ratcheted, "S4: collateral locks must be ratchet-only");
+    assert!(
+        collateral_preserved,
+        "S4: collateral_amount must be set on ledger"
+    );
 }
 
 // =========================================================================

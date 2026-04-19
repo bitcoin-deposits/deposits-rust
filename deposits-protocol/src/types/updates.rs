@@ -1387,17 +1387,13 @@ mod tests {
             }],
             fees: FeeStructure::new(100, 25, 2016),
             last_fee_assessment: 800_000,
-            collateral_lock_amount: 500_000,
-            collateral_lock_expires: 850_000,
             transfer_fees: TransferFeeSchedule::default(),
-            is_collateral: true,
             receive_requires_sig: false,
             fee_change_after_blocks: Some(52560),
             fee_change_notice_blocks: Some(2016),
             fee_change_limit_bps: Some(1000),
             opened_at_block: 100,
             pending_fee_change: None,
-            collateral_locks: Vec::new(),
         };
         let encoded = original.tlv_encode();
         let decoded = Deposit::tlv_decode(&encoded).unwrap();
@@ -1415,146 +1411,6 @@ mod tests {
         let encoded = original.tlv_encode();
         let decoded = ReservesOutput::tlv_decode(&encoded).unwrap();
         assert_eq!(original, decoded);
-    }
-
-    #[test]
-    fn test_collateral_attestation_tlv_roundtrip() {
-        let pk = test_pubkey();
-        let original = CollateralAttestation {
-            operator_id: pk,
-            quorum_member: pk,
-            collateral_ledger_id: "test_ledger_id".to_string(),
-            amount: 1_000_000,
-            block_height: 800_000,
-            lock_until_block: 900_000,
-            signature: [0xaa; 64],
-            ledger_hash: [0xbb; 32],
-        };
-        let encoded = original.tlv_encode();
-        let decoded = CollateralAttestation::tlv_decode(&encoded).unwrap();
-        assert_eq!(original, decoded);
-    }
-
-    fn test_pubkey_2() -> PublicKey {
-        let secp = bitcoin::secp256k1::Secp256k1::new();
-        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap();
-        PublicKey::from_secret_key(&secp, &sk)
-    }
-
-    fn test_pubkey_3() -> PublicKey {
-        let secp = bitcoin::secp256k1::Secp256k1::new();
-        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[3u8; 32]).unwrap();
-        PublicKey::from_secret_key(&secp, &sk)
-    }
-
-    #[test]
-    fn test_collateral_attestation_methods() {
-        let attestation = CollateralAttestation {
-            operator_id: test_pubkey(),
-            quorum_member: test_pubkey_2(),
-            collateral_ledger_id: String::new(),
-            amount: 100_000,
-            block_height: 800_000,
-            lock_until_block: 900_000,
-            signature: [0u8; 64],
-            ledger_hash: [0u8; 32],
-        };
-
-        assert_eq!(attestation.available_collateral(), 100_000);
-        assert!(attestation.is_recent(800_100, 200));
-        assert!(!attestation.is_recent(800_300, 200));
-    }
-
-    #[test]
-    fn test_ledger_state_collateral_tracking() {
-        let op = test_pubkey();
-        let partner = test_pubkey_2();
-        let mut state = super::super::ledger_state::LedgerState::new(op, partner.to_string(), 0);
-
-        // Add quorum members
-        let collateral1 = test_pubkey_2();
-        let collateral2 = test_pubkey_3();
-        state.quorum_members = vec![
-            QuorumMember {
-                pubkey: collateral1,
-                ledger_id: String::new(),
-                min_fee_bps: None,
-                min_fee_fixed: None,
-                max_fee_period: None,
-                collateral_lock_amount: None,
-                collateral_lock_until: None,
-                dispute_response_blocks: None,
-                dispute_arm_blocks: None,
-                service_response_blocks: None,
-                max_transfer_timeout_blocks: None,
-                max_descriptor_bytes: None,
-            },
-            QuorumMember {
-                pubkey: collateral2,
-                ledger_id: String::new(),
-                min_fee_bps: None,
-                min_fee_fixed: None,
-                max_fee_period: None,
-                collateral_lock_amount: None,
-                collateral_lock_until: None,
-                dispute_response_blocks: None,
-                dispute_arm_blocks: None,
-                service_response_blocks: None,
-                max_transfer_timeout_blocks: None,
-                max_descriptor_bytes: None,
-            },
-        ];
-
-        // Add attestation for collateral1
-        let attestation1 = CollateralAttestation::new(
-            op,
-            collateral1,
-            String::new(),
-            50_000,
-            800_000,
-            0, // lock_until_block
-            [0u8; 64],
-            [0u8; 32],
-        );
-        state
-            .update_collateral_attestation(collateral1, attestation1)
-            .unwrap();
-
-        // Check available collateral
-        assert_eq!(state.total_available_collateral(800_100, 200), 50_000);
-        assert_eq!(
-            state.partner_available_collateral(&collateral1),
-            Some(50_000)
-        );
-        assert_eq!(state.partner_available_collateral(&collateral2), None);
-
-        // Check missing attestations
-        let missing = state.missing_attestations(800_100, 200);
-        assert_eq!(missing.len(), 1);
-        assert!(missing.contains(&collateral2));
-
-        // Add second attestation
-        let attestation2 = CollateralAttestation::new(
-            op,
-            collateral2,
-            String::new(),
-            30_000,
-            800_000,
-            0, // lock_until_block
-            [0u8; 64],
-            [0u8; 32],
-        );
-        state
-            .update_collateral_attestation(collateral2, attestation2)
-            .unwrap();
-
-        // Now both have attestations
-        assert_eq!(state.total_available_collateral(800_100, 200), 80_000);
-        assert!(state.missing_attestations(800_100, 200).is_empty());
-
-        // Stale attestations should not count
-        assert_eq!(state.total_available_collateral(800_400, 200), 0);
-        assert_eq!(state.missing_attestations(800_400, 200).len(), 2);
     }
 
     // ========================================================================

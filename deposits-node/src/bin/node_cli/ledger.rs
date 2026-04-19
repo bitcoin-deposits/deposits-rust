@@ -613,19 +613,13 @@ async fn ledger_health(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             } else {
                 &member.ledger_id
             };
-            // Check attestation status
-            let attestation = ledger.state.collateral_attestations.get(&member.pubkey);
-            let attest_info = match attestation {
-                Some(a) => format!(
-                    "attested {} sats, expires block {}",
-                    a.amount / 1000,
-                    a.lock_until_block
-                ),
-                None => "no attestation".to_string(),
+            let membership_info = match member.membership_until {
+                Some(until) => format!("membership until block {}", until),
+                None => "no membership expiry".to_string(),
             };
             println!(
                 "    - {} (ledger: {}..., {})",
-                short_pubkey, short_lid, attest_info
+                short_pubkey, short_lid, membership_info
             );
         }
 
@@ -1065,7 +1059,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         // Collateral
         ad.received_collateral_msats = ledger.state.total_collateral();
         ad.attested_collateral_msats = ledger.state.total_collateral();
-        ad.held_collateral_msats = ledger.total_held_collateral();
+        ad.held_collateral_msats = ledger.state.collateral_amount;
 
         println!("Publishing ledger advertisement...");
         println!("  Ledger ID: {}...", &ledger_id[..16]);

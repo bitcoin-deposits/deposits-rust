@@ -487,7 +487,7 @@ pub async fn auto_advertise_ledger(
     ad.reserves_amount_msats = ledger.reserves_amount();
     ad.received_collateral_msats = ledger.state.total_collateral();
     ad.attested_collateral_msats = ledger.state.total_collateral();
-    ad.held_collateral_msats = ledger.total_held_collateral();
+    ad.held_collateral_msats = ledger.state.collateral_amount;
 
     // Apply fee schedule from CLI flags
     if let Some(bps) = fee_schedule.annual_fee_bps {

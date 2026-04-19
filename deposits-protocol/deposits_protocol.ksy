@@ -196,7 +196,7 @@ types:
   #   202 = descriptor (string, miniscript)
   #   204 = witness (nested TLV)
   #   208 = new_descriptor (string)
-  #   230 = is_collateral (u8, 0 or 1)
+  #   230 = reserved (was is_collateral)
   #   232 = receive_requires_sig (u8, 0 or 1)
   #
   # Fees:
@@ -247,7 +247,7 @@ types:
   #   234 = min_fee_bps (u16, QuorumAddMember)
   #   236 = min_fee_fixed (u64, QuorumAddMember)
   #   238 = max_fee_period (u32, QuorumAddMember)
-  #   240 = collateral_lock_amount (u64, QuorumAddMember)
+  #   240 = reserved (was collateral_lock_amount)
   #   242 = collateral_lock_until (u32, QuorumAddMember)
   #   252 = dispute_response_blocks (u32, QuorumAddMember)
   #   254 = dispute_arm_blocks (u32, QuorumAddMember)
@@ -263,7 +263,7 @@ types:
   # QuorumBegin:
   #   84  = new_outpoint_txid (32 bytes)
   #   86  = quorum_expiry (u32)
-  #   88  = total_collateral (u64, msats, sum of attested collateral)
+  #   88  = collateral_amount_msats (u64, msats, collateral portion of UTXO)
   #   90  = spending_txid (32 bytes)
   #   92  = new_outpoint_vout (u32)
   #

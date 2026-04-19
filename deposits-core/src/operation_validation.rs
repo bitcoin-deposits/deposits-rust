@@ -1280,17 +1280,13 @@ mod tests {
             invoices: Vec::new(),
             fees: FeeStructure::default(),
             last_fee_assessment: 0,
-            collateral_lock_amount: 0,
-            collateral_lock_expires: 0,
             transfer_fees: TransferFeeSchedule::default(),
-            is_collateral: false,
             receive_requires_sig: false,
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
             opened_at_block: 0,
             pending_fee_change: None,
-            collateral_locks: Vec::new(),
         };
         ledger.state.deposits.insert(source_id, source_deposit);
 
@@ -1383,17 +1379,13 @@ mod tests {
             invoices: Vec::new(),
             fees: FeeStructure::default(),
             last_fee_assessment: 0,
-            collateral_lock_amount: 0,
-            collateral_lock_expires: 0,
             transfer_fees: TransferFeeSchedule::default(),
-            is_collateral: false,
             receive_requires_sig: false,
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
             opened_at_block: 0,
             pending_fee_change: None,
-            collateral_locks: Vec::new(),
         };
         ledger.state.deposits.insert(source_id, source_deposit);
 

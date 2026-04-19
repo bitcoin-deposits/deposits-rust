@@ -261,7 +261,6 @@ fn attack_operate_during_dispute() {
             payment_hash: None,
             invoice: None,
             cosigner_guarantee_signature: None,
-            is_collateral: false,
             receive_requires_sig: false,
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
@@ -472,18 +471,19 @@ fn attack_watcher_detects_malicious_sequence() {
 }
 
 // =========================================================================
-// Attack 10: Collateral lock on non-collateral deposit
+// Attack 10: CollateralLock is deprecated (no-op)
 // =========================================================================
 
 #[test]
-fn attack_collateral_lock_on_regular_deposit() {
+fn collateral_lock_is_deprecated_noop() {
+    // CollateralLock operations are deprecated under the collateral-in-UTXO model.
+    // They are accepted as no-ops for backward compatibility but have no effect.
     let mut net = setup_adversarial_network();
     let user = net.create_depositor("victim", 10);
-    let deposit_id = net.op_mut("alice").open_deposit(&user); // regular deposit, not collateral
+    let deposit_id = net.op_mut("alice").open_deposit(&user);
     net.op_mut("alice")
         .credit_deposit(deposit_id, 500_000, [0xAA; 32]);
 
-    // Attack: try to collateral-lock a regular deposit
     let alice_pk = net.op("alice").public_key;
     let result = net
         .op_mut("alice")
@@ -499,8 +499,6 @@ fn attack_collateral_lock_on_regular_deposit() {
             for_ledger_id: "target_ledger".to_string(),
         });
 
-    assert!(
-        result.is_err(),
-        "CollateralLock on non-collateral deposit must be rejected"
-    );
+    // Deprecated operation succeeds as no-op
+    assert!(result.is_ok(), "CollateralLock should be accepted as no-op");
 }

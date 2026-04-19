@@ -39,43 +39,13 @@ impl Node {
             ));
         }
 
-        // Non-collateral obligations only for collateral limit checks
-        // (collateral does not cover collateral — only customer deposits)
-        let customer_obligations: u64 = ledger
-            .state
-            .deposits
-            .values()
-            .filter(|d| !d.is_collateral)
-            .map(|d| d.balance + d.locked_balance)
-            .sum();
-        let new_customer_total = customer_obligations.saturating_add(additional_msats);
-
-        // Check total_collateral limit: customer obligations <= sum of attested collateral
-        if ledger.state.total_collateral() > 0
-            && new_customer_total > ledger.state.total_collateral()
-        {
+        // Check collateral limit: total obligations <= collateral_amount
+        let collateral = ledger.state.total_collateral();
+        if collateral > 0 && new_total_all > collateral {
             return Some(format!(
-                "Would exceed total collateral: {} + {} = {} msats > {} msats (total attested collateral)",
-                customer_obligations, additional_msats, new_customer_total, ledger.state.total_collateral()
+                "Would exceed collateral: {} + {} = {} msats > {} msats (collateral)",
+                all_deposits, additional_msats, new_total_all, collateral
             ));
-        }
-
-        // Check per-member collateral limit: customer obligations <= 2 * min(member.collateral_lock_amount)
-        let min_collateral = ledger
-            .state
-            .quorum_members
-            .iter()
-            .filter_map(|m| m.collateral_lock_amount)
-            .min();
-
-        if let Some(min_c) = min_collateral {
-            let collateral_limit = min_c.saturating_mul(2);
-            if new_customer_total > collateral_limit {
-                return Some(format!(
-                    "Would exceed collateral limit: {} + {} = {} msats > {} msats (2x smallest member collateral {})",
-                    customer_obligations, additional_msats, new_customer_total, collateral_limit, min_c
-                ));
-            }
         }
 
         None
@@ -487,8 +457,7 @@ impl Node {
         min_fee_bps: Option<u16>,
         min_fee_fixed: Option<u64>,
         max_fee_period: Option<u32>,
-        collateral_lock_amount: Option<u64>,
-        collateral_lock_until: Option<u32>,
+        membership_until: Option<u32>,
     ) -> Result<String, Error> {
         // Pre-validate
         {
@@ -524,8 +493,7 @@ impl Node {
             min_fee_bps,
             min_fee_fixed,
             max_fee_period,
-            collateral_lock_amount,
-            collateral_lock_until,
+            membership_until,
             dispute_response_blocks: None,
             dispute_arm_blocks: None,
             service_response_blocks: None,
@@ -613,67 +581,21 @@ impl Node {
 
         let deposit_id = compute_deposit_id(descriptor);
 
-        // Pre-validate and check idempotency
-        let already_locked = {
+        // Pre-validate: check deposit exists
+        {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
                 .get(ledger_id)
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = ledger_arc.read().unwrap();
 
-            // Check if deposit exists
-            let deposit = ledger.state.deposits.get(&deposit_id).ok_or_else(|| {
+            ledger.state.deposits.get(&deposit_id).ok_or_else(|| {
                 Error::Protocol(format!("Deposit not found for descriptor {}", descriptor))
             })?;
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-
-            // Check if collateral is already locked with sufficient amount and duration
-            // This makes the operation idempotent - safe to retry without error
-            deposit.collateral_lock_amount >= amount_msats
-                && deposit.collateral_lock_expires >= lock_until_block
-                && deposit.collateral_lock_expires > block_height
-        };
-
-        if already_locked {
-            tracing::info!(
-                "Collateral already locked for deposit {}: skipping lock operation (idempotent)",
-                hex::encode(deposit_id),
-            );
-        } else {
-            // Create the deposit holder's signature for the lock
-            let secp = Secp256k1::signing_only();
-            let _deposit_pubkey = PublicKey::from_secret_key(&secp, deposit_secret);
-            let msg_str = format!(
-                "COLLATERAL_LOCK:{}:{}:{}:{}",
-                hex::encode(deposit_id),
-                amount_msats,
-                lock_until_block,
-                hex::encode(self.node_id.serialize())
-            );
-            let msg_hash = sha256::Hash::hash(msg_str.as_bytes());
-            let msg = Message::from_digest(*msg_hash.as_byte_array());
-            let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, deposit_secret);
-            let signature = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-            let lock_signature: [u8; 64] = signature.serialize();
-
-            // Create witness from signature
-            let witness = DescriptorWitness {
-                stack: vec![lock_signature.to_vec()],
-            };
-
-            // Apply the CollateralLock operation
-            let operation = LedgerOperation::CollateralLock {
-                deposit_id,
-                amount: amount_msats,
-                lock_until_block,
-                operator_id: self.node_id,
-                for_ledger_id: ledger_id.to_string(),
-                witness,
-            };
-
-            self.commit_operation(ledger_id, operation).await?;
         }
+
+        // CollateralLock is now a deprecated no-op; collateral is tracked at the UTXO level.
+        // Proceed directly to building the attestation.
 
         // Build attestation from post-commit state
         let block_height = self.wallet.get_block_height().unwrap_or(0);
@@ -684,15 +606,10 @@ impl Node {
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
             let ledger = ledger_arc.read().unwrap();
 
-            // Use the specific deposit's lock amount, not the total across all deposits.
-            // Each attestation is for one deposit's collateral contribution.
-            let deposit = ledger
-                .state
-                .deposits
-                .get(&deposit_id)
-                .ok_or_else(|| Error::Protocol("Deposit disappeared after lock".to_string()))?;
-            let locked_amount = deposit.collateral_lock_amount;
-            let lock_expiry = deposit.collateral_lock_expires;
+            // Use the requested amount and lock duration for the attestation.
+            // Collateral is now tracked at the UTXO level, not per-deposit.
+            let locked_amount = amount_msats;
+            let lock_expiry = lock_until_block;
 
             // Get current ledger hash for the attestation
             let ledger_hash = ledger.hash();
@@ -781,7 +698,6 @@ impl Node {
         descriptor: &str,
         fees: Option<FeeStructure>,
         transfer_fees: Option<deposits_core::TransferFeeSchedule>,
-        is_collateral: bool,
         receive_requires_sig: bool,
     ) -> Result<Deposit, Error> {
         let deposit_id = compute_deposit_id(descriptor);
@@ -809,7 +725,6 @@ impl Node {
             payment_hash: None,
             invoice: None,
             cosigner_guarantee_signature: None,
-            is_collateral,
             receive_requires_sig,
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,

@@ -250,6 +250,7 @@ fn schema_ledger_open() {
             (OPERATOR_ID, pubkey_bytes()),
             (RESERVES_ID, str_bytes("bcrt1qtest")),
             (62, u64_bytes(100_000_000)), // RESERVES_AMOUNT
+            (88, u64_bytes(0)),           // COLLATERAL_AMOUNT
             (GENESIS_BLOCK, u32_bytes(100)),
         ],
     );
@@ -287,7 +288,7 @@ fn schema_deposit_open() {
             (PAYMENT_HASH, hash32()),
             (INVOICE, str_bytes("lnbcrt1test")),
             (COSIGNER_SIG, sig64()),
-            (230, u8_bytes(1)), // IS_COLLATERAL
+            // 230 (is_collateral) removed
         ],
     );
 }
@@ -468,8 +469,7 @@ fn schema_quorum_add_member() {
             (MIN_FEE_BPS, u16_bytes(500)),
             (MIN_FEE_FIXED, u64_bytes(100_000)),
             (MAX_FEE_PERIOD, u32_bytes(2016)),
-            (COLLATERAL_LOCK_AMT, u64_bytes(50_000_000)),
-            (COLLATERAL_LOCK_UNTIL_BLOCK, u32_bytes(10000)),
+            (242, u32_bytes(10000)), // MEMBERSHIP_UNTIL
         ],
     );
 }

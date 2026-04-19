@@ -1358,8 +1358,7 @@ pub async fn recovery_rebuild_quorum_add(
         min_fee_bps: None,
         min_fee_fixed: None,
         max_fee_period: None,
-        collateral_lock_amount: None,
-        collateral_lock_until: None,
+        membership_until: None,
         dispute_response_blocks: None,
         dispute_arm_blocks: None,
         service_response_blocks: None,
@@ -3910,7 +3909,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         quorum_expiry,
         ledger_hash,
         quorum_members: quorum_members.clone(),
-        total_collateral: 0, // recovery — collateral will be re-attested
+        collateral_amount: 0, // recovery — collateral will be re-attested
     };
 
     let message_bytes = operation.tlv_encode();

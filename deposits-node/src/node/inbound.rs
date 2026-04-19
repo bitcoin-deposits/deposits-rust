@@ -988,7 +988,6 @@ impl Node {
         // Reset derived state fields that will be rebuilt by replay
         fork_state.deposits.clear();
         fork_state.quorum_members.clear();
-        fork_state.collateral_attestations.clear();
         fork_state.joined_quorums.clear();
         fork_state.pending_transfers.clear();
         fork_state.quorum_at_fork.clear();

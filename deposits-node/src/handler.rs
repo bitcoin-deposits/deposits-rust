@@ -910,6 +910,7 @@ impl DepositsHandler {
                     reserves_id: reserves_address.clone(),
                     genesis_block,
                     reserves_amount: reserves_balance,
+                    collateral_amount: 0,
                 };
                 if let Err(e) = ledger_guard.append_operation(operation) {
                     tracing::error!("Failed to append LedgerOpen: {:?}", e);

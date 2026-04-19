@@ -121,7 +121,7 @@ pub async fn process_deposit_open_request(
 
     // Open the deposit with co-signing
     match node
-        .open_deposit(ledger_id, &descriptor, Some(fees), None, false, false)
+        .open_deposit(ledger_id, &descriptor, Some(fees), None, false)
         .await
     {
         Ok(deposit) => {

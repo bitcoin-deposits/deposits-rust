@@ -393,6 +393,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 reserves_id: "bcrt1qtest".into(),
                 genesis_block: 100,
                 reserves_amount: 100_000_000,
+                collateral_amount: 0,
             },
         ),
         (
@@ -406,7 +407,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 quorum_expiry: 1000,
                 ledger_hash: h32(),
                 quorum_members: vec![pk()],
-                total_collateral: 50_000_000,
+                collateral_amount: 50_000_000,
             },
         ),
         (
@@ -419,7 +420,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 payment_hash: Some(h32()),
                 invoice: Some("lnbcrt1test".into()),
                 cosigner_guarantee_signature: Some(sig()),
-                is_collateral: false,
+
                 receive_requires_sig: false,
                 fee_change_after_blocks: None,
                 fee_change_notice_blocks: None,
@@ -554,19 +555,6 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
             },
         ),
         (
-            "CollateralAttestation",
-            LedgerOperation::CollateralAttestation {
-                collateral_operator: pk(),
-                quorum_member: pk(),
-                collateral_ledger_id: "abc123".into(),
-                amount: 50_000_000,
-                block_height: 200,
-                lock_until_block: 1000,
-                ledger_hash: h32(),
-                signature: sig(),
-            },
-        ),
-        (
             "QuorumAddMember",
             LedgerOperation::QuorumAddMember {
                 quorum_member: pk(),
@@ -575,8 +563,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 min_fee_bps: Some(500),
                 min_fee_fixed: Some(100_000),
                 max_fee_period: Some(2016),
-                collateral_lock_amount: Some(50_000_000),
-                collateral_lock_until: Some(10000),
+                membership_until: Some(10000),
                 dispute_response_blocks: None,
                 dispute_arm_blocks: None,
                 service_response_blocks: None,
@@ -589,17 +576,6 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
             LedgerOperation::QuorumRemoveMember {
                 quorum_member: pk(),
                 operator_signature: sig(),
-            },
-        ),
-        (
-            "CollateralLock",
-            LedgerOperation::CollateralLock {
-                deposit_id: did(),
-                amount: 25_000_000,
-                lock_until_block: 1000,
-                operator_id: pk(),
-                witness: wit(),
-                for_ledger_id: "test_ledger_id".to_string(),
             },
         ),
         (

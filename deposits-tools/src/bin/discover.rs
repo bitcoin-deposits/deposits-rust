@@ -185,12 +185,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let deposit_count = state.deposits.len();
 
-            // Get collateral from attestations
-            let collateral: u64 = state
-                .collateral_attestations
-                .values()
-                .map(|a| a.available_collateral())
-                .sum();
+            // Get collateral amount
+            let collateral: u64 = state.collateral_amount;
 
             let display_name = node_name.clone();
             let display_name_cap = display_name[..1].to_uppercase() + &display_name[1..];

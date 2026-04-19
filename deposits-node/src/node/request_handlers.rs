@@ -187,12 +187,6 @@ impl Node {
             advertisement.to_fee_structure()
         };
 
-        // Check if this is a collateral deposit
-        let is_collateral = request
-            .params
-            .get("is_collateral")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
 
         // Check if receiving requires wallet signature
         let receive_requires_sig = request
@@ -267,7 +261,6 @@ impl Node {
                 &descriptor,
                 Some(fees),
                 transfer_fees,
-                is_collateral,
                 receive_requires_sig,
             )
             .await
@@ -815,8 +808,6 @@ impl Node {
                     "balance_msats": deposit.balance,
                     "balance_sats": deposit.balance / 1000,
                     "locked_msats": deposit.locked_balance,
-                    "collateral_lock_msats": deposit.collateral_lock_amount,
-                    "collateral_lock_expires": deposit.collateral_lock_expires,
                     "block_height": block_height,
                 });
                 tracing::debug!(
@@ -3823,14 +3814,10 @@ impl Node {
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
 
-        // Extract collateral commitment from request
-        let collateral_lock_amount = request
+        // Extract membership duration from request
+        let membership_until = request
             .params
-            .get("collateral_lock_amount")
-            .and_then(|v| v.as_u64());
-        let collateral_lock_until = request
-            .params
-            .get("collateral_lock_until")
+            .get("membership_until")
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
 
@@ -3843,8 +3830,7 @@ impl Node {
                 min_fee_bps,
                 min_fee_fixed,
                 max_fee_period,
-                collateral_lock_amount,
-                collateral_lock_until,
+                membership_until,
             )
             .await
         {

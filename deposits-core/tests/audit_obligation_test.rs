@@ -36,32 +36,14 @@ fn make_ledger() -> Ledger {
 }
 
 // =========================================================================
-// total_collateral() computed from attestations
+// total_collateral() returns collateral_amount from state
 // =========================================================================
 
 #[test]
-fn total_collateral_computed_from_attestations() {
-    let mut ledger = make_ledger();
-
-    // No attestations → zero collateral
+fn total_collateral_returns_collateral_amount() {
+    let ledger = make_ledger();
+    // Default collateral_amount is 0
     assert_eq!(ledger.state.total_collateral(), 0);
-
-    // Add an attestation
-    use deposits_core::types::CollateralAttestation;
-    ledger.state.collateral_attestations.insert(
-        test_pubkey_2(),
-        CollateralAttestation::new(
-            test_pubkey(),
-            test_pubkey_2(),
-            String::new(),
-            500_000,
-            0,
-            0,
-            [0u8; 64],
-            [0u8; 32],
-        ),
-    );
-    assert_eq!(ledger.state.total_collateral(), 500_000);
 }
 
 // =========================================================================
@@ -82,7 +64,7 @@ fn quorum_begin_stores_quorum_expiry() {
             quorum_expiry: 100_000,
             ledger_hash: [0u8; 32],
             quorum_members: vec![],
-            total_collateral: 500_000,
+            collateral_amount: 500_000,
         })
         .unwrap();
 
@@ -103,7 +85,7 @@ fn quorum_begin_updates_reserves_key_and_amount() {
             quorum_expiry: 100_000,
             ledger_hash: [0u8; 32],
             quorum_members: vec![],
-            total_collateral: 500_000,
+            collateral_amount: 500_000,
         })
         .unwrap();
 
@@ -126,7 +108,7 @@ fn quorum_begin_overwrites_previous_values() {
             quorum_expiry: 100_000,
             ledger_hash: [0u8; 32],
             quorum_members: vec![],
-            total_collateral: 500_000,
+            collateral_amount: 500_000,
         })
         .unwrap();
 
@@ -143,7 +125,7 @@ fn quorum_begin_overwrites_previous_values() {
             quorum_expiry: 200_000,
             ledger_hash: [1u8; 32],
             quorum_members: vec![],
-            total_collateral: 750_000,
+            collateral_amount: 750_000,
         })
         .unwrap();
 
@@ -171,7 +153,6 @@ fn delivery_embed_no_state_changes() {
             payment_hash: None,
             invoice: None,
             cosigner_guarantee_signature: None,
-            is_collateral: false,
             receive_requires_sig: false,
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
@@ -230,8 +211,7 @@ fn quorum_member_timing_fields_roundtrip() {
         min_fee_bps: None,
         min_fee_fixed: None,
         max_fee_period: None,
-        collateral_lock_amount: Some(100_000),
-        collateral_lock_until: Some(50_000),
+        membership_until: Some(50_000),
         dispute_response_blocks: Some(144),
         dispute_arm_blocks: Some(288),
         service_response_blocks: Some(72),
@@ -248,8 +228,7 @@ fn quorum_member_timing_fields_roundtrip() {
     assert_eq!(decoded.service_response_blocks, Some(72));
     assert_eq!(decoded.max_transfer_timeout_blocks, Some(1008));
     assert_eq!(decoded.max_descriptor_bytes, Some(256));
-    assert_eq!(decoded.collateral_lock_amount, Some(100_000));
-    assert_eq!(decoded.collateral_lock_until, Some(50_000));
+    assert_eq!(decoded.membership_until, Some(50_000));
 }
 
 // =========================================================================
@@ -264,8 +243,7 @@ fn quorum_member_timing_fields_default_to_none() {
         min_fee_bps: None,
         min_fee_fixed: None,
         max_fee_period: None,
-        collateral_lock_amount: None,
-        collateral_lock_until: None,
+        membership_until: None,
         dispute_response_blocks: None,
         dispute_arm_blocks: None,
         service_response_blocks: None,
@@ -303,12 +281,7 @@ fn quorum_member_timing_fields_default_to_none() {
         json
     );
     assert!(
-        !json.contains("collateral_lock_amount"),
-        "None field should be skipped: {}",
-        json
-    );
-    assert!(
-        !json.contains("collateral_lock_until"),
+        !json.contains("membership_until"),
         "None field should be skipped: {}",
         json
     );
@@ -320,8 +293,7 @@ fn quorum_member_timing_fields_default_to_none() {
     assert_eq!(decoded.service_response_blocks, None);
     assert_eq!(decoded.max_transfer_timeout_blocks, None);
     assert_eq!(decoded.max_descriptor_bytes, None);
-    assert_eq!(decoded.collateral_lock_amount, None);
-    assert_eq!(decoded.collateral_lock_until, None);
+    assert_eq!(decoded.membership_until, None);
 }
 
 #[test]
@@ -334,8 +306,7 @@ fn quorum_member_missing_timing_fields_deserialize_as_none() {
         min_fee_bps: None,
         min_fee_fixed: None,
         max_fee_period: None,
-        collateral_lock_amount: None,
-        collateral_lock_until: None,
+        membership_until: None,
         dispute_response_blocks: None,
         dispute_arm_blocks: None,
         service_response_blocks: None,
@@ -360,6 +331,5 @@ fn quorum_member_missing_timing_fields_deserialize_as_none() {
     assert_eq!(decoded.min_fee_bps, None);
     assert_eq!(decoded.min_fee_fixed, None);
     assert_eq!(decoded.max_fee_period, None);
-    assert_eq!(decoded.collateral_lock_amount, None);
-    assert_eq!(decoded.collateral_lock_until, None);
+    assert_eq!(decoded.membership_until, None);
 }

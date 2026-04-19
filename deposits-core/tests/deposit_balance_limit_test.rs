@@ -37,7 +37,6 @@ fn open_deposit(ledger: &mut Ledger, descriptor: &str) -> [u8; 16] {
             payment_hash: None,
             invoice: None,
             cosigner_guarantee_signature: None,
-            is_collateral: false,
             receive_requires_sig: false,
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,

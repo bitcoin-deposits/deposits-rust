@@ -154,7 +154,6 @@ fn format_op(op: &LedgerOperation) -> String {
             deposit_id,
             descriptor,
             fees,
-            is_collateral,
             ..
         } => {
             let desc = if descriptor.len() > 30 {
@@ -162,7 +161,6 @@ fn format_op(op: &LedgerOperation) -> String {
             } else {
                 descriptor.clone()
             };
-            let coll = if *is_collateral { " [collateral]" } else { "" };
             let fee_str = match fees {
                 Some(f) => format!(
                     "{}bps+{}/yr",
@@ -172,11 +170,10 @@ fn format_op(op: &LedgerOperation) -> String {
                 None => "default".to_string(),
             };
             format!(
-                "DepositOpen  id={} desc={} fee={}{}",
+                "DepositOpen  id={} desc={} fee={}",
                 short_deposit_id(deposit_id),
                 desc,
-                fee_str,
-                coll
+                fee_str
             )
         }
         LedgerOperation::DepositClose { deposit_id } => {
@@ -375,8 +372,8 @@ fn print_state(state: &LedgerState) {
             if let Some(bps) = m.min_fee_bps {
                 details.push(format!("min_fee={}bps", bps));
             }
-            if let Some(lock) = m.collateral_lock_amount {
-                details.push(format!("coll_lock={}", format_msats(lock)));
+            if let Some(until) = m.membership_until {
+                details.push(format!("membership_until={}", until));
             }
             println!("    {}  {}", short_pubkey(&m.pubkey), details.join("  "));
         }
@@ -398,18 +395,9 @@ fn print_state(state: &LedgerState) {
         }
     }
 
-    if !state.collateral_attestations.is_empty() {
+    if state.collateral_amount > 0 {
         println!();
-        println!("  Collateral Attestations:");
-        for (pk, att) in &state.collateral_attestations {
-            println!(
-                "    {}  amount={}  block={}  lock_until={}",
-                short_pubkey(pk),
-                format_msats(att.amount),
-                att.block_height,
-                att.lock_until_block
-            );
-        }
+        println!("  Collateral: {}", format_msats(state.collateral_amount));
     }
 
     if !state.deposits.is_empty() {
@@ -418,12 +406,7 @@ fn print_state(state: &LedgerState) {
         let mut deposits: Vec<_> = state.deposits.iter().collect();
         deposits.sort_by_key(|(id, _)| **id);
         for (id, dep) in deposits {
-            let coll = if dep.is_collateral {
-                " [collateral]"
-            } else {
-                ""
-            };
-            println!("    {}{}", deposit_id_hex(id), coll);
+            println!("    {}", deposit_id_hex(id));
             let desc = if dep.descriptor.len() > 50 {
                 format!("{}...", &dep.descriptor[..50])
             } else {
@@ -441,13 +424,6 @@ fn print_state(state: &LedgerState) {
                 format_msats(dep.fees.annualized_msats),
                 dep.fees.frequency_blocks
             );
-            if dep.collateral_lock_amount > 0 {
-                println!(
-                    "      coll_lock:  {} until block {}",
-                    format_msats(dep.collateral_lock_amount),
-                    dep.collateral_lock_expires
-                );
-            }
             if let Some((ref new_fees, eff)) = dep.pending_fee_change {
                 println!(
                     "      pending_fee: {}bps + {}/yr at block {}",
@@ -495,11 +471,7 @@ fn print_state(state: &LedgerState) {
 
     let total_balance: u64 = state.deposits.values().map(|d| d.balance).sum();
     let total_locked: u64 = state.deposits.values().map(|d| d.locked_balance).sum();
-    let total_collateral: u64 = state
-        .collateral_attestations
-        .values()
-        .map(|a| a.available_collateral())
-        .sum();
+    let total_collateral: u64 = state.collateral_amount;
 
     println!();
     println!("  Summary:");

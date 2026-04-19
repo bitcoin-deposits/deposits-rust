@@ -168,8 +168,7 @@ mod tests {
                 min_fee_bps: None,
                 min_fee_fixed: None,
                 max_fee_period: None,
-                collateral_lock_amount: None,
-                collateral_lock_until: None,
+                membership_until: None,
                 dispute_response_blocks: None,
                 dispute_arm_blocks: None,
                 service_response_blocks: None,
@@ -200,8 +199,7 @@ mod tests {
                 min_fee_bps: None,
                 min_fee_fixed: None,
                 max_fee_period: None,
-                collateral_lock_amount: None,
-                collateral_lock_until: None,
+                membership_until: None,
                 dispute_response_blocks: None,
                 dispute_arm_blocks: None,
                 service_response_blocks: None,
@@ -245,8 +243,7 @@ mod tests {
                 min_fee_bps: None,
                 min_fee_fixed: None,
                 max_fee_period: None,
-                collateral_lock_amount: None,
-                collateral_lock_until: None,
+                membership_until: None,
                 dispute_response_blocks: None,
                 dispute_arm_blocks: None,
                 service_response_blocks: None,
@@ -265,11 +262,12 @@ mod tests {
                 quorum_expiry: 1_000_000,
                 ledger_hash: [0x33; 32],
                 quorum_members: vec![member_key],
-                total_collateral: 50_000,
+                collateral_amount: 50_000,
             })
             .unwrap();
 
-        ledger
+        // CollateralAttestation is deprecated (no-op), just verify it doesn't error
+        let result = ledger
             .apply_state_changes(&LedgerOperation::CollateralAttestation {
                 collateral_operator: member_key,
                 quorum_member: member_key,
@@ -279,75 +277,8 @@ mod tests {
                 lock_until_block: 900_000,
                 signature: [0xEF; 64],
                 ledger_hash: [0u8; 32],
-            })
-            .unwrap();
-
-        assert!(ledger
-            .state
-            .collateral_attestations
-            .contains_key(&member_key));
-    }
-
-    #[test]
-    fn test_ledger_collateral_attestation_from_quorum_member() {
-        let operator_key = generate_test_pubkey(1);
-        let member_key = generate_test_pubkey(3);
-        let mut ledger = Ledger::new_as_operator(operator_key, "bcrt1qtest".to_string(), 0);
-
-        // Add member, promote via QuorumBegin, then attest
-        ledger
-            .apply_state_changes(&LedgerOperation::QuorumAddMember {
-                quorum_member: member_key,
-                quorum_member_signature: [0xAA; 64],
-                member_ledger_id: "quorum_member_ledger".to_string(),
-                min_fee_bps: None,
-                min_fee_fixed: None,
-                max_fee_period: None,
-                collateral_lock_amount: None,
-                collateral_lock_until: None,
-                dispute_response_blocks: None,
-                dispute_arm_blocks: None,
-                service_response_blocks: None,
-                max_transfer_timeout_blocks: None,
-                max_descriptor_bytes: None,
-            })
-            .unwrap();
-
-        ledger
-            .apply_state_changes(&LedgerOperation::QuorumBegin {
-                reserves_id: "bcrt1qtest_rotated".to_string(),
-                spending_txid: [0x11; 32],
-                new_outpoint_txid: [0x22; 32],
-                new_outpoint_vout: 0,
-                amount: 100_000_000,
-                quorum_expiry: 1_000_000,
-                ledger_hash: [0x33; 32],
-                quorum_members: vec![member_key],
-                total_collateral: 50_000,
-            })
-            .unwrap();
-
-        ledger
-            .apply_state_changes(&LedgerOperation::CollateralAttestation {
-                collateral_operator: member_key,
-                quorum_member: member_key,
-                collateral_ledger_id: "quorum_member_ledger".to_string(),
-                amount: 75_000,
-                block_height: 800_000,
-                lock_until_block: 900_000,
-                signature: [0xEF; 64],
-                ledger_hash: [0u8; 32],
-            })
-            .unwrap();
-
-        assert!(ledger
-            .state
-            .collateral_attestations
-            .contains_key(&member_key));
-        assert_eq!(
-            ledger.state.collateral_attestations[&member_key].amount,
-            75_000
-        );
+            });
+        assert!(result.is_ok(), "Deprecated CollateralAttestation should be accepted as no-op");
     }
 
     #[test]
@@ -387,8 +318,7 @@ mod tests {
                 min_fee_bps: None,
                 min_fee_fixed: None,
                 max_fee_period: None,
-                collateral_lock_amount: None,
-                collateral_lock_until: None,
+                membership_until: None,
                 dispute_response_blocks: None,
                 dispute_arm_blocks: None,
                 service_response_blocks: None,
@@ -407,7 +337,7 @@ mod tests {
                 quorum_expiry: 1_000_000,
                 ledger_hash: [0x33; 32],
                 quorum_members: vec![member_key],
-                total_collateral: 50_000,
+                collateral_amount: 50_000,
             })
             .unwrap();
 
@@ -423,12 +353,10 @@ mod tests {
                 ledger_hash: [0u8; 32],
             })
             .unwrap();
-        assert!(ledger
-            .state
-            .collateral_attestations
-            .contains_key(&member_key));
+        // CollateralAttestation was applied
+        let seq_before_remove = ledger.state.sequence;
 
-        // Remove the member — attestation should be cleared
+        // Remove the member
         ledger
             .apply_state_changes(&LedgerOperation::QuorumRemoveMember {
                 quorum_member: member_key,
@@ -436,10 +364,12 @@ mod tests {
             })
             .unwrap();
 
+        // Member should be removed from quorum
         assert!(!ledger
             .state
-            .collateral_attestations
-            .contains_key(&member_key));
+            .quorum_members
+            .iter()
+            .any(|m| m.pubkey == member_key));
     }
 
     // =========================================================================
@@ -463,8 +393,7 @@ mod tests {
                 min_fee_bps: None,
                 min_fee_fixed: None,
                 max_fee_period: None,
-                collateral_lock_amount: None,
-                collateral_lock_until: None,
+                membership_until: None,
                 dispute_response_blocks: None,
                 dispute_arm_blocks: None,
                 service_response_blocks: None,
@@ -489,7 +418,7 @@ mod tests {
                 quorum_expiry: 1_000_000,
                 ledger_hash: [0x33; 32],
                 quorum_members: vec![member_key],
-                total_collateral: 50_000,
+                collateral_amount: 50_000,
             })
             .unwrap();
         let hash_after_begin = update.current_hash;

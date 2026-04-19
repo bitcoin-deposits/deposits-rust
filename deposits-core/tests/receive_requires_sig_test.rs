@@ -33,7 +33,6 @@ fn make_ledger() -> Ledger {
 fn open_deposit_ex(
     ledger: &mut Ledger,
     descriptor: &str,
-    is_collateral: bool,
     receive_requires_sig: bool,
 ) -> [u8; 16] {
     let deposit_id = compute_deposit_id(descriptor);
@@ -46,7 +45,6 @@ fn open_deposit_ex(
             payment_hash: None,
             invoice: None,
             cosigner_guarantee_signature: None,
-            is_collateral,
             receive_requires_sig,
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
@@ -63,19 +61,18 @@ fn open_deposit_ex(
 #[test]
 fn receive_requires_sig_flag_set_on_deposit() {
     let mut ledger = make_ledger();
-    let did = open_deposit_ex(&mut ledger, "pk(guarded_key)", false, true);
+    let did = open_deposit_ex(&mut ledger, "pk(guarded_key)", true);
     let deposit = ledger.state.deposits.get(&did).unwrap();
     assert!(
         deposit.receive_requires_sig,
         "deposit should have receive_requires_sig set"
     );
-    assert!(!deposit.is_collateral, "deposit should not be collateral");
 }
 
 #[test]
 fn receive_requires_sig_flag_not_set_by_default() {
     let mut ledger = make_ledger();
-    let did = open_deposit_ex(&mut ledger, "pk(normal_key)", false, false);
+    let did = open_deposit_ex(&mut ledger, "pk(normal_key)", false);
     let deposit = ledger.state.deposits.get(&did).unwrap();
     assert!(
         !deposit.receive_requires_sig,
@@ -84,11 +81,10 @@ fn receive_requires_sig_flag_not_set_by_default() {
 }
 
 #[test]
-fn both_flags_can_coexist() {
+fn receive_requires_sig_flag_set_independently() {
     let mut ledger = make_ledger();
-    let did = open_deposit_ex(&mut ledger, "pk(both_flags)", true, true);
+    let did = open_deposit_ex(&mut ledger, "pk(both_flags)", true);
     let deposit = ledger.state.deposits.get(&did).unwrap();
-    assert!(deposit.is_collateral);
     assert!(deposit.receive_requires_sig);
 }
 
@@ -107,7 +103,6 @@ fn deposit_open_receive_requires_sig_tlv_roundtrip() {
         payment_hash: None,
         invoice: None,
         cosigner_guarantee_signature: None,
-        is_collateral: false,
         receive_requires_sig: true,
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
@@ -119,12 +114,10 @@ fn deposit_open_receive_requires_sig_tlv_roundtrip() {
 
     if let LedgerOperation::DepositOpen {
         receive_requires_sig,
-        is_collateral,
         ..
     } = decoded
     {
         assert!(receive_requires_sig, "flag should survive TLV roundtrip");
-        assert!(!is_collateral);
     } else {
         panic!("decoded wrong variant");
     }
@@ -141,7 +134,6 @@ fn deposit_open_without_flag_decodes_as_false() {
         payment_hash: None,
         invoice: None,
         cosigner_guarantee_signature: None,
-        is_collateral: false,
         receive_requires_sig: false,
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
@@ -173,17 +165,13 @@ fn deposit_struct_receive_requires_sig_tlv_roundtrip() {
         invoices: vec![],
         fees: FeeStructure::default(),
         last_fee_assessment: 0,
-        collateral_lock_amount: 0,
-        collateral_lock_expires: 0,
         transfer_fees: TransferFeeSchedule::default(),
-        is_collateral: false,
         receive_requires_sig: true,
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
         fee_change_limit_bps: None,
         opened_at_block: 0,
         pending_fee_change: None,
-        collateral_locks: Vec::new(),
     };
 
     let encoded = deposit.tlv_encode();
@@ -208,17 +196,13 @@ fn deposit_struct_without_flag_field_defaults_false() {
         invoices: vec![],
         fees: FeeStructure::default(),
         last_fee_assessment: 0,
-        collateral_lock_amount: 0,
-        collateral_lock_expires: 0,
         transfer_fees: TransferFeeSchedule::default(),
-        is_collateral: false,
         receive_requires_sig: false,
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
         fee_change_limit_bps: None,
         opened_at_block: 0,
         pending_fee_change: None,
-        collateral_locks: Vec::new(),
     };
 
     let encoded = deposit.tlv_encode();
@@ -236,8 +220,8 @@ fn deposit_struct_without_flag_field_defaults_false() {
 #[test]
 fn guarded_and_unguarded_deposits_coexist() {
     let mut ledger = make_ledger();
-    let guarded = open_deposit_ex(&mut ledger, "pk(guarded)", false, true);
-    let normal = open_deposit_ex(&mut ledger, "pk(normal)", false, false);
+    let guarded = open_deposit_ex(&mut ledger, "pk(guarded)", true);
+    let normal = open_deposit_ex(&mut ledger, "pk(normal)", false);
 
     assert_eq!(ledger.state.deposits.len(), 2);
 
@@ -256,8 +240,8 @@ fn guarded_and_unguarded_deposits_coexist() {
 #[test]
 fn transfer_lock_to_guarded_deposit_applies_state() {
     let mut ledger = make_ledger();
-    let source = open_deposit_ex(&mut ledger, "pk(sender)", false, false);
-    let dest = open_deposit_ex(&mut ledger, "pk(receiver)", false, true);
+    let source = open_deposit_ex(&mut ledger, "pk(sender)", false);
+    let dest = open_deposit_ex(&mut ledger, "pk(receiver)", true);
 
     // Credit the source
     ledger

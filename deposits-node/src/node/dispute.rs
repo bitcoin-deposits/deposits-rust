@@ -104,59 +104,46 @@ impl Node {
                     .collect()
             };
 
-            let mut attestations_to_copy: Vec<LedgerOperation> = Vec::new();
+            // Collateral is now tracked at the UTXO level; no attestations to copy.
+            // Add quorum members from our ledgers to the fork if needed.
             let mut quorum_members_to_add: Vec<(bitcoin::secp256k1::PublicKey, String)> =
                 Vec::new();
 
-            // Use derived collateral_attestations state instead of scanning history
             for ledger_arc in &our_ledger_arcs {
                 let ledger = ledger_arc.read().unwrap();
-                for (collateral_op, att) in ledger.state.collateral_attestations.iter() {
-                    if att.quorum_member == our_pubkey {
-                        attestations_to_copy.push(LedgerOperation::CollateralAttestation {
-                            collateral_operator: *collateral_op,
-                            quorum_member: att.quorum_member,
-                            collateral_ledger_id: att.collateral_ledger_id.clone(),
-                            amount: att.amount,
-                            block_height: att.block_height,
-                            lock_until_block: att.lock_until_block,
-                            signature: att.signature,
-                            ledger_hash: att.ledger_hash,
-                        });
-                        if !quorum_members_to_add
-                            .iter()
-                            .any(|(pk, _)| pk == collateral_op)
-                        {
-                            quorum_members_to_add
-                                .push((*collateral_op, att.collateral_ledger_id.clone()));
-                        }
+                for member in &ledger.state.quorum_members {
+                    if !quorum_members_to_add
+                        .iter()
+                        .any(|(pk, _)| pk == &member.pubkey)
+                    {
+                        quorum_members_to_add
+                            .push((member.pubkey, member.ledger_id.clone()));
                     }
                 }
             }
 
-            if !attestations_to_copy.is_empty() {
+            if !quorum_members_to_add.is_empty() {
                 // Add quorum members to the fork
-                for (member, member_ledger_id) in quorum_members_to_add {
+                for (member, member_ledger_id) in &quorum_members_to_add {
                     let mut fork_ledger = fork_arc.write().unwrap();
 
                     if fork_ledger
                         .state
                         .quorum_members
                         .iter()
-                        .any(|m| m.pubkey == member)
+                        .any(|m| m.pubkey == *member)
                     {
                         continue;
                     }
 
                     let add_op = LedgerOperation::QuorumAddMember {
-                        quorum_member: member,
+                        quorum_member: *member,
                         quorum_member_signature: [0u8; 64],
                         member_ledger_id: member_ledger_id.clone(),
                         min_fee_bps: None,
                         min_fee_fixed: None,
                         max_fee_period: None,
-                        collateral_lock_amount: None,
-                        collateral_lock_until: None,
+                        membership_until: None,
                         dispute_response_blocks: None,
                         dispute_arm_blocks: None,
                         service_response_blocks: None,
@@ -180,26 +167,7 @@ impl Node {
                     }
                 }
 
-                // Copy attestations to the fork
-                for attestation in attestations_to_copy {
-                    let mut fork_ledger = fork_arc.write().unwrap();
-
-                    if let Err(e) = fork_ledger.append_operation_with_block(
-                        attestation,
-                        current_block,
-                        block_hash,
-                    ) {
-                        tracing::warn!("Failed to copy attestation to fork: {:?}", e);
-                    } else {
-                        if let Some(update) = fork_ledger.history.last_mut() {
-                            update.operator_id = our_pubkey;
-                        }
-                        tracing::info!("Copied attestation to dispute fork");
-                        added_new_operations = true;
-                    }
-                }
-
-                // Sign after adding members and attestations
+                // Sign after adding members
                 self.sign_last_update(&fork_key)?;
             }
         }
