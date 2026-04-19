@@ -40,12 +40,12 @@ Every extraction number has one of three types:
 
 | Finding | Extraction | Type | Attack |
 |---------|-----------|------|--------|
-| Cross-ledger attestation replay | collateral amount | (T) | Attestation accepted on different ledger — quorum membership check passes, ledger binding is not enforced at protocol layer. |
+| Cross-ledger attestation replay | collateral amount | (T) | Historical: applied to old cross-ledger collateral model. Under collateral-in-UTXO, collateral is local to the operator's own ledger. |
 | Verifier compromise | enables deposit opening | (T) | Single point of failure for attestation-based access control. |
 | Cosigner abbreviated history | enables hidden forks | (T) | New quorum members must replay from genesis — protocol relies on node enforcement. |
 
 **Operator requirements:**
-1. Watchers must verify `collateral_ledger_id` matches expected member ledger
+1. Watchers verify co-signed `collateral_amount_msats` matches UTXO value minus reserves
 2. Protect attestation verifier signing key as critical infrastructure
 3. Enforce full-chain validation for new quorum members
 

@@ -33,7 +33,7 @@ Every test targets one invariant from the registry:
 | S1 | DisputeStateGate | dispute state blocks normal ops |
 | S2 | HashChainIntegrity | hash chain is append-only |
 | S3 | BalanceNonNegative | balance cannot go negative |
-| S4 | CollateralRatchet | collateral locks only increase |
+| S4 | CollateralInUTXO | collateral preserved in UTXO by co-signers |
 | L1 | DisputeLiveness | disputes resolve in bounded time |
 | L2 | LotteryLiveness | lottery completes even with withholding |
 | L3 | WalletEmbedding | wallet can force evidence onto ledger |
@@ -158,7 +158,7 @@ assert!(result.is_err(), "Protocol must reject this");
 cargo test -p deposits-integration-tests
 
 # Layer 3: Docker (requires running environment)
-cd deposits-tools && ./bin/reinit.sh --nodes 4
+cd deposits-tools && ./bin/setup.sh 3
 cargo test -p deposits-integration-tests -- --ignored --nocapture
 ```
 
@@ -194,7 +194,7 @@ tests/
 |---------|----------|---------|--------|
 | Near-expiry extraction window | High | Wallet-policy | Wallets must check remaining_lock > cascade_time |
 | Collateral can be < deposits | Medium | Wallet-policy | Wallets must check total_collateral >= total_deposits |
-| Attestation not ledger-bound | Medium | Node-policy | Watchers verify collateral_ledger_id |
+| Quorum member misbehavior | Medium | Node-policy | Cross-ledger slashing via fraud proof |
 | NUMS point | Needs audit | Implementation | Verify BIP-341 construction |
 | Deposit ID 128-bit collision | Low | Protocol | 2^64 birthday — infeasible but not 256-bit |
 | Lottery liveness (all withhold) | Low | Node-policy | Liveness proofs + quorum slashing for non-reveals |

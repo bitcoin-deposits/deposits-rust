@@ -2,9 +2,9 @@
 
 Collateral-secured verifiable ledgers for off-chain Bitcoin custody.
 
-Operators maintain append-only hash chains of signed updates tracking deposits, transfers, and fees. Quorum members provide collateral backing and co-signatures. Wallets verify the chain, retain evidence, and escalate through the quorum if the operator misbehaves.
+Operators maintain append-only hash chains of signed updates tracking deposits, transfers, and fees. Each operator's UTXO is split into reserves (deposit capacity) and collateral (security bond), both held in the same Taproot output controlled by the quorum. If the operator misbehaves, the quorum confiscates the collateral.
 
-See [WHITEPAPER.md](WHITEPAPER.md) for design rationale and [PROTOCOL.md](PROTOCOL.md) for the wire protocol specification.
+See the [DEP specifications](DEP-01.md) for protocol details and [PROPOSAL.md](PROPOSAL.md) for the collateral model rationale.
 
 ## Crates
 
@@ -60,7 +60,7 @@ cargo run --release --bin deposits-wallet -- \
 
 ### Local test network
 
-The test environment uses Docker for infrastructure (bitcoind, electrs, strfry relays) and runs operator nodes as bare processes:
+The test environment uses Docker for infrastructure (bitcoind, electrs) and runs operator nodes as bare processes:
 
 ```bash
 cd deposits-tools
@@ -68,16 +68,30 @@ cd deposits-tools
 # Start infrastructure
 docker compose up -d
 
-# Build and set up 4-operator network
+# Build and set up a 10-operator Q=3 network
 cargo build --release
-./bin/reinit.sh
+./bin/setup.sh 3
 
-# Run tests
-./bin/test-quorum.sh
-./bin/test-dispute-4op.sh
+# Or a 16-operator Q=5 network
+./bin/setup.sh 5
 ```
 
-See [deposits-tools/OPERATIONS.md](deposits-tools/OPERATIONS.md) for detailed operational docs.
+`setup.sh Q` creates `3*Q+1` operators, each with 3 ledgers and independent Q-member quorums. No collateral deposits needed -- collateral is part of the UTXO.
+
+### Docker
+
+```bash
+# Build the production image
+docker build -t deposits-node -f deposits-node/Dockerfile .
+
+# Run with environment variables
+docker run -e NODE_SEED=<hex> -e NETWORK=bitcoin \
+    -e ELECTRUM_URL=http://electrs:3000 \
+    -e LEDGER_RELAY=wss://relay.example.com \
+    -v ./data:/data deposits-node
+```
+
+See [deposits-tools/docker/docker-compose.nodes.yml](deposits-tools/docker/docker-compose.nodes.yml) for a compose template.
 
 ## Architecture
 

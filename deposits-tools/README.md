@@ -1,116 +1,59 @@
-# deposits-node Docker Environment
+# deposits-tools
 
-This directory contains Docker configuration for running deposits-node test networks.
+Test tooling, admin scripts, and Docker infrastructure for Bitcoin Deposits.
 
 ## Quick Start
 
 ```bash
-# From this directory
-cd deposits-tools/bdk
+# Start infrastructure (bitcoind, electrs)
+docker compose up -d
 
-# Initialize the network (builds images, starts services, funds nodes)
-./bin/reinit.sh
+# Build binaries
+cd .. && cargo build --release && cd deposits-tools
 
-# Check status
-docker compose ps
+# Set up a Q=3 network (10 operators, 30 ledgers)
+./bin/setup.sh 3
 
-# Run tests
-./bin/test.sh
-
-# Follow logs
-docker compose logs -f
-
-# Stop everything
-docker compose down -v
+# Or Q=5 (16 operators, 48 ledgers)
+./bin/setup.sh 5
 ```
+
+`setup.sh Q` creates `3*Q+1` operators with 3 ledgers each, forms Q-member quorums, and activates them. Two relays: one durable (ledgers), one ephemeral (messaging). No collateral deposit phase -- collateral is part of the UTXO.
 
 ## Architecture
 
-deposits-node uses:
-
-- **On-chain UTXOs** for reserves (P2WSH with operator+timelock / partner-multisig)
-- **Nostr relays** for peer messaging (NIP-04 encrypted DMs)
-- **Electrs** for blockchain indexing (BDK wallet sync)
-
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Docker Network                        │
-├─────────────────────────────────────────────────────────┤
-│                                                          │
-│   ┌─────────┐    ┌─────────┐    ┌──────────────────┐   │
-│   │ Bitcoin │────│ Electrs │────│   deposits-node   │   │
-│   │  Core   │    │         │    │     nodes        │   │
-│   └─────────┘    └─────────┘    └────────┬─────────┘   │
-│                                          │              │
-│                                    ┌─────┴─────┐        │
-│                                    │   Nostr   │        │
-│                                    │   Relay   │        │
-│                                    └───────────┘        │
-└─────────────────────────────────────────────────────────┘
+Docker:           bitcoind + electrs (blockchain infrastructure)
+Host processes:   deposits-node (one per operator) + strfry (2 relays)
 ```
 
-## Services
-
-| Service | Container | Host Port | Description |
-|---------|-----------|-----------|-------------|
-| Bitcoin Core | bdk-bitcoind | 18543 (RPC) | Regtest node |
-| Electrs | bdk-electrs | 3102 | Blockchain indexer |
-| Nostr Relay | bdk-nostr-relay | 7778 | Strfry relay |
-| Alice | bdk-alice | - | Operator node |
-| Bob | bdk-bob | - | Operator node |
-| Charlie | bdk-charlie | - | Partner node |
+Each operator runs a `deposits-node run` daemon that manages BDK wallets, communicates via Nostr relays, and maintains co-signed hash-chain ledgers.
 
 ## Scripts
 
-### reinit.sh
+| Script | Description |
+|--------|-------------|
+| `bin/setup.sh Q` | Set up a Q-quorum network from scratch |
+| `bin/redeploy.sh` | Rebuild binaries, restart nodes (preserves data) |
+| `bin/setup-verifier.sh` | Set up lightning address verification service |
+| `bin/setup-htlc-agent.sh` | Set up HTLC routing agent |
+| `bin/setup-lnurl.sh` | Set up LNURL server |
 
-Reinitializes the entire network:
+## Docker Infrastructure
 
-```bash
-./bin/reinit.sh           # Full rebuild and restart
-./bin/reinit.sh --quick   # Restart without rebuilding
-./bin/reinit.sh --fund    # Just fund nodes (assumes running)
-```
-
-### test.sh
-
-Runs health checks and basic tests:
-
-```bash
-./bin/test.sh             # Run all tests
-./bin/test.sh --health    # Just check service health
-./bin/test.sh --verbose   # Show more output
-```
+| Service | Host Port | Description |
+|---------|-----------|-------------|
+| bitcoind | 18543 (RPC) | Regtest node |
+| electrs | 3201+ | Blockchain indexer (per-group) |
+| strfry (ledgers) | 7779 | Durable relay for ledger updates |
+| strfry (messaging) | 7780 | Ephemeral relay for request/response |
 
 ## Manual Operations
 
-### Mine blocks
-
 ```bash
-docker exec bdk-bitcoind bitcoin-cli -regtest \
-  -rpcuser=user -rpcpassword=pass \
-  -rpcwallet=faucet -generate 1
+# Mine blocks
+docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=faucet -generate 10
+
+# Check an operator's ledgers
+source bin/_common.sh && run_node_cmd alice ledger list
 ```
-
-### View node logs
-
-```bash
-docker compose logs -f bdk-alice
-docker compose logs -f bdk-bob
-docker compose logs -f bdk-charlie
-```
-
-### Enter dev container
-
-```bash
-docker compose --profile dev up -d dev
-docker exec -it bdk-dev bash
-```
-
-## Ports
-
-| Service | Port |
-|---------|------|
-| Bitcoin RPC | 18543 |
-| Electrs | 3102 |
-| Nostr | 7778 |
