@@ -60,7 +60,7 @@ The operator's UTXO is split into two portions:
 - **Reserves**: the deposit capacity — wallets can deposit up to this amount
 - **Collateral**: the security bond — cannot be used for deposits, at risk of slashing
 
-Both live in the same Taproot output, controlled by the same quorum via tiered spending paths (see DEP-03). The `collateral_amount` is declared in `QuorumBegin` and enforced by co-signers.
+Both live in the same Taproot output, controlled by the same quorum via tiered spending paths (see DEP-03). Both `reserves_amount` and `collateral_amount` are declared in `LedgerOpen` and `QuorumBegin`. Co-signers MUST verify that `reserves_amount + collateral_amount` equals the on-chain UTXO value (in msats). `QuorumBegin` may update either value (e.g., to adjust the ratio), subject to quorum member agreement via co-signature.
 
 ### Slashing
 
