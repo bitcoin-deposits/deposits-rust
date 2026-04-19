@@ -290,17 +290,6 @@ impl PendingTransfer {
 // Deposit
 // ============================================================================
 
-/// A per-ledger collateral lock entry. Tracks amount and expiry for a specific ledger.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CollateralLockEntry {
-    /// Ledger ID (hex) this lock is backing.
-    pub for_ledger_id: String,
-    /// Amount locked (millisatoshis).
-    pub amount: u64,
-    /// Block height when this lock expires.
-    pub lock_until_block: u32,
-}
-
 /// A user deposit in the protocol.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deposit {
@@ -324,21 +313,9 @@ pub struct Deposit {
     pub fees: FeeStructure,
     /// Block height of last fee assessment.
     pub last_fee_assessment: u32,
-    /// Legacy single collateral lock (deprecated — use collateral_locks).
-    #[serde(default)]
-    pub collateral_lock_amount: u64,
-    #[serde(default)]
-    pub collateral_lock_expires: u32,
-    /// Per-ledger collateral locks. Key is the ledger ID (hex) being backed.
-    /// A deposit can back at most 3 ledgers simultaneously.
-    #[serde(default)]
-    pub collateral_locks: Vec<CollateralLockEntry>,
     /// Per-transfer fee schedule (fixed + proportional).
     #[serde(default)]
     pub transfer_fees: TransferFeeSchedule,
-    /// If true, this deposit is collateral — subject to collateral rules only.
-    #[serde(default)]
-    pub is_collateral: bool,
     /// If true, incoming funds require a signature from the deposit key.
     #[serde(default)]
     pub receive_requires_sig: bool,
@@ -373,11 +350,7 @@ impl Deposit {
             invoices: Vec::new(),
             fees: fees.unwrap_or_default(),
             last_fee_assessment: 0,
-            collateral_lock_amount: 0,
-            collateral_lock_expires: 0,
-            collateral_locks: Vec::new(),
             transfer_fees: TransferFeeSchedule::default(),
-            is_collateral: false,
             receive_requires_sig: false,
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
@@ -562,14 +535,10 @@ pub struct QuorumMember {
     /// Longer periods mean less frequent fee collection (worse for the member).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_fee_period: Option<u32>,
-    /// Minimum collateral (msats) the member commits to maintain.
-    /// Obligations are limited to 2x the smallest member's commitment.
+    /// Block height until which the member commits to serving.
+    /// Membership duration is limited to the shortest commitment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub collateral_lock_amount: Option<u64>,
-    /// Block height until which the member's collateral must remain locked.
-    /// Membership duration is limited to the shortest lock time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub collateral_lock_until: Option<u32>,
+    pub membership_until: Option<u32>,
     /// Blocks before a member must respond to embedded fraud evidence (default 144 ~1 day)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispute_response_blocks: Option<u32>,
@@ -587,72 +556,6 @@ pub struct QuorumMember {
     pub max_descriptor_bytes: Option<u32>,
 }
 
-/// A collateral attestation from a quorum member proving their reserves backing.
-///
-/// Partners periodically sign attestations proving they have committed
-/// collateral in their channels backing this ledger's deposits.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CollateralAttestation {
-    /// Operator node ID this attestation is for.
-    #[serde(with = "serde_pubkey")]
-    pub operator_id: PublicKey,
-    /// Partner who signed this attestation.
-    #[serde(with = "serde_pubkey")]
-    pub quorum_member: PublicKey,
-    /// The ledger ID where collateral is locked.
-    /// Must match member_ledger_id from the QuorumAddMember that added this member.
-    #[serde(default)]
-    pub collateral_ledger_id: String,
-    /// Amount of collateral committed (satoshis).
-    pub amount: u64,
-    /// Block height when this attestation was created.
-    pub block_height: u32,
-    /// Block height when the collateral lock expires.
-    #[serde(default)]
-    pub lock_until_block: u32,
-    /// Signature over the attestation content.
-    #[serde(with = "serde_64")]
-    pub signature: [u8; 64],
-    /// Hash of the partner's ledger state when they created this attestation.
-    #[serde(with = "serde_32")]
-    pub ledger_hash: [u8; 32],
-}
-
-impl CollateralAttestation {
-    /// Create a new collateral attestation.
-    pub fn new(
-        operator_id: PublicKey,
-        quorum_member: PublicKey,
-        collateral_ledger_id: String,
-        amount: u64,
-        block_height: u32,
-        lock_until_block: u32,
-        signature: [u8; 64],
-        ledger_hash: [u8; 32],
-    ) -> Self {
-        Self {
-            operator_id,
-            quorum_member,
-            collateral_ledger_id,
-            amount,
-            block_height,
-            lock_until_block,
-            signature,
-            ledger_hash,
-        }
-    }
-
-    /// Get the available collateral from this attestation.
-    pub fn available_collateral(&self) -> u64 {
-        self.amount
-    }
-
-    /// Check if this attestation is recent enough.
-    pub fn is_recent(&self, current_block: u32, max_age_blocks: u32) -> bool {
-        current_block.saturating_sub(self.block_height) <= max_age_blocks
-    }
-}
-
 // ============================================================================
 // Dispute State
 // ============================================================================
@@ -667,8 +570,7 @@ impl CollateralAttestation {
 ///   ▼
 /// DISPUTED
 ///   │  - Quorum is disbanded
-///   │  - All collateral attestations voided
-///   │  - Only QuorumAddMember and CollateralAttestation allowed
+///   │  - Only QuorumAddMember allowed
 ///   │
 ///   │ DisputeArmed (pre-commitment)
 ///   ▼

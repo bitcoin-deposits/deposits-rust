@@ -114,7 +114,6 @@ pub use types::{
     serde_pubkey_vec,
     AuditResult,
     ChannelId,
-    CollateralAttestation,
     // Channel types
     CommitmentExtraOutput,
     CosignEntry,

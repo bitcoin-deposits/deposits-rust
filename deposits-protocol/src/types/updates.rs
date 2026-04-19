@@ -955,19 +955,7 @@ impl TlvEncode for Deposit {
                 deposit_fields::LAST_FEE_ASSESSMENT,
                 self.last_fee_assessment,
             )
-            .u64_field(
-                deposit_fields::COLLATERAL_PLEDGE_AMOUNT,
-                self.collateral_lock_amount,
-            )
-            .u32_field(
-                deposit_fields::COLLATERAL_PLEDGE_EXPIRES,
-                self.collateral_lock_expires,
-            )
             .nested(deposit_fields::TRANSFER_FEES, &self.transfer_fees)
-            .u8_field(
-                deposit_fields::IS_COLLATERAL,
-                if self.is_collateral { 1 } else { 0 },
-            )
             .u8_field(
                 deposit_fields::RECEIVE_REQUIRES_SIG,
                 if self.receive_requires_sig { 1 } else { 0 },
@@ -997,17 +985,9 @@ impl TlvDecode for Deposit {
             invoices: reader.read_vec(deposit_fields::INVOICES)?,
             fees: reader.read_nested(deposit_fields::FEES)?,
             last_fee_assessment: reader.read_u32(deposit_fields::LAST_FEE_ASSESSMENT)?,
-            collateral_lock_amount: reader
-                .read_u64_opt(deposit_fields::COLLATERAL_PLEDGE_AMOUNT)?
-                .unwrap_or(0),
-            collateral_lock_expires: reader
-                .read_u32_opt(deposit_fields::COLLATERAL_PLEDGE_EXPIRES)?
-                .unwrap_or(0),
-            collateral_locks: Vec::new(), // rebuilt from history replay
             transfer_fees: reader
                 .read_nested_opt(deposit_fields::TRANSFER_FEES)?
                 .unwrap_or_default(),
-            is_collateral: reader.read_u8(deposit_fields::IS_COLLATERAL).unwrap_or(0) != 0,
             receive_requires_sig: reader
                 .read_u8(deposit_fields::RECEIVE_REQUIRES_SIG)
                 .unwrap_or(0)
@@ -1199,70 +1179,7 @@ impl TlvDecode for SignedLedgerUpdate {
     }
 }
 
-// Field type constants for CollateralAttestation
-mod collateral_attestation_fields {
-    pub const OPERATOR_ID: u64 = 0;
-    pub const QUORUM_MEMBER: u64 = 2;
-    pub const COLLATERAL_LEDGER_ID: u64 = 3;
-    pub const AMOUNT: u64 = 4;
-    pub const BLOCK_HEIGHT: u64 = 6;
-    pub const LOCK_UNTIL_BLOCK: u64 = 7;
-    pub const SIGNATURE: u64 = 8;
-    pub const LEDGER_HASH: u64 = 10;
-}
-
-impl TlvEncode for CollateralAttestation {
-    fn tlv_encode(&self) -> Vec<u8> {
-        TlvBuilder::new()
-            .pubkey_field(
-                collateral_attestation_fields::OPERATOR_ID,
-                &self.operator_id,
-            )
-            .pubkey_field(
-                collateral_attestation_fields::QUORUM_MEMBER,
-                &self.quorum_member,
-            )
-            .string_field(
-                collateral_attestation_fields::COLLATERAL_LEDGER_ID,
-                &self.collateral_ledger_id,
-            )
-            .u64_field(collateral_attestation_fields::AMOUNT, self.amount)
-            .u32_field(
-                collateral_attestation_fields::BLOCK_HEIGHT,
-                self.block_height,
-            )
-            .u32_field(
-                collateral_attestation_fields::LOCK_UNTIL_BLOCK,
-                self.lock_until_block,
-            )
-            .bytes_field(collateral_attestation_fields::SIGNATURE, &self.signature)
-            .bytes_field(
-                collateral_attestation_fields::LEDGER_HASH,
-                &self.ledger_hash,
-            )
-            .build()
-    }
-}
-
-impl TlvDecode for CollateralAttestation {
-    fn tlv_decode(data: &[u8]) -> TlvResult<Self> {
-        let reader = TlvReader::new(data)?;
-        Ok(Self {
-            operator_id: reader.read_pubkey(collateral_attestation_fields::OPERATOR_ID)?,
-            quorum_member: reader.read_pubkey(collateral_attestation_fields::QUORUM_MEMBER)?,
-            collateral_ledger_id: reader
-                .read_string_opt(collateral_attestation_fields::COLLATERAL_LEDGER_ID)?
-                .unwrap_or_default(),
-            amount: reader.read_u64(collateral_attestation_fields::AMOUNT)?,
-            block_height: reader.read_u32(collateral_attestation_fields::BLOCK_HEIGHT)?,
-            lock_until_block: reader
-                .read_u32_opt(collateral_attestation_fields::LOCK_UNTIL_BLOCK)?
-                .unwrap_or(0),
-            signature: reader.read_bytes(collateral_attestation_fields::SIGNATURE)?,
-            ledger_hash: reader.read_bytes(collateral_attestation_fields::LEDGER_HASH)?,
-        })
-    }
-}
+// CollateralAttestation TLV codec removed — struct no longer exists.
 
 // ============================================================================
 // Tests

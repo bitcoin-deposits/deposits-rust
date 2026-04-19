@@ -198,11 +198,6 @@ impl Ledger {
         self.state.total_deposit_balance()
     }
 
-    /// Get total collateral held by other operators on this ledger (millisatoshis).
-    pub fn total_held_collateral(&self) -> u64 {
-        self.state.total_held_collateral()
-    }
-
     /// Get reserves amount (millisatoshis).
     pub fn reserves_amount(&self) -> u64 {
         self.state.reserves_amount
@@ -685,8 +680,7 @@ impl Ledger {
                 min_fee_bps: None,
                 min_fee_fixed: None,
                 max_fee_period: None,
-                collateral_lock_amount: None,
-                collateral_lock_until: None,
+                membership_until: None,
                 dispute_response_blocks: None,
                 dispute_arm_blocks: None,
                 service_response_blocks: None,
@@ -806,7 +800,6 @@ impl Ledger {
         // Reset derived state
         self.state.deposits.clear();
         self.state.reserves_amount = 0;
-        self.state.collateral_attestations.clear();
         self.state.sequence = 0;
         self.state.chain_tip_hash = [0u8; 32];
 
@@ -839,34 +832,6 @@ impl Ledger {
     // Collateral Methods
     // ========================================================================
 
-    /// Get total available collateral from attestations.
-    pub fn total_available_collateral(&self, current_block: u32, max_age_blocks: u32) -> u64 {
-        self.state
-            .total_available_collateral(current_block, max_age_blocks)
-    }
-
-    /// Get available collateral from a specific partner.
-    pub fn partner_available_collateral(&self, partner: &PublicKey) -> Option<u64> {
-        self.state.partner_available_collateral(partner)
-    }
-
-    /// Get list of partners with missing or stale attestations.
-    pub fn missing_attestations(&self, current_block: u32, max_age_blocks: u32) -> Vec<PublicKey> {
-        self.state
-            .missing_attestations(current_block, max_age_blocks)
-    }
-
-    /// Get total collateral pledged by deposit holders.
-    ///
-    /// Only counts pledges that haven't expired (lock_until_block > current_block).
-    pub fn total_deposit_pledged_collateral(&self, current_block: u32) -> u64 {
-        self.state
-            .deposits
-            .values()
-            .filter(|d| d.collateral_lock_expires > current_block)
-            .map(|d| d.collateral_lock_amount)
-            .sum()
-    }
 
     // ========================================================================
     // Operation Application
@@ -1257,10 +1222,8 @@ impl Ledger {
             LedgerOperation::CollateralLock {
                 deposit_id,
                 amount,
-                lock_until_block,
                 operator_id,
-                for_ledger_id,
-                witness: _,
+                ..
             } => {
                 // 1. Deposit must exist
                 let deposit = self
@@ -1280,35 +1243,7 @@ impl Ledger {
                     });
                 }
 
-                // 4. Per-ledger ratchet check: if updating an existing lock for
-                // this ledger_id, new amount >= existing AND new expiry >= existing.
-                // New ledger_ids are allowed at any amount (no ratchet for first lock).
-                if let Some(existing) = deposit
-                    .collateral_locks
-                    .iter()
-                    .find(|e| e.for_ledger_id == *for_ledger_id)
-                {
-                    if *amount < existing.amount {
-                        return Err(DepositsError::ProtocolViolation {
-                            violation_type: "collateral_lock_ratchet_violation".to_string(),
-                            details: format!(
-                                "New lock amount {} must be >= existing amount {} for ledger {}",
-                                amount, existing.amount, for_ledger_id
-                            ),
-                        });
-                    }
-                    if *lock_until_block < existing.lock_until_block {
-                        return Err(DepositsError::ProtocolViolation {
-                            violation_type: "collateral_lock_ratchet_violation".to_string(),
-                            details: format!(
-                                "New lock expiry {} must be >= existing expiry {} for ledger {}",
-                                lock_until_block, existing.lock_until_block, for_ledger_id
-                            ),
-                        });
-                    }
-                }
-
-                // 5. operator_id must match ledger operator
+                // 4. operator_id must match ledger operator
                 if *operator_id != self.state.operator_key {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "invalid_collateral_lock_operator".to_string(),
@@ -1358,13 +1293,6 @@ impl Ledger {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "custody_armed_no_quorum".to_string(),
                         details: "Cannot arm without any quorum members".to_string(),
-                    });
-                }
-                // Must have at least one collateral attestation
-                if self.state.collateral_attestations.is_empty() {
-                    return Err(DepositsError::ProtocolViolation {
-                        violation_type: "custody_armed_no_attestations".to_string(),
-                        details: "Cannot arm without any collateral attestations".to_string(),
                     });
                 }
             }
@@ -1700,71 +1628,22 @@ impl LedgerValidator {
     // Collateral Validation Methods
     // ========================================================================
 
-    /// Get the total available collateral from attestations.
+    /// Validate reserves are sufficient for a given deposit liability.
     ///
-    /// Only counts attestations that are recent enough.
-    pub fn total_available_collateral(
-        ledger: &Ledger,
-        current_block: u32,
-        max_age_blocks: u32,
-    ) -> u64 {
-        ledger
-            .state
-            .total_available_collateral(current_block, max_age_blocks)
-    }
-
-    /// Get collateral from a specific partner.
-    pub fn partner_available_collateral(ledger: &Ledger, partner: &PublicKey) -> Option<u64> {
-        ledger.state.partner_available_collateral(partner)
-    }
-
-    /// Get list of partners with missing or stale attestations.
-    pub fn missing_attestations(
-        ledger: &Ledger,
-        current_block: u32,
-        max_age_blocks: u32,
-    ) -> Vec<PublicKey> {
-        ledger
-            .state
-            .missing_attestations(current_block, max_age_blocks)
-    }
-
-    /// Validate collateral is sufficient for a given deposit liability.
+    /// Obligations must not exceed reserves.
     ///
-    /// In the 100%+100% model:
-    /// - Requirement 1: reserves >= deposit_liability (checked elsewhere)
-    /// - Requirement 2: attestations >= deposit_liability (if we have quorum members)
-    ///
-    /// Returns Ok if collateral is sufficient, Err with details if not.
+    /// Returns Ok if reserves are sufficient, Err with details if not.
     pub fn validate_collateral_for_liability(
         ledger: &Ledger,
         deposit_liability: u64,
-        current_block: u32,
-        max_attestation_age_blocks: u32,
+        _current_block: u32,
+        _max_attestation_age_blocks: u32,
     ) -> DepositsResult<()> {
-        // Requirement 1: reserves >= deposit_liability
         if ledger.state.reserves_amount < deposit_liability {
             return Err(DepositsError::InsufficientReserves {
                 required: deposit_liability,
                 available: ledger.state.reserves_amount,
             });
-        }
-
-        // Requirement 2: attestations >= deposit_liability (if quorum is active)
-        if ledger.state.quorum_state == QuorumState::Active {
-            let total_collateral =
-                Self::total_available_collateral(ledger, current_block, max_attestation_age_blocks);
-            if total_collateral < deposit_liability {
-                return Err(DepositsError::InsufficientCollateral {
-                    required: deposit_liability,
-                    available: total_collateral,
-                    missing_attestations: Self::missing_attestations(
-                        ledger,
-                        current_block,
-                        max_attestation_age_blocks,
-                    ),
-                });
-            }
         }
 
         Ok(())
@@ -1992,14 +1871,9 @@ impl LedgerManager {
         )
     }
 
-    /// Get total collateral from attestations.
-    pub fn total_collateral(&self, current_block: u32, max_age_blocks: u32) -> u64 {
-        LedgerValidator::total_available_collateral(&self.ledger, current_block, max_age_blocks)
-    }
-
-    /// Get partners missing attestations.
-    pub fn missing_attestations(&self, current_block: u32, max_age_blocks: u32) -> Vec<PublicKey> {
-        LedgerValidator::missing_attestations(&self.ledger, current_block, max_age_blocks)
+    /// Get total collateral (reserves amount).
+    pub fn total_collateral(&self, _current_block: u32, _max_age_blocks: u32) -> u64 {
+        self.ledger.state.reserves_amount
     }
 
     // ========================================================================

@@ -59,6 +59,7 @@ impl TestNetwork {
                     reserves_id: format!("bcrt1q{}reserves", name),
                     genesis_block: 0,
                     reserves_amount,
+                    collateral_amount: reserves_amount, // 50/50 split
                 };
                 ledger.append_operation(open_op).unwrap();
 
@@ -128,7 +129,6 @@ impl Operator {
             payment_hash: None,
             invoice: None,
             cosigner_guarantee_signature: None,
-            is_collateral: false,
             receive_requires_sig: false,
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
@@ -215,8 +215,7 @@ impl Operator {
             min_fee_bps: Some(50),
             min_fee_fixed: Some(100),
             max_fee_period: Some(2016),
-            collateral_lock_amount: Some(50_000),
-            collateral_lock_until: Some(900_000),
+            membership_until: Some(900_000),
             dispute_response_blocks: None,
             dispute_arm_blocks: None,
             service_response_blocks: None,
@@ -244,7 +243,7 @@ impl Operator {
             quorum_expiry: 1_000_000,
             ledger_hash: self.ledger.state.chain_tip_hash,
             quorum_members: members,
-            total_collateral: 50_000,
+            collateral_amount: 50_000,
         };
         self.ledger.append_operation(op).unwrap();
     }

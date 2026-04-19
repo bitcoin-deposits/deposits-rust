@@ -120,12 +120,14 @@ impl TlvEncode for LedgerOperation {
                 reserves_id,
                 genesis_block,
                 reserves_amount,
+                collateral_amount,
             } => {
                 builder = builder
                     .pubkey_field(OPERATOR_ID, operator_id)
                     .string_field(RESERVES_ID, reserves_id)
                     .u32_field(GENESIS_BLOCK, *genesis_block)
-                    .u64_field(RESERVES_AMOUNT, *reserves_amount);
+                    .u64_field(RESERVES_AMOUNT, *reserves_amount)
+                    .u64_field(TOTAL_COLLATERAL, *collateral_amount);
             }
             Self::QuorumBegin {
                 reserves_id,
@@ -136,7 +138,7 @@ impl TlvEncode for LedgerOperation {
                 quorum_expiry,
                 ledger_hash,
                 quorum_members,
-                total_collateral,
+                collateral_amount,
             } => {
                 let mut members_bytes = Vec::new();
                 for pk in quorum_members {
@@ -151,7 +153,7 @@ impl TlvEncode for LedgerOperation {
                     .u32_field(QUORUM_EXPIRY, *quorum_expiry)
                     .bytes_field(LEDGER_HASH, ledger_hash)
                     .bytes_field(QUORUM_MEMBERS, &members_bytes)
-                    .u64_field(TOTAL_COLLATERAL, *total_collateral);
+                    .u64_field(TOTAL_COLLATERAL, *collateral_amount);
             }
             Self::DepositOpen {
                 deposit_id,
@@ -161,7 +163,6 @@ impl TlvEncode for LedgerOperation {
                 payment_hash,
                 invoice,
                 cosigner_guarantee_signature,
-                is_collateral,
                 receive_requires_sig,
                 fee_change_after_blocks,
                 fee_change_notice_blocks,
@@ -184,9 +185,6 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(sig) = cosigner_guarantee_signature {
                     builder = builder.bytes_field(COSIGNER_SIG, sig);
-                }
-                if *is_collateral {
-                    builder = builder.u8_field(IS_COLLATERAL, 1);
                 }
                 if *receive_requires_sig {
                     builder = builder.u8_field(RECEIVE_REQUIRES_SIG, 1);
@@ -399,8 +397,7 @@ impl TlvEncode for LedgerOperation {
                 min_fee_bps,
                 min_fee_fixed,
                 max_fee_period,
-                collateral_lock_amount,
-                collateral_lock_until,
+                membership_until,
                 dispute_response_blocks,
                 dispute_arm_blocks,
                 service_response_blocks,
@@ -420,11 +417,8 @@ impl TlvEncode for LedgerOperation {
                 if let Some(period) = max_fee_period {
                     builder = builder.u32_field(MAX_FEE_PERIOD, *period);
                 }
-                if let Some(amt) = collateral_lock_amount {
-                    builder = builder.u64_field(COLLATERAL_LOCK_AMOUNT, *amt);
-                }
-                if let Some(lock) = collateral_lock_until {
-                    builder = builder.u32_field(COLLATERAL_LOCK_UNTIL, *lock);
+                if let Some(until) = membership_until {
+                    builder = builder.u32_field(COLLATERAL_LOCK_UNTIL, *until);
                 }
                 if let Some(v) = dispute_response_blocks {
                     builder = builder.u32_field(DISPUTE_RESPONSE_BLOCKS, *v);
@@ -551,6 +545,7 @@ impl TlvDecode for LedgerOperation {
                 reserves_id: reader.read_string(RESERVES_ID)?,
                 genesis_block: reader.read_u32_opt(GENESIS_BLOCK)?.unwrap_or(0),
                 reserves_amount: reader.read_u64_opt(RESERVES_AMOUNT)?.unwrap_or(0),
+                collateral_amount: reader.read_u64_opt(TOTAL_COLLATERAL)?.unwrap_or(0),
             }),
             12 => {
                 let members_bytes = reader.read_raw_opt(QUORUM_MEMBERS).unwrap_or(&[]);
@@ -573,7 +568,7 @@ impl TlvDecode for LedgerOperation {
                     quorum_expiry: reader.read_u32(QUORUM_EXPIRY)?,
                     ledger_hash: reader.read_bytes(LEDGER_HASH)?,
                     quorum_members,
-                    total_collateral: reader.read_u64(TOTAL_COLLATERAL)?,
+                    collateral_amount: reader.read_u64(TOTAL_COLLATERAL)?,
                 })
             }
             20 => Ok(Self::DepositOpen {
@@ -584,7 +579,6 @@ impl TlvDecode for LedgerOperation {
                 payment_hash: reader.read_bytes_opt(PAYMENT_HASH)?,
                 invoice: reader.read_string_opt(INVOICE)?,
                 cosigner_guarantee_signature: reader.read_bytes_opt(COSIGNER_SIG)?,
-                is_collateral: reader.read_u8(IS_COLLATERAL).unwrap_or(0) != 0,
                 receive_requires_sig: reader.read_u8(RECEIVE_REQUIRES_SIG).unwrap_or(0) != 0,
                 fee_change_after_blocks: reader.read_u32_opt(FEE_CHANGE_AFTER)?,
                 fee_change_notice_blocks: reader.read_u32_opt(FEE_CHANGE_NOTICE)?,
@@ -694,8 +688,7 @@ impl TlvDecode for LedgerOperation {
                 min_fee_bps: reader.read_u16_opt(MIN_FEE_BPS)?,
                 min_fee_fixed: reader.read_u64_opt(MIN_FEE_FIXED)?,
                 max_fee_period: reader.read_u32_opt(MAX_FEE_PERIOD)?,
-                collateral_lock_amount: reader.read_u64_opt(COLLATERAL_LOCK_AMOUNT)?,
-                collateral_lock_until: reader.read_u32_opt(COLLATERAL_LOCK_UNTIL)?,
+                membership_until: reader.read_u32_opt(COLLATERAL_LOCK_UNTIL)?,
                 dispute_response_blocks: reader.read_u32_opt(DISPUTE_RESPONSE_BLOCKS)?,
                 dispute_arm_blocks: reader.read_u32_opt(DISPUTE_ARM_BLOCKS)?,
                 service_response_blocks: reader.read_u32_opt(SERVICE_RESPONSE_BLOCKS)?,
@@ -1935,7 +1928,6 @@ mod tests {
             payment_hash: Some([0xAB; 32]),
             invoice: Some("lnbc...".to_string()),
             cosigner_guarantee_signature: None,
-            is_collateral: false,
             receive_requires_sig: false,
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
@@ -2073,7 +2065,6 @@ mod tests {
                 payment_hash: Some([0xAA; 32]),
                 invoice: Some("lnbc...".to_string()),
                 cosigner_guarantee_signature: None,
-                is_collateral: false,
                 receive_requires_sig: false,
                 fee_change_after_blocks: Some(52560),
                 fee_change_notice_blocks: Some(2016),

@@ -42,10 +42,14 @@ pub struct LedgerState {
     /// All deposits in this ledger, keyed by deposit_id.
     #[serde(with = "serde_deposit_id_map")]
     pub deposits: HashMap<DepositId, Deposit>,
-    /// Reserves amount backing this ledger (millisatoshis).
+    /// Reserves amount backing this ledger (deposit capacity, millisatoshis).
     /// Set at LedgerOpen, updated at QuorumBegin during reserves rotation.
     #[serde(default)]
     pub reserves_amount: u64,
+    /// Collateral amount (security bond, millisatoshis).
+    /// Set at LedgerOpen, updated at QuorumBegin. reserves + collateral = UTXO value.
+    #[serde(default)]
+    pub collateral_amount: u64,
     /// Quorum lifecycle state (PreQuorum → Active → Expired).
     /// Determines co-signature requirements and allowed operation types.
     #[serde(default)]
@@ -61,11 +65,6 @@ pub struct LedgerState {
     /// Block height when the current quorum expires (from QuorumBegin).
     #[serde(default)]
     pub quorum_expiry: Option<u32>,
-    /// Collateral attestations from quorum members proving their reserves.
-    /// Key is the partner's public key (must be in quorum_members list).
-    /// Attestations are updated periodically and validated before use.
-    #[serde(with = "serde_pubkey_map", default)]
-    pub collateral_attestations: HashMap<PublicKey, CollateralAttestation>,
     /// Pending conditional transfers between deposits.
     /// Key is the transfer_id (hash of the signing message).
     #[serde(with = "serde_transfer_id_map", default)]
@@ -144,7 +143,7 @@ impl LedgerState {
             quorum_members: Vec::new(),
             next_quorum_members: Vec::new(),
             quorum_expiry: None,
-            collateral_attestations: HashMap::new(),
+            collateral_amount: 0,
             pending_transfers: HashMap::new(),
             open_invoice_locks: HashMap::new(),
             credited_payments: std::collections::HashSet::new(),
@@ -188,22 +187,25 @@ impl LedgerState {
                 reserves_id,
                 genesis_block,
                 reserves_amount,
+                collateral_amount,
             } => {
                 next.operator_key = *operator_id;
                 next.reserves_key = reserves_id.clone();
                 next.genesis_block = *genesis_block;
                 next.ledger_id = Self::compute_ledger_id(operator_id, reserves_id, *genesis_block);
                 next.reserves_amount = *reserves_amount;
+                next.collateral_amount = *collateral_amount;
             }
             LedgerOperation::QuorumBegin {
                 reserves_id,
                 amount,
-                total_collateral: _,
+                collateral_amount,
                 quorum_expiry,
                 ..
             } => {
                 next.reserves_key = reserves_id.clone();
                 next.reserves_amount = *amount;
+                next.collateral_amount = *collateral_amount;
                 next.quorum_expiry = Some(*quorum_expiry);
                 // Promote pending quorum members to active
                 next.quorum_members = std::mem::take(&mut next.next_quorum_members);
@@ -214,7 +216,6 @@ impl LedgerState {
                 descriptor,
                 fees,
                 transfer_fees,
-                is_collateral,
                 receive_requires_sig,
                 fee_change_after_blocks,
                 fee_change_notice_blocks,
@@ -228,7 +229,6 @@ impl LedgerState {
                 if let Some(tf) = transfer_fees {
                     deposit.transfer_fees = tf.clone();
                 }
-                deposit.is_collateral = *is_collateral;
                 deposit.receive_requires_sig = *receive_requires_sig;
                 deposit.fee_change_after_blocks = *fee_change_after_blocks;
                 deposit.fee_change_notice_blocks = *fee_change_notice_blocks;
@@ -389,8 +389,7 @@ impl LedgerState {
                 min_fee_bps,
                 min_fee_fixed,
                 max_fee_period,
-                collateral_lock_amount,
-                collateral_lock_until,
+                membership_until,
                 dispute_response_blocks,
                 dispute_arm_blocks,
                 service_response_blocks,
@@ -413,8 +412,7 @@ impl LedgerState {
                         min_fee_bps: *min_fee_bps,
                         min_fee_fixed: *min_fee_fixed,
                         max_fee_period: *max_fee_period,
-                        collateral_lock_amount: *collateral_lock_amount,
-                        collateral_lock_until: *collateral_lock_until,
+                        membership_until: *membership_until,
                         dispute_response_blocks: *dispute_response_blocks,
                         dispute_arm_blocks: *dispute_arm_blocks,
                         service_response_blocks: *service_response_blocks,
@@ -427,82 +425,13 @@ impl LedgerState {
                 next.quorum_members.retain(|m| m.pubkey != *quorum_member);
                 next.next_quorum_members
                     .retain(|m| m.pubkey != *quorum_member);
-                next.collateral_attestations.remove(quorum_member);
             }
-            LedgerOperation::CollateralLock {
-                deposit_id,
-                amount,
-                lock_until_block,
-                for_ledger_id,
-                ..
-            } => {
-                let deposit = next
-                    .deposits
-                    .get_mut(deposit_id)
-                    .ok_or(crate::DepositsError::DepositNotFound)?;
-                if !deposit.is_collateral {
-                    return Err(crate::DepositsError::InvalidState(
-                        "CollateralLock can only be applied to collateral deposits".to_string(),
-                    ));
-                }
-                // Update or insert per-ledger lock
-                if let Some(entry) = deposit
-                    .collateral_locks
-                    .iter_mut()
-                    .find(|e| e.for_ledger_id == *for_ledger_id)
-                {
-                    entry.amount = *amount;
-                    entry.lock_until_block = *lock_until_block;
-                } else {
-                    // Check cap before adding new ledger
-                    if deposit.collateral_locks.len() >= MAX_COLLATERAL_LOCKS {
-                        return Err(crate::DepositsError::InvalidState(format!(
-                            "Collateral deposit already backs {} ledgers (max {})",
-                            deposit.collateral_locks.len(),
-                            MAX_COLLATERAL_LOCKS
-                        )));
-                    }
-                    deposit.collateral_locks.push(CollateralLockEntry {
-                        for_ledger_id: for_ledger_id.clone(),
-                        amount: *amount,
-                        lock_until_block: *lock_until_block,
-                    });
-                }
-                // Update legacy fields for backward compat (total across all locks)
-                deposit.collateral_lock_amount =
-                    deposit.collateral_locks.iter().map(|e| e.amount).sum();
-                deposit.collateral_lock_expires = deposit
-                    .collateral_locks
-                    .iter()
-                    .map(|e| e.lock_until_block)
-                    .max()
-                    .unwrap_or(0);
+            LedgerOperation::CollateralLock { .. } => {
+                // Deprecated: collateral is now tracked at the UTXO level via collateral_amount
             }
-            LedgerOperation::LedgerClose => {
-                next.collateral_attestations.clear();
-            }
-            LedgerOperation::CollateralAttestation {
-                collateral_operator,
-                quorum_member,
-                collateral_ledger_id,
-                amount,
-                block_height,
-                lock_until_block,
-                signature,
-                ledger_hash,
-            } => {
-                let attestation = CollateralAttestation::new(
-                    *collateral_operator,
-                    *quorum_member,
-                    collateral_ledger_id.clone(),
-                    *amount,
-                    *block_height,
-                    *lock_until_block,
-                    *signature,
-                    *ledger_hash,
-                );
-                next.collateral_attestations
-                    .insert(*collateral_operator, attestation);
+            LedgerOperation::LedgerClose => {}
+            LedgerOperation::CollateralAttestation { .. } => {
+                // Deprecated: collateral is now tracked at the UTXO level via collateral_amount
             }
             LedgerOperation::QuorumJoin {
                 operator_id,
@@ -530,7 +459,6 @@ impl LedgerState {
             } => {
                 next.quorum_at_fork = next.quorum_members.clone();
                 next.dispute_fork_sequence = *last_valid_sequence;
-                next.collateral_attestations.clear();
                 next.dispute_state = DisputeState::Disputed;
             }
             LedgerOperation::DisputeArmed { .. } => {
@@ -784,28 +712,8 @@ impl LedgerState {
                     }
                 }
             }
-            LedgerOperation::CollateralLock {
-                deposit_id,
-                amount,
-                lock_until_block,
-                operator_id,
-                witness,
-                ..
-            } => {
-                if let Some(deposit) = self.deposits.get(deposit_id) {
-                    let msg = crate::signature_utils::collateral_lock_signing_message(
-                        deposit_id,
-                        *amount,
-                        *lock_until_block,
-                        operator_id,
-                    );
-                    if !verifier.verify_witness(&deposit.descriptor, witness, &msg) {
-                        violations.push(ConformanceViolation::InvalidWitness {
-                            operation: "CollateralLock",
-                            detail: "witness does not satisfy deposit descriptor".to_string(),
-                        });
-                    }
-                }
+            LedgerOperation::CollateralLock { .. } => {
+                // Deprecated: collateral is now tracked at the UTXO level
             }
             LedgerOperation::DepositKeyRotate {
                 deposit_id,
@@ -839,13 +747,9 @@ impl LedgerState {
         self.deposits.values().map(|d| d.balance).sum()
     }
 
-    /// Get total balance of collateral deposits held by other operators on this ledger (msats).
-    pub fn total_held_collateral(&self) -> u64 {
-        self.deposits
-            .values()
-            .filter(|d| d.is_collateral)
-            .map(|d| d.balance)
-            .sum()
+    /// Get the declared collateral amount for this ledger (msats).
+    pub fn total_collateral(&self) -> u64 {
+        self.collateral_amount
     }
 
     /// Get total locked balance across all deposits.
@@ -856,76 +760,6 @@ impl LedgerState {
     /// Check if reserves are sufficient.
     pub fn has_sufficient_reserves(&self) -> bool {
         self.reserves_amount >= self.total_deposit_balance()
-    }
-
-    /// Total attested collateral from all quorum members (millisatoshis).
-    /// Computed from the collateral_attestations HashMap.
-    pub fn total_collateral(&self) -> u64 {
-        self.collateral_attestations
-            .values()
-            .map(|a| a.available_collateral())
-            .sum()
-    }
-
-    // ========================================================================
-    // Collateral Tracking Methods
-    // ========================================================================
-
-    /// Update or add a collateral attestation from a quorum member.
-    ///
-    /// Returns error if the partner is not in the quorum_members list.
-    pub fn update_collateral_attestation(
-        &mut self,
-        partner: PublicKey,
-        attestation: CollateralAttestation,
-    ) -> Result<(), crate::DepositsError> {
-        if !self.quorum_members.iter().any(|m| m.pubkey == partner) {
-            return Err(crate::DepositsError::ProtocolViolation {
-                violation_type: "invalid_quorum_member".to_string(),
-                details: format!("Partner {} is not a quorum member for this ledger", partner),
-            });
-        }
-        self.collateral_attestations.insert(partner, attestation);
-        Ok(())
-    }
-
-    /// Get the total available collateral from all attestations.
-    ///
-    /// Only counts attestations that are recent enough (within max_age_blocks of current_block).
-    pub fn total_available_collateral(&self, current_block: u32, max_age_blocks: u32) -> u64 {
-        self.collateral_attestations
-            .values()
-            .filter(|a| a.is_recent(current_block, max_age_blocks))
-            .map(|a| a.available_collateral())
-            .sum()
-    }
-
-    /// Get available collateral from a specific quorum member.
-    pub fn partner_available_collateral(&self, partner: &PublicKey) -> Option<u64> {
-        self.collateral_attestations
-            .get(partner)
-            .map(|a| a.available_collateral())
-    }
-
-    /// Check if all quorum members have valid attestations.
-    ///
-    /// Returns list of partners missing attestations or with stale attestations.
-    pub fn missing_attestations(&self, current_block: u32, max_age_blocks: u32) -> Vec<PublicKey> {
-        self.quorum_members
-            .iter()
-            .filter(
-                |member| match self.collateral_attestations.get(&member.pubkey) {
-                    None => true,
-                    Some(a) => !a.is_recent(current_block, max_age_blocks),
-                },
-            )
-            .map(|m| m.pubkey)
-            .collect()
-    }
-
-    /// Clear all collateral attestations.
-    pub fn clear_collateral_attestations(&mut self) {
-        self.collateral_attestations.clear();
     }
 
     /// Get active quorum memberships (not expired).

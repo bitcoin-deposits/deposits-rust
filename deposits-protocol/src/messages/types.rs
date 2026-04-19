@@ -163,6 +163,8 @@ pub enum LedgerOperation {
         genesis_block: u32,
         /// Initial reserves amount in millisatoshis (from on-chain UTXO balance)
         reserves_amount: u64,
+        /// Collateral amount in millisatoshis (security bond portion of UTXO)
+        collateral_amount: u64,
     },
 
     // ========== Reserves Operations (1) ==========
@@ -198,9 +200,8 @@ pub enum LedgerOperation {
         ledger_hash: [u8; 32],
         /// Quorum member pubkeys included in this rotation
         quorum_members: Vec<bitcoin::secp256k1::PublicKey>,
-        /// Total attested collateral across all quorum members (msats).
-        /// Wallets use this to verify obligation limits without scanning attestations.
-        total_collateral: u64,
+        /// Collateral amount in millisatoshis (security bond portion of UTXO).
+        collateral_amount: u64,
     },
 
     // ========== Deposit Operations (6) ==========
@@ -216,10 +217,6 @@ pub enum LedgerOperation {
         payment_hash: Option<[u8; 32]>,
         invoice: Option<String>,
         cosigner_guarantee_signature: Option<[u8; 64]>,
-        /// If true, this deposit is collateral — subject to collateral rules,
-        /// not regular deposit obligations. Collateral deposits cannot be
-        /// transferred or withdrawn normally.
-        is_collateral: bool,
         /// If true, incoming funds (transfers, offers, invoices) require a
         /// signature from the deposit key. Prevents unsolicited crediting.
         receive_requires_sig: bool,
@@ -379,12 +376,8 @@ pub enum LedgerOperation {
         min_fee_fixed: Option<u64>,
         /// Maximum fee collection period (blocks) the member allows
         max_fee_period: Option<u32>,
-        /// Minimum collateral (msats) the member commits to maintain on their ledger.
-        /// Obligations are limited to 2x the smallest member's commitment.
-        collateral_lock_amount: Option<u64>,
-        /// Block height until which the member's collateral must remain locked.
-        /// Membership duration is limited to the shortest lock time.
-        collateral_lock_until: Option<u32>,
+        /// Block height until which this member commits to serving.
+        membership_until: Option<u32>,
         /// Per-quorum timing: blocks before member must respond to fraud evidence
         dispute_response_blocks: Option<u32>,
         /// Per-quorum timing: blocks after DisputeEnter to arm for lottery
@@ -924,12 +917,14 @@ impl BinaryCodec for LedgerOperation {
                 reserves_id,
                 genesis_block,
                 reserves_amount,
+                collateral_amount,
             } => {
                 write_pubkey(w, operator_id)?;
                 write_string(w, reserves_id)?;
                 write_u32(w, *genesis_block)?;
                 write_u32(w, 0)?; // reserved (was collateral_enforcement_block)
                 write_u64(w, *reserves_amount)?;
+                write_u64(w, *collateral_amount)?;
             }
             Self::QuorumBegin {
                 reserves_id,
@@ -940,7 +935,7 @@ impl BinaryCodec for LedgerOperation {
                 quorum_expiry,
                 ledger_hash,
                 quorum_members,
-                total_collateral,
+                collateral_amount,
             } => {
                 write_string(w, reserves_id)?;
                 write_32(w, spending_txid)?;
@@ -951,7 +946,7 @@ impl BinaryCodec for LedgerOperation {
                 write_u8(w, quorum_members.len() as u8)?;
                 write_u32(w, *quorum_expiry)?;
                 write_32(w, ledger_hash)?;
-                write_u64(w, *total_collateral)?;
+                write_u64(w, *collateral_amount)?;
             }
             // Legacy encoding - deposit operations now use deposit_id/descriptor, but we encode
             // the deposit_id bytes as a placeholder for legacy compatibility
@@ -1373,11 +1368,13 @@ impl BinaryCodec for LedgerOperation {
                 let _reserved = read_u32(r)?; // was collateral_enforcement_block
                                               // reserves_amount added later; default to 0 for legacy data
                 let reserves_amount = read_u64(r).unwrap_or(0);
+                let collateral_amount = read_u64(r).unwrap_or(0);
                 Ok(Self::LedgerOpen {
                     operator_id,
                     reserves_id,
                     genesis_block,
                     reserves_amount,
+                    collateral_amount,
                 })
             }
             // QuorumBegin (12) — formerly ReservesRotate
@@ -1391,7 +1388,7 @@ impl BinaryCodec for LedgerOperation {
                 let _size = read_u8(r)?; // legacy: skip
                 let quorum_expiry = read_u32(r)?;
                 let ledger_hash = read_32(r)?;
-                let total_collateral = read_u64(r).unwrap_or(0);
+                let collateral_amount = read_u64(r).unwrap_or(0);
                 Ok(Self::QuorumBegin {
                     reserves_id,
                     spending_txid,
@@ -1401,7 +1398,7 @@ impl BinaryCodec for LedgerOperation {
                     quorum_expiry,
                     ledger_hash,
                     quorum_members: Vec::new(),
-                    total_collateral,
+                    collateral_amount,
                 })
             }
             // Deposit operations (20-25) - legacy decoding extracts deposit_id from embedded bytes
@@ -1417,7 +1414,6 @@ impl BinaryCodec for LedgerOperation {
                     payment_hash: read_option(r, read_32)?,
                     invoice: read_option(r, read_string)?,
                     cosigner_guarantee_signature: read_option(r, read_64)?,
-                    is_collateral: false,
                     receive_requires_sig: false,
                     fee_change_after_blocks: None,
                     fee_change_notice_blocks: None,
@@ -1641,8 +1637,7 @@ impl BinaryCodec for LedgerOperation {
                 min_fee_bps: None,
                 min_fee_fixed: None,
                 max_fee_period: None,
-                collateral_lock_amount: None,
-                collateral_lock_until: None,
+                membership_until: None,
                 dispute_response_blocks: None,
                 dispute_arm_blocks: None,
                 service_response_blocks: None,

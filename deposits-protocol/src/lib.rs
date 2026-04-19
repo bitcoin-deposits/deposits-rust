@@ -36,7 +36,7 @@ pub use tlv::{TlvBuilder, TlvDecode, TlvEncode, TlvError, TlvReader, TlvResult, 
 pub use types::{
     compute_deposit_id, entropy_selection_score, is_entropy_winner, select_entropy_winner,
     serde_32, serde_64, serde_opt_64, serde_pubkey, serde_pubkey_map, serde_pubkey_vec,
-    AuditResult, ChannelId, CollateralAttestation, CommitmentExtraOutput, ConformanceViolation,
+    AuditResult, ChannelId, CommitmentExtraOutput, ConformanceViolation,
     CrossLedgerViolation, Deposit, DepositId, DepositInfo, DepositOffer, DepositOfferStatus,
     DescriptorWitness, DisputeState, FeeStructure, Invoice, InvoiceInfo, LedgerState,
     LedgerStateUpdate, LedgerUpdate, NoVerify, OnChainWithdrawal, OnChainWithdrawalStatus,
