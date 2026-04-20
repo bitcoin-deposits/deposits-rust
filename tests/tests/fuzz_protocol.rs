@@ -812,6 +812,61 @@ fn fuzz_protocol_5node_q3_2adv_no_profit() {
     eprintln!("fuzz stats: {:?}", stats);
 }
 
+/// Sanity: with 3 adversaries in a 5-op Q=3 cluster, operator 0's quorum is
+/// [1,2,3] — members 1 and 2 are adversary (majority). The adversary SHOULD
+/// be able to push non-conforming updates through on op 0's ledger. This test
+/// asserts profit > 0 across the run — if it's zero, the fuzzer isn't actually
+/// modeling the attack surface.
+#[test]
+fn fuzz_protocol_5node_q3_3adv_profit_is_reachable() {
+    let mut any_profit = 0i64;
+    let mut profitable_seeds = 0u32;
+
+    for seed in 0..100u64 {
+        let mut sim = ProtocolSim::new(5, &[0, 1, 2]);
+        let mut rng = Rng::new(seed * 104729 + 17);
+
+        for _ in 0..200 {
+            sim.step(&mut rng);
+        }
+
+        // Honest invariants must still hold — the adversary attacking op 0
+        // shouldn't cause op 3 or 4 (honest) to become non-conforming.
+        for (i, op) in sim.operators.iter().enumerate() {
+            if !sim.honest.contains(&i) {
+                continue;
+            }
+            let total: u64 = op.ledger.state.deposits.values().map(|d| d.balance).sum();
+            assert!(
+                total <= op.ledger.state.reserves_amount,
+                "seed {} honest op {} over-reserved: {} > {}",
+                seed,
+                i,
+                total,
+                op.ledger.state.reserves_amount
+            );
+        }
+
+        let profit = sim.evaluate_profit();
+        if profit.net > 0 {
+            profitable_seeds += 1;
+            any_profit += profit.net;
+        }
+    }
+
+    assert!(
+        profitable_seeds > 0,
+        "with 3 adversaries & op 0's adv-majority quorum, adversary should \
+         achieve profit in at least one seed. Got zero across 100 seeds — \
+         the fuzzer may not be exercising the attack correctly."
+    );
+
+    eprintln!(
+        "3-adversary run: {} profitable seeds out of 100, total stolen = {} sats",
+        profitable_seeds, any_profit
+    );
+}
+
 /// Same config with a heavier load — 1000 runs × 1000 ops = 1M ops. Release-
 /// mode benchmark/sanity run. Marked #[ignore] so it doesn't block normal
 /// test runs; run with `cargo test --release fuzz_protocol_heavy -- --ignored --nocapture`.
