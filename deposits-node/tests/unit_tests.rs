@@ -645,33 +645,6 @@ fn invoice_lock_signing_message_changes_with_payment_hash() {
 }
 
 #[test]
-fn collateral_lock_signing_message_deterministic() {
-    use deposits_core::signature_utils::collateral_lock_signing_message;
-
-    let deposit_id = [0xcc; 16];
-    let amount = 100_000u64;
-    let lock_until = 900_000u32;
-    let pk = test_pubkey();
-
-    let msg1 = collateral_lock_signing_message(&deposit_id, amount, lock_until, &pk);
-    let msg2 = collateral_lock_signing_message(&deposit_id, amount, lock_until, &pk);
-    assert_eq!(msg1, msg2);
-}
-
-#[test]
-fn collateral_lock_signing_message_changes_with_lock_height() {
-    use deposits_core::signature_utils::collateral_lock_signing_message;
-
-    let deposit_id = [0xcc; 16];
-    let amount = 100_000u64;
-    let pk = test_pubkey();
-
-    let msg_a = collateral_lock_signing_message(&deposit_id, amount, 800_000, &pk);
-    let msg_b = collateral_lock_signing_message(&deposit_id, amount, 900_000, &pk);
-    assert_ne!(msg_a, msg_b);
-}
-
-#[test]
 fn transfer_lock_signing_message_deterministic() {
     use deposits_core::signature_utils::transfer_lock_signing_message;
 

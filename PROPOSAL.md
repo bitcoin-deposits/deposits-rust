@@ -104,7 +104,6 @@ Values are maximum sybil percentage where 0/500 trials were profitable.
 ### deposits-protocol
 
 - Ledger state: add `collateral_amount` field alongside reserves
-- Operations: new `CollateralLock` operation that designates portion of UTXO as collateral (not available for deposits)
 - Conformance: reject deposits that would exceed `reserves_amount` (not total UTXO)
 
 ### deposits-core
@@ -126,9 +125,7 @@ Values are maximum sybil percentage where 0/500 trials were profitable.
 ### Remove (old collateral model)
 
 Removed operations and fields:
-- `CollateralLock` (disc 45) — operation and all handling
-- `CollateralAttestation` (disc 42) — operation and all handling
-- `is_collateral` flag on `DepositOpen` — collateral is no longer a deposit type
+- collateral-deposit-type flag on `DepositOpen` — collateral is no longer a deposit type
 - `collateral_lock_amount`, `collateral_lock_until` on `QuorumAddMember`
 - `for_ledger_id` / `collateral_ledger_id` — no cross-ledger collateral
 - `total_collateral` field on `QuorumBegin` (replaced by `collateral_amount_msats`)

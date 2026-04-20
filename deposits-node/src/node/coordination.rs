@@ -18,7 +18,7 @@ impl Node {
     ///
     /// This is a simplified version of handle_ledger_response that only processes
     /// co-sign responses. Used inside request_cosign to avoid the recursive call:
-    /// request_cosign -> handle_ledger_response -> record_collateral_attestation -> sign_and_broadcast -> request_cosign
+    /// request_cosign -> handle_ledger_response -> sign_and_broadcast -> request_cosign
     pub(crate) fn handle_cosign_response_only(&self, response: crate::nostr::LedgerResponse) {
         use std::str::FromStr;
         // For error responses, don't remove the pending request - keep waiting for success.
@@ -258,137 +258,6 @@ impl Node {
             return;
         }
 
-        // Check if this is a response to one of our pending collateral_lock requests
-        let our_reserves_id = {
-            let pending = self.pending_collateral_requests.lock().unwrap();
-            pending.get(&response.request_id).cloned()
-        };
-
-        let Some(reserves_id) = our_reserves_id else {
-            // Not a tracked request, ignore
-            return;
-        };
-
-        // Remove from pending
-        {
-            let mut pending = self.pending_collateral_requests.lock().unwrap();
-            pending.remove(&response.request_id);
-            metrics::set_pending_collateral_requests(pending.len());
-        }
-
-        if !response.success {
-            tracing::warn!(
-                "Collateral lock request {} failed: {}",
-                &response.request_id[..16.min(response.request_id.len())],
-                response.error.unwrap_or_default()
-            );
-            return;
-        }
-
-        // Extract and decode attestation from response
-        let Some(result) = response.result else {
-            tracing::warn!("Collateral lock response has no result data");
-            return;
-        };
-
-        let Some(attestation_b64) = result.get("attestation_b64").and_then(|v| v.as_str()) else {
-            tracing::warn!("Collateral lock response missing attestation_b64");
-            return;
-        };
-
-        // Decode base64 -> JSON -> CollateralAttestationMsg
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-        let attestation_json = match BASE64.decode(attestation_b64) {
-            Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("Failed to decode attestation as UTF-8: {}", e);
-                    return;
-                }
-            },
-            Err(e) => {
-                tracing::error!("Failed to decode attestation base64: {}", e);
-                return;
-            }
-        };
-
-        let attestation: deposits_core::CollateralAttestationMsg =
-            match serde_json::from_str(&attestation_json) {
-                Ok(a) => a,
-                Err(e) => {
-                    tracing::error!("Failed to parse attestation JSON: {}", e);
-                    return;
-                }
-            };
-
-        tracing::info!(
-            "Auto-recording attestation: amount={} msats, until_block={}, from operator {}...",
-            attestation.amount,
-            attestation.lock_until_block,
-            &hex::encode(attestation.operator.serialize())[..16]
-        );
-
-        // Record the attestation on our ledger (now includes co-signing and broadcast)
-        match self
-            .record_collateral_attestation(&reserves_id, attestation)
-            .await
-        {
-            Ok(event_id) => {
-                tracing::info!(
-                    "Attestation recorded and broadcast on ledger {}: event_id={}",
-                    &reserves_id[..16.min(reserves_id.len())],
-                    &event_id[..16.min(event_id.len())]
-                );
-            }
-            Err(e) => {
-                tracing::error!("Failed to record attestation: {}", e);
-            }
-        }
-    }
-
-    /// Send a collateral_lock request and track it for auto-recording the attestation response
-    ///
-    /// When the response arrives with an attestation, it will be automatically recorded
-    /// on our ledger (specified by `our_reserves_id`).
-    pub async fn send_collateral_lock_request(
-        &self,
-        target_ledger_id: &str,
-        our_reserves_id: &str,
-        deposit_secret: &bitcoin::secp256k1::SecretKey,
-        amount_msats: u64,
-        lock_blocks: u32,
-    ) -> Result<String, Error> {
-        let params = serde_json::json!({
-            "deposit_secret": hex::encode(deposit_secret.secret_bytes()),
-            "amount_msats": amount_msats,
-            "lock_blocks": lock_blocks,
-            "requesting_operator": hex::encode(self.node_id.serialize()),
-        });
-
-        // Send the request
-        let request_id = self
-            .nostr
-            .send_ledger_request(target_ledger_id, "collateral_lock", params)
-            .await
-            .map_err(|e| {
-                Error::Protocol(format!("Failed to send collateral_lock request: {:?}", e))
-            })?;
-        self.track_sent_event(&request_id);
-
-        // Track for auto-recording
-        {
-            let mut pending = self.pending_collateral_requests.lock().unwrap();
-            pending.insert(request_id.clone(), our_reserves_id.to_string());
-            metrics::set_pending_collateral_requests(pending.len());
-        }
-
-        tracing::info!(
-            "Sent collateral_lock request {} to ledger {}..., tracking for auto-record",
-            &request_id[..16.min(request_id.len())],
-            &target_ledger_id[..16.min(target_ledger_id.len())]
-        );
-
-        Ok(request_id)
     }
 
     /// Request a co-signature from a quorum member for an update.

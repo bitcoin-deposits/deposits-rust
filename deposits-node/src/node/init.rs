@@ -83,7 +83,6 @@ impl Node {
             outbound_rx: Mutex::new(outbound_rx),
             deposit_offers: Mutex::new(deposit_offers),
             withdrawals: Mutex::new(withdrawals),
-            pending_collateral_requests: Mutex::new(HashMap::new()),
             pending_cosign_requests: Arc::new(Mutex::new(HashMap::new())),
             pending_consent_requests: Arc::new(Mutex::new(HashMap::new())),
             staging_locks: Mutex::new(HashMap::new()),

@@ -1910,7 +1910,7 @@ async function discoverLedgers() {
     }
     const node = nodeMap.get(pk);
     node.reserves += ad.reserves_amount_msats || 0;
-    // collateralAtRisk is computed solely from CollateralAttestation events (deduplicated)
+    // collateralAtRisk is now derived from collateral_amount on QuorumBegin (UTXO-level)
     node.ledgerCount++;
     node.ads.push(ad);
   }
@@ -1925,7 +1925,7 @@ async function discoverLedgers() {
     if (ad.ledger_id && ad.operator_pubkey) ledgerToOp[ad.ledger_id] = ad.operator_pubkey;
   }
 
-  // Fetch QuorumAddMember (43), QuorumBegin (12), and CollateralAttestation (42)
+  // Fetch QuorumAddMember (43) and QuorumBegin (12)
   let updateEvents = await fetchEvents({ kinds: [9100], '#t': ['43', '12'], limit: 2000 }, 15000);
   if (updateEvents.length === 0) {
     updateEvents = await fetchEvents({ kinds: [9100], limit: 2000 }, 15000);

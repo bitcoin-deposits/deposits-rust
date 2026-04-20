@@ -189,7 +189,7 @@ pub enum LedgerOperation {
         new_outpoint_vout: u32,
         /// Amount in millisatoshis (should match previous reserves)
         amount: u64,
-        /// Block height when the quorum expires (shortest member's collateral_lock_until).
+        /// Block height when the quorum expires (shortest member's membership_until).
         /// A new QuorumBegin MUST be appended before this block (see DEP-11).
         /// The reserves tapscript uses this for tiered spending:
         ///   - Full quorum (k-of-n): no timelock
@@ -345,21 +345,6 @@ pub enum LedgerOperation {
         reason: u8,
     },
 
-    // ========== Collateral Operations ==========
-    /// Record a collateral attestation from another quorum member
-    CollateralAttestation {
-        collateral_operator: PublicKey,
-        quorum_member: PublicKey,
-        /// The ledger ID where collateral is locked (must match member_ledger_id from QuorumAddMember)
-        collateral_ledger_id: String,
-        amount: u64,
-        block_height: u32,
-        /// Block height when the collateral lock expires
-        lock_until_block: u32,
-        signature: [u8; 64],
-        ledger_hash: [u8; 32],
-    },
-
     // ========== Quorum Membership (2) ==========
     /// Add a quorum member to the VoterSet.
     /// Fee limits are the member's terms — minimum fees they require.
@@ -393,23 +378,6 @@ pub enum LedgerOperation {
     QuorumRemoveMember {
         quorum_member: PublicKey,
         operator_signature: [u8; 64],
-    },
-    /// Lock deposit balance as collateral backing for the operator.
-    /// The locked amount cannot be withdrawn until lock expires.
-    /// Uses ratchet semantics: can only increase amount AND extend duration.
-    CollateralLock {
-        /// Which deposit is locking collateral
-        deposit_id: DepositId,
-        /// Amount locked as collateral (millisatoshis)
-        amount: u64,
-        /// Block height when the lock expires
-        lock_until_block: u32,
-        /// Operator being backed
-        operator_id: PublicKey,
-        /// Ledger this collateral is backing (64-char hex). A deposit can back at most 3 ledgers.
-        for_ledger_id: String,
-        /// Witness satisfying the deposit descriptor to authorize the lock
-        witness: DescriptorWitness,
     },
     /// Record that we have joined another operator's quorum as a monitoring member.
     /// This is appended to the consenting party's own ledger when they grant consent.
@@ -549,10 +517,8 @@ impl LedgerOperation {
             Self::TransferLock { .. } => 70,
             Self::TransferComplete { .. } => 71,
             Self::TransferFail { .. } => 72,
-            Self::CollateralAttestation { .. } => 42,
             Self::QuorumAddMember { .. } => 43,
             Self::QuorumRemoveMember { .. } => 44,
-            Self::CollateralLock { .. } => 45,
             Self::QuorumJoin { .. } => 46,
             Self::FeeCollect { .. } => 50,
             // Custody dispute operations
@@ -586,10 +552,8 @@ impl LedgerOperation {
             Self::TransferLock { .. } => consts::TRANSFER_LOCK,
             Self::TransferComplete { .. } => consts::TRANSFER_COMPLETE,
             Self::TransferFail { .. } => consts::TRANSFER_FAIL,
-            Self::CollateralAttestation { .. } => consts::COLLATERAL_ATTESTATION,
             Self::QuorumAddMember { .. } => consts::QUORUM_ADD_MEMBER,
             Self::QuorumRemoveMember { .. } => consts::QUORUM_REMOVE_MEMBER,
-            Self::CollateralLock { .. } => consts::COLLATERAL_LOCK,
             Self::QuorumJoin { .. } => consts::QUORUM_JOIN,
             Self::FeeCollect { .. } => consts::MAINTENANCE_FEE_COLLECT,
             Self::DisputeEnter { .. } => consts::LEDGER_UPDATE,
@@ -631,10 +595,8 @@ impl LedgerOperation {
             36 => consts::ONCHAIN_LOCK,
             37 => consts::ONCHAIN_FAIL,
             38 => consts::ONCHAIN_FULFILL,
-            42 => consts::COLLATERAL_ATTESTATION,
             43 => consts::QUORUM_ADD_MEMBER,
             44 => consts::QUORUM_REMOVE_MEMBER,
-            45 => consts::COLLATERAL_LOCK,
             46 => consts::QUORUM_JOIN,
             50 => consts::MAINTENANCE_FEE_COLLECT,
             54 | 55 | 56 | 57 | 80 => consts::LEDGER_UPDATE,
@@ -1227,25 +1189,6 @@ impl BinaryCodec for LedgerOperation {
                 write_32(w, block_hash)?;
                 write_u8(w, *reason)?;
             }
-            Self::CollateralAttestation {
-                collateral_operator,
-                quorum_member,
-                collateral_ledger_id,
-                amount,
-                block_height,
-                lock_until_block,
-                signature,
-                ledger_hash,
-            } => {
-                write_pubkey(w, collateral_operator)?;
-                write_pubkey(w, quorum_member)?;
-                write_string(w, collateral_ledger_id)?;
-                write_u64(w, *amount)?;
-                write_u32(w, *block_height)?;
-                write_u32(w, *lock_until_block)?;
-                write_64(w, signature)?;
-                write_32(w, ledger_hash)?;
-            }
             Self::QuorumAddMember {
                 quorum_member,
                 quorum_member_signature,
@@ -1262,35 +1205,6 @@ impl BinaryCodec for LedgerOperation {
             } => {
                 write_pubkey(w, quorum_member)?;
                 write_64(w, operator_signature)?;
-            }
-            Self::CollateralLock {
-                deposit_id,
-                amount,
-                lock_until_block,
-                operator_id,
-                for_ledger_id,
-                witness,
-            } => {
-                let mut legacy_bytes = [0u8; 33];
-                legacy_bytes[0] = 0x02;
-                legacy_bytes[1..17].copy_from_slice(deposit_id);
-                w.write_all(&legacy_bytes)?;
-                write_u64(w, *amount)?;
-                write_u32(w, *lock_until_block)?;
-                write_pubkey(w, operator_id)?;
-                let sig_bytes: [u8; 64] = witness
-                    .stack
-                    .first()
-                    .and_then(|s| {
-                        if s.len() >= 64 {
-                            s[..64].try_into().ok()
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or([0u8; 64]);
-                w.write_all(&sig_bytes)?;
-                write_string(w, for_ledger_id)?;
             }
             Self::QuorumJoin {
                 operator_id,
@@ -1619,17 +1533,6 @@ impl BinaryCodec for LedgerOperation {
                 block_hash: read_32(r)?,
                 reason: read_u8(r).unwrap_or(1),
             }),
-            // Collateral operations (40-44)
-            42 => Ok(Self::CollateralAttestation {
-                collateral_operator: read_pubkey(r)?,
-                quorum_member: read_pubkey(r)?,
-                collateral_ledger_id: read_string(r)?,
-                amount: read_u64(r)?,
-                block_height: read_u32(r)?,
-                lock_until_block: read_u32(r)?,
-                signature: read_64(r)?,
-                ledger_hash: read_32(r)?,
-            }),
             43 => Ok(Self::QuorumAddMember {
                 quorum_member: read_pubkey(r)?,
                 quorum_member_signature: read_64(r)?,
@@ -1648,26 +1551,6 @@ impl BinaryCodec for LedgerOperation {
                 quorum_member: read_pubkey(r)?,
                 operator_signature: read_64(r)?,
             }),
-            45 => {
-                let legacy_bytes = read_33(r)?;
-                let mut deposit_id = [0u8; 16];
-                deposit_id.copy_from_slice(&legacy_bytes[1..17]);
-                let amount = read_u64(r)?;
-                let lock_until_block = read_u32(r)?;
-                let operator_id = read_pubkey(r)?;
-                let sig = read_64(r)?;
-                let for_ledger_id = read_string(r).unwrap_or_default();
-                Ok(Self::CollateralLock {
-                    deposit_id,
-                    amount,
-                    lock_until_block,
-                    operator_id,
-                    for_ledger_id,
-                    witness: crate::types::DescriptorWitness {
-                        stack: vec![sig.to_vec()],
-                    },
-                })
-            }
             46 => Ok(Self::QuorumJoin {
                 operator_id: read_pubkey(r)?,
                 ledger_id: read_string(r)?,

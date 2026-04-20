@@ -58,13 +58,6 @@ fn scale_limit_realistic_network() {
                 net.op_mut(&names[i]).add_quorum_member(member, &lid);
             }
             net.op_mut(&names[i]).begin_quorum(1_000_000);
-
-            // Attestations from each member
-            for j in 1..=q {
-                let member_idx = (i + j) % n;
-                net.op_mut(&names[i])
-                    .record_attestation(&snapshots[member_idx], 500_000);
-            }
         }
         let setup_ms = t1.elapsed().as_millis();
         let total_ms = t0.elapsed().as_millis();

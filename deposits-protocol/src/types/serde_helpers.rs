@@ -321,5 +321,3 @@ pub mod serde_transfer_id_map {
     }
 }
 
-/// Maximum number of ledgers a single collateral deposit can back simultaneously.
-pub const MAX_COLLATERAL_LOCKS: usize = 3;

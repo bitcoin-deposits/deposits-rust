@@ -146,8 +146,6 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 70 | TransferLock | Transfers |
 | 71 | TransferComplete | Transfers |
 | 72 | TransferFail | Transfers |
-| 42 | *Reserved* | *Previously CollateralAttestation* |
-| 45 | *Reserved* | *Previously CollateralLock* |
 | 54 | DisputeEnter | Dispute |
 | 55 | DisputeAcquire | Dispute |
 | 56 | DisputeYield | Dispute |
@@ -191,7 +189,6 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 202 | descriptor | variable | DepositOpen (miniscript) |
 | 204 | witness | variable | TransferLock, DepositKeyRotate (nested) |
 | 208 | new_descriptor | variable | DepositKeyRotate |
-| 230 | *Reserved* | 1 | *Previously is_collateral* |
 | 232 | receive_requires_sig | 1 | DepositOpen |
 
 #### Fees

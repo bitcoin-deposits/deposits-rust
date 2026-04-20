@@ -22,7 +22,7 @@ fn make_network(n: usize, reserves: u64) -> TestNetwork {
 }
 
 /// Set up full-mesh quorum on operator 0's ledger with all others as members.
-fn setup_quorum(net: &mut TestNetwork, n: usize, collateral_per_member: u64) {
+fn setup_quorum(net: &mut TestNetwork, n: usize) {
     let names = operator_names(n);
     let operator = &names[0];
 
@@ -44,10 +44,6 @@ fn setup_quorum(net: &mut TestNetwork, n: usize, collateral_per_member: u64) {
         net.op_mut(operator).add_quorum_member(member, &lid);
     }
     net.op_mut(operator).begin_quorum(1_000_000);
-    for member in &members {
-        net.op_mut(operator)
-            .record_attestation(member, collateral_per_member);
-    }
 }
 
 // =========================================================================
@@ -159,7 +155,7 @@ fn scaling_dispute_state_gate() {
         let names = operator_names(n);
         let mut net = make_network(n, 1_000_000);
 
-        setup_quorum(&mut net, n, 500_000);
+        setup_quorum(&mut net, n);
 
         let user = net.create_depositor("u", 10);
         let did = net.op_mut(&names[0]).open_deposit(&user);

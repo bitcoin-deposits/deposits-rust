@@ -18,8 +18,7 @@ NORMAL
   ▼
 DISPUTED
   │  - Quorum is disbanded
-  │  - All collateral attestations voided
-  │  - Only QuorumAddMember and CollateralAttestation allowed
+  │  - Only QuorumAddMember allowed (plus DisputeArmed to transition)
   │
   │ DisputeArmed (pre-commitment)
   ▼
@@ -41,7 +40,6 @@ Opens a custody dispute. Can only be signed by a quorum member (verified against
 
 **Effects:**
 - Disbands the quorum (all memberships voided)
-- Voids all collateral attestations
 - The signer becomes the "parent pubkey" for this branch
 - Transitions ledger to DISPUTED state
 
@@ -52,10 +50,6 @@ Opens a custody dispute. Can only be signed by a quorum member (verified against
 ### QuorumAddMember (during DISPUTED)
 
 Adds a member to the new quorum being built. Must be signed by the dispute opener (parent pubkey).
-
-### CollateralAttestation (during DISPUTED)
-
-Records a collateral attestation from a quorum member. Required to prove the new custodian has backing.
 
 ### DisputeArmed
 
@@ -68,7 +62,6 @@ Signals that the candidate has rebuilt their quorum and is ready to compete for 
 
 **Validation:**
 - Must have at least N quorum members added
-- Must have collateral attestations from quorum members
 
 ### DisputeAcquire
 
@@ -122,20 +115,18 @@ Seq  Block  Signer  Operation
         │ 18   201    bob     DisputeEnter              │
         │                     (quorum disbanded)          │
         │ 19   202    bob     QuorumAddMember(charlie)    │
-        │ 20   202    bob     CollateralAttestation(charlie)
-        │ 21   203    bob     DisputeArmed                │
+        │ 20   203    bob     DisputeArmed                │
         │          ─── entropy block 206 ───              │
-        │ 22   207    bob     DisputeAcquire (winner!)    │
+        │ 21   207    bob     DisputeAcquire (winner!)    │
         └─────────────────────────────────────────────────┘
 
         ┌─── charlie's branch ───────────────────────────┐
         │ 18   201    charlie DisputeEnter              │
         │                     (quorum disbanded)          │
         │ 19   202    charlie QuorumAddMember(bob)        │
-        │ 20   202    charlie CollateralAttestation(bob)  │
-        │ 21   203    charlie DisputeArmed                │
+        │ 20   203    charlie DisputeArmed                │
         │          ─── entropy block 206 ───              │
-        │ 22   207    charlie DisputeYield (lost)         │
+        │ 21   207    charlie DisputeYield (lost)         │
         └─────────────────────────────────────────────────┘
 ```
 
@@ -160,7 +151,7 @@ This ensures:
 
 1. Each update signed by the same pubkey as the previous update
 2. Exception: DisputeEnter signed by someone who was a quorum member at the fork point
-3. In DISPUTED: only QuorumAddMember and CollateralAttestation allowed
+3. In DISPUTED: only QuorumAddMember allowed (plus DisputeArmed to transition out)
 4. In ARMED: only DisputeAcquire or DisputeYield allowed
 5. DisputeAcquire only valid for entropy-selected winner
 6. DisputeYield only valid for non-winners

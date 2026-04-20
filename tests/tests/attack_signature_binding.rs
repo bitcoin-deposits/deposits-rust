@@ -64,24 +64,6 @@ fn attack_signing_domain_separation() {
             ),
         ),
         (
-            "collateral_lock(deposit_a)",
-            deposits_protocol::collateral_lock_signing_message(
-                &deposit_id_a,
-                500_000,
-                900_000,
-                &make_key(1).1,
-            ),
-        ),
-        (
-            "collateral_lock(deposit_b)",
-            deposits_protocol::collateral_lock_signing_message(
-                &deposit_id_b,
-                500_000,
-                900_000,
-                &make_key(1).1,
-            ),
-        ),
-        (
             "transfer_lock",
             deposits_protocol::transfer_lock_signing_message(
                 &nonce,

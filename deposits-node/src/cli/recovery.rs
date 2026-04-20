@@ -11,7 +11,7 @@ use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1};
 
 use deposits_core::messages::LedgerOperation;
 use deposits_core::types::select_entropy_winner;
-use deposits_core::{CollateralAttestationMsg, SignedLedgerUpdate, TlvDecode, TlvEncode};
+use deposits_core::{SignedLedgerUpdate, TlvDecode, TlvEncode};
 
 use crate::nostr::{NostrTransportBuilder, KIND_LEDGER_DISPUTE, KIND_LEDGER_UPDATE};
 
@@ -1230,31 +1230,29 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
 /// Rebuild the quorum during a dispute.
 pub async fn recovery_rebuild(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-node recovery rebuild <ledger_id> <quorum-add|attestation|status> [args...]");
+        eprintln!(
+            "Usage: deposits-node recovery rebuild <ledger_id> <quorum-add|status> [args...]"
+        );
         eprintln!();
         eprintln!("Subcommands:");
         eprintln!("  quorum-add <member_pubkey>     Add a quorum member to your dispute branch");
-        eprintln!(
-            "  attestation <attestation_json> Record a collateral attestation on your branch"
-        );
-        eprintln!("  status                         Show current quorum/attestation state");
+        eprintln!("  status                         Show current quorum state");
         return Ok(());
     }
 
     let ledger_id = args[0].trim().to_string();
 
     if args.len() < 2 {
-        eprintln!("Missing subcommand. Use: quorum-add, attestation, or status");
+        eprintln!("Missing subcommand. Use: quorum-add or status");
         return Ok(());
     }
 
     match args[1].as_str() {
         "quorum-add" => recovery_rebuild_quorum_add(&ledger_id, &args[2..]).await,
-        "attestation" => recovery_rebuild_attestation(&ledger_id, &args[2..]).await,
         "status" => recovery_rebuild_status(&ledger_id, &args[2..]).await,
         cmd => {
             eprintln!("Unknown rebuild subcommand: {}", cmd);
-            eprintln!("Use: quorum-add, attestation, or status");
+            eprintln!("Use: quorum-add or status");
             Ok(())
         }
     }
@@ -1451,192 +1449,7 @@ pub async fn recovery_rebuild_quorum_add(
     Ok(())
 }
 
-/// Record a collateral attestation on our dispute branch.
-pub async fn recovery_rebuild_attestation(
-    ledger_id: &str,
-    args: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut attestation_json: Option<String> = None;
-    let mut config_args = Vec::new();
-
-    for (i, arg) in args.iter().enumerate() {
-        if arg.starts_with("--") {
-            config_args.push(arg.clone());
-            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                config_args.push(args[i + 1].clone());
-            }
-        } else if attestation_json.is_none() {
-            attestation_json = Some(arg.clone());
-        }
-    }
-
-    let attestation_json = attestation_json.ok_or("Missing attestation_json")?;
-    let attestation: CollateralAttestationMsg = serde_json::from_str(&attestation_json)
-        .map_err(|e| format!("Invalid attestation JSON: {}", e))?;
-
-    let config = parse_config(&config_args)?;
-    let relay_url = config
-        .relays
-        .first()
-        .ok_or("No relay configured. Use --relay <url>")?
-        .clone();
-
-    let secp = Secp256k1::new();
-    let secret_key = derive_operator_secret(&config.seed, config.network)?;
-    let keypair = Keypair::from_secret_key(&secp, &secret_key);
-    let our_pubkey = keypair.public_key();
-
-    println!("Recording collateral attestation on dispute branch...");
-    println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
-    println!("  From: {}...", &attestation.operator.to_string()[..16]);
-    println!("  Amount: {} msats", attestation.amount);
-    println!("  Lock until: block {}", attestation.lock_until_block);
-
-    println!("Fetching ledger from Nostr...");
-    let client = get_or_create_client(&relay_url).await?;
-
-    let filter = Filter::new()
-        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(
-            crate::nostr::TAG_LEDGER_ID,
-            [crate::nostr::ledger_tag(ledger_id)],
-        )
-        .limit(500);
-
-    let events = client
-        .fetch_events(vec![filter], None)
-        .await
-        .map_err(|e| format!("Failed to fetch events: {}", e))?;
-
-    let mut our_updates: Vec<SignedLedgerUpdate> = Vec::new();
-    for event in events.iter() {
-        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
-            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
-                if update.operator_id == our_pubkey {
-                    our_updates.push(update);
-                }
-            }
-        }
-    }
-
-    if our_updates.is_empty() {
-        return Err("No updates found from you. Run 'recovery dispute' first.".into());
-    }
-
-    our_updates.sort_by_key(|u| u.sequence_number);
-    let our_latest = our_updates.last().unwrap().clone();
-    println!(
-        "  Found {} updates from you, latest at sequence {}",
-        our_updates.len(),
-        our_latest.sequence_number
-    );
-
-    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora
-        .get_height()
-        .map_err(|e| format!("Failed to get block height: {:?}", e))?;
-
-    let operation = LedgerOperation::CollateralAttestation {
-        collateral_operator: attestation.operator,
-        quorum_member: attestation.quorum_member,
-        collateral_ledger_id: attestation.collateral_ledger_id.clone(),
-        amount: attestation.amount,
-        block_height: attestation.block_height,
-        lock_until_block: attestation.lock_until_block,
-        signature: attestation.signature,
-        ledger_hash: attestation.ledger_hash,
-    };
-
-    let message_bytes = operation.tlv_encode();
-
-    let sequence = our_latest.sequence_number + 1;
-    let mut hash_input = Vec::new();
-    hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&our_latest.current_hash);
-    hash_input.extend_from_slice(&message_bytes);
-    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
-
-    let update_msg = format!(
-        "deposits:ledger:{}:{}:{}",
-        hex::encode(our_latest.current_hash),
-        sequence,
-        hex::encode(new_hash)
-    );
-    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
-    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
-
-    let ledger_id_bytes: [u8; 32] = {
-        let decoded =
-            hex::decode(ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
-        decoded
-            .try_into()
-            .map_err(|_| "Ledger ID must be 32 bytes")?
-    };
-
-    let signed_update = SignedLedgerUpdate {
-        message: message_bytes,
-        message_type: deposits_core::messages::consts::COLLATERAL_ATTESTATION,
-        operator_signature: operator_sig_bytes,
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
-        cosignatures: Vec::new(),
-        cosign_signature: [0u8; 64],
-        operator_id: our_pubkey,
-        ledger_id: ledger_id_bytes,
-        sequence_number: sequence,
-        previous_hash: our_latest.current_hash,
-        current_hash: new_hash,
-        block_height: current_block_height,
-        block_hash: [0u8; 32],
-    };
-
-    println!("Publishing CollateralAttestation to Nostr...");
-    let publishing_keys = Keys::new(
-        nostr_sdk::SecretKey::from_slice(&config.seed)
-            .map_err(|e| format!("Invalid key: {}", e))?,
-    );
-    let publishing_client = Client::new(publishing_keys.clone());
-    publishing_client
-        .add_relay(&relay_url)
-        .await
-        .map_err(|e| format!("Failed to add relay: {}", e))?;
-    publishing_client.connect().await;
-
-    let update_bytes = signed_update.tlv_encode();
-    let content = BASE64.encode(&update_bytes);
-
-    let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_UPDATE), content)
-        .tags(vec![Tag::custom(
-            TagKind::SingleLetter(crate::nostr::TAG_LEDGER_ID),
-            [ledger_id],
-        )])
-        .sign_with_keys(&publishing_keys)
-        .map_err(|e| format!("Failed to sign event: {}", e))?;
-
-    publishing_client
-        .send_event(event)
-        .await
-        .map_err(|e| format!("Failed to publish: {}", e))?;
-
-    publishing_client.disconnect().await.ok();
-
-    println!();
-    println!("CollateralAttestation published!");
-    println!("  Sequence: {}", sequence);
-    println!("  From: {}...", &attestation.operator.to_string()[..16]);
-    println!("  Amount: {} msats", attestation.amount);
-    println!();
-    println!("Once you have enough attestations, run:");
-    println!(
-        "  recovery arm {}...",
-        &ledger_id[..16.min(ledger_id.len())]
-    );
-
-    Ok(())
-}
-
-/// Show the current quorum/attestation status on our dispute branch.
+/// Show the current quorum status on our dispute branch.
 pub async fn recovery_rebuild_status(
     ledger_id: &str,
     args: &[String],
@@ -1674,7 +1487,6 @@ pub async fn recovery_rebuild_status(
 
     let mut our_updates: Vec<SignedLedgerUpdate> = Vec::new();
     let mut quorum_members: Vec<PublicKey> = Vec::new();
-    let mut attestations: Vec<(PublicKey, u64, u32)> = Vec::new();
     let mut has_dispute = false;
     let mut has_armed = false;
 
@@ -1690,14 +1502,6 @@ pub async fn recovery_rebuild_status(
                                 if !quorum_members.contains(&quorum_member) {
                                     quorum_members.push(quorum_member);
                                 }
-                            }
-                            LedgerOperation::CollateralAttestation {
-                                collateral_operator,
-                                amount,
-                                lock_until_block,
-                                ..
-                            } => {
-                                attestations.push((collateral_operator, amount, lock_until_block));
                             }
                             _ => {}
                         }
@@ -1735,16 +1539,6 @@ pub async fn recovery_rebuild_status(
         println!("  - {}...", &member.to_string()[..16]);
     }
     println!();
-    println!("Collateral attestations: {}", attestations.len());
-    for (op, amount, until) in &attestations {
-        println!(
-            "  - {}... {} msats until block {}",
-            &op.to_string()[..16],
-            amount,
-            until
-        );
-    }
-    println!();
 
     if !has_dispute {
         println!("Next: Run 'recovery dispute <ledger_id>' to open a dispute.");
@@ -1752,8 +1546,6 @@ pub async fn recovery_rebuild_status(
         println!(
             "Next: Add quorum members with 'recovery rebuild <ledger_id> quorum-add <pubkey>'"
         );
-    } else if attestations.is_empty() {
-        println!("Next: Get attestations and record with 'recovery rebuild <ledger_id> attestation <json>'");
     } else if !has_armed {
         println!("Ready to arm! Run 'recovery arm <ledger_id>'");
     } else {

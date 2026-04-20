@@ -15,7 +15,6 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
     let mut amount_sats: Option<u64> = None;
     let mut alias: Option<String> = None;
     let mut skip_cosign_verify = false;
-    let mut is_collateral = false;
     let mut cli_fee_bps: Option<u64> = None;
     let mut cli_fee_fixed: Option<u64> = None;
     let mut cli_fee_period: Option<u64> = None;
@@ -30,9 +29,6 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
             }
             "--skip-cosign-verify" => {
                 skip_cosign_verify = true;
-            }
-            "--collateral" => {
-                is_collateral = true;
             }
             "--fee-bps" if i + 1 < args.len() => {
                 cli_fee_bps = Some(args[i + 1].parse().unwrap_or(0));
@@ -171,15 +167,12 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
     println!();
 
     // Step 1: Send deposit_open request to create the deposit account
-    let mut open_params = serde_json::json!({
+    let open_params = serde_json::json!({
         "deposit_pubkey": hex::encode(our_pubkey.serialize()),
         "fee_fixed": fee_fixed,
         "fee_bps": fee_bps,
         "fee_frequency": fee_frequency,
     });
-    if is_collateral {
-        open_params["is_collateral"] = serde_json::json!(true);
-    }
 
     println!("Sending deposit_open request to operator...");
 

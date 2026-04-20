@@ -61,12 +61,6 @@ pub enum ResponseData {
         /// New state hash after append
         new_hash: [u8; 32],
     },
-    /// Collateral attestation processed
-    CollateralAttestationProcessed {
-        operator: PublicKey,
-        quorum_member: PublicKey,
-        amount: u64,
-    },
     /// Uncredited payment accusation - emit event for node layer
     UncreditedPaymentAccusation {
         operator: PublicKey,

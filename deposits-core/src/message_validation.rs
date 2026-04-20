@@ -803,10 +803,8 @@ pub fn validate_ledger_operation<C: ValidationContext>(
             }
         }
         // Operations without specific validation (validated in ledger.rs or by construction)
-        LedgerOperation::CollateralAttestation { .. }
-        | LedgerOperation::QuorumAddMember { .. }
+        LedgerOperation::QuorumAddMember { .. }
         | LedgerOperation::QuorumRemoveMember { .. }
-        | LedgerOperation::CollateralLock { .. }
         | LedgerOperation::QuorumJoin { .. }
         | LedgerOperation::QuorumBegin { .. }
         | LedgerOperation::DisputeEnter { .. }

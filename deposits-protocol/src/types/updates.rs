@@ -933,7 +933,6 @@ mod deposit_fields {
     pub const FEES: u64 = 8;
     pub const LAST_FEE_ASSESSMENT: u64 = 10;
     pub const TRANSFER_FEES: u64 = 16;
-    pub const IS_COLLATERAL: u64 = 20; // u8 (0 or 1)
     pub const RECEIVE_REQUIRES_SIG: u64 = 22; // u8 (0 or 1)
     pub const FEE_CHANGE_AFTER: u64 = 24; // u32
     pub const FEE_CHANGE_NOTICE: u64 = 26; // u32
@@ -1178,8 +1177,6 @@ impl TlvDecode for SignedLedgerUpdate {
         Ok(update)
     }
 }
-
-// CollateralAttestation TLV codec removed — struct no longer exists.
 
 // ============================================================================
 // Tests
@@ -1426,9 +1423,8 @@ mod tests {
         assert!(!DisputeState::Normal.allows_operation(56)); // DisputeYield
         assert!(!DisputeState::Normal.allows_operation(57)); // DisputeArmed
 
-        // Disputed state - only QuorumAddMember(43), CollateralAttestation(42), DisputeArmed(57)
+        // Disputed state - only QuorumAddMember(43) and DisputeArmed(57)
         assert!(DisputeState::Disputed.allows_operations());
-        assert!(DisputeState::Disputed.allows_operation(42)); // CollateralAttestation
         assert!(DisputeState::Disputed.allows_operation(43)); // QuorumAddMember
         assert!(DisputeState::Disputed.allows_operation(57)); // DisputeArmed
         assert!(!DisputeState::Disputed.allows_operation(10)); // Random op blocked

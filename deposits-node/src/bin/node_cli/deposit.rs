@@ -417,18 +417,10 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         i += 1;
     }
 
-    // Check for --collateral flag
-    let is_collateral = config_args.iter().any(|a| a == "--collateral");
-    let config_args: Vec<String> = config_args
-        .into_iter()
-        .filter(|a| a != "--collateral")
-        .collect();
-
     if positional.len() < 2 {
-        eprintln!("Usage: deposits-node deposit open <reserves_id> <deposit_pubkey> [--collateral] [options]");
+        eprintln!("Usage: deposits-node deposit open <reserves_id> <deposit_pubkey> [options]");
         eprintln!("\nExample:");
         eprintln!("  deposits-node deposit open 02abc...partner 02def...deposit");
-        eprintln!("  deposits-node deposit open <ledger_id> <pubkey> --collateral");
         return Ok(());
     }
 
@@ -444,16 +436,10 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     println!("Opening deposit...");
     println!("  Ledger ID: {}", ledger_id);
     println!("  Deposit pubkey: {}", deposit_pubkey);
-    if is_collateral {
-        println!("  Type: COLLATERAL");
-    }
 
-    let mut params = serde_json::json!({
+    let params = serde_json::json!({
         "deposit_pubkey": deposit_pubkey,
     });
-    if is_collateral {
-        params["is_collateral"] = serde_json::json!(true);
-    }
 
     let result = send_daemon_request(&config, ledger_id, "deposit_open", params).await?;
 

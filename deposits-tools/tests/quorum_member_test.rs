@@ -1,7 +1,7 @@
 //! Tests for quorum member management via ledger updates
 //!
-//! Tests the AddQuorumMember, RemoveQuorumMember, CollateralAttestation,
-//! CollateralConsentRequest, and CollateralConsentResponse messages and their effect on ledger state.
+//! Tests the AddQuorumMember, RemoveQuorumMember, CollateralConsentRequest,
+//! and CollateralConsentResponse messages and their effect on ledger state.
 
 #[cfg(test)]
 mod tests {
@@ -15,8 +15,8 @@ mod tests {
     };
     // Wire message structs from deposits-core for struct construction
     use deposits_core::wire_messages::{
-        CollateralAttestationMsg, CollateralConsentRequestMsg, CollateralConsentResponseMsg,
-        QuorumAddMemberMsg, QuorumRemoveMemberMsg,
+        CollateralConsentRequestMsg, CollateralConsentResponseMsg, QuorumAddMemberMsg,
+        QuorumRemoveMemberMsg,
     };
 
     /// Generate a deterministic test public key
@@ -122,34 +122,6 @@ mod tests {
         println!("QuorumRemoveMemberMsg struct test passed!");
     }
 
-    #[test]
-    fn test_collateral_attestation_message_struct() {
-        let operator = generate_test_pubkey(1);
-        let quorum_member = generate_test_pubkey(2);
-
-        let msg = CollateralAttestationMsg {
-            operator,
-            quorum_member,
-            collateral_ledger_id: "member_collateral_ledger".to_string(),
-            amount: 100_000,
-            block_height: 800_000,
-            lock_until_block: 0,
-            signature: [0xEF; 64],
-            ledger_hash: [0u8; 32],
-        };
-
-        assert_eq!(msg.operator, operator);
-        assert_eq!(msg.quorum_member, quorum_member);
-        assert_eq!(msg.amount, 100_000);
-        assert_eq!(msg.block_height, 800_000);
-        assert_eq!(msg.signature, [0xEF; 64]);
-
-        // Test available_collateral calculation
-        assert_eq!(msg.available_collateral(), 100_000);
-
-        println!("CollateralAttestationMsg struct test passed!");
-    }
-
     // =========================================================================
     // Ledger State Transition Tests
     // =========================================================================
@@ -224,152 +196,6 @@ mod tests {
         assert!(!ledger
             .state
             .next_quorum_members
-            .iter()
-            .any(|m| m.pubkey == member_key));
-    }
-
-    #[test]
-    fn test_ledger_collateral_attestation_from_channel_partner() {
-        let operator_key = generate_test_pubkey(1);
-        let member_key = generate_test_pubkey(2);
-        let mut ledger = Ledger::new_as_operator(operator_key, "bcrt1qtest".to_string(), 0);
-
-        // Add member, promote via QuorumBegin, then attest
-        ledger
-            .apply_state_changes(&LedgerOperation::QuorumAddMember {
-                quorum_member: member_key,
-                quorum_member_signature: [0xAA; 64],
-                member_ledger_id: "member_collateral_ledger".to_string(),
-                min_fee_bps: None,
-                min_fee_fixed: None,
-                max_fee_period: None,
-                membership_until: None,
-                dispute_response_blocks: None,
-                dispute_arm_blocks: None,
-                service_response_blocks: None,
-                max_transfer_timeout_blocks: None,
-                max_descriptor_bytes: None,
-            })
-            .unwrap();
-
-        ledger
-            .apply_state_changes(&LedgerOperation::QuorumBegin {
-                reserves_id: "bcrt1qtest_rotated".to_string(),
-                spending_txid: [0x11; 32],
-                new_outpoint_txid: [0x22; 32],
-                new_outpoint_vout: 0,
-                amount: 100_000_000,
-                quorum_expiry: 1_000_000,
-                ledger_hash: [0x33; 32],
-                quorum_members: vec![member_key],
-                collateral_amount: 50_000,
-            })
-            .unwrap();
-
-        // CollateralAttestation is deprecated (no-op), just verify it doesn't error
-        let result = ledger.apply_state_changes(&LedgerOperation::CollateralAttestation {
-            collateral_operator: member_key,
-            quorum_member: member_key,
-            collateral_ledger_id: "member_collateral_ledger".to_string(),
-            amount: 50_000,
-            block_height: 800_000,
-            lock_until_block: 900_000,
-            signature: [0xEF; 64],
-            ledger_hash: [0u8; 32],
-        });
-        assert!(
-            result.is_ok(),
-            "Deprecated CollateralAttestation should be accepted as no-op"
-        );
-    }
-
-    #[test]
-    fn test_ledger_collateral_attestation_from_unknown_rejected() {
-        let operator_key = generate_test_pubkey(1);
-        let unknown_key = generate_test_pubkey(99);
-        let mut ledger = Ledger::new_as_operator(operator_key, "bcrt1qtest".to_string(), 0);
-
-        // Attempt attestation from a key that is not a quorum member
-        // Use apply_operation which runs validate_operation
-        let result = ledger.apply_operation(&LedgerOperation::CollateralAttestation {
-            collateral_operator: unknown_key,
-            quorum_member: unknown_key,
-            collateral_ledger_id: "unknown_ledger".to_string(),
-            amount: 50_000,
-            block_height: 800_000,
-            lock_until_block: 900_000,
-            signature: [0xEF; 64],
-            ledger_hash: [0u8; 32],
-        });
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_remove_quorum_member_clears_attestation() {
-        let operator_key = generate_test_pubkey(1);
-        let member_key = generate_test_pubkey(2);
-        let mut ledger = Ledger::new_as_operator(operator_key, "bcrt1qtest".to_string(), 0);
-
-        // Add member, promote, attest
-        ledger
-            .apply_state_changes(&LedgerOperation::QuorumAddMember {
-                quorum_member: member_key,
-                quorum_member_signature: [0xAA; 64],
-                member_ledger_id: "member_collateral_ledger".to_string(),
-                min_fee_bps: None,
-                min_fee_fixed: None,
-                max_fee_period: None,
-                membership_until: None,
-                dispute_response_blocks: None,
-                dispute_arm_blocks: None,
-                service_response_blocks: None,
-                max_transfer_timeout_blocks: None,
-                max_descriptor_bytes: None,
-            })
-            .unwrap();
-
-        ledger
-            .apply_state_changes(&LedgerOperation::QuorumBegin {
-                reserves_id: "bcrt1qtest_rotated".to_string(),
-                spending_txid: [0x11; 32],
-                new_outpoint_txid: [0x22; 32],
-                new_outpoint_vout: 0,
-                amount: 100_000_000,
-                quorum_expiry: 1_000_000,
-                ledger_hash: [0x33; 32],
-                quorum_members: vec![member_key],
-                collateral_amount: 50_000,
-            })
-            .unwrap();
-
-        ledger
-            .apply_state_changes(&LedgerOperation::CollateralAttestation {
-                collateral_operator: member_key,
-                quorum_member: member_key,
-                collateral_ledger_id: "member_collateral_ledger".to_string(),
-                amount: 50_000,
-                block_height: 800_000,
-                lock_until_block: 900_000,
-                signature: [0xEF; 64],
-                ledger_hash: [0u8; 32],
-            })
-            .unwrap();
-        // CollateralAttestation was applied
-        let seq_before_remove = ledger.state.sequence;
-
-        // Remove the member
-        ledger
-            .apply_state_changes(&LedgerOperation::QuorumRemoveMember {
-                quorum_member: member_key,
-                operator_signature: [0xBB; 64],
-            })
-            .unwrap();
-
-        // Member should be removed from quorum
-        assert!(!ledger
-            .state
-            .quorum_members
             .iter()
             .any(|m| m.pubkey == member_key));
     }
@@ -620,7 +446,7 @@ mod tests {
     #[test]
     fn test_ledger_update_should_not_skip_broadcast_queue() {
         // LedgerUpdate messages are ledger updates and should NOT be in the skip list
-        // (QuorumAddMember, CollateralAttestation, etc. are all LedgerUpdate operations)
+        // (QuorumAddMember, etc. are all LedgerUpdate operations)
         // We verify the skip list pattern doesn't match LedgerUpdate by checking message types
         use deposits_core::messages::LEDGER_UPDATE;
         assert_eq!(LEDGER_UPDATE, 0x8001);

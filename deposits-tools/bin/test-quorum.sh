@@ -19,7 +19,6 @@ source "$SCRIPT_DIR/_common.sh"
 RESERVES_AMOUNT=100000000  # 1 BTC in sats
 DEPOSIT_PERCENT=20         # 20% of reserves
 ENFORCEMENT_DELAY=200      # Blocks until enforcement
-COLLATERAL_LOCK_BLOCKS=500 # Lock duration
 
 # Use temp directory for state
 STATE_DIR=$(mktemp -d)
@@ -672,89 +671,8 @@ fund_deposits() {
 
 lock_collateral() {
     log_info ""
-    log_info "=== Phase 6: Lock Collateral via Nostr (lock for $COLLATERAL_LOCK_BLOCKS blocks) ==="
+    log_info "=== Phase 6: Skipped (collateral is now tracked at the UTXO level) ==="
     echo ""
-
-    local deposit_amount=$((RESERVES_AMOUNT * DEPOSIT_PERCENT / 100))
-    local deposit_amount_msats=$((deposit_amount * 1000))
-
-    # Group by depositor to avoid concurrent writes to same local ledger
-    local pids=()
-    for depositor in $OPERATORS; do
-        (
-            for op in $OPERATORS; do
-                for n in $(seq 1 $LEDGERS_PER_OP); do
-                    local expected_depositor=$(get_other_n "$op" $((n - 1)))
-                    if [ "$depositor" = "$expected_depositor" ]; then
-                        local has_deposit=$(get_value "deposit_${depositor}_on_${op}_${n}")
-                        if [ "$has_deposit" = "1" ]; then
-                            local secret=$(get_value "secret_${depositor}_${op}_${n}")
-                            local ledger_id=$(get_value "ledger_id_${op}_${n}")
-                            local depositor_ledger_id=$(get_value "ledger_id_${depositor}_1")
-                            local depositor_node_id=$(get_value "node_id_$depositor")
-                            local dep_short="$depositor"
-                            local op_short="$op"
-                            local result_file="$STATE_DIR/lock_${depositor}_${op}_${n}.result"
-
-                            log_info "$dep_short requesting collateral lock on $op_short L$n..."
-
-                            local lock_output=$(run_nostr_request "$depositor" "$ledger_id" collateral_lock "$secret" "$deposit_amount_msats" "$COLLATERAL_LOCK_BLOCKS" "$depositor_node_id" 2>&1)
-
-                            if echo "$lock_output" | grep -q "SUCCESS\|attestation"; then
-                                local attestation_b64=$(echo "$lock_output" | grep -o '"attestation_b64"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/"attestation_b64"[[:space:]]*:[[:space:]]*"//' | sed 's/"$//')
-
-                                if [ -n "$attestation_b64" ]; then
-                                    local attestation_json=$(echo "$attestation_b64" | base64 -d 2>/dev/null)
-
-                                    log_info "  $dep_short recording attestation from $op_short L$n..."
-                                    local record_output=$(run_node_cmd "$depositor" collateral record "$depositor_ledger_id" "$attestation_json" 2>&1)
-
-                                    if echo "$record_output" | grep -q "recorded\|Collateral attestation"; then
-                                        echo "PASS:locked and recorded" > "$result_file"
-                                    else
-                                        echo "FAIL:locked but attestation not recorded" > "$result_file"
-                                        echo "$record_output" > "${result_file}.output"
-                                    fi
-                                else
-                                    echo "FAIL:locked but no attestation in response" > "$result_file"
-                                    echo "$lock_output" > "${result_file}.output"
-                                fi
-                            else
-                                echo "FAIL:failed to lock" > "$result_file"
-                                echo "$lock_output" > "${result_file}.output"
-                            fi
-                        fi
-                    fi
-                done
-            done
-        ) &
-        pids+=($!)
-    done
-
-    for pid in "${pids[@]}"; do
-        wait "$pid" 2>/dev/null
-    done
-
-    # Collect results
-    for op in $OPERATORS; do
-        for n in $(seq 1 $LEDGERS_PER_OP); do
-            local depositor=$(get_other_n "$op" $((n - 1)))
-            local dep_short="$depositor"
-            local op_short="$op"
-            local result_file="$STATE_DIR/lock_${depositor}_${op}_${n}.result"
-
-            if [ -f "$result_file" ]; then
-                local result=$(cat "$result_file")
-                if echo "$result" | grep -q "^PASS"; then
-                    test_pass "$dep_short: locked on $op_short L$n, attestation recorded"
-                else
-                    local reason=$(echo "$result" | sed 's/^FAIL://')
-                    test_fail "$dep_short: $reason on $op_short L$n"
-                    [ -f "${result_file}.output" ] && log_warn "    Output: $(cat "${result_file}.output")"
-                fi
-            fi
-        done
-    done
 }
 
 # ============================================================================
@@ -803,15 +721,13 @@ validate_ledgers() {
             local history_output=$(cat "$tmpdir/${op}_${n}")
 
             local op_count=$(echo "$history_output" | grep -c "↑" 2>/dev/null || echo "0")
-            local lock_count=$(echo "$history_output" | grep -c "CollateralLock" 2>/dev/null || echo "0")
-            local attestation_count=$(echo "$history_output" | grep -c "CollateralAttestation" 2>/dev/null || echo "0")
             local deposit_count=$(echo "$history_output" | grep -c "DepositOpen" 2>/dev/null || echo "0")
             local quorum_add_count=$(echo "$history_output" | grep -c "QuorumAddMember" 2>/dev/null || echo "0")
             local quorum_join_count=$(echo "$history_output" | grep -c "QuorumJoin" 2>/dev/null || echo "0")
             local reserves_rotate_count=$(echo "$history_output" | grep -c "QuorumBegin" 2>/dev/null || echo "0")
 
             if [ "$op_count" -gt 0 ]; then
-                test_pass "$op_short L$n: $op_count ops, $deposit_count deposits, $quorum_add_count adds, $quorum_join_count joins, $reserves_rotate_count rotations, $lock_count locks, $attestation_count attestations"
+                test_pass "$op_short L$n: $op_count ops, $deposit_count deposits, $quorum_add_count adds, $quorum_join_count joins, $reserves_rotate_count rotations"
             else
                 test_fail "$op_short L$n has no operations"
             fi
@@ -1460,7 +1376,6 @@ main() {
     log_info "Reserves: $RESERVES_AMOUNT sats each"
     log_info "Deposit: ${DEPOSIT_PERCENT}% of reserves"
     log_info "Enforcement delay: $ENFORCEMENT_DELAY blocks"
-    log_info "Collateral lock: $COLLATERAL_LOCK_BLOCKS blocks"
     echo ""
 
     # Ensure watchers are stopped on exit

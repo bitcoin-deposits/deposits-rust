@@ -426,13 +426,7 @@ impl LedgerState {
                 next.next_quorum_members
                     .retain(|m| m.pubkey != *quorum_member);
             }
-            LedgerOperation::CollateralLock { .. } => {
-                // Deprecated: collateral is now tracked at the UTXO level via collateral_amount
-            }
             LedgerOperation::LedgerClose => {}
-            LedgerOperation::CollateralAttestation { .. } => {
-                // Deprecated: collateral is now tracked at the UTXO level via collateral_amount
-            }
             LedgerOperation::QuorumJoin {
                 operator_id,
                 ledger_id,
@@ -711,9 +705,6 @@ impl LedgerState {
                         });
                     }
                 }
-            }
-            LedgerOperation::CollateralLock { .. } => {
-                // Deprecated: collateral is now tracked at the UTXO level
             }
             LedgerOperation::DepositKeyRotate {
                 deposit_id,

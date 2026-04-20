@@ -149,10 +149,8 @@ types:
         36 = OnchainLock
         37 = OnchainFail
         38 = OnchainFulfill
-        42 = CollateralAttestation
         43 = QuorumAddMember
         44 = QuorumRemoveMember
-        45 = CollateralLock
         46 = QuorumJoin
         50 = FeeCollect
         54 = DisputeEnter
@@ -196,7 +194,6 @@ types:
   #   202 = descriptor (string, miniscript)
   #   204 = witness (nested TLV)
   #   208 = new_descriptor (string)
-  #   230 = reserved (was is_collateral)
   #   232 = receive_requires_sig (u8, 0 or 1)
   #
   # Fees:
@@ -233,22 +230,21 @@ types:
   #   228 = fail_reason (u8, 1=timeout, 0=reserved)
   #
   # Quorum/Collateral:
-  #   38  = collateral_operator (33 bytes)
-  #   40  = signature (64 bytes, CollateralAttestation)
-  #   42  = ledger_hash (32 bytes, QuorumBegin/CollateralAttestation)
+  #   38  = reserved (was collateral_operator)
+  #   42  = ledger_hash (32 bytes, QuorumBegin)
   #   44  = quorum_member (33 bytes)
   #   46  = quorum_member_sig (64 bytes, QuorumAddMember)
   #   48  = operator_sig (64 bytes, QuorumRemoveMember)
-  #   76  = lock_until_block (u32)
+  #   76  = reserved (was lock_until_block)
   #   80  = our_signature (64 bytes, QuorumJoin)
   #   82  = membership_expires (u32, QuorumJoin)
   #   114 = member_ledger_id (string)
-  #   124 = collateral_ledger_id (string)
+  #   124 = reserved (was collateral_ledger_id)
   #   234 = min_fee_bps (u16, QuorumAddMember)
   #   236 = min_fee_fixed (u64, QuorumAddMember)
   #   238 = max_fee_period (u32, QuorumAddMember)
   #   240 = reserved (was collateral_lock_amount)
-  #   242 = collateral_lock_until (u32, QuorumAddMember)
+  #   242 = membership_until (u32, QuorumAddMember)
   #   252 = dispute_response_blocks (u32, QuorumAddMember)
   #   254 = dispute_arm_blocks (u32, QuorumAddMember)
   #   256 = service_response_blocks (u32, QuorumAddMember)

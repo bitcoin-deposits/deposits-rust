@@ -26,9 +26,6 @@ fn setup_quorum_network() -> TestNetwork {
     net.op_mut("alice")
         .add_quorum_member(&charlie_snap, &charlie_lid);
     net.op_mut("alice").begin_quorum(1_000_000);
-    net.op_mut("alice").record_attestation(&bob_snap, 500_000);
-    net.op_mut("alice")
-        .record_attestation(&charlie_snap, 500_000);
 
     net
 }
@@ -103,7 +100,6 @@ fn dispute_arm_after_enter_succeeds() {
     net.op_mut("alice").add_quorum_member(&bob_snap, "bob_lid");
     net.op_mut("alice")
         .add_quorum_member(&charlie_snap, "charlie_lid");
-    net.op_mut("alice").record_attestation(&bob_snap, 500_000);
 
     let arm_op = deposits_protocol::LedgerOperation::DisputeArmed {
         armed_block: 800_000,
@@ -138,7 +134,6 @@ fn dispute_acquire_returns_to_normal() {
         ledger: net.op("bob").ledger.clone(),
     };
     net.op_mut("alice").add_quorum_member(&bob_snap, "bob_lid");
-    net.op_mut("alice").record_attestation(&bob_snap, 500_000);
 
     let arm_op = deposits_protocol::LedgerOperation::DisputeArmed {
         armed_block: 800_000,
@@ -189,7 +184,6 @@ fn dispute_yield_tombstones_ledger() {
         ledger: net.op("bob").ledger.clone(),
     };
     net.op_mut("alice").add_quorum_member(&bob_snap, "bob_lid");
-    net.op_mut("alice").record_attestation(&bob_snap, 500_000);
 
     let arm_op = deposits_protocol::LedgerOperation::DisputeArmed {
         armed_block: 800_000,

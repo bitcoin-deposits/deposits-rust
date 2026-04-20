@@ -116,13 +116,6 @@ fn invariant_e3_slashing_deterrence() {
             net.op_mut(op_name).add_quorum_member(member, &lid);
         }
         net.op_mut(op_name).begin_quorum(1_000_000);
-        for member in &snapshots {
-            if member.name == *op_name {
-                continue;
-            }
-            net.op_mut(op_name)
-                .record_attestation(member, collateral_per_member);
-        }
     }
 
     // Query actual state: alice's reserves and collateral on her ledger
@@ -427,7 +420,6 @@ fn invariant_s1_dispute_state_gate() {
     let bob_lid = hex::encode(bob_snap.ledger.state.ledger_id);
     net.op_mut("alice").add_quorum_member(&bob_snap, &bob_lid);
     net.op_mut("alice").begin_quorum(1_000_000);
-    net.op_mut("alice").record_attestation(&bob_snap, 500_000);
 
     let user = net.create_depositor("u", 10);
     let did = net.op_mut("alice").open_deposit(&user);
@@ -494,7 +486,7 @@ fn invariant_s1_dispute_state_gate() {
         }
     }
 
-    // QuorumAddMember and CollateralAttestation SHOULD be allowed (rebuild)
+    // QuorumAddMember SHOULD be allowed (rebuild)
     let allowed = net
         .op_mut("alice")
         .ledger
@@ -692,8 +684,7 @@ fn invariant_s4_collateral_in_utxo() {
         blocked: collateral_preserved,
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
-        notes: "Collateral is a declared portion of the UTXO, enforced by co-signers. \
-                CollateralLock operations are deprecated no-ops."
+        notes: "Collateral is a declared portion of the UTXO, enforced by co-signers."
             .into(),
         steps: vec![],
     });
@@ -798,7 +789,6 @@ fn invariant_l2_lottery_liveness() {
     let bob_lid = hex::encode(bob_snap.ledger.state.ledger_id);
     net.op_mut("alice").add_quorum_member(&bob_snap, &bob_lid);
     net.op_mut("alice").begin_quorum(1_000_000);
-    net.op_mut("alice").record_attestation(&bob_snap, 500_000);
 
     let seq = net.op("alice").ledger.state.sequence;
     net.op_mut("alice")
@@ -809,7 +799,6 @@ fn invariant_l2_lottery_liveness() {
         })
         .unwrap();
     net.op_mut("alice").add_quorum_member(&bob_snap, "lid");
-    net.op_mut("alice").record_attestation(&bob_snap, 500_000);
     net.op_mut("alice")
         .ledger
         .apply_operation(&LedgerOperation::DisputeArmed {

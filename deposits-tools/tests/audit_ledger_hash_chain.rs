@@ -132,13 +132,11 @@ fn test_real_world_broken_audit_chain() {
     //
     // Expected direct ledger:
     //   LedgerOpenRequest:    [00000000 → cdfdf7d0]
-    //   AddQuorumMember: [cdfdf7d0 → 786e8e7e]
-    //   CollateralAttestation:[786e8e7e → 6feadabe]
-    //   CollateralAttestation:[6feadabe → b296c726]
-    //   ReservesToReserves:   [b296c726 → c5eaa702]
+    //   AddQuorumMember:      [cdfdf7d0 → 786e8e7e]
+    //   ReservesToReserves:   [786e8e7e → c5eaa702]
     //
     // Broken audit ledger:
-    //   ReservesToReserves:   [6feadabe → c5eaa702]  <- missing 4 updates!
+    //   ReservesToReserves:   [6feadabe → c5eaa702]  <- missing 2 updates!
 
     let broken_audit_updates = vec![
         // Only one update, starting from wrong hash (should be b296c726, not 6feadabe)

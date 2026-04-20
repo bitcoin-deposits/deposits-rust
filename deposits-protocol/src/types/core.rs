@@ -522,7 +522,6 @@ pub struct QuorumMember {
     #[serde(with = "serde_pubkey")]
     pub pubkey: PublicKey,
     /// The ledger ID where this member will lock collateral.
-    /// This must match the collateral_ledger_id in any CollateralAttestation from this member.
     pub ledger_id: String,
     /// Minimum annualized fee rate (basis points) this member requires.
     /// DepositOpen fees below this should be rejected during co-signing.
@@ -587,7 +586,6 @@ pub struct QuorumMember {
 ///
 /// ```text
 /// PreQuorum
-///   │  - Only is_collateral deposits allowed
 ///   │  - Operator-only signatures (no co-signing)
 ///   │  - QuorumAddMember populates pending member list
 ///   │
@@ -604,7 +602,7 @@ pub struct QuorumMember {
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum QuorumState {
-    /// No quorum yet. Only collateral deposits allowed, operator-only signatures.
+    /// No quorum yet. Operator-only signatures (no co-signing required).
     #[default]
     PreQuorum,
     /// Quorum is active. Co-signatures required, full operations allowed.
@@ -619,7 +617,7 @@ pub enum DisputeState {
     #[default]
     Normal,
     /// Dispute has been opened. Quorum is disbanded, only QuorumAddMember
-    /// and CollateralAttestation operations are allowed.
+    /// operations are allowed (along with DisputeArmed to transition).
     Disputed,
     /// Candidate is armed and locked in for entropy selection.
     /// No more quorum/collateral changes allowed.
@@ -646,8 +644,8 @@ impl DisputeState {
                 !matches!(operation_discriminant, 55..=57) // DisputeArmed, DisputeAcquire, DisputeYield
             }
             DisputeState::Disputed => {
-                // Only QuorumAddMember, CollateralAttestation, and DisputeArmed allowed
-                matches!(operation_discriminant, 43 | 42 | 57) // QuorumAddMember, CollateralAttestation, DisputeArmed
+                // Only QuorumAddMember and DisputeArmed allowed
+                matches!(operation_discriminant, 43 | 57) // QuorumAddMember, DisputeArmed
             }
             DisputeState::Armed => {
                 // Only DisputeAcquire or DisputeYield allowed

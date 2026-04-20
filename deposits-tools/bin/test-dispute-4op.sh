@@ -9,7 +9,6 @@
 # 5. Bob, Charlie, Diana each:
 #    - Publish DisputeEnter (opens dispute)
 #    - Rebuild quorum with non-Alice members
-#    - Post collateral attestations from non-Alice members
 #    - Request non-Alice quorum members join their chain
 #    - Publish DisputeArmed (pre-commitment with lottery hash)
 # 6. Confiscate reserves to lottery Tapscript output
@@ -29,7 +28,6 @@ source "$SCRIPT_DIR/_common.sh"
 RESERVES_AMOUNT=100000000  # 1 BTC in sats
 COLLATERAL_PERCENT=15      # 15% of reserves as collateral
 ENFORCEMENT_DELAY=200      # Blocks until enforcement
-COLLATERAL_LOCK_BLOCKS=500 # Lock duration
 
 # Use temp directory for state
 STATE_DIR=$(mktemp -d)
@@ -440,67 +438,6 @@ fund_deposits() {
 }
 
 # ============================================================================
-# Phase 6: Lock collateral and record attestations
-# ============================================================================
-
-lock_collateral() {
-    log_info ""
-    log_info "=== Phase 6: Lock Collateral (lock for $COLLATERAL_LOCK_BLOCKS blocks) ==="
-    echo ""
-
-    local deposit_amount=$((RESERVES_AMOUNT * COLLATERAL_PERCENT / 100))
-    local deposit_amount_msats=$((deposit_amount * 1000))
-
-    for depositor in $OPERATORS; do
-        for operator in $OPERATORS; do
-            local has_deposit=$(get_value "deposit_${depositor}_on_${operator}")
-            if [ "$depositor" != "$operator" ] && [ "$has_deposit" = "1" ]; then
-                local ledger_id=$(get_value "ledger_id_$operator")
-                local depositor_reserves_id=$(get_value "reserves_id_$depositor")
-                local depositor_node_id=$(get_value "node_id_$depositor")
-                local dep_short="$depositor"
-                local op_short="$operator"
-
-                log_info "$dep_short locking collateral on $op_short's ledger..."
-
-                # Get the wallet-derived deposit secret for the depositor's deposit on this ledger
-                local deposit_secret=$(get_deposit_secret "$depositor" "$ledger_id")
-                if [ -z "$deposit_secret" ]; then
-                    test_fail "$dep_short: could not derive deposit secret"
-                    continue
-                fi
-
-                # Send collateral_lock request via Nostr to the operator's ledger
-                # Format: collateral_lock <secret> <amount_msats> <lock_blocks> [requesting_op]
-                local lock_output=$(run_nostr_request "$depositor" "$ledger_id" collateral_lock \
-                    "$deposit_secret" "$deposit_amount_msats" "$COLLATERAL_LOCK_BLOCKS" "$depositor_node_id" 2>&1)
-
-                if echo "$lock_output" | grep -q "success\|attestation\|locked"; then
-                    local attestation_b64=$(echo "$lock_output" | grep -o 'attestation_b64:[[:space:]]*[A-Za-z0-9+/=]*' | sed 's/attestation_b64:[[:space:]]*//')
-
-                    if [ -n "$attestation_b64" ]; then
-                        local attestation_json=$(echo "$attestation_b64" | base64 -d 2>/dev/null)
-                        local record_output=$(run_node_cmd "$depositor" collateral record "$depositor_reserves_id" "$attestation_json" 2>&1)
-
-                        if echo "$record_output" | grep -q "recorded\|Collateral attestation"; then
-                            test_pass "$dep_short: locked on $op_short, attestation recorded"
-                        else
-                            test_fail "$dep_short: locked but attestation not recorded"
-                        fi
-                    else
-                        # Attestation might be auto-recorded
-                        test_pass "$dep_short: locked collateral on $op_short"
-                    fi
-                else
-                    test_fail "$dep_short failed to lock on $op_short"
-                    echo "    Output: $lock_output"
-                fi
-            fi
-        done
-    done
-}
-
-# ============================================================================
 # Phase 7: Mine past enforcement block
 # ============================================================================
 
@@ -621,82 +558,6 @@ rebuild_quorum() {
                 else
                     log_warn "$op_short failed to add $member_short"
                     echo "Output: $add_output" | head -5
-                fi
-            fi
-        done
-    done
-}
-
-# ============================================================================
-# Phase 11: Post collateral attestations from non-Alice members
-# ============================================================================
-
-post_attestations() {
-    log_info ""
-    log_info "=== Phase 11: Post Non-Alice Collateral Attestations ==="
-    echo ""
-
-    local alice_ledger_id=$(get_value "ledger_id_alice")
-
-    for op in $NON_ALICE_OPERATORS; do
-        local has_dispute=$(get_value "dispute_${op}")
-        if [ "$has_dispute" != "1" ]; then
-            continue
-        fi
-
-        local op_short="$op"
-        local op_node_id=$(get_value "node_id_$op")
-
-        log_info "$op_short getting attestations from non-Alice members..."
-
-        # Get attestations from other non-Alice operators
-        for attester in $NON_ALICE_OPERATORS; do
-            if [ "$op" != "$attester" ]; then
-                local attester_short="$attester"
-                local attester_reserves_id=$(get_value "reserves_id_$attester")
-                local attester_node_id=$(get_value "node_id_$attester")
-                local op_ledger_id=$(get_value "ledger_id_$op")
-
-                log_info "  $attester_short locking collateral for $op_short..."
-
-                # Get the attester's wallet-derived deposit secret for this ledger
-                local deposit_secret=$(get_deposit_secret "$attester" "$op_ledger_id")
-                if [ -z "$deposit_secret" ]; then
-                    log_warn "$attester_short: could not derive deposit secret"
-                    continue
-                fi
-
-                # Send collateral_lock request via Nostr to op's ledger
-                local lock_output=$(run_nostr_request "$attester" "$op_ledger_id" collateral_lock \
-                    "$deposit_secret" 15000000000 500 "$attester_node_id" 2>&1)
-
-                if echo "$lock_output" | grep -q "success\|attestation\|locked"; then
-                    # Extract attestation (may be auto-recorded or returned)
-                    local attestation_b64=$(echo "$lock_output" | grep -o 'attestation_b64:[[:space:]]*[A-Za-z0-9+/=]*' | sed 's/attestation_b64:[[:space:]]*//')
-                    local attestation_json=""
-                    if [ -n "$attestation_b64" ]; then
-                        attestation_json=$(echo "$attestation_b64" | base64 -d 2>/dev/null)
-                    fi
-
-                    if [ -n "$attestation_json" ]; then
-                        log_info "  $op_short recording attestation from $attester_short..."
-
-                        # Record attestation on dispute branch
-                        local record_output=$(run_node_cmd "$op" recovery rebuild "$alice_ledger_id" attestation "$attestation_json" 2>&1)
-
-                        if echo "$record_output" | grep -q "published\|CollateralAttestation"; then
-                            test_pass "$op_short got attestation from $attester_short"
-                        else
-                            log_warn "$op_short failed to record attestation from $attester_short"
-                            echo "Output: $record_output" | head -5
-                        fi
-                    else
-                        # Attestation may have been auto-recorded by the node
-                        test_pass "$attester_short locked collateral for $op_short"
-                    fi
-                else
-                    log_warn "$attester_short failed to lock collateral for $op_short"
-                    echo "Lock output: $lock_output" | head -5
                 fi
             fi
         done
@@ -1043,7 +904,6 @@ main() {
     log_info "Reserves: $RESERVES_AMOUNT sats each"
     log_info "Collateral: ${COLLATERAL_PERCENT}% per partner"
     log_info "Enforcement delay: $ENFORCEMENT_DELAY blocks"
-    log_info "Collateral lock: $COLLATERAL_LOCK_BLOCKS blocks"
     echo ""
 
     trap cleanup_nostr_watchers EXIT
@@ -1069,14 +929,12 @@ main() {
     # Open cross-deposits using deposits-wallet (keys derived from seed)
     open_cross_deposits
     fund_deposits
-    lock_collateral
     mine_to_enforcement
 
     # Dispute phase
     alice_goes_rogue
     start_disputes
     rebuild_quorum
-    post_attestations
     arm_for_entropy
 
     # Lottery phase (on-chain dispute resolution)

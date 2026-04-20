@@ -268,28 +268,6 @@ fn format_op(op: &LedgerOperation) -> String {
             format_msats(*amount),
             block_height
         ),
-        LedgerOperation::CollateralAttestation {
-            collateral_operator,
-            amount,
-            block_height,
-            ..
-        } => format!(
-            "CollateralAttest  operator={} amount={} block={}",
-            short_pubkey(collateral_operator),
-            format_msats(*amount),
-            block_height
-        ),
-        LedgerOperation::CollateralLock {
-            deposit_id,
-            amount,
-            lock_until_block,
-            ..
-        } => format!(
-            "CollateralLock  id={} amount={} until={}",
-            short_deposit_id(deposit_id),
-            format_msats(*amount),
-            lock_until_block
-        ),
         LedgerOperation::TransferLock {
             source_deposit_id,
             destination_deposit_id,
@@ -1447,13 +1425,12 @@ fn lookup_op_field(tag: u64) -> (&'static str, Enc) {
         224 => ("script_witness", Enc::Witness),
         226 => ("transfer_fees", Enc::FeeTlv),
         228 => ("fail_reason", Enc::U8),
-        230 => ("is_collateral", Enc::U8),
         232 => ("receive_requires_sig", Enc::U8),
         234 => ("min_fee_bps", Enc::U16),
         236 => ("min_fee_fixed", Enc::U64),
         238 => ("max_fee_period", Enc::U32),
-        240 => ("collateral_lock_amount", Enc::U64),
-        242 => ("collateral_lock_until", Enc::U32),
+        // 240 was collateral_lock_amount (removed with collateral-in-UTXO migration)
+        242 => ("membership_until", Enc::U32),
         244 => ("fee_change_after", Enc::U32),
         246 => ("fee_change_notice", Enc::U32),
         248 => ("fee_change_limit_bps", Enc::U16),
@@ -1495,10 +1472,8 @@ fn discriminant_name(disc: u8) -> &'static str {
         36 => "OnchainLock",
         37 => "OnchainFail",
         38 => "OnchainFulfill",
-        42 => "CollateralAttestation",
         43 => "QuorumAddMember",
         44 => "QuorumRemoveMember",
-        45 => "CollateralLock",
         46 => "QuorumJoin",
         50 => "FeeCollect",
         54 => "DisputeEnter",
@@ -1520,7 +1495,7 @@ fn format_field_value(val: &[u8], enc: Enc, name: &str, col: &Col) -> String {
             let v = val.first().copied().unwrap_or(0);
             if name == "discriminant" {
                 format!("{} = {}", v, col.green(discriminant_name(v)))
-            } else if name == "is_collateral" || name == "receive_requires_sig" {
+            } else if name == "receive_requires_sig" {
                 format!("{} ({})", v, if v != 0 { "true" } else { "false" })
             } else {
                 format!("{}", v)
@@ -2099,7 +2074,7 @@ fn format_field_spans(val: &[u8], enc: Enc, name: &str) -> Vec<Span<'static>> {
                     Span::raw(format!("{} = ", v)),
                     Span::styled(discriminant_name(v).to_string(), green),
                 ]
-            } else if name == "is_collateral" || name == "receive_requires_sig" {
+            } else if name == "receive_requires_sig" {
                 vec![Span::raw(format!(
                     "{} ({})",
                     v,

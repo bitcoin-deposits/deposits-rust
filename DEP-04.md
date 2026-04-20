@@ -98,8 +98,6 @@ Wallets send ephemeral Kind 20101 events to operator relays. The content is JSON
 | cosign_invoice | Request co-signature on invoice | DEP-10 |
 | partner_add | Add quorum member | DEP-05 |
 | partner_join | Record quorum join | DEP-05 |
-| collateral_lock | Lock collateral | DEP-05 |
-| collateral_record | Record collateral attestation | DEP-05 |
 | request_route | Request cross-ledger route from courier | DEP-13 |
 
 ### Response Format

@@ -101,10 +101,6 @@ fn describe_metrics() {
         "pending_cosign_requests",
         "Number of pending co-sign requests awaiting response"
     );
-    describe_gauge!(
-        "pending_collateral_requests",
-        "Number of pending collateral lock requests"
-    );
     describe_gauge!("pending_deposit_offers", "Number of pending deposit offers");
 
     // Latency metrics
@@ -437,11 +433,6 @@ pub fn record_transfer_completed(ledger_id: &str) {
 /// Set the number of pending co-sign requests.
 pub fn set_pending_cosign_requests(count: usize) {
     gauge!("pending_cosign_requests").set(count as f64);
-}
-
-/// Set the number of pending collateral lock requests.
-pub fn set_pending_collateral_requests(count: usize) {
-    gauge!("pending_collateral_requests").set(count as f64);
 }
 
 /// Set the number of pending deposit offers.

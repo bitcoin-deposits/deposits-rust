@@ -247,9 +247,7 @@ pub fn handle_ledger_update<C: HandlerContext>(
                 // or have already been checked for idempotency above
                 LedgerOperation::QuorumAddMember { .. }
                 | LedgerOperation::QuorumRemoveMember { .. }
-                | LedgerOperation::CollateralLock { .. }
                 | LedgerOperation::QuorumJoin { .. }
-                | LedgerOperation::CollateralAttestation { .. }
                 | LedgerOperation::QuorumBegin { .. }
                 | LedgerOperation::DisputeEnter { .. }
                 | LedgerOperation::DisputeArmed { .. }

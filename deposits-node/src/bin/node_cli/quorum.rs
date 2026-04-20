@@ -218,13 +218,9 @@ async fn quorum_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .windows(2)
         .find(|w| w[0] == "--max-fee-period")
         .and_then(|w| w[1].parse().ok());
-    let collateral_lock_amount: Option<u64> = config_args
+    let membership_until: Option<u64> = config_args
         .windows(2)
-        .find(|w| w[0] == "--collateral-amount")
-        .and_then(|w| w[1].parse().ok());
-    let collateral_lock_until: Option<u64> = config_args
-        .windows(2)
-        .find(|w| w[0] == "--collateral-lock-until")
+        .find(|w| w[0] == "--membership-until")
         .and_then(|w| w[1].parse().ok());
 
     let mut params = serde_json::json!({
@@ -240,11 +236,8 @@ async fn quorum_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(v) = max_fee_period {
         params["max_fee_period"] = v.into();
     }
-    if let Some(v) = collateral_lock_amount {
-        params["collateral_lock_amount"] = v.into();
-    }
-    if let Some(v) = collateral_lock_until {
-        params["collateral_lock_until"] = v.into();
+    if let Some(v) = membership_until {
+        params["membership_until"] = v.into();
     }
 
     let result = send_daemon_request(&config, &ledger_id, "quorum_add", params).await?;

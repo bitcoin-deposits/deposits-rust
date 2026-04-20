@@ -5,7 +5,6 @@
 | # | System | Status | Description |
 |---|--------|--------|-------------|
 | 1 | Cryptographic Ledger | ✅ Complete | Hash chains, SignedLedgerUpdate, audit broadcasting |
-| 2 | Multichannel Collateral | ✅ Complete | Attestations, validation, game theory enforcement |
 | 3 | Dedicated Commitment Output | ✅ Complete | Tapscript reserves in commitment TX |
 | 4 | Peer Multisig + VoterSet | ✅ Complete | VoterSet wired to reserves output, voter registration implemented |
 | 5 | Invoice Cosigning | ✅ Complete | Partner cosigns invoices before valid |
@@ -18,21 +17,6 @@
 ---
 
 ## Detailed TODO
-
-### System 2: Multichannel Collateral ✅
-- [x] CollateralAttestationMsg (0x808D) codec support
-- [x] CollateralAttestation message handler (stores attestations per ledger)
-- [x] Collateral validation: reserves >= deposits AND attestations >= deposits
-- [x] Ledger.validate_collateral_for_liability() with stale attestation detection
-- [x] Ledger.can_add_deposit() and can_credit_payment() validation helpers
-- [x] 8 new unit tests for collateral validation
-
-**Game Theory:**
-- Each ledger needs reserves >= deposits (direct backing)
-- Each ledger also needs attestations >= deposits (collateral backing)
-- Attestations = excess reserves in OTHER channels that quorum members can slash
-- Same attestation backs multiple ledgers (capital efficiency)
-- Theft requires colluding with enough quorum members that remaining attestations can't cover
 
 ### System 4: Peer Multisig + VoterSet ✅
 - [x] Wire VoterSet into tapscript building for reserves output
@@ -97,7 +81,6 @@
 4. **System 4: VoterSet** - Need voters identified for voting/claims
 5. **System 9: Tiered Recovery** - Determine who can claim
 6. **System 10: Ledger Reassignment** - Execute the claim
-7. **System 2: Collateral** - Central to economic security (saving for last)
 
 ---
 
@@ -122,6 +105,3 @@
 - [x] AddQuorumMember message (0x8097) for voter registration during multi-party quorum setup
 - [x] VoterSet fix: operator excluded from voters (they're being judged)
 - [x] Recovery claim codec support (0x8091, 0x8093, 0x8095) for signature collection flow
-- [x] CollateralAttestation (0x808D) codec and message handler
-- [x] Collateral validation: validate_collateral_for_liability(), can_add_deposit(), can_credit_payment()
-- [x] 8 unit tests for collateral validation (reserves + attestations game theory)

@@ -358,7 +358,6 @@ fn double_dispute_enter_rejected() {
     let bob_lid = hex::encode(bob_snap.ledger.state.ledger_id);
     net.op_mut("alice").add_quorum_member(&bob_snap, &bob_lid);
     net.op_mut("alice").begin_quorum(1_000_000);
-    net.op_mut("alice").record_attestation(&bob_snap, 500_000);
 
     let seq = net.op("alice").ledger.state.sequence;
     net.op_mut("alice")

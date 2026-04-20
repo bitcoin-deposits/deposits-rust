@@ -42,12 +42,12 @@ pub mod consts {
     pub const COLLATERAL_INCREASE: u16 = 0x80CB;
     pub const COLLATERAL_DECREASE: u16 = 0x80CD;
     pub const COLLATERAL_STATUS: u16 = 0x80CF;
-    pub const COLLATERAL_ATTESTATION: u16 = 0x808D;
+    // 0x808D was COLLATERAL_ATTESTATION (removed with collateral-in-UTXO migration)
     pub const QUORUM_ADD_MEMBER: u16 = 0x8097;
     pub const QUORUM_REMOVE_MEMBER: u16 = 0x8099;
     pub const COLLATERAL_CONSENT_REQUEST: u16 = 0x809B;
     pub const COLLATERAL_CONSENT_RESPONSE: u16 = 0x809D;
-    pub const COLLATERAL_LOCK: u16 = 0x809F;
+    // 0x809F was COLLATERAL_LOCK (removed with collateral-in-UTXO migration)
     pub const QUORUM_JOIN: u16 = 0x80AB;
 
     // Deposit operations
@@ -143,7 +143,6 @@ pub const ALL_OPERATION_MESSAGE_TYPES: &[u16] = &[
     COLLATERAL_INCREASE,
     COLLATERAL_DECREASE,
     COLLATERAL_STATUS,
-    COLLATERAL_ATTESTATION,
     QUORUM_ADD_MEMBER,
     QUORUM_REMOVE_MEMBER,
     COLLATERAL_CONSENT_REQUEST,
@@ -235,7 +234,6 @@ pub fn get_message_category(message_type: u16) -> Option<&'static str> {
         COLLATERAL_INCREASE
         | COLLATERAL_DECREASE
         | COLLATERAL_STATUS
-        | COLLATERAL_ATTESTATION
         | QUORUM_ADD_MEMBER
         | QUORUM_REMOVE_MEMBER
         | COLLATERAL_CONSENT_REQUEST

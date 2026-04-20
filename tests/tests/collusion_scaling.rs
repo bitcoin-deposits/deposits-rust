@@ -282,11 +282,6 @@ fn collusion_verified_against_protocol() {
             net.op_mut(&names[i]).add_quorum_member(member, &lid);
         }
         net.op_mut(&names[i]).begin_quorum(1_000_000);
-        for j in 1..=q {
-            let member_idx = (i + j) % n;
-            net.op_mut(&names[i])
-                .record_attestation(&snapshots[member_idx], 500_000);
-        }
     }
 
     // Coalition: op_0 steals from their own ledger

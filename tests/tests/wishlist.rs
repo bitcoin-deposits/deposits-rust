@@ -513,12 +513,6 @@ fn tier3_3_lottery_griefing() {
         net.op_mut("alice").add_quorum_member(member, &lid);
     }
     net.op_mut("alice").begin_quorum(1_000_000);
-    for member in &snapshots {
-        if member.name == "alice" {
-            continue;
-        }
-        net.op_mut("alice").record_attestation(member, 500_000);
-    }
 
     // Enter dispute
     let seq = net.op("alice").ledger.state.sequence;
@@ -538,8 +532,6 @@ fn tier3_3_lottery_griefing() {
         net.op_mut("alice")
             .add_quorum_member(member, &hex::encode(member.ledger.state.ledger_id));
     }
-    net.op_mut("alice")
-        .record_attestation(&snapshots[1], 500_000);
 
     // Bob arms (commits to lottery)
     net.op_mut("alice")

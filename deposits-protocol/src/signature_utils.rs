@@ -40,25 +40,6 @@ pub fn withdrawal_signing_message(
     sha256::Hash::hash(signing_message.as_bytes()).to_byte_array()
 }
 
-/// Create the signing message hash for a collateral lock.
-///
-/// Format: SHA256("COLLATERAL_LOCK:{deposit_id}:{amount}:{lock_until_block}:{operator_id}")
-pub fn collateral_lock_signing_message(
-    deposit_id: &crate::types::DepositId,
-    amount: u64,
-    lock_until_block: u32,
-    operator_id: &PublicKey,
-) -> [u8; 32] {
-    let message = format!(
-        "COLLATERAL_LOCK:{}:{}:{}:{}",
-        hex::encode(deposit_id),
-        amount,
-        lock_until_block,
-        operator_id
-    );
-    sha256::Hash::hash(message.as_bytes()).to_byte_array()
-}
-
 /// Create the signing message hash for an invoice lock (Lightning payment).
 ///
 /// Format: SHA256("INVOICE:{deposit_id}:{payment_hash}:{amount_with_fees}")

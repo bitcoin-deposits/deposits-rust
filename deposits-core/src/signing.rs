@@ -15,8 +15,8 @@ use crate::error::DepositsError;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{schnorr::Signature, Keypair, Message, PublicKey, Secp256k1, SecretKey};
 use deposits_protocol::signature_utils::{
-    collateral_lock_signing_message, compute_transfer_id, invoice_lock_signing_message,
-    transfer_lock_signing_message, withdrawal_signing_message,
+    compute_transfer_id, invoice_lock_signing_message, transfer_lock_signing_message,
+    withdrawal_signing_message,
 };
 
 /// Create a deposit guarantee signature (Bob's commitment to credit specific deposit)
@@ -373,27 +373,6 @@ pub fn verify_transfer_complete_witness(
     crate::descriptor::verify_witness(completion_script, script_witness, &message_hash)
 }
 
-/// Verify a collateral lock witness.
-///
-/// Verifies that the witness satisfies the deposit's descriptor for the
-/// collateral lock authorization.
-pub fn verify_collateral_lock_witness(
-    witness: &crate::types::DescriptorWitness,
-    descriptor: &str,
-    deposit_id: &crate::types::DepositId,
-    amount: u64,
-    lock_until_block: u32,
-    operator_id: &PublicKey,
-    _block_height: u32,
-) -> Result<bool, DepositsError> {
-    // Get the message hash
-    let message_hash =
-        collateral_lock_signing_message(deposit_id, amount, lock_until_block, operator_id);
-
-    // Verify the witness
-    crate::descriptor::verify_witness(descriptor, witness, &message_hash)
-}
-
 /// Create a withdrawal authorization signature.
 ///
 /// Creates a Schnorr signature authorizing a withdrawal from a deposit.
@@ -432,47 +411,6 @@ pub fn create_withdrawal_signature(
         amount_sats,
         fee_sats,
     );
-
-    // Sign with Schnorr
-    let secp = Secp256k1::new();
-    let keypair = Keypair::from_secret_key(&secp, secret_key);
-    let msg = Message::from_digest(message_hash);
-    let sig: Signature = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-
-    Ok(sig.serialize())
-}
-
-/// Create a collateral lock authorization signature.
-///
-/// Creates a Schnorr signature authorizing a collateral lock on a deposit.
-/// This signature is used as part of the DescriptorWitness for the collateral lock.
-///
-/// # Arguments
-/// * `secret_key` - The deposit holder's secret key
-/// * `deposit_pubkey` - The deposit's public key (for deriving deposit_id)
-/// * `amount` - Amount to lock in millisatoshis
-/// * `lock_until_block` - Block height until which the collateral is locked
-/// * `operator_id` - The operator's public key
-///
-/// # Returns
-/// A 64-byte Schnorr signature
-pub fn create_collateral_lock_signature(
-    secret_key: &SecretKey,
-    deposit_pubkey: &PublicKey,
-    amount: u64,
-    lock_until_block: u32,
-    operator_id: &PublicKey,
-) -> Result<[u8; 64], DepositsError> {
-    use bitcoin::secp256k1::schnorr::Signature;
-    use bitcoin::secp256k1::Keypair;
-
-    // Derive deposit_id from pubkey (for backwards compatibility)
-    let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
-    let deposit_id = crate::types::compute_deposit_id(&descriptor);
-
-    // Get the message hash
-    let message_hash =
-        collateral_lock_signing_message(&deposit_id, amount, lock_until_block, operator_id);
 
     // Sign with Schnorr
     let secp = Secp256k1::new();
@@ -815,84 +753,4 @@ mod tests {
         assert!(!valid, "Signature should be invalid for modified amount");
     }
 
-    #[test]
-    fn test_collateral_lock_signature_roundtrip() {
-        use crate::types::{compute_deposit_id, DescriptorWitness};
-
-        let (deposit_holder_secret, deposit_pubkey) = create_test_keypair();
-        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
-        let deposit_id = compute_deposit_id(&descriptor);
-
-        // Create another keypair for operator
-        let secp = Secp256k1::new();
-        let operator_secret = SecretKey::from_slice(&[2u8; 32]).unwrap();
-        let operator_pubkey = PublicKey::from_secret_key(&secp, &operator_secret);
-
-        let amount = 1_000_000u64;
-        let lock_until_block = 850_000u32;
-
-        // Create signature
-        let sig = create_collateral_lock_signature(
-            &deposit_holder_secret,
-            &deposit_pubkey,
-            amount,
-            lock_until_block,
-            &operator_pubkey,
-        )
-        .unwrap();
-
-        // Verify signature using verify_collateral_lock_witness
-        let witness = DescriptorWitness::from_signature(&sig);
-        let valid = verify_collateral_lock_witness(
-            &witness,
-            &descriptor,
-            &deposit_id,
-            amount,
-            lock_until_block,
-            &operator_pubkey,
-            800_000,
-        )
-        .unwrap();
-        assert!(valid, "Collateral lock signature should be valid");
-    }
-
-    #[test]
-    fn test_collateral_lock_signature_wrong_amount() {
-        use crate::types::{compute_deposit_id, DescriptorWitness};
-
-        let (deposit_holder_secret, deposit_pubkey) = create_test_keypair();
-        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
-        let deposit_id = compute_deposit_id(&descriptor);
-
-        let secp = Secp256k1::new();
-        let operator_secret = SecretKey::from_slice(&[2u8; 32]).unwrap();
-        let operator_pubkey = PublicKey::from_secret_key(&secp, &operator_secret);
-
-        let amount = 1_000_000u64;
-        let lock_until_block = 850_000u32;
-
-        // Create signature with original amount
-        let sig = create_collateral_lock_signature(
-            &deposit_holder_secret,
-            &deposit_pubkey,
-            amount,
-            lock_until_block,
-            &operator_pubkey,
-        )
-        .unwrap();
-
-        // Verify with different amount should fail
-        let witness = DescriptorWitness::from_signature(&sig);
-        let valid = verify_collateral_lock_witness(
-            &witness,
-            &descriptor,
-            &deposit_id,
-            amount + 1000, // Different amount
-            lock_until_block,
-            &operator_pubkey,
-            800_000,
-        )
-        .unwrap();
-        assert!(!valid, "Signature should be invalid for modified amount");
-    }
 }

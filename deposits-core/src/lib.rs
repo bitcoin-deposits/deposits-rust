@@ -168,8 +168,8 @@ pub use validation::{
 };
 // Re-export signing message builders from signature_utils (pure data construction)
 pub use signature_utils::{
-    collateral_lock_signing_message, compute_transfer_id, invoice_lock_signing_message,
-    transfer_lock_signing_message, withdrawal_signing_message,
+    compute_transfer_id, invoice_lock_signing_message, transfer_lock_signing_message,
+    withdrawal_signing_message,
 };
 // Re-export crypto operations from signing module
 pub use message_handlers::{handle_ledger_update, HandlerResult, ResponseData};
@@ -219,17 +219,15 @@ pub use operation_validation::{
     MAX_FEE_RATE_BPS,
 };
 pub use signing::{
-    create_collateral_lock_signature, create_deposit_guarantee_signature,
-    create_deposit_offer_signature, create_payment_authorization_signature,
-    create_payment_signature, create_withdrawal_signature, verify_collateral_lock_witness,
-    verify_deposit_guarantee_signature, verify_deposit_offer_signature,
-    verify_invoice_lock_witness, verify_payment_signature, verify_transfer_complete_witness,
-    verify_transfer_lock_witness, verify_withdrawal_witness,
+    create_deposit_guarantee_signature, create_deposit_offer_signature,
+    create_payment_authorization_signature, create_payment_signature,
+    create_withdrawal_signature, verify_deposit_guarantee_signature,
+    verify_deposit_offer_signature, verify_invoice_lock_witness, verify_payment_signature,
+    verify_transfer_complete_witness, verify_transfer_lock_witness, verify_withdrawal_witness,
 };
 pub use tlv::{TlvBuilder, TlvDecode, TlvEncode, TlvError, TlvReader, TlvResult, TlvStream};
 pub use wire_messages::{
     AcceptReservesMsg,
-    CollateralAttestationMsg,
     CollateralConsentRequestMsg,
     CollateralConsentResponseMsg,
     DepositCloseMsg,

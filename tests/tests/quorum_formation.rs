@@ -1,4 +1,4 @@
-//! Quorum formation: add members, begin quorum, collateral attestations.
+//! Quorum formation: add members, begin quorum.
 
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use deposits_core::ledger::Ledger;
@@ -72,28 +72,6 @@ fn quorum_begin_promotes_members() {
 }
 
 #[test]
-fn collateral_attestation_tracked() {
-    let mut net = TestNetwork::new(&["alice", "bob"], 1_000_000);
-
-    let bob_snap = Operator {
-        name: "bob".into(),
-        secret_key: net.op("bob").secret_key,
-        public_key: net.op("bob").public_key,
-        ledger: net.op("bob").ledger.clone(),
-    };
-    let bob_lid = hex::encode(bob_snap.ledger.state.ledger_id);
-
-    net.op_mut("alice").add_quorum_member(&bob_snap, &bob_lid);
-    net.op_mut("alice").begin_quorum(1_000_000);
-
-    // Record attestation
-    net.op_mut("alice").record_attestation(&bob_snap, 500_000);
-
-    // Verify attestation was recorded (sequence advanced)
-    assert!(net.op("alice").ledger.state.sequence > 0);
-}
-
-#[test]
 fn full_quorum_setup_three_operators() {
     let mut net = TestNetwork::new(&["alice", "bob", "charlie"], 1_000_000);
 
@@ -126,20 +104,6 @@ fn full_quorum_setup_three_operators() {
     }
 
     net.op_mut("alice").begin_quorum(1_000_000);
-
-    // Record attestations from both members
-    for (name, sk, pk, _) in &ops {
-        if name == "alice" {
-            continue;
-        }
-        let member = Operator {
-            name: name.clone(),
-            secret_key: *sk,
-            public_key: *pk,
-            ledger: Ledger::new_as_operator(*pk, format!("bcrt1q{}reserves", name), 0),
-        };
-        net.op_mut("alice").record_attestation(&member, 500_000);
-    }
 
     // Verify full quorum state
     let state = &net.op("alice").ledger.state;

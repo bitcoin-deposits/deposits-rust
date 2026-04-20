@@ -1218,41 +1218,6 @@ impl Ledger {
                     });
                 }
             }
-            LedgerOperation::CollateralLock {
-                deposit_id,
-                amount,
-                operator_id,
-                ..
-            } => {
-                // 1. Deposit must exist
-                let deposit = self
-                    .state
-                    .deposits
-                    .get(deposit_id)
-                    .ok_or(DepositsError::DepositNotFound)?;
-
-                // 2. Witness verification is done at the message handler level
-                // where the descriptor can be evaluated against the witness
-
-                // 3. amount <= deposit.balance
-                if *amount > deposit.balance {
-                    return Err(DepositsError::InsufficientDepositBalance {
-                        available: deposit.balance,
-                        required: *amount,
-                    });
-                }
-
-                // 4. operator_id must match ledger operator
-                if *operator_id != self.state.operator_key {
-                    return Err(DepositsError::ProtocolViolation {
-                        violation_type: "invalid_collateral_lock_operator".to_string(),
-                        details: format!(
-                            "Operator ID {} does not match ledger operator {}",
-                            operator_id, self.state.operator_key
-                        ),
-                    });
-                }
-            }
             LedgerOperation::QuorumJoin {
                 operator_id,
                 ledger_id,
@@ -1309,50 +1274,6 @@ impl Ledger {
                 }
                 // Winner validation is done via validate_custody_resolution()
                 // which requires knowing all candidates (from Nostr observation)
-            }
-            LedgerOperation::CollateralAttestation {
-                collateral_operator,
-                collateral_ledger_id,
-                ..
-            } => {
-                // 1. Verify the collateral_operator is a quorum member (active or pending).
-                let member = self
-                    .state
-                    .quorum_members
-                    .iter()
-                    .find(|m| m.pubkey == *collateral_operator)
-                    .or_else(|| {
-                        self.state
-                            .next_quorum_members
-                            .iter()
-                            .find(|m| m.pubkey == *collateral_operator)
-                    });
-
-                let Some(member) = member else {
-                    return Err(DepositsError::ProtocolViolation {
-                        violation_type: "collateral_attestation_from_non_member".to_string(),
-                        details: format!(
-                            "Attestation from {} who is not a quorum member",
-                            collateral_operator
-                        ),
-                    });
-                };
-
-                // 2. Verify collateral_ledger_id matches the member's announced ledger.
-                // The member_ledger_id was declared when the member was added via
-                // QuorumAddMember — the attestation must reference that same ledger.
-                if !member.ledger_id.is_empty()
-                    && !collateral_ledger_id.is_empty()
-                    && member.ledger_id != *collateral_ledger_id
-                {
-                    return Err(DepositsError::ProtocolViolation {
-                        violation_type: "collateral_attestation_wrong_ledger".to_string(),
-                        details: format!(
-                            "Attestation references ledger {} but member announced {}",
-                            collateral_ledger_id, member.ledger_id
-                        ),
-                    });
-                }
             }
             _ => {
                 // Other operations have simpler or no validation

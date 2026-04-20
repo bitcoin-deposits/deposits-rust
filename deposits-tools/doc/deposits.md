@@ -168,109 +168,6 @@ When building commitment transactions, both parties must agree on the hash of ea
 
 ---
 
-## 2. Multichannel Collateral
-
-The 100%+100% collateral model ensures deposits are backed by both direct reserves AND slashable collateral from other channels.
-
-### The Two-Layer Protection
-
-```
-Layer 1 - RESERVES:      reserves >= deposits (direct backing in this channel)
-Layer 2 - ATTESTATIONS:  attestations >= deposits (slashable funds in other channels)
-```
-
-Both requirements must be met before any operation that increases deposit liability.
-
-### Example: Alice Operates Three Channels
-
-```
-Alice→Bob:     deposits=60k, reserves=80k (20k as collateral)
-Alice→Charlie: deposits=50k, reserves=80k (30k as collateral)
-Alice→David:   deposits=40k, reserves=70k (30k as collateral)
-
-Total deposits: 150k
-Total reserves: 230k (80k as slashable collateral)
-```
-
-For the Alice→Bob ledger:
-- **Reserves**: 60k ≥ 60k deposits ✓
-- **Attestations**: Charlie attests 30k + David attests 30k = 60k ≥ 60k deposits ✓
-
-### Collateral Attestation Message
-
-Partners send `COLLATERAL_ATTESTATION` (0x808D) to attest how much of the operator's funds are collateral at risk:
-
-```rust
-pub struct CollateralAttestationMsg {
-    pub reserves_output_amount: u64,  // Operator's reserves in our channel
-    pub reserves_required: u64,       // Required for operator's deposits with us
-    pub block_height: u32,            // Freshness check
-    pub signature: [u8; 64],          // Partner's signature
-}
-
-// Available collateral = reserves_output_amount - reserves_required
-// This is what recovery can slash if the operator cheats
-```
-
-### Game Theory: Why Theft is Unprofitable
-
-If Alice colludes with Bob to steal the 60k reserves from Alice→Bob:
-1. The reserves are gone from Alice→Bob
-2. BUT Charlie can slash 30k of Alice's excess in Alice→Charlie
-3. AND David can slash 30k of Alice's excess in Alice→David
-4. Users recover 60k from slashed collateral
-
-**Alice cannot profit from colluding with any single partner** — her collateral in other channels covers the theft.
-
-### The Economics of Attack
-
-| Attack | Capital Required | Losses if Caught | Success Probability | Expected Value |
-|--------|-----------------|------------------|---------------------|----------------|
-| Steal 10k sats | 20k+ reserves | 20k+ slashing | ~0% (cryptographically proven) | **NEGATIVE** |
-| Steal 100k sats | 200k+ reserves | 200k+ slashing | ~0% | **NEGATIVE** |
-| Any theft | 2x theft amount | 2x+ theft amount | ~0% | **NEGATIVE** |
-
-**Key insight**: To steal X, operator must have locked 2X+ capital. Getting caught means losing all 2X+. Getting caught is near-certain due to:
-- Signed ledger updates prove every operation
-- Hash chain detects any modification
-- Multiple independent validators watching
-- Cryptographic proofs are irrefutable
-
-### Capital Efficiency
-
-The same attestation backs multiple ledgers:
-- Charlie's 30k excess backs BOTH Alice→Bob AND Alice→David
-- David's 30k excess backs BOTH Alice→Bob AND Alice→Charlie
-
-This allows 60k of excess collateral to provide security for 150k of deposits across 3 ledgers, because theft of any ledger triggers slashing that fully covers it, and stealing two at once is hard.
-
-### Validation Before Operations
-
-```rust
-pub fn validate_collateral_for_liability(
-    &self,
-    deposit_liability: u64,
-    current_block: u32,
-    max_attestation_age_blocks: u32,
-) -> Result<(), DepositsError> {
-    // Requirement 1: reserves >= deposit_liability
-    if self.reserves_amount < deposit_liability {
-        return Err(DepositsError::InsufficientReserves { ... });
-    }
-
-    // Requirement 2: attestations >= deposit_liability
-    if !self.quorum_members.is_empty() {
-        let total_collateral = self.total_available_collateral(current_block, max_attestation_age_blocks);
-        if total_collateral < deposit_liability {
-            return Err(DepositsError::InsufficientCollateral { ... });
-        }
-    }
-    Ok(())
-}
-```
-
----
-
 ## 3. Dedicated Commitment Output
 
 The protocol embeds a reserves output in every Lightning commitment transaction. This output uses a tapscript structure that encodes the ledger hash and recovery spending paths.
@@ -792,7 +689,6 @@ pub struct Ledger {
     pub last_updated: u64,
     pub partner_deepest_ack_hash: [u8; 32],
     pub channel_deepest_commitment_hash: [u8; 32],
-    pub collateral_attestations: HashMap<PublicKey, CollateralAttestationMsg>,
 }
 ```
 

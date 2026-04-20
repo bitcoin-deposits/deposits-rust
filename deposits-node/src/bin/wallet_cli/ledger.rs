@@ -376,10 +376,6 @@ fn format_operation(op: &LedgerOperation) -> (String, Option<deposits_core::type
         LedgerOperation::FeeCollect { deposit_id, .. } => {
             ("FeeCollect".to_string(), Some(*deposit_id))
         }
-        LedgerOperation::CollateralLock { deposit_id, .. } => {
-            ("CollateralLock".to_string(), Some(*deposit_id))
-        }
-        LedgerOperation::CollateralAttestation { .. } => ("CollateralAttest".to_string(), None),
         LedgerOperation::QuorumBegin { .. } => ("QuorumBegin".to_string(), None),
         _ => ("Unknown".to_string(), None),
     }

@@ -535,8 +535,6 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::TransferComplete { .. } => "TransferComplete",
         LedgerOperation::TransferFail { .. } => "TransferFail",
         LedgerOperation::FeeCollect { .. } => "FeeCollect",
-        LedgerOperation::CollateralAttestation { .. } => "CollateralAttestation",
-        LedgerOperation::CollateralLock { .. } => "CollateralLock",
         LedgerOperation::QuorumAddMember { .. } => "QuorumAddMember",
         LedgerOperation::QuorumRemoveMember { .. } => "QuorumRemoveMember",
         LedgerOperation::QuorumBegin { .. } => "QuorumBegin",

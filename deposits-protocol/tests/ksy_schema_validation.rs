@@ -184,6 +184,7 @@ const SEQUENCE_NUMBER: u64 = 28;
 const PAYMENT_ID: u64 = 30;
 const PREIMAGE: u64 = 34;
 const BLOCK_HEIGHT: u64 = 36;
+#[allow(dead_code)]
 const COLLATERAL_OPERATOR: u64 = 38;
 const SIGNATURE: u64 = 40;
 const LEDGER_HASH: u64 = 42;
@@ -198,6 +199,7 @@ const VOUT: u64 = 68;
 const DESTINATION_ADDRESS: u64 = 70;
 const WITHDRAWAL_ID: u64 = 72;
 const FUNDING_ADDRESS: u64 = 74;
+#[allow(dead_code)]
 const LOCK_UNTIL_BLOCK: u64 = 76;
 const MEMBERSHIP_EXPIRES: u64 = 82;
 const SPENDING_TXID: u64 = 90;
@@ -218,6 +220,7 @@ const NEW_RESERVES_ADDRESS: u64 = 120;
 const COMMITMENT_HASH: u64 = 112;
 const TARGET_RESERVES: u64 = 122;
 const MEMBER_LEDGER_ID: u64 = 114;
+#[allow(dead_code)]
 const COLLATERAL_LEDGER_ID: u64 = 124;
 const DEPOSIT_ID: u64 = 200;
 const DESCRIPTOR: u64 = 202;
@@ -236,8 +239,8 @@ const FAIL_REASON: u64 = 228;
 const MIN_FEE_BPS: u64 = 234;
 const MIN_FEE_FIXED: u64 = 236;
 const MAX_FEE_PERIOD: u64 = 238;
-const COLLATERAL_LOCK_AMT: u64 = 240;
-const COLLATERAL_LOCK_UNTIL_BLOCK: u64 = 242;
+// 240 (was COLLATERAL_LOCK_AMOUNT) removed with collateral-in-UTXO migration
+// 242 is still MEMBERSHIP_UNTIL on QuorumAddMember (see inline use below)
 // Fee amount field
 const FEE: u64 = 2; // shares with AMOUNT for some ops, but fee uses it differently in TransferLock
 
@@ -288,7 +291,6 @@ fn schema_deposit_open() {
             (PAYMENT_HASH, hash32()),
             (INVOICE, str_bytes("lnbcrt1test")),
             (COSIGNER_SIG, sig64()),
-            // 230 (is_collateral) removed
         ],
     );
 }
@@ -440,24 +442,6 @@ fn schema_onchain_fulfill() {
 }
 
 #[test]
-fn schema_collateral_attestation() {
-    validate_schema(
-        42,
-        "CollateralAttestation",
-        &[
-            (COLLATERAL_OPERATOR, pubkey_bytes()),
-            (QUORUM_MEMBER, pubkey_bytes()),
-            (COLLATERAL_LEDGER_ID, str_bytes("abc123")),
-            (AMOUNT, u64_bytes(50_000_000)),
-            (BLOCK_HEIGHT, u32_bytes(200)),
-            (LOCK_UNTIL_BLOCK, u32_bytes(1000)),
-            (LEDGER_HASH, hash32()),
-            (SIGNATURE, sig64()),
-        ],
-    );
-}
-
-#[test]
 fn schema_quorum_add_member() {
     validate_schema(
         43,
@@ -480,22 +464,6 @@ fn schema_quorum_remove_member() {
         44,
         "QuorumRemoveMember",
         &[(QUORUM_MEMBER, pubkey_bytes()), (OPERATOR_SIG, sig64())],
-    );
-}
-
-#[test]
-fn schema_collateral_lock() {
-    validate_schema(
-        45,
-        "CollateralLock",
-        &[
-            (DEPOSIT_ID, deposit_id()),
-            (AMOUNT, u64_bytes(25_000_000)),
-            (LOCK_UNTIL_BLOCK, u32_bytes(1000)),
-            (OPERATOR_ID, pubkey_bytes()),
-            (WITNESS, witness_tlv()),
-            (MEMBER_LEDGER_ID, str_bytes("test_ledger_id")),
-        ],
     );
 }
 

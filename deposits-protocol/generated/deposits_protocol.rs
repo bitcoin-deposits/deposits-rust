@@ -150,10 +150,8 @@ impl DepositsProtocol_FeeStructure {
  *   38 = OnchainFulfill
  *   40 = CollateralIncrease
  *   41 = CollateralDecrease
- *   42 = CollateralAttestation
  *   43 = QuorumAddMember
  *   44 = QuorumRemoveMember
- *   45 = CollateralLock
  *   46 = QuorumJoin
  *   50 = FeeCollect
  *   54 = DisputeEnter

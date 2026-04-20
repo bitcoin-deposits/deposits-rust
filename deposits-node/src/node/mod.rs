@@ -268,10 +268,6 @@ pub struct Node {
     /// Pending withdrawals indexed by withdrawal_id
     withdrawals: Mutex<HashMap<[u8; 32], (OnChainWithdrawal, OnChainWithdrawalStatus)>>,
 
-    /// Pending collateral lock requests (request_id -> our_reserves_id)
-    /// Used to auto-record attestations when responses arrive
-    pending_collateral_requests: Mutex<HashMap<String, String>>,
-
     /// Pending co-sign requests: request_id -> (ledger_id, oneshot sender for co-sign result)
     /// The result includes the co-signer's signature and the member's ledger hash
     pending_cosign_requests: Arc<Mutex<HashMap<String, (String, Arc<CosignCollector>)>>>,

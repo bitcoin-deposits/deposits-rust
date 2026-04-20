@@ -21,7 +21,7 @@ mod ledger_op_tlv {
     pub const PAYMENT_ID: u64 = 30;
     pub const PREIMAGE: u64 = 34;
     pub const BLOCK_HEIGHT: u64 = 36;
-    pub const COLLATERAL_OPERATOR: u64 = 38;
+    // 38 was COLLATERAL_OPERATOR (removed with collateral-in-UTXO migration)
     pub const SIGNATURE: u64 = 40;
     pub const LEDGER_HASH: u64 = 42;
     pub const QUORUM_MEMBER: u64 = 44;
@@ -39,8 +39,7 @@ mod ledger_op_tlv {
     pub const DESTINATION_ADDRESS: u64 = 70;
     pub const WITHDRAWAL_ID: u64 = 72;
     pub const FUNDING_ADDRESS: u64 = 74;
-    // CollateralLock fields
-    pub const LOCK_UNTIL_BLOCK: u64 = 76;
+    // 76 was LOCK_UNTIL_BLOCK (removed with collateral-in-UTXO migration)
     // QuorumJoin fields
     pub const MEMBERSHIP_EXPIRES: u64 = 82;
     // QuorumBegin fields
@@ -63,7 +62,7 @@ mod ledger_op_tlv {
     pub const TARGET_RESERVES: u64 = 122;
     // Quorum/Collateral ledger binding fields
     pub const MEMBER_LEDGER_ID: u64 = 114;
-    pub const COLLATERAL_LEDGER_ID: u64 = 124;
+    // 124 was COLLATERAL_LEDGER_ID (removed with collateral-in-UTXO migration)
     // Descriptor-based deposit fields
     pub const DEPOSIT_ID: u64 = 200; // 16-byte deposit identifier
     pub const DESCRIPTOR: u64 = 202; // Variable-length string
@@ -82,7 +81,6 @@ mod ledger_op_tlv {
     pub const SCRIPT_WITNESS: u64 = 224;
     pub const TRANSFER_FEES: u64 = 226;
     pub const FAIL_REASON: u64 = 228; // u8 (0 = timeout)
-    pub const IS_COLLATERAL: u64 = 230; // u8 (0 or 1)
     pub const RECEIVE_REQUIRES_SIG: u64 = 232; // u8 (0 or 1)
                                                // Quorum member fee limits (on QuorumAddMember)
     pub const MIN_FEE_BPS: u64 = 234; // u16
@@ -92,8 +90,8 @@ mod ledger_op_tlv {
     pub const FEE_CHANGE_NOTICE: u64 = 246; // u32 (notice blocks)
     pub const FEE_CHANGE_LIMIT_BPS: u64 = 248; // u16 (default 1000 = 10%)
     pub const EFFECTIVE_BLOCK: u64 = 250; // u32 (on FeeChange)
-    pub const COLLATERAL_LOCK_AMOUNT: u64 = 240; // u64 (msats)
-    pub const COLLATERAL_LOCK_UNTIL: u64 = 242; // u32 (block height)
+    // 240 was COLLATERAL_LOCK_AMOUNT (removed with collateral-in-UTXO migration)
+    pub const MEMBERSHIP_UNTIL: u64 = 242; // u32 (block height) — on QuorumAddMember
 
     // Per-quorum timing parameters (on QuorumAddMember)
     pub const DISPUTE_RESPONSE_BLOCKS: u64 = 252; // u32
@@ -370,26 +368,6 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(BLOCK_HASH, block_hash)
                     .u8_field(FAIL_REASON, *reason);
             }
-            Self::CollateralAttestation {
-                collateral_operator,
-                quorum_member,
-                collateral_ledger_id,
-                amount,
-                block_height,
-                lock_until_block,
-                signature,
-                ledger_hash,
-            } => {
-                builder = builder
-                    .pubkey_field(COLLATERAL_OPERATOR, collateral_operator)
-                    .pubkey_field(QUORUM_MEMBER, quorum_member)
-                    .string_field(COLLATERAL_LEDGER_ID, collateral_ledger_id)
-                    .u64_field(AMOUNT, *amount)
-                    .u32_field(BLOCK_HEIGHT, *block_height)
-                    .u32_field(LOCK_UNTIL_BLOCK, *lock_until_block)
-                    .bytes_field(SIGNATURE, signature)
-                    .bytes_field(LEDGER_HASH, ledger_hash);
-            }
             Self::QuorumAddMember {
                 quorum_member,
                 quorum_member_signature,
@@ -418,7 +396,7 @@ impl TlvEncode for LedgerOperation {
                     builder = builder.u32_field(MAX_FEE_PERIOD, *period);
                 }
                 if let Some(until) = membership_until {
-                    builder = builder.u32_field(COLLATERAL_LOCK_UNTIL, *until);
+                    builder = builder.u32_field(MEMBERSHIP_UNTIL, *until);
                 }
                 if let Some(v) = dispute_response_blocks {
                     builder = builder.u32_field(DISPUTE_RESPONSE_BLOCKS, *v);
@@ -443,22 +421,6 @@ impl TlvEncode for LedgerOperation {
                 builder = builder
                     .pubkey_field(QUORUM_MEMBER, quorum_member)
                     .bytes_field(OPERATOR_SIG, operator_signature);
-            }
-            Self::CollateralLock {
-                deposit_id,
-                amount,
-                lock_until_block,
-                operator_id,
-                for_ledger_id,
-                witness,
-            } => {
-                builder = builder
-                    .deposit_id_field(DEPOSIT_ID, deposit_id)
-                    .u64_field(AMOUNT, *amount)
-                    .u32_field(LOCK_UNTIL_BLOCK, *lock_until_block)
-                    .pubkey_field(OPERATOR_ID, operator_id)
-                    .string_field(MEMBER_LEDGER_ID, for_ledger_id)
-                    .witness_field(WITNESS, witness);
             }
             Self::QuorumJoin {
                 operator_id,
@@ -671,16 +633,6 @@ impl TlvDecode for LedgerOperation {
                 block_hash: reader.read_bytes(BLOCK_HASH)?,
                 reason: reader.read_u8(FAIL_REASON).unwrap_or(1),
             }),
-            42 => Ok(Self::CollateralAttestation {
-                collateral_operator: reader.read_pubkey(COLLATERAL_OPERATOR)?,
-                quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,
-                collateral_ledger_id: reader.read_string(COLLATERAL_LEDGER_ID)?,
-                amount: reader.read_u64(AMOUNT)?,
-                block_height: reader.read_u32(BLOCK_HEIGHT)?,
-                lock_until_block: reader.read_u32(LOCK_UNTIL_BLOCK)?,
-                signature: reader.read_bytes(SIGNATURE)?,
-                ledger_hash: reader.read_bytes(LEDGER_HASH)?,
-            }),
             43 => Ok(Self::QuorumAddMember {
                 quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,
                 quorum_member_signature: reader.read_bytes(QUORUM_MEMBER_SIG)?,
@@ -688,7 +640,7 @@ impl TlvDecode for LedgerOperation {
                 min_fee_bps: reader.read_u16_opt(MIN_FEE_BPS)?,
                 min_fee_fixed: reader.read_u64_opt(MIN_FEE_FIXED)?,
                 max_fee_period: reader.read_u32_opt(MAX_FEE_PERIOD)?,
-                membership_until: reader.read_u32_opt(COLLATERAL_LOCK_UNTIL)?,
+                membership_until: reader.read_u32_opt(MEMBERSHIP_UNTIL)?,
                 dispute_response_blocks: reader.read_u32_opt(DISPUTE_RESPONSE_BLOCKS)?,
                 dispute_arm_blocks: reader.read_u32_opt(DISPUTE_ARM_BLOCKS)?,
                 service_response_blocks: reader.read_u32_opt(SERVICE_RESPONSE_BLOCKS)?,
@@ -698,16 +650,6 @@ impl TlvDecode for LedgerOperation {
             44 => Ok(Self::QuorumRemoveMember {
                 quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,
                 operator_signature: reader.read_bytes(OPERATOR_SIG)?,
-            }),
-            45 => Ok(Self::CollateralLock {
-                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
-                amount: reader.read_u64(AMOUNT)?,
-                lock_until_block: reader.read_u32(LOCK_UNTIL_BLOCK)?,
-                operator_id: reader.read_pubkey(OPERATOR_ID)?,
-                for_ledger_id: reader
-                    .read_string_opt(MEMBER_LEDGER_ID)?
-                    .unwrap_or_default(),
-                witness: reader.read_witness(WITNESS)?,
             }),
             46 => Ok(Self::QuorumJoin {
                 operator_id: reader.read_pubkey(OPERATOR_ID)?,

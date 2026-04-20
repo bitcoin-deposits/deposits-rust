@@ -58,26 +58,12 @@ fn make_quorum_add_member() -> LedgerOperation {
     }
 }
 
-fn make_collateral_attestation() -> LedgerOperation {
-    LedgerOperation::CollateralAttestation {
-        collateral_operator: test_pubkey_2(),
-        quorum_member: test_pubkey_2(),
-        collateral_ledger_id: "member_ledger".to_string(),
-        amount: 100_000,
-        block_height: 800_000,
-        lock_until_block: 900_000,
-        signature: [0xAB; 64],
-        ledger_hash: [0xCD; 32],
-    }
-}
-
 // =========================================================================
 // Ledger Synchronization Tests - Prevent Divergence Regression
 // =========================================================================
 
 /// Test that applying the same sequence of updates to two separate ledgers
-/// produces identical hash chains. This is the core invariant that was
-/// broken when CollateralAttestation wasn't forwarded to partners.
+/// produces identical hash chains.
 #[test]
 fn test_identical_updates_produce_identical_hashes() {
     let mut operator = Ledger::new_as_operator(test_pubkey(), "bcrt1qtest".to_string(), 0);
@@ -100,18 +86,14 @@ fn test_identical_updates_produce_identical_hashes() {
     assert_eq!(operator.state.chain_tip_hash, partner.state.chain_tip_hash);
     assert_eq!(operator.state.sequence, partner.state.sequence);
 
-    // Apply QuorumAddMember + CollateralAttestation to both
+    // Apply QuorumAddMember to both
     let op3 = make_quorum_add_member();
     operator.apply_operation(&op3).unwrap();
     partner.apply_operation(&op3).unwrap();
 
-    let op4 = make_collateral_attestation();
-    operator.apply_operation(&op4).unwrap();
-    partner.apply_operation(&op4).unwrap();
-
     assert_eq!(operator.state.chain_tip_hash, partner.state.chain_tip_hash);
     assert_eq!(operator.state.sequence, partner.state.sequence);
-    assert_eq!(operator.state.sequence, 4);
+    assert_eq!(operator.state.sequence, 3);
 }
 
 /// Test that divergent ledgers can be detected by comparing hashes.
@@ -139,77 +121,10 @@ fn test_divergent_ledgers_have_different_hashes() {
     assert_eq!(partner.state.sequence, 1);
 }
 
-/// Test that multiple attestations from different quorum members
-/// produce consistent hashes when applied in the same order.
-#[test]
-fn test_multiple_attestations_maintain_sync() {
-    let mut operator = Ledger::new_as_operator(test_pubkey(), "bcrt1qtest".to_string(), 0);
-    let mut partner = Ledger::new_as_partner(test_pubkey(), "bcrt1qtest".to_string(), 0);
-
-    // First add the quorum member so attestation is valid
-    let add_member = make_quorum_add_member();
-    operator.apply_operation(&add_member).unwrap();
-    partner.apply_operation(&add_member).unwrap();
-
-    // Apply first attestation to both
-    let att1 = make_collateral_attestation();
-    operator.apply_operation(&att1).unwrap();
-    partner.apply_operation(&att1).unwrap();
-
-    assert_eq!(operator.state.chain_tip_hash, partner.state.chain_tip_hash);
-    assert_eq!(operator.state.sequence, partner.state.sequence);
-
-    // Apply a second attestation (updated block height) to both
-    let att2 = LedgerOperation::CollateralAttestation {
-        collateral_operator: test_pubkey_2(),
-        quorum_member: test_pubkey_2(),
-        collateral_ledger_id: "member_ledger".to_string(),
-        amount: 200_000,
-        block_height: 801_000,
-        lock_until_block: 901_000,
-        signature: [0xAB; 64],
-        ledger_hash: [0xDE; 32],
-    };
-    operator.apply_operation(&att2).unwrap();
-    partner.apply_operation(&att2).unwrap();
-
-    assert_eq!(operator.state.chain_tip_hash, partner.state.chain_tip_hash);
-    assert_eq!(operator.state.sequence, partner.state.sequence);
-    assert_eq!(operator.state.sequence, 3);
-}
-
-/// Test that the partner's own attestation (sent to operator in response
-/// to ReservesToReserves) updates both the message and their own ledger.
-/// This was fixed by having the partner apply their attestation before sending.
-#[test]
-fn test_partner_attestation_self_application() {
-    let mut partner = Ledger::new_as_partner(test_pubkey(), "bcrt1qtest".to_string(), 0);
-
-    // Add quorum member first
-    let add_member = make_quorum_add_member();
-    partner.apply_operation(&add_member).unwrap();
-
-    let initial_hash = partner.state.chain_tip_hash;
-    let initial_seq = partner.state.sequence;
-
-    // Partner applies their own attestation
-    let att = make_collateral_attestation();
-    partner.apply_operation(&att).unwrap();
-
-    // State should have advanced
-    assert_ne!(partner.state.chain_tip_hash, initial_hash);
-    assert_eq!(partner.state.sequence, initial_seq + 1);
-    assert_ne!(partner.state.chain_tip_hash, [0u8; 32]);
-
-    // Verify the attestation advanced the state
-    assert_eq!(partner.state.sequence, 2);
-}
-
 /// Test full synchronization flow:
 /// 1. LedgerOpen sets params
 /// 2. DepositOpen
 /// 3. QuorumAddMember
-/// 4. CollateralAttestation from quorum member
 ///
 /// Both sides should have identical final state.
 #[test]
@@ -247,14 +162,6 @@ fn test_full_sync_flow() {
     assert_eq!(operator.state.chain_tip_hash, partner.state.chain_tip_hash);
     assert_eq!(operator.state.sequence, 3);
 
-    // Step 4: CollateralAttestation
-    let att = make_collateral_attestation();
-    operator.apply_operation(&att).unwrap();
-    partner.apply_operation(&att).unwrap();
-
-    assert_eq!(operator.state.chain_tip_hash, partner.state.chain_tip_hash);
-    assert_eq!(operator.state.sequence, 4);
-
     // Verify full state equality
     assert_eq!(operator.state.sequence, partner.state.sequence);
     assert_eq!(operator.state.deposits.len(), partner.state.deposits.len());
@@ -278,7 +185,6 @@ fn test_hash_chain_determinism() {
         make_deposit_open("pk(determinism1)"),
         make_deposit_open("pk(determinism2)"),
         make_quorum_add_member(),
-        make_collateral_attestation(),
     ];
     for op in &ops {
         ledger_a.apply_operation(op).unwrap();
@@ -366,7 +272,6 @@ fn test_auditor_chain_must_start_from_zero() {
         make_deposit_open("pk(audit1)"),
         make_deposit_open("pk(audit2)"),
         make_quorum_add_member(),
-        make_collateral_attestation(),
     ];
 
     // Track hash at each sequence number

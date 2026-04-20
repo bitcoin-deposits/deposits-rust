@@ -201,32 +201,6 @@ pub struct QuorumRemoveMemberMsg {
     pub operator_signature: [u8; 64],
 }
 
-/// collateral attestation message
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CollateralAttestationMsg {
-    #[serde(with = "crate::types::serde_pubkey")]
-    pub operator: PublicKey,
-    #[serde(with = "crate::types::serde_pubkey")]
-    pub quorum_member: PublicKey,
-    /// The ledger ID where collateral is locked (must match member_ledger_id from QuorumAddMember)
-    pub collateral_ledger_id: String,
-    pub amount: u64,
-    pub block_height: u32,
-    #[serde(default)]
-    pub lock_until_block: u32,
-    #[serde(with = "crate::types::serde_64")]
-    pub signature: [u8; 64],
-    #[serde(with = "crate::types::serde_32")]
-    pub ledger_hash: [u8; 32],
-}
-
-impl CollateralAttestationMsg {
-    /// Get the available collateral amount
-    pub fn available_collateral(&self) -> u64 {
-        self.amount
-    }
-}
-
 /// collateral consent request message
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollateralConsentRequestMsg {

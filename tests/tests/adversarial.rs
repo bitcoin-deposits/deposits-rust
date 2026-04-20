@@ -50,13 +50,6 @@ fn setup_adversarial_network() -> TestNetwork {
             net.op_mut(op_name).add_quorum_member(member, &lid);
         }
         net.op_mut(op_name).begin_quorum(1_000_000);
-        // Record attestations from all quorum members
-        for member in &snapshots {
-            if member.name == *op_name {
-                continue;
-            }
-            net.op_mut(op_name).record_attestation(member, 500_000);
-        }
     }
 
     net
@@ -298,7 +291,6 @@ fn attack_false_custody_claim() {
         ledger: net.op("bob").ledger.clone(),
     };
     net.op_mut("alice").add_quorum_member(&bob_snap, "bob_lid");
-    net.op_mut("alice").record_attestation(&bob_snap, 500_000);
 
     // Arm
     let arm = LedgerOperation::DisputeArmed {
@@ -468,37 +460,4 @@ fn attack_watcher_detects_malicious_sequence() {
     // Watcher still tracked the full state
     assert_eq!(watcher.state.total_deposit_balance(), 600_000);
     assert_eq!(watcher.state.deposits.len(), 2);
-}
-
-// =========================================================================
-// Attack 10: CollateralLock is deprecated (no-op)
-// =========================================================================
-
-#[test]
-fn collateral_lock_is_deprecated_noop() {
-    // CollateralLock operations are deprecated under the collateral-in-UTXO model.
-    // They are accepted as no-ops for backward compatibility but have no effect.
-    let mut net = setup_adversarial_network();
-    let user = net.create_depositor("victim", 10);
-    let deposit_id = net.op_mut("alice").open_deposit(&user);
-    net.op_mut("alice")
-        .credit_deposit(deposit_id, 500_000, [0xAA; 32]);
-
-    let alice_pk = net.op("alice").public_key;
-    let result = net
-        .op_mut("alice")
-        .ledger
-        .apply_operation(&LedgerOperation::CollateralLock {
-            deposit_id,
-            amount: 500_000,
-            lock_until_block: 900_000,
-            operator_id: alice_pk,
-            witness: deposits_protocol::DescriptorWitness {
-                stack: vec![vec![0xFF; 64]],
-            },
-            for_ledger_id: "target_ledger".to_string(),
-        });
-
-    // Deprecated operation succeeds as no-op
-    assert!(result.is_ok(), "CollateralLock should be accepted as no-op");
 }

@@ -82,8 +82,7 @@ Wallets should:
 Creating offers and invoices increases the ledger's potential obligations. The operator must not create offers or invoices that would push total obligations above the least of:
 
 1. The reserves amount (from LedgerOpen/QuorumBegin)
-2. The sum of all attested collateral (`total_collateral` from QuorumBegin)
-3. Twice the smallest quorum member's `collateral_lock_amount`
+2. The collateral amount declared on LedgerOpen/QuorumBegin (`collateral_amount`)
 
 See DEP-05 for details.
 

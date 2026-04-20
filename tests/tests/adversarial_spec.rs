@@ -107,104 +107,6 @@ fn attack_fee_overflow() {
 }
 
 // =========================================================================
-// Tier 5.4: Replay attestation across ledgers
-// =========================================================================
-
-#[test]
-fn attack_replay_attestation_across_ledgers() {
-    let mut log = AttackLog::new();
-
-    let mut net = TestNetwork::new(&["alice", "bob"], 1_000_000);
-
-    let bob_snap = Operator {
-        name: "bob".into(),
-        secret_key: net.op("bob").secret_key,
-        public_key: net.op("bob").public_key,
-        ledger: net.op("bob").ledger.clone(),
-    };
-    let bob_lid = hex::encode(bob_snap.ledger.state.ledger_id);
-
-    // Alice adds bob as quorum member and begins quorum
-    net.op_mut("alice").add_quorum_member(&bob_snap, &bob_lid);
-    net.op_mut("alice").begin_quorum(1_000_000);
-
-    // Bob attests on alice's ledger
-    let attestation_op = LedgerOperation::CollateralAttestation {
-        collateral_operator: bob_snap.public_key,
-        quorum_member: bob_snap.public_key,
-        collateral_ledger_id: bob_lid.clone(),
-        amount: 500_000,
-        block_height: 800_000,
-        lock_until_block: 900_000,
-        signature: [0xEF; 64],
-        ledger_hash: [0xCD; 32],
-    };
-    net.op_mut("alice")
-        .ledger
-        .apply_operation(&attestation_op)
-        .unwrap();
-
-    // Stronger test: give bob a quorum that includes bob as a member,
-    // but with a DIFFERENT member_ledger_id than the attestation references.
-    // This tests that the collateral_ledger_id must match the member's
-    // declared ledger_id from QuorumAddMember.
-    let alice_snap = Operator {
-        name: "alice".into(),
-        secret_key: net.op("alice").secret_key,
-        public_key: net.op("alice").public_key,
-        ledger: net.op("alice").ledger.clone(),
-    };
-    // Add bob as quorum member on bob's ledger, but with a DIFFERENT ledger_id
-    // than what the attestation uses
-    let alice_lid = hex::encode(alice_snap.ledger.state.ledger_id);
-    net.op_mut("bob").add_quorum_member(&bob_snap, &alice_lid); // different ledger_id!
-    net.op_mut("bob").begin_quorum(1_000_000);
-
-    // Now try to replay alice's attestation on bob's ledger.
-    // The attestation has collateral_ledger_id = bob_lid,
-    // but bob's quorum member entry on bob's ledger has member_ledger_id = alice_lid.
-    // The new validation should catch the mismatch.
-    let replay_result = net.op_mut("bob").ledger.apply_operation(&attestation_op);
-
-    let blocked = replay_result.is_err();
-
-    log.record(AttackResult {
-        name: "Replay attestation across ledgers".into(),
-        invariant: Invariant::SignatureBinding,
-        adversary: AdversaryCapability::single_operator(4),
-        cost_sats: 0,
-        extraction_sats: 500_000,
-        blocked,
-        defense: if blocked {
-            DefenseLayer::Protocol
-        } else {
-            DefenseLayer::NodePolicy
-        },
-        scaling: Scaling::Constant,
-        notes: if blocked {
-            "Attestation rejected: collateral_ledger_id doesn't match member's \
-             announced ledger_id. Cross-ledger replay blocked."
-                .into()
-        } else {
-            "Attestation accepted on different ledger. Protocol allows this \
-             because CollateralAttestation only checks quorum membership, \
-             not target ledger identity. The collateral_ledger_id field \
-             identifies the SOURCE of collateral, not the TARGET ledger. \
-             Defense: watchers verify collateral_ledger_id matches expected \
-             member ledger, and the attestation signature binds to the \
-             specific collateral lock (which is on a specific ledger)."
-                .into()
-        },
-        steps: vec![],
-    });
-
-    // This is a KNOWN property: attestations pass quorum membership check
-    // regardless of which ledger they were originally created for. The
-    // defense is at the node/watcher layer (verify collateral_ledger_id).
-    // We document this rather than assert it's blocked.
-}
-
-// =========================================================================
 // Tier 5.5: Deposit ID collision (16-byte truncated SHA256)
 // =========================================================================
 
@@ -403,8 +305,8 @@ fn attack_taproot_tree_extra_leaf() {
 fn attack_near_expiry_extraction() {
     let mut log = AttackLog::new();
 
-    // Model: operator waits until collateral_lock is about to expire,
-    // then steals. Question: is the remaining lock time sufficient for
+    // Model: operator waits until the member's commitment window is about to
+    // expire, then steals. Question: is the remaining time sufficient for
     // the dispute cascade to complete?
 
     let dispute_response_blocks: u32 = 144; // ~1 day
@@ -439,9 +341,9 @@ fn attack_near_expiry_extraction() {
         defense: DefenseLayer::WalletPolicy,
         scaling: Scaling::Constant,
         notes: format!(
-            "Extraction window exists when remaining_collateral_lock < {} blocks \
+            "Extraction window exists when remaining member commitment < {} blocks \
              (diameter {} × response_blocks {}). Wallets MUST refuse deposits \
-             when collateral lock expires within cascade_time. Current implementation \
+             when membership expires within cascade_time. Current implementation \
              does not enforce this — it's a wallet-policy defense.",
             cascade_time, quorum_diameter, dispute_response_blocks
         ),
@@ -476,9 +378,6 @@ fn attack_collateral_double_counting() {
 
     net.op_mut("alice").add_quorum_member(&bob_snap, &bob_lid);
     net.op_mut("alice").begin_quorum(1_000_000);
-
-    // Bob attests 500k collateral
-    net.op_mut("alice").record_attestation(&bob_snap, 500_000);
 
     // Alice credits 3 deposits of 300k each (total 900k, reserves 1M — fine)
     let user1 = net.create_depositor("u1", 10);

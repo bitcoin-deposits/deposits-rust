@@ -856,7 +856,6 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                     LedgerOperation::DepositOpen { deposit_id, .. } => Some(*deposit_id),
                     LedgerOperation::DepositClose { deposit_id, .. } => Some(*deposit_id),
                     LedgerOperation::FeeChange { deposit_id, .. } => Some(*deposit_id),
-                    LedgerOperation::CollateralLock { deposit_id, .. } => Some(*deposit_id),
                     LedgerOperation::OnchainCredit { deposit_id, .. } => Some(*deposit_id),
                     LedgerOperation::OnchainLock { deposit_id, .. } => Some(*deposit_id),
                     LedgerOperation::OnchainFail { deposit_id, .. } => Some(*deposit_id),
@@ -2164,34 +2163,6 @@ pub async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Er
             }
             serde_json::Value::Object(obj)
         }
-        "collateral_lock" => {
-            // params: deposit_secret amount_msats lock_blocks [requesting_operator]
-            if params.len() < 3 {
-                return Err(
-                    "collateral_lock requires: <deposit_secret> <amount_msats> <lock_blocks> [requesting_operator]".into(),
-                );
-            }
-            let mut obj = serde_json::Map::new();
-            obj.insert(
-                "deposit_secret".to_string(),
-                serde_json::Value::String(params[0].clone()),
-            );
-            obj.insert(
-                "amount_msats".to_string(),
-                serde_json::json!(params[1].parse::<u64>().unwrap_or(0)),
-            );
-            obj.insert(
-                "lock_blocks".to_string(),
-                serde_json::json!(params[2].parse::<u32>().unwrap_or(0)),
-            );
-            if params.len() > 3 {
-                obj.insert(
-                    "requesting_operator".to_string(),
-                    serde_json::Value::String(params[3].clone()),
-                );
-            }
-            serde_json::Value::Object(obj)
-        }
         "deposit_withdraw" => {
             // params: deposit_secret destination_address amount_sats
             if params.len() < 3 {
@@ -2676,43 +2647,6 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         ),
                     )
                 }
-                LedgerOperation::CollateralAttestation {
-                    collateral_operator,
-                    amount,
-                    lock_until_block,
-                    ..
-                } => {
-                    let pk_bytes = collateral_operator.serialize();
-                    (
-                        "CollateralAttestation",
-                        format!(
-                            "from:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
-                            pk_bytes[0],
-                            pk_bytes[1],
-                            pk_bytes[2],
-                            pk_bytes[3],
-                            amount,
-                            lock_until_block
-                        ),
-                    )
-                }
-                LedgerOperation::CollateralLock {
-                    deposit_id,
-                    amount,
-                    lock_until_block,
-                    ..
-                } => (
-                    "CollateralLock",
-                    format!(
-                        "id:{:02x}{:02x}{:02x}{:02x}  amt:{} msat  until_block:{}",
-                        deposit_id[0],
-                        deposit_id[1],
-                        deposit_id[2],
-                        deposit_id[3],
-                        amount,
-                        lock_until_block
-                    ),
-                ),
                 LedgerOperation::OnchainCredit {
                     deposit_id,
                     amount,
