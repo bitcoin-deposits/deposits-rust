@@ -86,6 +86,11 @@ struct SimOperator {
     /// Pending transfers we've originated locally, with the preimage the
     /// completion_script commits to — used to generate honest TransferComplete.
     pending_preimages: HashMap<[u8; 32], [u8; 32]>,
+    /// For each victim's ledger we're watching, the pubkeys of operators we've
+    /// observed publish DisputeArmed. Used to validate the entropy-selected
+    /// winner when a DisputeAcquire arrives — matches the real-protocol
+    /// `validate_custody_resolution` flow.
+    armed_candidates: HashMap<usize, Vec<PublicKey>>,
     /// Total funds deposited into our ledger by external wallets.
     wallet_funds: u64,
 }
@@ -144,6 +149,7 @@ impl ProtocolSim {
                     deposits: Vec::new(),
                     depositor_keys: HashMap::new(),
                     pending_preimages: HashMap::new(),
+                    armed_candidates: HashMap::new(),
                     wallet_funds: 0,
                 }
             })
@@ -227,14 +233,42 @@ impl ProtocolSim {
     /// checks for operations that would silently saturate, witness validity
     /// for ops where conformance is permissive. Block height flows through
     /// to FeeChange validation (timing/limit rules).
-    fn honest_would_cosign(replica: &LedgerState, op: &LedgerOperation, block_height: u32) -> bool {
+    fn honest_would_cosign(
+        replica: &LedgerState,
+        op: &LedgerOperation,
+        block_height: u32,
+        armed_candidates: &[PublicKey],
+        signer_pubkey: &PublicKey,
+    ) -> bool {
         // State-machine gate: the dispute state must permit this operation type.
         // Real cosigners refuse DisputeArmed/Acquire/Yield in Normal state, and
         // refuse almost everything in Disputed/Armed/Tombstoned.
         if !replica.dispute_state.allows_operation(op.discriminant()) {
             return false;
         }
-        if !validate_per_op_as_cosigner(replica, op, block_height) {
+        // Signer identity check. Mirrors validate_update_signer in deposits-core
+        // /src/ledger.rs: DisputeEnter in Normal state must be signed by a
+        // quorum member; every other op must be signed by the current
+        // parent_pubkey (the branch owner).
+        match op {
+            LedgerOperation::DisputeEnter { .. }
+                if replica.dispute_state == DisputeState::Normal =>
+            {
+                if !replica
+                    .quorum_members
+                    .iter()
+                    .any(|m| &m.pubkey == signer_pubkey)
+                {
+                    return false;
+                }
+            }
+            _ => {
+                if &replica.parent_pubkey != signer_pubkey {
+                    return false;
+                }
+            }
+        }
+        if !validate_per_op_as_cosigner(replica, op, block_height, armed_candidates) {
             return false;
         }
         let verifier = CoreWitnessVerifier;
@@ -275,7 +309,13 @@ impl ProtocolSim {
                     .replicas
                     .get(&proposer)
                     .expect("replica must exist for quorum member");
-                Self::honest_would_cosign(replica, &op, self.block_height)
+                let candidates: &[PublicKey] = self.operators[m]
+                    .armed_candidates
+                    .get(&proposer)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let proposer_pk = self.operators[proposer].public_key;
+                Self::honest_would_cosign(replica, &op, self.block_height, candidates, &proposer_pk)
             } else {
                 true
             };
@@ -331,21 +371,49 @@ impl ProtocolSim {
                     // replicas. In that case, leave the replica stale.
                 }
             }
+            // Record armer: if DisputeArmed was applied, the armer (= proposer,
+            // since in our sim the proposer is the one "claiming" this branch
+            // by virtue of proposing) gets added to this signer's candidate list.
+            if matches!(op, LedgerOperation::DisputeArmed { .. }) {
+                let proposer_pk = self.operators[proposer].public_key;
+                let list = self.operators[signer]
+                    .armed_candidates
+                    .entry(proposer)
+                    .or_default();
+                if !list.contains(&proposer_pk) {
+                    list.push(proposer_pk);
+                }
+            }
         }
 
-        // 6. Auto-dispute: if adversary-majority pushed through an op that
-        //    honest cosigners refused, those honest cosigners trigger
-        //    DisputeEnter on their own replicas. Mirrors auto_arm_for_dispute
-        //    in deposits-node/src/node/inbound.rs. Each refuser independently
-        //    forks their view and stops co-signing on this ledger.
+        // 6. Auto-dispute-and-arm: if adversary-majority pushed through an op
+        //    that honest cosigners refused, those honest cosigners trigger
+        //    DisputeEnter AND DisputeArmed on their own replicas (both steps
+        //    of the real auto_arm_for_dispute in deposits-node/src/node/inbound.rs).
+        //    The armers get broadcast to every quorum member's candidate list so
+        //    the entropy-winner check in a subsequent DisputeAcquire has
+        //    competitive candidates.
         if !honest_refusers.is_empty() {
             let last_valid = self.operators[proposer]
                 .ledger
                 .state
                 .sequence
                 .saturating_sub(1);
+            let victim_quorum = self.operators[proposer].quorum_members.clone();
             for &refuser in &honest_refusers {
-                let _ = self.dispute_enter(proposer, refuser, last_valid);
+                if self.dispute_enter(proposer, refuser, last_valid) == DisputeStepResult::Applied {
+                    let _ = self.dispute_arm(proposer, refuser);
+                    let refuser_pk = self.operators[refuser].public_key;
+                    for &member in &victim_quorum {
+                        let list = self.operators[member]
+                            .armed_candidates
+                            .entry(proposer)
+                            .or_default();
+                        if !list.contains(&refuser_pk) {
+                            list.push(refuser_pk);
+                        }
+                    }
+                }
             }
         }
 
@@ -508,6 +576,7 @@ fn validate_per_op_as_cosigner(
     replica: &LedgerState,
     op: &LedgerOperation,
     block_height: u32,
+    armed_candidates: &[PublicKey],
 ) -> bool {
     let ledger = ledger_shell(replica);
     match op {
@@ -592,7 +661,26 @@ fn validate_per_op_as_cosigner(
             op_val::validate_fee_collect_by_id(&ledger, deposit_id, *amount, *block_height).is_ok()
         }
         LedgerOperation::LedgerClose => op_val::validate_ledger_close(&ledger).is_ok(),
-        // The remaining ops are either governance/dispute (cosigners defer to
+        // Custody resolution — entropy-winner checks. Mirrors Ledger::validate_custody_resolution
+        // and Ledger::validate_custody_yield but with the candidate list supplied
+        // by the cosigner (who built it from observed DisputeArmed events).
+        LedgerOperation::DisputeAcquire {
+            new_custodian,
+            entropy_block_hash,
+            ..
+        } => {
+            use deposits_protocol::types::is_entropy_winner;
+            !armed_candidates.is_empty()
+                && is_entropy_winner(entropy_block_hash, new_custodian, armed_candidates)
+        }
+        LedgerOperation::DisputeYield => {
+            // A real cosigner validates DisputeYield against the entropy_block_hash
+            // from the winning DisputeAcquire they've already observed. Our sim
+            // doesn't track acquires separately, so we only require the yielder
+            // (parent_pubkey on the replica's fork) to be an armed candidate.
+            armed_candidates.contains(&replica.parent_pubkey)
+        }
+        // The remaining ops are either governance (cosigners defer to
         // state-machine gates + conformance) or validated during apply.
         _ => true,
     }
