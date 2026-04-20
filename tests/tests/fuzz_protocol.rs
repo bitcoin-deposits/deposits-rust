@@ -649,20 +649,75 @@ fn gen_deposit_open(
     let (dsk, dpk) = keypair(seed);
     let descriptor = format!("pk({})", hex::encode(dpk.serialize()));
     let deposit_id = compute_deposit_id(&descriptor);
+    // Use a tight frequency (100 blocks) so the fuzzer reaches FeeCollect paths
+    // in a reasonable number of steps. Fee-change-limit 10% gives teeth to
+    // FeeChange validation without rejecting all honest attempts.
+    let fees = FeeStructure::new(0, 100, 100);
     let op = LedgerOperation::DepositOpen {
         deposit_id,
         descriptor: descriptor.clone(),
-        fees: Some(FeeStructure::default()),
+        fees: Some(fees),
         transfer_fees: None,
         payment_hash: None,
         invoice: None,
         cosigner_guarantee_signature: None,
         receive_requires_sig: false,
-        fee_change_after_blocks: None,
-        fee_change_notice_blocks: None,
-        fee_change_limit_bps: None,
+        fee_change_after_blocks: Some(50),
+        fee_change_notice_blocks: Some(20),
+        fee_change_limit_bps: Some(1000), // 10% per change
     };
     (op, deposit_id, descriptor, seed, dsk)
+}
+
+/// Build an honest FeeCollect: pick a deposit whose fee schedule allows a
+/// collection at the current block, with an amount within available balance.
+fn gen_honest_fee_collect(
+    op: &SimOperator,
+    rng: &mut Rng,
+    block_height: u32,
+) -> Option<LedgerOperation> {
+    let (did, _, _) = pick_deposit(op, rng)?;
+    let deposit = op.ledger.state.deposits.get(&did)?;
+    let earliest = deposit
+        .last_fee_assessment
+        .saturating_add(deposit.fees.frequency_blocks);
+    if block_height < earliest {
+        return None;
+    }
+    let available = deposit.balance.saturating_sub(deposit.locked_balance);
+    if available == 0 {
+        return None;
+    }
+    let max_fee = available.min(10_000);
+    let amount = 1 + rng.range(max_fee.max(1));
+    Some(LedgerOperation::FeeCollect {
+        deposit_id: did,
+        amount,
+        block_height,
+    })
+}
+
+/// Build an adversarial FeeCollect: ignores rate limits, over-draws, or picks
+/// a backdated block_height. Honest validation paths should reject it.
+fn gen_adversary_fee_collect(
+    op: &SimOperator,
+    rng: &mut Rng,
+    block_height: u32,
+) -> Option<LedgerOperation> {
+    let (did, _, _) = pick_deposit(op, rng)?;
+    let deposit = op.ledger.state.deposits.get(&did)?;
+    let choice = rng.range(4);
+    let (amount, block) = match choice {
+        0 => (deposit.balance.saturating_mul(2), block_height), // over-draw
+        1 => (1000, deposit.last_fee_assessment.saturating_sub(100)), // backdated
+        2 => (u64::MAX / 2, block_height),                      // massive amount
+        _ => (1, deposit.last_fee_assessment),                  // too early (= last assessment)
+    };
+    Some(LedgerOperation::FeeCollect {
+        deposit_id: did,
+        amount,
+        block_height: block,
+    })
 }
 
 /// An honest operator stays within reserves. Generates a mix of:
@@ -670,6 +725,7 @@ fn gen_deposit_open(
 /// - InvoiceCredit capped at headroom
 /// - TransferLock between two existing deposits (intra-ledger, signed)
 /// - TransferComplete for a pending transfer we own the preimage for
+/// - FeeCollect when the fee schedule permits
 fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<GeneratedOp> {
     let op = &sim.operators[proposer];
     let total_balance: u64 = op.ledger.state.deposits.values().map(|d| d.balance).sum();
@@ -677,6 +733,16 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
     let headroom = reserves.saturating_sub(total_balance);
     let has_pending = !op.ledger.state.pending_transfers.is_empty();
 
+    let choice = rng.range(100);
+    if choice < 20 && !op.deposits.is_empty() {
+        if let Some(o) = gen_honest_fee_collect(op, rng, sim.block_height) {
+            return Some(GeneratedOp {
+                op: o,
+                record_deposit: None,
+                record_pending: None,
+            });
+        }
+    }
     let choice = rng.range(100);
     if choice < 25 || op.deposits.is_empty() {
         let (o, did, desc, seed, dsk) = gen_deposit_open(proposer, op.deposits.len(), rng);
@@ -785,6 +851,15 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
 /// blatantly over-reserve or with bad witnesses. Honest co-signers filter.
 fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<GeneratedOp> {
     let op = &sim.operators[proposer];
+    if rng.range(100) < 15 && !op.deposits.is_empty() {
+        if let Some(o) = gen_adversary_fee_collect(op, rng, sim.block_height) {
+            return Some(GeneratedOp {
+                op: o,
+                record_deposit: None,
+                record_pending: None,
+            });
+        }
+    }
     let choice = rng.range(100);
     let has_pending = !op.ledger.state.pending_transfers.is_empty();
 
@@ -899,6 +974,10 @@ impl ProtocolSim {
     /// Run one fuzzing step: pick a random operator, generate an op, propose it.
     /// Returns the outcome for inspection. Noop if no op can be generated.
     fn step(&mut self, rng: &mut Rng) -> Option<Outcome> {
+        // Advance the sim clock. Some operations (FeeCollect rate limit,
+        // FeeChange notice period) depend on block height progressing.
+        self.block_height = self.block_height.saturating_add(rng.range(30) as u32 + 1);
+
         let n = self.operators.len();
         let proposer = rng.range(n as u64) as usize;
         let gen = if self.adversary.contains(&proposer) {
