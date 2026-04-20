@@ -225,12 +225,16 @@ impl ProtocolSim {
     /// Either failing means "don't sign". The first layer catches things the
     /// pure state machine doesn't — e.g., FeeCollect rate limits, balance
     /// checks for operations that would silently saturate, witness validity
-    /// for ops where conformance is permissive.
-    fn honest_would_cosign(replica: &LedgerState, op: &LedgerOperation) -> bool {
-        if replica.dispute_state != DisputeState::Normal {
+    /// for ops where conformance is permissive. Block height flows through
+    /// to FeeChange validation (timing/limit rules).
+    fn honest_would_cosign(replica: &LedgerState, op: &LedgerOperation, block_height: u32) -> bool {
+        // State-machine gate: the dispute state must permit this operation type.
+        // Real cosigners refuse DisputeArmed/Acquire/Yield in Normal state, and
+        // refuse almost everything in Disputed/Armed/Tombstoned.
+        if !replica.dispute_state.allows_operation(op.discriminant()) {
             return false;
         }
-        if !validate_per_op_as_cosigner(replica, op) {
+        if !validate_per_op_as_cosigner(replica, op, block_height) {
             return false;
         }
         let verifier = CoreWitnessVerifier;
@@ -263,6 +267,7 @@ impl ProtocolSim {
         // 2. Co-sign round: each quorum member decides.
         let members = self.operators[proposer].quorum_members.clone();
         let mut signers: Vec<usize> = Vec::new();
+        let mut honest_refusers: Vec<usize> = Vec::new();
 
         for &m in &members {
             let will_sign = if self.honest.contains(&m) {
@@ -270,12 +275,14 @@ impl ProtocolSim {
                     .replicas
                     .get(&proposer)
                     .expect("replica must exist for quorum member");
-                Self::honest_would_cosign(replica, &op)
+                Self::honest_would_cosign(replica, &op, self.block_height)
             } else {
                 true
             };
             if will_sign {
                 signers.push(m);
+            } else if self.honest.contains(&m) {
+                honest_refusers.push(m);
             }
         }
 
@@ -290,7 +297,7 @@ impl ProtocolSim {
         if self.honest.contains(&proposer) {
             self.operators[proposer]
                 .ledger
-                .append_operation(op.clone())
+                .append_operation_with_block(op.clone(), self.block_height, [0u8; 32])
                 .expect("honest operator refused to apply after passing local validation");
         } else {
             // Adversary: apply without conformance enforcement. We write
@@ -323,6 +330,22 @@ impl ProtocolSim {
                     // but adversary signers may have applied to inconsistent
                     // replicas. In that case, leave the replica stale.
                 }
+            }
+        }
+
+        // 6. Auto-dispute: if adversary-majority pushed through an op that
+        //    honest cosigners refused, those honest cosigners trigger
+        //    DisputeEnter on their own replicas. Mirrors auto_arm_for_dispute
+        //    in deposits-node/src/node/inbound.rs. Each refuser independently
+        //    forks their view and stops co-signing on this ledger.
+        if !honest_refusers.is_empty() {
+            let last_valid = self.operators[proposer]
+                .ledger
+                .state
+                .sequence
+                .saturating_sub(1);
+            for &refuser in &honest_refusers {
+                let _ = self.dispute_enter(proposer, refuser, last_valid);
             }
         }
 
@@ -446,7 +469,11 @@ fn ledger_shell(state: &LedgerState) -> Ledger {
 /// `deposits-core/src/message_handlers/ledger.rs::handle_ledger_update`.
 /// Returns true if the op passes validation (cosigner would sign), false if
 /// any validator rejects it.
-fn validate_per_op_as_cosigner(replica: &LedgerState, op: &LedgerOperation) -> bool {
+fn validate_per_op_as_cosigner(
+    replica: &LedgerState,
+    op: &LedgerOperation,
+    block_height: u32,
+) -> bool {
     let ledger = ledger_shell(replica);
     match op {
         LedgerOperation::LedgerOpen { .. } => true,
@@ -460,13 +487,14 @@ fn validate_per_op_as_cosigner(replica: &LedgerState, op: &LedgerOperation) -> b
             deposit_id,
             new_fees,
             effective_block,
-        } => {
-            // block_height = 0 skips timing/limit checks (see validator). The
-            // sim's honest propose path uses append_operation (block 0), so
-            // the cosigner does the same — keeps both sides consistent.
-            op_val::validate_deposit_fee_change(&ledger, deposit_id, new_fees, *effective_block, 0)
-                .is_ok()
-        }
+        } => op_val::validate_deposit_fee_change(
+            &ledger,
+            deposit_id,
+            new_fees,
+            *effective_block,
+            block_height,
+        )
+        .is_ok(),
         LedgerOperation::DepositKeyRotate {
             deposit_id,
             new_descriptor,
@@ -966,6 +994,47 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
 /// blatantly over-reserve or with bad witnesses. Honest co-signers filter.
 fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<GeneratedOp> {
     let op = &sim.operators[proposer];
+    // Occasional bogus dispute inputs. Most will be rejected by the state-machine
+    // dispute_state gate (e.g., DisputeArmed only valid in Disputed state) or
+    // by conformance checks; a few may land but self-sabotage the adversary
+    // (DisputeEnter on their own ledger locks it into Disputed state, preventing
+    // further adversarial ops). Either way, honest cosigners' per-op validators
+    // and the state gate should contain the damage.
+    if rng.range(100) < 4 {
+        let choice = rng.range(4);
+        let o = match choice {
+            0 => LedgerOperation::DisputeEnter {
+                last_valid_sequence: op.ledger.state.sequence,
+                reason: format!("bogus_{}", rng.next()),
+            },
+            1 => LedgerOperation::DisputeArmed {
+                armed_block: sim.block_height,
+                commitment_hash: {
+                    let mut h = [0u8; 20];
+                    h[0] = rng.range(256) as u8;
+                    h
+                },
+                target_reserves: format!("bcrt1q_bogus_{}", proposer),
+            },
+            2 => LedgerOperation::DisputeAcquire {
+                new_custodian: op.public_key,
+                entropy_block_height: sim.block_height,
+                entropy_block_hash: {
+                    let mut h = [0u8; 32];
+                    h[0] = rng.range(256) as u8;
+                    h
+                },
+                spend_txid: [0xFF; 32],
+                new_reserves_address: format!("bcrt1q_adv_self_{}", proposer),
+            },
+            _ => LedgerOperation::DisputeYield,
+        };
+        return Some(GeneratedOp {
+            op: o,
+            record_deposit: None,
+            record_pending: None,
+        });
+    }
     if rng.range(100) < 15 && !op.deposits.is_empty() {
         if let Some(o) = gen_adversary_fee_collect(op, rng, sim.block_height) {
             return Some(GeneratedOp {
