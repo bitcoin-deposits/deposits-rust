@@ -76,7 +76,7 @@ fn calc_padded_len(unpadded_len: usize) -> usize {
         return 32;
     }
     // Calculate next power of 2 based on (unpadded_len - 1)
-    let next_power = 1usize << ((unpadded_len - 1) as u64).ilog2() as usize + 1;
+    let next_power = 1usize << (((unpadded_len - 1) as u64).ilog2() as usize + 1);
     let chunk = (next_power / 8).max(32);
     chunk * ((unpadded_len - 1) / chunk + 1)
 }

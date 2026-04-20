@@ -33,7 +33,9 @@ impl FlowGraph {
             let mut q = VecDeque::new();
             q.push_back(s);
             while let Some(u) = q.pop_front() {
-                if u == t { break; }
+                if u == t {
+                    break;
+                }
                 for v in 0..n {
                     if !visited[v] && residual[u][v] > 0 {
                         visited[v] = true;
@@ -42,12 +44,21 @@ impl FlowGraph {
                     }
                 }
             }
-            if !visited[t] { break; }
+            if !visited[t] {
+                break;
+            }
             let mut flow = u32::MAX;
             let mut v = t;
-            while let Some(u) = parent[v] { flow = flow.min(residual[u][v]); v = u; }
+            while let Some(u) = parent[v] {
+                flow = flow.min(residual[u][v]);
+                v = u;
+            }
             v = t;
-            while let Some(u) = parent[v] { residual[u][v] -= flow; residual[v][u] += flow; v = u; }
+            while let Some(u) = parent[v] {
+                residual[u][v] -= flow;
+                residual[v][u] += flow;
+                v = u;
+            }
             total += flow;
         }
         total
@@ -67,7 +78,9 @@ fn mincut_to_anchors(n: usize, edges: &[(usize, usize)], target: usize, anchors:
         g.add_edge(2 * u + 1, 2 * v, (n + 1) as u32);
         g.add_edge(2 * v + 1, 2 * u, (n + 1) as u32);
     }
-    for &a in anchors { g.add_edge(2 * a + 1, 2 * ss, (n + 1) as u32); }
+    for &a in anchors {
+        g.add_edge(2 * a + 1, 2 * ss, (n + 1) as u32);
+    }
     g.max_flow(2 * target + 1, 2 * ss)
 }
 
@@ -169,9 +182,7 @@ fn anchor_coverage(adj: &[HashSet<usize>], target: usize, anchors: &[usize]) -> 
     }
     let covered = members
         .iter()
-        .filter(|&&m| {
-            anchor_set.contains(&m) || adj[m].iter().any(|n| anchor_set.contains(n))
-        })
+        .filter(|&&m| anchor_set.contains(&m) || adj[m].iter().any(|n| anchor_set.contains(n)))
         .count();
     covered as f64 / members.len() as f64
 }
@@ -255,11 +266,7 @@ fn local_connectivity(adj: &[HashSet<usize>], target: usize, anchors: &[usize]) 
 }
 
 /// Metric 8: Composite safety score — weighted combination.
-fn composite_score(
-    adj: &[HashSet<usize>],
-    target: usize,
-    anchors: &[usize],
-) -> f64 {
+fn composite_score(adj: &[HashSet<usize>], target: usize, anchors: &[usize]) -> f64 {
     let n = adj.len() as f64;
     let deg = degree(adj, target) / n;
     let div = neighbor_diversity(adj, target) / n;
@@ -270,7 +277,13 @@ fn composite_score(
     let lconn = local_connectivity(adj, target, anchors) / n;
 
     // Weight: local connectivity and anchor coverage matter most
-    0.10 * deg + 0.15 * div + 0.10 * overlap + 0.10 * dist + 0.15 * cov + 0.15 * nconn + 0.25 * lconn
+    0.10 * deg
+        + 0.15 * div
+        + 0.10 * overlap
+        + 0.10 * dist
+        + 0.15 * cov
+        + 0.15 * nconn
+        + 0.25 * lconn
 }
 
 // =========================================================================
@@ -299,7 +312,9 @@ fn rank(values: &[f64]) -> Vec<f64> {
 
 fn spearman_rank(x: &[f64], y: &[f64]) -> f64 {
     let n = x.len();
-    if n < 2 { return f64::NAN; }
+    if n < 2 {
+        return f64::NAN;
+    }
     let rx = rank(x);
     let ry = rank(y);
     let mean_rx: f64 = rx.iter().sum::<f64>() / n as f64;
@@ -314,7 +329,9 @@ fn spearman_rank(x: &[f64], y: &[f64]) -> f64 {
         den_x += dx * dx;
         den_y += dy * dy;
     }
-    if den_x == 0.0 || den_y == 0.0 { return f64::NAN; }
+    if den_x == 0.0 || den_y == 0.0 {
+        return f64::NAN;
+    }
     num / (den_x * den_y).sqrt()
 }
 
@@ -325,7 +342,9 @@ fn spearman_rank(x: &[f64], y: &[f64]) -> f64 {
 fn ring_topology(n: usize, q: usize) -> Vec<(usize, usize)> {
     let mut edges = Vec::new();
     for i in 0..n {
-        for j in 1..=q { edges.push((i, (i + j) % n)); }
+        for j in 1..=q {
+            edges.push((i, (i + j) % n));
+        }
     }
     edges
 }
@@ -336,7 +355,9 @@ fn dispersed_topology(n: usize, q: usize) -> Vec<(usize, usize)> {
         let stride = n / (q + 1);
         for j in 1..=q {
             let m = (i + j * stride.max(1)) % n;
-            if m != i { edges.push((i, m)); }
+            if m != i {
+                edges.push((i, m));
+            }
         }
     }
     edges
@@ -344,17 +365,22 @@ fn dispersed_topology(n: usize, q: usize) -> Vec<(usize, usize)> {
 
 fn clustered_topology(n: usize, q: usize, cs: usize) -> Vec<(usize, usize)> {
     let mut edges = Vec::new();
-    let nc = (n + cs - 1) / cs;
+    let nc = n.div_ceil(cs);
     for i in 0..n {
         let c = i / cs;
         let mut added = 0;
         for j in 0..cs {
             let m = c * cs + j;
-            if m < n && m != i && added < q { edges.push((i, m)); added += 1; }
+            if m < n && m != i && added < q {
+                edges.push((i, m));
+                added += 1;
+            }
         }
         if added < q {
             let bridge = ((c + 1) % nc) * cs;
-            if bridge < n && bridge != i { edges.push((i, bridge)); }
+            if bridge < n && bridge != i {
+                edges.push((i, bridge));
+            }
         }
     }
     edges
@@ -375,7 +401,7 @@ fn min_profitable_coalition(
     let adj = adjacency(n, edges);
     let quorum: Vec<usize> = adj[target].iter().copied().collect();
     let q = quorum.len();
-    let majority = (q + 1) / 2;
+    let majority = q.div_ceil(2);
 
     // Try coalition sizes from 1 up
     for k in 1..=q {
@@ -419,7 +445,17 @@ fn metric_comparison() {
         println!("--- {} ---", topo_name);
         println!(
             "{:>3} | {:>4} | {:>5} | {:>5} | {:>5} | {:>5} | {:>5} | {:>5} | {:>7} | {:>6} | {:>8}",
-            "Op", "Deg", "Div", "Ovlp", "Dist", "ACov", "NConn", "LConn", "Comp", "Mincut", "MinCoal"
+            "Op",
+            "Deg",
+            "Div",
+            "Ovlp",
+            "Dist",
+            "ACov",
+            "NConn",
+            "LConn",
+            "Comp",
+            "Mincut",
+            "MinCoal"
         );
         println!("{}", "-".repeat(95));
 
@@ -427,7 +463,9 @@ fn metric_comparison() {
         let mut metric_data: Vec<(f64, f64, f64, f64, f64, f64, f64, f64, u32, usize)> = Vec::new();
 
         for target in 0..n {
-            if anchors.contains(&target) { continue; }
+            if anchors.contains(&target) {
+                continue;
+            }
 
             let deg = degree(&adj, target);
             let div = neighbor_diversity(&adj, target);
@@ -466,9 +504,16 @@ fn metric_comparison() {
 
             println!("  Correlation with Mincut (Spearman rank):");
             for (name, values) in &metrics_named {
-                let r = spearman_rank(&values, &mincuts);
-                let bar = if r.is_nan() { "  (no variance)".to_string() }
-                    else { format!("  {}{}", if r >= 0.0 { "+" } else { "" }, "█".repeat((r.abs() * 20.0) as usize)) };
+                let r = spearman_rank(values, &mincuts);
+                let bar = if r.is_nan() {
+                    "  (no variance)".to_string()
+                } else {
+                    format!(
+                        "  {}{}",
+                        if r >= 0.0 { "+" } else { "" },
+                        "█".repeat((r.abs() * 20.0) as usize)
+                    )
+                };
                 println!("    {:>12}: {:>6.3}{}", name, r, bar);
             }
             println!();
@@ -513,7 +558,9 @@ fn metric_comparison_large() {
         let mut metric_data: Vec<(f64, f64, f64, f64, f64, f64, f64, f64, u32)> = Vec::new();
 
         for target in 0..n {
-            if anchors.contains(&target) { continue; }
+            if anchors.contains(&target) {
+                continue;
+            }
 
             let deg = degree(&adj, target);
             let div = neighbor_diversity(&adj, target);
@@ -556,9 +603,16 @@ fn metric_comparison_large() {
 
         println!("  Correlation with Mincut (Spearman rank):");
         for (name, values) in &metrics_named {
-            let r = spearman_rank(&values, &mincuts);
-            let bar = if r.is_nan() { "  (no variance)".to_string() }
-                else { format!("  {}{}", if r >= 0.0 { "+" } else { "" }, "█".repeat((r.abs() * 20.0) as usize)) };
+            let r = spearman_rank(values, &mincuts);
+            let bar = if r.is_nan() {
+                "  (no variance)".to_string()
+            } else {
+                format!(
+                    "  {}{}",
+                    if r >= 0.0 { "+" } else { "" },
+                    "█".repeat((r.abs() * 20.0) as usize)
+                )
+            };
             println!("    {:>12}: {:>6.3}{}", name, r, bar);
         }
         println!();

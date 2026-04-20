@@ -183,7 +183,7 @@ fn dispersed_topology(n: usize, q: usize) -> Vec<(usize, usize)> {
 /// Clustered: operators form cliques, with sparse inter-clique connections.
 fn clustered_topology(n: usize, q: usize, cluster_size: usize) -> Vec<(usize, usize)> {
     let mut edges = Vec::new();
-    let num_clusters = (n + cluster_size - 1) / cluster_size;
+    let num_clusters = n.div_ceil(cluster_size);
 
     for i in 0..n {
         let my_cluster = i / cluster_size;

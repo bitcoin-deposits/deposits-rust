@@ -15,8 +15,15 @@ struct FlowGraph {
     capacity: Vec<Vec<u32>>,
 }
 impl FlowGraph {
-    fn new(n: usize) -> Self { Self { n, capacity: vec![vec![0; n]; n] } }
-    fn add_edge(&mut self, f: usize, t: usize, c: u32) { self.capacity[f][t] += c; }
+    fn new(n: usize) -> Self {
+        Self {
+            n,
+            capacity: vec![vec![0; n]; n],
+        }
+    }
+    fn add_edge(&mut self, f: usize, t: usize, c: u32) {
+        self.capacity[f][t] += c;
+    }
     fn max_flow(&self, s: usize, t: usize) -> u32 {
         let n = self.n;
         let mut res = self.capacity.clone();
@@ -28,19 +35,32 @@ impl FlowGraph {
             let mut q = VecDeque::new();
             q.push_back(s);
             while let Some(u) = q.pop_front() {
-                if u == t { break; }
+                if u == t {
+                    break;
+                }
                 for v in 0..n {
                     if !vis[v] && res[u][v] > 0 {
-                        vis[v] = true; par[v] = Some(u); q.push_back(v);
+                        vis[v] = true;
+                        par[v] = Some(u);
+                        q.push_back(v);
                     }
                 }
             }
-            if !vis[t] { break; }
+            if !vis[t] {
+                break;
+            }
             let mut flow = u32::MAX;
             let mut v = t;
-            while let Some(u) = par[v] { flow = flow.min(res[u][v]); v = u; }
+            while let Some(u) = par[v] {
+                flow = flow.min(res[u][v]);
+                v = u;
+            }
             v = t;
-            while let Some(u) = par[v] { res[u][v] -= flow; res[v][u] += flow; v = u; }
+            while let Some(u) = par[v] {
+                res[u][v] -= flow;
+                res[v][u] += flow;
+                v = u;
+            }
             total += flow;
         }
         total
@@ -61,14 +81,18 @@ fn mincut(n: usize, adj: &[HashSet<usize>], target: usize, anchors: &[usize]) ->
             g.add_edge(2 * i + 1, 2 * j, (n + 1) as u32);
         }
     }
-    for &a in anchors { g.add_edge(2 * a + 1, 2 * ss, (n + 1) as u32); }
+    for &a in anchors {
+        g.add_edge(2 * a + 1, 2 * ss, (n + 1) as u32);
+    }
     g.max_flow(2 * target + 1, 2 * ss)
 }
 
 fn clustering_coeff(adj: &[HashSet<usize>], node: usize) -> f64 {
     let neighbors: Vec<usize> = adj[node].iter().copied().collect();
     let k = neighbors.len();
-    if k < 2 { return 0.0; }
+    if k < 2 {
+        return 0.0;
+    }
     let mut connected = 0usize;
     for i in 0..k {
         for j in (i + 1)..k {
@@ -100,8 +124,8 @@ fn wallet_accepts(n: usize, adj: &[HashSet<usize>], target: usize, anchors: &[us
 struct Network {
     adj: Vec<HashSet<usize>>,
     is_attacker: Vec<bool>,
-    reserves: Vec<u64>,     // operator's own reserves on their ledger
-    deposits: Vec<u64>,     // wallet deposits on this operator's ledger
+    reserves: Vec<u64>, // operator's own reserves on their ledger
+    deposits: Vec<u64>, // wallet deposits on this operator's ledger
     quorum: Vec<Vec<usize>>,
     per_lock: Vec<u64>,
     anchors: Vec<usize>,
@@ -114,9 +138,9 @@ impl Network {
         let per_lock = utxo / (2 * q as u64);
 
         let mut adj = vec![HashSet::new(); n];
-        let quorum: Vec<Vec<usize>> = (0..n).map(|i| {
-            (1..=q).map(|j| (i + j) % n).collect()
-        }).collect();
+        let quorum: Vec<Vec<usize>> = (0..n)
+            .map(|i| (1..=q).map(|j| (i + j) % n).collect())
+            .collect();
         for i in 0..n {
             for &m in &quorum[i] {
                 adj[i].insert(m);
@@ -137,7 +161,9 @@ impl Network {
         }
     }
 
-    fn n(&self) -> usize { self.adj.len() }
+    fn n(&self) -> usize {
+        self.adj.len()
+    }
 
     /// Add sybil nodes. Returns the range of new node IDs.
     fn add_sybils(&mut self, count: usize, q: usize, utxo: u64) -> (usize, usize) {
@@ -195,7 +221,9 @@ impl Network {
         let n = self.n();
         let mut deposited_on = Vec::new();
         for i in 0..n {
-            if self.anchors.contains(&i) { continue; }
+            if self.anchors.contains(&i) {
+                continue;
+            }
             if wallet_accepts(n, &self.adj, i, &self.anchors) {
                 self.deposits[i] += amount;
                 deposited_on.push(i);
@@ -211,8 +239,8 @@ impl Network {
         let coalition: Vec<usize> = (0..n).filter(|&i| self.is_attacker[i]).collect();
         let cs: HashSet<usize> = coalition.iter().copied().collect();
 
-        let mut wallet_losses = 0u64;   // wallet deposits stolen
-        let mut attacker_cost = 0u64;    // collateral slashed + own reserves lost
+        let mut wallet_losses = 0u64; // wallet deposits stolen
+        let mut attacker_cost = 0u64; // collateral slashed + own reserves lost
 
         let mut details = Vec::new();
 
@@ -220,7 +248,7 @@ impl Network {
             let q = &self.quorum[i];
             let ciq = q.iter().filter(|m| cs.contains(m)).count();
             let hiq = q.len() - ciq;
-            let maj = (q.len() + 1) / 2;
+            let maj = q.len().div_ceil(2);
             let hmaj = hiq >= maj;
             let is_att = self.is_attacker[i];
 
@@ -229,10 +257,16 @@ impl Network {
                 if hmaj {
                     // Honest quorum confiscates attacker's reserves
                     attacker_cost += self.reserves[i];
-                    details.push(format!("  node {:>2}: ATK own reserves {} confiscated", i, self.reserves[i]));
+                    details.push(format!(
+                        "  node {:>2}: ATK own reserves {} confiscated",
+                        i, self.reserves[i]
+                    ));
                 } else {
                     // Attacker keeps own reserves (but that's not profit)
-                    details.push(format!("  node {:>2}: ATK keeps own reserves {}", i, self.reserves[i]));
+                    details.push(format!(
+                        "  node {:>2}: ATK keeps own reserves {}",
+                        i, self.reserves[i]
+                    ));
                 }
                 // Can attacker steal wallet deposits on their own ledger?
                 if self.deposits[i] > 0 {
@@ -240,9 +274,15 @@ impl Network {
                     // But the quorum must sign. If attacker's quorum is mostly attacker...
                     if !hmaj {
                         wallet_losses += self.deposits[i];
-                        details.push(format!("  node {:>2}: ATK steals wallet deposit {}!", i, self.deposits[i]));
+                        details.push(format!(
+                            "  node {:>2}: ATK steals wallet deposit {}!",
+                            i, self.deposits[i]
+                        ));
                     } else {
-                        details.push(format!("  node {:>2}: ATK cannot steal deposit {} (honest quorum)", i, self.deposits[i]));
+                        details.push(format!(
+                            "  node {:>2}: ATK cannot steal deposit {} (honest quorum)",
+                            i, self.deposits[i]
+                        ));
                     }
                 }
             } else {
@@ -250,16 +290,24 @@ impl Network {
                 if !hmaj {
                     // Coalition controls quorum — steal reserves AND deposits
                     wallet_losses += self.deposits[i];
-                    details.push(format!("  node {:>2}: HONEST compromised, deposit {} stolen", i, self.deposits[i]));
+                    details.push(format!(
+                        "  node {:>2}: HONEST compromised, deposit {} stolen",
+                        i, self.deposits[i]
+                    ));
                 } else if ciq > 0 {
                     // Honest quorum slashes attacker collateral
-                    let slashed: u64 = coalition.iter()
+                    let slashed: u64 = coalition
+                        .iter()
                         .filter(|&&c| q.contains(&c))
                         .map(|&c| self.per_lock[c])
                         .sum();
                     attacker_cost += slashed;
-                    details.push(format!("  node {:>2}: HONEST safe, slashes {} from {} attacker members",
-                        i, slashed, q.iter().filter(|m| cs.contains(m)).count()));
+                    details.push(format!(
+                        "  node {:>2}: HONEST safe, slashes {} from {} attacker members",
+                        i,
+                        slashed,
+                        q.iter().filter(|m| cs.contains(m)).count()
+                    ));
                 }
             }
         }
@@ -285,10 +333,20 @@ struct AttackOutcome {
 }
 
 fn print_outcome(label: &str, outcome: &AttackOutcome, verbose: bool) {
-    let tag = if outcome.net_theft > 0 { "STOLEN!" } else { "FAILED" };
-    println!("  [{}] {} — K={}, wallet_loss={}, attacker_cost={}, net={:+}",
-        tag, label, outcome.coalition_size,
-        outcome.wallet_losses, outcome.attacker_cost, outcome.net_theft);
+    let tag = if outcome.net_theft > 0 {
+        "STOLEN!"
+    } else {
+        "FAILED"
+    };
+    println!(
+        "  [{}] {} — K={}, wallet_loss={}, attacker_cost={}, net={:+}",
+        tag,
+        label,
+        outcome.coalition_size,
+        outcome.wallet_losses,
+        outcome.attacker_cost,
+        outcome.net_theft
+    );
     if verbose || outcome.net_theft > 0 {
         for d in &outcome.details {
             println!("    {}", d);
@@ -307,9 +365,15 @@ fn try_to_steal() {
     let deposit_amount = 100_000u64;
 
     println!("\n=== CAN WE STEAL FROM WALLETS? ===");
-    println!("  Policy: mincut >= {} AND clustering < {}", MIN_MINCUT, MAX_CLUSTERING);
+    println!(
+        "  Policy: mincut >= {} AND clustering < {}",
+        MIN_MINCUT, MAX_CLUSTERING
+    );
     println!("  Network: 20 honest nodes, ring Q={}, 6 anchors", q);
-    println!("  Wallet deposits {}sat on every node that passes\n", deposit_amount);
+    println!(
+        "  Wallet deposits {}sat on every node that passes\n",
+        deposit_amount
+    );
 
     // =====================================================================
     // Strategy 1: Sybil island with bridges
@@ -320,17 +384,21 @@ fn try_to_steal() {
         let (sb, _se) = net.add_sybils(10, q, utxo);
 
         // Bridge to anchor-adjacent nodes
-        net.bridge(sb + 0, 1); net.bridge(sb + 1, 4);
-        net.bridge(sb + 2, 7); net.bridge(sb + 3, 11);
-        net.bridge(sb + 4, 14); net.bridge(sb + 5, 17);
+        net.bridge(sb, 1);
+        net.bridge(sb + 1, 4);
+        net.bridge(sb + 2, 7);
+        net.bridge(sb + 3, 11);
+        net.bridge(sb + 4, 14);
+        net.bridge(sb + 5, 17);
 
         let deposited = net.wallet_deposit(deposit_amount);
 
-        let sybil_accepted: Vec<usize> = (sb..sb+10)
-            .filter(|i| deposited.contains(i))
-            .collect();
-        println!("  Wallet deposited on {} nodes ({} sybils accepted)",
-            deposited.len(), sybil_accepted.len());
+        let sybil_accepted: Vec<usize> = (sb..sb + 10).filter(|i| deposited.contains(i)).collect();
+        println!(
+            "  Wallet deposited on {} nodes ({} sybils accepted)",
+            deposited.len(),
+            sybil_accepted.len()
+        );
 
         let outcome = net.attack();
         print_outcome("sybil island", &outcome, true);
@@ -348,26 +416,36 @@ fn try_to_steal() {
         let (sb, _se) = net.add_sybils(20, q, utxo);
 
         // 6 bridges spread across the sybil ring
-        net.bridge(sb + 0, 1); net.bridge(sb + 3, 4);
-        net.bridge(sb + 6, 7); net.bridge(sb + 10, 11);
-        net.bridge(sb + 13, 14); net.bridge(sb + 16, 17);
+        net.bridge(sb, 1);
+        net.bridge(sb + 3, 4);
+        net.bridge(sb + 6, 7);
+        net.bridge(sb + 10, 11);
+        net.bridge(sb + 13, 14);
+        net.bridge(sb + 16, 17);
 
         // Check what sybil clustering looks like
         let n = net.n();
         let sample_cc = clustering_coeff(&net.adj, sb + 8); // middle sybil, no bridge
         let sample_mc = mincut(n, &net.adj, sb + 8, &net.anchors);
-        println!("  Sybil node (no bridge) — clustering={:.3}, mincut={}", sample_cc, sample_mc);
+        println!(
+            "  Sybil node (no bridge) — clustering={:.3}, mincut={}",
+            sample_cc, sample_mc
+        );
 
-        let bridge_cc = clustering_coeff(&net.adj, sb + 0);
-        let bridge_mc = mincut(n, &net.adj, sb + 0, &net.anchors);
-        println!("  Sybil node (bridge)    — clustering={:.3}, mincut={}", bridge_cc, bridge_mc);
+        let bridge_cc = clustering_coeff(&net.adj, sb);
+        let bridge_mc = mincut(n, &net.adj, sb, &net.anchors);
+        println!(
+            "  Sybil node (bridge)    — clustering={:.3}, mincut={}",
+            bridge_cc, bridge_mc
+        );
 
         let deposited = net.wallet_deposit(deposit_amount);
-        let sybil_accepted: Vec<usize> = (sb..sb+20)
-            .filter(|i| deposited.contains(i))
-            .collect();
-        println!("  Wallet deposited on {} nodes ({} sybils accepted)",
-            deposited.len(), sybil_accepted.len());
+        let sybil_accepted: Vec<usize> = (sb..sb + 20).filter(|i| deposited.contains(i)).collect();
+        println!(
+            "  Wallet deposited on {} nodes ({} sybils accepted)",
+            deposited.len(),
+            sybil_accepted.len()
+        );
 
         if !sybil_accepted.is_empty() {
             let outcome = net.attack();
@@ -391,7 +469,11 @@ fn try_to_steal() {
 
         let deposited = net.wallet_deposit(deposit_amount);
         let outcome = net.attack();
-        print_outcome(&format!("{} compromised adjacent", num_compromised), &outcome, outcome.net_theft > 0);
+        print_outcome(
+            &format!("{} compromised adjacent", num_compromised),
+            &outcome,
+            outcome.net_theft > 0,
+        );
     }
     println!();
 
@@ -411,7 +493,11 @@ fn try_to_steal() {
 
         let deposited = net.wallet_deposit(deposit_amount);
         let outcome = net.attack();
-        print_outcome(&format!("{} compromised spread", num_compromised), &outcome, outcome.net_theft > 0);
+        print_outcome(
+            &format!("{} compromised spread", num_compromised),
+            &outcome,
+            outcome.net_theft > 0,
+        );
     }
     println!();
 
@@ -442,8 +528,10 @@ fn try_to_steal() {
             let mc = mincut(n, &net.adj, h, &net.anchors);
             let cc = clustering_coeff(&net.adj, h);
             let accepted = deposited.contains(&h);
-            println!("  Compromised bridge {} — mc={}, cc={:.3}, accepted={}",
-                h, mc, cc, accepted);
+            println!(
+                "  Compromised bridge {} — mc={}, cc={:.3}, accepted={}",
+                h, mc, cc, accepted
+            );
         }
 
         let outcome = net.attack();

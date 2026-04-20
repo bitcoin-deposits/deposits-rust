@@ -7,18 +7,25 @@
 //! "Profit" = adversary ends up with more funds than they started with,
 //! accounting for collateral slashed and reserves confiscated.
 
+use deposits_core::Ledger;
 use deposits_protocol::messages::LedgerOperation;
 use deposits_protocol::types::*;
-use deposits_core::Ledger;
 
 /// Simple PRNG
 struct Rng(u64);
 impl Rng {
-    fn new(seed: u64) -> Self { Self(seed.max(1)) }
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13; self.0 ^= self.0 >> 7; self.0 ^= self.0 << 17; self.0
+    fn new(seed: u64) -> Self {
+        Self(seed.max(1))
     }
-    fn range(&mut self, max: u64) -> u64 { self.next() % max.max(1) }
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn range(&mut self, max: u64) -> u64 {
+        self.next() % max.max(1)
+    }
 }
 
 fn test_pubkey(idx: u8) -> bitcoin::secp256k1::PublicKey {
@@ -40,45 +47,50 @@ fn make_deposit_id(descriptor: &str) -> DepositId {
 /// A minimal multi-operator cluster.
 struct Cluster {
     operators: Vec<Operator>,
-    honest: Vec<usize>,     // indices of honest operators
-    adversary: Vec<usize>,  // indices of adversarial operators
+    honest: Vec<usize>,    // indices of honest operators
+    adversary: Vec<usize>, // indices of adversarial operators
 }
 
 struct Operator {
     idx: usize,
     pubkey: bitcoin::secp256k1::PublicKey,
     ledger: Ledger,
-    quorum_members: Vec<usize>, // indices of quorum members
+    quorum_members: Vec<usize>,         // indices of quorum members
     deposits: Vec<(DepositId, String)>, // (id, descriptor)
-    funded_by_wallet: u64,  // external deposits from wallets
+    funded_by_wallet: u64,              // external deposits from wallets
 }
 
 impl Cluster {
     fn new(n: usize, adversary_indices: &[usize]) -> Self {
-        let adversary_set: std::collections::HashSet<usize> = adversary_indices.iter().copied().collect();
+        let adversary_set: std::collections::HashSet<usize> =
+            adversary_indices.iter().copied().collect();
 
-        let mut operators: Vec<Operator> = (0..n).map(|i| {
-            let pk = test_pubkey((i + 1) as u8);
-            let mut ledger = Ledger::new_as_operator(pk, format!("reserves_{}", i), 0);
+        let mut operators: Vec<Operator> = (0..n)
+            .map(|i| {
+                let pk = test_pubkey((i + 1) as u8);
+                let mut ledger = Ledger::new_as_operator(pk, format!("reserves_{}", i), 0);
 
-            // LedgerOpen with 40/60 split
-            ledger.apply_operation(&LedgerOperation::LedgerOpen {
-                operator_id: pk,
-                reserves_id: format!("reserves_{}", i),
-                genesis_block: 0,
-                reserves_amount: 400_000, // 40%
-                collateral_amount: 600_000, // 60%
-            }).unwrap();
+                // LedgerOpen with 40/60 split
+                ledger
+                    .apply_operation(&LedgerOperation::LedgerOpen {
+                        operator_id: pk,
+                        reserves_id: format!("reserves_{}", i),
+                        genesis_block: 0,
+                        reserves_amount: 400_000,   // 40%
+                        collateral_amount: 600_000, // 60%
+                    })
+                    .unwrap();
 
-            Operator {
-                idx: i,
-                pubkey: pk,
-                ledger,
-                quorum_members: Vec::new(),
-                deposits: Vec::new(),
-                funded_by_wallet: 0,
-            }
-        }).collect();
+                Operator {
+                    idx: i,
+                    pubkey: pk,
+                    ledger,
+                    quorum_members: Vec::new(),
+                    deposits: Vec::new(),
+                    funded_by_wallet: 0,
+                }
+            })
+            .collect();
 
         // Assign Q=3 quorums: each operator gets 3 members (round-robin, skip self)
         for i in 0..n {
@@ -92,41 +104,51 @@ impl Cluster {
             // Add quorum members to ledger
             for &m in &members {
                 let member_pk = operators[m].pubkey;
-                operators[i].ledger.apply_operation(&LedgerOperation::QuorumAddMember {
-                    quorum_member: member_pk,
-                    quorum_member_signature: [0xAA; 64],
-                    member_ledger_id: format!("reserves_{}", m),
-                    min_fee_bps: None,
-                    min_fee_fixed: None,
-                    max_fee_period: None,
-                    membership_until: None,
-                    dispute_response_blocks: None,
-                    dispute_arm_blocks: None,
-                    service_response_blocks: None,
-                    max_transfer_timeout_blocks: None,
-                    max_descriptor_bytes: None,
-                }).unwrap();
+                operators[i]
+                    .ledger
+                    .apply_operation(&LedgerOperation::QuorumAddMember {
+                        quorum_member: member_pk,
+                        quorum_member_signature: [0xAA; 64],
+                        member_ledger_id: format!("reserves_{}", m),
+                        min_fee_bps: None,
+                        min_fee_fixed: None,
+                        max_fee_period: None,
+                        membership_until: None,
+                        dispute_response_blocks: None,
+                        dispute_arm_blocks: None,
+                        service_response_blocks: None,
+                        max_transfer_timeout_blocks: None,
+                        max_descriptor_bytes: None,
+                    })
+                    .unwrap();
             }
 
             // QuorumBegin
             let member_pks: Vec<_> = members.iter().map(|&m| operators[m].pubkey).collect();
-            operators[i].ledger.apply_operation(&LedgerOperation::QuorumBegin {
-                reserves_id: format!("reserves_{}_rotated", i),
-                spending_txid: [0x11; 32],
-                new_outpoint_txid: [(i as u8 + 0x20); 32],
-                new_outpoint_vout: 0,
-                amount: 400_000,
-                quorum_expiry: 999_999,
-                ledger_hash: [0x33; 32],
-                quorum_members: member_pks,
-                collateral_amount: 600_000,
-            }).unwrap();
+            operators[i]
+                .ledger
+                .apply_operation(&LedgerOperation::QuorumBegin {
+                    reserves_id: format!("reserves_{}_rotated", i),
+                    spending_txid: [0x11; 32],
+                    new_outpoint_txid: [(i as u8 + 0x20); 32],
+                    new_outpoint_vout: 0,
+                    amount: 400_000,
+                    quorum_expiry: 999_999,
+                    ledger_hash: [0x33; 32],
+                    quorum_members: member_pks,
+                    collateral_amount: 600_000,
+                })
+                .unwrap();
         }
 
         let honest: Vec<usize> = (0..n).filter(|i| !adversary_set.contains(i)).collect();
         let adversary: Vec<usize> = adversary_indices.to_vec();
 
-        Cluster { operators, honest, adversary }
+        Cluster {
+            operators,
+            honest,
+            adversary,
+        }
     }
 
     /// Open a wallet deposit on an operator's ledger.
@@ -136,34 +158,42 @@ impl Cluster {
         let descriptor = format!("pk({})", hex::encode(pk.serialize()));
         let deposit_id = make_deposit_id(&descriptor);
 
-        self.operators[op_idx].ledger.apply_operation(&LedgerOperation::DepositOpen {
-            deposit_id,
-            descriptor: descriptor.clone(),
-            fees: Some(FeeStructure::default()),
-            transfer_fees: None,
-            payment_hash: None,
-            invoice: None,
-            cosigner_guarantee_signature: None,
-            receive_requires_sig: false,
-            fee_change_after_blocks: None,
-            fee_change_notice_blocks: None,
-            fee_change_limit_bps: None,
-        }).unwrap();
+        self.operators[op_idx]
+            .ledger
+            .apply_operation(&LedgerOperation::DepositOpen {
+                deposit_id,
+                descriptor: descriptor.clone(),
+                fees: Some(FeeStructure::default()),
+                transfer_fees: None,
+                payment_hash: None,
+                invoice: None,
+                cosigner_guarantee_signature: None,
+                receive_requires_sig: false,
+                fee_change_after_blocks: None,
+                fee_change_notice_blocks: None,
+                fee_change_limit_bps: None,
+            })
+            .unwrap();
 
         // Credit it
         let mut ph = [0u8; 32];
         ph[0] = key_idx;
         ph[1] = op_idx as u8;
         let seq = self.operators[op_idx].ledger.state.sequence + 1;
-        self.operators[op_idx].ledger.apply_operation(&LedgerOperation::InvoiceCredit {
-            payment_hash: ph,
-            deposit_id,
-            amount,
-            invoice_id: format!("wallet_dep_{}_{}", op_idx, key_idx),
-            sequence_number: seq,
-        }).unwrap();
+        self.operators[op_idx]
+            .ledger
+            .apply_operation(&LedgerOperation::InvoiceCredit {
+                payment_hash: ph,
+                deposit_id,
+                amount,
+                invoice_id: format!("wallet_dep_{}_{}", op_idx, key_idx),
+                sequence_number: seq,
+            })
+            .unwrap();
 
-        self.operators[op_idx].deposits.push((deposit_id, descriptor));
+        self.operators[op_idx]
+            .deposits
+            .push((deposit_id, descriptor));
         self.operators[op_idx].funded_by_wallet += amount;
         deposit_id
     }
@@ -173,14 +203,19 @@ impl Cluster {
     /// if their quorum has adversary majority, they can steal deposits.
     /// Cost: on adversary operators where honest has majority, collateral is slashed.
     fn evaluate_attack(&self) -> (i64, u64, u64) {
-        let adversary_set: std::collections::HashSet<usize> = self.adversary.iter().copied().collect();
+        let adversary_set: std::collections::HashSet<usize> =
+            self.adversary.iter().copied().collect();
         let mut stolen = 0u64;
         let mut cost = 0u64;
 
         for op in &self.operators {
-            let adv_in_q = op.quorum_members.iter().filter(|m| adversary_set.contains(m)).count();
+            let adv_in_q = op
+                .quorum_members
+                .iter()
+                .filter(|m| adversary_set.contains(m))
+                .count();
             let hon_in_q = op.quorum_members.len() - adv_in_q;
-            let majority = (op.quorum_members.len() + 1) / 2;
+            let majority = op.quorum_members.len().div_ceil(2);
             let honest_majority = hon_in_q >= majority;
             let is_adversary = adversary_set.contains(&op.idx);
 
@@ -219,7 +254,10 @@ fn fuzz_adversarial_cluster() {
     let mut best_attack_net = i64::MIN;
 
     // Try every pair of adversary nodes
-    println!("{:>12} | {:>8} {:>8} {:>+9} | {:>12}", "Adversaries", "Stolen", "Cost", "Net", "Result");
+    println!(
+        "{:>12} | {:>8} {:>8} {:>+9} | {:>12}",
+        "Adversaries", "Stolen", "Cost", "Net", "Result"
+    );
     println!("{}", "-".repeat(60));
 
     for a1 in 0..n {
@@ -238,7 +276,7 @@ fn fuzz_adversarial_cluster() {
                 for i in 0..n {
                     let num_deposits = (rng.range(3) + 1) as usize;
                     for _ in 0..num_deposits {
-                        let amount = (rng.range(deposit_amount) + 1000) as u64;
+                        let amount = rng.range(deposit_amount) + 1000;
                         cluster.wallet_deposit(i, amount);
                     }
                 }
@@ -253,8 +291,13 @@ fn fuzz_adversarial_cluster() {
                         let mut ph = [0u8; 32];
                         ph[..8].copy_from_slice(&rng.next().to_le_bytes());
                         let reserves = cluster.operators[adv].ledger.state.reserves_amount;
-                        let current_total: u64 = cluster.operators[adv].ledger.state.deposits
-                            .values().map(|d| d.balance).sum();
+                        let current_total: u64 = cluster.operators[adv]
+                            .ledger
+                            .state
+                            .deposits
+                            .values()
+                            .map(|d| d.balance)
+                            .sum();
                         let headroom = reserves.saturating_sub(current_total);
 
                         // Try crediting exactly at the limit (should work)
@@ -268,7 +311,7 @@ fn fuzz_adversarial_cluster() {
                                     amount: headroom.min(50_000),
                                     invoice_id: inv_id,
                                     sequence_number: seq,
-                                }
+                                },
                             );
                         }
                     }
@@ -276,35 +319,50 @@ fn fuzz_adversarial_cluster() {
 
                 // Check invariants
                 for op in &cluster.operators {
-                    let total_balance: u64 = op.ledger.state.deposits.values()
-                        .map(|d| d.balance).sum();
+                    let total_balance: u64 =
+                        op.ledger.state.deposits.values().map(|d| d.balance).sum();
                     assert!(
                         total_balance <= op.ledger.state.reserves_amount,
                         "Invariant violation: deposits {} > reserves {} on operator {}",
-                        total_balance, op.ledger.state.reserves_amount, op.idx
+                        total_balance,
+                        op.ledger.state.reserves_amount,
+                        op.idx
                     );
                 }
 
                 let (net, _, _) = cluster.evaluate_attack();
                 total_net += net;
-                if net > max_net { max_net = net; }
-                if net > 0 { profitable += 1; }
+                if net > max_net {
+                    max_net = net;
+                }
+                if net > 0 {
+                    profitable += 1;
+                }
             }
 
             let avg_net = total_net / trials as i64;
             let tag = if profitable > 0 { "EXPLOIT" } else { "safe" };
-            println!("{:>5},{:>5}   | {:>8} {:>8} {:>+9} | {:>12}",
-                a1, a2,
-                "", "", avg_net, tag);
+            println!(
+                "{:>5},{:>5}   | {:>8} {:>8} {:>+9} | {:>12}",
+                a1, a2, "", "", avg_net, tag
+            );
 
             total_profitable += profitable;
-            if avg_net < worst_net { worst_net = avg_net; }
-            if max_net > best_attack_net { best_attack_net = max_net; }
+            if avg_net < worst_net {
+                worst_net = avg_net;
+            }
+            if max_net > best_attack_net {
+                best_attack_net = max_net;
+            }
         }
     }
 
     println!();
-    println!("  Total profitable across all pairs: {}/{}", total_profitable, 10 * trials);
+    println!(
+        "  Total profitable across all pairs: {}/{}",
+        total_profitable,
+        10 * trials
+    );
     println!("  Worst avg net: {:+}", worst_net);
     println!("  Best single trial: {:+}", best_attack_net);
 

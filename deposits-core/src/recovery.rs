@@ -1037,7 +1037,7 @@ mod tests {
         assert!(vote.verify().is_ok());
 
         // Verify voter matches keypair
-        let expected_voter = PublicKey::from(keypair.public_key());
+        let expected_voter = keypair.public_key();
         assert_eq!(vote.voter, expected_voter);
         assert!(!vote.is_conforming);
         assert_eq!(vote.validated_hash, [1u8; 32]);

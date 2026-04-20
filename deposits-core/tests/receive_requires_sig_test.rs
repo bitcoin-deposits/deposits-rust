@@ -30,11 +30,7 @@ fn make_ledger() -> Ledger {
     }
 }
 
-fn open_deposit_ex(
-    ledger: &mut Ledger,
-    descriptor: &str,
-    receive_requires_sig: bool,
-) -> [u8; 16] {
+fn open_deposit_ex(ledger: &mut Ledger, descriptor: &str, receive_requires_sig: bool) -> [u8; 16] {
     let deposit_id = compute_deposit_id(descriptor);
     ledger
         .apply_state_changes(&LedgerOperation::DepositOpen {

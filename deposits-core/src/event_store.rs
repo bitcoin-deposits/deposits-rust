@@ -442,7 +442,7 @@ mod tests {
     /// Helper to compute hash the same way SignedLedgerUpdate::compute_hash does.
     fn compute_hash(seq: u64, prev_hash: &[u8; 32], message: &[u8]) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update(&seq.to_le_bytes());
+        hasher.update(seq.to_le_bytes());
         hasher.update(prev_hash);
         hasher.update(message);
         let result = hasher.finalize();

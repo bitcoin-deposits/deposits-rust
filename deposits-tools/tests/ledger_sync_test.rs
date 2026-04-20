@@ -210,6 +210,7 @@ fn test_partner_attestation_self_application() {
 /// 2. DepositOpen
 /// 3. QuorumAddMember
 /// 4. CollateralAttestation from quorum member
+///
 /// Both sides should have identical final state.
 #[test]
 fn test_full_sync_flow() {

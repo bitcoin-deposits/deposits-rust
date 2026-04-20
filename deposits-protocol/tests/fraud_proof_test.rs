@@ -194,7 +194,7 @@ fn verify_embedding_matches_hash() {
 
 #[test]
 fn discriminants_are_unique() {
-    let types = vec![
+    let types = [
         FraudProofType::UncreditedOnchainPayment,
         FraudProofType::UncreditedLightningPayment,
         FraudProofType::StaleCosignature,
@@ -484,9 +484,9 @@ fn compute_hash_without_member_hash_is_backward_compatible() {
     // Without member_ledger_hash, hash is just SHA256(seq || prev_hash || message)
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(&1u64.to_le_bytes());
-    hasher.update(&[0u8; 32]);
-    hasher.update(&[1u8, 2, 3]);
+    hasher.update(1u64.to_le_bytes());
+    hasher.update([0u8; 32]);
+    hasher.update([1u8, 2, 3]);
     let expected: [u8; 32] = hasher.finalize().into();
 
     assert_eq!(update.compute_hash(), expected);
@@ -620,8 +620,8 @@ fn chain_hash_is_sha256_of_current_hash_and_operator_sig() {
 
     // Manual chain_hash computation
     let mut hasher = Sha256::new();
-    hasher.update(&update.current_hash);
-    hasher.update(&update.operator_signature);
+    hasher.update(update.current_hash);
+    hasher.update(update.operator_signature);
     let expected: [u8; 32] = hasher.finalize().into();
 
     assert_eq!(update.chain_hash(), expected);

@@ -101,7 +101,7 @@ fn attack_nums_keypath_spend_attempt() {
 
         // Verify: does this signature validate against the output's public key?
         let output_key = output.spend_info.output_key();
-        let verify_result = secp.verify_schnorr(&sig, &msg, &output_key.to_inner());
+        let verify_result = secp.verify_schnorr(&sig, &msg, &output_key.to_x_only_public_key());
         let sig_valid = verify_result.is_ok();
 
         steps.push(AttackStep {

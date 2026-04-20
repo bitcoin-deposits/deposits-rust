@@ -430,7 +430,7 @@ fn scaling_detection_probability() {
     for n in [4, 8, 12] {
         let watchers = n - 1; // quorum members watching
         let p_single_miss = 0.01f64; // 1% chance each watcher misses
-        let p_all_miss = p_single_miss.powi(watchers as i32);
+        let p_all_miss = p_single_miss.powi(watchers);
         let p_detect = 1.0 - p_all_miss;
 
         // EV threshold: p where EV = 0

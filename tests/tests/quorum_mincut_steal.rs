@@ -10,23 +10,58 @@ use std::collections::{HashSet, VecDeque};
 // Flow graph
 // =========================================================================
 
-struct FG { n: usize, c: Vec<Vec<u32>> }
+struct FG {
+    n: usize,
+    c: Vec<Vec<u32>>,
+}
 impl FG {
-    fn new(n: usize) -> Self { Self { n, c: vec![vec![0; n]; n] } }
-    fn ae(&mut self, f: usize, t: usize, c: u32) { self.c[f][t] += c; }
+    fn new(n: usize) -> Self {
+        Self {
+            n,
+            c: vec![vec![0; n]; n],
+        }
+    }
+    fn ae(&mut self, f: usize, t: usize, c: u32) {
+        self.c[f][t] += c;
+    }
     fn mf(&self, s: usize, t: usize) -> u32 {
-        let n = self.n; let mut r = self.c.clone(); let mut tot = 0;
+        let n = self.n;
+        let mut r = self.c.clone();
+        let mut tot = 0;
         loop {
-            let mut p = vec![None; n]; let mut v = vec![false; n]; v[s] = true;
-            let mut q = VecDeque::new(); q.push_back(s);
+            let mut p = vec![None; n];
+            let mut v = vec![false; n];
+            v[s] = true;
+            let mut q = VecDeque::new();
+            q.push_back(s);
             while let Some(u) = q.pop_front() {
-                if u == t { break; }
-                for w in 0..n { if !v[w] && r[u][w] > 0 { v[w] = true; p[w] = Some(u); q.push_back(w); } }
+                if u == t {
+                    break;
+                }
+                for w in 0..n {
+                    if !v[w] && r[u][w] > 0 {
+                        v[w] = true;
+                        p[w] = Some(u);
+                        q.push_back(w);
+                    }
+                }
             }
-            if !v[t] { break; }
-            let mut f = u32::MAX; let mut w = t;
-            while let Some(u) = p[w] { f = f.min(r[u][w]); w = u; } w = t;
-            while let Some(u) = p[w] { r[u][w] -= f; r[w][u] += f; w = u; } tot += f;
+            if !v[t] {
+                break;
+            }
+            let mut f = u32::MAX;
+            let mut w = t;
+            while let Some(u) = p[w] {
+                f = f.min(r[u][w]);
+                w = u;
+            }
+            w = t;
+            while let Some(u) = p[w] {
+                r[u][w] -= f;
+                r[w][u] += f;
+                w = u;
+            }
+            tot += f;
         }
         tot
     }
@@ -40,14 +75,26 @@ fn quorum_mincut(n: usize, adj: &[HashSet<usize>], quorum: &[usize], anchors: &[
     let qs: HashSet<usize> = quorum.iter().copied().collect();
     let ans: HashSet<usize> = anchors.iter().copied().collect();
     for i in 0..n {
-        let cap = if qs.contains(&i) || ans.contains(&i) { (n + 1) as u32 } else { 1 };
+        let cap = if qs.contains(&i) || ans.contains(&i) {
+            (n + 1) as u32
+        } else {
+            1
+        };
         g.ae(2 * i, 2 * i + 1, cap);
     }
     g.ae(2 * src, 2 * src + 1, (n + 1) as u32);
     g.ae(2 * sink, 2 * sink + 1, (n + 1) as u32);
-    for i in 0..n { for &j in &adj[i] { g.ae(2 * i + 1, 2 * j, (n + 1) as u32); } }
-    for &q in quorum { g.ae(2 * src + 1, 2 * q, (n + 1) as u32); }
-    for &a in anchors { g.ae(2 * a + 1, 2 * sink, (n + 1) as u32); }
+    for i in 0..n {
+        for &j in &adj[i] {
+            g.ae(2 * i + 1, 2 * j, (n + 1) as u32);
+        }
+    }
+    for &q in quorum {
+        g.ae(2 * src + 1, 2 * q, (n + 1) as u32);
+    }
+    for &a in anchors {
+        g.ae(2 * a + 1, 2 * sink, (n + 1) as u32);
+    }
     g.mf(2 * src + 1, 2 * sink)
 }
 
@@ -71,20 +118,32 @@ impl Network {
         let reserves = utxo / 2;
         let per_lock = utxo / (2 * q as u64);
         let mut adj = vec![HashSet::new(); n];
-        let quorum: Vec<Vec<usize>> = (0..n).map(|i|
-            (1..=q).map(|j| (i + j) % n).collect()
-        ).collect();
-        for i in 0..n { for &m in &quorum[i] { adj[i].insert(m); adj[m].insert(i); } }
+        let quorum: Vec<Vec<usize>> = (0..n)
+            .map(|i| (1..=q).map(|j| (i + j) % n).collect())
+            .collect();
+        for i in 0..n {
+            for &m in &quorum[i] {
+                adj[i].insert(m);
+                adj[m].insert(i);
+            }
+        }
         let anchors: Vec<usize> = (0..num_anchors).map(|i| i * n / num_anchors).collect();
         let labels = (0..n).map(|i| format!("h{}", i)).collect();
         Network {
-            adj, quorum, is_attacker: vec![false; n],
-            reserves: vec![reserves; n], per_lock: vec![per_lock; n],
-            deposits: vec![0; n], anchors, labels,
+            adj,
+            quorum,
+            is_attacker: vec![false; n],
+            reserves: vec![reserves; n],
+            per_lock: vec![per_lock; n],
+            deposits: vec![0; n],
+            anchors,
+            labels,
         }
     }
 
-    fn n(&self) -> usize { self.adj.len() }
+    fn n(&self) -> usize {
+        self.adj.len()
+    }
 
     fn add_node(&mut self, label: &str, is_attacker: bool, reserves: u64, per_lock: u64) -> usize {
         let id = self.n();
@@ -106,7 +165,9 @@ impl Network {
         self.adj[member].insert(operator);
     }
 
-    fn compromise(&mut self, node: usize) { self.is_attacker[node] = true; }
+    fn compromise(&mut self, node: usize) {
+        self.is_attacker[node] = true;
+    }
 
     fn wallet_check(&self, operator: usize, threshold: u32) -> (bool, u32) {
         let qmc = quorum_mincut(self.n(), &self.adj, &self.quorum[operator], &self.anchors);
@@ -116,8 +177,12 @@ impl Network {
     fn wallet_deposit_all(&mut self, amount: u64, threshold: u32) -> Vec<usize> {
         let mut deposited = Vec::new();
         for i in 0..self.n() {
-            if self.anchors.contains(&i) { continue; }
-            if self.quorum[i].is_empty() { continue; }
+            if self.anchors.contains(&i) {
+                continue;
+            }
+            if self.quorum[i].is_empty() {
+                continue;
+            }
             let (ok, _) = self.wallet_check(i, threshold);
             if ok {
                 self.deposits[i] += amount;
@@ -136,10 +201,12 @@ impl Network {
 
         for i in 0..n {
             let q = &self.quorum[i];
-            if q.is_empty() { continue; }
+            if q.is_empty() {
+                continue;
+            }
             let ciq = q.iter().filter(|m| cs.contains(m)).count();
             let hiq = q.len() - ciq;
-            let maj = (q.len() + 1) / 2;
+            let maj = q.len().div_ceil(2);
             let hmaj = hiq >= maj;
             let is_att = self.is_attacker[i];
 
@@ -147,36 +214,55 @@ impl Network {
                 if hmaj {
                     attacker_cost += self.reserves[i];
                     if self.deposits[i] > 0 {
-                        details.push(format!("  {}: ATK, deposits {} SAFE (honest quorum {}h/{})",
-                            self.labels[i], self.deposits[i], hiq, q.len()));
+                        details.push(format!(
+                            "  {}: ATK, deposits {} SAFE (honest quorum {}h/{})",
+                            self.labels[i],
+                            self.deposits[i],
+                            hiq,
+                            q.len()
+                        ));
                     }
                 } else if self.deposits[i] > 0 {
                     wallet_loss += self.deposits[i];
-                    details.push(format!("  {}: ATK steals deposit {}! (coal {}/{})",
-                        self.labels[i], self.deposits[i], ciq, q.len()));
+                    details.push(format!(
+                        "  {}: ATK steals deposit {}! (coal {}/{})",
+                        self.labels[i],
+                        self.deposits[i],
+                        ciq,
+                        q.len()
+                    ));
                 }
             } else {
                 if !hmaj {
                     if self.deposits[i] > 0 {
                         wallet_loss += self.deposits[i];
-                        details.push(format!("  {}: HONEST compromised, deposit {} stolen (coal {}/{})",
-                            self.labels[i], self.deposits[i], ciq, q.len()));
+                        details.push(format!(
+                            "  {}: HONEST compromised, deposit {} stolen (coal {}/{})",
+                            self.labels[i],
+                            self.deposits[i],
+                            ciq,
+                            q.len()
+                        ));
                     }
                 } else if ciq > 0 {
-                    let slashed: u64 = cs.iter()
+                    let slashed: u64 = cs
+                        .iter()
                         .filter(|&&c| q.contains(&c))
                         .map(|&c| self.per_lock[c])
                         .sum();
                     attacker_cost += slashed;
                     if slashed > 0 {
-                        details.push(format!("  {}: HONEST safe, slashes {} ({} attacker members)",
-                            self.labels[i], slashed, ciq));
+                        details.push(format!(
+                            "  {}: HONEST safe, slashes {} ({} attacker members)",
+                            self.labels[i], slashed, ciq
+                        ));
                     }
                 }
             }
         }
         AttackOutcome {
-            wallet_loss, attacker_cost,
+            wallet_loss,
+            attacker_cost,
             net: wallet_loss as i64 - attacker_cost as i64,
             details,
         }
@@ -193,10 +279,14 @@ struct AttackOutcome {
 impl AttackOutcome {
     fn print(&self, label: &str) {
         let tag = if self.net > 0 { "STOLEN!" } else { "FAILED" };
-        println!("  [{}] {} — wallet_loss={} attacker_cost={} net={:+}",
-            tag, label, self.wallet_loss, self.attacker_cost, self.net);
+        println!(
+            "  [{}] {} — wallet_loss={} attacker_cost={} net={:+}",
+            tag, label, self.wallet_loss, self.attacker_cost, self.net
+        );
         if self.net > 0 || !self.details.is_empty() {
-            for d in &self.details { println!("    {}", d); }
+            for d in &self.details {
+                println!("    {}", d);
+            }
         }
     }
 }
@@ -214,13 +304,18 @@ fn try_to_steal_with_quorum_mincut() {
     let base = Network::honest_ring(20, Q, 6, UTXO);
     let mut honest_qmcs: Vec<u32> = Vec::new();
     for i in 0..20 {
-        if base.anchors.contains(&i) { continue; }
+        if base.anchors.contains(&i) {
+            continue;
+        }
         let (_, qmc) = base.wallet_check(i, 0);
         honest_qmcs.push(qmc);
     }
     let min_honest_qmc = *honest_qmcs.iter().min().unwrap();
-    println!("Honest network quorum-mincut range: {} - {}",
-        min_honest_qmc, honest_qmcs.iter().max().unwrap());
+    println!(
+        "Honest network quorum-mincut range: {} - {}",
+        min_honest_qmc,
+        honest_qmcs.iter().max().unwrap()
+    );
 
     // Use a threshold that all honest nodes pass
     let threshold = min_honest_qmc;
@@ -247,7 +342,7 @@ fn try_to_steal_with_quorum_mincut() {
             }
         }
         // Bridges
-        for (si, hi) in [(0,1), (3,4), (6,7), (10,11), (13,14), (16,17)] {
+        for (si, hi) in [(0, 1), (3, 4), (6, 7), (10, 11), (13, 14), (16, 17)] {
             net.add_quorum_edge(sybil_ids[si], hi);
         }
 
@@ -257,7 +352,11 @@ fn try_to_steal_with_quorum_mincut() {
 
         let deposited = net.wallet_deposit_all(DEPOSIT, threshold);
         let sybil_deps = sybil_ids.iter().filter(|i| deposited.contains(i)).count();
-        println!("  Deposited on {} nodes ({} sybils)", deposited.len(), sybil_deps);
+        println!(
+            "  Deposited on {} nodes ({} sybils)",
+            deposited.len(),
+            sybil_deps
+        );
 
         let outcome = net.attack();
         outcome.print("sybil ring");
@@ -278,11 +377,17 @@ fn try_to_steal_with_quorum_mincut() {
             sybil_ids.push(id);
         }
         for i in 0..20 {
-            for j in 1..=Q { net.add_quorum_edge(sybil_ids[i], sybil_ids[(i + j) % 20]); }
+            for j in 1..=Q {
+                net.add_quorum_edge(sybil_ids[i], sybil_ids[(i + j) % 20]);
+            }
         }
         // Bridge EVERY sybil to an honest node
         for i in 0..20 {
-            let honest = if net.anchors.contains(&i) { (i + 1) % 20 } else { i };
+            let honest = if net.anchors.contains(&i) {
+                (i + 1) % 20
+            } else {
+                i
+            };
             net.add_quorum_edge(sybil_ids[i], honest);
         }
 
@@ -291,7 +396,11 @@ fn try_to_steal_with_quorum_mincut() {
 
         let deposited = net.wallet_deposit_all(DEPOSIT, threshold);
         let sybil_deps = sybil_ids.iter().filter(|i| deposited.contains(i)).count();
-        println!("  Deposited on {} nodes ({} sybils)", deposited.len(), sybil_deps);
+        println!(
+            "  Deposited on {} nodes ({} sybils)",
+            deposited.len(),
+            sybil_deps
+        );
 
         if sybil_deps > 0 {
             let outcome = net.attack();
@@ -328,12 +437,21 @@ fn try_to_steal_with_quorum_mincut() {
 
         let (ok, qmc) = net.wallet_check(sybil_ids[0], threshold);
         println!("  sybil_0 quorum-mincut={}, passes={}", qmc, ok);
-        println!("  sybil_0 quorum={:?}", net.quorum[sybil_ids[0]].iter()
-            .map(|&m| net.labels[m].clone()).collect::<Vec<_>>());
+        println!(
+            "  sybil_0 quorum={:?}",
+            net.quorum[sybil_ids[0]]
+                .iter()
+                .map(|&m| net.labels[m].clone())
+                .collect::<Vec<_>>()
+        );
 
         let deposited = net.wallet_deposit_all(DEPOSIT, threshold);
         let sybil_deps = sybil_ids.iter().filter(|i| deposited.contains(i)).count();
-        println!("  Deposited on {} nodes ({} sybils)", deposited.len(), sybil_deps);
+        println!(
+            "  Deposited on {} nodes ({} sybils)",
+            deposited.len(),
+            sybil_deps
+        );
 
         if sybil_deps > 0 {
             // But now honest nodes have dispute authority!
@@ -354,7 +472,9 @@ fn try_to_steal_with_quorum_mincut() {
         let deposited = net.wallet_deposit_all(DEPOSIT, threshold);
         for i in 0..k.min(20) {
             let node = (1 + i) % 20;
-            if !net.anchors.contains(&node) { net.compromise(node); }
+            if !net.anchors.contains(&node) {
+                net.compromise(node);
+            }
         }
         let outcome = net.attack();
         outcome.print(&format!("{} adjacent compromised", k));
@@ -368,7 +488,7 @@ fn try_to_steal_with_quorum_mincut() {
     {
         let mut net = Network::honest_ring(20, Q, 6, UTXO);
         let deposited = net.wallet_deposit_all(DEPOSIT, threshold);
-        net.compromise(0);  // anchor
+        net.compromise(0); // anchor
         net.compromise(1);
         net.compromise(19);
         net.compromise(18);
@@ -394,9 +514,9 @@ fn try_to_steal_with_quorum_mincut() {
         }
 
         // Each sybil: 2 sybil quorum members + 3 honest (to pass quorum-mincut)
-        let honest_in_quorum: Vec<Vec<usize>> = (0..10).map(|i| {
-            vec![(i * 2) % 20, (i * 2 + 1) % 20, (i * 2 + 5) % 20]
-        }).collect();
+        let honest_in_quorum: Vec<Vec<usize>> = (0..10)
+            .map(|i| vec![(i * 2) % 20, (i * 2 + 1) % 20, (i * 2 + 5) % 20])
+            .collect();
 
         for i in 0..10 {
             net.add_quorum_edge(sybil_ids[i], sybil_ids[(i + 1) % 10]);
@@ -412,8 +532,14 @@ fn try_to_steal_with_quorum_mincut() {
 
         // Now compromise the honest quorum members too
         let all_honest_used: HashSet<usize> = honest_in_quorum.iter().flatten().copied().collect();
-        println!("  Compromising {} honest nodes used as quorum members: {:?}",
-            all_honest_used.len(), all_honest_used.iter().map(|h| format!("h{}", h)).collect::<Vec<_>>());
+        println!(
+            "  Compromising {} honest nodes used as quorum members: {:?}",
+            all_honest_used.len(),
+            all_honest_used
+                .iter()
+                .map(|h| format!("h{}", h))
+                .collect::<Vec<_>>()
+        );
 
         for &h in &all_honest_used {
             net.compromise(h);
@@ -422,7 +548,11 @@ fn try_to_steal_with_quorum_mincut() {
         // Wallet deposited BEFORE compromise (the attack is: pass check, then turn)
         let deposited = net.wallet_deposit_all(DEPOSIT, threshold);
         let sybil_deps = sybil_ids.iter().filter(|i| deposited.contains(i)).count();
-        println!("  Deposited on {} nodes ({} sybils)", deposited.len(), sybil_deps);
+        println!(
+            "  Deposited on {} nodes ({} sybils)",
+            deposited.len(),
+            sybil_deps
+        );
 
         if sybil_deps > 0 {
             let outcome = net.attack();
@@ -458,9 +588,13 @@ fn forty_nine_percent_attack() {
     let min_qmc = (0..n)
         .filter(|i| !base.anchors.contains(i) && !base.quorum[*i].is_empty())
         .map(|i| quorum_mincut(n, &base.adj, &base.quorum[i], &base.anchors))
-        .min().unwrap();
+        .min()
+        .unwrap();
     let threshold = min_qmc;
-    println!("  Honest quorum-mincut minimum: {} (using as threshold)\n", threshold);
+    println!(
+        "  Honest quorum-mincut minimum: {} (using as threshold)\n",
+        threshold
+    );
 
     // -----------------------------------------------------------------
     // Strategy A: 49 adjacent compromised nodes
@@ -469,11 +603,19 @@ fn forty_nine_percent_attack() {
     {
         let mut net = Network::honest_ring(n, q, num_anchors, utxo);
         net.wallet_deposit_all(deposit, threshold);
-        for i in 1..50 { if !net.anchors.contains(&i) { net.compromise(i); } }
+        for i in 1..50 {
+            if !net.anchors.contains(&i) {
+                net.compromise(i);
+            }
+        }
 
         let coal_count = (0..n).filter(|&i| net.is_attacker[i]).count();
         let outcome = net.attack();
-        println!("  Coalition: {} nodes ({}%)", coal_count, coal_count * 100 / n);
+        println!(
+            "  Coalition: {} nodes ({}%)",
+            coal_count,
+            coal_count * 100 / n
+        );
         outcome.print("49 adjacent");
     }
     println!();
@@ -488,7 +630,9 @@ fn forty_nine_percent_attack() {
         // Every other node (skip anchors)
         let mut compromised = 0;
         for i in 0..n {
-            if compromised >= 49 { break; }
+            if compromised >= 49 {
+                break;
+            }
             if i % 2 == 1 && !net.anchors.contains(&i) {
                 net.compromise(i);
                 compromised += 1;
@@ -496,7 +640,9 @@ fn forty_nine_percent_attack() {
         }
         // Fill remaining
         for i in 0..n {
-            if compromised >= 49 { break; }
+            if compromised >= 49 {
+                break;
+            }
             if !net.is_attacker[i] && !net.anchors.contains(&i) {
                 net.compromise(i);
                 compromised += 1;
@@ -505,7 +651,11 @@ fn forty_nine_percent_attack() {
 
         let coal_count = (0..n).filter(|&i| net.is_attacker[i]).count();
         let outcome = net.attack();
-        println!("  Coalition: {} nodes ({}%)", coal_count, coal_count * 100 / n);
+        println!(
+            "  Coalition: {} nodes ({}%)",
+            coal_count,
+            coal_count * 100 / n
+        );
         outcome.print("49 spread");
     }
     println!();
@@ -518,11 +668,15 @@ fn forty_nine_percent_attack() {
         let mut net = Network::honest_ring(n, q, num_anchors, utxo);
         net.wallet_deposit_all(deposit, threshold);
         // Compromise all anchors
-        for &a in &net.anchors.clone() { net.compromise(a); }
+        for &a in &net.anchors.clone() {
+            net.compromise(a);
+        }
         // Plus 43 more adjacent to anchor 0
         let mut compromised = num_anchors;
         for i in 1..n {
-            if compromised >= 49 { break; }
+            if compromised >= 49 {
+                break;
+            }
             if !net.is_attacker[i] {
                 net.compromise(i);
                 compromised += 1;
@@ -531,7 +685,11 @@ fn forty_nine_percent_attack() {
 
         let coal_count = (0..n).filter(|&i| net.is_attacker[i]).count();
         let outcome = net.attack();
-        println!("  Coalition: {} nodes ({}%)", coal_count, coal_count * 100 / n);
+        println!(
+            "  Coalition: {} nodes ({}%)",
+            coal_count,
+            coal_count * 100 / n
+        );
         outcome.print("49 incl anchors");
     }
     println!();
@@ -556,7 +714,11 @@ fn forty_nine_percent_attack() {
         let mut compromised_honest = Vec::new();
         for i in 0..19 {
             let node = 1 + i * 5; // every 5th, skip anchors
-            let node = if net.anchors.contains(&node) { node + 1 } else { node };
+            let node = if net.anchors.contains(&node) {
+                node + 1
+            } else {
+                node
+            };
             if node < n && !net.is_attacker[node] {
                 net.compromise(node);
                 compromised_honest.push(node);
@@ -576,20 +738,30 @@ fn forty_nine_percent_attack() {
 
         let n_total = net.n();
         let coal_count = (0..n_total).filter(|&i| net.is_attacker[i]).count();
-        println!("  Total nodes: {}, coalition: {} ({}% of honest network)",
-            n_total, coal_count, 49);
+        println!(
+            "  Total nodes: {}, coalition: {} ({}% of honest network)",
+            n_total, coal_count, 49
+        );
 
         // Check if sybils pass
         let (ok, qmc) = net.wallet_check(sybil_ids[0], threshold);
         println!("  sybil_0 quorum-mincut={}, passes={}", qmc, ok);
-        println!("  sybil_0 quorum: {:?}", net.quorum[sybil_ids[0]].iter()
-            .map(|&m| net.labels[m].clone()).collect::<Vec<_>>());
+        println!(
+            "  sybil_0 quorum: {:?}",
+            net.quorum[sybil_ids[0]]
+                .iter()
+                .map(|&m| net.labels[m].clone())
+                .collect::<Vec<_>>()
+        );
 
         net.wallet_deposit_all(deposit, threshold);
 
         let sybil_deps = sybil_ids.iter().filter(|&&i| net.deposits[i] > 0).count();
         let honest_deps = (0..n).filter(|&i| net.deposits[i] > 0).count();
-        println!("  Wallet deposited on {} honest + {} sybil nodes", honest_deps, sybil_deps);
+        println!(
+            "  Wallet deposited on {} honest + {} sybil nodes",
+            honest_deps, sybil_deps
+        );
 
         let outcome = net.attack();
         outcome.print("30 sybils + 19 compromised");
@@ -609,14 +781,18 @@ fn forty_nine_percent_attack() {
         // Compromise every other non-anchor node
         let mut compromised = 0;
         for i in 0..n {
-            if compromised >= 49 { break; }
+            if compromised >= 49 {
+                break;
+            }
             if !net.anchors.contains(&i) && i % 2 == 1 {
                 net.compromise(i);
                 compromised += 1;
             }
         }
         for i in 0..n {
-            if compromised >= 49 { break; }
+            if compromised >= 49 {
+                break;
+            }
             if !net.anchors.contains(&i) && !net.is_attacker[i] {
                 net.compromise(i);
                 compromised += 1;
@@ -626,36 +802,63 @@ fn forty_nine_percent_attack() {
         let coal_count = (0..n).filter(|&i| net.is_attacker[i]).count();
 
         // Count deposits on attacker vs honest nodes
-        let att_deposits: u64 = (0..n).filter(|&i| net.is_attacker[i]).map(|i| net.deposits[i]).sum();
-        let hon_deposits: u64 = (0..n).filter(|&i| !net.is_attacker[i]).map(|i| net.deposits[i]).sum();
+        let att_deposits: u64 = (0..n)
+            .filter(|&i| net.is_attacker[i])
+            .map(|i| net.deposits[i])
+            .sum();
+        let hon_deposits: u64 = (0..n)
+            .filter(|&i| !net.is_attacker[i])
+            .map(|i| net.deposits[i])
+            .sum();
         println!("  Coalition: {} nodes", coal_count);
-        println!("  Deposits on attacker nodes: {}, honest nodes: {}", att_deposits, hon_deposits);
+        println!(
+            "  Deposits on attacker nodes: {}, honest nodes: {}",
+            att_deposits, hon_deposits
+        );
 
         let outcome = net.attack();
         outcome.print("49 alternating");
 
         // Show breakdown
-        let att_stolen: u64 = (0..n).filter(|&i| {
-            net.is_attacker[i] && net.deposits[i] > 0 && {
-                let ciq = net.quorum[i].iter().filter(|&&m| net.is_attacker[m]).count();
-                let maj = (net.quorum[i].len() + 1) / 2;
-                ciq >= maj
-            }
-        }).map(|i| net.deposits[i]).sum();
-        let hon_stolen: u64 = (0..n).filter(|&i| {
-            !net.is_attacker[i] && net.deposits[i] > 0 && {
-                let ciq = net.quorum[i].iter().filter(|&&m| net.is_attacker[m]).count();
-                let maj = (net.quorum[i].len() + 1) / 2;
-                ciq >= maj
-            }
-        }).map(|i| net.deposits[i]).sum();
-        let att_safe: u64 = (0..n).filter(|&i| {
-            net.is_attacker[i] && net.deposits[i] > 0 && {
-                let ciq = net.quorum[i].iter().filter(|&&m| net.is_attacker[m]).count();
-                let maj = (net.quorum[i].len() + 1) / 2;
-                ciq < maj
-            }
-        }).map(|i| net.deposits[i]).sum();
+        let att_stolen: u64 = (0..n)
+            .filter(|&i| {
+                net.is_attacker[i] && net.deposits[i] > 0 && {
+                    let ciq = net.quorum[i]
+                        .iter()
+                        .filter(|&&m| net.is_attacker[m])
+                        .count();
+                    let maj = net.quorum[i].len().div_ceil(2);
+                    ciq >= maj
+                }
+            })
+            .map(|i| net.deposits[i])
+            .sum();
+        let hon_stolen: u64 = (0..n)
+            .filter(|&i| {
+                !net.is_attacker[i] && net.deposits[i] > 0 && {
+                    let ciq = net.quorum[i]
+                        .iter()
+                        .filter(|&&m| net.is_attacker[m])
+                        .count();
+                    let maj = net.quorum[i].len().div_ceil(2);
+                    ciq >= maj
+                }
+            })
+            .map(|i| net.deposits[i])
+            .sum();
+        let att_safe: u64 = (0..n)
+            .filter(|&i| {
+                net.is_attacker[i] && net.deposits[i] > 0 && {
+                    let ciq = net.quorum[i]
+                        .iter()
+                        .filter(|&&m| net.is_attacker[m])
+                        .count();
+                    let maj = net.quorum[i].len().div_ceil(2);
+                    ciq < maj
+                }
+            })
+            .map(|i| net.deposits[i])
+            .sum();
         println!("    Stolen from attacker nodes: {}", att_stolen);
         println!("    Stolen from honest nodes: {}", hon_stolen);
         println!("    Safe on attacker nodes (honest quorum): {}", att_safe);

@@ -36,7 +36,9 @@ impl FlowGraph {
             let mut q = VecDeque::new();
             q.push_back(s);
             while let Some(u) = q.pop_front() {
-                if u == t { break; }
+                if u == t {
+                    break;
+                }
                 for v in 0..n {
                     if !visited[v] && residual[u][v] > 0 {
                         visited[v] = true;
@@ -45,12 +47,21 @@ impl FlowGraph {
                     }
                 }
             }
-            if !visited[t] { break; }
+            if !visited[t] {
+                break;
+            }
             let mut flow = u32::MAX;
             let mut v = t;
-            while let Some(u) = parent[v] { flow = flow.min(residual[u][v]); v = u; }
+            while let Some(u) = parent[v] {
+                flow = flow.min(residual[u][v]);
+                v = u;
+            }
             v = t;
-            while let Some(u) = parent[v] { residual[u][v] -= flow; residual[v][u] += flow; v = u; }
+            while let Some(u) = parent[v] {
+                residual[u][v] -= flow;
+                residual[v][u] += flow;
+                v = u;
+            }
             total += flow;
         }
         total
@@ -79,7 +90,9 @@ fn mincut_to_anchors(n: usize, edges: &[(usize, usize)], target: usize, anchors:
         g.add_edge(2 * u + 1, 2 * v, (n + 1) as u32);
         g.add_edge(2 * v + 1, 2 * u, (n + 1) as u32);
     }
-    for &a in anchors { g.add_edge(2 * a + 1, 2 * ss, (n + 1) as u32); }
+    for &a in anchors {
+        g.add_edge(2 * a + 1, 2 * ss, (n + 1) as u32);
+    }
     g.max_flow(2 * target + 1, 2 * ss)
 }
 
@@ -139,7 +152,7 @@ fn min_profitable_coalition(
     let adj = adjacency(n, edges);
     let quorum: Vec<usize> = adj[target].iter().copied().collect();
     let q = quorum.len();
-    let majority = (q + 1) / 2;
+    let majority = q.div_ceil(2);
     for k in 1..=q {
         if k >= majority {
             let honest_neighbors = q - k;
@@ -159,7 +172,9 @@ fn min_profitable_coalition(
 fn ring_topology(n: usize, q: usize) -> Vec<(usize, usize)> {
     let mut edges = Vec::new();
     for i in 0..n {
-        for j in 1..=q { edges.push((i, (i + j) % n)); }
+        for j in 1..=q {
+            edges.push((i, (i + j) % n));
+        }
     }
     edges
 }
@@ -170,7 +185,9 @@ fn dispersed_topology(n: usize, q: usize) -> Vec<(usize, usize)> {
         let stride = n / (q + 1);
         for j in 1..=q {
             let m = (i + j * stride.max(1)) % n;
-            if m != i { edges.push((i, m)); }
+            if m != i {
+                edges.push((i, m));
+            }
         }
     }
     edges
@@ -178,17 +195,22 @@ fn dispersed_topology(n: usize, q: usize) -> Vec<(usize, usize)> {
 
 fn clustered_topology(n: usize, q: usize, cs: usize) -> Vec<(usize, usize)> {
     let mut edges = Vec::new();
-    let nc = (n + cs - 1) / cs;
+    let nc = n.div_ceil(cs);
     for i in 0..n {
         let c = i / cs;
         let mut added = 0;
         for j in 0..cs {
             let m = c * cs + j;
-            if m < n && m != i && added < q { edges.push((i, m)); added += 1; }
+            if m < n && m != i && added < q {
+                edges.push((i, m));
+                added += 1;
+            }
         }
         if added < q {
             let bridge = ((c + 1) % nc) * cs;
-            if bridge < n && bridge != i { edges.push((i, bridge)); }
+            if bridge < n && bridge != i {
+                edges.push((i, bridge));
+            }
         }
     }
     edges
@@ -260,24 +282,78 @@ fn localconn_safety_map() {
     // Collect records across many scenarios
     let mut all_records: Vec<SafetyRecord> = Vec::new();
 
-    let scenarios: Vec<(&str, usize, usize, usize, Box<dyn Fn(usize, usize) -> Vec<(usize, usize)>>)> = vec![
-        ("ring",      16, 3, 2, Box::new(|n, q| ring_topology(n, q))),
-        ("ring",      16, 5, 2, Box::new(|n, q| ring_topology(n, q))),
-        ("ring",      32, 5, 2, Box::new(|n, q| ring_topology(n, q))),
-        ("ring",      32, 5, 3, Box::new(|n, q| ring_topology(n, q))),
-        ("ring",      32, 7, 3, Box::new(|n, q| ring_topology(n, q))),
-        ("dispersed", 16, 3, 2, Box::new(|n, q| dispersed_topology(n, q))),
-        ("dispersed", 16, 5, 2, Box::new(|n, q| dispersed_topology(n, q))),
-        ("dispersed", 32, 5, 2, Box::new(|n, q| dispersed_topology(n, q))),
-        ("dispersed", 32, 7, 3, Box::new(|n, q| dispersed_topology(n, q))),
-        ("clustered", 16, 3, 2, Box::new(|n, q| clustered_topology(n, q, 4))),
-        ("clustered", 16, 5, 2, Box::new(|n, q| clustered_topology(n, q, 4))),
-        ("clustered", 32, 5, 2, Box::new(|n, q| clustered_topology(n, q, 4))),
-        ("clustered", 32, 5, 3, Box::new(|n, q| clustered_topology(n, q, 8))),
-        ("hub-spoke", 16, 3, 2, Box::new(|n, q| hub_spoke_topology(n, q, 3))),
-        ("hub-spoke", 16, 5, 2, Box::new(|n, q| hub_spoke_topology(n, q, 4))),
-        ("hub-spoke", 32, 5, 2, Box::new(|n, q| hub_spoke_topology(n, q, 5))),
-        ("hub-spoke", 32, 5, 3, Box::new(|n, q| hub_spoke_topology(n, q, 5))),
+    let scenarios: Vec<(
+        &str,
+        usize,
+        usize,
+        usize,
+        Box<dyn Fn(usize, usize) -> Vec<(usize, usize)>>,
+    )> = vec![
+        ("ring", 16, 3, 2, Box::new(ring_topology)),
+        ("ring", 16, 5, 2, Box::new(ring_topology)),
+        ("ring", 32, 5, 2, Box::new(ring_topology)),
+        ("ring", 32, 5, 3, Box::new(ring_topology)),
+        ("ring", 32, 7, 3, Box::new(ring_topology)),
+        ("dispersed", 16, 3, 2, Box::new(dispersed_topology)),
+        ("dispersed", 16, 5, 2, Box::new(dispersed_topology)),
+        ("dispersed", 32, 5, 2, Box::new(dispersed_topology)),
+        ("dispersed", 32, 7, 3, Box::new(dispersed_topology)),
+        (
+            "clustered",
+            16,
+            3,
+            2,
+            Box::new(|n, q| clustered_topology(n, q, 4)),
+        ),
+        (
+            "clustered",
+            16,
+            5,
+            2,
+            Box::new(|n, q| clustered_topology(n, q, 4)),
+        ),
+        (
+            "clustered",
+            32,
+            5,
+            2,
+            Box::new(|n, q| clustered_topology(n, q, 4)),
+        ),
+        (
+            "clustered",
+            32,
+            5,
+            3,
+            Box::new(|n, q| clustered_topology(n, q, 8)),
+        ),
+        (
+            "hub-spoke",
+            16,
+            3,
+            2,
+            Box::new(|n, q| hub_spoke_topology(n, q, 3)),
+        ),
+        (
+            "hub-spoke",
+            16,
+            5,
+            2,
+            Box::new(|n, q| hub_spoke_topology(n, q, 4)),
+        ),
+        (
+            "hub-spoke",
+            32,
+            5,
+            2,
+            Box::new(|n, q| hub_spoke_topology(n, q, 5)),
+        ),
+        (
+            "hub-spoke",
+            32,
+            5,
+            3,
+            Box::new(|n, q| hub_spoke_topology(n, q, 5)),
+        ),
     ];
 
     for (topo, n, q, num_anchors, gen) in &scenarios {
@@ -285,14 +361,16 @@ fn localconn_safety_map() {
         let adj = adjacency(*n, &edges);
 
         // Place anchors evenly
-        let anchors: Vec<usize> = (0..*num_anchors)
-            .map(|i| i * n / num_anchors)
-            .collect();
+        let anchors: Vec<usize> = (0..*num_anchors).map(|i| i * n / num_anchors).collect();
 
         for target in 0..*n {
-            if anchors.contains(&target) { continue; }
+            if anchors.contains(&target) {
+                continue;
+            }
             // Skip nodes with no edges (isolated in hub-spoke)
-            if adj[target].is_empty() { continue; }
+            if adj[target].is_empty() {
+                continue;
+            }
 
             let lconn = local_connectivity(&adj, target, &anchors);
             let mc = mincut_to_anchors(*n, &edges, target, &anchors);
@@ -331,11 +409,22 @@ fn localconn_safety_map() {
         let min_mc = records.iter().map(|r| r.true_mincut).min().unwrap();
         let max_mc = records.iter().map(|r| r.true_mincut).max().unwrap();
         let avg_mc = records.iter().map(|r| r.true_mincut as f64).sum::<f64>() / count as f64;
-        let exact_pct = records.iter().filter(|r| r.lconn_is_exact()).count() as f64 / count as f64 * 100.0;
-        let conserv_pct = records.iter().filter(|r| r.lconn_is_conservative()).count() as f64 / count as f64 * 100.0;
-        let avg_coal = records.iter()
-            .map(|r| if r.min_coalition >= r.n { r.n } else { r.min_coalition })
-            .sum::<usize>() as f64 / count as f64;
+        let exact_pct =
+            records.iter().filter(|r| r.lconn_is_exact()).count() as f64 / count as f64 * 100.0;
+        let conserv_pct = records.iter().filter(|r| r.lconn_is_conservative()).count() as f64
+            / count as f64
+            * 100.0;
+        let avg_coal = records
+            .iter()
+            .map(|r| {
+                if r.min_coalition >= r.n {
+                    r.n
+                } else {
+                    r.min_coalition
+                }
+            })
+            .sum::<usize>() as f64
+            / count as f64;
 
         println!(
             "{:>6} | {:>6} | {:>8} | {:>8.1} | {:>8} | {:>7.1}% | {:>7.1}% | {:>10.1}",
@@ -357,9 +446,7 @@ fn localconn_safety_map() {
     for (topo, n, q, num_anchors, gen) in &scenarios {
         let edges = gen(*n, *q);
         let adj = adjacency(*n, &edges);
-        let anchors: Vec<usize> = (0..*num_anchors)
-            .map(|i| i * n / num_anchors)
-            .collect();
+        let anchors: Vec<usize> = (0..*num_anchors).map(|i| i * n / num_anchors).collect();
 
         let mut exact = 0;
         let mut conservative = 0;
@@ -367,23 +454,36 @@ fn localconn_safety_map() {
         let mut count = 0;
 
         for target in 0..*n {
-            if anchors.contains(&target) { continue; }
-            if adj[target].is_empty() { continue; }
+            if anchors.contains(&target) {
+                continue;
+            }
+            if adj[target].is_empty() {
+                continue;
+            }
 
             let lconn = local_connectivity(&adj, target, &anchors);
             let mc = mincut_to_anchors(*n, &edges, target, &anchors);
 
             count += 1;
-            if lconn == mc { exact += 1; }
-            if lconn <= mc { conservative += 1; }
+            if lconn == mc {
+                exact += 1;
+            }
+            if lconn <= mc {
+                conservative += 1;
+            }
             let err = (lconn as i32 - mc as i32).abs();
-            if err > max_error { max_error = err; }
+            if err > max_error {
+                max_error = err;
+            }
         }
 
         if count > 0 {
             println!(
                 "{:>12} | {:>5} | {:>5} | {:>6} | {:>7.1}% | {:>7.1}% | {:>8}",
-                topo, n, q, count,
+                topo,
+                n,
+                q,
+                count,
                 exact as f64 / count as f64 * 100.0,
                 conservative as f64 / count as f64 * 100.0,
                 max_error,
@@ -406,8 +506,15 @@ fn localconn_safety_map() {
     for lc in &lconn_keys {
         let records = &by_lconn[lc];
         let min_mc = records.iter().map(|r| r.true_mincut).min().unwrap();
-        let worst_coal = records.iter()
-            .map(|r| if r.min_coalition >= r.n { usize::MAX } else { r.min_coalition })
+        let worst_coal = records
+            .iter()
+            .map(|r| {
+                if r.min_coalition >= r.n {
+                    usize::MAX
+                } else {
+                    r.min_coalition
+                }
+            })
             .min()
             .unwrap();
 
@@ -422,8 +529,13 @@ fn localconn_safety_map() {
 
         println!(
             "{:>6} | {:>12} | {:>12} | {}",
-            lc, min_mc,
-            if worst_coal == usize::MAX { "safe".to_string() } else { worst_coal.to_string() },
+            lc,
+            min_mc,
+            if worst_coal == usize::MAX {
+                "safe".to_string()
+            } else {
+                worst_coal.to_string()
+            },
             interp,
         );
     }
@@ -440,14 +552,16 @@ fn localconn_safety_map() {
     for (topo, n, q, num_anchors, gen) in &scenarios {
         let edges = gen(*n, *q);
         let adj = adjacency(*n, &edges);
-        let anchors: Vec<usize> = (0..*num_anchors)
-            .map(|i| i * n / num_anchors)
-            .collect();
+        let anchors: Vec<usize> = (0..*num_anchors).map(|i| i * n / num_anchors).collect();
 
         let dist = topo_dists.entry(topo).or_default();
         for target in 0..*n {
-            if anchors.contains(&target) { continue; }
-            if adj[target].is_empty() { continue; }
+            if anchors.contains(&target) {
+                continue;
+            }
+            if adj[target].is_empty() {
+                continue;
+            }
             let lconn = local_connectivity(&adj, target, &anchors);
             *dist.entry(lconn).or_insert(0) += 1;
         }
@@ -482,26 +596,50 @@ fn localconn_safety_map() {
 
     let total = all_records.len();
     let exact = all_records.iter().filter(|r| r.lconn_is_exact()).count();
-    let conservative = all_records.iter().filter(|r| r.lconn_is_conservative()).count();
+    let conservative = all_records
+        .iter()
+        .filter(|r| r.lconn_is_conservative())
+        .count();
     let optimistic = total - conservative;
 
     println!("  Total observations:  {}", total);
-    println!("  LocalConn == Mincut: {} ({:.1}%)", exact, exact as f64 / total as f64 * 100.0);
-    println!("  LocalConn <= Mincut: {} ({:.1}%) — safe (conservative)", conservative, conservative as f64 / total as f64 * 100.0);
-    println!("  LocalConn >  Mincut: {} ({:.1}%) — UNSAFE (overestimates)", optimistic, optimistic as f64 / total as f64 * 100.0);
+    println!(
+        "  LocalConn == Mincut: {} ({:.1}%)",
+        exact,
+        exact as f64 / total as f64 * 100.0
+    );
+    println!(
+        "  LocalConn <= Mincut: {} ({:.1}%) — safe (conservative)",
+        conservative,
+        conservative as f64 / total as f64 * 100.0
+    );
+    println!(
+        "  LocalConn >  Mincut: {} ({:.1}%) — UNSAFE (overestimates)",
+        optimistic,
+        optimistic as f64 / total as f64 * 100.0
+    );
 
     // LocalConn should never be dangerously optimistic
     // Allow some small overestimates but flag them
     if optimistic > 0 {
-        println!("\n  WARNING: {} cases where LocalConn overestimates safety!", optimistic);
+        println!(
+            "\n  WARNING: {} cases where LocalConn overestimates safety!",
+            optimistic
+        );
         println!("  These are cases where the 2-hop neighborhood misses a global bottleneck.");
-        let overestimates: Vec<_> = all_records.iter()
+        let overestimates: Vec<_> = all_records
+            .iter()
             .filter(|r| !r.lconn_is_conservative())
             .collect();
         for r in overestimates.iter().take(10) {
-            println!("    N={} Q={}: LConn={} but Mincut={} (overestimate by {})",
-                r.n, r.q, r.local_conn, r.true_mincut,
-                r.local_conn as i32 - r.true_mincut as i32);
+            println!(
+                "    N={} Q={}: LConn={} but Mincut={} (overestimate by {})",
+                r.n,
+                r.q,
+                r.local_conn,
+                r.true_mincut,
+                r.local_conn as i32 - r.true_mincut as i32
+            );
         }
     }
 

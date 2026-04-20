@@ -465,7 +465,7 @@ fn invariant_s1_dispute_state_gate() {
                 payment_hash: None,
                 invoice: None,
                 cosigner_guarantee_signature: None,
-    
+
                 receive_requires_sig: false,
                 fee_change_after_blocks: None,
                 fee_change_notice_blocks: None,

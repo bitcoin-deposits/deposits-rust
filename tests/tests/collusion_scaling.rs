@@ -302,7 +302,7 @@ fn collusion_verified_against_protocol() {
     // Does the honest minority (2 of 3 quorum members) have enough
     // to force a dispute?
     let honest_quorum_members = q - 1; // op_2 and op_3 (1 coalition member: op_1)
-    let quorum_majority = (q + 1) / 2;
+    let quorum_majority = q.div_ceil(2);
     let honest_can_dispute = honest_quorum_members >= quorum_majority;
 
     // Can honest members confiscate reserves? Need Taproot majority.

@@ -338,6 +338,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unnecessary_literal_unwrap)]
     fn test_result_type() {
         let ok: DepositsResult<u64> = Ok(42);
         assert_eq!(ok.unwrap(), 42);

@@ -21,23 +21,58 @@ const DEPOSIT: u64 = 100_000;
 // Flow graph for quorum-mincut
 // =========================================================================
 
-struct FG { n: usize, c: Vec<Vec<u32>> }
+struct FG {
+    n: usize,
+    c: Vec<Vec<u32>>,
+}
 impl FG {
-    fn new(n: usize) -> Self { Self { n, c: vec![vec![0; n]; n] } }
-    fn ae(&mut self, f: usize, t: usize, c: u32) { self.c[f][t] += c; }
+    fn new(n: usize) -> Self {
+        Self {
+            n,
+            c: vec![vec![0; n]; n],
+        }
+    }
+    fn ae(&mut self, f: usize, t: usize, c: u32) {
+        self.c[f][t] += c;
+    }
     fn mf(&self, s: usize, t: usize) -> u32 {
-        let n = self.n; let mut r = self.c.clone(); let mut tot = 0;
+        let n = self.n;
+        let mut r = self.c.clone();
+        let mut tot = 0;
         loop {
-            let mut p = vec![None; n]; let mut v = vec![false; n]; v[s] = true;
-            let mut q = VecDeque::new(); q.push_back(s);
+            let mut p = vec![None; n];
+            let mut v = vec![false; n];
+            v[s] = true;
+            let mut q = VecDeque::new();
+            q.push_back(s);
             while let Some(u) = q.pop_front() {
-                if u == t { break; }
-                for w in 0..n { if !v[w] && r[u][w] > 0 { v[w] = true; p[w] = Some(u); q.push_back(w); } }
+                if u == t {
+                    break;
+                }
+                for w in 0..n {
+                    if !v[w] && r[u][w] > 0 {
+                        v[w] = true;
+                        p[w] = Some(u);
+                        q.push_back(w);
+                    }
+                }
             }
-            if !v[t] { break; }
-            let mut f = u32::MAX; let mut w = t;
-            while let Some(u) = p[w] { f = f.min(r[u][w]); w = u; } w = t;
-            while let Some(u) = p[w] { r[u][w] -= f; r[w][u] += f; w = u; } tot += f;
+            if !v[t] {
+                break;
+            }
+            let mut f = u32::MAX;
+            let mut w = t;
+            while let Some(u) = p[w] {
+                f = f.min(r[u][w]);
+                w = u;
+            }
+            w = t;
+            while let Some(u) = p[w] {
+                r[u][w] -= f;
+                r[w][u] += f;
+                w = u;
+            }
+            tot += f;
         }
         tot
     }
@@ -45,20 +80,34 @@ impl FG {
 
 fn quorum_mincut(adj: &[HashSet<usize>], quorum: &[usize], anchors: &[usize]) -> u32 {
     let n = adj.len();
-    let src = n; let sink = n + 1; let nn = 2 * (n + 2);
+    let src = n;
+    let sink = n + 1;
+    let nn = 2 * (n + 2);
     let mut g = FG::new(nn);
     let qs: HashSet<usize> = quorum.iter().copied().collect();
     let ans: HashSet<usize> = anchors.iter().copied().collect();
     for i in 0..n {
-        let cap = if qs.contains(&i) || ans.contains(&i) { (n+1) as u32 } else { 1 };
-        g.ae(2*i, 2*i+1, cap);
+        let cap = if qs.contains(&i) || ans.contains(&i) {
+            (n + 1) as u32
+        } else {
+            1
+        };
+        g.ae(2 * i, 2 * i + 1, cap);
     }
-    g.ae(2*src, 2*src+1, (n+1) as u32);
-    g.ae(2*sink, 2*sink+1, (n+1) as u32);
-    for i in 0..n { for &j in &adj[i] { g.ae(2*i+1, 2*j, (n+1) as u32); } }
-    for &q in quorum { g.ae(2*src+1, 2*q, (n+1) as u32); }
-    for &a in anchors { g.ae(2*a+1, 2*sink, (n+1) as u32); }
-    g.mf(2*src+1, 2*sink)
+    g.ae(2 * src, 2 * src + 1, (n + 1) as u32);
+    g.ae(2 * sink, 2 * sink + 1, (n + 1) as u32);
+    for i in 0..n {
+        for &j in &adj[i] {
+            g.ae(2 * i + 1, 2 * j, (n + 1) as u32);
+        }
+    }
+    for &q in quorum {
+        g.ae(2 * src + 1, 2 * q, (n + 1) as u32);
+    }
+    for &a in anchors {
+        g.ae(2 * a + 1, 2 * sink, (n + 1) as u32);
+    }
+    g.mf(2 * src + 1, 2 * sink)
 }
 
 // =========================================================================
@@ -83,7 +132,10 @@ impl Game {
     }
 
     fn set_quorum(&mut self, node: usize, members: Vec<usize>) {
-        for &m in &members { self.adj[node].insert(m); self.adj[m].insert(node); }
+        for &m in &members {
+            self.adj[node].insert(m);
+            self.adj[m].insert(node);
+        }
         self.quorums[node] = members;
     }
 
@@ -94,12 +146,20 @@ impl Game {
         let mut funded_h = 0;
         let mut funded_a = 0;
         for i in 0..N {
-            if self.anchors.contains(&i) { continue; }
-            if self.quorums[i].is_empty() { continue; }
+            if self.anchors.contains(&i) {
+                continue;
+            }
+            if self.quorums[i].is_empty() {
+                continue;
+            }
             let qmc = quorum_mincut(&self.adj, &self.quorums[i], &self.anchors);
             if qmc >= qmc_threshold {
                 deposits[i] = DEPOSIT;
-                if self.is_attacker[i] { funded_a += 1; } else { funded_h += 1; }
+                if self.is_attacker[i] {
+                    funded_a += 1;
+                } else {
+                    funded_h += 1;
+                }
             }
         }
         (deposits, funded_h, funded_a)
@@ -113,18 +173,24 @@ impl Game {
         let mut acost = 0u64;
         for i in 0..N {
             let q = &self.quorums[i];
-            if q.is_empty() { continue; }
+            if q.is_empty() {
+                continue;
+            }
             let ciq = q.iter().filter(|m| attackers.contains(m)).count();
             let hiq = q.len() - ciq;
-            let maj = (q.len() + 1) / 2;
+            let maj = q.len().div_ceil(2);
             let hmaj = hiq >= maj;
             let is_att = attackers.contains(&i);
             if is_att {
-                if hmaj { acost += UTXO / 2; }
-                else if deposits[i] > 0 { wloss += deposits[i]; }
+                if hmaj {
+                    acost += UTXO / 2;
+                } else if deposits[i] > 0 {
+                    wloss += deposits[i];
+                }
             } else {
-                if !hmaj && deposits[i] > 0 { wloss += deposits[i]; }
-                else if hmaj && ciq > 0 {
+                if !hmaj && deposits[i] > 0 {
+                    wloss += deposits[i];
+                } else if hmaj && ciq > 0 {
                     acost += q.iter().filter(|m| attackers.contains(m)).count() as u64 * per_lock;
                 }
             }
@@ -135,8 +201,10 @@ impl Game {
 
 fn print_result(label: &str, funded_h: usize, funded_a: usize, wloss: u64, acost: u64, net: i64) {
     let tag = if net > 0 { "STOLEN!" } else { "SAFE" };
-    println!("  [{:>6}] {:>40} | funded h={:>2} a={:>2} | wloss={:>8} acost={:>8} net={:>+9}",
-        tag, label, funded_h, funded_a, wloss, acost, net);
+    println!(
+        "  [{:>6}] {:>40} | funded h={:>2} a={:>2} | wloss={:>8} acost={:>8} net={:>+9}",
+        tag, label, funded_h, funded_a, wloss, acost, net
+    );
 }
 
 // =========================================================================
@@ -153,7 +221,7 @@ fn the_final_game() {
     // The defender doesn't know who's attacker, so picks from all N
     let honest: Vec<usize> = (0..51).collect();
     let attacker: Vec<usize> = (51..100).collect();
-    let anchors = vec![0, 16, 33, 50, 66, 83]; // within honest range
+    let anchors = [0, 16, 33, 50, 66, 83]; // within honest range
 
     // Sweep quorum-mincut thresholds
     for qmc_thresh in [0, 5, 10, 20, 50] {
@@ -269,7 +337,9 @@ fn the_final_game() {
                 // Ring quorum with bridges
                 let mut members: Vec<usize> = Vec::new();
                 // 4 attacker neighbors
-                for j in 1..=4 { members.push(attacker[(idx + j) % 49]); }
+                for j in 1..=4 {
+                    members.push(attacker[(idx + j) % 49]);
+                }
                 // 1 honest bridge
                 members.push(honest[idx % 51]);
                 members.truncate(Q);
@@ -294,7 +364,9 @@ fn the_final_game() {
                 g.set_quorum(i, members);
             }
             // Attacker doesn't even make quorums — just sits on honest quorums
-            for &i in &attacker { g.is_attacker[i] = true; }
+            for &i in &attacker {
+                g.is_attacker[i] = true;
+            }
 
             // How many honest quorums have attacker majority?
             let mut att_majority = 0;
@@ -302,14 +374,20 @@ fn the_final_game() {
             for &i in &honest {
                 let atk_in_q = g.quorums[i].iter().filter(|&&m| g.is_attacker[m]).count();
                 att_count_dist[atk_in_q] += 1;
-                if atk_in_q >= (Q + 1) / 2 { att_majority += 1; }
+                if atk_in_q >= Q.div_ceil(2) {
+                    att_majority += 1;
+                }
             }
 
             let (deps, fh, fa) = g.wallet_fund(qmc_thresh);
             let (wl, ac, net) = g.attack(&deps);
             print_result("F: sit on honest quorums", fh, fa, wl, ac, net);
             println!("      Honest quorum attacker counts: {:?}", att_count_dist);
-            println!("      Honest quorums with attacker majority: {}/{}", att_majority, honest.len());
+            println!(
+                "      Honest quorums with attacker majority: {}/{}",
+                att_majority,
+                honest.len()
+            );
         }
 
         println!();

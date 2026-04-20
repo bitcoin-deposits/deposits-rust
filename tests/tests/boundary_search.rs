@@ -39,8 +39,8 @@ fn boundary_collateral_ratio() {
     let threshold = search.find_boundary(|ratio| {
         let collateral_per_member = (reserves as f64 * ratio) as u64;
         let total_collateral = collateral_per_member * quorum_size;
-        let profit = reserves as f64 - total_collateral as f64;
-        profit // positive = profitable, negative = deterred
+
+        reserves as f64 - total_collateral as f64 // positive = profitable, negative = deterred
     });
 
     log.record(AttackResult {

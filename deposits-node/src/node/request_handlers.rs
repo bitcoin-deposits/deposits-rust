@@ -187,7 +187,6 @@ impl Node {
             advertisement.to_fee_structure()
         };
 
-
         // Check if receiving requires wallet signature
         let receive_requires_sig = request
             .params

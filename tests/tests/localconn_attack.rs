@@ -16,7 +16,10 @@ struct FlowGraph {
 
 impl FlowGraph {
     fn new(n: usize) -> Self {
-        Self { n, capacity: vec![vec![0; n]; n] }
+        Self {
+            n,
+            capacity: vec![vec![0; n]; n],
+        }
     }
     fn add_edge(&mut self, from: usize, to: usize, cap: u32) {
         self.capacity[from][to] += cap;
@@ -32,7 +35,9 @@ impl FlowGraph {
             let mut q = VecDeque::new();
             q.push_back(s);
             while let Some(u) = q.pop_front() {
-                if u == t { break; }
+                if u == t {
+                    break;
+                }
                 for v in 0..n {
                     if !visited[v] && residual[u][v] > 0 {
                         visited[v] = true;
@@ -41,12 +46,21 @@ impl FlowGraph {
                     }
                 }
             }
-            if !visited[t] { break; }
+            if !visited[t] {
+                break;
+            }
             let mut flow = u32::MAX;
             let mut v = t;
-            while let Some(u) = parent[v] { flow = flow.min(residual[u][v]); v = u; }
+            while let Some(u) = parent[v] {
+                flow = flow.min(residual[u][v]);
+                v = u;
+            }
             v = t;
-            while let Some(u) = parent[v] { residual[u][v] -= flow; residual[v][u] += flow; v = u; }
+            while let Some(u) = parent[v] {
+                residual[u][v] -= flow;
+                residual[v][u] += flow;
+                v = u;
+            }
             total += flow;
         }
         total
@@ -67,7 +81,9 @@ fn local_connectivity(adj: &[HashSet<usize>], target: usize, anchors: &[usize]) 
     neighborhood.insert(target);
     for &n1 in &adj[target] {
         neighborhood.insert(n1);
-        for &n2 in &adj[n1] { neighborhood.insert(n2); }
+        for &n2 in &adj[n1] {
+            neighborhood.insert(n2);
+        }
     }
     let nodes: Vec<usize> = neighborhood.iter().copied().collect();
     let node_idx: HashMap<usize, usize> = nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
@@ -95,7 +111,9 @@ fn local_connectivity(adj: &[HashSet<usize>], target: usize, anchors: &[usize]) 
             has_anchor = true;
         }
     }
-    if !has_anchor { return 0; }
+    if !has_anchor {
+        return 0;
+    }
     let target_i = node_idx[&target];
     g.max_flow(2 * target_i + 1, 2 * ss)
 }
@@ -107,7 +125,9 @@ fn local_connectivity(adj: &[HashSet<usize>], target: usize, anchors: &[usize]) 
 fn ring_topology(n: usize, q: usize) -> Vec<(usize, usize)> {
     let mut edges = Vec::new();
     for i in 0..n {
-        for j in 1..=q { edges.push((i, (i + j) % n)); }
+        for j in 1..=q {
+            edges.push((i, (i + j) % n));
+        }
     }
     edges
 }
@@ -118,7 +138,9 @@ fn dispersed_topology(n: usize, q: usize) -> Vec<(usize, usize)> {
         let stride = n / (q + 1);
         for j in 1..=q {
             let m = (i + j * stride.max(1)) % n;
-            if m != i { edges.push((i, m)); }
+            if m != i {
+                edges.push((i, m));
+            }
         }
     }
     edges
@@ -126,17 +148,22 @@ fn dispersed_topology(n: usize, q: usize) -> Vec<(usize, usize)> {
 
 fn clustered_topology(n: usize, q: usize, cs: usize) -> Vec<(usize, usize)> {
     let mut edges = Vec::new();
-    let nc = (n + cs - 1) / cs;
+    let nc = n.div_ceil(cs);
     for i in 0..n {
         let c = i / cs;
         let mut added = 0;
         for j in 0..cs {
             let m = c * cs + j;
-            if m < n && m != i && added < q { edges.push((i, m)); added += 1; }
+            if m < n && m != i && added < q {
+                edges.push((i, m));
+                added += 1;
+            }
         }
         if added < q {
             let bridge = ((c + 1) % nc) * cs;
-            if bridge < n && bridge != i { edges.push((i, bridge)); }
+            if bridge < n && bridge != i {
+                edges.push((i, bridge));
+            }
         }
     }
     edges
@@ -146,7 +173,9 @@ fn hub_spoke_topology(n: usize, q: usize, num_hubs: usize) -> Vec<(usize, usize)
     let mut edges = Vec::new();
     let hubs: Vec<usize> = (0..num_hubs).collect();
     for i in 0..hubs.len() {
-        for j in (i + 1)..hubs.len() { edges.push((hubs[i], hubs[j])); }
+        for j in (i + 1)..hubs.len() {
+            edges.push((hubs[i], hubs[j]));
+        }
     }
     for i in num_hubs..n {
         for j in 0..q.min(num_hubs) {
@@ -217,7 +246,7 @@ fn simulate_attack(
         let q = quorum.len();
         let coalition_in_q = quorum.iter().filter(|m| coalition_set.contains(m)).count();
         let honest_in_q = q - coalition_in_q;
-        let majority_needed = (q + 1) / 2;
+        let majority_needed = q.div_ceil(2);
         let honest_majority = honest_in_q >= majority_needed;
         let is_coal = coalition_set.contains(&i);
 
@@ -243,7 +272,7 @@ fn simulate_attack(
         outcomes.push(LedgerOutcome {
             operator: i,
             is_coalition: is_coal,
-            quorum: quorum,
+            quorum,
             coalition_in_quorum: coalition_in_q,
             honest_majority,
             can_steal,
@@ -253,15 +282,21 @@ fn simulate_attack(
 
     // P&L calculation
     let target_outcome = &outcomes[target];
-    let stolen_from_target = if target_outcome.can_steal { reserves } else { 0 };
+    let stolen_from_target = if target_outcome.can_steal {
+        reserves
+    } else {
+        0
+    };
 
     // Coalition members steal their own reserves (walk away with them)
     let stolen_from_coalition_own = coalition.len() as u64 * reserves;
 
     // Honest operators whose quorum is compromised
-    let stolen_from_honest = outcomes.iter()
+    let stolen_from_honest = outcomes
+        .iter()
         .filter(|o| !o.is_coalition && o.operator != target && o.can_steal)
-        .count() as u64 * reserves;
+        .count() as u64
+        * reserves;
 
     let total_extracted = stolen_from_target + stolen_from_coalition_own + stolen_from_honest;
 
@@ -271,7 +306,9 @@ fn simulate_attack(
     for outcome in &outcomes {
         if outcome.can_slash_coalition {
             // This honest ledger can slash. How many coalition members are in its quorum?
-            let coalition_members_here = outcome.quorum.iter()
+            let coalition_members_here = outcome
+                .quorum
+                .iter()
                 .filter(|m| coalition_set.contains(m))
                 .count();
             collateral_slashed += coalition_members_here as u64 * collateral;
@@ -294,7 +331,7 @@ fn simulate_attack(
         // Coalition member c's quorum — is it honest-majority?
         let coal_in_c_quorum = c_outcome.coalition_in_quorum;
         let honest_in_c = c_outcome.quorum.len() - coal_in_c_quorum;
-        let majority = (c_outcome.quorum.len() + 1) / 2;
+        let majority = c_outcome.quorum.len().div_ceil(2);
         if honest_in_c >= majority {
             // Honest quorum controls c's reserves — coalition can't take them
             coalition_reserves_recovered += reserves;
@@ -332,7 +369,9 @@ fn best_coalition_attack(
     collateral: u64,
 ) -> Option<AttackTrace> {
     let quorum: Vec<usize> = adj[target].iter().copied().collect();
-    if k > quorum.len() { return None; }
+    if k > quorum.len() {
+        return None;
+    }
 
     // Generate all k-combinations of target's quorum
     let combos = combinations(&quorum, k);
@@ -340,7 +379,10 @@ fn best_coalition_attack(
 
     for coalition in combos {
         let trace = simulate_attack(n, adj, target, &coalition, reserves, collateral);
-        if best.as_ref().map_or(true, |b| trace.net_profit > b.net_profit) {
+        if best
+            .as_ref()
+            .is_none_or(|b| trace.net_profit > b.net_profit)
+        {
             best = Some(trace);
         }
     }
@@ -348,8 +390,12 @@ fn best_coalition_attack(
 }
 
 fn combinations(items: &[usize], k: usize) -> Vec<Vec<usize>> {
-    if k == 0 { return vec![vec![]]; }
-    if items.len() < k { return vec![]; }
+    if k == 0 {
+        return vec![vec![]];
+    }
+    if items.len() < k {
+        return vec![];
+    }
     let mut result = Vec::new();
     // Include items[0]
     for mut combo in combinations(&items[1..], k - 1) {
@@ -397,25 +443,39 @@ fn can_you_steal_from_lconn2() {
             .filter(|&t| local_connectivity(&adj, t, &anchors) == 2)
             .collect();
 
-        if lconn2_targets.is_empty() { continue; }
+        if lconn2_targets.is_empty() {
+            continue;
+        }
 
-        println!("=== {} === ({} nodes with LConn=2)", name, lconn2_targets.len());
+        println!(
+            "=== {} === ({} nodes with LConn=2)",
+            name,
+            lconn2_targets.len()
+        );
 
         for &target in &lconn2_targets {
             let quorum: Vec<usize> = adj[target].iter().copied().collect();
 
             // Try coalition sizes from 2 up to quorum size
             for k in 2..=quorum.len() {
-                if let Some(mut trace) = best_coalition_attack(*n, &adj, target, k, reserves, collateral) {
+                if let Some(mut trace) =
+                    best_coalition_attack(*n, &adj, target, k, reserves, collateral)
+                {
                     trace.local_conn = 2;
 
                     let profitable = trace.net_profit > 0;
-                    if profitable { any_profitable = true; }
+                    if profitable {
+                        any_profitable = true;
+                    }
 
                     // Only print interesting cases: the smallest k that's profitable,
                     // or k=2 always (the question being asked)
                     if k == 2 || profitable {
-                        let tag = if profitable { "PROFITABLE" } else { "UNPROFITABLE" };
+                        let tag = if profitable {
+                            "PROFITABLE"
+                        } else {
+                            "UNPROFITABLE"
+                        };
 
                         println!(
                             "  target={:>2} coalition={:?} (K={}): {} net={:+}",
@@ -436,7 +496,8 @@ fn can_you_steal_from_lconn2() {
                         // Show per-ledger detail for profitable attacks
                         if profitable {
                             println!("    --- per-ledger breakdown ---");
-                            let coalition_set: HashSet<usize> = trace.coalition.iter().copied().collect();
+                            let coalition_set: HashSet<usize> =
+                                trace.coalition.iter().copied().collect();
                             for o in &trace.ledger_outcomes {
                                 let role = if o.operator == target {
                                     "TARGET"
@@ -450,8 +511,16 @@ fn can_you_steal_from_lconn2() {
                                     continue; // skip unaffected
                                 };
 
-                                let quorum_str: String = o.quorum.iter()
-                                    .map(|m| if coalition_set.contains(m) { format!("*{}*", m) } else { m.to_string() })
+                                let quorum_str: String = o
+                                    .quorum
+                                    .iter()
+                                    .map(|m| {
+                                        if coalition_set.contains(m) {
+                                            format!("*{}*", m)
+                                        } else {
+                                            m.to_string()
+                                        }
+                                    })
                                     .collect::<Vec<_>>()
                                     .join(",");
 
@@ -465,7 +534,9 @@ fn can_you_steal_from_lconn2() {
                         }
 
                         // If profitable, don't try larger coalitions
-                        if profitable { break; }
+                        if profitable {
+                            break;
+                        }
                     }
                 }
             }
@@ -512,7 +583,9 @@ fn can_you_steal_from_lconn2() {
         let safe = profitable_count == 0;
         println!(
             "{:>7}% | {:>12} | {:>12} | {:>12}",
-            ratio_pct, total_scenarios, profitable_count,
+            ratio_pct,
+            total_scenarios,
+            profitable_count,
             if safe { "SAFE" } else { "EXPLOITABLE" },
         );
     }
@@ -554,35 +627,50 @@ fn can_you_steal_from_lconn3() {
             .filter(|&t| local_connectivity(&adj, t, &anchors) == 3)
             .collect();
 
-        if lconn3_targets.is_empty() { continue; }
+        if lconn3_targets.is_empty() {
+            continue;
+        }
 
-        println!("=== {} === ({} nodes with LConn=3)", name, lconn3_targets.len());
+        println!(
+            "=== {} === ({} nodes with LConn=3)",
+            name,
+            lconn3_targets.len()
+        );
 
         for &target in &lconn3_targets {
             let quorum: Vec<usize> = adj[target].iter().copied().collect();
 
             for k in 3..=quorum.len() {
-                if let Some(mut trace) = best_coalition_attack(*n, &adj, target, k, reserves, collateral) {
+                if let Some(mut trace) =
+                    best_coalition_attack(*n, &adj, target, k, reserves, collateral)
+                {
                     trace.local_conn = 3;
                     let profitable = trace.net_profit > 0;
-                    if profitable { any_profitable = true; }
+                    if profitable {
+                        any_profitable = true;
+                    }
 
                     if k == 3 || profitable {
-                        let tag = if profitable { "PROFITABLE" } else { "UNPROFITABLE" };
+                        let tag = if profitable {
+                            "PROFITABLE"
+                        } else {
+                            "UNPROFITABLE"
+                        };
                         println!(
                             "  target={:>2} coalition={:?} (K={}): {} net={:+}",
                             target, trace.coalition, k, tag, trace.net_profit
                         );
                         println!(
                             "    extracted: target={}  own={}  honest_compromised={}  total={}",
-                            trace.stolen_from_target, trace.stolen_from_coalition_own,
-                            trace.stolen_from_honest_compromised, trace.total_extracted,
+                            trace.stolen_from_target,
+                            trace.stolen_from_coalition_own,
+                            trace.stolen_from_honest_compromised,
+                            trace.total_extracted,
                         );
-                        println!(
-                            "    slashed: {}",
-                            trace.collateral_slashed,
-                        );
-                        if profitable { break; }
+                        println!("    slashed: {}", trace.collateral_slashed,);
+                        if profitable {
+                            break;
+                        }
                     }
                 }
             }
@@ -615,8 +703,8 @@ fn minimum_safe_lconn() {
         ("disp16q5", 16, dispersed_topology(16, 5)),
         ("clus16q3", 16, clustered_topology(16, 3, 4)),
         ("clus16q5", 16, clustered_topology(16, 5, 4)),
-        ("hub16q3",  16, hub_spoke_topology(16, 3, 3)),
-        ("hub32q5",  32, hub_spoke_topology(32, 5, 5)),
+        ("hub16q3", 16, hub_spoke_topology(16, 3, 3)),
+        ("hub32q5", 32, hub_spoke_topology(32, 5, 5)),
     ];
 
     println!(
@@ -634,13 +722,18 @@ fn minimum_safe_lconn() {
             let anchors: Vec<usize> = vec![0, n / 2];
 
             for target in 0..*n {
-                if anchors.contains(&target) || adj[target].is_empty() { continue; }
+                if anchors.contains(&target) || adj[target].is_empty() {
+                    continue;
+                }
                 let lconn = local_connectivity(&adj, target, &anchors);
-                if lconn == 0 { continue; } // skip disconnected
+                if lconn == 0 {
+                    continue;
+                } // skip disconnected
 
                 let quorum: Vec<usize> = adj[target].iter().copied().collect();
                 for k in 2..=quorum.len() {
-                    if let Some(trace) = best_coalition_attack(*n, &adj, target, k, reserves, coll) {
+                    if let Some(trace) = best_coalition_attack(*n, &adj, target, k, reserves, coll)
+                    {
                         if trace.net_profit > 0 {
                             *profitable_by_lconn.entry(lconn).or_insert(0) += 1;
                             break; // found profitable for this target
@@ -657,7 +750,8 @@ fn minimum_safe_lconn() {
         let detail: String = {
             let mut entries: Vec<_> = profitable_by_lconn.iter().collect();
             entries.sort();
-            entries.iter()
+            entries
+                .iter()
                 .map(|(lc, count)| format!("LC{}={} attacks", lc, count))
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -665,8 +759,13 @@ fn minimum_safe_lconn() {
 
         println!(
             "{:>7}% | {:>8} | {}",
-            ratio_pct, min_safe,
-            if detail.is_empty() { "none exploitable".into() } else { detail },
+            ratio_pct,
+            min_safe,
+            if detail.is_empty() {
+                "none exploitable".into()
+            } else {
+                detail
+            },
         );
     }
 }

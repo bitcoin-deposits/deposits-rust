@@ -88,7 +88,7 @@ mod tests {
 
         assert_eq!(msg_granted.operator_id, operator_id);
         assert_eq!(msg_granted.reserves_id, reserves_id);
-        assert_eq!(msg_granted.consent_granted, true);
+        assert!(msg_granted.consent_granted);
         assert_eq!(msg_granted.quorum_member_signature, [0x12; 64]);
 
         // Test with consent denied
@@ -99,7 +99,7 @@ mod tests {
             quorum_member_signature: [0u8; 64],
         };
 
-        assert_eq!(msg_denied.consent_granted, false);
+        assert!(!msg_denied.consent_granted);
 
         println!("CollateralConsentResponseMsg struct test passed!");
     }
@@ -267,18 +267,20 @@ mod tests {
             .unwrap();
 
         // CollateralAttestation is deprecated (no-op), just verify it doesn't error
-        let result = ledger
-            .apply_state_changes(&LedgerOperation::CollateralAttestation {
-                collateral_operator: member_key,
-                quorum_member: member_key,
-                collateral_ledger_id: "member_collateral_ledger".to_string(),
-                amount: 50_000,
-                block_height: 800_000,
-                lock_until_block: 900_000,
-                signature: [0xEF; 64],
-                ledger_hash: [0u8; 32],
-            });
-        assert!(result.is_ok(), "Deprecated CollateralAttestation should be accepted as no-op");
+        let result = ledger.apply_state_changes(&LedgerOperation::CollateralAttestation {
+            collateral_operator: member_key,
+            quorum_member: member_key,
+            collateral_ledger_id: "member_collateral_ledger".to_string(),
+            amount: 50_000,
+            block_height: 800_000,
+            lock_until_block: 900_000,
+            signature: [0xEF; 64],
+            ledger_hash: [0u8; 32],
+        });
+        assert!(
+            result.is_ok(),
+            "Deprecated CollateralAttestation should be accepted as no-op"
+        );
     }
 
     #[test]

@@ -109,8 +109,12 @@ fn tier2_1_nums_point_audit() {
     );
     let keypath_blocked = if let Ok(tkp) = tweaked {
         let sig = secp.sign_schnorr_no_aux_rand(&msg, &tkp);
-        secp.verify_schnorr(&sig, &msg, &output.spend_info.output_key().to_inner())
-            .is_err()
+        secp.verify_schnorr(
+            &sig,
+            &msg,
+            &output.spend_info.output_key().to_x_only_public_key(),
+        )
+        .is_err()
     } else {
         true
     };

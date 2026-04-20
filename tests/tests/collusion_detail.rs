@@ -37,7 +37,7 @@ fn analyze_detailed(n: usize, q: usize, coalition: &[usize]) -> Vec<LedgerAttack
         // Taproot tier-0: majority immediate = ceil((Q+1)/2) signers
         // But the operator (tie-breaker) is NOT in the quorum — they're the one being disputed
         // So the quorum members need to meet the threshold WITHOUT the operator
-        let majority_needed = (q + 1) / 2; // majority of Q members
+        let majority_needed = q.div_ceil(2); // majority of Q members
         let honest_majority = honest_in_q >= majority_needed;
 
         // For Taproot confiscation, the tier-0 script requires majority of voters

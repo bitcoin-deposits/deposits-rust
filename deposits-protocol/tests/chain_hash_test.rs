@@ -44,9 +44,9 @@ fn current_hash_without_signatures_is_content_only() {
     let u = make_update(0, [0u8; 32], &[1, 2, 3]);
 
     let mut h = Sha256::new();
-    h.update(&0u64.to_le_bytes());
-    h.update(&[0u8; 32]);
-    h.update(&[1u8, 2, 3]);
+    h.update(0u64.to_le_bytes());
+    h.update([0u8; 32]);
+    h.update([1u8, 2, 3]);
     let expected: [u8; 32] = h.finalize().into();
 
     assert_eq!(u.current_hash, expected);
@@ -64,10 +64,10 @@ fn current_hash_with_cosign_signature() {
 
     // Verify manually
     let mut h = Sha256::new();
-    h.update(&0u64.to_le_bytes());
-    h.update(&[0u8; 32]);
-    h.update(&[1u8, 2, 3]);
-    h.update(&[0xAA; 64]);
+    h.update(0u64.to_le_bytes());
+    h.update([0u8; 32]);
+    h.update([1u8, 2, 3]);
+    h.update([0xAA; 64]);
     let expected: [u8; 32] = h.finalize().into();
 
     assert_eq!(u.current_hash, expected);
@@ -82,11 +82,11 @@ fn current_hash_with_member_ledger_hash_and_cosign_signature() {
     u.current_hash = u.compute_hash();
 
     let mut h = Sha256::new();
-    h.update(&0u64.to_le_bytes());
-    h.update(&[0u8; 32]);
-    h.update(&[1u8, 2, 3]);
-    h.update(&[0xBB; 32]);
-    h.update(&[0xCC; 64]);
+    h.update(0u64.to_le_bytes());
+    h.update([0u8; 32]);
+    h.update([1u8, 2, 3]);
+    h.update([0xBB; 32]);
+    h.update([0xCC; 64]);
     let expected: [u8; 32] = h.finalize().into();
 
     assert_eq!(u.current_hash, expected);
@@ -102,8 +102,8 @@ fn chain_hash_is_sha256_current_hash_plus_operator_sig() {
     u.operator_signature = [0xDD; 64];
 
     let mut h = Sha256::new();
-    h.update(&u.current_hash);
-    h.update(&[0xDD; 64]);
+    h.update(u.current_hash);
+    h.update([0xDD; 64]);
     let expected: [u8; 32] = h.finalize().into();
 
     assert_eq!(u.chain_hash(), expected);
@@ -196,18 +196,18 @@ fn chain_with_cosigned_and_unsigned_updates() {
 
     // u1's current_hash includes member_ledger_hash + cosign_signature
     let mut h = Sha256::new();
-    h.update(&1u64.to_le_bytes());
-    h.update(&u0.chain_hash());
-    h.update(&[2u8]);
-    h.update(&[0xAA; 32]);
-    h.update(&[0xBB; 64]);
+    h.update(1u64.to_le_bytes());
+    h.update(u0.chain_hash());
+    h.update([2u8]);
+    h.update([0xAA; 32]);
+    h.update([0xBB; 64]);
     let expected: [u8; 32] = h.finalize().into();
     assert_eq!(u1.current_hash, expected);
 
     // u1's chain_hash folds in operator sig
     let mut h2 = Sha256::new();
-    h2.update(&u1.current_hash);
-    h2.update(&[0x02; 64]);
+    h2.update(u1.current_hash);
+    h2.update([0x02; 64]);
     let expected_chain: [u8; 32] = h2.finalize().into();
     assert_eq!(u1.chain_hash(), expected_chain);
     assert_eq!(u2.previous_hash, expected_chain);

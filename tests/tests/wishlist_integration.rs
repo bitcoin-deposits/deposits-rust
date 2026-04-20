@@ -76,14 +76,13 @@ fn tier4_1_relay_censorship() {
         blocked: multi_relay_defense && hash_chain_rejects_fakes,
         defense: DefenseLayer::NodePolicy,
         scaling: Scaling::Constant,
-        notes: format!(
-            "Single-relay censorship mitigated by multi-relay subscriptions. \
+        notes: "Single-relay censorship mitigated by multi-relay subscriptions. \
              Fake events rejected by hash chain (can't forge chain continuity). \
              Delay attacks detectable by cross-relay sequence comparison. \
              Residual risk: attacker controlling ALL relays creates indistinguishable \
              censorship — wallet can't tell 'relay down' from 'operator silent'. \
              Defense: wallet should use diverse relay sets and flag stale operators."
-        ),
+            .to_string(),
         steps: vec![],
     });
 }
@@ -147,15 +146,14 @@ fn tier4_2_wallet_state_exfiltration() {
         blocked: false,
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
-        notes: format!(
-            "Ledger updates (Kind 9100) are PUBLIC — deposit balances, \
+        notes: "Ledger updates (Kind 9100) are PUBLIC — deposit balances, \
              payment amounts, and operator identities are visible to anyone. \
              This is by design (verification requires transparency). \
              DM metadata (sender/recipient/timing) correlates wallet \
              identity with deposit activity. \
              Protocol explicitly trades privacy for verifiability. \
              NOT a bug — but users must understand deposits are not private."
-        ),
+            .to_string(),
         steps: vec![],
     });
 }
@@ -220,13 +218,12 @@ fn tier4_3_recovery_ambiguity() {
         blocked: !can_forge_parallel_chain,
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
-        notes: format!(
-            "Hash chain prevents fake event injection (can't forge chain continuity). \
+        notes: "Hash chain prevents fake event injection (can't forge chain continuity). \
              Parallel chain requires operator signing key. \
              Residual: DoS via garbage events tagged with victim's ledger_id — \
              wallet must filter by chain validity, not just tag match. \
              Recovery should start from known-good checkpoint, not from relay scan."
-        ),
+            .to_string(),
         steps: vec![],
     });
 }
@@ -316,7 +313,7 @@ fn tier5_2_timing_attacks() {
     let secp = Secp256k1::new();
 
     // Generate test keys
-    let keys: Vec<(SecretKey, PublicKey)> = (1..=20).map(|i| make_key(i)).collect();
+    let keys: Vec<(SecretKey, PublicKey)> = (1..=20).map(make_key).collect();
     let msg_hash = [0xAA; 32];
     let msg = Message::from_digest(msg_hash);
 

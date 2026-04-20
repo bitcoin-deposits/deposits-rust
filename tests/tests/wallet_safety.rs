@@ -21,7 +21,10 @@ struct FlowGraph {
 
 impl FlowGraph {
     fn new(n: usize) -> Self {
-        Self { n, capacity: vec![vec![0; n]; n] }
+        Self {
+            n,
+            capacity: vec![vec![0; n]; n],
+        }
     }
     fn add_edge(&mut self, from: usize, to: usize, cap: u32) {
         self.capacity[from][to] += cap;
@@ -37,7 +40,9 @@ impl FlowGraph {
             let mut q = VecDeque::new();
             q.push_back(s);
             while let Some(u) = q.pop_front() {
-                if u == t { break; }
+                if u == t {
+                    break;
+                }
                 for v in 0..n {
                     if !vis[v] && res[u][v] > 0 {
                         vis[v] = true;
@@ -46,12 +51,21 @@ impl FlowGraph {
                     }
                 }
             }
-            if !vis[t] { break; }
+            if !vis[t] {
+                break;
+            }
             let mut flow = u32::MAX;
             let mut v = t;
-            while let Some(u) = parent[v] { flow = flow.min(res[u][v]); v = u; }
+            while let Some(u) = parent[v] {
+                flow = flow.min(res[u][v]);
+                v = u;
+            }
             v = t;
-            while let Some(u) = parent[v] { res[u][v] -= flow; res[v][u] += flow; v = u; }
+            while let Some(u) = parent[v] {
+                res[u][v] -= flow;
+                res[v][u] += flow;
+                v = u;
+            }
             total += flow;
         }
         total
@@ -109,15 +123,17 @@ impl Network {
         let reserves = utxo_per_op / 2;
         let per_lock = utxo_per_op / (2 * q as u64);
 
-        let mut operators: Vec<Operator> = (0..n).map(|i| Operator {
-            id: i,
-            name: format!("honest_{}", i),
-            is_sybil: false,
-            reserves,
-            quorum: (1..=q).map(|j| (i + j) % n).collect(),
-            collateral_on: Vec::new(), // filled below
-            per_lock,
-        }).collect();
+        let mut operators: Vec<Operator> = (0..n)
+            .map(|i| Operator {
+                id: i,
+                name: format!("honest_{}", i),
+                is_sybil: false,
+                reserves,
+                quorum: (1..=q).map(|j| (i + j) % n).collect(),
+                collateral_on: Vec::new(), // filled below
+                per_lock,
+            })
+            .collect();
 
         // Each operator posts collateral on ledgers where they're a quorum member
         for i in 0..n {
@@ -130,8 +146,12 @@ impl Network {
         let mut adj = vec![Vec::new(); n];
         for i in 0..n {
             for &m in &operators[i].quorum {
-                if !adj[i].contains(&m) { adj[i].push(m); }
-                if !adj[m].contains(&i) { adj[m].push(i); }
+                if !adj[i].contains(&m) {
+                    adj[i].push(m);
+                }
+                if !adj[m].contains(&i) {
+                    adj[m].push(i);
+                }
             }
         }
 
@@ -141,7 +161,13 @@ impl Network {
     /// Attach a sybil island: `num_sybils` fake nodes connected to `bridges`
     /// (existing honest nodes). Sybils form quorums among themselves.
     /// They post collateral on bridge nodes to create graph edges.
-    fn attach_sybil_island(&mut self, num_sybils: usize, bridges: &[usize], q: usize, utxo_per_sybil: u64) {
+    fn attach_sybil_island(
+        &mut self,
+        num_sybils: usize,
+        bridges: &[usize],
+        q: usize,
+        utxo_per_sybil: u64,
+    ) {
         let base = self.operators.len();
         let reserves = utxo_per_sybil / 2;
         let per_lock = utxo_per_sybil / (2 * q as u64);
@@ -159,7 +185,9 @@ impl Network {
             }
             // If not enough sybils for full quorum, add bridges
             for &b in bridges {
-                if quorum.len() >= q { break; }
+                if quorum.len() >= q {
+                    break;
+                }
                 if !quorum.contains(&b) {
                     quorum.push(b);
                 }
@@ -197,13 +225,19 @@ impl Network {
         self.adj = vec![Vec::new(); n];
         for i in 0..n {
             for &m in &self.operators[i].quorum {
-                if !self.adj[i].contains(&m) { self.adj[i].push(m); }
-                if !self.adj[m].contains(&i) { self.adj[m].push(i); }
+                if !self.adj[i].contains(&m) {
+                    self.adj[i].push(m);
+                }
+                if !self.adj[m].contains(&i) {
+                    self.adj[m].push(i);
+                }
             }
         }
     }
 
-    fn n(&self) -> usize { self.operators.len() }
+    fn n(&self) -> usize {
+        self.operators.len()
+    }
 }
 
 // =========================================================================
@@ -232,7 +266,7 @@ fn simulate_attack(net: &Network, target: usize, coalition: &[usize]) -> AttackR
         let q = &op.quorum;
         let ciq = q.iter().filter(|m| cs.contains(m)).count();
         let hiq = q.len() - ciq;
-        let maj = (q.len() + 1) / 2;
+        let maj = q.len().div_ceil(2);
         let hmaj = hiq >= maj;
         let is_c = cs.contains(&i);
 
@@ -271,10 +305,17 @@ fn simulate_attack(net: &Network, target: usize, coalition: &[usize]) -> AttackR
 }
 
 fn combinations(items: &[usize], k: usize) -> Vec<Vec<usize>> {
-    if k == 0 { return vec![vec![]]; }
-    if items.len() < k { return vec![]; }
+    if k == 0 {
+        return vec![vec![]];
+    }
+    if items.len() < k {
+        return vec![];
+    }
     let mut r = Vec::new();
-    for mut c in combinations(&items[1..], k - 1) { c.insert(0, items[0]); r.push(c); }
+    for mut c in combinations(&items[1..], k - 1) {
+        c.insert(0, items[0]);
+        r.push(c);
+    }
     r.extend(combinations(&items[1..], k));
     r
 }
@@ -288,7 +329,7 @@ fn best_attack(net: &Network, target: usize, max_k: usize) -> Option<AttackResul
     for k in 2..=pool.len().min(max_k) {
         for coal in combinations(pool, k) {
             let result = simulate_attack(net, target, &coal);
-            if best.as_ref().map_or(true, |b| result.net > b.net) {
+            if best.as_ref().is_none_or(|b| result.net > b.net) {
                 best = Some(result);
             }
         }
@@ -314,25 +355,40 @@ fn wallet_advice_test() {
     // Wallet's trust anchors: 6 evenly spaced (gives mincut >= 6 for ring Q=5)
     let anchors: Vec<usize> = (0..6).map(|i| i * 20 / 6).collect();
 
-    println!("Honest network: {} operators, Q={}, 6 anchors={:?}", honest_count, q, anchors);
-    println!("  reserves={}, per_lock={}, per_lock/reserves={:.0}%\n",
-        utxo / 2, utxo / (2 * q as u64),
-        100.0 / q as f64);
+    println!(
+        "Honest network: {} operators, Q={}, 6 anchors={:?}",
+        honest_count, q, anchors
+    );
+    println!(
+        "  reserves={}, per_lock={}, per_lock/reserves={:.0}%\n",
+        utxo / 2,
+        utxo / (2 * q as u64),
+        100.0 / q as f64
+    );
 
     // Step 2: Wallet advice
     let threshold = q as u32 + 1; // mincut > Q, i.e. >= Q+1
-    println!("WALLET ADVICE: require mincut >= {} to your anchors\n", threshold);
+    println!(
+        "WALLET ADVICE: require mincut >= {} to your anchors\n",
+        threshold
+    );
 
     // Check all honest nodes
     println!("--- Honest node mincuts ---");
     let n = net.operators.len();
     for i in 0..honest_count {
-        if anchors.contains(&i) { continue; }
+        if anchors.contains(&i) {
+            continue;
+        }
         let mc = mincut_to_anchors(n, &net.adj, i, &anchors);
         let safe = mc >= threshold;
         if !safe {
-            println!("  {} mincut={} {}", net.operators[i].name, mc,
-                if safe { "OK" } else { "REJECT" });
+            println!(
+                "  {} mincut={} {}",
+                net.operators[i].name,
+                mc,
+                if safe { "OK" } else { "REJECT" }
+            );
         }
     }
     let all_honest_pass = (0..honest_count)
@@ -344,17 +400,28 @@ fn wallet_advice_test() {
     println!("--- Attack: embedded coalition (no sybils) ---");
     let mut any_profitable = false;
     for target in 0..honest_count {
-        if anchors.contains(&target) { continue; }
+        if anchors.contains(&target) {
+            continue;
+        }
         if let Some(result) = best_attack(&net, target, 8) {
             if result.net > 0 {
                 any_profitable = true;
-                let coal_names: Vec<String> = result.coalition.iter()
-                    .map(|&c| net.operators[c].name.clone()).collect();
-                println!("  EXPLOIT: target={} coal=[{}] K={} net={:+}",
-                    net.operators[target].name, coal_names.join(","),
-                    result.coalition.len(), result.net);
-                println!("    extracted={} slashed={} own_lost={}",
-                    result.extracted, result.slashed, result.own_reserves_lost);
+                let coal_names: Vec<String> = result
+                    .coalition
+                    .iter()
+                    .map(|&c| net.operators[c].name.clone())
+                    .collect();
+                println!(
+                    "  EXPLOIT: target={} coal=[{}] K={} net={:+}",
+                    net.operators[target].name,
+                    coal_names.join(","),
+                    result.coalition.len(),
+                    result.net
+                );
+                println!(
+                    "    extracted={} slashed={} own_lost={}",
+                    result.extracted, result.slashed, result.own_reserves_lost
+                );
             }
         }
     }
@@ -365,16 +432,19 @@ fn wallet_advice_test() {
 
     // Step 4: Attach sybil island and test
     for (sybil_count, bridge_nodes) in [
-        (6, vec![5, 6]),           // small island, 2 bridges
-        (10, vec![3, 7, 11]),      // medium island, 3 bridges
-        (16, vec![2, 5, 8, 11]),   // large island, 4 bridges
-        (16, vec![1, 4, 7, 10, 13, 16]),  // large island, 6 bridges (one per anchor gap)
+        (6, vec![5, 6]),                 // small island, 2 bridges
+        (10, vec![3, 7, 11]),            // medium island, 3 bridges
+        (16, vec![2, 5, 8, 11]),         // large island, 4 bridges
+        (16, vec![1, 4, 7, 10, 13, 16]), // large island, 6 bridges (one per anchor gap)
     ] {
         let mut net_sybil = Network::ring(20, q, utxo);
         net_sybil.attach_sybil_island(sybil_count, &bridge_nodes, q, utxo);
         let n = net_sybil.operators.len();
 
-        println!("--- Sybil island: {} sybils, bridges={:?} ---", sybil_count, bridge_nodes);
+        println!(
+            "--- Sybil island: {} sybils, bridges={:?} ---",
+            sybil_count, bridge_nodes
+        );
 
         // Check mincut for sybil nodes
         let sybil_base = honest_count;
@@ -384,38 +454,64 @@ fn wallet_advice_test() {
             sybil_mincuts.push((i, mc));
         }
         let max_sybil_mc = sybil_mincuts.iter().map(|&(_, mc)| mc).max().unwrap_or(0);
-        let sybils_accepted = sybil_mincuts.iter().filter(|&&(_, mc)| mc >= threshold).count();
-        println!("  Sybil mincuts: max={}, accepted by wallet: {}/{}",
-            max_sybil_mc, sybils_accepted, sybil_count);
+        let sybils_accepted = sybil_mincuts
+            .iter()
+            .filter(|&&(_, mc)| mc >= threshold)
+            .count();
+        println!(
+            "  Sybil mincuts: max={}, accepted by wallet: {}/{}",
+            max_sybil_mc, sybils_accepted, sybil_count
+        );
 
         if sybils_accepted > 0 {
-            println!("  WARNING: wallet would accept {} sybil nodes!", sybils_accepted);
+            println!(
+                "  WARNING: wallet would accept {} sybil nodes!",
+                sybils_accepted
+            );
         }
 
         // Try attacks: sybils targeting honest nodes
         let mut best_sybil_attack: Option<(String, AttackResult)> = None;
         for target in 0..honest_count {
-            if anchors.contains(&target) { continue; }
+            if anchors.contains(&target) {
+                continue;
+            }
             let mc = mincut_to_anchors(n, &net_sybil.adj, target, &anchors);
-            if mc < threshold { continue; } // wallet would reject
+            if mc < threshold {
+                continue;
+            } // wallet would reject
 
             // Coalition from target's quorum (may include sybils now)
             if let Some(result) = best_attack(&net_sybil, target, 8) {
-                if best_sybil_attack.as_ref().map_or(true, |b| result.net > b.1.net) {
+                if best_sybil_attack
+                    .as_ref()
+                    .is_none_or(|b| result.net > b.1.net)
+                {
                     best_sybil_attack = Some((net_sybil.operators[target].name.clone(), result));
                 }
             }
         }
 
         if let Some((target_name, result)) = &best_sybil_attack {
-            let coal_names: Vec<String> = result.coalition.iter()
-                .map(|&c| net_sybil.operators[c].name.clone()).collect();
+            let coal_names: Vec<String> = result
+                .coalition
+                .iter()
+                .map(|&c| net_sybil.operators[c].name.clone())
+                .collect();
             let tag = if result.net > 0 { "EXPLOIT!" } else { "safe" };
-            println!("  Best attack on wallet-approved honest target: {} [{}]",
-                target_name, tag);
-            println!("    coalition=[{}] K={}", coal_names.join(","), result.coalition.len());
-            println!("    extracted={} slashed={} own_lost={} net={:+}",
-                result.extracted, result.slashed, result.own_reserves_lost, result.net);
+            println!(
+                "  Best attack on wallet-approved honest target: {} [{}]",
+                target_name, tag
+            );
+            println!(
+                "    coalition=[{}] K={}",
+                coal_names.join(","),
+                result.coalition.len()
+            );
+            println!(
+                "    extracted={} slashed={} own_lost={} net={:+}",
+                result.extracted, result.slashed, result.own_reserves_lost, result.net
+            );
         } else {
             println!("  No attack possible on wallet-approved targets");
         }
@@ -424,7 +520,9 @@ fn wallet_advice_test() {
         let mut sybil_self_steal = false;
         for &(sybil_id, mc) in &sybil_mincuts {
             // This would only matter if wallet accepted the sybil
-            if mc < threshold { continue; }
+            if mc < threshold {
+                continue;
+            }
             // All quorum members are sybils — attacker controls everything
             // But "stealing" from your own sybil is just moving your own money
             sybil_self_steal = true;
@@ -437,21 +535,39 @@ fn wallet_advice_test() {
     }
 
     // Step 5: Adversarial topology — attacker specifically tries to get mincut >= threshold
-    println!("--- Adversarial bridge placement: can attacker achieve mincut >= {}? ---\n", threshold);
-    println!("  Attacker needs {} independent paths to anchors.", threshold);
+    println!(
+        "--- Adversarial bridge placement: can attacker achieve mincut >= {}? ---\n",
+        threshold
+    );
+    println!(
+        "  Attacker needs {} independent paths to anchors.",
+        threshold
+    );
     println!("  Each path requires a bridge to the honest network.");
     println!("  Each bridge = real collateral posted on a real node.\n");
 
     // Best case: attacker places bridges on anchor-adjacent nodes
-    let strategic_bridges: Vec<usize> = anchors.iter()
-        .flat_map(|&a| net.adj[a].iter().copied().filter(|&x| !anchors.contains(&x)))
-        .collect::<HashSet<_>>().into_iter().take(threshold as usize).collect();
+    let strategic_bridges: Vec<usize> = anchors
+        .iter()
+        .flat_map(|&a| {
+            net.adj[a]
+                .iter()
+                .copied()
+                .filter(|&x| !anchors.contains(&x))
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .take(threshold as usize)
+        .collect();
 
     let mut net_strategic = Network::ring(20, q, utxo);
     net_strategic.attach_sybil_island(10, &strategic_bridges, q, utxo);
     let n = net_strategic.operators.len();
 
-    println!("  Strategic bridges (anchor-adjacent): {:?}", strategic_bridges);
+    println!(
+        "  Strategic bridges (anchor-adjacent): {:?}",
+        strategic_bridges
+    );
     let sybil_mc = mincut_to_anchors(n, &net_strategic.adj, honest_count, &anchors);
     println!("  Sybil node 0 mincut to anchors: {}", sybil_mc);
     println!("  Wallet accepts: {}\n", sybil_mc >= threshold);
@@ -463,16 +579,21 @@ fn wallet_advice_test() {
         println!("  Sybil passed mincut check. But sybil's quorum members are:");
         for &m in &net_strategic.operators[honest_count].quorum {
             let mc = mincut_to_anchors(n, &net_strategic.adj, m, &anchors);
-            println!("    {} mincut={} {}",
-                net_strategic.operators[m].name, mc,
-                if mc >= threshold { "OK" } else { "REJECT" });
+            println!(
+                "    {} mincut={} {}",
+                net_strategic.operators[m].name,
+                mc,
+                if mc >= threshold { "OK" } else { "REJECT" }
+            );
         }
 
         println!();
         println!("  ADDITIONAL WALLET RULE: also check mincut of ALL quorum members.");
         println!("  If any quorum member fails, the quorum is compromised -> reject.");
 
-        let quorum_pass = net_strategic.operators[honest_count].quorum.iter()
+        let quorum_pass = net_strategic.operators[honest_count]
+            .quorum
+            .iter()
             .all(|&m| mincut_to_anchors(n, &net_strategic.adj, m, &anchors) >= threshold);
         println!("  All quorum members pass: {}", quorum_pass);
     }
@@ -483,11 +604,17 @@ fn wallet_advice_test() {
     println!("  2. For candidate operator O with quorum Q:");
     println!("     a. Compute mincut(O, your_anchors) on the quorum graph");
     println!("     b. Compute mincut(m, your_anchors) for each quorum member m");
-    println!("     c. Require ALL >= {} (= Q_size + 1 for 50/50 split)", threshold);
+    println!(
+        "     c. Require ALL >= {} (= Q_size + 1 for 50/50 split)",
+        threshold
+    );
     println!("  3. Re-check periodically (quorum memberships can change)");
     println!("  4. Threshold formula: mincut > reserves / per_lock");
     println!("     With 50/50 split: mincut > Q_size");
     println!();
     assert!(all_honest_pass, "All honest nodes should pass wallet check");
-    assert!(!any_profitable, "No attack should be profitable on honest network");
+    assert!(
+        !any_profitable,
+        "No attack should be profitable on honest network"
+    );
 }

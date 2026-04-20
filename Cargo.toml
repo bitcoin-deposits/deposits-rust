@@ -20,6 +20,8 @@ large_enum_variant = "allow"     # Boxing enum variants is a larger refactor
 await_holding_lock = "allow"     # MutexGuard across await needs async lock refactor
 should_implement_trait = "allow" # from_str methods that predate FromStr impl
 unnecessary_unwrap = "allow"     # Legitimate pattern in some match arms
+needless_range_loop = "allow"    # Simulation/graph code in integration tests favors index-based loops
+assertions_on_constants = "allow" # Tests sanity-check compile-time constants
 
 [workspace.lints.rust]
 # Pre-release: unused code is expected as features are built incrementally

@@ -99,8 +99,7 @@ fn get_collateral_lock_expiry(operator: &str) -> Option<u32> {
         .filter_map(|l| {
             l.split_whitespace()
                 .filter_map(|w| w.replace(',', "").parse::<u32>().ok())
-                .filter(|&n| n > 1000) // block heights are large numbers
-                .next()
+                .find(|&n| n > 1000)
         })
         .min() // earliest expiry is the constraint
 }
@@ -234,8 +233,7 @@ fn docker_expiry_boundary_search() {
         .and_then(|l| {
             l.split_whitespace()
                 .filter_map(|w| w.replace(',', "").parse::<u32>().ok())
-                .filter(|&n| n > 1000)
-                .next()
+                .find(|&n| n > 1000)
         })
         .unwrap_or(0);
 

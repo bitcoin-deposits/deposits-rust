@@ -32,6 +32,11 @@ path = "src/bin/replay-ledger.rs"
 name = "deposits-lnurl"
 path = "src/bin/deposits-lnurl.rs"
 
+[features]
+# Tests gated on this feature predate the rename from "bitcoin-deposits" to "deposits".
+# Kept as an empty feature so those tests remain opt-in without breaking the build.
+bitcoin-deposits = []
+
 [dependencies]
 # Bitcoin
 bitcoin = { version = "0.32", features = ["serde", "rand-std"] }

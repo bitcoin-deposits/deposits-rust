@@ -1946,7 +1946,7 @@ mod tests {
         } = decoded
         {
             assert_eq!(decoded_id, deposit_id);
-            assert_eq!(descriptor, format!("legacy({})", hex::encode(&deposit_id)));
+            assert_eq!(descriptor, format!("legacy({})", hex::encode(deposit_id)));
         } else {
             panic!("Expected DepositOpen");
         }

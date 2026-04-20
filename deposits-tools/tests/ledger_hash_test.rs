@@ -18,7 +18,7 @@ mod tests {
         let script = Builder::new()
             .push_opcode(OP_RETURN)
             .push_slice(prefix)
-            .push_slice(&test_ledger_hash)
+            .push_slice(test_ledger_hash)
             .into_script();
 
         // Create transaction output
@@ -98,7 +98,7 @@ mod tests {
         let script = Builder::new()
             .push_opcode(OP_RETURN)
             .push_slice(prefix)
-            .push_slice(&ledger_hash)
+            .push_slice(ledger_hash)
             .into_script();
 
         let ledger_hash_output = TxOut {

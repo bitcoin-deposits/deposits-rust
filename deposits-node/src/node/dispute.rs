@@ -116,8 +116,7 @@ impl Node {
                         .iter()
                         .any(|(pk, _)| pk == &member.pubkey)
                     {
-                        quorum_members_to_add
-                            .push((member.pubkey, member.ledger_id.clone()));
+                        quorum_members_to_add.push((member.pubkey, member.ledger_id.clone()));
                     }
                 }
             }

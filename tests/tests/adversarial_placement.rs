@@ -14,7 +14,9 @@ const Q: usize = 5;
 const UTXO: u64 = 600_000;
 const DEPOSIT: u64 = 100_000;
 
-fn anchors() -> Vec<usize> { vec![0, 8, 17, 25, 34, 42] } // within honest range
+fn anchors() -> Vec<usize> {
+    vec![0, 8, 17, 25, 34, 42]
+} // within honest range
 
 // =========================================================================
 // Attack economics
@@ -26,26 +28,36 @@ fn attack(quorums: &[Vec<usize>], attackers: &HashSet<usize>, deposits: &[u64]) 
     let mut acost = 0u64;
     for i in 0..quorums.len() {
         let q = &quorums[i];
-        if q.is_empty() { continue; }
+        if q.is_empty() {
+            continue;
+        }
         let ciq = q.iter().filter(|m| attackers.contains(m)).count();
         let hiq = q.len() - ciq;
-        let maj = (q.len() + 1) / 2;
+        let maj = q.len().div_ceil(2);
         let hmaj = hiq >= maj;
         let is_att = attackers.contains(&i);
         if is_att {
-            if hmaj { acost += UTXO / 2; }
-            else if deposits[i] > 0 { wloss += deposits[i]; }
+            if hmaj {
+                acost += UTXO / 2;
+            } else if deposits[i] > 0 {
+                wloss += deposits[i];
+            }
         } else {
-            if !hmaj && deposits[i] > 0 { wloss += deposits[i]; }
-            else if hmaj && ciq > 0 { acost += ciq as u64 * per_lock; }
+            if !hmaj && deposits[i] > 0 {
+                wloss += deposits[i];
+            } else if hmaj && ciq > 0 {
+                acost += ciq as u64 * per_lock;
+            }
         }
     }
     (wloss as i64 - acost as i64, wloss, acost)
 }
 
 fn min_majority_arc(quorum: &[usize], n: usize) -> usize {
-    if quorum.is_empty() { return 0; }
-    let majority = (quorum.len() + 1) / 2;
+    if quorum.is_empty() {
+        return 0;
+    }
+    let majority = quorum.len().div_ceil(2);
     let mut positions: Vec<usize> = quorum.to_vec();
     positions.sort();
     let mut min_arc = n;
@@ -56,7 +68,9 @@ fn min_majority_arc(quorum: &[usize], n: usize) -> usize {
         } else {
             (n - positions[i]) + positions[end]
         };
-        if arc < min_arc { min_arc = arc; }
+        if arc < min_arc {
+            min_arc = arc;
+        }
     }
     min_arc
 }
@@ -84,11 +98,15 @@ fn adversarial_placement() {
         let mut members: Vec<usize> = Vec::new();
         for j in 1..=Q {
             let idx = (i + j * stride) % N_HONEST;
-            if idx != i && !members.contains(&idx) { members.push(idx); }
+            if idx != i && !members.contains(&idx) {
+                members.push(idx);
+            }
         }
         while members.len() < Q {
             let m = (i + members.len() + 1) % N_HONEST;
-            if m != i && !members.contains(&m) { members.push(m); }
+            if m != i && !members.contains(&m) {
+                members.push(m);
+            }
         }
         quorums[i] = members;
     }
@@ -97,10 +115,14 @@ fn adversarial_placement() {
     let min_arc_threshold = N_HONEST / Q; // 10
 
     println!("--- Defender: dispersed quorums among honest nodes ---");
-    println!("  Wallet rule: MinArc >= {} (among honest node IDs)\n", min_arc_threshold);
+    println!(
+        "  Wallet rule: MinArc >= {} (among honest node IDs)\n",
+        min_arc_threshold
+    );
 
     // Verify all honest nodes pass
-    let honest_pass = honest.iter()
+    let honest_pass = honest
+        .iter()
         .filter(|&&i| !anchor_set.contains(&i))
         .all(|&i| min_majority_arc(&quorums[i], N_HONEST) >= min_arc_threshold);
     println!("  All honest nodes pass wallet check: {}\n", honest_pass);
@@ -113,8 +135,11 @@ fn adversarial_placement() {
         }
     }
     let total_deposited: u64 = deposits.iter().sum();
-    println!("  Wallet deposits: {} on {} honest nodes\n", total_deposited,
-        honest.iter().filter(|&&i| deposits[i] > 0).count());
+    println!(
+        "  Wallet deposits: {} on {} honest nodes\n",
+        total_deposited,
+        honest.iter().filter(|&&i| deposits[i] > 0).count()
+    );
 
     // =================================================================
     // ATTACKER STRATEGIES
@@ -134,7 +159,10 @@ fn adversarial_placement() {
         }
         let (net, wloss, acost) = attack(&q, &attacker_set, &deposits);
         println!("  No connection to honest network.");
-        println!("  wallet_loss={}, attacker_cost={}, net={:+}", wloss, acost, net);
+        println!(
+            "  wallet_loss={}, attacker_cost={}, net={:+}",
+            wloss, acost, net
+        );
         println!("  (Attacker can't reach honest quorums — zero impact)\n");
     }
 
@@ -175,19 +203,31 @@ fn adversarial_placement() {
             }
         }
         println!("  Attacker nodes with honest quorum members:");
-        println!("  MinArc threshold: {}, accepted: {}/{}", min_arc_threshold, att_accepted, N_ATTACK);
+        println!(
+            "  MinArc threshold: {}, accepted: {}/{}",
+            min_arc_threshold, att_accepted, N_ATTACK
+        );
 
         if att_accepted > 0 {
             let (net, wloss, acost) = attack(&q, &attacker_set, &att_deposits);
-            println!("  wallet_loss={}, attacker_cost={}, net={:+}", wloss, acost, net);
+            println!(
+                "  wallet_loss={}, attacker_cost={}, net={:+}",
+                wloss, acost, net
+            );
 
             // But honest majority in quorum blocks theft!
-            let att_blocked = attacker_nodes.iter().filter(|&&id| {
-                let ciq = q[id].iter().filter(|m| attacker_set.contains(m)).count();
-                let hiq = q[id].len() - ciq;
-                hiq >= (q[id].len() + 1) / 2
-            }).count();
-            println!("  Attacker nodes where honest quorum blocks theft: {}/{}", att_blocked, att_accepted);
+            let att_blocked = attacker_nodes
+                .iter()
+                .filter(|&&id| {
+                    let ciq = q[id].iter().filter(|m| attacker_set.contains(m)).count();
+                    let hiq = q[id].len() - ciq;
+                    hiq >= q[id].len().div_ceil(2)
+                })
+                .count();
+            println!(
+                "  Attacker nodes where honest quorum blocks theft: {}/{}",
+                att_blocked, att_accepted
+            );
         } else {
             println!("  No attacker nodes accepted by wallet.");
         }
@@ -223,12 +263,18 @@ fn adversarial_placement() {
             }
         }
         println!("  All-sybil quorums, 6 bridges to honest network");
-        println!("  MinArc threshold: {}, accepted: {}/{}", min_arc_threshold, att_accepted, N_ATTACK);
+        println!(
+            "  MinArc threshold: {}, accepted: {}/{}",
+            min_arc_threshold, att_accepted, N_ATTACK
+        );
 
         if att_accepted > 0 {
             // Check: even if wallet accepts, can attacker steal?
             let (net, wloss, acost) = attack(&q, &attacker_set, &att_deposits);
-            println!("  wallet_loss={}, attacker_cost={}, net={:+}", wloss, acost, net);
+            println!(
+                "  wallet_loss={}, attacker_cost={}, net={:+}",
+                wloss, acost, net
+            );
         } else {
             println!("  All-sybil quorums have low MinArc among their members — rejected.");
         }
@@ -250,9 +296,16 @@ fn adversarial_placement() {
         let total_att = attackers_total.len();
         let (net, wloss, acost) = attack(&quorums, &attackers_total, &deposits);
         let tag = if net > 0 { " STOLEN!" } else { "" };
-        println!("  Compromise {}: total_attackers={} ({}%), wallet_loss={}, cost={}, net={:+}{}",
-            compromised_count, total_att, total_att * 100 / N,
-            wloss, acost, net, tag);
+        println!(
+            "  Compromise {}: total_attackers={} ({}%), wallet_loss={}, cost={}, net={:+}{}",
+            compromised_count,
+            total_att,
+            total_att * 100 / N,
+            wloss,
+            acost,
+            net,
+            tag
+        );
     }
     println!();
 
@@ -265,26 +318,43 @@ fn adversarial_placement() {
         let mut insiders: HashSet<usize> = HashSet::new();
         let mut count = 0;
         for i in 0..N_HONEST {
-            if count >= 49 { break; }
+            if count >= 49 {
+                break;
+            }
             if !anchor_set.contains(&i) {
                 insiders.insert(i);
                 count += 1;
             }
         }
-        println!("  Attacker controls {} of {} 'honest' nodes (anchors safe)", insiders.len(), N_HONEST);
-        println!("  Honest remaining: anchors + {} others", N_HONEST - insiders.len() - anch.len());
+        println!(
+            "  Attacker controls {} of {} 'honest' nodes (anchors safe)",
+            insiders.len(),
+            N_HONEST
+        );
+        println!(
+            "  Honest remaining: anchors + {} others",
+            N_HONEST - insiders.len() - anch.len()
+        );
 
         let (net, wloss, acost) = attack(&quorums, &insiders, &deposits);
         let tag = if net > 0 { " STOLEN!" } else { "" };
-        println!("  wallet_loss={}, cost={}, net={:+}{}", wloss, acost, net, tag);
+        println!(
+            "  wallet_loss={}, cost={}, net={:+}{}",
+            wloss, acost, net, tag
+        );
 
         // How many nodes have attacker quorum majority?
-        let compromised_quorums = (0..N_HONEST).filter(|&i| {
-            let ciq = quorums[i].iter().filter(|m| insiders.contains(m)).count();
-            ciq >= (quorums[i].len() + 1) / 2
-        }).count();
+        let compromised_quorums = (0..N_HONEST)
+            .filter(|&i| {
+                let ciq = quorums[i].iter().filter(|m| insiders.contains(m)).count();
+                ciq >= quorums[i].len().div_ceil(2)
+            })
+            .count();
         let safe_quorums = N_HONEST - compromised_quorums;
-        println!("  Quorums with attacker majority: {}/{}", compromised_quorums, N_HONEST);
+        println!(
+            "  Quorums with attacker majority: {}/{}",
+            compromised_quorums, N_HONEST
+        );
         println!("  Quorums still safe: {}", safe_quorums);
     }
     println!();
