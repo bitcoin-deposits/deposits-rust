@@ -13,7 +13,8 @@
 
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
 use deposits_core::descriptor::CoreWitnessVerifier;
-use deposits_core::ledger::Ledger;
+use deposits_core::ledger::{Ledger, LedgerProtocolState, LedgerRole};
+use deposits_core::operation_validation as op_val;
 use deposits_protocol::messages::LedgerOperation;
 use deposits_protocol::signature_utils;
 use deposits_protocol::types::*;
@@ -216,12 +217,20 @@ impl ProtocolSim {
 
     /// An honest co-signer's decision: would I sign this update?
     ///
-    /// Checks:
-    /// - Operation applies cleanly against my replica (not a hard error)
-    /// - Post-apply state is conforming (no ConformanceViolations)
-    /// - Dispute state is Normal
+    /// Mirrors what `handle_ledger_update` does in the real protocol:
+    /// 1. Per-operation validators (balance checks, fee rate limits, witness
+    ///    verification, etc.) via `validate_per_op_as_cosigner`
+    /// 2. State-machine apply + conformance check via `apply_with_verifier`
+    ///
+    /// Either failing means "don't sign". The first layer catches things the
+    /// pure state machine doesn't — e.g., FeeCollect rate limits, balance
+    /// checks for operations that would silently saturate, witness validity
+    /// for ops where conformance is permissive.
     fn honest_would_cosign(replica: &LedgerState, op: &LedgerOperation) -> bool {
         if replica.dispute_state != DisputeState::Normal {
+            return false;
+        }
+        if !validate_per_op_as_cosigner(replica, op) {
             return false;
         }
         let verifier = CoreWitnessVerifier;
@@ -418,6 +427,112 @@ fn apply_with_dispute_gate(state: &LedgerState, op: &LedgerOperation) -> Result<
         return Err(());
     }
     state.apply(op).map_err(|_| ())
+}
+
+/// Build a lightweight `Ledger` shell around a state clone so we can call the
+/// existing `validate_*_by_id` functions, which take `&Ledger`. None of those
+/// validators touch `history` or `protocol`, so the empty defaults are fine.
+fn ledger_shell(state: &LedgerState) -> Ledger {
+    Ledger {
+        state: state.clone(),
+        protocol: LedgerProtocolState::default(),
+        role: LedgerRole::Partner,
+        history: Vec::new(),
+    }
+}
+
+/// Per-operation validation an honest cosigner runs *before* applying the
+/// state machine. This mirrors the dispatch inside
+/// `deposits-core/src/message_handlers/ledger.rs::handle_ledger_update`.
+/// Returns true if the op passes validation (cosigner would sign), false if
+/// any validator rejects it.
+fn validate_per_op_as_cosigner(replica: &LedgerState, op: &LedgerOperation) -> bool {
+    let ledger = ledger_shell(replica);
+    match op {
+        LedgerOperation::LedgerOpen { .. } => true,
+        LedgerOperation::DepositOpen {
+            deposit_id, fees, ..
+        } => op_val::validate_deposit_add_by_id(&ledger, deposit_id, fees.as_ref()).is_ok(),
+        LedgerOperation::DepositClose { deposit_id } => {
+            op_val::validate_deposit_close_by_id(&ledger, deposit_id).is_ok()
+        }
+        LedgerOperation::FeeChange {
+            deposit_id,
+            new_fees,
+            effective_block,
+        } => {
+            // block_height = 0 skips timing/limit checks (see validator). The
+            // sim's honest propose path uses append_operation (block 0), so
+            // the cosigner does the same — keeps both sides consistent.
+            op_val::validate_deposit_fee_change(&ledger, deposit_id, new_fees, *effective_block, 0)
+                .is_ok()
+        }
+        LedgerOperation::DepositKeyRotate {
+            deposit_id,
+            new_descriptor,
+            witness,
+        } => op_val::validate_deposit_key_rotate(&ledger, deposit_id, new_descriptor, witness)
+            .is_ok(),
+        LedgerOperation::InvoiceCredit {
+            payment_hash,
+            deposit_id,
+            amount,
+            invoice_id,
+            ..
+        } => op_val::validate_credit_payment_by_id(
+            &ledger,
+            deposit_id,
+            *amount,
+            payment_hash,
+            invoice_id,
+        )
+        .is_ok(),
+        LedgerOperation::InvoiceLock {
+            deposit_id,
+            amount,
+            payment_id,
+            witness,
+            ..
+        } => op_val::validate_payment_lock_by_id(&ledger, deposit_id, *amount, payment_id, witness)
+            .is_ok(),
+        LedgerOperation::InvoiceFulfill {
+            deposit_id,
+            amount,
+            payment_id,
+            witness,
+            preimage,
+            ..
+        } => op_val::validate_payment_fulfill_by_id(
+            deposit_id, *amount, payment_id, witness, preimage,
+        )
+        .is_ok(),
+        LedgerOperation::InvoiceFail { amount, .. } => {
+            op_val::validate_payment_fail(*amount).is_ok()
+        }
+        LedgerOperation::OnchainCredit {
+            deposit_id, amount, ..
+        } => ledger.state.deposits.contains_key(deposit_id) && *amount > 0,
+        LedgerOperation::OnchainLock {
+            deposit_id, amount, ..
+        } => ledger
+            .state
+            .deposits
+            .get(deposit_id)
+            .map(|d| d.available_balance() >= *amount)
+            .unwrap_or(false),
+        LedgerOperation::OnchainFail { .. } | LedgerOperation::OnchainFulfill { .. } => true,
+        LedgerOperation::FeeCollect {
+            deposit_id,
+            amount,
+            block_height,
+        } => {
+            op_val::validate_fee_collect_by_id(&ledger, deposit_id, *amount, *block_height).is_ok()
+        }
+        LedgerOperation::LedgerClose => op_val::validate_ledger_close(&ledger).is_ok(),
+        // The remaining ops are either governance/dispute (cosigners defer to
+        // state-machine gates + conformance) or validated during apply.
+        _ => true,
+    }
 }
 
 impl ProtocolSim {
