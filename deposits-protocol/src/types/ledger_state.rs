@@ -360,7 +360,13 @@ impl LedgerState {
                     .deposits
                     .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
-                deposit.lock(*amount)?;
+                // Lock both the amount (leaves to destination) and the fee
+                // (leaves to miners) — both actually leave the deposit when
+                // the withdrawal confirms. Mirrors TransferLock, which locks
+                // amount + fee. Saturating_add guards against astronomical
+                // inputs from simulator paths.
+                let total = amount.saturating_add(*fee_sats);
+                deposit.lock(total)?;
                 next.pending_withdrawals.insert(
                     *withdrawal_id,
                     PendingWithdrawal {
@@ -379,13 +385,16 @@ impl LedgerState {
                 next.deposits
                     .get(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
-                // Release the lock using the amount recorded at OnchainLock.
+                // Release the full lock (amount + fee_sats) recorded at
+                // OnchainLock. The withdrawal didn't happen, so both the
+                // amount and the reserved fee stay with the deposit.
                 // If the withdrawal_id isn't tracked (e.g. replay on a state
                 // that never saw the lock), silently ignore — mirrors the
                 // TransferFail pattern of `if let Some(pending) = ...`.
                 if let Some(pending) = next.pending_withdrawals.remove(withdrawal_id) {
                     if let Some(deposit) = next.deposits.get_mut(&pending.deposit_id) {
-                        deposit.unlock(pending.amount);
+                        let total = pending.amount.saturating_add(pending.fee_sats);
+                        deposit.unlock(total);
                     }
                 }
             }
@@ -398,12 +407,15 @@ impl LedgerState {
                 next.deposits
                     .get(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
-                // Fulfill using the amount recorded at OnchainLock. Using the
-                // stored amount (rather than the op's amount field) is safer
-                // against mismatch and matches the TransferComplete pattern.
+                // Fulfill using the total (amount + fee) recorded at
+                // OnchainLock. Unlike TransferComplete where the fee is
+                // operator income that stays on the ledger, an on-chain
+                // fee goes to miners — so both amount and fee_sats actually
+                // leave the deposit's obligation.
                 if let Some(pending) = next.pending_withdrawals.remove(withdrawal_id) {
                     if let Some(deposit) = next.deposits.get_mut(&pending.deposit_id) {
-                        deposit.fulfill(pending.amount);
+                        let total = pending.amount.saturating_add(pending.fee_sats);
+                        deposit.fulfill(total);
                     }
                 }
             }

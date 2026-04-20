@@ -62,12 +62,14 @@ fn onchain_credit_lock_fulfill() {
         .unwrap();
 
     let deposit = net.op("alice").ledger.state.deposits.get(&did).unwrap();
-    // OnchainLock moves funds to locked_balance (balance stays at 200k, locked=100k)
-    // Fee is also locked, so available = 200k - 100k - 1k = 99k... but
-    // actually OnchainLock only locks `amount`, not amount+fee_sats
-    // Let's check actual state
+    // OnchainLock locks amount + fee_sats (both leave when the withdrawal
+    // confirms: amount to destination, fee to miners). Balance is unchanged
+    // until fulfill; locked = 100k + 1k = 101k.
     assert_eq!(deposit.balance, 200_000, "balance unchanged by lock");
-    assert_eq!(deposit.locked_balance, 100_000, "locked = amount");
+    assert_eq!(
+        deposit.locked_balance, 101_000,
+        "locked = amount + fee_sats"
+    );
 
     // OnchainFulfill
     net.op_mut("alice")
@@ -82,6 +84,9 @@ fn onchain_credit_lock_fulfill() {
         .unwrap();
 
     let deposit = net.op("alice").ledger.state.deposits.get(&did).unwrap();
+    // Fulfill decrements balance and locked by the full total (amount + fee).
+    // Both actually left the ledger: amount to destination, fee to miners.
+    assert_eq!(deposit.balance, 99_000, "balance -= amount + fee_sats");
     assert_eq!(deposit.locked_balance, 0);
 }
 
@@ -132,7 +137,10 @@ fn onchain_fail_returns_funds() {
     // Confirm the lock recorded by OnchainLock.
     let deposit = net.op("alice").ledger.state.deposits.get(&did).unwrap();
     assert_eq!(deposit.balance, 200_000, "balance unchanged by lock");
-    assert_eq!(deposit.locked_balance, 100_000, "locked = amount");
+    assert_eq!(
+        deposit.locked_balance, 101_000,
+        "locked = amount + fee_sats"
+    );
 
     // Fail (onchain withdrawal didn't confirm)
     net.op_mut("alice")
