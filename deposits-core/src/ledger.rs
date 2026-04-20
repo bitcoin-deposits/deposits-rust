@@ -766,9 +766,10 @@ impl Ledger {
         }
     }
 
-    /// Get total deposit liability (sum of all deposit balances).
+    /// Get total deposit liability (`balance + locked_balance` across deposits,
+    /// per DEP-05).
     pub fn total_deposit_liability(&self) -> u64 {
-        self.state.deposits.values().map(|d| d.balance).sum()
+        self.state.total_deposit_balance()
     }
 
     /// Check if a credit has been issued for a given payment hash.
@@ -1504,9 +1505,9 @@ impl LedgerValidator {
         ledger.history.len()
     }
 
-    /// Get the total balance across all deposits.
+    /// Get the total balance across all deposits (balance + locked, per DEP-05).
     pub fn total_balance(ledger: &Ledger) -> u64 {
-        ledger.state.deposits.values().map(|d| d.balance).sum()
+        ledger.state.total_deposit_balance()
     }
 
     /// Get total locked balance across all deposits.
@@ -2191,9 +2192,10 @@ mod tests {
 
         ledger.apply_operation(&lock_op).unwrap();
 
-        // Verify source balance decreased and locked increased
+        // Verify locked increased; balance is unchanged (it's the total
+        // obligation, and the lock just marks a portion in-flight).
         let source = ledger.state.deposits.get(&source_id).unwrap();
-        assert_eq!(source.balance, 100_000 - 30_000 - 500); // 69,500
+        assert_eq!(source.balance, 100_000);
         assert_eq!(source.locked_balance, 30_500); // amount + fee
 
         // Verify pending transfer was created
@@ -2217,10 +2219,11 @@ mod tests {
         // Verify pending transfer was removed
         assert!(ledger.state.pending_transfers.is_empty());
 
-        // Verify source locked balance is now 0
+        // After Complete: source.balance lost the `amount` that actually left;
+        // fee is operator income (not tracked as per-deposit obligation).
         let source = ledger.state.deposits.get(&source_id).unwrap();
         assert_eq!(source.locked_balance, 0);
-        assert_eq!(source.balance, 69_500); // unchanged from before
+        assert_eq!(source.balance, 100_000 - 30_000); // 70,000
 
         // Verify destination received the amount (not the fee)
         let dest = ledger.state.deposits.get(&dest_id).unwrap();
@@ -2278,9 +2281,9 @@ mod tests {
 
         ledger.apply_operation(&lock_op).unwrap();
 
-        // Verify funds locked
+        // Verify funds locked; balance unchanged (total obligation is the same).
         let source = ledger.state.deposits.get(&source_id).unwrap();
-        assert_eq!(source.balance, 100_000 - 25_250);
+        assert_eq!(source.balance, 100_000);
         assert_eq!(source.locked_balance, 25_250);
 
         // Timeout the transfer (deadline passed, preimage not revealed)

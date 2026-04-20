@@ -56,9 +56,9 @@ fn transfer_lock_and_complete() {
         .apply_operation(&lock_op)
         .unwrap();
 
-    // Check source: balance decreased, locked increased
+    // Check source: balance unchanged (it's the total obligation); locked goes up.
     let src = net.op("alice").ledger.state.deposits.get(&src_id).unwrap();
-    assert_eq!(src.balance, 100_000 - amount - fee);
+    assert_eq!(src.balance, 100_000);
     assert_eq!(src.locked_balance, amount + fee);
 
     // Check pending transfer exists
@@ -81,10 +81,11 @@ fn transfer_lock_and_complete() {
         .apply_operation(&complete_op)
         .unwrap();
 
-    // Source: locked balance released
+    // Source: locked balance released; balance dropped by the amount that
+    // actually left (fee stays with operator as income, not tracked as obligation).
     let src = net.op("alice").ledger.state.deposits.get(&src_id).unwrap();
     assert_eq!(src.locked_balance, 0);
-    assert_eq!(src.balance, 100_000 - amount - fee);
+    assert_eq!(src.balance, 100_000 - amount);
 
     // Destination: received the amount (not the fee)
     let dst = net.op("alice").ledger.state.deposits.get(&dst_id).unwrap();

@@ -271,9 +271,11 @@ fn transfer_lock_to_guarded_deposit_applies_state() {
         })
         .unwrap();
 
-    // Source balance should be reduced
+    // Source balance is unchanged (balance = total obligation); the lock
+    // moves a portion into locked_balance instead.
     let src = ledger.state.deposits.get(&source).unwrap();
-    assert_eq!(src.balance, 100_000 - amount - fee);
+    assert_eq!(src.balance, 100_000);
+    assert_eq!(src.locked_balance, amount + fee);
 
     // Destination should still have receive_requires_sig
     let dst = ledger.state.deposits.get(&dest).unwrap();

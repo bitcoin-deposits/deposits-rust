@@ -108,8 +108,9 @@ pub fn validate_credit_payment(
         ));
     }
 
-    // Check that credit doesn't exceed reserves backing
-    let current_deposits: u64 = ledger.state.deposits.values().map(|d| d.balance).sum();
+    // Check that credit doesn't exceed reserves backing. Per DEP-05, "total
+    // obligations" = balance + locked across all deposits.
+    let current_deposits = ledger.state.total_deposit_balance();
     let new_total_deposits = current_deposits.saturating_add(amount);
 
     if new_total_deposits > ledger.reserves_amount() {
@@ -485,9 +486,9 @@ pub fn validate_cosign_invoice(
         return Err("Invalid payment hash: appears to be fake".to_string());
     }
 
-    // CRITICAL: Check that cosigning this invoice wouldn't exceed reserves capacity
-    // Total deposits + this new invoice amount must not exceed reserves
-    let current_deposits: u64 = ledger.state.deposits.values().map(|d| d.balance).sum();
+    // CRITICAL: Check that cosigning this invoice wouldn't exceed reserves capacity.
+    // Per DEP-05, total obligations = balance + locked across all deposits.
+    let current_deposits = ledger.state.total_deposit_balance();
     let new_total_deposits = current_deposits.saturating_add(amount);
 
     if new_total_deposits > ledger.reserves_amount() {
@@ -524,8 +525,9 @@ pub fn validate_cosign_invoice(
 ///
 /// Note: The caller must separately verify that the reserves_id matches the expected value.
 pub fn validate_ledger_close(ledger: &Ledger) -> ValidationResult {
-    // Check for outstanding balances - deposits should be empty or zero-balance
-    let total_balance: u64 = ledger.state.deposits.values().map(|d| d.balance).sum();
+    // Check for outstanding balances — deposits should be empty or zero-balance,
+    // including any locked funds (in-flight transfers/invoices) per DEP-05.
+    let total_balance = ledger.state.total_deposit_balance();
     if total_balance > 0 {
         return Err(format!(
             "Cannot close ledger with outstanding deposit balance: {} msat",
@@ -960,8 +962,9 @@ pub fn validate_credit_payment_by_id(
         return Err("Credit amount must be greater than zero".to_string());
     }
 
-    // Check that credit wouldn't exceed reserves capacity
-    let current_deposits: u64 = ledger.state.deposits.values().map(|d| d.balance).sum();
+    // Check that credit wouldn't exceed reserves capacity (obligations =
+    // balance + locked across all deposits per DEP-05).
+    let current_deposits = ledger.state.total_deposit_balance();
     let new_total_deposits = current_deposits.saturating_add(amount);
 
     if new_total_deposits > ledger.reserves_amount() {

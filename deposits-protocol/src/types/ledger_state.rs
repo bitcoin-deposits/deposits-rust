@@ -490,7 +490,9 @@ impl LedgerState {
                         required: total,
                     });
                 }
-                deposit.balance = deposit.balance.saturating_sub(total);
+                // `balance` is the total obligation for this deposit (includes
+                // any locked portion). TransferLock just marks more of that
+                // balance as locked — it does NOT reduce the obligation.
                 deposit.locked_balance = deposit.locked_balance.saturating_add(total);
                 next.pending_transfers.insert(
                     *transfer_id,
@@ -510,7 +512,11 @@ impl LedgerState {
                 if let Some(pending) = next.pending_transfers.remove(transfer_id) {
                     let total = pending.total_locked();
                     if let Some(source) = next.deposits.get_mut(&pending.source_deposit_id) {
+                        // Lock released; amount actually left the source.
+                        // Fee is operator income (not tracked as per-deposit
+                        // obligation), so only `amount` comes off source.balance.
                         source.locked_balance = source.locked_balance.saturating_sub(total);
+                        source.balance = source.balance.saturating_sub(pending.amount);
                     }
                     if let Some(dest) = next.deposits.get_mut(&pending.destination_deposit_id) {
                         dest.balance = dest.balance.saturating_add(pending.amount);
@@ -521,8 +527,9 @@ impl LedgerState {
                 if let Some(pending) = next.pending_transfers.remove(transfer_id) {
                     let total = pending.total_locked();
                     if let Some(source) = next.deposits.get_mut(&pending.source_deposit_id) {
+                        // Lock released; `balance` was never decremented, so
+                        // there's nothing to restore — obligation is unchanged.
                         source.locked_balance = source.locked_balance.saturating_sub(total);
-                        source.balance = source.balance.saturating_add(total);
                     }
                 }
             }
@@ -734,8 +741,15 @@ impl LedgerState {
     }
 
     /// Get total balance across all deposits (millisatoshis).
+    ///
+    /// This is the operator's total obligation. Per the design, `balance`
+    /// already represents the total claim for each deposit (including any
+    /// portion currently locked for in-flight ops). Per-deposit spendable
+    /// funds are computed by `available_balance()` = `balance - locked_balance`.
     pub fn total_deposit_balance(&self) -> u64 {
-        self.deposits.values().map(|d| d.balance).sum()
+        self.deposits
+            .values()
+            .fold(0u64, |acc, d| acc.saturating_add(d.balance))
     }
 
     /// Get the declared collateral amount for this ledger (msats).
