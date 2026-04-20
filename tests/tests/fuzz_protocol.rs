@@ -443,6 +443,41 @@ enum DisputeStepResult {
     NotAQuorumMember,
 }
 
+/// Human-readable name for a LedgerOperation variant — used by histogram tests.
+fn op_name(op: &LedgerOperation) -> &'static str {
+    match op {
+        LedgerOperation::LedgerOpen { .. } => "LedgerOpen",
+        LedgerOperation::DepositOpen { .. } => "DepositOpen",
+        LedgerOperation::DepositClose { .. } => "DepositClose",
+        LedgerOperation::FeeChange { .. } => "FeeChange",
+        LedgerOperation::DepositKeyRotate { .. } => "DepositKeyRotate",
+        LedgerOperation::InvoiceCredit { .. } => "InvoiceCredit",
+        LedgerOperation::InvoiceLock { .. } => "InvoiceLock",
+        LedgerOperation::InvoiceFulfill { .. } => "InvoiceFulfill",
+        LedgerOperation::InvoiceFail { .. } => "InvoiceFail",
+        LedgerOperation::OnchainCredit { .. } => "OnchainCredit",
+        LedgerOperation::OnchainLock { .. } => "OnchainLock",
+        LedgerOperation::OnchainFulfill { .. } => "OnchainFulfill",
+        LedgerOperation::OnchainFail { .. } => "OnchainFail",
+        LedgerOperation::TransferLock { .. } => "TransferLock",
+        LedgerOperation::TransferComplete { .. } => "TransferComplete",
+        LedgerOperation::TransferFail { .. } => "TransferFail",
+        LedgerOperation::FeeCollect { .. } => "FeeCollect",
+        LedgerOperation::CollateralAttestation { .. } => "CollateralAttestation",
+        LedgerOperation::CollateralLock { .. } => "CollateralLock",
+        LedgerOperation::QuorumAddMember { .. } => "QuorumAddMember",
+        LedgerOperation::QuorumRemoveMember { .. } => "QuorumRemoveMember",
+        LedgerOperation::QuorumBegin { .. } => "QuorumBegin",
+        LedgerOperation::QuorumJoin { .. } => "QuorumJoin",
+        LedgerOperation::DisputeEnter { .. } => "DisputeEnter",
+        LedgerOperation::DisputeArmed { .. } => "DisputeArmed",
+        LedgerOperation::DisputeAcquire { .. } => "DisputeAcquire",
+        LedgerOperation::DisputeYield => "DisputeYield",
+        LedgerOperation::DeliveryEmbed { .. } => "DeliveryEmbed",
+        LedgerOperation::LedgerClose => "LedgerClose",
+    }
+}
+
 /// Apply an op to a replica, checking the DisputeState gate first. Mirrors
 /// what `Ledger::apply_operation` does but operates on a pure LedgerState.
 fn apply_with_dispute_gate(state: &LedgerState, op: &LedgerOperation) -> Result<LedgerState, ()> {
@@ -1158,18 +1193,26 @@ impl ProtocolSim {
     /// Run one fuzzing step: pick a random operator, generate an op, propose it.
     /// Returns the outcome for inspection. Noop if no op can be generated.
     fn step(&mut self, rng: &mut Rng) -> Option<Outcome> {
+        self.step_detailed(rng).map(|(o, _, _)| o)
+    }
+
+    /// Same as `step` but also returns the operation type name and whether
+    /// the proposer was an adversary. Useful for histogram analysis.
+    fn step_detailed(&mut self, rng: &mut Rng) -> Option<(Outcome, &'static str, bool)> {
         // Advance the sim clock. Some operations (FeeCollect rate limit,
         // FeeChange notice period) depend on block height progressing.
         self.block_height = self.block_height.saturating_add(rng.range(30) as u32 + 1);
 
         let n = self.operators.len();
         let proposer = rng.range(n as u64) as usize;
-        let gen = if self.adversary.contains(&proposer) {
+        let is_adv = self.adversary.contains(&proposer);
+        let gen = if is_adv {
             gen_adversary_op(self, proposer, rng)
         } else {
             gen_honest_op(self, proposer, rng)
         }?;
 
+        let name = op_name(&gen.op);
         let outcome = self.propose(proposer, gen.op);
         if outcome == Outcome::Applied {
             if let Some((did, desc, seed, dsk)) = gen.record_deposit {
@@ -1182,7 +1225,7 @@ impl ProtocolSim {
                     .insert(tid, preimage);
             }
         }
-        Some(outcome)
+        Some((outcome, name, is_adv))
     }
 
     /// An invariant that must hold on every honest operator's ledger: total
@@ -1767,6 +1810,65 @@ fn explore_10node_q3_4adv_placements() {
             "{:32} adv-maj on ops {:?}: {}/100 profitable, {} sats stolen, {}/{} apply/reject",
             label, adv_maj_operators, profitable_seeds, total_stolen, total_applied, total_rejected
         );
+    }
+}
+
+/// What's actually accessible? Histogram of (operation type, proposer role,
+/// outcome) across a fuzz run. Shows which operation types get generated,
+/// who generated them, and whether honest cosigners let them through.
+#[test]
+#[ignore]
+fn explore_op_histogram() {
+    for (label, adv) in &[("5op-2adv", &[0usize, 1][..]), ("5op-3adv", &[0, 1, 2][..])] {
+        // Accumulate (op_name, proposer_kind, outcome) → count.
+        let mut hist: std::collections::BTreeMap<(&'static str, &'static str, &'static str), u64> =
+            std::collections::BTreeMap::new();
+
+        for seed in 0..100u64 {
+            let mut sim = ProtocolSim::new(5, adv);
+            let mut rng = Rng::new(seed * 104729 + 17);
+            for _ in 0..500 {
+                if let Some((outcome, name, is_adv)) = sim.step_detailed(&mut rng) {
+                    let role = if is_adv { "adv" } else { "honest" };
+                    let bucket = match outcome {
+                        Outcome::Applied => "cosigned",
+                        Outcome::RejectedCosign => "cosign_reject",
+                        Outcome::RejectedLocal => "local_reject",
+                    };
+                    *hist.entry((name, role, bucket)).or_insert(0) += 1;
+                }
+            }
+        }
+
+        eprintln!(
+            "\n=== {} — op histogram (proposer role × outcome) ===",
+            label
+        );
+        eprintln!(
+            "{:<22} {:>8} {:>8} {:>8} | {:>8} {:>8} {:>8}",
+            "op_type", "H:cosig", "H:cos✗", "H:loc✗", "A:cosig", "A:cos✗", "A:loc✗"
+        );
+        // Roll up by op_name.
+        let mut by_op: std::collections::BTreeMap<&'static str, [u64; 6]> =
+            std::collections::BTreeMap::new();
+        for (&(name, role, bucket), &count) in &hist {
+            let slot = match (role, bucket) {
+                ("honest", "cosigned") => 0,
+                ("honest", "cosign_reject") => 1,
+                ("honest", "local_reject") => 2,
+                ("adv", "cosigned") => 3,
+                ("adv", "cosign_reject") => 4,
+                ("adv", "local_reject") => 5,
+                _ => continue,
+            };
+            by_op.entry(name).or_insert([0; 6])[slot] += count;
+        }
+        for (name, counts) in &by_op {
+            eprintln!(
+                "{:<22} {:>8} {:>8} {:>8} | {:>8} {:>8} {:>8}",
+                name, counts[0], counts[1], counts[2], counts[3], counts[4], counts[5]
+            );
+        }
     }
 }
 
