@@ -87,6 +87,7 @@ struct ProtocolSim {
     operators: Vec<SimOperator>,
     honest: HashSet<usize>,
     adversary: HashSet<usize>,
+    block_height: u32,
 }
 
 /// Outcome of a proposal.
@@ -200,6 +201,7 @@ impl ProtocolSim {
             operators,
             honest,
             adversary,
+            block_height: 100_000,
         }
     }
 
@@ -358,6 +360,202 @@ impl ProtocolSim {
             .push((deposit_id, descriptor, depositor_seed));
         self.operators[proposer].wallet_funds += amount;
         Some(deposit_id)
+    }
+}
+
+// =========================================================================
+// Dispute simulation
+// =========================================================================
+
+/// Records a single dispute branch (one disputer's fork of a victim's ledger).
+#[derive(Clone)]
+struct DisputeBranch {
+    /// Who is driving this branch (a quorum member of the victim).
+    disputer: usize,
+    /// Did this branch reach Armed state?
+    armed: bool,
+    /// Final outcome after entropy resolution (set by resolve_dispute).
+    outcome: DisputeOutcome,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DisputeOutcome {
+    Pending,
+    /// This branch won the entropy lottery and acquired custody.
+    Acquired,
+    /// This branch lost and yielded voluntarily.
+    Yielded,
+    /// This branch never armed — excluded from lottery.
+    NeverArmed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DisputeStepResult {
+    /// Op was invalid and correctly rejected by the state machine.
+    Rejected,
+    /// Op applied successfully to the disputer's fork.
+    Applied,
+    /// Disputer wasn't in the victim's quorum-at-fork — operation not allowed.
+    NotAQuorumMember,
+}
+
+/// Apply an op to a replica, checking the DisputeState gate first. Mirrors
+/// what `Ledger::apply_operation` does but operates on a pure LedgerState.
+fn apply_with_dispute_gate(state: &LedgerState, op: &LedgerOperation) -> Result<LedgerState, ()> {
+    if !state.dispute_state.allows_operation(op.discriminant()) {
+        return Err(());
+    }
+    state.apply(op).map_err(|_| ())
+}
+
+impl ProtocolSim {
+    /// A quorum member `disputer` initiates a dispute against `victim`. Forks
+    /// the disputer's replica of victim's ledger into the Disputed state.
+    ///
+    /// Returns Rejected if the state machine refused (wrong state, unknown
+    /// replica), NotAQuorumMember if the disputer isn't in victim's quorum.
+    fn dispute_enter(
+        &mut self,
+        victim: usize,
+        disputer: usize,
+        last_valid: u64,
+    ) -> DisputeStepResult {
+        if !self.operators[victim].quorum_members.contains(&disputer) {
+            return DisputeStepResult::NotAQuorumMember;
+        }
+        let op = LedgerOperation::DisputeEnter {
+            last_valid_sequence: last_valid,
+            reason: format!("op_{}_vs_op_{}", disputer, victim),
+        };
+        let replica = match self.operators[disputer].replicas.get(&victim) {
+            Some(r) => r.clone(),
+            None => return DisputeStepResult::Rejected,
+        };
+        match apply_with_dispute_gate(&replica, &op) {
+            Ok(new_state) => {
+                self.operators[disputer].replicas.insert(victim, new_state);
+                DisputeStepResult::Applied
+            }
+            Err(_) => DisputeStepResult::Rejected,
+        }
+    }
+
+    /// Disputer arms their fork of the victim's ledger for the lottery.
+    fn dispute_arm(&mut self, victim: usize, disputer: usize) -> DisputeStepResult {
+        let op = LedgerOperation::DisputeArmed {
+            armed_block: self.block_height,
+            // HASH160 of the disputer's idx as the preimage commitment.
+            commitment_hash: {
+                let mut h = [0u8; 20];
+                h[0] = disputer as u8;
+                h[1] = victim as u8;
+                h
+            },
+            target_reserves: format!("bcrt1q_op{}_recovers_{}", disputer, victim),
+        };
+        let replica = match self.operators[disputer].replicas.get(&victim) {
+            Some(r) => r.clone(),
+            None => return DisputeStepResult::Rejected,
+        };
+        match apply_with_dispute_gate(&replica, &op) {
+            Ok(new_state) => {
+                self.operators[disputer].replicas.insert(victim, new_state);
+                DisputeStepResult::Applied
+            }
+            Err(_) => DisputeStepResult::Rejected,
+        }
+    }
+
+    /// Resolve a dispute: pick the entropy winner from armed candidates, apply
+    /// DisputeAcquire on the winner's fork, DisputeYield on the losers' forks.
+    ///
+    /// Returns (winner_idx, branches).
+    fn dispute_resolve(
+        &mut self,
+        victim: usize,
+        candidates: &[usize],
+        entropy_block_hash: [u8; 32],
+    ) -> (Option<usize>, Vec<DisputeBranch>) {
+        let mut branches: Vec<DisputeBranch> = candidates
+            .iter()
+            .map(|&d| {
+                let armed = self.operators[d]
+                    .replicas
+                    .get(&victim)
+                    .map(|s| s.dispute_state == DisputeState::Armed)
+                    .unwrap_or(false);
+                DisputeBranch {
+                    disputer: d,
+                    armed,
+                    outcome: if armed {
+                        DisputeOutcome::Pending
+                    } else {
+                        DisputeOutcome::NeverArmed
+                    },
+                }
+            })
+            .collect();
+
+        let armed_pks: Vec<PublicKey> = branches
+            .iter()
+            .filter(|b| b.armed)
+            .map(|b| self.operators[b.disputer].public_key)
+            .collect();
+
+        let winner_pk = select_entropy_winner(&entropy_block_hash, &armed_pks);
+        let winner_idx = winner_pk.and_then(|pk| {
+            branches
+                .iter()
+                .find(|b| b.armed && self.operators[b.disputer].public_key == pk)
+                .map(|b| b.disputer)
+        });
+
+        let entropy_height = self.block_height + 6;
+        self.block_height = entropy_height;
+
+        for branch in branches.iter_mut() {
+            if !branch.armed {
+                continue;
+            }
+            if Some(branch.disputer) == winner_idx {
+                let acquire_op = LedgerOperation::DisputeAcquire {
+                    new_custodian: self.operators[branch.disputer].public_key,
+                    entropy_block_height: entropy_height,
+                    entropy_block_hash,
+                    spend_txid: {
+                        let mut t = [0u8; 32];
+                        t[0] = branch.disputer as u8;
+                        t[1] = 0xAC;
+                        t
+                    },
+                    new_reserves_address: format!("bcrt1q_new_{}", branch.disputer),
+                };
+                let replica = self.operators[branch.disputer].replicas[&victim].clone();
+                match apply_with_dispute_gate(&replica, &acquire_op) {
+                    Ok(new) => {
+                        self.operators[branch.disputer].replicas.insert(victim, new);
+                        branch.outcome = DisputeOutcome::Acquired;
+                    }
+                    Err(_) => {
+                        branch.outcome = DisputeOutcome::Pending;
+                    }
+                }
+            } else {
+                let yield_op = LedgerOperation::DisputeYield;
+                let replica = self.operators[branch.disputer].replicas[&victim].clone();
+                match apply_with_dispute_gate(&replica, &yield_op) {
+                    Ok(new) => {
+                        self.operators[branch.disputer].replicas.insert(victim, new);
+                        branch.outcome = DisputeOutcome::Yielded;
+                    }
+                    Err(_) => {
+                        branch.outcome = DisputeOutcome::Pending;
+                    }
+                }
+            }
+        }
+
+        (winner_idx, branches)
     }
 }
 
@@ -865,6 +1063,213 @@ fn fuzz_protocol_5node_q3_3adv_profit_is_reachable() {
         "3-adversary run: {} profitable seeds out of 100, total stolen = {} sats",
         profitable_seeds, any_profit
     );
+}
+
+// =========================================================================
+// Dispute flow tests
+// =========================================================================
+
+#[test]
+fn dispute_enter_by_non_quorum_member_rejected() {
+    let mut sim = ProtocolSim::new(5, &[0]);
+    // Op 0's quorum = [1, 2, 3]. Op 4 is NOT a member.
+    let result = sim.dispute_enter(0, 4, 1);
+    assert_eq!(result, DisputeStepResult::NotAQuorumMember);
+}
+
+#[test]
+fn dispute_full_flow_produces_single_winner() {
+    // Adversary op 0 sits behind quorum [1, 2, 3]. Honest members 2 and 3
+    // both initiate dispute and arm. Adversary member 1 also arms (competing).
+    // Verify entropy selection picks exactly one winner.
+    let mut sim = ProtocolSim::new(5, &[0, 1]);
+
+    // Phase 1: adversary op 0 opens a deposit (a conforming op, just to
+    // give the ledger some history).
+    let (_sk, dpk) = keypair(9001);
+    let descriptor = format!("pk({})", hex::encode(dpk.serialize()));
+    let deposit_id = compute_deposit_id(&descriptor);
+    let open = LedgerOperation::DepositOpen {
+        deposit_id,
+        descriptor,
+        fees: Some(FeeStructure::default()),
+        transfer_fees: None,
+        payment_hash: None,
+        invoice: None,
+        cosigner_guarantee_signature: None,
+        receive_requires_sig: false,
+        fee_change_after_blocks: None,
+        fee_change_notice_blocks: None,
+        fee_change_limit_bps: None,
+    };
+    assert_eq!(sim.propose(0, open), Outcome::Applied);
+
+    // Phase 2: members 1, 2, 3 each initiate their own dispute branch.
+    let last_valid = sim.operators[0].ledger.state.sequence;
+    for disputer in [1usize, 2, 3] {
+        assert_eq!(
+            sim.dispute_enter(0, disputer, last_valid),
+            DisputeStepResult::Applied,
+            "disputer {} should successfully enter dispute",
+            disputer
+        );
+    }
+
+    // Phase 3: each branch arms.
+    for disputer in [1usize, 2, 3] {
+        assert_eq!(
+            sim.dispute_arm(0, disputer),
+            DisputeStepResult::Applied,
+            "disputer {} should successfully arm",
+            disputer
+        );
+    }
+
+    // Phase 4: resolve with a fixed entropy block hash.
+    let entropy_hash = [0x5Au8; 32];
+    let (winner, branches) = sim.dispute_resolve(0, &[1, 2, 3], entropy_hash);
+
+    assert!(
+        winner.is_some(),
+        "should have a winner with 3 armed candidates"
+    );
+    let winner_idx = winner.unwrap();
+    assert!([1, 2, 3].contains(&winner_idx));
+
+    let acquired: Vec<_> = branches
+        .iter()
+        .filter(|b| b.outcome == DisputeOutcome::Acquired)
+        .collect();
+    let yielded: Vec<_> = branches
+        .iter()
+        .filter(|b| b.outcome == DisputeOutcome::Yielded)
+        .collect();
+    assert_eq!(acquired.len(), 1, "exactly one branch should acquire");
+    assert_eq!(yielded.len(), 2, "exactly two branches should yield");
+    assert_eq!(acquired[0].disputer, winner_idx);
+}
+
+#[test]
+fn dispute_unarmed_candidate_is_never_winner() {
+    let mut sim = ProtocolSim::new(5, &[0]);
+    let last_valid = sim.operators[0].ledger.state.sequence;
+
+    // Only members 1 and 2 arm; member 3 enters but doesn't arm.
+    sim.dispute_enter(0, 1, last_valid);
+    sim.dispute_enter(0, 2, last_valid);
+    sim.dispute_enter(0, 3, last_valid);
+    sim.dispute_arm(0, 1);
+    sim.dispute_arm(0, 2);
+    // Deliberately skip arming member 3.
+
+    let (winner, branches) = sim.dispute_resolve(0, &[1, 2, 3], [0x42; 32]);
+    let three_branch = branches.iter().find(|b| b.disputer == 3).unwrap();
+    assert_eq!(three_branch.outcome, DisputeOutcome::NeverArmed);
+    assert!(winner == Some(1) || winner == Some(2));
+}
+
+#[test]
+fn dispute_resolution_is_deterministic_for_same_entropy() {
+    // Same config, same entropy, same winner — no matter when we run it.
+    let mut sim_a = ProtocolSim::new(5, &[0]);
+    let mut sim_b = ProtocolSim::new(5, &[0]);
+    let entropy = [0xEEu8; 32];
+
+    for sim in [&mut sim_a, &mut sim_b] {
+        let lv = sim.operators[0].ledger.state.sequence;
+        for d in [1, 2, 3] {
+            sim.dispute_enter(0, d, lv);
+            sim.dispute_arm(0, d);
+        }
+    }
+
+    let (winner_a, _) = sim_a.dispute_resolve(0, &[1, 2, 3], entropy);
+    let (winner_b, _) = sim_b.dispute_resolve(0, &[1, 2, 3], entropy);
+    assert_eq!(winner_a, winner_b);
+}
+
+#[test]
+fn dispute_enter_is_rejected_in_disputed_state() {
+    // After DisputeEnter lands, further DisputeEnters on the same fork should
+    // be rejected by the state machine (state is now Disputed, not Normal).
+    let mut sim = ProtocolSim::new(5, &[0]);
+    let lv = sim.operators[0].ledger.state.sequence;
+    assert_eq!(sim.dispute_enter(0, 1, lv), DisputeStepResult::Applied);
+    // Second attempt on the SAME disputer's fork should fail.
+    assert_eq!(sim.dispute_enter(0, 1, lv), DisputeStepResult::Rejected);
+}
+
+/// Exploration: 10 nodes, 4 adversary, Q=3. With round-robin Q=[i+1,i+2,i+3],
+/// adversary placement matters — clustered adversaries compromise multiple
+/// ledgers, spread adversaries compromise none. Dumps stats, doesn't assert.
+#[test]
+#[ignore]
+fn explore_10node_q3_4adv_placements() {
+    let placements: &[(&str, &[usize])] = &[
+        ("clustered {0,1,2,3}", &[0, 1, 2, 3]),
+        ("spread {0,3,5,7}", &[0, 3, 5, 7]),
+        ("pairs {0,1,5,6}", &[0, 1, 5, 6]),
+        ("adjacent+one {0,1,2,5}", &[0, 1, 2, 5]),
+        ("every-other {0,2,4,6}", &[0, 2, 4, 6]),
+    ];
+
+    for (label, adv) in placements {
+        // Count how many operators have adversary-majority quorums.
+        let mut adv_maj_operators = Vec::new();
+        for i in 0..10 {
+            let members: Vec<usize> = (1..=3).map(|j| (i + j) % 10).collect();
+            let adv_count = members.iter().filter(|m| adv.contains(m)).count();
+            if adv_count >= 2 {
+                adv_maj_operators.push(i);
+            }
+        }
+
+        let mut profitable_seeds = 0u32;
+        let mut total_stolen = 0i64;
+        let mut total_applied = 0u64;
+        let mut total_rejected = 0u64;
+
+        for seed in 0..100u64 {
+            let mut sim = ProtocolSim::new(10, adv);
+            let mut rng = Rng::new(seed * 104729 + 17);
+
+            for _ in 0..500 {
+                match sim.step(&mut rng) {
+                    Some(Outcome::Applied) => total_applied += 1,
+                    Some(Outcome::RejectedCosign) => total_rejected += 1,
+                    _ => {}
+                }
+            }
+
+            // Honest invariants must still hold.
+            for (i, op) in sim.operators.iter().enumerate() {
+                if !sim.honest.contains(&i) {
+                    continue;
+                }
+                let total: u64 = op.ledger.state.deposits.values().map(|d| d.balance).sum();
+                assert!(
+                    total <= op.ledger.state.reserves_amount,
+                    "{} seed {} honest op {} over-reserved: {} > {}",
+                    label,
+                    seed,
+                    i,
+                    total,
+                    op.ledger.state.reserves_amount
+                );
+            }
+
+            let profit = sim.evaluate_profit();
+            if profit.net > 0 {
+                profitable_seeds += 1;
+                total_stolen += profit.net;
+            }
+        }
+
+        eprintln!(
+            "{:32} adv-maj on ops {:?}: {}/100 profitable, {} sats stolen, {}/{} apply/reject",
+            label, adv_maj_operators, profitable_seeds, total_stolen, total_applied, total_rejected
+        );
+    }
 }
 
 /// Same config with a heavier load — 1000 runs × 1000 ops = 1M ops. Release-
