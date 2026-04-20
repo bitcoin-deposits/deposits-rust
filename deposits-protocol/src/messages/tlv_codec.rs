@@ -90,7 +90,7 @@ mod ledger_op_tlv {
     pub const FEE_CHANGE_NOTICE: u64 = 246; // u32 (notice blocks)
     pub const FEE_CHANGE_LIMIT_BPS: u64 = 248; // u16 (default 1000 = 10%)
     pub const EFFECTIVE_BLOCK: u64 = 250; // u32 (on FeeChange)
-    // 240 was COLLATERAL_LOCK_AMOUNT (removed with collateral-in-UTXO migration)
+                                          // 240 was COLLATERAL_LOCK_AMOUNT (removed with collateral-in-UTXO migration)
     pub const MEMBERSHIP_UNTIL: u64 = 242; // u32 (block height) — on QuorumAddMember
 
     // Per-quorum timing parameters (on QuorumAddMember)

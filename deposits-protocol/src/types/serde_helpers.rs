@@ -320,4 +320,3 @@ pub mod serde_transfer_id_map {
         Ok(entries.into_iter().map(|e| (e.key, e.value)).collect())
     }
 }
-

@@ -960,6 +960,47 @@ fn gen_deposit_open(
     (op, deposit_id, descriptor, seed, dsk)
 }
 
+/// Build an honest FeeChange: tweak annualized_bps by up to the allowed
+/// `fee_change_limit_bps` delta, with effective_block respecting the notice
+/// period. Returns None if no deposit qualifies (e.g. not enough blocks since
+/// open yet).
+fn gen_honest_fee_change(
+    op: &SimOperator,
+    rng: &mut Rng,
+    block_height: u32,
+) -> Option<GeneratedOp> {
+    let (did, _, _) = pick_deposit(op, rng)?;
+    let deposit = op.ledger.state.deposits.get(&did)?;
+    let after = deposit.fee_change_after_blocks?;
+    let notice = deposit.fee_change_notice_blocks?;
+    let limit_bps = deposit.fee_change_limit_bps?;
+    // Need at least `after` blocks since open.
+    if block_height < deposit.opened_at_block.saturating_add(after) {
+        return None;
+    }
+    let current = deposit.fees.annualized_bps as u64;
+    // Max change = current * limit_bps / 10000 (per validator).
+    let max_delta = (current.saturating_mul(limit_bps as u64)) / 10000;
+    let delta = rng.range(max_delta.saturating_add(1));
+    let new_bps = (current + delta).min(10_000) as u16; // cap at MAX_FEE_RATE_BPS
+    let new_fees = FeeStructure::new(
+        deposit.fees.annualized_msats,
+        new_bps,
+        deposit.fees.frequency_blocks,
+    );
+    let effective_block = block_height.saturating_add(notice).saturating_add(1);
+    Some(GeneratedOp {
+        op: LedgerOperation::FeeChange {
+            deposit_id: did,
+            new_fees,
+            effective_block,
+        },
+        record_deposit: None,
+        record_pending: None,
+        record_invoice: None,
+    })
+}
+
 /// Build an honest FeeCollect: pick a deposit whose fee schedule allows a
 /// collection at the current block, with an amount within available balance.
 fn gen_honest_fee_collect(
@@ -1019,7 +1060,7 @@ fn gen_adversary_fee_collect(
 /// - FeeCollect when the fee schedule permits
 fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<GeneratedOp> {
     let op = &sim.operators[proposer];
-    let total_balance: u64 = op.ledger.state.deposits.values().map(|d| d.balance).sum();
+    let total_balance = op.ledger.state.total_deposit_balance();
     let reserves = op.ledger.state.reserves_amount;
     let headroom = reserves.saturating_sub(total_balance);
     let has_pending = !op.ledger.state.pending_transfers.is_empty();
@@ -1035,6 +1076,69 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             });
         }
     }
+    // 5% each for the less-frequent lifecycle ops. Return None if the state
+    // doesn't support them and fall through to the main choice ladder.
+    let aux = rng.range(100);
+    if aux < 5 {
+        // DepositClose on an empty deposit (balance=0, no locks). Newly-opened
+        // deposits satisfy this naturally.
+        if let Some((did, _, _)) = op.deposits.iter().find_map(|(d, desc, s)| {
+            let dep = op.ledger.state.deposits.get(d)?;
+            if dep.balance == 0 && dep.locked_balance == 0 {
+                Some((*d, desc.clone(), *s))
+            } else {
+                None
+            }
+        }) {
+            return Some(GeneratedOp {
+                op: LedgerOperation::DepositClose { deposit_id: did },
+                record_deposit: None,
+                record_pending: None,
+                record_invoice: None,
+            });
+        }
+    } else if aux < 10 && has_pending {
+        // TransferFail: any pending transfer with reason=1 (timeout).
+        let pending_ids: Vec<[u8; 32]> =
+            op.ledger.state.pending_transfers.keys().copied().collect();
+        let tid = pending_ids[rng.range(pending_ids.len() as u64) as usize];
+        let mut block_hash = [0u8; 32];
+        block_hash[..4].copy_from_slice(&sim.block_height.to_le_bytes());
+        return Some(GeneratedOp {
+            op: LedgerOperation::TransferFail {
+                transfer_id: tid,
+                block_hash,
+                reason: 1,
+            },
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+        });
+    } else if aux < 15 && !op.deposits.is_empty() {
+        // FeeChange: bump bps by <= 10% of current, with ≥20-block notice.
+        if let Some(gen) = gen_honest_fee_change(op, rng, sim.block_height) {
+            return Some(gen);
+        }
+    } else if aux < 25 && headroom > 1000 && !op.deposits.is_empty() {
+        // OnchainCredit: operator claims an on-chain UTXO arrived.
+        let (did, _, _) = pick_deposit(op, rng)?;
+        let amount = 1000 + rng.range(headroom - 1000);
+        let mut txid = [0u8; 32];
+        txid[..8].copy_from_slice(&rng.next().to_le_bytes());
+        return Some(GeneratedOp {
+            op: LedgerOperation::OnchainCredit {
+                txid,
+                vout: rng.range(4) as u32,
+                deposit_id: did,
+                amount,
+                funding_address: format!("bcrt1q_funding_{}", proposer),
+            },
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+        });
+    }
+
     let choice = rng.range(100);
     if choice < 25 || op.deposits.is_empty() {
         let (o, did, desc, seed, dsk) = gen_deposit_open(proposer, op.deposits.len(), rng);
@@ -1215,6 +1319,88 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
 /// blatantly over-reserve or with bad witnesses. Honest co-signers filter.
 fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<GeneratedOp> {
     let op = &sim.operators[proposer];
+    // Occasional adversarial variants of the less-common ops. These should
+    // be rejected by validate_per_op_as_cosigner or by the state machine.
+    let aux = rng.range(100);
+    if aux < 3 && !op.deposits.is_empty() {
+        // DepositClose on a deposit with non-zero balance → rejected.
+        let (did, _, _) = pick_deposit(op, rng)?;
+        return Some(GeneratedOp {
+            op: LedgerOperation::DepositClose { deposit_id: did },
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+        });
+    } else if aux < 6 && !op.deposits.is_empty() {
+        // Adversarial DepositKeyRotate: rotate to attacker-controlled descriptor,
+        // signed with the attacker's operator key (not the depositor's).
+        use bitcoin::hashes::{sha256, Hash};
+        let (did, _, _) = pick_deposit(op, rng)?;
+        let new_descriptor = format!("pk({})", hex::encode(op.public_key.serialize()));
+        let msg = sha256::Hash::hash(new_descriptor.as_bytes()).to_byte_array();
+        let witness = sign_pk_witness(&op.secret_key, &msg);
+        return Some(GeneratedOp {
+            op: LedgerOperation::DepositKeyRotate {
+                deposit_id: did,
+                new_descriptor,
+                witness,
+            },
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+        });
+    } else if aux < 10 && !op.deposits.is_empty() {
+        // Adversarial FeeChange: huge rate jump violating fee_change_limit_bps
+        // and/or annualized_bps > MAX_FEE_RATE_BPS.
+        let (did, _, _) = pick_deposit(op, rng)?;
+        let deposit = op.ledger.state.deposits.get(&did)?;
+        let new_fees = FeeStructure::new(
+            deposit.fees.annualized_msats,
+            if rng.range(2) == 0 { 50_000 } else { 9_000 }, // both exceed limits
+            deposit.fees.frequency_blocks,
+        );
+        return Some(GeneratedOp {
+            op: LedgerOperation::FeeChange {
+                deposit_id: did,
+                new_fees,
+                effective_block: sim.block_height + 1, // too soon (notice=20)
+            },
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+        });
+    } else if aux < 13 && !op.ledger.state.pending_transfers.is_empty() {
+        // Adversarial TransferFail: reason=0 is reserved/invalid per the spec.
+        let pending_ids: Vec<[u8; 32]> =
+            op.ledger.state.pending_transfers.keys().copied().collect();
+        let tid = pending_ids[rng.range(pending_ids.len() as u64) as usize];
+        return Some(GeneratedOp {
+            op: LedgerOperation::TransferFail {
+                transfer_id: tid,
+                block_hash: [0xBA; 32],
+                reason: 0,
+            },
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+        });
+    } else if aux < 17 && !op.deposits.is_empty() {
+        // Adversarial OnchainCredit: amount=0 (rejected) or non-existent deposit.
+        let (did, _, _) = pick_deposit(op, rng)?;
+        let amount = if rng.range(2) == 0 { 0 } else { u64::MAX / 2 };
+        return Some(GeneratedOp {
+            op: LedgerOperation::OnchainCredit {
+                txid: [0xBA; 32],
+                vout: 0,
+                deposit_id: did,
+                amount,
+                funding_address: String::new(),
+            },
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+        });
+    }
     // Occasional bogus dispute inputs. Most will be rejected by the state-machine
     // dispute_state gate (e.g., DisputeArmed only valid in Disputed state) or
     // by conformance checks; a few may land but self-sabotage the adversary
@@ -1307,7 +1493,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
         let available = deposit.balance.saturating_sub(deposit.locked_balance);
         let source = op.deposits.iter().find(|(d, _, _)| *d == did).cloned()?;
         let amount = if rng.range(100) < 40 {
-            available + 10_000
+            available.saturating_add(10_000)
         } else {
             1 + rng.range(available.max(1))
         };
@@ -1491,7 +1677,7 @@ impl ProtocolSim {
             if !self.honest.contains(&i) {
                 continue;
             }
-            let total: u64 = op.ledger.state.deposits.values().map(|d| d.balance).sum();
+            let total = op.ledger.state.total_deposit_balance();
             if total > op.ledger.state.reserves_amount {
                 violations.push(format!(
                     "honest op {} over-reserved: total_deposits={} reserves={}",
@@ -1667,7 +1853,7 @@ impl ProtocolSim {
 
         for (i, op) in self.operators.iter().enumerate() {
             let st = &op.ledger.state;
-            let total: u64 = st.deposits.values().map(|d| d.balance).sum();
+            let total = st.total_deposit_balance();
 
             // Honest operator invariants. Note: locked_balance > balance is
             // NOT a violation — both fields independently track different
@@ -1688,7 +1874,7 @@ impl ProtocolSim {
                 // An honest operator's replica of ANY ledger must itself be
                 // conforming — we only co-sign conforming updates.
                 if self.honest.contains(&i) {
-                    let r_total: u64 = replica.deposits.values().map(|d| d.balance).sum();
+                    let r_total = replica.total_deposit_balance();
                     if r_total > replica.reserves_amount {
                         v.push(format!(
                             "honest op {} holds non-conforming replica of op {}: \
@@ -1720,7 +1906,7 @@ impl ProtocolSim {
 
         for (i, op) in self.operators.iter().enumerate() {
             let st = &op.ledger.state;
-            let total: u64 = st.deposits.values().map(|d| d.balance).sum();
+            let total = st.total_deposit_balance();
             let over = total.saturating_sub(st.reserves_amount);
             if over == 0 {
                 continue;
@@ -1829,7 +2015,7 @@ fn fuzz_protocol_5node_q3_3adv_profit_is_reachable() {
             if !sim.honest.contains(&i) {
                 continue;
             }
-            let total: u64 = op.ledger.state.deposits.values().map(|d| d.balance).sum();
+            let total = op.ledger.state.total_deposit_balance();
             assert!(
                 total <= op.ledger.state.reserves_amount,
                 "seed {} honest op {} over-reserved: {} > {}",
@@ -1843,7 +2029,7 @@ fn fuzz_protocol_5node_q3_3adv_profit_is_reachable() {
         let profit = sim.evaluate_profit();
         if profit.net > 0 {
             profitable_seeds += 1;
-            any_profit += profit.net;
+            any_profit = any_profit.saturating_add(profit.net);
         }
     }
 
@@ -2041,7 +2227,7 @@ fn explore_10node_q3_4adv_placements() {
                 if !sim.honest.contains(&i) {
                     continue;
                 }
-                let total: u64 = op.ledger.state.deposits.values().map(|d| d.balance).sum();
+                let total = op.ledger.state.total_deposit_balance();
                 assert!(
                     total <= op.ledger.state.reserves_amount,
                     "{} seed {} honest op {} over-reserved: {} > {}",

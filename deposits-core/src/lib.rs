@@ -220,10 +220,10 @@ pub use operation_validation::{
 };
 pub use signing::{
     create_deposit_guarantee_signature, create_deposit_offer_signature,
-    create_payment_authorization_signature, create_payment_signature,
-    create_withdrawal_signature, verify_deposit_guarantee_signature,
-    verify_deposit_offer_signature, verify_invoice_lock_witness, verify_payment_signature,
-    verify_transfer_complete_witness, verify_transfer_lock_witness, verify_withdrawal_witness,
+    create_payment_authorization_signature, create_payment_signature, create_withdrawal_signature,
+    verify_deposit_guarantee_signature, verify_deposit_offer_signature,
+    verify_invoice_lock_witness, verify_payment_signature, verify_transfer_complete_witness,
+    verify_transfer_lock_witness, verify_withdrawal_witness,
 };
 pub use tlv::{TlvBuilder, TlvDecode, TlvEncode, TlvError, TlvReader, TlvResult, TlvStream};
 pub use wire_messages::{

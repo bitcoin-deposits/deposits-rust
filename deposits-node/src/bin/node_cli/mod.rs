@@ -910,4 +910,3 @@ pub async fn collateral_command(args: &[String]) -> Result<(), Box<dyn std::erro
     );
     Ok(())
 }
-

@@ -255,9 +255,7 @@ impl Node {
                     tracing::warn!("Consent response missing valid consent_signature");
                 }
             }
-            return;
         }
-
     }
 
     /// Request a co-signature from a quorum member for an update.

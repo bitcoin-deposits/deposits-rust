@@ -684,8 +684,7 @@ fn invariant_s4_collateral_in_utxo() {
         blocked: collateral_preserved,
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
-        notes: "Collateral is a declared portion of the UTXO, enforced by co-signers."
-            .into(),
+        notes: "Collateral is a declared portion of the UTXO, enforced by co-signers.".into(),
         steps: vec![],
     });
 

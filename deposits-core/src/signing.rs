@@ -752,5 +752,4 @@ mod tests {
         let valid = verify_withdrawal_witness(&withdrawal, &descriptor, 800_000).unwrap();
         assert!(!valid, "Signature should be invalid for modified amount");
     }
-
 }
