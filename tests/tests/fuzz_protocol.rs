@@ -429,6 +429,97 @@ impl ProtocolSim {
         Outcome::Applied
     }
 
+    /// Cross-ledger attack: `attacker` (a quorum member of `victim`) proposes
+    /// a dispute operation on the victim's ledger. Goes through the same
+    /// cosign flow as `propose()`, but the ledger being modified is the
+    /// victim's, not the attacker's — and the signer identity is the attacker,
+    /// not the victim.
+    ///
+    /// If the attacker reaches cosign majority on the victim's quorum (e.g.
+    /// because other adversaries are cosigners), the dispute op applies to
+    /// the victim's real ledger state. Subsequent DisputeArmed + DisputeAcquire
+    /// can ultimately transfer custody to the attacker.
+    fn adversary_propose_on_victim(
+        &mut self,
+        victim: usize,
+        attacker: usize,
+        op: LedgerOperation,
+    ) -> Outcome {
+        if !self.operators[victim].quorum_members.contains(&attacker) {
+            return Outcome::RejectedLocal;
+        }
+        let attacker_pk = self.operators[attacker].public_key;
+
+        let members = self.operators[victim].quorum_members.clone();
+        let mut signers: Vec<usize> = Vec::new();
+        for &m in &members {
+            let will_sign = if self.honest.contains(&m) {
+                let candidates: Vec<PublicKey> = self.operators[m]
+                    .armed_candidates
+                    .get(&victim)
+                    .cloned()
+                    .unwrap_or_default();
+                let replica = self.operators[m]
+                    .replicas
+                    .get(&victim)
+                    .expect("replica must exist for quorum member");
+                Self::honest_would_cosign(
+                    replica,
+                    &op,
+                    self.block_height,
+                    &candidates,
+                    &attacker_pk,
+                )
+            } else {
+                true
+            };
+            if will_sign {
+                signers.push(m);
+            }
+        }
+        let threshold = members.len() / 2 + 1;
+        if signers.len() < threshold {
+            return Outcome::RejectedCosign;
+        }
+
+        // Apply to the victim's real ledger state. Use apply_state_changes
+        // (skipping conformance) because dispute ops can move state in ways
+        // the owner wouldn't sanction.
+        if self.operators[victim]
+            .ledger
+            .apply_state_changes(&op)
+            .is_err()
+        {
+            return Outcome::RejectedLocal;
+        }
+        self.operators[victim].ledger.state.sequence += 1;
+
+        // Propagate to all cosigners' replicas, and for DisputeArmed record
+        // the attacker as an armer in every quorum member's candidate list.
+        for &signer in &signers {
+            let replica = self.operators[signer]
+                .replicas
+                .get(&victim)
+                .expect("replica must exist");
+            if let Ok(new_state) = replica.apply(&op) {
+                self.operators[signer].replicas.insert(victim, new_state);
+            }
+        }
+        if matches!(op, LedgerOperation::DisputeArmed { .. }) {
+            for &m in &members {
+                let list = self.operators[m]
+                    .armed_candidates
+                    .entry(victim)
+                    .or_default();
+                if !list.contains(&attacker_pk) {
+                    list.push(attacker_pk);
+                }
+            }
+        }
+
+        Outcome::Applied
+    }
+
     /// Give an operator `amount` of "external wallet funds" — these will be
     /// deposited into its ledger via InvoiceCredit. Represents customer
     /// deposits the operator is holding.
@@ -2189,6 +2280,91 @@ impl ProtocolSim {
         }
         s
     }
+}
+
+// =========================================================================
+// Cross-ledger adversary attack: adv-majority quorum takes over honest ledger
+// =========================================================================
+
+/// 2-adv config, adv = {0, 1}. Op 3 (honest) has quorum [4, 0, 1] — two
+/// adversaries in a Q=3 quorum means adv-majority. Adversary 0 publishes
+/// DisputeEnter on op 3's ledger, then DisputeArmed, then DisputeAcquire
+/// naming themselves as new_custodian. Honest member 4 sees all three
+/// operations. With no actual violation observed, honest 4 has nothing to
+/// arm against — the attacker ends up as sole armed candidate and wins
+/// entropy trivially. Custody transfers.
+///
+/// This test exercises the path even though operator 4 is honest and did
+/// nothing wrong. It's the canonical adv-majority-compromised-quorum attack.
+#[test]
+fn adv_majority_quorum_can_take_over_honest_ledger() {
+    let mut sim = ProtocolSim::new(5, &[0, 1]);
+    // Victim: op 3. Attackers: 0 and 1 (both in quorum [4, 0, 1]).
+    let victim = 3;
+    let attacker = 0;
+    let victim_pk_before = sim.operators[victim].ledger.state.operator_key;
+
+    // DisputeEnter signed by attacker. They ARE in victim's quorum.
+    let last_valid = sim.operators[victim].ledger.state.sequence;
+    let enter = LedgerOperation::DisputeEnter {
+        last_valid_sequence: last_valid,
+        reason: "fabricated".to_string(),
+    };
+    assert_eq!(
+        sim.adversary_propose_on_victim(victim, attacker, enter),
+        Outcome::Applied,
+        "adv-majority lets DisputeEnter through"
+    );
+    assert_eq!(
+        sim.operators[victim].ledger.state.dispute_state,
+        DisputeState::Disputed
+    );
+
+    // DisputeArmed signed by attacker. Adv-majority signs; attacker added
+    // to every quorum member's armed_candidates[victim].
+    let armed = LedgerOperation::DisputeArmed {
+        armed_block: sim.block_height,
+        commitment_hash: [0x11; 20],
+        target_reserves: format!("bcrt1q_{}", attacker),
+    };
+    assert_eq!(
+        sim.adversary_propose_on_victim(victim, attacker, armed),
+        Outcome::Applied
+    );
+    assert_eq!(
+        sim.operators[victim].ledger.state.dispute_state,
+        DisputeState::Armed
+    );
+
+    // DisputeAcquire naming attacker. Candidate list = [attacker_pk] (sole
+    // armer), so attacker trivially wins entropy.
+    let attacker_pk = sim.operators[attacker].public_key;
+    let acquire = LedgerOperation::DisputeAcquire {
+        new_custodian: attacker_pk,
+        entropy_block_height: sim.block_height + 6,
+        entropy_block_hash: [0x22; 32],
+        spend_txid: [0x33; 32],
+        new_reserves_address: format!("bcrt1q_attacker_{}", attacker),
+    };
+    assert_eq!(
+        sim.adversary_propose_on_victim(victim, attacker, acquire),
+        Outcome::Applied
+    );
+
+    // Custody transferred: victim's operator_key is now the attacker.
+    assert_eq!(
+        sim.operators[victim].ledger.state.operator_key, attacker_pk,
+        "attacker is now the operator of op {}'s ledger",
+        victim
+    );
+    assert_ne!(
+        sim.operators[victim].ledger.state.operator_key, victim_pk_before,
+        "operator_key changed as a result of the attack"
+    );
+    assert_eq!(
+        sim.operators[victim].ledger.state.dispute_state,
+        DisputeState::Normal
+    );
 }
 
 // =========================================================================
