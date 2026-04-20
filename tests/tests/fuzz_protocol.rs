@@ -663,6 +663,23 @@ fn validate_per_op_as_cosigner(
             op_val::validate_fee_collect_by_id(&ledger, deposit_id, *amount, *block_height).is_ok()
         }
         LedgerOperation::LedgerClose => op_val::validate_ledger_close(&ledger).is_ok(),
+        LedgerOperation::QuorumJoin {
+            operator_id,
+            ledger_id,
+            membership_expires,
+        } => {
+            // Ratchet: can only extend membership duration. Mirrors the check
+            // in Ledger::validate_operation.
+            if let Some(existing) = replica
+                .joined_quorums
+                .iter()
+                .find(|m| &m.operator_id == operator_id && &m.ledger_id == ledger_id)
+            {
+                *membership_expires >= existing.membership_expires
+            } else {
+                true
+            }
+        }
         // Custody resolution — entropy-winner checks. Mirrors Ledger::validate_custody_resolution
         // and Ledger::validate_custody_yield but with the candidate list supplied
         // by the cosigner (who built it from observed DisputeArmed events).
@@ -998,6 +1015,7 @@ fn gen_honest_fee_change(
         record_deposit: None,
         record_pending: None,
         record_invoice: None,
+        record_key_rotate: None,
     })
 }
 
@@ -1073,6 +1091,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
                 record_deposit: None,
                 record_pending: None,
                 record_invoice: None,
+                record_key_rotate: None,
             });
         }
     }
@@ -1095,6 +1114,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
                 record_deposit: None,
                 record_pending: None,
                 record_invoice: None,
+                record_key_rotate: None,
             });
         }
     } else if aux < 10 && has_pending {
@@ -1113,13 +1133,87 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         });
     } else if aux < 15 && !op.deposits.is_empty() {
         // FeeChange: bump bps by <= 10% of current, with ≥20-block notice.
         if let Some(gen) = gen_honest_fee_change(op, rng, sim.block_height) {
             return Some(gen);
         }
-    } else if aux < 25 && headroom > 1000 && !op.deposits.is_empty() {
+    } else if aux < 20 && !op.deposits.is_empty() {
+        // DepositKeyRotate (honest): fresh keypair; sign hash(new_descriptor)
+        // with the OLD depositor key; record the new key so future witness
+        // signing (InvoiceLock, TransferLock, etc.) uses it.
+        use bitcoin::hashes::{sha256, Hash};
+        let (did, _, _) = pick_deposit(op, rng)?;
+        let old_sk = op.depositor_keys.get(&did).copied()?;
+        let seed = 20_000u16.wrapping_add(rng.range(40_000) as u16);
+        let (new_sk, new_pk) = keypair(seed);
+        let new_descriptor = format!("pk({})", hex::encode(new_pk.serialize()));
+        let msg = sha256::Hash::hash(new_descriptor.as_bytes()).to_byte_array();
+        let witness = sign_pk_witness(&old_sk, &msg);
+        return Some(GeneratedOp {
+            op: LedgerOperation::DepositKeyRotate {
+                deposit_id: did,
+                new_descriptor,
+                witness,
+            },
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+            record_key_rotate: Some((did, new_sk)),
+        });
+    } else if aux < 22 {
+        // QuorumJoin (honest): operator declares monitoring commitment for
+        // another operator's ledger. Pick a different operator; ratchet the
+        // membership_expires forward from whatever's already recorded.
+        let n = sim.operators.len();
+        let other = (proposer + 1 + rng.range((n - 1) as u64) as usize) % n;
+        let target_ledger_id = sim.operators[other].ledger.state.ledger_id;
+        let existing_expires = op
+            .ledger
+            .state
+            .joined_quorums
+            .iter()
+            .find(|m| {
+                m.operator_id == sim.operators[other].public_key
+                    && m.ledger_id == hex::encode(target_ledger_id)
+            })
+            .map(|m| m.membership_expires)
+            .unwrap_or(0);
+        let new_expires = existing_expires
+            .max(sim.block_height)
+            .saturating_add(rng.range(100_000) as u32 + 1);
+        return Some(GeneratedOp {
+            op: LedgerOperation::QuorumJoin {
+                operator_id: sim.operators[other].public_key,
+                ledger_id: hex::encode(target_ledger_id),
+                membership_expires: new_expires,
+            },
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+            record_key_rotate: None,
+        });
+    } else if aux < 23 {
+        // DeliveryEmbed: apply is a no-op ("causal ordering only"). We emit
+        // it for coverage; honest cosigners sign because it's benign.
+        let n = sim.operators.len();
+        let other = rng.range(n as u64) as usize;
+        let mut request_hash = [0u8; 32];
+        request_hash[..8].copy_from_slice(&rng.next().to_le_bytes());
+        return Some(GeneratedOp {
+            op: LedgerOperation::DeliveryEmbed {
+                request_hash,
+                target_ledger_id: sim.operators[other].ledger.state.ledger_id,
+                target_operator: sim.operators[other].public_key,
+            },
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+            record_key_rotate: None,
+        });
+    } else if aux < 28 && headroom > 1000 && !op.deposits.is_empty() {
         // OnchainCredit: operator claims an on-chain UTXO arrived.
         let (did, _, _) = pick_deposit(op, rng)?;
         let amount = 1000 + rng.range(headroom - 1000);
@@ -1136,6 +1230,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         });
     }
 
@@ -1147,6 +1242,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             record_deposit: Some((did, desc, seed, dsk)),
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         })
     } else if choice < 50 && has_pending {
         // TransferComplete: pick a pending transfer. Use a matching preimage
@@ -1167,6 +1263,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
                 record_deposit: None,
                 record_pending: None,
                 record_invoice: None,
+                record_key_rotate: None,
             })
         } else {
             None
@@ -1221,6 +1318,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             record_deposit: None,
             record_pending: Some((tid, preimage)),
             record_invoice: None,
+            record_key_rotate: None,
         })
     } else if choice < 80 && !op.ledger.state.open_invoice_locks.is_empty() {
         // InvoiceFulfill or InvoiceFail on an existing lock. Honest fulfills
@@ -1259,6 +1357,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         })
     } else if choice < 90 && !op.deposits.is_empty() {
         // InvoiceLock: lock funds on an existing deposit, signing with its
@@ -1289,6 +1388,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             record_deposit: None,
             record_pending: None,
             record_invoice: Some((pid, preimage)),
+            record_key_rotate: None,
         })
     } else if headroom > 1000 {
         let (did, _, _) = pick_deposit(op, rng)?;
@@ -1309,6 +1409,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         })
     } else {
         None
@@ -1330,6 +1431,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         });
     } else if aux < 6 && !op.deposits.is_empty() {
         // Adversarial DepositKeyRotate: rotate to attacker-controlled descriptor,
@@ -1348,6 +1450,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         });
     } else if aux < 10 && !op.deposits.is_empty() {
         // Adversarial FeeChange: huge rate jump violating fee_change_limit_bps
@@ -1368,6 +1471,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         });
     } else if aux < 13 && !op.ledger.state.pending_transfers.is_empty() {
         // Adversarial TransferFail: reason=0 is reserved/invalid per the spec.
@@ -1383,6 +1487,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         });
     } else if aux < 17 && !op.deposits.is_empty() {
         // Adversarial OnchainCredit: amount=0 (rejected) or non-existent deposit.
@@ -1399,6 +1504,53 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
+        });
+    } else if aux < 19 {
+        // Adversarial LedgerClose: try to close while deposits have non-zero
+        // obligation. validate_ledger_close should reject.
+        return Some(GeneratedOp {
+            op: LedgerOperation::LedgerClose,
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+            record_key_rotate: None,
+        });
+    } else if aux < 22 {
+        // Adversarial QuorumRemoveMember: try to remove one of our honest
+        // cosigners to weaken future majority checks. (In this sim, SimOperator.
+        // quorum_members is static from init and doesn't read ledger state, so
+        // this exercise only confirms cosigners reject the op — a real impl
+        // should reduce the quorum size.)
+        let members = &op.quorum_members;
+        if !members.is_empty() {
+            let m_idx = members[rng.range(members.len() as u64) as usize];
+            let m_pk = sim.operators[m_idx].public_key;
+            return Some(GeneratedOp {
+                op: LedgerOperation::QuorumRemoveMember {
+                    quorum_member: m_pk,
+                    operator_signature: [0xCC; 64],
+                },
+                record_deposit: None,
+                record_pending: None,
+                record_invoice: None,
+                record_key_rotate: None,
+            });
+        }
+    } else if aux < 24 {
+        // Adversarial QuorumJoin: ratchet-violating (expires < existing).
+        let n = sim.operators.len();
+        let other = (proposer + 1 + rng.range((n - 1) as u64) as usize) % n;
+        return Some(GeneratedOp {
+            op: LedgerOperation::QuorumJoin {
+                operator_id: sim.operators[other].public_key,
+                ledger_id: hex::encode(sim.operators[other].ledger.state.ledger_id),
+                membership_expires: 0, // already expired
+            },
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+            record_key_rotate: None,
         });
     }
     // Occasional bogus dispute inputs. Most will be rejected by the state-machine
@@ -1441,6 +1593,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         });
     }
     if rng.range(100) < 15 && !op.deposits.is_empty() {
@@ -1450,6 +1603,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
                 record_deposit: None,
                 record_pending: None,
                 record_invoice: None,
+                record_key_rotate: None,
             });
         }
     }
@@ -1463,6 +1617,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             record_deposit: Some((did, desc, seed, dsk)),
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         })
     } else if choice < 30 && has_pending {
         // TransferComplete with either the real preimage (works) or a
@@ -1484,6 +1639,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         })
     } else if choice < 35 && !op.deposits.is_empty() {
         // Adversarial InvoiceLock: wrong witness (signed with adversary's
@@ -1511,6 +1667,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         })
     } else if choice < 45 && !op.ledger.state.open_invoice_locks.is_empty() {
         // Adversarial InvoiceFulfill: correct payment_id but bogus preimage.
@@ -1538,6 +1695,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         })
     } else if choice < 50 && op.deposits.len() >= 2 {
         // Adversarial TransferLock: wrong witness, over-balance, or mismatched
@@ -1556,7 +1714,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
         // Pick an amount that sometimes over-spends and sometimes doesn't,
         // plus a wrong witness (sign with adversary's key instead of depositor's).
         let amount = if rng.range(100) < 40 {
-            source_balance + 10_000
+            source_balance.saturating_add(10_000)
         } else {
             source_balance.saturating_sub(1000).max(1000)
         };
@@ -1580,6 +1738,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         })
     } else {
         // Credit — adversary doesn't respect reserves.
@@ -1607,6 +1766,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
+            record_key_rotate: None,
         })
     }
 }
@@ -1622,6 +1782,10 @@ struct GeneratedOp {
     /// If set, caller must store (payment_id, preimage) in open_invoice_preimages
     /// so we can Fulfill the lock later with the matching preimage.
     record_invoice: Option<([u8; 32], [u8; 32])>,
+    /// If set, caller must replace depositor_keys[deposit_id] with the new key
+    /// after an Applied DepositKeyRotate — subsequent witness signing must
+    /// use the rotated-to key.
+    record_key_rotate: Option<(DepositId, SecretKey)>,
 }
 
 impl ProtocolSim {
@@ -1663,6 +1827,9 @@ impl ProtocolSim {
                 self.operators[proposer]
                     .open_invoice_preimages
                     .insert(payment_id, preimage);
+            }
+            if let Some((did, new_sk)) = gen.record_key_rotate {
+                self.operators[proposer].depositor_keys.insert(did, new_sk);
             }
         }
         Some((outcome, name, is_adv))

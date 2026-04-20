@@ -483,7 +483,7 @@ impl LedgerState {
                     .deposits
                     .get_mut(source_deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
-                let total = amount + fee;
+                let total = amount.saturating_add(*fee);
                 if deposit.available_balance() < total {
                     return Err(crate::DepositsError::InsufficientDepositBalance {
                         available: deposit.available_balance(),
