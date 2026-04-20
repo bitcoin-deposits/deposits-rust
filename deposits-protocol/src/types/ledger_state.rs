@@ -74,6 +74,12 @@ pub struct LedgerState {
     /// removed by InvoiceFulfill or InvoiceFail.
     #[serde(with = "serde_transfer_id_map", default)]
     pub open_invoice_locks: HashMap<[u8; 32], OpenInvoiceLock>,
+    /// Pending on-chain withdrawals awaiting fulfill or fail.
+    /// Key is the withdrawal_id. Populated by OnchainLock, removed by
+    /// OnchainFulfill or OnchainFail. Stored so the resolving op (which
+    /// only carries withdrawal_id) can recover the locked amount.
+    #[serde(with = "serde_transfer_id_map", default)]
+    pub pending_withdrawals: HashMap<[u8; 32], PendingWithdrawal>,
     /// Payment hashes that have been credited (InvoiceCredit).
     /// Prevents double-crediting the same lightning payment.
     #[serde(default)]
@@ -146,6 +152,7 @@ impl LedgerState {
             collateral_amount: 0,
             pending_transfers: HashMap::new(),
             open_invoice_locks: HashMap::new(),
+            pending_withdrawals: HashMap::new(),
             credited_payments: std::collections::HashSet::new(),
             sequence: 0,
             chain_tip_hash: [0u8; 32],
@@ -342,29 +349,63 @@ impl LedgerState {
                 deposit.credit(*amount);
             }
             LedgerOperation::OnchainLock {
-                deposit_id, amount, ..
+                deposit_id,
+                amount,
+                fee_sats,
+                destination_address,
+                withdrawal_id,
+                ..
             } => {
                 let deposit = next
                     .deposits
                     .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.lock(*amount)?;
+                next.pending_withdrawals.insert(
+                    *withdrawal_id,
+                    PendingWithdrawal {
+                        deposit_id: *deposit_id,
+                        amount: *amount,
+                        fee_sats: *fee_sats,
+                        destination_address: destination_address.clone(),
+                    },
+                );
             }
-            LedgerOperation::OnchainFail { deposit_id, .. } => {
-                let _deposit = next
-                    .deposits
-                    .get_mut(deposit_id)
+            LedgerOperation::OnchainFail {
+                withdrawal_id,
+                deposit_id,
+            } => {
+                // Ensure the named deposit exists (mirrors prior behavior).
+                next.deposits
+                    .get(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
-                // TODO: Need to look up the withdrawal amount from withdrawal_id
+                // Release the lock using the amount recorded at OnchainLock.
+                // If the withdrawal_id isn't tracked (e.g. replay on a state
+                // that never saw the lock), silently ignore — mirrors the
+                // TransferFail pattern of `if let Some(pending) = ...`.
+                if let Some(pending) = next.pending_withdrawals.remove(withdrawal_id) {
+                    if let Some(deposit) = next.deposits.get_mut(&pending.deposit_id) {
+                        deposit.unlock(pending.amount);
+                    }
+                }
             }
             LedgerOperation::OnchainFulfill {
-                deposit_id, amount, ..
+                deposit_id,
+                withdrawal_id,
+                ..
             } => {
-                let deposit = next
-                    .deposits
-                    .get_mut(deposit_id)
+                // Ensure the named deposit exists (mirrors prior behavior).
+                next.deposits
+                    .get(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
-                deposit.fulfill(*amount);
+                // Fulfill using the amount recorded at OnchainLock. Using the
+                // stored amount (rather than the op's amount field) is safer
+                // against mismatch and matches the TransferComplete pattern.
+                if let Some(pending) = next.pending_withdrawals.remove(withdrawal_id) {
+                    if let Some(deposit) = next.deposits.get_mut(&pending.deposit_id) {
+                        deposit.fulfill(pending.amount);
+                    }
+                }
             }
             LedgerOperation::FeeCollect {
                 deposit_id,

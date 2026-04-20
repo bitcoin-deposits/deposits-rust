@@ -286,6 +286,25 @@ impl PendingTransfer {
     }
 }
 
+/// A pending on-chain withdrawal awaiting confirmation or failure.
+///
+/// Created by OnchainLock, resolved by OnchainFulfill (funds actually left
+/// the reserves) or OnchainFail (withdrawal abandoned, lock released).
+/// Tracked in `LedgerState.pending_withdrawals` keyed by `withdrawal_id`
+/// so OnchainFail/OnchainFulfill can look up the locked amount.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingWithdrawal {
+    /// The deposit the funds are locked from.
+    #[serde(with = "serde_deposit_id")]
+    pub deposit_id: DepositId,
+    /// Amount being withdrawn (satoshis or msats, matching op field).
+    pub amount: u64,
+    /// On-chain miner fee allocated for this withdrawal.
+    pub fee_sats: u64,
+    /// Destination Bitcoin address.
+    pub destination_address: String,
+}
+
 // ============================================================================
 // Deposit
 // ============================================================================

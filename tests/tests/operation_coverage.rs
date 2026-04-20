@@ -129,6 +129,11 @@ fn onchain_fail_returns_funds() {
         })
         .unwrap();
 
+    // Confirm the lock recorded by OnchainLock.
+    let deposit = net.op("alice").ledger.state.deposits.get(&did).unwrap();
+    assert_eq!(deposit.balance, 200_000, "balance unchanged by lock");
+    assert_eq!(deposit.locked_balance, 100_000, "locked = amount");
+
     // Fail (onchain withdrawal didn't confirm)
     net.op_mut("alice")
         .ledger
@@ -138,8 +143,18 @@ fn onchain_fail_returns_funds() {
         })
         .unwrap();
 
-    // TODO: OnchainFail currently doesn't unlock (has a TODO in protocol code)
-    // This test documents the current behavior
+    // OnchainFail releases the lock — balance untouched, locked goes to 0.
+    let deposit = net.op("alice").ledger.state.deposits.get(&did).unwrap();
+    assert_eq!(deposit.balance, 200_000, "balance unchanged by fail");
+    assert_eq!(deposit.locked_balance, 0, "fail releases the lock");
+    assert!(
+        !net.op("alice")
+            .ledger
+            .state
+            .pending_withdrawals
+            .contains_key(&withdrawal_id),
+        "pending_withdrawals entry cleaned up on fail"
+    );
 }
 
 // =========================================================================
