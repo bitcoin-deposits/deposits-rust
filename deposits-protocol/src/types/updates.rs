@@ -361,6 +361,10 @@ impl SignedLedgerUpdate {
 // ============================================================================
 
 /// Deposit information for API responses.
+///
+/// Spendable funds are always computed as `balance - locked_balance`; they
+/// are not stored separately because `locked_balance` is a subset of `balance`,
+/// not an additional quantity.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DepositInfo {
     /// Deposit identifier (hex).
@@ -372,8 +376,6 @@ pub struct DepositInfo {
     /// Portion of `balance` earmarked for in-flight operations (millisatoshis).
     /// Subset of `balance`, not a separate bucket.
     pub locked_balance: u64,
-    /// Spendable funds: `balance - locked_balance` (millisatoshis).
-    pub available_balance: u64,
     /// Number of active invoices.
     pub invoice_count: usize,
     /// Fee structure.
@@ -387,7 +389,6 @@ impl From<&Deposit> for DepositInfo {
             descriptor: d.descriptor.clone(),
             balance: d.balance,
             locked_balance: d.locked_balance,
-            available_balance: d.available_balance(),
             invoice_count: d.invoices.len(),
             fees: d.fees.clone(),
         }
