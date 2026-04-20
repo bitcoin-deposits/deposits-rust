@@ -86,6 +86,9 @@ struct SimOperator {
     /// Pending transfers we've originated locally, with the preimage the
     /// completion_script commits to — used to generate honest TransferComplete.
     pending_preimages: HashMap<[u8; 32], [u8; 32]>,
+    /// Open invoice locks we originated, keyed by payment_id → preimage. Used
+    /// to generate honest InvoiceFulfill with the correct preimage.
+    open_invoice_preimages: HashMap<[u8; 32], [u8; 32]>,
     /// For each victim's ledger we're watching, the pubkeys of operators we've
     /// observed publish DisputeArmed. Used to validate the entropy-selected
     /// winner when a DisputeAcquire arrives — matches the real-protocol
@@ -149,6 +152,7 @@ impl ProtocolSim {
                     deposits: Vec::new(),
                     depositor_keys: HashMap::new(),
                     pending_preimages: HashMap::new(),
+                    open_invoice_preimages: HashMap::new(),
                     armed_candidates: HashMap::new(),
                     wallet_funds: 0,
                 }
@@ -863,6 +867,29 @@ fn sign_pk_witness(sk: &SecretKey, msg_hash: &[u8; 32]) -> DescriptorWitness {
     }
 }
 
+/// Build an InvoiceLock op signed with `source_sk`. Returns (op, payment_id,
+/// preimage) so the caller can record the preimage for later Fulfill.
+fn build_invoice_lock(
+    source: &(DepositId, String, u16),
+    amount: u64,
+    sequence_number: u64,
+    source_sk: &SecretKey,
+    preimage: [u8; 32],
+) -> (LedgerOperation, [u8; 32]) {
+    use bitcoin::hashes::{sha256, Hash};
+    let payment_id = sha256::Hash::hash(&preimage).to_byte_array();
+    let msg = signature_utils::invoice_lock_signing_message(&source.0, &payment_id, amount);
+    let witness = sign_pk_witness(source_sk, &msg);
+    let op = LedgerOperation::InvoiceLock {
+        deposit_id: source.0,
+        amount,
+        payment_id,
+        sequence_number,
+        witness,
+    };
+    (op, payment_id)
+}
+
 /// Build a TransferLock for an intra-ledger transfer. Returns (op, transfer_id,
 /// preimage) so honest callers can later TransferComplete.
 fn build_transfer_lock(
@@ -1006,6 +1033,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
                 op: o,
                 record_deposit: None,
                 record_pending: None,
+                record_invoice: None,
             });
         }
     }
@@ -1016,6 +1044,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             op: o,
             record_deposit: Some((did, desc, seed, dsk)),
             record_pending: None,
+            record_invoice: None,
         })
     } else if choice < 50 && has_pending {
         // TransferComplete: pick a pending transfer. Use a matching preimage
@@ -1035,6 +1064,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
                 op: o,
                 record_deposit: None,
                 record_pending: None,
+                record_invoice: None,
             })
         } else {
             None
@@ -1088,6 +1118,75 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             op: o,
             record_deposit: None,
             record_pending: Some((tid, preimage)),
+            record_invoice: None,
+        })
+    } else if choice < 80 && !op.ledger.state.open_invoice_locks.is_empty() {
+        // InvoiceFulfill or InvoiceFail on an existing lock. Honest fulfills
+        // with the matching preimage if we have it.
+        let payment_ids: Vec<[u8; 32]> =
+            op.ledger.state.open_invoice_locks.keys().copied().collect();
+        let pid = payment_ids[rng.range(payment_ids.len() as u64) as usize];
+        let lock = op.ledger.state.open_invoice_locks.get(&pid)?;
+        let did = lock.deposit_id;
+        let amount = lock.amount;
+        let source = op.deposits.iter().find(|(d, _, _)| *d == did).cloned()?;
+        let source_sk = op.depositor_keys.get(&did).copied()?;
+        let msg = signature_utils::invoice_lock_signing_message(&did, &pid, amount);
+        let witness = sign_pk_witness(&source_sk, &msg);
+        let o = if rng.range(100) < 70 {
+            // Fulfill path — needs the real preimage.
+            let preimage = op.open_invoice_preimages.get(&pid).copied()?;
+            LedgerOperation::InvoiceFulfill {
+                deposit_id: source.0,
+                amount,
+                payment_id: pid,
+                sequence_number: op.ledger.state.sequence + 1,
+                witness,
+                preimage,
+            }
+        } else {
+            LedgerOperation::InvoiceFail {
+                deposit_id: source.0,
+                amount,
+                payment_id: pid,
+                sequence_number: op.ledger.state.sequence + 1,
+            }
+        };
+        Some(GeneratedOp {
+            op: o,
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+        })
+    } else if choice < 90 && !op.deposits.is_empty() {
+        // InvoiceLock: lock funds on an existing deposit, signing with its
+        // depositor key. Amount capped at available_balance minus a safety
+        // margin so reserves don't trip.
+        let (did, _, _) = pick_deposit(op, rng)?;
+        let deposit = op.ledger.state.deposits.get(&did)?;
+        let available = deposit.balance.saturating_sub(deposit.locked_balance);
+        if available < 1000 {
+            return None;
+        }
+        let source = op.deposits.iter().find(|(d, _, _)| *d == did).cloned()?;
+        let source_sk = op.depositor_keys.get(&did).copied()?;
+        let amount = 500 + rng.range(available.saturating_sub(500).max(1));
+        let mut preimage = [0u8; 32];
+        preimage[..8].copy_from_slice(&rng.next().to_le_bytes());
+        preimage[8] = proposer as u8;
+        preimage[9] = 0x11;
+        let (o, pid) = build_invoice_lock(
+            &source,
+            amount,
+            op.ledger.state.sequence + 1,
+            &source_sk,
+            preimage,
+        );
+        Some(GeneratedOp {
+            op: o,
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: Some((pid, preimage)),
         })
     } else if headroom > 1000 {
         let (did, _, _) = pick_deposit(op, rng)?;
@@ -1107,6 +1206,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             op: o,
             record_deposit: None,
             record_pending: None,
+            record_invoice: None,
         })
     } else {
         None
@@ -1156,6 +1256,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             op: o,
             record_deposit: None,
             record_pending: None,
+            record_invoice: None,
         });
     }
     if rng.range(100) < 15 && !op.deposits.is_empty() {
@@ -1164,6 +1265,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
                 op: o,
                 record_deposit: None,
                 record_pending: None,
+                record_invoice: None,
             });
         }
     }
@@ -1176,6 +1278,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             op: o,
             record_deposit: Some((did, desc, seed, dsk)),
             record_pending: None,
+            record_invoice: None,
         })
     } else if choice < 30 && has_pending {
         // TransferComplete with either the real preimage (works) or a
@@ -1196,8 +1299,63 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             op: o,
             record_deposit: None,
             record_pending: None,
+            record_invoice: None,
         })
-    } else if choice < 45 && op.deposits.len() >= 2 {
+    } else if choice < 35 && !op.deposits.is_empty() {
+        // Adversarial InvoiceLock: wrong witness (signed with adversary's
+        // operator key, not the depositor's), possibly over-balance.
+        let (did, _, _) = pick_deposit(op, rng)?;
+        let deposit = op.ledger.state.deposits.get(&did)?;
+        let available = deposit.balance.saturating_sub(deposit.locked_balance);
+        let source = op.deposits.iter().find(|(d, _, _)| *d == did).cloned()?;
+        let amount = if rng.range(100) < 40 {
+            available + 10_000
+        } else {
+            1 + rng.range(available.max(1))
+        };
+        let mut preimage = [0u8; 32];
+        preimage[0] = rng.range(256) as u8;
+        let (o, _pid) = build_invoice_lock(
+            &source,
+            amount,
+            op.ledger.state.sequence + 1,
+            &op.secret_key, // wrong key
+            preimage,
+        );
+        Some(GeneratedOp {
+            op: o,
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+        })
+    } else if choice < 45 && !op.ledger.state.open_invoice_locks.is_empty() {
+        // Adversarial InvoiceFulfill: correct payment_id but bogus preimage.
+        let payment_ids: Vec<[u8; 32]> =
+            op.ledger.state.open_invoice_locks.keys().copied().collect();
+        let pid = payment_ids[rng.range(payment_ids.len() as u64) as usize];
+        let lock = op.ledger.state.open_invoice_locks.get(&pid)?;
+        let did = lock.deposit_id;
+        let amount = lock.amount;
+        let mut bad_preimage = [0u8; 32];
+        bad_preimage[0] = rng.range(256) as u8;
+        bad_preimage[1] = 0xBA;
+        let o = LedgerOperation::InvoiceFulfill {
+            deposit_id: did,
+            amount,
+            payment_id: pid,
+            sequence_number: op.ledger.state.sequence + 1,
+            witness: DescriptorWitness {
+                stack: vec![vec![0u8; 64]],
+            }, // garbage sig
+            preimage: bad_preimage,
+        };
+        Some(GeneratedOp {
+            op: o,
+            record_deposit: None,
+            record_pending: None,
+            record_invoice: None,
+        })
+    } else if choice < 50 && op.deposits.len() >= 2 {
         // Adversarial TransferLock: wrong witness, over-balance, or mismatched
         // signing-message. Honest co-signers should flag InvalidWitness.
         let src_idx = rng.range(op.deposits.len() as u64) as usize;
@@ -1237,6 +1395,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             op: o,
             record_deposit: None,
             record_pending: None,
+            record_invoice: None,
         })
     } else {
         // Credit — adversary doesn't respect reserves.
@@ -1263,6 +1422,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             op: o,
             record_deposit: None,
             record_pending: None,
+            record_invoice: None,
         })
     }
 }
@@ -1275,6 +1435,9 @@ struct GeneratedOp {
     /// If set, caller must store (transfer_id, preimage) so we can complete
     /// the transfer later.
     record_pending: Option<([u8; 32], [u8; 32])>,
+    /// If set, caller must store (payment_id, preimage) in open_invoice_preimages
+    /// so we can Fulfill the lock later with the matching preimage.
+    record_invoice: Option<([u8; 32], [u8; 32])>,
 }
 
 impl ProtocolSim {
@@ -1311,6 +1474,11 @@ impl ProtocolSim {
                 self.operators[proposer]
                     .pending_preimages
                     .insert(tid, preimage);
+            }
+            if let Some((payment_id, preimage)) = gen.record_invoice {
+                self.operators[proposer]
+                    .open_invoice_preimages
+                    .insert(payment_id, preimage);
             }
         }
         Some((outcome, name, is_adv))
