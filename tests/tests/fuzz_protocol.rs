@@ -1841,6 +1841,129 @@ impl ProtocolSim {
 }
 
 // =========================================================================
+// Regression: the exact sequence that surfaced the DEP-05 over-reserve bug.
+// =========================================================================
+
+/// Constructs the credit+lock+credit+fail sequence the fuzzer found before
+/// the fix in commit 888b0e3. Under the old state machine, step 4 would push
+/// total_deposit_balance past reserves_amount. With the fix, balance already
+/// represents total obligation, so TransferFail is a no-op on balance and
+/// the ledger stays within reserves.
+#[test]
+fn credit_lock_credit_fail_stays_within_reserves() {
+    use deposits_core::ledger::Ledger;
+    use deposits_protocol::messages::LedgerOperation;
+    use deposits_protocol::types::compute_deposit_id;
+
+    let (_sk0, pk0) = keypair(1);
+    let mut ledger = Ledger::new_as_operator(pk0, "reserves".to_string(), 0);
+    let reserves_amount: u64 = 400_000;
+    ledger
+        .append_operation(LedgerOperation::LedgerOpen {
+            operator_id: pk0,
+            reserves_id: "reserves".to_string(),
+            genesis_block: 0,
+            reserves_amount,
+            collateral_amount: 0,
+        })
+        .unwrap();
+
+    // D1: `pk(A)`, depositor A. D2: `pk(B)`, depositor B.
+    let (sk_a, pk_a) = keypair(1001);
+    let (_sk_b, pk_b) = keypair(1002);
+    let desc_a = format!("pk({})", hex::encode(pk_a.serialize()));
+    let desc_b = format!("pk({})", hex::encode(pk_b.serialize()));
+    let did_a = compute_deposit_id(&desc_a);
+    let did_b = compute_deposit_id(&desc_b);
+
+    for (did, desc) in [(did_a, desc_a.clone()), (did_b, desc_b.clone())] {
+        ledger
+            .append_operation(LedgerOperation::DepositOpen {
+                deposit_id: did,
+                descriptor: desc,
+                fees: Some(FeeStructure::default()),
+                transfer_fees: None,
+                payment_hash: None,
+                invoice: None,
+                cosigner_guarantee_signature: None,
+                receive_requires_sig: false,
+                fee_change_after_blocks: None,
+                fee_change_notice_blocks: None,
+                fee_change_limit_bps: None,
+            })
+            .unwrap();
+    }
+
+    // Step 1: credit D1 to 100k.
+    ledger
+        .append_operation(LedgerOperation::InvoiceCredit {
+            payment_hash: [0x11; 32],
+            deposit_id: did_a,
+            amount: 100_000,
+            invoice_id: "c1".to_string(),
+            sequence_number: ledger.state.sequence + 1,
+        })
+        .unwrap();
+    assert_eq!(ledger.state.total_deposit_balance(), 100_000);
+
+    // Step 2: TransferLock 90k+500 from D1 to D2.
+    let (source, dest) = ((did_a, desc_a.clone(), 0u16), (did_b, desc_b, 0u16));
+    let mut preimage = [0u8; 32];
+    preimage[0] = 0xAA;
+    let (lock_op, _tid) = build_transfer_lock(
+        &source, &dest, 90_000, 500, 900_000, &sk_a, preimage, [0xCC; 32],
+    );
+    ledger.append_operation(lock_op).unwrap();
+    // Under the fix, `balance` is unchanged by the lock.
+    assert_eq!(ledger.state.deposits[&did_a].balance, 100_000);
+    assert_eq!(ledger.state.deposits[&did_a].locked_balance, 90_500);
+    assert_eq!(ledger.state.total_deposit_balance(), 100_000);
+
+    // Step 3: credit D2 up to the honest headroom the old generator would
+    // have computed from sum(balance). Under the fix, headroom is the true
+    // remainder against reserves — so we credit to exactly reserves-100_000.
+    ledger
+        .append_operation(LedgerOperation::InvoiceCredit {
+            payment_hash: [0x22; 32],
+            deposit_id: did_b,
+            amount: reserves_amount - 100_000,
+            invoice_id: "c2".to_string(),
+            sequence_number: ledger.state.sequence + 1,
+        })
+        .unwrap();
+    assert_eq!(ledger.state.total_deposit_balance(), reserves_amount);
+
+    // Step 4: the canary — previously TransferFail restored 90_500 into D1's
+    // balance and pushed total to 490_500 > 400_000. Under the fix, balance
+    // is unchanged, only `locked_balance` drops.
+    let transfer_id = ledger
+        .state
+        .pending_transfers
+        .keys()
+        .copied()
+        .next()
+        .unwrap();
+    ledger
+        .append_operation(LedgerOperation::TransferFail {
+            transfer_id,
+            block_hash: [0x33; 32],
+            reason: 1,
+        })
+        .unwrap();
+
+    assert_eq!(
+        ledger.state.total_deposit_balance(),
+        reserves_amount,
+        "TransferFail must not push total obligation over reserves"
+    );
+    assert!(
+        ledger.state.total_deposit_balance() <= ledger.state.reserves_amount,
+        "post-fail obligation must stay within reserves"
+    );
+    assert_eq!(ledger.state.deposits[&did_a].locked_balance, 0);
+}
+
+// =========================================================================
 // Step 3: full invariant set, profit evaluation, scaled fuzz.
 // =========================================================================
 
