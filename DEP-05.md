@@ -80,7 +80,16 @@ The UTXO is split evenly: each ledger gets UTXO/L in reserves and UTXO/L in coll
 
 ## Obligation Limits
 
-A ledger's total obligations (sum of all deposit balances and locked amounts) must not exceed the reserves amount (from QuorumBegin). This is enforced when creating new funding offers or invoices (see DEP-10).
+A ledger's total obligations — the sum of every deposit's `balance` — must not exceed the reserves amount (from QuorumBegin). This is enforced when creating new funding offers or invoices (see DEP-10).
+
+### Balance Accounting Model
+
+Each deposit has two fields:
+
+- **`balance`**: the total obligation the operator owes for this deposit (msats). This is the authoritative figure counted toward the ledger's obligations.
+- **`locked_balance`**: a subset of `balance` that is currently earmarked for in-flight operations (pending transfers, invoice locks). It is not a separate bucket of funds and is not additive with `balance`.
+
+Per-deposit spendable funds are `available_balance = balance - locked_balance`. Locking funds for an in-flight operation does not change the deposit's `balance` or the ledger's total obligation — the funds were already counted. Only settlement (credit/debit/fulfill) changes `balance`.
 
 ### Security Model
 

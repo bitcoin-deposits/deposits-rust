@@ -32,7 +32,7 @@ The deposit starts with zero balance. Funds are added via on-chain offers, light
 
 ### Close (disc 21)
 
-`DepositClose` removes the deposit. The deposit must have zero balance and zero locked balance.
+`DepositClose` removes the deposit. The deposit must have zero `balance` and no in-flight operations (`locked_balance == 0`).
 
 ### Key Rotation (disc 23)
 

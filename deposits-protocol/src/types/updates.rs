@@ -367,11 +367,12 @@ pub struct DepositInfo {
     pub deposit_id: String,
     /// Miniscript descriptor.
     pub descriptor: String,
-    /// Current balance (millisatoshis).
+    /// Total obligation owed on this deposit (millisatoshis).
     pub balance: u64,
-    /// Locked balance (millisatoshis).
+    /// Portion of `balance` earmarked for in-flight operations (millisatoshis).
+    /// Subset of `balance`, not a separate bucket.
     pub locked_balance: u64,
-    /// Available balance (millisatoshis).
+    /// Spendable funds: `balance - locked_balance` (millisatoshis).
     pub available_balance: u64,
     /// Number of active invoices.
     pub invoice_count: usize,

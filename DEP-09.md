@@ -20,7 +20,7 @@ The sender requests a `TransferLock` with:
 - **transfer_id**: 32-byte identifier (derived from the signing message hash)
 - **witness**: satisfies the sender's deposit descriptor, authorizing the lock
 
-The operator verifies the sender's witness, checks sufficient balance, validates the fee, and appends the operation. The sender's balance is reduced by `amount + fee`, which moves to `locked_balance`.
+The operator verifies the sender's witness, checks sufficient balance, validates the fee, and appends the operation. The source deposit's `locked_balance` is increased by `amount + fee`, earmarking that portion of `balance` for the pending transfer. The `balance` itself is unchanged until the transfer is settled (see DEP-05 for the balance accounting model).
 
 If the destination deposit has `receive_requires_sig`, the request must also include a `receive_signature` from the destination descriptor.
 

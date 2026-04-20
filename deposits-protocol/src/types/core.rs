@@ -303,9 +303,19 @@ pub struct Deposit {
     ///   "and(pk(A),after(100))"                  - key + timelock
     ///   "or(pk(A),and(pk(B),sha256(H)))"         - key OR (key + hashlock)
     pub descriptor: String,
-    /// Current balance in millisatoshis.
+    /// Total obligation owed on this deposit, in millisatoshis.
+    ///
+    /// This is the authoritative figure counted toward the ledger's total
+    /// obligations. It is not reduced when funds are locked for an in-flight
+    /// operation — only on settlement (debit/fulfill).
     pub balance: u64,
-    /// Locked balance for pending payments (millisatoshis).
+    /// Portion of `balance` currently earmarked for in-flight operations
+    /// (pending transfers, invoice locks), in millisatoshis.
+    ///
+    /// This is a subset of `balance`, not a separate bucket. Spendable funds
+    /// are `available_balance() = balance - locked_balance`. Locking does not
+    /// add to the ledger's total obligation because the funds are already
+    /// counted in `balance`.
     pub locked_balance: u64,
     /// Outstanding unexpired invoices.
     pub invoices: Vec<Invoice>,
