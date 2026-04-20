@@ -1328,6 +1328,35 @@ struct FuzzStats {
     noop: u64,
 }
 
+/// Observability snapshot of dispute activity across a simulation. Counts
+/// how many replicas are in each DisputeState — a proxy for how often honest
+/// cosigners auto-triggered disputes.
+#[derive(Default, Debug, Clone)]
+#[allow(dead_code)]
+struct DisputeSnapshot {
+    replicas_normal: u64,
+    replicas_disputed: u64,
+    replicas_armed: u64,
+    replicas_tombstoned: u64,
+}
+
+impl ProtocolSim {
+    fn snapshot_disputes(&self) -> DisputeSnapshot {
+        let mut s = DisputeSnapshot::default();
+        for op in &self.operators {
+            for replica in op.replicas.values() {
+                match replica.dispute_state {
+                    DisputeState::Normal => s.replicas_normal += 1,
+                    DisputeState::Disputed => s.replicas_disputed += 1,
+                    DisputeState::Armed => s.replicas_armed += 1,
+                    DisputeState::Tombstoned => s.replicas_tombstoned += 1,
+                }
+            }
+        }
+        s
+    }
+}
+
 // =========================================================================
 // Step 3: full invariant set, profit evaluation, scaled fuzz.
 // =========================================================================
@@ -1737,6 +1766,57 @@ fn explore_10node_q3_4adv_placements() {
         eprintln!(
             "{:32} adv-maj on ops {:?}: {}/100 profitable, {} sats stolen, {}/{} apply/reject",
             label, adv_maj_operators, profitable_seeds, total_stolen, total_applied, total_rejected
+        );
+    }
+}
+
+/// Observability: does the fuzzer actually exercise disputes? Reports the
+/// distribution of replica DisputeStates for both the safe (2-adv) and
+/// vulnerable (3-adv) configurations. In the 2-adv case we expect ~zero
+/// disputes (adversary can't push through, so honest never auto-triggers).
+/// In the 3-adv case we expect many Disputed replicas (honest refusers of
+/// the adv-majority pushes through).
+#[test]
+#[ignore]
+fn explore_dispute_activity() {
+    for (label, adv) in &[
+        ("2-adv safe", &[0usize, 1][..]),
+        ("3-adv attacked", &[0, 1, 2][..]),
+    ] {
+        let mut total = DisputeSnapshot::default();
+        let mut applied = 0u64;
+        let mut rejected_cosign = 0u64;
+        for seed in 0..100u64 {
+            let mut sim = ProtocolSim::new(5, adv);
+            let mut rng = Rng::new(seed * 104729 + 17);
+            for _ in 0..200 {
+                match sim.step(&mut rng) {
+                    Some(Outcome::Applied) => applied += 1,
+                    Some(Outcome::RejectedCosign) => rejected_cosign += 1,
+                    _ => {}
+                }
+            }
+            let s = sim.snapshot_disputes();
+            total.replicas_normal += s.replicas_normal;
+            total.replicas_disputed += s.replicas_disputed;
+            total.replicas_armed += s.replicas_armed;
+            total.replicas_tombstoned += s.replicas_tombstoned;
+        }
+        let total_replicas = total.replicas_normal
+            + total.replicas_disputed
+            + total.replicas_armed
+            + total.replicas_tombstoned;
+        eprintln!(
+            "{:18} applied={} rejected_cosign={} | replicas: normal={} disputed={} armed={} tombstoned={} ({}% dispute rate)",
+            label,
+            applied,
+            rejected_cosign,
+            total.replicas_normal,
+            total.replicas_disputed,
+            total.replicas_armed,
+            total.replicas_tombstoned,
+            (total.replicas_disputed + total.replicas_armed + total.replicas_tombstoned) * 100
+                / total_replicas.max(1)
         );
     }
 }
