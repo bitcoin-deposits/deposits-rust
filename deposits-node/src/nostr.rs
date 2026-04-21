@@ -1503,6 +1503,109 @@ impl NostrTransport {
         Ok(event_id)
     }
 
+    /// Send an admin-class request gift-wrapped to the operator (recipient)
+    /// and signed by the signer's key (inside the seal). The outer wrap uses
+    /// a throwaway key so relays can't correlate sender identities across
+    /// events, and the rumor inside is a Kind 20101 ledger request with the
+    /// same `#l`/`action` structure the existing handlers already understand.
+    ///
+    /// The daemon's `process_ledger_request` unwraps on the way in and
+    /// populates `gift_wrap_sender` with the seal signer's pubkey; admin
+    /// handlers then enforce via `check_admin_authorized`.
+    ///
+    /// Returns the rumor event id (used by the requester to match the
+    /// eventual response).
+    pub async fn send_admin_request(
+        &self,
+        recipient_hex: &str,
+        ledger_id: &str,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<String, Error> {
+        let content = serde_json::to_string(&params)
+            .map_err(|e| Error::Serialization(format!("Failed to serialize params: {}", e)))?;
+        let recipient_pk = nostr_sdk::PublicKey::from_hex(recipient_hex)
+            .map_err(|e| Error::Nostr(format!("Invalid recipient pubkey: {}", e)))?;
+
+        // ── Rumor: the "real" Kind 20101 event, unsigned per NIP-59 ──
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let rumor_json = serde_json::json!({
+            "kind": KIND_LEDGER_REQUEST,
+            "content": content,
+            "tags": [
+                ["l", ledger_id],
+                ["action", action],
+            ],
+            "pubkey": self.keys.public_key().to_hex(),
+            "created_at": created_at,
+        })
+        .to_string();
+        // Rumor id — the handler returns this as the "event_id" so responses
+        // can be matched to our request.
+        let rumor_id = {
+            use sha2::{Digest, Sha256};
+            // Canonical NIP-01 serialization for event id hashing.
+            let canonical = serde_json::json!([
+                0,
+                self.keys.public_key().to_hex(),
+                created_at,
+                KIND_LEDGER_REQUEST,
+                [["l", ledger_id], ["action", action]],
+                content,
+            ])
+            .to_string();
+            hex::encode(Sha256::digest(canonical.as_bytes()))
+        };
+
+        // ── Seal: NIP-04-encrypted rumor, Kind 13, signed by us ──
+        let seal_content = nip04::encrypt(self.keys.secret_key(), &recipient_pk, &rumor_json)
+            .map_err(|e| Error::Nostr(format!("admin seal encrypt failed: {}", e)))?;
+        let seal_event = EventBuilder::new(Kind::Custom(13), &seal_content)
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("admin seal sign failed: {}", e)))?;
+        let seal_json = serde_json::json!({
+            "id": seal_event.id.to_hex(),
+            "pubkey": seal_event.pubkey.to_hex(),
+            "created_at": seal_event.created_at.as_u64(),
+            "kind": 13,
+            "content": seal_event.content,
+            "sig": seal_event.sig.to_string(),
+        })
+        .to_string();
+
+        // ── Wrap: outer Kind 20101 with a throwaway key ──
+        let throwaway = Keys::generate();
+        let wrap_content = nip04::encrypt(throwaway.secret_key(), &recipient_pk, &seal_json)
+            .map_err(|e| Error::Nostr(format!("admin wrap encrypt failed: {}", e)))?;
+        let wrap = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &wrap_content)
+            .tag(Tag::public_key(recipient_pk))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
+                [ledger_id],
+            ))
+            .tag(Tag::custom(TagKind::custom("action"), [action]))
+            .sign_with_keys(&throwaway)
+            .map_err(|e| Error::Nostr(format!("admin wrap sign failed: {}", e)))?;
+
+        // The daemon's response references the OUTER wrap event id in its
+        // #e tag (that's what process_ledger_request returns as event_id),
+        // so the caller must wait on that id — not the rumor id.
+        let wrap_id = wrap.id.to_hex();
+        let _ = rumor_id;
+
+        // Subscribe BEFORE publishing so a fast response isn't missed.
+        self.subscribe_to_response(&wrap_id).await?;
+
+        self.send_event_with_timeout(wrap)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send admin request: {}", e)))?;
+
+        Ok(wrap_id)
+    }
+
     /// Send a ledger response (reply to a request).
     /// If `gift_wrap_to` is set, the response is gift-wrapped to that pubkey.
     pub async fn send_ledger_response(
@@ -3212,17 +3315,34 @@ impl NostrTransport {
             if !interested.is_empty() && kind_num != 4
             /* EncryptedDirectMessage */
             {
-                let ledger_id = Self::extract_ledger_id_from_event(&event, kind_num);
-                if let Some(lid) = &ledger_id {
-                    if !interested.contains(lid) {
-                        if kind_num == KIND_LEDGER_REQUEST {
-                            tracing::warn!("Dropping kind {} request for ledger {} (not in interested set: {:?})",
-                                kind_num, lid, interested.iter().collect::<Vec<_>>());
+                // Admin / peer-addressed events (#p = our pubkey) bypass the
+                // ledger filter — they're meant for us regardless of which
+                // ledger they reference. Without this, gift-wrapped admin
+                // requests (ledger_open, reserves_create) get dropped as
+                // soon as the daemon has any ledger in its interested set.
+                let our_xonly_hex = {
+                    let (xo, _) = self.our_pubkey.x_only_public_key();
+                    hex::encode(xo.serialize())
+                };
+                let addressed_to_us = event.tags.iter().any(|tag| {
+                    tag.kind()
+                        == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P))
+                        && tag.content() == Some(our_xonly_hex.as_str())
+                });
+
+                if !addressed_to_us {
+                    let ledger_id = Self::extract_ledger_id_from_event(&event, kind_num);
+                    if let Some(lid) = &ledger_id {
+                        if !interested.contains(lid) {
+                            if kind_num == KIND_LEDGER_REQUEST {
+                                tracing::warn!("Dropping kind {} request for ledger {} (not in interested set: {:?})",
+                                    kind_num, lid, interested.iter().collect::<Vec<_>>());
+                            }
+                            return false; // Not our ledger — drop
                         }
-                        return false; // Not our ledger — drop
                     }
+                    // If no ledger_id could be extracted, let it through (safety)
                 }
-                // If no ledger_id could be extracted, let it through (safety)
             }
             drop(interested);
 
@@ -3235,8 +3355,17 @@ impl NostrTransport {
                     let _ = self.ledger_tx.send(update);
                 }
             } else if kind_num == KIND_LEDGER_REQUEST {
-                if let Ok(request) = self.process_ledger_request(&event) {
-                    let _ = self.request_tx.send(request);
+                match self.process_ledger_request(&event) {
+                    Ok(request) => {
+                        let _ = self.request_tx.send(request);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "process_ledger_request failed for event {}: {}",
+                            &event.id.to_hex()[..16],
+                            e
+                        );
+                    }
                 }
             } else if kind_num == KIND_LEDGER_RESPONSE {
                 if let Ok(response) = self.process_ledger_response(&event) {
@@ -3507,9 +3636,48 @@ impl NostrTransport {
             })
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Parse response from content
-        let mut response: LedgerResponse =
-            serde_json::from_str(&event.content).unwrap_or(LedgerResponse {
+        // Parse response from content. If the content isn't valid JSON, the
+        // response may be gift-wrapped (matches `send_ledger_response` with
+        // gift_wrap_to set, e.g. replies to admin-class requests): decrypt
+        // the outer layer, pull the rumor out of the seal, then parse the
+        // rumor's content as LedgerResponse.
+        let response_text: String = match serde_json::from_str::<LedgerResponse>(&event.content) {
+            Ok(_) => event.content.clone(),
+            Err(_) => {
+                // Gift-unwrap
+                let seal_json =
+                    nip04::decrypt(self.keys.secret_key(), &event.pubkey, &event.content)
+                        .map_err(|e| {
+                            Error::Nostr(format!("response gift unwrap outer failed: {}", e))
+                        })?;
+                let seal: serde_json::Value = serde_json::from_str(&seal_json).map_err(|e| {
+                    Error::Nostr(format!("response gift unwrap seal parse failed: {}", e))
+                })?;
+                let seal_pubkey_hex = seal["pubkey"].as_str().ok_or_else(|| {
+                    Error::Nostr("response gift unwrap: missing seal pubkey".to_string())
+                })?;
+                let seal_pubkey = nostr_sdk::PublicKey::from_hex(seal_pubkey_hex).map_err(|e| {
+                    Error::Nostr(format!("response gift unwrap: invalid seal pubkey: {}", e))
+                })?;
+                let rumor_json = nip04::decrypt(
+                    self.keys.secret_key(),
+                    &seal_pubkey,
+                    seal["content"].as_str().unwrap_or(""),
+                )
+                .map_err(|e| {
+                    Error::Nostr(format!("response gift unwrap seal decrypt failed: {}", e))
+                })?;
+                let rumor: serde_json::Value = serde_json::from_str(&rumor_json).map_err(|e| {
+                    Error::Nostr(format!("response gift unwrap rumor parse failed: {}", e))
+                })?;
+                // The rumor carries the response payload as `content` (see
+                // send_ledger_response's gift-wrap branch).
+                rumor["content"].as_str().unwrap_or_default().to_string()
+            }
+        };
+
+        let mut response: LedgerResponse = serde_json::from_str(&response_text).unwrap_or_else(
+            |_| LedgerResponse {
                 success: status == "ok",
                 result: None,
                 error: Some("Failed to parse response".to_string()),
@@ -3517,7 +3685,8 @@ impl NostrTransport {
                 ledger_id: String::new(),
                 event_id: String::new(),
                 timestamp: 0,
-            });
+            },
+        );
 
         response.request_id = request_id.clone();
         response.ledger_id = ledger_id;

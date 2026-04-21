@@ -39,6 +39,12 @@ impl Node {
         let is_cosign_request = request.action == "cosign_update"
             || request.action == "cosign_offer"
             || request.action == "cosign_invoice";
+        // Admin actions aren't tied to a ledger (e.g. reserves_create,
+        // ledger_open are about spinning one up). Gift-wrap unwrapping
+        // already populates gift_wrap_sender, and the handlers enforce
+        // via check_admin_authorized — skip the ledger ownership check.
+        let is_admin_request =
+            request.action == "reserves_create" || request.action == "ledger_open";
 
         // Silently drop operator-only actions if we're not the operator
         // (these are broadcast but only the operator should respond)
@@ -72,7 +78,7 @@ impl Node {
             return;
         }
 
-        if !is_our_ledger && !is_cross_ledger_sign && !is_cosign_request {
+        if !is_our_ledger && !is_cross_ledger_sign && !is_cosign_request && !is_admin_request {
             tracing::info!(
                 "DROP not_ours: action={}, ledger={}...",
                 request.action,
@@ -271,6 +277,8 @@ impl Node {
             "balance_query" => self.process_balance_query_request(&request).await,
             "make_invoice" => self.process_make_invoice_request(&request).await,
             "pay_invoice" => self.process_pay_invoice_request(&request).await,
+            "reserves_create" => self.process_reserves_create_request(&request).await,
+            "ledger_open" => self.process_ledger_open_request(&request).await,
             "bump" => {
                 tracing::info!("Bump requested - syncing wallet and checking deposits...");
                 if let Err(e) = self.sync_wallet() {

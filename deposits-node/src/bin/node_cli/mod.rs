@@ -337,6 +337,56 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     })
 }
 
+/// Send a gift-wrapped admin request to the local daemon and wait for a
+/// response. Use this for operations that must run inside the daemon (hold
+/// the wallet lock, touch the data dir) — `reserves_create`, `ledger_open`,
+/// etc. The rumor is signed by the operator key so the daemon's admin auth
+/// guard accepts it as if it came from the operator themselves.
+pub async fn send_admin_daemon_request(
+    config: &NodeConfig,
+    action: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    use deposits_node::nostr::NostrTransportBuilder;
+
+    if config.relays.is_empty() {
+        return Err("No relay configured. Use --relay <url>".into());
+    }
+
+    let secret_key = super::derive_operator_secret(&config.seed, config.network)?;
+    let (xonly, _) = PublicKey::from_secret_key(&bitcoin::secp256k1::Secp256k1::new(), &secret_key)
+        .x_only_public_key();
+    let recipient = hex::encode(xonly.serialize());
+
+    let mut builder = NostrTransportBuilder::new(secret_key);
+    for relay in &config.relays {
+        builder = builder.relay(relay);
+    }
+    let transport = builder.build().await?;
+
+    // Admin requests aren't tied to a ledger; use the operator's own pubkey
+    // as the #l sentinel. The daemon's filter bypasses it anyway when #p
+    // matches self, and handlers dispatch by action.
+    let req_id = transport
+        .send_admin_request(&recipient, &recipient, action, params)
+        .await?;
+    let resp = transport
+        .wait_for_response(&req_id, 60_000)
+        .await
+        .map_err(|e| format!("admin request timeout: {}", e))?;
+
+    if !resp.success {
+        return Err(format!(
+            "admin {} rejected: {}",
+            action,
+            resp.error.as_deref().unwrap_or("unknown")
+        )
+        .into());
+    }
+    resp.result
+        .ok_or_else(|| "daemon returned no result".into())
+}
+
 /// Send a Nostr request to the daemon and wait for a response.
 ///
 /// This is used by CLI commands that delegate ledger mutations to the running daemon.

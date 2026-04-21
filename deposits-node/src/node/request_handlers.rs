@@ -6,6 +6,51 @@ impl Node {
     // These process incoming Nostr requests for ledger operations.
     // ========================================================================
 
+    /// Check whether an incoming request is authorized to invoke admin-class
+    /// actions (e.g. `ledger_open`, `reserves_create`). Admin requests must
+    /// be gift-wrapped and the unwrapped sender must match either our own
+    /// operator pubkey (local CLI using the operator seed) or the admin
+    /// pubkey registered at bootstrap (remote admin with their own key).
+    ///
+    /// Returns `Ok(())` if authorized; otherwise returns the standard
+    /// handler failure tuple for the caller to return directly.
+    pub(crate) fn check_admin_authorized(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> Result<(), (bool, Option<String>, Option<String>)> {
+        let Some(sender_hex) = request.gift_wrap_sender.as_deref() else {
+            return Err((
+                false,
+                None,
+                Some("admin request must be gift-wrapped".to_string()),
+            ));
+        };
+
+        // Our operator identity as x-only hex (nostr key == operator key).
+        let our_xonly = {
+            let (xo, _) = self.node_id.x_only_public_key();
+            hex::encode(xo.serialize())
+        };
+        if sender_hex == our_xonly {
+            return Ok(());
+        }
+
+        if let Some(admin_pk) = &self.admin_pubkey {
+            if sender_hex == admin_pk.to_hex() {
+                return Ok(());
+            }
+        }
+
+        Err((
+            false,
+            None,
+            Some(format!(
+                "admin request from {}: not operator or registered admin",
+                &sender_hex[..16.min(sender_hex.len())]
+            )),
+        ))
+    }
+
     pub(crate) async fn process_deposit_open_request(
         &self,
         request: &crate::nostr::LedgerRequest,
@@ -4263,5 +4308,102 @@ impl Node {
                 )
             }
         }
+    }
+
+    // ========================================================================
+    // Admin handlers — gift-wrapped requests only, gated by check_admin_authorized.
+    // These expose the filesystem-only bootstrap operations as Nostr actions so
+    // the daemon can run continuously and remote admins can drive them.
+    // ========================================================================
+
+    /// Admin: create a reserves UTXO from the wallet's on-chain balance.
+    /// Params: `{amount_sats: u64}` (defaults to available balance - 1000 if missing).
+    pub(crate) async fn process_reserves_create_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        if let Err(denial) = self.check_admin_authorized(request) {
+            return denial;
+        }
+
+        if let Err(e) = self.sync_wallet() {
+            return (false, None, Some(format!("wallet sync failed: {}", e)));
+        }
+        let balance = match self.wallet_balance() {
+            Ok(b) => b,
+            Err(e) => return (false, None, Some(format!("wallet_balance: {}", e))),
+        };
+
+        // If the caller specified an amount, honor it; otherwise consume the
+        // full balance minus a small reserve for the transaction fee.
+        let amount_sats = request
+            .params
+            .get("amount_sats")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_else(|| balance.saturating_sub(1000));
+        if amount_sats + 1000 > balance {
+            return (
+                false,
+                None,
+                Some(format!(
+                    "insufficient balance: {} sats (need {} + fees)",
+                    balance, amount_sats
+                )),
+            );
+        }
+
+        let reserves = match self.create_reserves(amount_sats, vec![], 0) {
+            Ok(r) => r,
+            Err(e) => return (false, None, Some(format!("create_reserves: {}", e))),
+        };
+        let txid = match self.wallet.broadcast(&reserves.tx) {
+            Ok(t) => t,
+            Err(e) => return (false, None, Some(format!("broadcast: {}", e))),
+        };
+
+        let result = serde_json::json!({
+            "txid": txid.to_string(),
+            "vout": reserves.outpoint.vout,
+            "amount_sats": reserves.amount,
+            "address": reserves.address.to_string(),
+            "timeout_height": reserves.timeout_height,
+        });
+        (true, Some(result.to_string()), None)
+    }
+
+    /// Admin: open a ledger against an existing reserves UTXO.
+    pub(crate) async fn process_ledger_open_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        if let Err(denial) = self.check_admin_authorized(request) {
+            return denial;
+        }
+
+        if let Err(e) = self.sync_wallet() {
+            return (false, None, Some(format!("wallet sync failed: {}", e)));
+        }
+
+        let ledger = match self.open_ledger() {
+            Ok(l) => l,
+            Err(e) => return (false, None, Some(format!("open_ledger: {}", e))),
+        };
+        let ledger_id = ledger.ledger_id_hex();
+
+        // Mark dirty so the run loop's broadcast-dirty pass picks it up. We
+        // can't call broadcast_all_updates here directly: it holds a ledger
+        // read-guard across an await, and this handler is invoked from a
+        // Send-requiring tokio::spawn in main_loop.
+        self.dirty_ledgers
+            .lock()
+            .unwrap()
+            .insert(ledger_id.clone());
+
+        let result = serde_json::json!({
+            "ledger_id": ledger_id,
+            "reserves_key": ledger.state.reserves_key,
+            "operator": ledger.state.operator_key.to_string(),
+        });
+        (true, Some(result.to_string()), None)
     }
 }

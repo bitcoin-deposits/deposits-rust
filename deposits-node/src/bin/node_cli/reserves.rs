@@ -31,7 +31,9 @@ pub async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error:
     }
 }
 
-/// Create a new reserves UTXO
+/// Create a new reserves UTXO by asking the running daemon (gift-wrapped
+/// admin request). The daemon holds the BDK wallet lock; we can't safely
+/// build a second Node over the same data_dir.
 async fn reserves_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Parse amount from first positional argument
     let mut amount_sats: u64 = 100_000_000; // Default 1 BTC
@@ -56,35 +58,27 @@ async fn reserves_create(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     }
 
     let config = parse_config(&config_args)?;
-    let node = Node::new(config).await?;
+    println!("Creating reserves output for {} sats (via daemon)...", amount_sats);
 
-    // Sync wallet first
-    node.sync_wallet()?;
-
-    let balance = node.wallet_balance()?;
-    if balance < amount_sats + 1000 {
-        // Need funds + fee
-        return Err(format!(
-            "Insufficient balance: {} sats (need {} + fees)",
-            balance, amount_sats
-        )
-        .into());
-    }
-
-    println!("Creating reserves output for {} sats...", amount_sats);
-
-    // Create reserves with no partners initially (operator-only for now)
-    let reserves = node.create_reserves(amount_sats, vec![], 0)?;
-
-    // Broadcast the transaction
-    let txid = node.wallet.broadcast(&reserves.tx)?;
+    let params = serde_json::json!({ "amount_sats": amount_sats });
+    let result = super::send_admin_daemon_request(&config, "reserves_create", params).await?;
 
     println!("Reserves created!");
-    println!("  TXID: {}", txid);
-    println!("  Vout: {}", reserves.outpoint.vout);
-    println!("  Amount: {} sats", reserves.amount); // wallet ReservesOutput.amount is in sats
-    println!("  Address: {}", reserves.address);
-    println!("  Timeout height: {}", reserves.timeout_height);
+    if let Some(txid) = result.get("txid").and_then(|v| v.as_str()) {
+        println!("  TXID: {}", txid);
+    }
+    if let Some(vout) = result.get("vout").and_then(|v| v.as_u64()) {
+        println!("  Vout: {}", vout);
+    }
+    if let Some(amt) = result.get("amount_sats").and_then(|v| v.as_u64()) {
+        println!("  Amount: {} sats", amt);
+    }
+    if let Some(addr) = result.get("address").and_then(|v| v.as_str()) {
+        println!("  Address: {}", addr);
+    }
+    if let Some(th) = result.get("timeout_height").and_then(|v| v.as_u64()) {
+        println!("  Timeout height: {}", th);
+    }
 
     Ok(())
 }

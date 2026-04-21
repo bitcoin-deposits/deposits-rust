@@ -126,38 +126,29 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let network = config.network;
     let relays = config.relays.clone();
     let operator_name = config.operator_name.clone();
-    let node = Node::new(config).await?;
 
-    // Sync wallet to get current state
-    node.sync_wallet()?;
+    println!("Opening ledger backed by reserves UTXO (via daemon)...");
 
-    // Check if we have reserves
-    let reserves_balance = node.reserves_balance()?;
-    if reserves_balance == 0 {
-        return Err("No reserves found. Create reserves first with 'reserves' command.".into());
-    }
-
-    println!("Opening ledger backed by reserves UTXO");
-    println!("  Our node ID: {}", node.node_id);
-    println!("  Reserves: {} sats", reserves_balance);
-
-    // Create the ledger
-    let ledger = node.open_ledger()?;
+    let result = super::send_admin_daemon_request(&config, "ledger_open", serde_json::json!({}))
+        .await?;
+    let ledger_id = result
+        .get("ledger_id")
+        .and_then(|v| v.as_str())
+        .ok_or("daemon did not return ledger_id")?
+        .to_string();
+    let reserves_key = result
+        .get("reserves_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     println!("\nLedger opened successfully!");
-    println!("  Ledger ID: {}", ledger.ledger_id_hex());
-    println!("  Operator: {}", ledger.state.operator_key);
-    println!("  Reserves: {}", ledger.state.reserves_key);
-    println!("  Sequence: {}", ledger.state.sequence);
-    println!("  Hash: {:02x?}", &ledger.state.chain_tip_hash[0..8]);
-    // Get ledger identifiers
-    let ledger_id = ledger.ledger_id_hex();
-    let reserves_key = ledger.state.reserves_key.clone();
-
-    // Broadcast all initial updates to Nostr
-    match node.broadcast_all_updates(&ledger_id).await {
-        Ok(count) => println!("  Broadcast {} updates to Nostr", count),
-        Err(e) => eprintln!("  Warning: Failed to broadcast to Nostr: {}", e),
+    println!("  Ledger ID: {}", ledger_id);
+    if let Some(op) = result.get("operator").and_then(|v| v.as_str()) {
+        println!("  Operator: {}", op);
+    }
+    if !reserves_key.is_empty() {
+        println!("  Reserves: {}", reserves_key);
     }
 
     // Print fee schedule if any flags were set
@@ -188,22 +179,11 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
-    // Auto-advertise ledger for wallet discovery
-    auto_advertise_ledger(
-        &node,
-        &reserves_key,
-        &seed,
-        network,
-        &relays,
-        operator_name.as_deref(),
-        &fee_schedule,
-    )
-    .await;
-    if let Err(e) = node.subscribe_to_ledger(&ledger_id).await {
-        eprintln!("  Warning: Failed to subscribe to ledger events: {}", e);
-    } else {
-        println!("  Subscribed to ledger events (requests/disputes)");
-    }
+    // Note: the daemon already loads the new ledger into its state and will
+    // include it in the next `republish_ledger_advertisements` pass (fires on
+    // daemon startup). Operators can also run `ledger advertise` explicitly
+    // after setting their preferred fee schedule.
+    let _ = (seed, network, relays, operator_name, fee_schedule);
 
     Ok(())
 }

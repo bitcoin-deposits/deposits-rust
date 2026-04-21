@@ -72,6 +72,7 @@ impl Node {
         tracing::info!("Node created with ID: {}", node_id);
 
         let node_id_hex = hex::encode(node_id.serialize());
+        let admin_pubkey = Self::load_admin_pubkey(&config.data_dir);
 
         Ok(Self {
             node_id,
@@ -136,7 +137,35 @@ impl Node {
             cosign_member_cache: Mutex::new(HashMap::new()),
             dirty_ledgers: Mutex::new(std::collections::HashSet::new()),
             operator_of_cache: Mutex::new(HashMap::new()),
+            admin_pubkey,
         })
+    }
+
+    /// Load the admin pubkey written by `deposits-node bootstrap init`.
+    /// Accepts either `npub1...` (bech32) or 64-char hex. Returns None if the
+    /// file is missing or malformed; callers then have no admin delegation
+    /// and must operate with the operator seed directly.
+    fn load_admin_pubkey(data_dir: &std::path::Path) -> Option<nostr_sdk::PublicKey> {
+        let path = data_dir.join("admin.npub");
+        let raw = std::fs::read_to_string(&path).ok()?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        match nostr_sdk::PublicKey::parse(trimmed) {
+            Ok(pk) => {
+                tracing::info!("Loaded admin pubkey from {}", path.display());
+                Some(pk)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Ignoring malformed admin.npub ({}): {}",
+                    path.display(),
+                    e
+                );
+                None
+            }
+        }
     }
 
     /// Sync the wallet with the blockchain (full — expensive)

@@ -86,7 +86,7 @@ done
 # Bootstrap-phase relay (single value, used by init/reserves/quorum commands).
 BOOT_RELAY=$(echo "$LEDGER_RELAY" | cut -d',' -f1)
 
-# --- Phase 1: seed + DM admin ---
+# --- Phase 1: seed + DM admin (pre-daemon, creates seed.hex + admin.npub) ---
 if [ ! -f "$DATA_DIR/seed.hex" ]; then
     echo ""
     echo "Phase 1: generating operator key + DMing admin..."
@@ -98,20 +98,7 @@ if [ ! -f "$DATA_DIR/seed.hex" ]; then
 fi
 NODE_SEED=$(cat "$DATA_DIR/seed.hex")
 
-# --- Phase 2: wait for funding + create reserves + open ledger ---
-if [ ! -f "$DATA_DIR/reserves_ready.marker" ]; then
-    echo ""
-    echo "Phase 2: waiting for funding + opening ledger..."
-    deposits-node bootstrap reserves \
-        --seed "$NODE_SEED" \
-        --data-dir "$DATA_DIR" \
-        --network "$NETWORK" \
-        --esplora "$ELECTRUM_URL" \
-        --relay "$BOOT_RELAY"
-    touch "$DATA_DIR/reserves_ready.marker"
-fi
-
-# --- Start deposits-node daemon ---
+# --- Start deposits-node daemon (runs through phases 2 + 3 via admin DMs) ---
 echo ""
 echo "Starting deposits-node daemon..."
 echo "  Network:      $NETWORK"
@@ -133,11 +120,24 @@ deposits-node run \
     $NAME_FLAG &
 DAEMON_PID=$!
 
-# Give the daemon a moment to open its relay subscriptions before we start
-# sending quorum_add requests through it.
+# Give the daemon time to open its relay subscriptions before we start
+# sending admin requests through it.
 sleep 5
 
-# --- Phase 3: quorum formation ---
+# --- Phase 2: wait for funding + create reserves + open ledger (via daemon) ---
+if [ ! -f "$DATA_DIR/reserves_ready.marker" ]; then
+    echo ""
+    echo "Phase 2: waiting for funding + opening ledger..."
+    deposits-node bootstrap reserves \
+        --seed "$NODE_SEED" \
+        --data-dir "$DATA_DIR" \
+        --network "$NETWORK" \
+        --esplora "$ELECTRUM_URL" \
+        --relay "$BOOT_RELAY"
+    touch "$DATA_DIR/reserves_ready.marker"
+fi
+
+# --- Phase 3: discover peers + form Q=5 quorum (via daemon) ---
 if [ ! -f "$DATA_DIR/quorum_active.marker" ]; then
     echo ""
     echo "Phase 3: discovering peers + forming quorum (Q=$QUORUM_SIZE)..."

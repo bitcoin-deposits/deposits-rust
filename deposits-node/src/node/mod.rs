@@ -395,6 +395,11 @@ pub struct Node {
     /// Once true (operator found), the result is permanent.
     /// For false results, we rescan when history grows.
     operator_of_cache: Mutex<HashMap<String, (bool, usize)>>,
+
+    /// Admin identity authorized to send admin-class requests (gift-wrapped
+    /// Kind 20101) alongside our own operator key. Set at bootstrap and
+    /// persisted in {data_dir}/admin.npub (32-byte x-only hex).
+    pub admin_pubkey: Option<nostr_sdk::PublicKey>,
 }
 
 impl Node {

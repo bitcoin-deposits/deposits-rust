@@ -94,6 +94,13 @@ async fn bootstrap_init(args: &[String]) -> Result<(), Box<dyn std::error::Error
     validate_admin_profile(relay, &admin_pk).await?;
     println!("  profile found on {}", relay);
 
+    // Persist the admin pubkey so the daemon authorizes admin-class requests
+    // gift-wrapped by this identity on every startup.
+    std::fs::write(
+        config.data_dir.join("admin.npub"),
+        admin_pk.to_hex(),
+    )?;
+
     // Generate a fresh 128-bit entropy → BIP39 mnemonic. 128 bits = 12 words,
     // which is short enough to copy into a password manager. The first 32
     // bytes of the PBKDF2 seed go into `seed.hex` (existing wallet format).
@@ -254,73 +261,62 @@ async fn send_private_msg_nip17(
 async fn bootstrap_reserves(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_config(args)?;
 
-    let node = Node::new(config.clone()).await?;
-    node.sync_wallet()?;
+    // Phase 2 talks to a running daemon over gift-wrapped admin requests —
+    // the daemon holds the wallet lock, so we never instantiate a second
+    // Node against this data_dir.
 
-    // Already done? Check if we have a ledger already.
-    {
-        let ledgers = node.handler.ledgers.lock().unwrap();
-        if !ledgers.is_empty() {
-            eprintln!("bootstrap reserves: ledger already exists, skipping");
-            return Ok(());
-        }
-    }
-
-    // Display the same funding address that `bootstrap init` wrote out, so
-    // operators watching the log see a stable address while they fund it.
     let addr_file = config.data_dir.join("funding_address");
     let funding_addr = if addr_file.exists() {
         std::fs::read_to_string(&addr_file)?.trim().to_string()
     } else {
-        // Fallback for cases where init wasn't run (e.g. manual bootstrap).
-        let a = node.new_address()?.to_string();
-        std::fs::write(&addr_file, &a)?;
-        a
+        String::from("(unknown — bootstrap init was not run)")
     };
 
-    // Wait for any UTXO to arrive at any wallet address (BDK scans all
-    // derived addresses, so even if the admin pays a non-display one the
-    // balance still surfaces).
+    // Retry reserves_create until the daemon reports the wallet is funded.
+    // The daemon validates balance internally; we use its "insufficient"
+    // error as the cue to sleep and retry. On the first successful call we
+    // know the UTXO has arrived and a reserves tx was broadcast.
     let mut waited = 0u64;
-    let balance = loop {
-        let b = node.wallet_balance()?;
-        if b > 0 {
-            break b;
+    let reserves_result = loop {
+        match super::send_admin_daemon_request(
+            &config,
+            "reserves_create",
+            serde_json::json!({}),
+        )
+        .await
+        {
+            Ok(r) => break r,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("insufficient balance") {
+                    if waited % 60 == 0 {
+                        println!(
+                            "bootstrap reserves: waiting for funding at {} ({}s elapsed)",
+                            funding_addr, waited
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    waited += 15;
+                    continue;
+                }
+                return Err(format!("reserves_create: {}", e).into());
+            }
         }
-        if waited % 60 == 0 {
-            println!(
-                "bootstrap reserves: waiting for funding at {} ({}s elapsed)",
-                funding_addr, waited
-            );
-        }
-        tokio::time::sleep(Duration::from_secs(15)).await;
-        waited += 15;
-        node.sync_wallet()?;
     };
 
-    println!("bootstrap reserves: funded with {} sats", balance);
-
-    // Reserve (total - dust) so there's room for the reserves-tx fee.
-    // create_reserves validates against balance internally.
-    let reserve_sats = balance.saturating_sub(1000);
-    if reserve_sats < 10_000 {
-        return Err(format!(
-            "funded amount too small ({} sats); need at least 11000",
-            balance
-        )
-        .into());
+    if let Some(txid) = reserves_result.get("txid").and_then(|v| v.as_str()) {
+        println!("bootstrap reserves: tx {}", txid);
+    }
+    if let Some(amt) = reserves_result.get("amount_sats").and_then(|v| v.as_u64()) {
+        println!("  amount: {} sats", amt);
     }
 
-    println!("bootstrap reserves: creating reserves UTXO ({} sats)", reserve_sats);
-    let reserves = node.create_reserves(reserve_sats, vec![], 0)?;
-    let txid = node.wallet.broadcast(&reserves.tx)?;
-    println!("  reserves tx: {}", txid);
-    println!("  reserves address: {}", reserves.address);
-
-    // Open the ledger against the fresh reserves UTXO.
-    let ledger = node.open_ledger()?;
-    let ledger_id = ledger.ledger_id_hex();
-    println!("bootstrap reserves: ledger opened {}", ledger_id);
+    // Open a ledger against the newly-created reserves UTXO.
+    let open_result =
+        super::send_admin_daemon_request(&config, "ledger_open", serde_json::json!({})).await?;
+    if let Some(lid) = open_result.get("ledger_id").and_then(|v| v.as_str()) {
+        println!("bootstrap reserves: ledger opened {}", lid);
+    }
 
     Ok(())
 }
