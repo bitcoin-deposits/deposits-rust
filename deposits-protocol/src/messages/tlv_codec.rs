@@ -8,7 +8,7 @@ use crate::tlv::{TlvBuilder, TlvDecode, TlvEncode, TlvError, TlvReader, TlvResul
 mod ledger_op_tlv {
     pub const DISCRIMINANT: u64 = 0;
     pub const AMOUNT: u64 = 2;
-    pub const SPEND_TO: u64 = 4;
+    // 4 was SPEND_TO (unused; declare freed)
     pub const QUORUM_MEMBERS: u64 = 6;
     pub const FEES: u64 = 12;
     pub const PAYMENT_HASH: u64 = 14;
@@ -22,7 +22,7 @@ mod ledger_op_tlv {
     pub const PREIMAGE: u64 = 34;
     pub const BLOCK_HEIGHT: u64 = 36;
     // 38 was COLLATERAL_OPERATOR (removed with collateral-in-UTXO migration)
-    pub const SIGNATURE: u64 = 40;
+    // 40 was SIGNATURE (unused; declare freed)
     pub const LEDGER_HASH: u64 = 42;
     pub const QUORUM_MEMBER: u64 = 44;
     pub const QUORUM_MEMBER_SIG: u64 = 46;

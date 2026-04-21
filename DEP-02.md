@@ -172,6 +172,7 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 82 | membership_expires | 4 | QuorumJoin |
 | 84 | new_outpoint_txid | 32 | QuorumBegin |
 | 86 | quorum_expiry | 4 | QuorumBegin (shortest member membership_until) |
+| 42 | ledger_hash | 32 | QuorumBegin (tip hash committed at rotation) |
 | 88 | collateral_amount_msats | 8 | LedgerOpen, QuorumBegin (security bond) |
 | 90 | spending_txid | 32 | QuorumBegin |
 | 92 | new_outpoint_vout | 4 | QuorumBegin |

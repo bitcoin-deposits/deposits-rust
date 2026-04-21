@@ -186,7 +186,6 @@ const PREIMAGE: u64 = 34;
 const BLOCK_HEIGHT: u64 = 36;
 #[allow(dead_code)]
 const COLLATERAL_OPERATOR: u64 = 38;
-const SIGNATURE: u64 = 40;
 const LEDGER_HASH: u64 = 42;
 const QUORUM_MEMBER: u64 = 44;
 const QUORUM_MEMBER_SIG: u64 = 46;
