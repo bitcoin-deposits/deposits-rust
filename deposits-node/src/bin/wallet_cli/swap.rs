@@ -37,6 +37,24 @@ async fn current_block_for(
     Ok(ad.current_block)
 }
 
+/// Configure the transport's response filter to cover both swap legs.
+/// Must be called BEFORE any send_ledger_request on either ledger — the
+/// response subscription is set up lazily on the first call and is pinned
+/// to the filter at that moment (see nostr::subscribe_to_response).
+fn configure_swap_response_filter(
+    transport: &deposits_node::nostr::NostrTransport,
+    left_ledger: &str,
+    right_ledger: &str,
+) {
+    transport.set_response_ledger_filter(vec![
+        left_ledger.to_string(),
+        right_ledger.to_string(),
+    ]);
+    // Clear the subscription flag so the next send re-subscribes with the
+    // updated filter (first send set it to a single-ledger filter).
+    transport.clear_response_subscription();
+}
+
 /// Submit a TransferLock via the operator. Returns the transfer_id.
 async fn submit_transfer_lock(
     transport: &deposits_node::nostr::NostrTransport,
@@ -70,8 +88,6 @@ async fn submit_transfer_lock(
     let transfer_id = compute_transfer_id(&msg_hash);
     let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
     let signature = secp.sign_schnorr(&msg, &keypair);
-
-    transport.set_response_ledger_filter(vec![ledger_id.to_string()]);
 
     let params = serde_json::json!({
         "nonce": hex::encode(nonce),
@@ -800,6 +816,10 @@ pub async fn swap_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut maker_dest_id = [0u8; 16];
     maker_dest_id.copy_from_slice(&maker_dest_bytes);
 
+    // Configure the response filter so subsequent transfer_lock /
+    // transfer_complete calls (on both legs) are deliverable.
+    configure_swap_response_filter(&transport, &ad.source_ledger, &from_ledger);
+
     // ── 1/3: wait for maker's lock on the ad's source ledger ──
     println!();
     println!(
@@ -1209,6 +1229,9 @@ async fn execute_maker_swap(
     _fee_msats: u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let completion_script = format!("sha256({})", req.hash_hex);
+
+    // Configure the response filter up-front to cover both legs.
+    configure_swap_response_filter(transport, &ad.source_ledger, &req.taker_source_ledger);
 
     // ── 1/4: lock on LEFT (our source ledger) ──
     let left_block = current_block_for(transport, &ad.source_ledger)
