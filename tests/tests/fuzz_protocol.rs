@@ -2109,26 +2109,6 @@ impl ProtocolSim {
         }
         Some((outcome, name, is_adv))
     }
-
-    /// An invariant that must hold on every honest operator's ledger: total
-    /// deposit balance must never exceed reserves. Violated adversary ledgers
-    /// are allowed (that's the attack surface — honest watchers detect it).
-    fn check_honest_invariants(&self) -> Vec<String> {
-        let mut violations = Vec::new();
-        for (i, op) in self.operators.iter().enumerate() {
-            if !self.honest.contains(&i) {
-                continue;
-            }
-            let total = op.ledger.state.total_deposit_balance();
-            if total > op.ledger.state.reserves_amount {
-                violations.push(format!(
-                    "honest op {} over-reserved: total_deposits={} reserves={}",
-                    i, total, op.ledger.state.reserves_amount
-                ));
-            }
-        }
-        violations
-    }
 }
 
 // =========================================================================
@@ -2223,10 +2203,10 @@ fn step2_fuzz_small_honest_invariants_hold() {
             }
         }
 
-        let violations = sim.check_honest_invariants();
+        let violations = sim.check_all_invariants();
         assert!(
             violations.is_empty(),
-            "seed {} produced honest invariant violations: {:?}",
+            "seed {} produced invariant violations: {:#?}",
             seed,
             violations
         );
@@ -2505,16 +2485,70 @@ impl ProtocolSim {
             let st = &op.ledger.state;
             let total = st.total_deposit_balance();
 
-            // Honest operator invariants. Note: locked_balance > balance is
-            // NOT a violation — both fields independently track different
-            // concepts (confirmed balance vs. in-flight locks). Each TransferLock
-            // reduces balance and increases locked, so their ratio can invert
-            // freely after activity.
+            // Honest-only: total obligation must stay within reserves.
             if self.honest.contains(&i) && total > st.reserves_amount {
                 v.push(format!(
                     "honest op {}: total_deposits {} > reserves {}",
                     i, total, st.reserves_amount
                 ));
+            }
+
+            // Universal: per DEP-05, locked_balance is a subset of balance.
+            // locked > balance means we've locked more than the deposit owes.
+            for (did, d) in &st.deposits {
+                if d.locked_balance > d.balance {
+                    v.push(format!(
+                        "op {} deposit {}: locked_balance {} > balance {}",
+                        i,
+                        hex::encode(did),
+                        d.locked_balance,
+                        d.balance
+                    ));
+                }
+            }
+
+            // Universal: sum of pending claims against each deposit must not
+            // exceed that deposit's locked_balance. Catches dangling pending
+            // entries and accounting drift where claims outlive locks.
+            let mut claimed: HashMap<DepositId, u64> = HashMap::new();
+            for pending in st.pending_transfers.values() {
+                let e = claimed.entry(pending.source_deposit_id).or_insert(0);
+                *e = e.saturating_add(pending.amount.saturating_add(pending.fee));
+            }
+            for w in st.pending_withdrawals.values() {
+                let e = claimed.entry(w.deposit_id).or_insert(0);
+                *e = e.saturating_add(w.amount.saturating_add(w.fee_sats));
+            }
+            for lock in st.open_invoice_locks.values() {
+                let e = claimed.entry(lock.deposit_id).or_insert(0);
+                *e = e.saturating_add(lock.amount);
+            }
+            for (did, total_claimed) in &claimed {
+                match st.deposits.get(did) {
+                    Some(d) if d.locked_balance < *total_claimed => {
+                        v.push(format!(
+                            "op {} deposit {}: pending claims {} > locked_balance {}",
+                            i,
+                            hex::encode(did),
+                            total_claimed,
+                            d.locked_balance
+                        ));
+                    }
+                    None => v.push(format!(
+                        "op {}: pending op references missing deposit {}",
+                        i,
+                        hex::encode(did)
+                    )),
+                    _ => {}
+                }
+            }
+
+            // History integrity (honest ledgers only — adversary path uses
+            // apply_state_changes which skips the history append, so there's
+            // nothing well-formed to check).
+            if self.honest.contains(&i) {
+                v.extend(self.check_history_integrity(i));
+                v.extend(self.check_operator_key_transitions(i));
             }
 
             // Every replica held by this operator should track whatever the
@@ -2536,6 +2570,71 @@ impl ProtocolSim {
             }
         }
 
+        v
+    }
+
+    /// Chain continuity + sequence monotonicity on operator i's authoritative
+    /// history. Each entry's sequence_number must be one more than the prior
+    /// entry's; each entry's previous_hash must equal the prior entry's
+    /// `current_hash` (the pre-signing hash, which is what
+    /// `Ledger::append_operation_with_block` stores in `chain_tip_hash` and
+    /// passes to the next update as `previous_hash`).
+    fn check_history_integrity(&self, i: usize) -> Vec<String> {
+        let mut v = Vec::new();
+        let history = &self.operators[i].ledger.history;
+        let mut expected_seq = 0u64;
+        let mut prev_current: Option<[u8; 32]> = None;
+        for (idx, update) in history.iter().enumerate() {
+            if update.sequence_number != expected_seq {
+                v.push(format!(
+                    "op {} history[{}]: sequence_number {} (expected {})",
+                    i, idx, update.sequence_number, expected_seq
+                ));
+            }
+            if let Some(prev) = prev_current {
+                if update.previous_hash != prev {
+                    v.push(format!(
+                        "op {} history[{}]: previous_hash breaks chain",
+                        i, idx
+                    ));
+                }
+            }
+            prev_current = Some(update.current_hash);
+            expected_seq = update.sequence_number.saturating_add(1);
+        }
+        v
+    }
+
+    /// operator_key may only be established by LedgerOpen or changed by
+    /// DisputeAcquire. Walk history, track which of those ops set the key,
+    /// and verify the final state matches.
+    fn check_operator_key_transitions(&self, i: usize) -> Vec<String> {
+        use deposits_protocol::TlvDecode;
+        let mut v = Vec::new();
+        let history = &self.operators[i].ledger.history;
+        let mut last_key: Option<PublicKey> = None;
+        for update in history {
+            if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                match op {
+                    LedgerOperation::LedgerOpen { operator_id, .. } => {
+                        last_key = Some(operator_id);
+                    }
+                    LedgerOperation::DisputeAcquire { new_custodian, .. } => {
+                        last_key = Some(new_custodian);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let current = self.operators[i].ledger.state.operator_key;
+        if let Some(expected) = last_key {
+            if expected != current {
+                v.push(format!(
+                    "op {}: operator_key {} does not match last LedgerOpen/DisputeAcquire's key {}",
+                    i, current, expected
+                ));
+            }
+        }
         v
     }
 
