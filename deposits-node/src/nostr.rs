@@ -1448,19 +1448,53 @@ impl NostrTransport {
         action: &str,
         params: serde_json::Value,
     ) -> Result<String, Error> {
+        // Fallback shim for callers that don't have a ledger context — use a
+        // zero placeholder. The daemon's request parser requires SOME #l tag,
+        // but handlers addressed by action+#p (e.g. health_status) ignore it.
+        self.send_agent_request_on_ledger(agent_pubkey, &"0".repeat(64), action, params)
+            .await
+    }
+
+    /// Like `send_agent_request` but with an explicit ledger_id for the `#l`
+    /// tag. Use this when you know which of the peer's ledgers to route
+    /// against; `process_ledger_request` rejects requests missing `#l`.
+    pub async fn send_agent_request_on_ledger(
+        &self,
+        agent_pubkey: &str,
+        ledger_id: &str,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<String, Error> {
         let content = serde_json::to_string(&params)
             .map_err(|e| Error::Serialization(format!("Failed to serialize params: {}", e)))?;
+
+        // Nostr p-tags require x-only pubkeys (BIP-340, 32 bytes / 64 hex).
+        // Advertisements sometimes carry 33-byte compressed secp256k1 form
+        // (0x02/0x03 prefix + x); strip the prefix so strfry accepts the tag.
+        let p_tag_value: String = if agent_pubkey.len() == 66 {
+            agent_pubkey[2..].to_string()
+        } else {
+            agent_pubkey.to_string()
+        };
 
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &content)
             .tag(Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P)),
-                [agent_pubkey],
+                [p_tag_value.as_str()],
+            ))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
+                [ledger_id],
             ))
             .tag(Tag::custom(TagKind::custom("action"), [action]))
             .sign_with_keys(&self.keys)
             .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
 
         let event_id = event.id.to_hex();
+
+        // Subscribe to the response BEFORE publishing so a fast reply isn't
+        // missed — same race as send_ledger_request handles.
+        self.subscribe_to_response(&event_id).await?;
 
         self.send_event_with_timeout(event)
             .await

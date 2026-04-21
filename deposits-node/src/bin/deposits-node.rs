@@ -79,6 +79,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "run" => node_cli::run::run_node(&args[2..]).await?,
         "info" => node_cli::show_info(&args[2..]).await?,
         "address" => node_cli::show_address(&args[2..]).await?,
+        "bootstrap" => node_cli::bootstrap::bootstrap_command(&args[2..]).await?,
         "reserves" => node_cli::reserves::reserves_command(&args[2..]).await?,
         "quorum" => node_cli::quorum::quorum_command(&args[2..]).await?,
         "ledger" => node_cli::ledger::ledger_command(&args[2..]).await?,

@@ -15,7 +15,7 @@ bdk_wallet = "1.0"
 bdk_esplora = { version = "0.20", features = ["blocking"] }
 
 # Nostr for peer messaging
-nostr-sdk = { version = "0.37", features = ["nip44", "nip47"] }
+nostr-sdk = { version = "0.37", features = ["nip44", "nip47", "nip59"] }
 
 # TLS crypto provider for nostr-sdk
 rustls = { version = "0.23", features = ["ring"] }
@@ -50,6 +50,9 @@ hex = "0.4"
 base64 = "0.22"
 chrono = "0.4"
 sha2 = "0.10"
+
+# BIP39 mnemonic for operator seed delivery (bootstrap)
+bip39 = "2"
 
 # Lightning invoice parsing
 lightning-invoice = "0.32"
