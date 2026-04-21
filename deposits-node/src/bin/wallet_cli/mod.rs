@@ -3,6 +3,7 @@ pub mod deposit;
 pub mod discover;
 pub mod ledger;
 pub mod payments;
+pub mod swap;
 
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{schnorr, Message, PublicKey, Secp256k1, SecretKey};
@@ -53,8 +54,11 @@ pub fn print_usage(program: &str) {
     eprintln!("  balance                     Show balances across all deposits");
     eprintln!("  sync                        Sync deposit statuses from daemon");
     eprintln!("  withdraw <alias> <amt>      Withdraw from a deposit (on-chain)");
+    eprintln!("  send <alias> <amt> --to <dst>  Happy-path intra-ledger transfer (lock+complete)");
     eprintln!("  transfer <alias> <amt>      Lock funds for conditional transfer (HTLC)");
     eprintln!("  transfer_complete <id>      Complete a transfer with preimage");
+    eprintln!("  swap-advertise <alias> <sats>  Publish an open swap offer");
+    eprintln!("  swap-list                   Discover open swap advertisements");
     eprintln!("  route <from> <to> <amt>     Send across ledgers via a courier");
     eprintln!("  spread <amt> [--count N]    Open deposits across N operators");
     eprintln!("  make_invoice <alias> <amt>  Create Lightning invoice for deposit");

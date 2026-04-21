@@ -46,6 +46,7 @@ pub async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                     "reserves_msats": ad.reserves_amount_msats,
                     "obligations_msats": ad.total_obligations_msats,
                     "headroom_msats": ad.available_headroom_msats,
+                    "current_block": ad.current_block,
                 })
             );
         }

@@ -1061,6 +1061,14 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         ad.attested_collateral_msats = ledger.state.total_collateral();
         ad.held_collateral_msats = ledger.state.collateral_amount;
 
+        // Chain tip — lets wallets pick transfer timeouts without a balance_query.
+        // Use the last ledger update's block_height (matches operator's validator).
+        ad.current_block = ledger
+            .history
+            .last()
+            .map(|u| u.block_height)
+            .unwrap_or_else(|| node.wallet.get_block_height().unwrap_or(0));
+
         println!("Publishing ledger advertisement...");
         println!("  Ledger ID: {}...", &ledger_id[..16]);
         println!("  Reserves: {} msats", ad.reserves_amount_msats);

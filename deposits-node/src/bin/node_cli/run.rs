@@ -72,6 +72,13 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     // Start the node
     node.start().await?;
 
+    // Refresh ledger advertisements so the chain tip and obligation counters
+    // reflect reality after a restart (the original ad could be hours old).
+    let published = super::republish_ledger_advertisements(&node).await;
+    if published > 0 {
+        tracing::info!("Refreshed {} ledger advertisement(s)", published);
+    }
+
     // Continuous CPU profiler using pprof-rs (timer-based sampling via ITIMER_PROF).
     // Works in Docker on any host OS — no hardware PMU or perf_event support needed.
     // SIGUSR1 triggers: stop guard, dump collapsed stacks, restart profiling.

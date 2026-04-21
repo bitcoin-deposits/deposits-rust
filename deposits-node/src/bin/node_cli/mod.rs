@@ -537,12 +537,123 @@ pub async fn auto_advertise_ledger(
         .reserves_amount_msats
         .saturating_sub(total_obligations_msats);
 
+    // Chain tip — lets wallets pick transfer timeouts without a balance_query.
+    // Use the last ledger update's block_height because that's what the operator
+    // validates timeouts against (current_block + max_timeout). The BDK wallet
+    // tip can run ahead if the ledger is idle, which would let wallets pick
+    // timeouts the operator then rejects.
+    ad.current_block = ledger
+        .history
+        .last()
+        .map(|u| u.block_height)
+        .unwrap_or_else(|| node.wallet.get_block_height().unwrap_or(0));
+
     // Use the node's existing transport — avoids ephemeral connection race where
     // a new transport disconnects before the relay processes the write.
     match node.nostr.publish_ledger_advertisement(&ad).await {
         Ok(_) => println!("  Advertised ledger for wallet discovery"),
         Err(e) => eprintln!("  Warning: Failed to advertise ledger: {}", e),
     }
+}
+
+/// Refresh ledger advertisements on startup so the chain tip and obligation
+/// counters aren't stale.
+///
+/// Fetches the most recent ad for each operator ledger, replaces the dynamic
+/// fields (current_block, obligations, headroom, collateral counters), and
+/// republishes. Static fields (fees, limits, name, description, relay_url) are
+/// preserved — the original `ledger advertise` call is the source of truth for
+/// those. If no prior ad exists for a ledger, it is skipped (the operator must
+/// run `ledger advertise` to set initial terms).
+pub async fn republish_ledger_advertisements(node: &Node) -> usize {
+    let ledger_ids: Vec<String> = {
+        let ledgers = node.handler.ledgers.lock().unwrap();
+        ledgers
+            .iter()
+            .filter(|(_, arc)| {
+                let l = arc.read().unwrap();
+                matches!(l.role, deposits_core::ledger::LedgerRole::Operator)
+            })
+            .map(|(lid, _)| lid.clone())
+            .collect()
+    };
+
+    let wallet_tip = node.wallet.get_block_height().unwrap_or(0);
+    let mut published = 0;
+
+    for ledger_id in ledger_ids {
+        let existing = match node.nostr.fetch_ledger_advertisement(&ledger_id).await {
+            Ok(Some(ad)) => ad,
+            Ok(None) => {
+                tracing::debug!(
+                    "No prior advertisement for ledger {} — skipping republish",
+                    &ledger_id[..16]
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch advertisement for {}: {}",
+                    &ledger_id[..16],
+                    e
+                );
+                continue;
+            }
+        };
+
+        let mut ad = existing;
+
+        // Refresh dynamic fields from the local ledger snapshot.
+        let refreshed = {
+            let ledgers = node.handler.ledgers.lock().unwrap();
+            ledgers.get(&ledger_id).map(|arc| {
+                let l = arc.read().unwrap();
+                // Use last ledger update's block_height — that's what operator
+                // validators compare timeouts against (see request_handlers.rs).
+                let last_block = l
+                    .history
+                    .last()
+                    .map(|u| u.block_height)
+                    .unwrap_or(wallet_tip);
+                (
+                    l.reserves_amount(),
+                    l.total_deposit_balance(),
+                    l.state.total_collateral(),
+                    l.state.collateral_amount,
+                    last_block,
+                )
+            })
+        };
+        let Some((reserves, obligations, total_collateral, held_collateral, last_block)) =
+            refreshed
+        else {
+            continue;
+        };
+
+        ad.reserves_amount_msats = reserves;
+        ad.total_obligations_msats = obligations;
+        ad.available_headroom_msats = reserves.saturating_sub(obligations);
+        ad.received_collateral_msats = total_collateral;
+        ad.attested_collateral_msats = total_collateral;
+        ad.held_collateral_msats = held_collateral;
+        ad.current_block = last_block;
+
+        match node.nostr.publish_ledger_advertisement(&ad).await {
+            Ok(_) => {
+                published += 1;
+                tracing::debug!("Republished advertisement for {}", &ledger_id[..16]);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to republish advertisement for {}: {}",
+                    &ledger_id[..16],
+                    e
+                );
+            }
+        }
+    }
+
+    published
 }
 
 /// Format an operation type and extract details from the message

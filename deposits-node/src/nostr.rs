@@ -109,6 +109,21 @@ pub const KIND_LEDGER_ADVERTISE: u16 = 39100;
 /// Content: JSON with per-ledger directional fees and balances.
 pub const KIND_AGENT_ADVERTISE: u16 = 39102;
 
+/// Custom Kind for open swap advertisement (bilateral peer-swap bootstrap).
+/// Uses NIP-33 parameterized replaceable events (30000-39999).
+/// Tag `d` = source_deposit_id ensures one ad per deposit per author.
+/// Content: JSON with source ledger/deposit, available amount, desired
+/// destination ledgers (preference hint, not a whitelist), and swap fees.
+pub const KIND_SWAP_ADVERTISE: u16 = 39103;
+
+/// Ephemeral swap-request event: taker → maker, proposing a specific swap
+/// against a published SwapAdvertisement. Addressed via #p = maker_pubkey.
+pub const KIND_SWAP_REQUEST: u16 = 20103;
+
+/// Ephemeral swap-response event: maker → taker, accepting or rejecting a
+/// swap_request. Addressed via #p = taker_pubkey and #e = request event id.
+pub const KIND_SWAP_RESPONSE: u16 = 20104;
+
 /// Custom Kind for fraud proof broadcasts (wallet evidence of operator dishonesty)
 /// Uses range 1000-9999 (regular custom events) for relay storage.
 /// Published by wallets with evidence embedded in the causal chain.
@@ -532,6 +547,11 @@ pub struct LedgerAdvertisement {
     /// Network (bitcoin, testnet, signet, regtest)
     pub network: String,
 
+    /// Operator's observed Bitcoin chain tip at publish time.
+    /// Lets wallets pick timeouts without a separate `balance_query` round-trip.
+    #[serde(default)]
+    pub current_block: u32,
+
     /// Version of the advertisement format
     #[serde(default = "default_version")]
     pub version: u8,
@@ -591,6 +611,140 @@ pub struct AgentLedgerEntry {
     pub fee_out_rate_bps: u64,
 }
 
+/// Open swap advertisement (Kind 39103).
+///
+/// Published by a wallet holding a deposit on one ledger, signaling openness
+/// to bilateral peer-swaps into other ledgers. Unlike `AgentAdvertisement`
+/// (which frames the publisher as routing infrastructure), a swap ad is a
+/// one-shot availability signal — "I have funds on X, I'd like Y or Z."
+///
+/// `desired_ledgers` is a preference hint, not a whitelist: a taker may still
+/// ask to swap into an unlisted ledger and the maker decides at negotiation
+/// time.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SwapAdvertisement {
+    /// Maker's Nostr pubkey (hex).
+    pub maker_pubkey: String,
+
+    /// Network (bitcoin, testnet, signet, regtest).
+    pub network: String,
+
+    /// Ledger where the maker holds the source funds.
+    pub source_ledger: String,
+
+    /// Source deposit ID (hex, 32 chars / 16 bytes).
+    pub source_deposit_id: String,
+
+    /// How much the maker is willing to swap out of `source_deposit_id` (msats).
+    pub available_msats: u64,
+
+    /// Ledgers the maker would prefer to receive on. Empty = no preference;
+    /// taker can propose any destination and maker decides at negotiation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub desired_ledgers: Vec<String>,
+
+    /// Flat swap fee in msats (charged by the maker on top of the amount).
+    #[serde(default)]
+    pub fee_fixed_msats: u64,
+
+    /// Proportional swap fee in basis points.
+    #[serde(default)]
+    pub fee_rate_bps: u16,
+
+    /// Per-swap minimum (msats).
+    #[serde(default)]
+    pub min_swap_msats: u64,
+
+    /// Per-swap maximum (msats). 0 = no cap.
+    #[serde(default)]
+    pub max_swap_msats: u64,
+
+    /// Relay where the maker listens for `swap_request` events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
+
+    /// Unix timestamp after which this ad should be ignored. 0 = no expiry.
+    #[serde(default)]
+    pub expires_at: u64,
+
+    /// Optional human-readable note (e.g. "offline after 5pm UTC").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+
+    /// Nostr event ID of this advertisement.
+    #[serde(skip)]
+    pub event_id: String,
+
+    /// Timestamp when published.
+    #[serde(skip)]
+    pub timestamp: u64,
+}
+
+/// A taker's proposal to execute a specific swap against a SwapAdvertisement.
+/// Published as Kind 20103 (ephemeral), signed by the taker, and addressed
+/// to the maker via a #p tag.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SwapRequest {
+    /// Event ID of the SwapAdvertisement this request references.
+    pub swap_ad_event_id: String,
+    /// Amount the taker wants to swap (msats out of the ad's source deposit).
+    pub amount_msats: u64,
+    /// sha256(preimage) — only the taker knows the preimage until reveal.
+    pub hash_hex: String,
+    /// Ledger the taker is offering on their side (the "right" leg).
+    pub taker_source_ledger: String,
+    /// Taker's deposit on `taker_source_ledger` that will fund the right leg.
+    pub taker_source_deposit_id: String,
+    /// Taker's deposit on the ad's source_ledger where they want to receive.
+    pub taker_dest_deposit_id: String,
+    /// Relay where the taker will listen for the response.
+    pub relay_url: String,
+    /// Nostr event ID of this request.
+    #[serde(skip)]
+    pub event_id: String,
+    /// Event author (= taker pubkey, hex).
+    #[serde(skip)]
+    pub taker_pubkey: String,
+    /// Timestamp when the request was published.
+    #[serde(skip)]
+    pub timestamp: u64,
+}
+
+/// A maker's response to a SwapRequest. Published as Kind 20104 (ephemeral),
+/// signed by the maker, addressed via #p = taker_pubkey and #e = request id.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SwapResponse {
+    /// Event ID of the SwapRequest this responds to.
+    pub request_event_id: String,
+    /// Whether the maker accepts the proposed swap.
+    pub accepted: bool,
+    /// Human-readable reject reason (present when `accepted == false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Maker's deposit on the taker's source ledger (destination of the right
+    /// leg). Present iff `accepted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker_dest_deposit_id: Option<String>,
+    /// Maker's intended timeout for the left leg (blocks in the future).
+    /// Maker locks on source_ledger with this timeout.
+    #[serde(default)]
+    pub timeout_left_blocks: u32,
+    /// Suggested timeout for the right leg (taker's lock). Must exceed
+    /// `timeout_left_blocks` by at least the maker's safety delta.
+    #[serde(default)]
+    pub timeout_right_blocks: u32,
+    /// Fee the maker will charge (msats). Derived from the ad's fee terms
+    /// and the requested amount.
+    #[serde(default)]
+    pub fee_msats: u64,
+    /// Nostr event ID of this response.
+    #[serde(skip)]
+    pub event_id: String,
+    /// Timestamp when the response was published.
+    #[serde(skip)]
+    pub timestamp: u64,
+}
+
 impl LedgerAdvertisement {
     /// Create a new advertisement with required fields
     pub fn new(
@@ -625,6 +779,7 @@ impl LedgerAdvertisement {
             access_control: false,
             allowed_domains: Vec::new(),
             network,
+            current_block: 0,
             version: 1,
             event_id: String::new(),
             timestamp: 0,
@@ -1975,6 +2130,238 @@ impl NostrTransport {
 
         ads.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         Ok(ads)
+    }
+
+    /// Publish a swap advertisement (Kind 39103). The d-tag is the source
+    /// deposit_id so one author can advertise multiple open swaps.
+    pub async fn publish_swap_advertisement(
+        &self,
+        ad: &SwapAdvertisement,
+    ) -> Result<String, Error> {
+        let content = serde_json::to_string(ad).map_err(|e| {
+            Error::Serialization(format!("Failed to serialize swap advertisement: {}", e))
+        })?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let event = EventBuilder::new(Kind::Custom(KIND_SWAP_ADVERTISE), &content)
+            .custom_created_at(Timestamp::from(now))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_ID),
+                [ad.source_deposit_id.as_str()],
+            ))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                [ad.source_ledger.as_str()],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign swap ad: {}", e)))?;
+
+        let event_id = event.id.to_hex();
+        self.send_event_with_timeout(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send swap ad: {}", e)))?;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        Ok(event_id)
+    }
+
+    /// Fetch open swap advertisements (Kind 39103) visible on the relays.
+    /// Expired ads are filtered out.
+    pub async fn fetch_swap_advertisements(
+        &self,
+        network: &str,
+    ) -> Result<Vec<SwapAdvertisement>, Error> {
+        let filter = Filter::new().kind(Kind::Custom(KIND_SWAP_ADVERTISE));
+
+        let events = self
+            .client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch swap advertisements: {}", e)))?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut ads = Vec::new();
+        for event in events.iter() {
+            if let Ok(mut ad) = serde_json::from_str::<SwapAdvertisement>(&event.content) {
+                if ad.network != network {
+                    continue;
+                }
+                if ad.expires_at != 0 && ad.expires_at < now {
+                    continue;
+                }
+                ad.event_id = event.id.to_hex();
+                ad.timestamp = event.created_at.as_u64();
+                ads.push(ad);
+            }
+        }
+
+        ads.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(ads)
+    }
+
+    /// Publish a SwapRequest addressed to a maker (Kind 20103).
+    pub async fn publish_swap_request(
+        &self,
+        maker_pubkey: &str,
+        req: &SwapRequest,
+    ) -> Result<String, Error> {
+        let content = serde_json::to_string(req).map_err(|e| {
+            Error::Serialization(format!("Failed to serialize swap request: {}", e))
+        })?;
+
+        let event = EventBuilder::new(Kind::Custom(KIND_SWAP_REQUEST), &content)
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_PUBKEY),
+                [maker_pubkey],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign swap request: {}", e)))?;
+
+        let event_id = event.id.to_hex();
+        self.send_event_with_timeout(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send swap request: {}", e)))?;
+        Ok(event_id)
+    }
+
+    /// Publish a SwapResponse to a taker (Kind 20104). `taker_pubkey` is the
+    /// hex-serialized secp256k1 pubkey the response is addressed to.
+    pub async fn publish_swap_response(
+        &self,
+        taker_pubkey: &str,
+        resp: &SwapResponse,
+    ) -> Result<String, Error> {
+        let content = serde_json::to_string(resp).map_err(|e| {
+            Error::Serialization(format!("Failed to serialize swap response: {}", e))
+        })?;
+
+        let event = EventBuilder::new(Kind::Custom(KIND_SWAP_RESPONSE), &content)
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_PUBKEY),
+                [taker_pubkey],
+            ))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_EVENT_REF),
+                [resp.request_event_id.as_str()],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign swap response: {}", e)))?;
+
+        let event_id = event.id.to_hex();
+        self.send_event_with_timeout(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send swap response: {}", e)))?;
+        Ok(event_id)
+    }
+
+    /// Subscribe to SwapResponses on active relays. Must be called before
+    /// `publish_swap_request` so the broadcast subscription is live when the
+    /// maker responds. Ephemeral events (20000-29999) are not stored by relays;
+    /// they are only delivered to subscribers active at publish time.
+    pub async fn subscribe_swap_responses(&self) -> Result<(), Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_SWAP_RESPONSE))
+            .since(Timestamp::now() - 5);
+        self.client
+            .subscribe(vec![filter], None)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to subscribe to swap responses: {}", e)))?;
+        Ok(())
+    }
+
+    /// Wait for a SwapResponse to a specific request event id. The receiver
+    /// MUST have been created before the request was published — broadcast
+    /// receivers only see events sent after their creation.
+    pub async fn wait_for_swap_response(
+        &self,
+        rx: &mut tokio::sync::broadcast::Receiver<RelayPoolNotification>,
+        request_event_id: &str,
+        timeout_ms: u64,
+    ) -> Result<SwapResponse, Error> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::Nostr("swap response timeout".into()));
+            }
+            let recv = tokio::time::timeout(remaining, rx.recv()).await;
+            let notif = match recv {
+                Ok(Ok(n)) => n,
+                Ok(Err(_)) | Err(_) => {
+                    return Err(Error::Nostr("swap response timeout".into()));
+                }
+            };
+            if let RelayPoolNotification::Event { event, .. } = notif {
+                if event.kind.as_u16() != KIND_SWAP_RESPONSE {
+                    continue;
+                }
+                if let Ok(mut resp) = serde_json::from_str::<SwapResponse>(&event.content) {
+                    if resp.request_event_id == request_event_id {
+                        resp.event_id = event.id.to_hex();
+                        resp.timestamp = event.created_at.as_u64();
+                        return Ok(resp);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Subscribe to inbound SwapRequests addressed to our pubkey. Must be
+    /// called before any `next_swap_request` calls — ephemeral events are
+    /// only delivered while a subscription is active.
+    pub async fn subscribe_swap_requests(&self, our_pubkey: &str) -> Result<(), Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_SWAP_REQUEST))
+            .custom_tag(TAG_PUBKEY, [our_pubkey])
+            .since(Timestamp::now() - 5);
+        self.client
+            .subscribe(vec![filter], None)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to subscribe to swap requests: {}", e)))?;
+        Ok(())
+    }
+
+    /// Wait for the next SwapRequest on the active subscription. Returns
+    /// `None` if no request arrives within `timeout_ms`. The receiver MUST
+    /// have been created before `subscribe_swap_requests` — see the note on
+    /// `wait_for_swap_response`.
+    pub async fn next_swap_request(
+        &self,
+        rx: &mut tokio::sync::broadcast::Receiver<RelayPoolNotification>,
+        timeout_ms: u64,
+    ) -> Result<Option<SwapRequest>, Error> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            let recv = tokio::time::timeout(remaining, rx.recv()).await;
+            let notif = match recv {
+                Ok(Ok(n)) => n,
+                Ok(Err(_)) | Err(_) => return Ok(None),
+            };
+            if let RelayPoolNotification::Event { event, .. } = notif {
+                if event.kind.as_u16() != KIND_SWAP_REQUEST {
+                    continue;
+                }
+                if let Ok(mut req) = serde_json::from_str::<SwapRequest>(&event.content) {
+                    req.event_id = event.id.to_hex();
+                    req.taker_pubkey = event.pubkey.to_hex();
+                    req.timestamp = event.created_at.as_u64();
+                    return Ok(Some(req));
+                }
+            }
+        }
     }
 
     /// Re-mirror our own advertisements to the durable (slow) relay.
