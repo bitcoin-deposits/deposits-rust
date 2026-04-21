@@ -1931,7 +1931,7 @@ async function discoverLedgers() {
     updateEvents = await fetchEvents({ kinds: [9100], limit: 2000 }, 15000);
   }
 
-  window._ledgerCollateral = {};  // ledger_id → total_collateral msats (from QuorumBegin)
+  window._ledgerCollateral = {};  // ledger_id → collateral_amount_msats (from QuorumBegin field 88)
   for (const ev of updateEvents) {
     try {
       const u = decodeUpdate(ev.content);
@@ -1953,8 +1953,8 @@ async function discoverLedgers() {
             if (!edgeSet.has(key)) { edgeSet.add(key); graphEdges.push({ from: opNode.id, to: memberNode.id }); }
           }
         }
-      } else if (u.opDisc === 12) { // QuorumBegin — field 6=member pubkeys, field 88=total_collateral
-        // Extract total_collateral (field 88) — authoritative sum from rotation time
+      } else if (u.opDisc === 12) { // QuorumBegin — field 6=member pubkeys, field 88=collateral_amount_msats
+        // Extract collateral_amount_msats (field 88) — authoritative sum from rotation time
         const totalCollatField = u.opFields.find(f => f.type === 88);
         if (totalCollatField && (totalCollatField.u64 || 0) > 0) {
           const collateral = totalCollatField.u64;
@@ -1988,7 +1988,7 @@ async function discoverLedgers() {
     } catch {}
   }
 
-  // _ledgerCollateral populated above from QuorumBegin total_collateral (msats)
+  // _ledgerCollateral populated above from QuorumBegin field 88 (collateral_amount_msats)
 
   // Initial positions — circle layout
   const cx = 200, cy = 175, r = 120;

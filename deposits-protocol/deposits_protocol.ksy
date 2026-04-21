@@ -189,10 +189,12 @@ types:
   #   96  = genesis_block (u32, LedgerOpen)
   #
   # Deposits:
-  #   18  = cosigner_guarantee_sig (64 bytes, DepositOpen)
+  #   18  = cosigner_sig (64 bytes, DepositOpen co-signer guarantee, optional)
+  #   24  = deposit_pubkey (33 bytes, DepositOpen)
   #   200 = deposit_id (16 bytes)
   #   202 = descriptor (string, miniscript)
   #   204 = witness (nested TLV)
+  #   206 = witness_element (bytes, sub-TLV inside type 204)
   #   208 = new_descriptor (string)
   #   232 = receive_requires_sig (u8, 0 or 1)
   #
@@ -236,7 +238,6 @@ types:
   #   46  = quorum_member_sig (64 bytes, QuorumAddMember)
   #   48  = operator_sig (64 bytes, QuorumRemoveMember)
   #   76  = reserved (was lock_until_block)
-  #   80  = our_signature (64 bytes, QuorumJoin)
   #   82  = membership_expires (u32, QuorumJoin)
   #   114 = member_ledger_id (string)
   #   124 = reserved (was collateral_ledger_id)

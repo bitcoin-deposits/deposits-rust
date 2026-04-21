@@ -32,10 +32,13 @@ echo "};"
 echo ""
 
 # --- FIELD_NAMES: "#   2   = amount (u64, msats)" lines ---
+# Skip entries whose name is "reserved" (marker for removed TLV types) — they
+# shouldn't appear in the catalog the wallet uses for display.
 echo "export const FIELD_NAMES = {"
 sed -n '/TLV field type reference/,/^  [a-z]/p' "$KSY" | \
     grep -E '^ *# +[0-9]+ += +[a-z]' | \
     sed -E "s/^ *# +([0-9]+) += +([a-z_]+).*/\1 \2/" | \
+    grep -v ' reserved$' | \
     sort -n -u | \
     while read num name; do
         echo "  ${num}: '${name}',"
