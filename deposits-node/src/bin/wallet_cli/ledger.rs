@@ -377,7 +377,20 @@ fn format_operation(op: &LedgerOperation) -> (String, Option<deposits_core::type
             ("FeeCollect".to_string(), Some(*deposit_id))
         }
         LedgerOperation::QuorumBegin { .. } => ("QuorumBegin".to_string(), None),
-        _ => ("Unknown".to_string(), None),
+        LedgerOperation::DepositKeyRotate { deposit_id, .. } => {
+            ("DepositKeyRotate".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::TransferLock {
+            source_deposit_id, ..
+        } => ("TransferLock".to_string(), Some(*source_deposit_id)),
+        LedgerOperation::TransferComplete { .. } => ("TransferComplete".to_string(), None),
+        LedgerOperation::TransferFail { .. } => ("TransferFail".to_string(), None),
+        LedgerOperation::DisputeEnter { .. } => ("DisputeEnter".to_string(), None),
+        LedgerOperation::DisputeArmed { .. } => ("DisputeArmed".to_string(), None),
+        LedgerOperation::DisputeAcquire { .. } => ("DisputeAcquire".to_string(), None),
+        LedgerOperation::DisputeYield => ("DisputeYield".to_string(), None),
+        LedgerOperation::DeliveryEmbed { .. } => ("DeliveryEmbed".to_string(), None),
+        LedgerOperation::LedgerClose => ("LedgerClose".to_string(), None),
     }
 }
 

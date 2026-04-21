@@ -790,14 +790,14 @@ pub async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Err
         println!(
             "  Total:  {} sats ({} BTC)  [{} pending]",
             total_sats,
-            total_sats as f64 / 100_000_000_000.0,
+            total_sats as f64 / 100_000_000.0,
             total_locked
         );
     } else {
         println!(
             "  Total:  {} sats ({} BTC)",
             total_sats,
-            total_sats as f64 / 100_000_000_000.0
+            total_sats as f64 / 100_000_000.0
         );
     }
     println!();

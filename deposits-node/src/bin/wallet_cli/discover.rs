@@ -100,7 +100,7 @@ pub async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         println!("   Ledger: {}", ad.ledger_id);
         println!(
             "   Available: {} sats ({} BTC)",
-            ad.available_headroom_msats,
+            ad.available_headroom_msats / 1000,
             ad.available_headroom_msats as f64 / 100_000_000_000.0
         );
         println!(
@@ -320,11 +320,14 @@ pub async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("--------");
     println!(
         "Available Headroom: {} sats ({} BTC)",
-        ad.available_headroom_msats,
+        ad.available_headroom_msats / 1000,
         ad.available_headroom_msats as f64 / 100_000_000_000.0
     );
-    println!("Total Reserves: {} sats", ad.reserves_amount_msats);
-    println!("Current Obligations: {} sats", ad.total_obligations_msats);
+    println!("Total Reserves: {} sats", ad.reserves_amount_msats / 1000);
+    println!(
+        "Current Obligations: {} sats",
+        ad.total_obligations_msats / 1000
+    );
     println!();
     println!("Trust & Security");
     println!("----------------");

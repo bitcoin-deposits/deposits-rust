@@ -1253,6 +1253,12 @@ impl NostrTransport {
 
         let event_id = event.id.to_hex();
 
+        // Ensure response subscription is active *before* publishing — operators
+        // can respond within milliseconds, well before a post-publish subscribe
+        // would complete setup. Without this the wallet would silently miss the
+        // response and fall through to a timeout.
+        self.subscribe_to_response(&event_id).await?;
+
         self.send_event_with_timeout(event)
             .await
             .map_err(|e| Error::Nostr(format!("Failed to send request: {}", e)))?;

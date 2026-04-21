@@ -185,7 +185,9 @@ pub async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let mut dest_deposit_id: Option<String> = None;
     let mut hash_hex: Option<String> = None;
     let mut timeout_height: Option<u32> = None;
-    let mut fee_msats: u64 = 2; // Default fixed fee in msats (matches TransferFeeSchedule::default())
+    // If --fee isn't supplied, compute from TransferFeeSchedule::default()
+    // (fixed_msats=2, rate_bps=20) against the transfer amount below.
+    let mut fee_msats_override: Option<u64> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -204,7 +206,7 @@ pub async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Er
                 i += 1;
             }
             "--fee" if i + 1 < args.len() => {
-                fee_msats = args[i + 1].parse()?;
+                fee_msats_override = Some(args[i + 1].parse()?);
                 i += 1;
             }
             s if s.starts_with("--") => {
@@ -301,6 +303,18 @@ pub async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
     // Convert to msats for signing and request
     let amount_msats = amount_sats * 1000;
+
+    // Resolve fee: use --fee if supplied, otherwise compute from the default
+    // TransferFeeSchedule (fixed_msats=2, rate_bps=20 per core.rs).
+    let fee_msats = match fee_msats_override {
+        Some(f) => f,
+        None => {
+            let default = deposits_core::types::TransferFeeSchedule::default();
+            default
+                .fixed_msats
+                .saturating_add(amount_msats.saturating_mul(default.rate_bps as u64) / 10_000)
+        }
+    };
 
     // Compute signing message and transfer_id (all in msats)
     let msg_hash = deposits_core::signature_utils::transfer_lock_signing_message(
