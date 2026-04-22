@@ -238,8 +238,11 @@ async fn send_private_msg_nip17(
         .map_err(|e| format!("add_relay: {}", e))?;
     client.connect().await;
 
-    // NIP-17 private_msg: builds the rumor, seals it with signer, gift-wraps
-    // with a fresh throwaway key, and returns the wrap event ready to send.
+    // Real NIP-17 DM: Kind 1059 outer, NIP-44 encryption, Kind 14 rumor.
+    // Distinct from the custom Kind-20101 envelope in NostrTransport
+    // ::send_admin_request (see that fn's doc for the divergences). We use
+    // real NIP-17 here because the recipient is an *external* admin running
+    // a normal Nostr client, not our own daemon.
     let extra: Vec<Tag> = Vec::new();
     let event = EventBuilder::private_msg(&keys, *recipient, body, extra)
         .await

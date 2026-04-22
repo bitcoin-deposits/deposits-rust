@@ -1503,18 +1503,39 @@ impl NostrTransport {
         Ok(event_id)
     }
 
-    /// Send an admin-class request gift-wrapped to the operator (recipient)
-    /// and signed by the signer's key (inside the seal). The outer wrap uses
-    /// a throwaway key so relays can't correlate sender identities across
-    /// events, and the rumor inside is a Kind 20101 ledger request with the
-    /// same `#l`/`action` structure the existing handlers already understand.
+    /// Send an admin-class request as a *custom* gift-wrapped Kind 20101.
     ///
-    /// The daemon's `process_ledger_request` unwraps on the way in and
-    /// populates `gift_wrap_sender` with the seal signer's pubkey; admin
-    /// handlers then enforce via `check_admin_authorized`.
+    /// ## Not NIP-17 — deliberate differences
     ///
-    /// Returns the rumor event id (used by the requester to match the
-    /// eventual response).
+    /// This envelope borrows the *shape* of NIP-59 gift-wrap (rumor → seal →
+    /// outer wrap) but is **not** interoperable with standard NIP-17 DM
+    /// clients. The divergences are intentional — they let admin requests
+    /// ride the existing Kind 20101 request pipeline (subscription filter,
+    /// `process_ledger_request` unwrap, action dispatch, response routing):
+    ///
+    /// | Field            | NIP-17      | This scheme                      |
+    /// |------------------|-------------|----------------------------------|
+    /// | Outer wrap kind  | 1059        | 20101 (KIND_LEDGER_REQUEST)      |
+    /// | Rumor kind       | 14          | 20101 (reuses request handlers)  |
+    /// | Seal kind        | 13          | 13 ✓                             |
+    /// | Encryption       | NIP-44      | NIP-04 (matches existing path)   |
+    ///
+    /// If we ever want interop with external Nostr DM clients, migrate to
+    /// real NIP-17 via `EventBuilder::private_msg` (already used for the
+    /// admin-onboarding DM in `bootstrap init`).
+    ///
+    /// ## Intentional response-id convention
+    ///
+    /// The returned id is the **outer wrap's** event id, not the rumor's.
+    /// The daemon's `process_ledger_request` already sets `event_id` from
+    /// `event.id` (i.e. the wrap), and `send_ledger_response` tags its
+    /// reply with that same id. Returning the rumor id would force a
+    /// second lookup table on the daemon side with no benefit.
+    ///
+    /// The seal's signer pubkey is surfaced to handlers as
+    /// `gift_wrap_sender`; `check_admin_authorized` uses it to confirm the
+    /// request came from the operator key or the admin pubkey registered
+    /// at bootstrap.
     pub async fn send_admin_request(
         &self,
         recipient_hex: &str,
@@ -1527,7 +1548,9 @@ impl NostrTransport {
         let recipient_pk = nostr_sdk::PublicKey::from_hex(recipient_hex)
             .map_err(|e| Error::Nostr(format!("Invalid recipient pubkey: {}", e)))?;
 
-        // ── Rumor: the "real" Kind 20101 event, unsigned per NIP-59 ──
+        // ── Rumor: the "real" Kind 20101 event, unsigned (NIP-59-style).
+        //    Real NIP-17 would use Kind 14 here; see the doc comment above
+        //    for why we keep it on 20101.
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -3489,7 +3512,10 @@ impl NostrTransport {
                 )
             }
             Err(_) => {
-                // Not JSON — try gift-unwrap (NIP-59 structure)
+                // Not JSON — try gift-unwrap. This is a NIP-59-*shaped*
+                // envelope but uses NIP-04 (not NIP-44) and Kind 20101
+                // for the outer wrap; see `send_admin_request` for the
+                // rationale and divergences from real NIP-17.
                 let seal_json =
                     nip04::decrypt(self.keys.secret_key(), &event.pubkey, &event.content).map_err(
                         |e| Error::Nostr(format!("Gift unwrap outer decrypt failed: {}", e)),
