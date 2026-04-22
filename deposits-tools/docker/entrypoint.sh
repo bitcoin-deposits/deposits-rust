@@ -62,25 +62,38 @@ if [ -z "$LEDGER_RELAY" ]; then
     exit 1
 fi
 
-# --- Start strfry relay ---
-sed "s|__RELAY_DIR__|${RELAY_DIR}|g; s|__RELAY_PORT__|${RELAY_PORT}|g" \
-    /etc/strfry.conf.tmpl > /tmp/strfry.conf
-echo "Starting local relay on port $RELAY_PORT..."
-strfry --config=/tmp/strfry.conf relay &
-sleep 1
-
-LOCAL_RELAY="ws://127.0.0.1:${RELAY_PORT}"
+# --- Start local strfry relay (if installed) ---
+# Optional: when strfry is bundled in the image, we run a local relay and
+# wire it as the primary publish target. Otherwise we rely entirely on
+# LEDGER_RELAY. Most real deployments use an external relay.
+LOCAL_RELAY=""
+if command -v strfry >/dev/null 2>&1 && [ -f /etc/strfry.conf.tmpl ]; then
+    sed "s|__RELAY_DIR__|${RELAY_DIR}|g; s|__RELAY_PORT__|${RELAY_PORT}|g" \
+        /etc/strfry.conf.tmpl > /tmp/strfry.conf
+    echo "Starting local relay on port $RELAY_PORT..."
+    strfry --config=/tmp/strfry.conf relay &
+    sleep 1
+    LOCAL_RELAY="ws://127.0.0.1:${RELAY_PORT}"
+fi
 
 # --- Build relay flag list ---
-# Primary = local, others = upstream relays for publishing + discovery.
-RELAYS="--relay $LOCAL_RELAY"
+# Primary is the local relay if present, otherwise the first upstream.
+RELAYS=""
+if [ -n "$LOCAL_RELAY" ]; then
+    RELAYS="--relay $LOCAL_RELAY"
+fi
 if [ -n "$EPHEMERAL_RELAYS" ]; then
     for r in $(echo "$EPHEMERAL_RELAYS" | tr ',' ' '); do
         RELAYS="$RELAYS --relay $r"
     done
 fi
 for r in $(echo "$LEDGER_RELAY" | tr ',' ' '); do
-    RELAYS="$RELAYS --slow-relay $r"
+    # When there's no local relay, the first upstream becomes primary.
+    if [ -z "$LOCAL_RELAY" ] && [ -z "$RELAYS" ]; then
+        RELAYS="--relay $r"
+    else
+        RELAYS="$RELAYS --slow-relay $r"
+    fi
 done
 
 # Bootstrap-phase relay (single value, used by init/reserves/quorum commands).
