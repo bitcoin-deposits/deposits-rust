@@ -101,7 +101,7 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
     let our_pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
 
     // Also derive the nostr identity key at index 0 for signing requests
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
 
     let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
@@ -784,7 +784,7 @@ pub async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         .unwrap_or_else(|| hex::encode(our_pubkey.serialize()));
 
     // Use nostr identity key (index 0) for transport signing
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
 
     let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])

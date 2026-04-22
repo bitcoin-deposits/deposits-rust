@@ -24,7 +24,7 @@ pub async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         println!();
     }
 
-    let secret_key = derive_secret_key(&config.seed, config.network)?;
+    let secret_key = config.nostr_key()?;
     let transport = NostrTransportBuilder::new(secret_key)
         .relay(&config.relays[0])
         .build()
@@ -275,7 +275,7 @@ pub async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         return Err("No relay specified. Use --relay <url>".into());
     }
 
-    let secret_key = derive_secret_key(&config.seed, config.network)?;
+    let secret_key = config.nostr_key()?;
     let transport = NostrTransportBuilder::new(secret_key)
         .relay(&config.relays[0])
         .build()

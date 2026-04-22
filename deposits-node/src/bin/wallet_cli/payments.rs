@@ -90,7 +90,7 @@ pub async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let our_pubkey = keypair.public_key();
 
     // Use nostr identity key (index 0) for transport signing
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
 
     // Compute deposit_id from descriptor
     let descriptor = format!("pk({})", hex::encode(our_pubkey.serialize()));
@@ -290,7 +290,7 @@ pub async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
 
     // Compute source deposit_id
     let descriptor = format!("pk({})", hex::encode(our_pubkey.serialize()));
@@ -465,7 +465,7 @@ pub async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error
     println!();
 
     // Connect to relay
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
     let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
@@ -603,7 +603,7 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
     let amount_msats = amount_sats * 1000;
 
     // Connect to relays
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
     let mut transport = NostrTransportBuilder::new(nostr_key);
     for r in &config.relays {
         transport = transport.relay(r);
@@ -905,7 +905,7 @@ pub async fn spread_deposits(args: &[String]) -> Result<(), Box<dyn std::error::
 
     // Discover operators
     println!("Discovering operators...");
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
     let mut transport = NostrTransportBuilder::new(nostr_key);
     for r in &config.relays {
         transport = transport.relay(r);
@@ -1112,7 +1112,7 @@ pub async fn make_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .ok_or("Invalid deposit record: missing deposit_pubkey")?;
 
     // Use nostr identity key for transport
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
 
     let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
@@ -1226,7 +1226,7 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     let our_pubkey = keypair.public_key();
 
     // Use nostr identity key for transport
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
 
     // Parse the bolt11 invoice to extract payment_hash and amount
     use lightning_invoice::Bolt11Invoice;
@@ -1461,7 +1461,7 @@ pub async fn send(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Fetch the ledger advertisement for the source ledger to pick a safe timeout.
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
     let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()

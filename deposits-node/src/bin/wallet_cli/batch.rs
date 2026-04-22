@@ -73,7 +73,7 @@ pub async fn batch_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
         return Err("No relay specified. Use --relay <url>".into());
     }
 
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
     let secp = Secp256k1::new();
 
     // Create persistent transport

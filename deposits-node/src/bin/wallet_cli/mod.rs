@@ -39,6 +39,25 @@ pub struct WalletConfig {
     pub network: bitcoin::Network,
     pub data_dir: PathBuf,
     pub relays: Vec<String>,
+    /// Explicit Nostr identity override (from `--nsec`). When set, this
+    /// key is used for ALL wallet-side Nostr signing (deposit_open,
+    /// swaps, verify flow, etc.) instead of the BIP32-derived key. Using
+    /// the same identity for both deposit_open and verify is required so
+    /// the attestation issued by the verifier matches the sender the
+    /// operator sees.
+    pub nostr_nsec: Option<SecretKey>,
+}
+
+impl WalletConfig {
+    /// Return the Nostr secret key this wallet should sign with. If
+    /// `--nsec` was supplied, use that; otherwise derive from the seed
+    /// at BIP32 index 0 (the default nostr identity slot).
+    pub fn nostr_key(&self) -> Result<SecretKey, Box<dyn std::error::Error>> {
+        if let Some(sk) = self.nostr_nsec {
+            return Ok(sk);
+        }
+        derive_secret_key(&self.seed, self.network)
+    }
 }
 
 pub fn print_usage(program: &str) {
@@ -81,6 +100,11 @@ pub fn print_usage(program: &str) {
     );
     eprintln!("  --data-dir <path>   Data directory (default: ~/.deposits-wallet)");
     eprintln!("  --seed <hex>        Wallet seed (32 bytes hex)");
+    eprintln!("  --nsec <key>        Override Nostr identity (nsec1... or 64-char hex).");
+    eprintln!("                      Use this to sign as your own npub instead of the");
+    eprintln!("                      seed-derived key — required when an operator gates");
+    eprintln!("                      deposits behind a lightning-verify attestation tied");
+    eprintln!("                      to your identity.");
     eprintln!("  --alias <name>      Local alias for the deposit (for open command)");
     eprintln!();
     eprintln!("Examples:");
@@ -104,6 +128,7 @@ pub fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error:
     let mut network = bitcoin::Network::Regtest;
     let mut data_dir: Option<PathBuf> = None;
     let mut relays = Vec::new();
+    let mut nostr_nsec: Option<SecretKey> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -117,6 +142,10 @@ pub fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error:
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&seed_bytes);
                 seed = Some(arr);
+                i += 1;
+            }
+            "--nsec" if i + 1 < args.len() => {
+                nostr_nsec = Some(parse_nsec_arg(&args[i + 1])?);
                 i += 1;
             }
             "--network" if i + 1 < args.len() => {
@@ -184,7 +213,28 @@ pub fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error:
         network,
         data_dir,
         relays,
+        nostr_nsec,
     })
+}
+
+/// Parse a `--nsec` argument. Accepts `nsec1...` bech32 or 64-char hex.
+fn parse_nsec_arg(s: &str) -> Result<SecretKey, Box<dyn std::error::Error>> {
+    let s = s.trim();
+    // bech32 nsec — `SecretKey::parse` accepts nsec1 and hex both, so we
+    // only need it to route via nostr_sdk when the user supplied bech32.
+    if s.starts_with("nsec1") {
+        let sk = nostr_sdk::SecretKey::parse(s)
+            .map_err(|e| format!("invalid nsec bech32: {}", e))?;
+        let bytes = sk.as_secret_bytes();
+        return SecretKey::from_slice(bytes)
+            .map_err(|e| format!("nsec bytes invalid for secp256k1: {}", e).into());
+    }
+    // Hex — accept upper/lower, reject non-32-byte lengths.
+    let bytes = hex::decode(s).map_err(|e| format!("invalid --nsec hex: {}", e))?;
+    if bytes.len() != 32 {
+        return Err("--nsec hex must be 32 bytes (64 chars)".into());
+    }
+    SecretKey::from_slice(&bytes).map_err(|e| format!("--nsec: {}", e).into())
 }
 
 pub fn derive_secret_key(

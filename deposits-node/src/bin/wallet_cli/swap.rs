@@ -350,7 +350,7 @@ pub async fn swap_advertise(args: &[String]) -> Result<(), Box<dyn std::error::E
     let descriptor = format!("pk({})", hex::encode(pk.serialize()));
     let deposit_id = compute_deposit_id(&descriptor);
 
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
     let nostr_pk =
         bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &nostr_key);
     // Nostr pubkeys are x-only (BIP-340, 32 bytes), not compressed secp256k1.
@@ -466,7 +466,7 @@ pub async fn swap_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         return Err("No relay specified. Use --relay <url>".into());
     }
 
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
     let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
@@ -661,7 +661,7 @@ pub async fn swap_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .to_string();
 
     // Connect to relay and fetch swap ads.
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
     let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
         .build()
@@ -918,7 +918,7 @@ pub async fn swap_listen(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         .map_err(|_| "No deposits found.")?;
     let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
 
-    let nostr_key = derive_secret_key(&config.seed, config.network)?;
+    let nostr_key = config.nostr_key()?;
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let nostr_pk = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &nostr_key);
     // Nostr identifies authors by x-only pubkey (BIP-340) — required for p-tag match.
