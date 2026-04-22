@@ -186,7 +186,12 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
     let mut attempted_verify = false;
     loop {
         let open_request_id = transport
-            .send_ledger_request(&ledger_id, "deposit_open", open_params.clone())
+            .send_ledger_request_ext(
+                &ledger_id,
+                "deposit_open",
+                open_params.clone(),
+                config.subkey_credential(),
+            )
             .await?;
 
         println!("  Request ID: {}...", &open_request_id[..16]);

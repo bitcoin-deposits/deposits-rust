@@ -47,6 +47,15 @@ pub struct WalletConfig {
     /// the attestation issued by the verifier matches the sender the
     /// operator sees.
     pub nostr_nsec: Option<SecretKey>,
+    /// DEP-04 subkey delegation: the account pubkey we're acting on
+    /// behalf of, in 64-char xonly hex. When set, outgoing Kind 20101
+    /// requests carry `["v", <account>]` + `["va", <attestation>]`
+    /// tags so the operator's `resolve_attested_sender` collapses us
+    /// back to the account for ACL purposes.
+    pub subkey_account: Option<String>,
+    /// DEP-04 attestation signature (64-byte Schnorr hex) that matches
+    /// `subkey_account`. Both must be present for the tags to be added.
+    pub subkey_attestation: Option<String>,
 }
 
 impl WalletConfig {
@@ -58,6 +67,15 @@ impl WalletConfig {
             return Ok(sk);
         }
         derive_secret_key(&self.seed, self.network)
+    }
+
+    /// If both `--subkey-of` and `--attestation-sig` were supplied,
+    /// return (account_xonly_hex, attestation_sig_hex). Otherwise None.
+    pub fn subkey_credential(&self) -> Option<(&str, &str)> {
+        match (&self.subkey_account, &self.subkey_attestation) {
+            (Some(a), Some(s)) => Some((a.as_str(), s.as_str())),
+            _ => None,
+        }
     }
 }
 
@@ -133,6 +151,8 @@ pub fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error:
     let mut data_dir: Option<PathBuf> = None;
     let mut relays = Vec::new();
     let mut nostr_nsec: Option<SecretKey> = None;
+    let mut subkey_account: Option<String> = None;
+    let mut subkey_attestation: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -150,6 +170,20 @@ pub fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error:
             }
             "--nsec-file" if i + 1 < args.len() => {
                 nostr_nsec = Some(load_nsec_file(&args[i + 1])?);
+                i += 1;
+            }
+            "--subkey-of" if i + 1 < args.len() => {
+                subkey_account = Some(parse_xonly_arg(&args[i + 1])?);
+                i += 1;
+            }
+            "--attestation-sig" if i + 1 < args.len() => {
+                let s = args[i + 1].trim();
+                if s.len() != 128 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(
+                        "--attestation-sig must be 64-byte Schnorr hex (128 chars)".into(),
+                    );
+                }
+                subkey_attestation = Some(s.to_lowercase());
                 i += 1;
             }
             "--network" if i + 1 < args.len() => {
@@ -212,13 +246,40 @@ pub fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error:
         }
     };
 
+    // A DEP-04 subkey delegation is (account, attestation) — either both
+    // supplied or neither. Half a credential has no meaning.
+    if subkey_account.is_some() != subkey_attestation.is_some() {
+        return Err(
+            "--subkey-of and --attestation-sig must be supplied together".into(),
+        );
+    }
+
     Ok(WalletConfig {
         seed,
         network,
         data_dir,
         relays,
         nostr_nsec,
+        subkey_account,
+        subkey_attestation,
     })
+}
+
+/// Parse an npub1... or xonly hex pubkey into xonly hex.
+fn parse_xonly_arg(s: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let s = s.trim();
+    if s.starts_with("npub1") {
+        let pk = nostr_sdk::PublicKey::parse(s)
+            .map_err(|e| format!("invalid npub: {}", e))?;
+        return Ok(pk.to_hex());
+    }
+    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(s.to_lowercase());
+    }
+    if s.len() == 66 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(s[2..].to_lowercase());
+    }
+    Err(format!("expected npub1... or 64-char hex, got {:?}", s).into())
 }
 
 /// Load a Nostr secret key from a file. The file contents (trimmed of

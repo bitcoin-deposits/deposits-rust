@@ -185,4 +185,102 @@ else
 fi
 
 log ""
-pass "access control: all 3 cases passed"
+log "=== DEP-04 subkey delegation ==="
+
+# Case 4: account allowlisted + attests a subkey → subkey opens deposit,
+#         operator resolves the v/va tags back to the allowlisted
+#         account and accepts.
+KEY_ACCT=$("$DEPOSITS_NODE" keygen)
+KEY_SUB=$("$DEPOSITS_NODE" keygen)
+ACCT_SEC=$(echo "$KEY_ACCT" | awk '{print $1}')
+SUB_SEC=$(echo  "$KEY_SUB"  | awk '{print $1}')
+ACCT_XONLY=$(echo "$KEY_ACCT" | awk '{print substr($2,3)}')
+SUB_XONLY=$(echo  "$KEY_SUB"  | awk '{print substr($2,3)}')
+echo "$ACCT_SEC" > /tmp/ac-test-acct.nsec
+echo "$SUB_SEC"  > /tmp/ac-test-sub.nsec
+chmod 600 /tmp/ac-test-acct.nsec /tmp/ac-test-sub.nsec
+log "  account: ${ACCT_XONLY:0:16}..."
+log "  subkey:  ${SUB_XONLY:0:16}..."
+
+# Restart op0 with allowlist = [ACCT_XONLY] so the account is authorized
+# but the subkey isn't on the list directly. The subkey should be
+# accepted ONLY via the DEP-04 attestation resolution.
+kill "$NEW_PID" 2>/dev/null || true
+sleep 2
+echo "$ACCT_XONLY" > "$OP_DATA/deposit_allowlist.txt"
+start_op0_acl
+
+# Publish the Kind 10301 attestation from the account, with the subkey
+# in inbox_keys. attest prints the signature; capture it.
+ATTEST_OUT=$("$DEPOSITS_WALLET" attest "$SUB_XONLY" \
+    --nsec-file /tmp/ac-test-acct.nsec \
+    --data-dir "$TEST_WALLET_DIR" \
+    --relay "$RELAY" 2>&1 | grep -v '^\[')
+ATT_SIG=$(echo "$ATTEST_OUT" | grep -oE "attestation:  [a-f0-9]+" | awk '{print $2}')
+if [ -z "$ATT_SIG" ]; then
+    echo "$ATTEST_OUT"
+    fail "attest produced no attestation sig"
+fi
+log "  attestation: ${ATT_SIG:0:16}..."
+
+# Fresh wallet state (different data-dir so deposit-key index + deposits
+# list don't leak between cases).
+SUB_WALLET=$(mktemp -d)
+
+log ""
+log "case 4a: subkey signs → resolved to allowlisted account → ACCEPTED"
+OUT_4A=$("$DEPOSITS_WALLET" open "$OP0_LEDGER" 100000 \
+    --alias ac-subkey \
+    --nsec-file /tmp/ac-test-sub.nsec \
+    --subkey-of "$ACCT_XONLY" \
+    --attestation-sig "$ATT_SIG" \
+    --data-dir "$SUB_WALLET" \
+    --relay "$RELAY" 2>&1 || true)
+if echo "$OUT_4A" | grep -q "Deposit account created\|Deposit account already exists"; then
+    pass "subkey accepted via DEP-04 resolution"
+else
+    echo "$OUT_4A" | tail -15
+    fail "subkey not accepted (expected via attestation)"
+fi
+
+log ""
+log "case 4b: subkey signs WITHOUT v/va tags → REJECTED"
+rm -f "$SUB_WALLET"/deposits.json
+OUT_4B=$("$DEPOSITS_WALLET" open "$OP0_LEDGER" 100000 \
+    --alias ac-subkey-bare \
+    --nsec-file /tmp/ac-test-sub.nsec \
+    --data-dir "$SUB_WALLET" \
+    --relay "$RELAY" 2>&1 || true)
+if echo "$OUT_4B" | grep -qE "code=not_authorized|not_authorized"; then
+    pass "subkey without delegation still rejected"
+else
+    echo "$OUT_4B" | tail -15
+    fail "expected subkey to be rejected without v/va tags"
+fi
+
+log ""
+log "case 4c: account revokes the subkey → subsequent attested open REJECTED"
+"$DEPOSITS_WALLET" revoke "$SUB_XONLY" \
+    --nsec-file /tmp/ac-test-acct.nsec \
+    --data-dir "$TEST_WALLET_DIR" \
+    --relay "$RELAY" >/dev/null 2>&1
+rm -f "$SUB_WALLET"/deposits.json
+OUT_4C=$("$DEPOSITS_WALLET" open "$OP0_LEDGER" 100000 \
+    --alias ac-subkey-revoked \
+    --nsec-file /tmp/ac-test-sub.nsec \
+    --subkey-of "$ACCT_XONLY" \
+    --attestation-sig "$ATT_SIG" \
+    --data-dir "$SUB_WALLET" \
+    --relay "$RELAY" 2>&1 || true)
+if echo "$OUT_4C" | grep -qE "invalid_subkey_delegation|revoked"; then
+    pass "revoked subkey rejected by resolve_attested_sender"
+else
+    echo "$OUT_4C" | tail -15
+    fail "expected subkey to be rejected after revocation"
+fi
+
+rm -rf "$SUB_WALLET"
+rm -f /tmp/ac-test-acct.nsec /tmp/ac-test-sub.nsec
+
+log ""
+pass "access control: all 6 cases passed"

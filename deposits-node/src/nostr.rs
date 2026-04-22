@@ -349,6 +349,19 @@ pub struct LedgerRequest {
     /// If gift-wrapped: real sender pubkey (for encrypting response back)
     #[serde(skip)]
     pub gift_wrap_sender: Option<String>,
+
+    /// DEP-04 subkey delegation — account pubkey (xonly hex) the sender
+    /// is acting on behalf of. Sourced from the event's `["v", "<hex>"]`
+    /// tag. When present alongside `subkey_attestation`, handlers resolve
+    /// access-control checks against this pubkey rather than `sender`.
+    #[serde(skip)]
+    pub subkey_account: Option<String>,
+
+    /// DEP-04 attestation signature — BIP-340 Schnorr over
+    /// `SHA256("nostr301:" + sender)`, signed by `subkey_account`.
+    /// Sourced from `["va", "<hex>"]`.
+    #[serde(skip)]
+    pub subkey_attestation: Option<String>,
 }
 
 /// A ledger response (reply to a request)
@@ -1413,15 +1426,45 @@ impl NostrTransport {
         action: &str,
         params: serde_json::Value,
     ) -> Result<String, Error> {
+        self.send_ledger_request_ext(ledger_id, action, params, None)
+            .await
+    }
+
+    /// Like `send_ledger_request` but with a DEP-04 subkey delegation
+    /// attached to the outgoing event. When `subkey_credential` is
+    /// `Some((account_xonly_hex, attestation_sig_hex))` we add `["v",
+    /// account]` and `["va", sig]` tags so the daemon's
+    /// `resolve_attested_sender` can collapse the signer back to the
+    /// account for ACL purposes. The event is still SIGNED by the
+    /// current wallet key (the subkey) — that's the whole point of
+    /// delegation.
+    pub async fn send_ledger_request_ext(
+        &self,
+        ledger_id: &str,
+        action: &str,
+        params: serde_json::Value,
+        subkey_credential: Option<(&str, &str)>,
+    ) -> Result<String, Error> {
         let content = serde_json::to_string(&params)
             .map_err(|e| Error::Serialization(format!("Failed to serialize params: {}", e)))?;
 
-        let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &content)
+        let mut builder = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &content)
             .tag(Tag::custom(
                 TagKind::SingleLetter(TAG_LEDGER_REQ),
                 [ledger_id],
             ))
-            .tag(Tag::custom(TagKind::custom("action"), [action]))
+            .tag(Tag::custom(TagKind::custom("action"), [action]));
+
+        if let Some((account_xonly, attestation_sig)) = subkey_credential {
+            builder = builder
+                .tag(Tag::custom(
+                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::V)),
+                    [account_xonly],
+                ))
+                .tag(Tag::custom(TagKind::custom("va"), [attestation_sig]));
+        }
+
+        let event = builder
             .sign_with_keys(&self.keys)
             .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
 
@@ -3890,6 +3933,28 @@ impl NostrTransport {
             })
             .ok_or_else(|| Error::Nostr("Missing action tag in ledger request".to_string()))?;
 
+        // Extract DEP-04 subkey delegation tags, if present:
+        //   ["v",  "<account xonly hex>"]
+        //   ["va", "<schnorr sig hex>"]
+        // Signature verification + Kind 10301 policy check happen in the
+        // handler — we just surface the raw values here.
+        let subkey_account = tags.iter().find_map(|tag| {
+            if tag.kind()
+                == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::V))
+            {
+                tag.content().map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
+        let subkey_attestation = tags.iter().find_map(|tag| {
+            if tag.kind() == TagKind::custom("va") {
+                tag.content().map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
+
         // Parse params from content
         let params: serde_json::Value =
             serde_json::from_str(&content_str).unwrap_or(serde_json::Value::Null);
@@ -3910,6 +3975,8 @@ impl NostrTransport {
             sender: real_sender.clone(),
             timestamp: event.created_at.as_u64(),
             gift_wrap_sender: if is_wrapped { Some(real_sender) } else { None },
+            subkey_account,
+            subkey_attestation,
         })
     }
 
