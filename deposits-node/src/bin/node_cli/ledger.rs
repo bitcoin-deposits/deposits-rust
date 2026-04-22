@@ -1028,13 +1028,10 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         ad.min_deposit_msats = min_deposit_msats;
         ad.reserves_amount_msats = ledger.reserves_amount();
 
-        // Calculate obligations and headroom
-        let total_obligations_msats = ledger.total_deposit_balance();
-        ad.total_obligations_msats = total_obligations_msats;
-
-        ad.available_headroom_msats = ad
-            .reserves_amount_msats
-            .saturating_sub(total_obligations_msats);
+        // Obligations and headroom deliberately NOT advertised — both are
+        // trivially inflatable by the operator via self-paid Lightning
+        // invoices, so they aren't reliable trust signals. Wallets discover
+        // capacity through couriers (swap ads).
 
         // Collateral
         ad.received_collateral_msats = ledger.state.total_collateral();
@@ -1052,11 +1049,6 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         println!("Publishing ledger advertisement...");
         println!("  Ledger ID: {}...", &ledger_id[..16]);
         println!("  Reserves: {} msats", ad.reserves_amount_msats);
-        println!("  Obligations: {} msats", ad.total_obligations_msats);
-        println!(
-            "  Available headroom: {} msats",
-            ad.available_headroom_msats
-        );
         println!(
             "  Attested collateral: {} msats",
             ad.attested_collateral_msats
@@ -1203,10 +1195,7 @@ pub async fn ledger_discover(args: &[String]) -> Result<(), Box<dyn std::error::
             "  Ledger ID: {}...",
             &ad.ledger_id[..16.min(ad.ledger_id.len())]
         );
-        println!("  Capacity:");
-        println!("    Reserves: {} msats", ad.reserves_amount_msats);
-        println!("    Obligations: {} msats", ad.total_obligations_msats);
-        println!("    Available: {} msats", ad.available_headroom_msats);
+        println!("  Reserves: {} msats", ad.reserves_amount_msats);
         println!(
             "  Attested collateral: {} msats",
             ad.attested_collateral_msats

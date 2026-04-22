@@ -60,8 +60,6 @@ for lid, ad in sorted(by_ledger.items()):
     name = ad.get('operator_name', 'Anonymous')
     network = ad.get('network', '?')
     reserves = ad.get('reserves_amount_msats', 0)
-    obligations = ad.get('total_obligations_msats', 0)
-    headroom = ad.get('available_headroom_msats', 0)
     collateral = ad.get('attested_collateral_msats', 0)
     annual_bps = ad.get('annual_fee_bps', 0)
     min_fee = ad.get('min_fee_sats', 0)
@@ -77,9 +75,7 @@ for lid, ad in sorted(by_ledger.items()):
     print(f'  Ledger:     {lid[:16]}...')
     print(f'  Operator:   {op_pk}...')
     print(f'  Reserves:   {reserves // 1000:,} sats')
-    if obligations > 0:
-        print(f'  Obligations: {obligations // 1000:,} sats')
-    print(f'  Available:  {headroom // 1000:,} sats')
+    # Obligations/headroom intentionally omitted — operator-synthesizable.
     if collateral > 0:
         print(f'  Collateral: {collateral // 1000:,} sats')
     print(f'  Quorum:     {quorum}')

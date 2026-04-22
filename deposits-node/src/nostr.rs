@@ -533,18 +533,15 @@ pub struct LedgerAdvertisement {
     pub min_deposit_msats: u64,
 
     // === Trust Info ===
-
-    // === Capacity ===
-    /// Current total obligations (deposit balances) in sats
-    #[serde(default)]
-    pub total_obligations_msats: u64,
-
-    /// Available headroom for new deposits in sats
-    /// Calculated as: reserves_amount - total_obligations (or fraction thereof)
-    #[serde(default)]
-    pub available_headroom_msats: u64,
-
-    // === Trust Info ===
+    //
+    // NOTE: historically carried `total_obligations_msats` and
+    // `available_headroom_msats` too. Both were dropped — they're
+    // trivially inflatable by the operator via self-paid Lightning
+    // invoices (see the over-reserves bootstrap pattern), so they
+    // aren't reliable trust signals. Wallets that need capacity
+    // information should either (a) discover a courier who already
+    // holds funds on this ledger, or (b) trust the protocol invariant
+    // `reserves ≥ obligations` enforced by the quorum's co-signers.
     /// Current total reserves backing the ledger (sats)
     pub reserves_amount_msats: u64,
 
@@ -801,8 +798,6 @@ impl LedgerAdvertisement {
             transfer_fee_rate_bps: 0,
             max_deposit_msats: u64::MAX,
             min_deposit_msats: 0,
-            total_obligations_msats: 0,
-            available_headroom_msats: 0,
             reserves_amount_msats: 0,
             received_collateral_msats: 0,
             attested_collateral_msats: 0,

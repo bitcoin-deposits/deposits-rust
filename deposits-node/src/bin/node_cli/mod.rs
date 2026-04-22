@@ -581,12 +581,11 @@ pub async fn auto_advertise_ledger(
         }
     }
 
-    // Calculate headroom
-    let total_obligations_msats = ledger.total_deposit_balance();
-    ad.total_obligations_msats = total_obligations_msats;
-    ad.available_headroom_msats = ad
-        .reserves_amount_msats
-        .saturating_sub(total_obligations_msats);
+    // Obligations and headroom deliberately NOT advertised — the operator
+    // can inflate them via self-paid Lightning invoices, so they're not a
+    // useful trust signal. Capacity information comes from couriers (swap
+    // ads) and the protocol invariant `reserves ≥ obligations` enforced by
+    // the quorum.
 
     // Chain tip — lets wallets pick transfer timeouts without a balance_query.
     // Use the last ledger update's block_height because that's what the operator
@@ -668,22 +667,21 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
                     .unwrap_or(wallet_tip);
                 (
                     l.reserves_amount(),
-                    l.total_deposit_balance(),
                     l.state.total_collateral(),
                     l.state.collateral_amount,
                     last_block,
                 )
             })
         };
-        let Some((reserves, obligations, total_collateral, held_collateral, last_block)) =
+        let Some((reserves, total_collateral, held_collateral, last_block)) =
             refreshed
         else {
             continue;
         };
 
         ad.reserves_amount_msats = reserves;
-        ad.total_obligations_msats = obligations;
-        ad.available_headroom_msats = reserves.saturating_sub(obligations);
+        // obligations/headroom intentionally omitted — see comment at the
+        // populate site in auto_advertise_ledger.
         ad.received_collateral_msats = total_collateral;
         ad.attested_collateral_msats = total_collateral;
         ad.held_collateral_msats = held_collateral;

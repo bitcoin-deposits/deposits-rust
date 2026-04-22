@@ -44,8 +44,6 @@ pub async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                     "operator_name": ad.operator_name,
                     "relay_url": ad.relay_url,
                     "reserves_msats": ad.reserves_amount_msats,
-                    "obligations_msats": ad.total_obligations_msats,
-                    "headroom_msats": ad.available_headroom_msats,
                     "current_block": ad.current_block,
                 })
             );
@@ -100,13 +98,9 @@ pub async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         );
         println!("   Ledger: {}", ad.ledger_id);
         println!(
-            "   Available: {} sats ({} BTC)",
-            ad.available_headroom_msats / 1000,
-            ad.available_headroom_msats as f64 / 100_000_000_000.0
-        );
-        println!(
-            "   Reserves: {} msats, Obligations: {} msats",
-            ad.reserves_amount_msats, ad.total_obligations_msats
+            "   Reserves: {} sats ({} BTC)",
+            ad.reserves_amount_msats / 1000,
+            ad.reserves_amount_msats as f64 / 100_000_000_000.0
         );
         println!(
             "   Deposited collateral: {} msats",
@@ -317,17 +311,12 @@ pub async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("Ledger ID: {}", ad.ledger_id);
     println!("Reserves Address: {}", ad.reserves_address);
     println!();
-    println!("Capacity");
+    println!("Reserves");
     println!("--------");
     println!(
-        "Available Headroom: {} sats ({} BTC)",
-        ad.available_headroom_msats / 1000,
-        ad.available_headroom_msats as f64 / 100_000_000_000.0
-    );
-    println!("Total Reserves: {} sats", ad.reserves_amount_msats / 1000);
-    println!(
-        "Current Obligations: {} sats",
-        ad.total_obligations_msats / 1000
+        "Total: {} sats ({} BTC)",
+        ad.reserves_amount_msats / 1000,
+        ad.reserves_amount_msats as f64 / 100_000_000_000.0
     );
     println!();
     println!("Trust & Security");

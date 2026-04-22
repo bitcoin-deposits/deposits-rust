@@ -2183,7 +2183,10 @@ function showNodeInfo(node) {
   for (const ad of node.ads) {
     const lid = ad.ledger_id || '';
     const reserves_msats = ad.reserves_amount_msats || 0;
-    const obligations_msats = ad.total_obligations_msats || 0;
+    // Obligations/headroom intentionally NOT displayed — the operator
+    // can inflate them at will via self-paid Lightning invoices, so
+    // they're not a reliable trust signal. Wallets should judge trust
+    // from reserves + collateral + quorum composition instead.
     const attested_collateral = ad.attested_collateral_msats || (window._ledgerCollateral && window._ledgerCollateral[lid]) || 0;
     const held_collateral = ad.held_collateral_msats || 0;
     const effective_reserves = Math.max(0, reserves_msats - held_collateral);
@@ -2194,13 +2197,6 @@ function showNodeInfo(node) {
     details += `<div style="font-size:10px; color:var(--muted); cursor:pointer;" onclick="selectLedger('${lid}')">${lid.slice(0, 16)}...</div>`;
     details += `<div class="kv"><span class="k">Attested collateral</span><span class="v">₿${fmtSats(attested_collateral)} <span style="color:${ratioColor}">(${ratio}%)</span></span></div>`;
     details += `<div class="kv"><span class="k">Reserves</span><span class="v">₿${fmtSats(reserves_msats)}${held_collateral > 0 ? ` (${fmtSats(held_collateral)} held)` : ''}</span></div>`;
-    const coverageStr = obligations_msats === 0
-      ? (attested_collateral > 0 ? '∞' : '–')
-      : Math.round(attested_collateral / obligations_msats * 100) + '%';
-    const coverageColor = obligations_msats === 0 ? 'var(--balance)'
-      : attested_collateral >= obligations_msats ? 'var(--balance)'
-      : attested_collateral >= obligations_msats / 2 ? 'var(--yellow)' : 'var(--red)';
-    details += `<div class="kv"><span class="k">Obligations</span><span class="v">₿${fmtSats(obligations_msats)} <span style="color:${coverageColor}">(${coverageStr} covered)</span></span></div>`;
 
     // Peer reuse: check if this ledger's collateral sources are shared with other ledgers
     const myMembers = lcm[lid];
@@ -2247,20 +2243,13 @@ window.selectLedger = function(ledgerId) {
     const held_coll_m = ad.held_collateral_msats || 0;
     const reserves_m = ad.reserves_amount_msats || 0;
     const effective_m = Math.max(0, reserves_m - held_coll_m);
-    const obligations_m = ad.total_obligations_msats || 0;
     const ratio = effective_m > 0 ? Math.round(att_coll_m / effective_m * 100) : 0;
     const ratioColor = ratio >= 100 ? 'var(--balance)' : ratio >= 50 ? 'var(--yellow)' : 'var(--red)';
     const fs = v => Math.floor(v / 1000).toLocaleString();
     details += `<div class="kv"><span class="k">Attested collateral</span><span class="v">₿${fs(att_coll_m)} <span style="color:${ratioColor}">(${ratio}%)</span></span></div>`;
     details += `<div class="kv"><span class="k">Reserves</span><span class="v">₿${fs(reserves_m)}${held_coll_m > 0 ? ` (${fs(held_coll_m)} held)` : ''}</span></div>`;
-    const covStr = obligations_m === 0
-      ? (att_coll_m > 0 ? '∞' : '–')
-      : Math.round(att_coll_m / obligations_m * 100) + '%';
-    const covColor = obligations_m === 0 ? 'var(--balance)'
-      : att_coll_m >= obligations_m ? 'var(--balance)'
-      : att_coll_m >= obligations_m / 2 ? 'var(--yellow)' : 'var(--red)';
-    details += `<div class="kv"><span class="k">Obligations</span><span class="v">₿${fs(obligations_m)} <span style="color:${covColor}">(${covStr} covered)</span></span></div>`;
-    details += `<div class="kv"><span class="k">Available</span><span class="v">₿${fs(ad.available_headroom_msats || 0)}</span></div>`;
+    // Obligations/headroom deliberately omitted — operator-synthesizable,
+    // see comment in the node list renderer above.
 
     // Quorum size from graph data
     const opNode = graphNodes.find(n => n.pubkey === (ad.operator_pubkey || ''));
@@ -2989,10 +2978,12 @@ window.showWalletOpen = async function() {
     const feePeriod = s.fee_period_blocks || 2016;
     const tfFixed = s.transfer_fee_fixed_msats || 0;
     const tfRate = s.transfer_fee_rate_bps || 0;
-    const totalHeadroom = groupAds.reduce((sum, a) => sum + (a.available_headroom_msats || 0), 0);
+    const totalReserves = groupAds.reduce((sum, a) => sum + (a.reserves_amount_msats || 0), 0);
 
-    // Pick the ledger with most headroom
-    const sorted = groupAds.sort((a, b) => (b.available_headroom_msats || 0) - (a.available_headroom_msats || 0));
+    // Pick the ledger with the most reserves (rough proxy for "newest /
+    // least full") — headroom would be the right metric but it's
+    // operator-synthesizable and no longer advertised.
+    const sorted = groupAds.sort((a, b) => (b.reserves_amount_msats || 0) - (a.reserves_amount_msats || 0));
     const best = sorted[0];
     const lid = best.ledger_id;
     const relay = best.relay_url || '';
@@ -3002,7 +2993,7 @@ window.showWalletOpen = async function() {
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <div style="flex:1">
           <div style="font-size:12px;">${(annualBps/100).toFixed(2)}%/yr + ₿${Math.floor(minFee * 52560 / feePeriod).toLocaleString()}/yr, xfer ₿${tfFixed}+${(tfRate/100).toFixed(2)}%</div>
-          <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ₿${totalHeadroom.toLocaleString()} available</div>
+          <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ₿${Math.floor(totalReserves/1000).toLocaleString()} reserves</div>
         </div>
         <button class="primary" style="margin-left:10px;" onclick="doWalletQuickOpen('${lid}','${esc(relay)}')">Open</button>
       </div>`;
@@ -3015,9 +3006,9 @@ window.showWalletOpen = async function() {
         const name = ad.operator_name || 'Anon';
         const adLid = ad.ledger_id || '';
         const adRelay = ad.relay_url || '';
-        const headroom = Math.floor((ad.available_headroom_msats || 0) / 1000).toLocaleString();
+        const reserves = Math.floor((ad.reserves_amount_msats || 0) / 1000).toLocaleString();
         const quorum = ad.quorum_size || 0;
-        html += `<button style="font-size:10px; padding:2px 6px;" onclick="event.stopPropagation(); doWalletQuickOpen('${adLid}','${esc(adRelay)}')" title="${adLid}">${esc(name)} (${adLid.slice(0,8)}...) ${headroom}s q=${quorum}</button>`;
+        html += `<button style="font-size:10px; padding:2px 6px;" onclick="event.stopPropagation(); doWalletQuickOpen('${adLid}','${esc(adRelay)}')" title="${adLid}">${esc(name)} (${adLid.slice(0,8)}...) ${reserves}s q=${quorum}</button>`;
       }
       html += `</div></div>`;
     }
@@ -3129,10 +3120,11 @@ window.doAutoSpread = async function() {
     return;
   }
 
-  // Pick ledgers from distinct NEW operators
+  // Pick ledgers from distinct NEW operators, sorted by reserves since
+  // available_headroom is no longer advertised.
   const candidates = Object.values(adMap)
-    .filter(a => !existingLedgers.has(a.ledger_id) && (a.available_headroom_msats || 0) > 0)
-    .sort((a, b) => (b.available_headroom_msats || 0) - (a.available_headroom_msats || 0));
+    .filter(a => !existingLedgers.has(a.ledger_id) && (a.reserves_amount_msats || 0) > 0)
+    .sort((a, b) => (b.reserves_amount_msats || 0) - (a.reserves_amount_msats || 0));
 
   const selected = [];
   const usedOperators = new Set([...fundedOperators]);
@@ -3906,8 +3898,8 @@ window.toggleNewDeposit = async function() {
     const s = groupAds[0];
     const annualBps = s.annual_fee_bps||0, minFee = s.min_fee_sats||0, feePeriod = s.fee_period_blocks||2016;
     const tfFixed = s.transfer_fee_fixed_msats||0, tfRate = s.transfer_fee_rate_bps||0;
-    const totalHeadroom = groupAds.reduce((sum, a) => sum + (a.available_headroom_msats||0), 0);
-    const sorted = groupAds.sort((a, b) => (b.available_headroom_msats||0) - (a.available_headroom_msats||0));
+    const totalReserves = groupAds.reduce((sum, a) => sum + (a.reserves_amount_msats||0), 0);
+    const sorted = groupAds.sort((a, b) => (b.reserves_amount_msats||0) - (a.reserves_amount_msats||0));
     const best = sorted[0];
     const gid = 'newdep-group-' + gIdx;
 
@@ -3915,7 +3907,7 @@ window.toggleNewDeposit = async function() {
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <div style="flex:1">
           <div style="font-size:12px;">${(annualBps/100).toFixed(2)}%/yr + ₿${Math.floor(minFee*52560/feePeriod).toLocaleString()}/yr, xfer ₿${tfFixed}+${(tfRate/100).toFixed(2)}%</div>
-          <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ₿${totalHeadroom.toLocaleString()} available</div>
+          <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ₿${Math.floor(totalReserves/1000).toLocaleString()} reserves</div>
         </div>
         <button class="primary" style="margin-left:10px;" onclick="doWalletQuickOpen('${best.ledger_id}','${esc(best.relay_url||'')}')">Open</button>
       </div>`;
@@ -3926,8 +3918,8 @@ window.toggleNewDeposit = async function() {
       for (const ad of sorted) {
         const name = ad.operator_name || 'Anon';
         const lid = ad.ledger_id || '';
-        const headroom = Math.floor((ad.available_headroom_msats||0) / 1000).toLocaleString();
-        html += `<button style="font-size:10px; padding:2px 6px;" onclick="event.stopPropagation(); doWalletQuickOpen('${lid}','${esc(ad.relay_url||'')}')" title="${lid}">${esc(name)} · ₿${headroom}</button>`;
+        const reserves = Math.floor((ad.reserves_amount_msats||0) / 1000).toLocaleString();
+        html += `<button style="font-size:10px; padding:2px 6px;" onclick="event.stopPropagation(); doWalletQuickOpen('${lid}','${esc(ad.relay_url||'')}')" title="${lid}">${esc(name)} · ₿${reserves}</button>`;
       }
       html += `</div></div>`;
     }
@@ -5459,10 +5451,10 @@ async function populateLedgerQuickLinks() {
       html += '<span style="display:inline-flex; flex-wrap:wrap; gap:3px;">';
       for (const ad of opAds) {
         const lid = ad.ledger_id || '';
-        const headroom = Math.floor((ad.available_headroom_msats || 0) / 1000).toLocaleString();
+        const reserves = Math.floor((ad.reserves_amount_msats || 0) / 1000).toLocaleString();
         const isMine = myIds.includes(lid);
         const border = isMine ? 'border-color:var(--balance);' : '';
-        html += `<button style="font-size:10px; padding:2px 6px; ${border}" onclick="openLedgerTab('${lid}')" title="${lid}">₿${headroom}</button>`;
+        html += `<button style="font-size:10px; padding:2px 6px; ${border}" onclick="openLedgerTab('${lid}')" title="${lid}">₿${reserves}</button>`;
       }
       html += '</span></div>';
     }
