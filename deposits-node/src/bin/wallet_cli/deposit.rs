@@ -18,6 +18,7 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
     let mut cli_fee_bps: Option<u64> = None;
     let mut cli_fee_fixed: Option<u64> = None;
     let mut cli_fee_period: Option<u64> = None;
+    let mut lightning_address: Option<String> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -25,6 +26,10 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
         match args[i].as_str() {
             "--alias" if i + 1 < args.len() => {
                 alias = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--lightning-address" | "--ln-address" if i + 1 < args.len() => {
+                lightning_address = Some(args[i + 1].clone());
                 i += 1;
             }
             "--skip-cosign-verify" => {
@@ -176,39 +181,109 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
 
     println!("Sending deposit_open request to operator...");
 
-    let open_request_id = transport
-        .send_ledger_request(&ledger_id, "deposit_open", open_params)
-        .await?;
+    // One retry after a successful verification round — without this the
+    // loop would spin forever on a persistent rejection.
+    let mut attempted_verify = false;
+    loop {
+        let open_request_id = transport
+            .send_ledger_request(&ledger_id, "deposit_open", open_params.clone())
+            .await?;
 
-    println!("  Request ID: {}...", &open_request_id[..16]);
+        println!("  Request ID: {}...", &open_request_id[..16]);
 
-    // Wait for deposit_open response using real-time subscription
-    // Use wait_for_valid_response to skip error responses from rogue operators
-    // (they may fail co-signing and return errors before the legitimate operator responds)
-    match transport
-        .wait_for_valid_response(&open_request_id, 30000, |response| {
-            if response.success {
-                return true; // Accept success
+        let response = match transport
+            .wait_for_valid_response(&open_request_id, 30000, |response| {
+                if response.success {
+                    return true;
+                }
+                let error = response.error.as_deref().unwrap_or("");
+                if error.contains("already exists") || error.contains("Deposit already") {
+                    return true;
+                }
+                // Also accept attestation_required so the outer flow can run
+                // the verifier round-trip and retry. Without this the filter
+                // would swallow the rejection as "rogue operator" noise.
+                if let Some(result_val) = &response.result {
+                    if let Some(code) = result_val.get("code").and_then(|v| v.as_str()) {
+                        if code == "attestation_required"
+                            || code == "not_authorized"
+                            || code == "denied"
+                        {
+                            return true;
+                        }
+                    }
+                }
+                eprintln!("Warning: Rejecting error response: {}", error);
+                false
+            })
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(format!("Timeout waiting for deposit_open response: {}", e).into());
             }
-            let error = response.error.as_deref().unwrap_or("");
-            // Accept "already exists" errors (they're fine to continue with)
-            if error.contains("already exists") || error.contains("Deposit already") {
-                return true;
-            }
-            // Reject other errors and keep waiting for a valid response
-            eprintln!("Warning: Rejecting error response: {}", error);
-            false
-        })
-        .await
-    {
-        Ok(response) => {
-            if response.success {
-                println!("  Deposit account created!");
-            } else {
-                println!("  Deposit account already exists, continuing...");
-            }
+        };
+
+        if response.success {
+            println!("  Deposit account created!");
+            break;
         }
-        Err(e) => return Err(format!("Timeout waiting for deposit_open response: {}", e).into()),
+        let err_str = response.error.as_deref().unwrap_or("");
+        if err_str.contains("already exists") || err_str.contains("Deposit already") {
+            println!("  Deposit account already exists, continuing...");
+            break;
+        }
+
+        // Access control path — inspect the structured error code.
+        let code = response
+            .result
+            .as_ref()
+            .and_then(|r| r.get("code"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if code == "attestation_required" && !attempted_verify {
+            let verifier_pubkey = response
+                .result
+                .as_ref()
+                .and_then(|r| r.get("verifier_pubkey"))
+                .and_then(|v| v.as_str())
+                .ok_or(
+                    "Operator requires attestation but did not advertise a verifier_pubkey",
+                )?;
+            let allowed_domains: Vec<String> = response
+                .result
+                .as_ref()
+                .and_then(|r| r.get("allowed_domains"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            run_verification_flow(
+                &transport,
+                verifier_pubkey,
+                &allowed_domains,
+                lightning_address.as_deref(),
+            )
+            .await?;
+            attempted_verify = true;
+            println!("  Retrying deposit_open...");
+            continue;
+        }
+
+        if code == "not_authorized" || code == "denied" {
+            return Err(format!(
+                "Operator rejected deposit (code={}): {}",
+                code, err_str
+            )
+            .into());
+        }
+
+        return Err(format!("deposit_open failed: {}", err_str).into());
     }
 
     // Step 2: Send make_offer request to get a funding address
@@ -450,6 +525,185 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
     println!("Fund with {}-{} sats:", min_sats, max_sats);
     println!("  {}", address);
     Ok(())
+}
+
+fn prompt_stdin(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::Write;
+    print!("{}", prompt);
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+/// Drive the lightning-verify service round-trip so the operator will
+/// accept a retried `deposit_open`. Mirrors the web wallet's interactive
+/// flow (index.html `showVerificationFlow`) but over stdin instead of a
+/// modal.
+async fn run_verification_flow(
+    transport: &deposits_node::nostr::NostrTransport,
+    verifier_pubkey: &str,
+    allowed_domains: &[String],
+    cli_lightning_address: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Duration;
+
+    println!();
+    println!("Operator requires a lightning-verify attestation.");
+    println!("  verifier:  {}...", &verifier_pubkey[..16.min(verifier_pubkey.len())]);
+    if !allowed_domains.is_empty() {
+        println!("  domains:   {}", allowed_domains.join(", "));
+    }
+
+    // Lightning address: flag > stdin prompt.
+    let address = match cli_lightning_address {
+        Some(a) => a.to_string(),
+        None => {
+            let hint = allowed_domains
+                .first()
+                .map(String::as_str)
+                .unwrap_or("domain.com");
+            prompt_stdin(&format!(
+                "Enter your lightning address (e.g. alice@{}): ",
+                hint
+            ))?
+        }
+    };
+    if !address.contains('@') {
+        return Err(format!("'{}' doesn't look like a lightning address", address).into());
+    }
+
+    // ── Round 1: request verification for address ──
+    println!("Requesting verification for {}...", address);
+    let req_id = transport
+        .send_verify_request(
+            verifier_pubkey,
+            serde_json::json!({ "lightning_address": address }),
+        )
+        .await?;
+    let resp = transport.wait_for_verify_response(&req_id, 30_000).await?;
+
+    match resp.get("status").and_then(|v| v.as_str()) {
+        Some("already_verified") => {
+            println!("Already verified.");
+            return Ok(());
+        }
+        Some("verified") => {
+            println!("Verified via NIP-05.");
+            if let Some(id) = resp.get("attestation_event_id").and_then(|v| v.as_str()) {
+                println!("  attestation: {}...", &id[..16.min(id.len())]);
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let invoice = resp
+        .get("invoice")
+        .and_then(|v| v.as_str())
+        .ok_or("Verifier returned neither `verified` status nor an invoice")?;
+    let session_id = resp
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Verifier did not return a session_id")?
+        .to_string();
+    let amount_sats = resp
+        .get("amount_sats")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    println!();
+    println!("Pay {} sats to verify your address:", amount_sats);
+    println!();
+    println!("  {}", invoice);
+    println!();
+    println!("Waiting for payment (polling every 3s, up to 3 minutes)...");
+
+    // ── Round 2: poll until challenge_sent ──
+    let mut attempts = 0u32;
+    loop {
+        if attempts >= 60 {
+            return Err("Payment not detected after 3 minutes — try again".into());
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        attempts += 1;
+
+        let cr = transport
+            .send_verify_request(
+                verifier_pubkey,
+                serde_json::json!({
+                    "action": "challenge",
+                    "session_id": &session_id,
+                }),
+            )
+            .await?;
+        let cresp = transport.wait_for_verify_response(&cr, 10_000).await?;
+        match cresp.get("status").and_then(|v| v.as_str()) {
+            Some("challenge_sent") => {
+                println!();
+                if let Some(msg) = cresp.get("message").and_then(|v| v.as_str()) {
+                    println!("{}", msg);
+                }
+                break;
+            }
+            Some("payment_pending") => {
+                // stay quiet between polls; single dot to show progress
+                use std::io::Write;
+                print!(".");
+                std::io::stdout().flush().ok();
+            }
+            other => {
+                let msg = cresp
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| other.unwrap_or("unknown"));
+                return Err(format!("Challenge failed: {}", msg).into());
+            }
+        }
+    }
+
+    // ── Round 3: submit amounts ──
+    let amounts_str = prompt_stdin(
+        "Enter the amounts you received (comma-separated, e.g. 123,456,789): ",
+    )?;
+    let amounts: Vec<u64> = amounts_str
+        .split(',')
+        .filter_map(|s| s.trim().parse::<u64>().ok())
+        .collect();
+    if amounts.is_empty() {
+        return Err("No amounts parsed".into());
+    }
+
+    println!("Submitting amounts...");
+    let vr = transport
+        .send_verify_request(
+            verifier_pubkey,
+            serde_json::json!({
+                "action": "verify",
+                "session_id": &session_id,
+                "amounts": amounts,
+            }),
+        )
+        .await?;
+    let vresp = transport.wait_for_verify_response(&vr, 30_000).await?;
+
+    match vresp.get("status").and_then(|v| v.as_str()) {
+        Some("verified") => {
+            println!("Verified.");
+            if let Some(id) = vresp.get("attestation_event_id").and_then(|v| v.as_str()) {
+                println!("  attestation: {}...", &id[..16.min(id.len())]);
+            }
+            Ok(())
+        }
+        _ => {
+            let msg = vresp
+                .get("message")
+                .or_else(|| vresp.get("error"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Verification failed");
+            Err(msg.into())
+        }
+    }
 }
 
 /// Add funds to an existing deposit

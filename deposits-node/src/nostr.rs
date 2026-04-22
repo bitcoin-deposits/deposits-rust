@@ -124,6 +124,17 @@ pub const KIND_SWAP_REQUEST: u16 = 20103;
 /// swap_request. Addressed via #p = taker_pubkey and #e = request event id.
 pub const KIND_SWAP_RESPONSE: u16 = 20104;
 
+/// Lightning-verify request: gift-wrapped ephemeral event addressed to the
+/// `attestation_verifier` service. Content is JSON (lightning_address on
+/// round one, `{action: "challenge", session_id}` / `{action: "verify",
+/// session_id, amounts}` on later rounds).
+pub const KIND_LIGHTNING_VERIFY_REQUEST: u16 = 25500;
+
+/// Lightning-verify response: gift-wrapped reply addressed back to the
+/// requester via #e tag on the outer wrap (matches the request's outer
+/// event id, same convention as `send_admin_request`).
+pub const KIND_LIGHTNING_VERIFY_RESPONSE: u16 = 25501;
+
 /// Custom Kind for fraud proof broadcasts (wallet evidence of operator dishonesty)
 /// Uses range 1000-9999 (regular custom events) for relay storage.
 /// Published by wallets with evidence embedded in the causal chain.
@@ -1627,6 +1638,180 @@ impl NostrTransport {
             .map_err(|e| Error::Nostr(format!("Failed to send admin request: {}", e)))?;
 
         Ok(wrap_id)
+    }
+
+    /// Send a request to a lightning-verify service (Kind 25500) using the
+    /// same custom NIP-04 gift-wrap envelope as `send_admin_request`.
+    /// Mirrors the web wallet's `giftWrap()` path so both clients talk to
+    /// the verifier identically.
+    ///
+    /// Returns the outer wrap event id. The verifier's reply is a Kind
+    /// 25501 event with `#e` pointing at that id — use
+    /// `wait_for_verify_response` to collect it.
+    pub async fn send_verify_request(
+        &self,
+        verifier_pubkey_hex: &str,
+        params: serde_json::Value,
+    ) -> Result<String, Error> {
+        let content = serde_json::to_string(&params).map_err(|e| {
+            Error::Serialization(format!("Failed to serialize verify params: {}", e))
+        })?;
+        // Verifier pubkeys are normally published as x-only (32 bytes /
+        // 64 hex). Accept compressed (33 bytes / 66 hex) too — strip the
+        // prefix for the recipient key and #p tag.
+        let xonly_hex: String = if verifier_pubkey_hex.len() == 66 {
+            verifier_pubkey_hex[2..].to_string()
+        } else {
+            verifier_pubkey_hex.to_string()
+        };
+        let recipient_pk = nostr_sdk::PublicKey::from_hex(&xonly_hex)
+            .map_err(|e| Error::Nostr(format!("Invalid verifier pubkey: {}", e)))?;
+
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let rumor_json = serde_json::json!({
+            "kind": KIND_LIGHTNING_VERIFY_REQUEST,
+            "content": content,
+            "tags": [["p", xonly_hex]],
+            "pubkey": self.keys.public_key().to_hex(),
+            "created_at": created_at,
+        })
+        .to_string();
+
+        let seal_content = nip04::encrypt(self.keys.secret_key(), &recipient_pk, &rumor_json)
+            .map_err(|e| Error::Nostr(format!("verify seal encrypt failed: {}", e)))?;
+        let seal_event = EventBuilder::new(Kind::Custom(13), &seal_content)
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("verify seal sign failed: {}", e)))?;
+        let seal_json = serde_json::json!({
+            "id": seal_event.id.to_hex(),
+            "pubkey": seal_event.pubkey.to_hex(),
+            "created_at": seal_event.created_at.as_u64(),
+            "kind": 13,
+            "content": seal_event.content,
+            "sig": seal_event.sig.to_string(),
+        })
+        .to_string();
+
+        let throwaway = Keys::generate();
+        let wrap_content = nip04::encrypt(throwaway.secret_key(), &recipient_pk, &seal_json)
+            .map_err(|e| Error::Nostr(format!("verify wrap encrypt failed: {}", e)))?;
+        let wrap = EventBuilder::new(Kind::Custom(KIND_LIGHTNING_VERIFY_REQUEST), &wrap_content)
+            .tag(Tag::public_key(recipient_pk))
+            .sign_with_keys(&throwaway)
+            .map_err(|e| Error::Nostr(format!("verify wrap sign failed: {}", e)))?;
+
+        let wrap_id = wrap.id.to_hex();
+
+        // Subscribe BEFORE publishing — verifier can respond within ms.
+        self.subscribe_verify_responses().await?;
+
+        self.send_event_with_timeout(wrap)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send verify request: {}", e)))?;
+
+        Ok(wrap_id)
+    }
+
+    /// Subscribe to Kind 25501 lightning-verify responses. Must be called
+    /// before any `send_verify_request` or `wait_for_verify_response`.
+    async fn subscribe_verify_responses(&self) -> Result<(), Error> {
+        let sub_key = "verify_responses".to_string();
+        {
+            let subs = self.active_subscriptions.read().unwrap();
+            if subs.contains(&sub_key) {
+                return Ok(());
+            }
+        }
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LIGHTNING_VERIFY_RESPONSE))
+            .since(Timestamp::now() - 5);
+        self.client
+            .subscribe(vec![filter], None)
+            .await
+            .map_err(|e| Error::Nostr(format!("subscribe verify: {}", e)))?;
+        self.active_subscriptions.write().unwrap().insert(sub_key);
+        Ok(())
+    }
+
+    /// Wait for a lightning-verify response (Kind 25501) whose `#e` tag
+    /// points at the given request id. Unwraps the gift envelope
+    /// (same NIP-04 shape as `send_verify_request`). Returns the
+    /// verifier's JSON content.
+    pub async fn wait_for_verify_response(
+        &self,
+        request_event_id: &str,
+        timeout_ms: u64,
+    ) -> Result<serde_json::Value, Error> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let mut rx = self.client.notifications();
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::Nostr("verify response timeout".into()));
+            }
+            let recv = tokio::time::timeout(remaining, rx.recv()).await;
+            let notif = match recv {
+                Ok(Ok(n)) => n,
+                _ => return Err(Error::Nostr("verify response timeout".into())),
+            };
+            if let RelayPoolNotification::Event { event, .. } = notif {
+                if event.kind.as_u16() != KIND_LIGHTNING_VERIFY_RESPONSE {
+                    continue;
+                }
+                // Match #e tag against request id.
+                let matches = event.tags.iter().any(|t| {
+                    t.kind() == TagKind::SingleLetter(TAG_EVENT_REF)
+                        && t.content() == Some(request_event_id)
+                });
+                if !matches {
+                    continue;
+                }
+                // Unwrap — same NIP-04 gift envelope the wallet/verifier use.
+                if let Ok(json) = self.unwrap_verify_payload(&event) {
+                    return Ok(json);
+                }
+                // If unwrap fails, keep waiting (could be a response for
+                // a different client that happened to match the e-tag by
+                // coincidence — extremely unlikely, but cheap to skip).
+            }
+        }
+    }
+
+    fn unwrap_verify_payload(&self, event: &Event) -> Result<serde_json::Value, Error> {
+        // Plaintext (unlikely but supported).
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&event.content) {
+            if let Some(s) = v.get("content").and_then(|x| x.as_str()) {
+                if let Ok(inner) = serde_json::from_str::<serde_json::Value>(s) {
+                    return Ok(inner);
+                }
+            }
+            return Ok(v);
+        }
+        // Gift-unwrap: outer → seal (kind 13) → rumor.
+        let seal_json =
+            nip04::decrypt(self.keys.secret_key(), &event.pubkey, &event.content)
+                .map_err(|e| Error::Nostr(format!("verify unwrap outer: {}", e)))?;
+        let seal: serde_json::Value = serde_json::from_str(&seal_json)
+            .map_err(|e| Error::Nostr(format!("verify seal parse: {}", e)))?;
+        let seal_pubkey_hex = seal["pubkey"]
+            .as_str()
+            .ok_or_else(|| Error::Nostr("verify seal missing pubkey".into()))?;
+        let seal_pubkey = nostr_sdk::PublicKey::from_hex(seal_pubkey_hex)
+            .map_err(|e| Error::Nostr(format!("verify seal pubkey parse: {}", e)))?;
+        let rumor_json = nip04::decrypt(
+            self.keys.secret_key(),
+            &seal_pubkey,
+            seal["content"].as_str().unwrap_or(""),
+        )
+        .map_err(|e| Error::Nostr(format!("verify rumor decrypt: {}", e)))?;
+        let rumor: serde_json::Value = serde_json::from_str(&rumor_json)
+            .map_err(|e| Error::Nostr(format!("verify rumor parse: {}", e)))?;
+        let content = rumor["content"].as_str().unwrap_or_default();
+        serde_json::from_str(content)
+            .map_err(|e| Error::Nostr(format!("verify payload parse: {}", e)))
     }
 
     /// Send a ledger response (reply to a request).
