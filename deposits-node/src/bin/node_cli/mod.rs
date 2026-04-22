@@ -7,6 +7,7 @@
 
 //! CLI command modules for deposits-node.
 
+pub mod admin;
 pub mod bootstrap;
 pub mod deposit;
 pub mod health;

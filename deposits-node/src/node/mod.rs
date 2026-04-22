@@ -188,6 +188,18 @@ pub struct OfferCoSignResult {
     pub member_ledger_hash: [u8; 32],
 }
 
+/// One entry in `{data_dir}/buffer_indices.json` tracking a buffer
+/// deposit the operator opened via `admin buffer open`. The index is
+/// the BIP32 derivation index used for the deposit key (same path the
+/// wallet uses), so admins can reconstruct the key from the mnemonic
+/// they received at bootstrap.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BufferIndexEntry {
+    pub index: u32,
+    pub ledger_id: String,
+    pub deposit_pubkey: String,
+}
+
 /// A pending Lightning invoice waiting for payment
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PendingInvoice {
@@ -400,6 +412,13 @@ pub struct Node {
     /// Kind 20101) alongside our own operator key. Set at bootstrap and
     /// persisted in {data_dir}/admin.npub (32-byte x-only hex).
     pub admin_pubkey: Option<nostr_sdk::PublicKey>,
+
+    /// Operator seed, retained for deriving buffer-deposit keys at
+    /// arbitrary BIP32 indices. Used by admin-only actions (`buffer
+    /// faucet`/`buffer sink`) to sign lock authorizations on deposits
+    /// the operator opened themselves. NOT used for customer-deposit
+    /// signing — those keys live in customer wallets.
+    pub(crate) seed: [u8; 32],
 }
 
 impl Node {

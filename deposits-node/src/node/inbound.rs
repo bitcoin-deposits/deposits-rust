@@ -43,8 +43,15 @@ impl Node {
         // ledger_open are about spinning one up). Gift-wrap unwrapping
         // already populates gift_wrap_sender, and the handlers enforce
         // via check_admin_authorized — skip the ledger ownership check.
-        let is_admin_request =
-            request.action == "reserves_create" || request.action == "ledger_open";
+        let is_admin_request = matches!(
+            request.action.as_str(),
+            "reserves_create"
+                | "ledger_open"
+                | "admin_buffer_open"
+                | "admin_buffer_fill"
+                | "admin_buffer_drain"
+                | "admin_buffer_list"
+        );
 
         // Silently drop operator-only actions if we're not the operator
         // (these are broadcast but only the operator should respond)
@@ -279,6 +286,10 @@ impl Node {
             "pay_invoice" => self.process_pay_invoice_request(&request).await,
             "reserves_create" => self.process_reserves_create_request(&request).await,
             "ledger_open" => self.process_ledger_open_request(&request).await,
+            "admin_buffer_open" => self.process_admin_buffer_open_request(&request).await,
+            "admin_buffer_fill" => self.process_admin_buffer_fill_request(&request).await,
+            "admin_buffer_drain" => self.process_admin_buffer_drain_request(&request).await,
+            "admin_buffer_list" => self.process_admin_buffer_list_request(&request).await,
             "bump" => {
                 tracing::info!("Bump requested - syncing wallet and checking deposits...");
                 if let Err(e) = self.sync_wallet() {
