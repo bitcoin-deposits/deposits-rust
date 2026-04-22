@@ -23,6 +23,29 @@ set -e
 #   NODE_NAME                        - operator name for advertisements
 #   QUORUM_SIZE                      - default 5
 #
+# Access control (passed through to the daemon via env):
+#   DEPOSIT_ACCESS_CONTROL           - "true" to gate deposit_open on the
+#                                      npub allowlist / verify attestation.
+#                                      When unset or "false", only the
+#                                      denylist is consulted.
+#   ATTESTATION_VERIFIER_PUBKEY      - hex pubkey of the lightning-verify
+#                                      service whose attestations the node
+#                                      trusts. Echoed back in rejection
+#                                      responses so wallets know who to
+#                                      DM.
+#   MAX_DEPOSIT_BALANCE_MSATS        - cap per deposit; 0 = unlimited.
+#
+# Access-control files (mount into /config to apply them):
+#   /config/deposit_allowlist.txt         - one xonly npub per line; these
+#                                           sender pubkeys skip the
+#                                           attestation check.
+#   /config/deposit_denylist.txt          - one npub per line; these are
+#                                           rejected regardless of
+#                                           DEPOSIT_ACCESS_CONTROL.
+#   /config/deposit_domain_allowlist.txt  - lightning-address domains whose
+#                                           verifier attestations are
+#                                           accepted (e.g. "example.com").
+#
 # State (in /data/node):
 #   seed.hex                         - generated operator seed (idempotent: reused on restart)
 #   funding_address                  - address shown in the DM (stable across restarts)
@@ -31,6 +54,7 @@ set -e
 #
 # Volumes:
 #   /data                            - persistent node data + relay DB
+#   /config                          - optional access-control lists (see above)
 
 DATA_DIR="/data/node"
 RELAY_DIR="/data/relay"
@@ -39,6 +63,16 @@ METRICS_PORT="${METRICS_PORT:-9100}"
 QUORUM_SIZE="${QUORUM_SIZE:-5}"
 
 mkdir -p "$DATA_DIR" "$RELAY_DIR"
+
+# --- Copy access-control lists from /config into the data dir ---
+# The daemon reads these from {data_dir} (see Node::load_list in
+# deposits-node/src/node/init.rs). We copy rather than symlink so a
+# container stop/start doesn't leave stale pointers.
+for f in deposit_allowlist.txt deposit_denylist.txt deposit_domain_allowlist.txt; do
+    if [ -f "/config/$f" ]; then
+        cp "/config/$f" "$DATA_DIR/$f"
+    fi
+done
 
 # --- Resolve admin npub ---
 ADMIN_NPUB="${1:-$ADMIN_NPUB}"
