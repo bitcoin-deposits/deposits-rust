@@ -1,3 +1,4 @@
+pub mod attest;
 pub mod batch;
 pub mod deposit;
 pub mod discover;

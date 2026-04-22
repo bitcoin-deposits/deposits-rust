@@ -135,6 +135,14 @@ pub const KIND_LIGHTNING_VERIFY_REQUEST: u16 = 25500;
 /// event id, same convention as `send_admin_request`).
 pub const KIND_LIGHTNING_VERIFY_RESPONSE: u16 = 25501;
 
+/// Subkey-list event (DEP-04 §"Subkey Attestation"): replaceable event
+/// authored by the root/account pubkey, listing currently-authorized
+/// subkeys (`inbox_keys`) and revoked ones (`revoked_subkeys`). The
+/// per-subkey attestation signature is carried by the subkey's own
+/// events via `["va", "<sig>"]`; this event is the policy index that
+/// verifiers consult to distinguish active from revoked delegations.
+pub const KIND_SUBKEY_LIST: u16 = 10301;
+
 /// Custom Kind for fraud proof broadcasts (wallet evidence of operator dishonesty)
 /// Uses range 1000-9999 (regular custom events) for relay storage.
 /// Published by wallets with evidence embedded in the causal chain.
@@ -1812,6 +1820,105 @@ impl NostrTransport {
         let content = rumor["content"].as_str().unwrap_or_default();
         serde_json::from_str(content)
             .map_err(|e| Error::Nostr(format!("verify payload parse: {}", e)))
+    }
+
+    /// Publish this wallet's Kind 10301 subkey list (DEP-04). The
+    /// content is a JSON object with `inbox_keys` and `revoked_subkeys`
+    /// arrays. Replaceable — relay keeps only the latest per author.
+    pub async fn publish_subkey_list(
+        &self,
+        inbox_keys: &[String],
+        revoked_subkeys: &[String],
+    ) -> Result<String, Error> {
+        let content = serde_json::json!({
+            "inbox_keys": inbox_keys,
+            "revoked_subkeys": revoked_subkeys,
+        })
+        .to_string();
+
+        // Replaceable events are broken if two publishes land in the same
+        // second — NIP-01 tie-breaks on event id, not on write order, so
+        // the older state can win. Query the existing event's timestamp
+        // and force ours strictly newer.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let prior = {
+            let our_pk = self.keys.public_key();
+            let filter = Filter::new()
+                .kind(Kind::Custom(KIND_SUBKEY_LIST))
+                .author(our_pk)
+                .limit(1);
+            let evs = self
+                .client
+                .fetch_events(vec![filter], Some(std::time::Duration::from_secs(3)))
+                .await
+                .ok();
+            evs.and_then(|e| e.iter().map(|x| x.created_at.as_u64()).max())
+                .unwrap_or(0)
+        };
+        let created_at = std::cmp::max(now, prior + 1);
+
+        let event = EventBuilder::new(Kind::Custom(KIND_SUBKEY_LIST), &content)
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign subkey list: {}", e)))?;
+        let event_id = event.id.to_hex();
+        self.send_event_with_timeout(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to publish subkey list: {}", e)))?;
+        // Give the relay a moment to persist before the CLI exits.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        Ok(event_id)
+    }
+
+    /// Fetch the latest Kind 10301 subkey list authored by
+    /// `author_xonly_hex`. Returns `(inbox_keys, revoked_subkeys)` or
+    /// `(vec![], vec![])` if no list has been published yet.
+    pub async fn fetch_subkey_list(
+        &self,
+        author_xonly_hex: &str,
+    ) -> Result<(Vec<String>, Vec<String>), Error> {
+        let author = nostr_sdk::PublicKey::from_hex(author_xonly_hex)
+            .map_err(|e| Error::Nostr(format!("Invalid author pubkey: {}", e)))?;
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_SUBKEY_LIST))
+            .author(author)
+            .limit(1);
+
+        let events = self
+            .client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch subkey list: {}", e)))?;
+
+        let mut latest: Option<&Event> = None;
+        for e in events.iter() {
+            match latest {
+                None => latest = Some(e),
+                Some(prev) if e.created_at > prev.created_at => latest = Some(e),
+                _ => {}
+            }
+        }
+        let Some(evt) = latest else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+
+        let parsed: serde_json::Value = serde_json::from_str(&evt.content)
+            .map_err(|e| Error::Serialization(format!("subkey list parse: {}", e)))?;
+        let take_arr = |k: &str| -> Vec<String> {
+            parsed
+                .get(k)
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Ok((take_arr("inbox_keys"), take_arr("revoked_subkeys")))
     }
 
     /// Send a ledger response (reply to a request).
