@@ -39,6 +39,14 @@ Members also specify timing parameters that govern protocol obligations (see DEP
 
 The strictest (smallest) values across all members apply to the quorum. The operator cannot open deposits with descriptors exceeding the quorum's `max_descriptor_bytes` limit.
 
+Members also specify compensation terms — the operator commits to pay each member a share of collected fees (see DEP-07) in exchange for co-signing:
+
+- **compensation_bps**: basis points of collected fees that flow to this member (default 300 = 3%). With Q=7 members at the default, ~21% of fee revenue is distributed to cosigners.
+- **compensation_deposit_id**: deposit on the operator's ledger where the member's share lands. The deposit MUST exist when `QuorumAddMember` is appended.
+- **compensation_frequency_blocks**: cadence at which accrued compensation is paid out (default 2016 ≈ 2 weeks, mirroring the default fee-collection cycle).
+
+These fields are per-member, not reduced to a quorum-wide minimum — different members can negotiate different rates. Omitting them means the member waived compensation.
+
 ### QuorumBegin (disc 12)
 
 Once members are added, the operator rotates reserves into a new Taproot multisig UTXO (see DEP-03). After `QuorumBegin`, every subsequent update MUST carry co-signatures from a strict majority (`floor(n/2) + 1`) of quorum members. This prevents the operator from maintaining parallel chains — a majority of cosigners will have seen and validated the canonical chain before signing any new update. `QuorumBegin` records the `quorum_expiry` (shortest membership duration) and `collateral_amount_msats`.

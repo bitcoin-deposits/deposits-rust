@@ -41,7 +41,7 @@ If the timeout is reached without completion, the operator appends `TransferFail
 - **block_hash**: the block hash at timeout height
 - **reason**: failure reason (1 = timeout, 0 = reserved)
 
-On failure: `amount` is returned to the source deposit (minus a smaller timeout fee), and the transfer is removed from pending.
+On failure: the lock on the source (`amount + fee`) is released; the source recovers `amount + proportional_portion_of_fee`, and the **fixed** portion of the fee (`fixed_msats` from the source's `TransferFeeSchedule`) is charged to the source's balance and credited to the operator. The transfer is removed from pending. See DEP-07 §"Fee on Failure" for the full model.
 
 ## Completion Scripts
 

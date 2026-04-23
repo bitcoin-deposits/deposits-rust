@@ -18,7 +18,9 @@ Fee calculation for a collection period:
     proportional_portion = balance * annualized_bps * blocks_elapsed / (52560 * 10000)
     total_fee = fixed_portion + proportional_portion
 
-All fee arithmetic uses integer division with floor rounding. The operator appends `FeeCollect` (disc 50) with the computed fee, which is deducted from the deposit's balance.
+All fee arithmetic uses integer division with floor rounding. Implementations MUST compute the multiplicative chain in at least u128 (or equivalent wide integer) before dividing — with realistic whale balances (~10¹⁶ msats), the product `balance * annualized_bps * blocks_elapsed` exceeds 2⁶⁴ long before the divisor rescues it, and silent u64 wrap would let the operator collect an arbitrary fraction of the intended fee. The final quotient fits in u64 for any sane input; implementations SHOULD saturate the downcast rather than wrap.
+
+The operator appends `FeeCollect` (disc 50) with the computed fee, which is deducted from the deposit's balance and added to the ledger's `fees_accumulated` counter (see below).
 
 ## Per-Transfer Fees (TransferFeeSchedule)
 
@@ -31,7 +33,35 @@ Fee calculation:
 
     fee = fixed_msats + (amount_msats * rate_bps / 10000)
 
+The same wide-integer requirement applies: `amount_msats * rate_bps` can overflow u64 for large amounts; implementations MUST widen to u128 and saturate the downcast.
+
 The sender must provide the exact expected fee in the `TransferLock` request. The operator rejects mismatches.
+
+### Fee on Failure
+
+Lock-then-resolve operations (`TransferLock`/`Complete`/`Fail`, `InvoiceLock`/`Fulfill`/`Fail`, `OnchainLock`/`Fulfill`/`Fail`) charge a fee even when the resolution is a failure. Rationale: the operator did real work holding the lock and coordinating the attempt. On the failure path:
+
+- The **proportional** portion of the fee is zero, since no `amount` was moved.
+- The **fixed** portion (`fixed_msats` from the deposit's current `TransferFeeSchedule`) is charged to the deposit and credited to the operator's `fees_accumulated`.
+- Any locked capacity is otherwise released. For `TransferFail` specifically, the source recovers `amount + proportional_portion` — only `fixed_msats` stays with the operator. For `InvoiceFail` and `OnchainFail`, the locked `amount` is released in full (those ops don't lock an operator fee upfront) and `fixed_msats` is debited from the deposit's balance.
+
+Implementations MUST use saturating subtraction so that a deposit whose balance dipped below `fixed_msats` between lock and fail does not panic or underflow — in that edge case the operator collects only what the deposit can afford.
+
+### Fee Accumulator
+
+Every ledger carries a monotonically non-decreasing `fees_accumulated: u64` counter tracking the total msats of fee the operator has earned on that ledger. Contributions:
+
+| Op | Amount added |
+|---|---|
+| `FeeCollect` | `amount` |
+| `TransferComplete` | `pending.fee` (fixed + proportional) |
+| `TransferFail` | `source.transfer_fees.fixed_msats` |
+| `InvoiceFail` | `deposit.transfer_fees.fixed_msats` |
+| `OnchainFail` | `deposit.transfer_fees.fixed_msats` |
+
+`OnchainLock.fee_sats` is a **miner** fee and is NOT accumulated on success or failure. Successful `InvoiceFulfill` and `OnchainFulfill` do not currently contribute (no operator-fee model on those paths today).
+
+`fees_accumulated` is serde-defaulted so pre-accumulator ledgers load with 0, and it is the substrate a future payout operation will debit against when distributing quorum-member compensation (see DEP-05).
 
 ## Fee Negotiation
 

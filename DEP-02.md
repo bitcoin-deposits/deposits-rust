@@ -66,7 +66,7 @@ Each `cosig_entry` is:
 | 33 | 64 | cosign_signature (Schnorr BIP-340) |
 | 97 | 32 | member_ledger_hash (cosigner's ledger tip) |
 
-Total entry size: 129 bytes. Entries MUST be sorted by cosigner_pubkey (lexicographic on serialized bytes). This ensures deterministic hashing.
+Total entry size: 129 bytes. Entries MUST be sorted by cosigner_pubkey (lexicographic on serialized bytes). This ensures deterministic hashing. Decoders MUST either reject unsorted input or canonicalize it before verifying `current_hash` and the operator signature — otherwise a malicious sender can reorder entries to produce a distinct but otherwise-valid hash for the same logical cosignature set, enabling signature malleability.
 
 After `QuorumBegin`, updates MUST include at least `floor(n/2) + 1` cosignatures from distinct quorum members (where n is the quorum size). Updates with fewer cosignatures are non-conforming.
 
@@ -255,6 +255,9 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 256 | service_response_blocks | 4 | QuorumAddMember |
 | 258 | max_transfer_timeout_blocks | 4 | QuorumAddMember |
 | 262 | max_descriptor_bytes | 4 | QuorumAddMember |
+| 264 | compensation_bps | 2 | QuorumAddMember |
+| 266 | compensation_deposit_id | 16 | QuorumAddMember |
+| 268 | compensation_frequency_blocks | 4 | QuorumAddMember |
 
 #### Dispute
 
