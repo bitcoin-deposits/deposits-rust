@@ -180,7 +180,12 @@ pub enum CoordinationMsg {
         reserves_id: String,
         operator_signature: [u8; 64],
     },
-    /// Quorum join request
+    /// Quorum join request.
+    ///
+    /// `compensation_*` fields are the member's *proposal* for co-signing
+    /// compensation — the operator either accepts (echoing them back on
+    /// the on-ledger QuorumAddMember) or rejects the request. See
+    /// `DEFAULT_COMPENSATION_BPS`.
     QuorumJoinRequest {
         requester_pubkey: PublicKey,
         operator_id: PublicKey,
@@ -188,6 +193,9 @@ pub enum CoordinationMsg {
         protocol_version: u16,
         timestamp: u64,
         signature: [u8; 64],
+        compensation_bps: Option<u16>,
+        compensation_deposit_id: Option<[u8; 16]>,
+        compensation_frequency_blocks: Option<u32>,
     },
     /// Quorum vote request
     QuorumVoteRequest {
@@ -713,6 +721,9 @@ impl BinaryCodec for CoordinationMsg {
                 protocol_version,
                 timestamp,
                 signature,
+                compensation_bps,
+                compensation_deposit_id,
+                compensation_frequency_blocks,
             } => {
                 write_u8(w, 2)?;
                 write_pubkey(w, requester_pubkey)?;
@@ -721,6 +732,9 @@ impl BinaryCodec for CoordinationMsg {
                 write_u16(w, *protocol_version)?;
                 write_u64(w, *timestamp)?;
                 write_64(w, signature)?;
+                write_option(w, compensation_bps, |w, v| write_u16(w, *v))?;
+                write_option(w, compensation_deposit_id, |w, v| write_16(w, v))?;
+                write_option(w, compensation_frequency_blocks, |w, v| write_u32(w, *v))?;
             }
             Self::QuorumVoteRequest {
                 vote_round_id,
@@ -810,6 +824,9 @@ impl BinaryCodec for CoordinationMsg {
                 protocol_version: read_u16(r)?,
                 timestamp: read_u64(r)?,
                 signature: read_64(r)?,
+                compensation_bps: read_option(r, read_u16)?,
+                compensation_deposit_id: read_option(r, read_16)?,
+                compensation_frequency_blocks: read_option(r, read_u32)?,
             }),
             3 => Ok(Self::QuorumVoteRequest {
                 vote_round_id: read_32(r)?,

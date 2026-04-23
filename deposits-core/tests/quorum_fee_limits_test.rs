@@ -67,6 +67,9 @@ fn add_member(
             service_response_blocks: None,
             max_transfer_timeout_blocks: None,
             max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
         })
         .unwrap();
 }
@@ -192,6 +195,9 @@ fn quorum_add_member_fee_limits_tlv_roundtrip() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     };
 
     let encoded = op.tlv_encode();
@@ -227,6 +233,9 @@ fn quorum_add_member_no_limits_tlv_roundtrip() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     };
 
     let encoded = op.tlv_encode();
@@ -265,6 +274,9 @@ fn strictest_limits_single_member() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     }];
 
     let (bps, fixed, period) = strictest_quorum_limits(&members);
@@ -288,6 +300,9 @@ fn strictest_limits_multiple_members_takes_most_restrictive() {
             service_response_blocks: None,
             max_transfer_timeout_blocks: None,
             max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
         },
         QuorumMember {
             pubkey: test_pubkey_3(),
@@ -301,6 +316,9 @@ fn strictest_limits_multiple_members_takes_most_restrictive() {
             service_response_blocks: None,
             max_transfer_timeout_blocks: None,
             max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
         },
     ];
 
@@ -326,6 +344,9 @@ fn strictest_limits_with_none_values() {
             service_response_blocks: None,
             max_transfer_timeout_blocks: None,
             max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
         },
         QuorumMember {
             pubkey: test_pubkey_3(),
@@ -339,6 +360,9 @@ fn strictest_limits_with_none_values() {
             service_response_blocks: None,
             max_transfer_timeout_blocks: None,
             max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
         },
     ];
 
@@ -363,6 +387,9 @@ fn strictest_limits_all_none() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     }];
 
     let (bps, fixed, period) = strictest_quorum_limits(&members);
@@ -389,6 +416,9 @@ fn fees_meeting_all_limits_pass() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     }];
 
     let fees = FeeStructure {
@@ -414,6 +444,9 @@ fn fees_below_min_bps_rejected() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     }];
 
     let fees = FeeStructure {
@@ -440,6 +473,9 @@ fn fees_below_min_fixed_rejected() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     }];
 
     let fees = FeeStructure {
@@ -470,6 +506,9 @@ fn fees_exceeding_max_period_rejected() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     }];
 
     let fees = FeeStructure {
@@ -500,6 +539,9 @@ fn fees_with_no_quorum_limits_always_pass() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     }];
 
     // Even zero fees pass when member has no limits
@@ -527,6 +569,9 @@ fn fees_must_satisfy_strictest_member() {
             service_response_blocks: None,
             max_transfer_timeout_blocks: None,
             max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
         },
         QuorumMember {
             pubkey: test_pubkey_3(),
@@ -540,6 +585,9 @@ fn fees_must_satisfy_strictest_member() {
             service_response_blocks: None,
             max_transfer_timeout_blocks: None,
             max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
         },
     ];
 
@@ -648,6 +696,9 @@ fn quorum_member_struct_fee_limits_survive_json_roundtrip() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     };
 
     let json = serde_json::to_string(&member).unwrap();
@@ -673,6 +724,9 @@ fn quorum_member_struct_no_limits_json_roundtrip() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     };
 
     let json = serde_json::to_string(&member).unwrap();
@@ -744,6 +798,9 @@ fn membership_duration_limited_by_shortest_commitment() {
             service_response_blocks: None,
             max_transfer_timeout_blocks: None,
             max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
         },
         QuorumMember {
             pubkey: test_pubkey_3(),
@@ -757,6 +814,9 @@ fn membership_duration_limited_by_shortest_commitment() {
             service_response_blocks: None,
             max_transfer_timeout_blocks: None,
             max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
         },
     ];
 
@@ -777,6 +837,9 @@ fn membership_duration_no_commitments_no_limit() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     }];
     assert_eq!(max_membership_block(&members), None);
 }

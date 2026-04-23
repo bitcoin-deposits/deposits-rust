@@ -582,7 +582,32 @@ pub struct QuorumMember {
     /// Maximum serialized descriptor size (bytes) member will accept on deposits
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_descriptor_bytes: Option<u32>,
+    /// Basis points of *collected* fees that flow to this member as
+    /// compensation for co-signing. Defaults to `DEFAULT_COMPENSATION_BPS`
+    /// (~3%). For a Q=7 quorum with every member at the default, the operator
+    /// distributes ~21% of fee revenue to cosigners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compensation_bps: Option<u16>,
+    /// Deposit on the operator's ledger where compensation lands. Identified
+    /// by 16-byte DepositId; the deposit must already exist (the member opens
+    /// it, or the operator opens it on the member's behalf, before this
+    /// QuorumAddMember is appended).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compensation_deposit_id: Option<DepositId>,
+    /// Cadence at which accrued compensation is paid out, in blocks.
+    /// Defaults to `DEFAULT_COMPENSATION_FREQUENCY_BLOCKS` (2016 ≈ 2 weeks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compensation_frequency_blocks: Option<u32>,
 }
+
+/// Default compensation rate for a quorum member: 3% (300 bips) of collected
+/// fees. Recommended when the member doesn't care to negotiate a custom rate.
+pub const DEFAULT_COMPENSATION_BPS: u16 = 300;
+
+/// Default compensation payout cadence: 2016 blocks (~2 weeks). Mirrors the
+/// default `frequency_blocks` on `FeeStructure`, so by default a member is
+/// paid once per operator fee-collection cycle.
+pub const DEFAULT_COMPENSATION_FREQUENCY_BLOCKS: u32 = 2016;
 
 // ============================================================================
 // Dispute State

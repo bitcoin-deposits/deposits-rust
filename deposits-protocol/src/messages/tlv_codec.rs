@@ -100,6 +100,15 @@ mod ledger_op_tlv {
     pub const MAX_TRANSFER_TIMEOUT_BLOCKS: u64 = 258; // u32
     pub const MAX_DESCRIPTOR_BYTES: u64 = 262; // u32
 
+    // Member compensation negotiated at quorum formation.
+    // `compensation_bps` is the portion of *collected* fees the operator
+    // commits to pay this member (300 = 3%). The payout lands in the
+    // member's chosen deposit on the operator's ledger at the member's
+    // chosen cadence.
+    pub const COMPENSATION_BPS: u64 = 264; // u16
+    pub const COMPENSATION_DEPOSIT_ID: u64 = 266; // [u8; 16]
+    pub const COMPENSATION_FREQUENCY_BLOCKS: u64 = 268; // u32
+
     // Delivery operation fields
     pub const REQUEST_HASH: u64 = 270; // [u8; 32]
     pub const TARGET_LEDGER_ID: u64 = 272; // [u8; 32]
@@ -381,6 +390,9 @@ impl TlvEncode for LedgerOperation {
                 service_response_blocks,
                 max_transfer_timeout_blocks,
                 max_descriptor_bytes,
+                compensation_bps,
+                compensation_deposit_id,
+                compensation_frequency_blocks,
             } => {
                 builder = builder
                     .pubkey_field(QUORUM_MEMBER, quorum_member)
@@ -412,6 +424,15 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(v) = max_descriptor_bytes {
                     builder = builder.u32_field(MAX_DESCRIPTOR_BYTES, *v);
+                }
+                if let Some(v) = compensation_bps {
+                    builder = builder.u16_field(COMPENSATION_BPS, *v);
+                }
+                if let Some(v) = compensation_deposit_id {
+                    builder = builder.deposit_id_field(COMPENSATION_DEPOSIT_ID, v);
+                }
+                if let Some(v) = compensation_frequency_blocks {
+                    builder = builder.u32_field(COMPENSATION_FREQUENCY_BLOCKS, *v);
                 }
             }
             Self::QuorumRemoveMember {
@@ -646,6 +667,9 @@ impl TlvDecode for LedgerOperation {
                 service_response_blocks: reader.read_u32_opt(SERVICE_RESPONSE_BLOCKS)?,
                 max_transfer_timeout_blocks: reader.read_u32_opt(MAX_TRANSFER_TIMEOUT_BLOCKS)?,
                 max_descriptor_bytes: reader.read_u32_opt(MAX_DESCRIPTOR_BYTES)?,
+                compensation_bps: reader.read_u16_opt(COMPENSATION_BPS)?,
+                compensation_deposit_id: reader.read_deposit_id_opt(COMPENSATION_DEPOSIT_ID)?,
+                compensation_frequency_blocks: reader.read_u32_opt(COMPENSATION_FREQUENCY_BLOCKS)?,
             }),
             44 => Ok(Self::QuorumRemoveMember {
                 quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,
@@ -1243,6 +1267,10 @@ mod coordination_tlv {
     pub const SCRIPT_PUBKEY: u64 = 60;
     pub const LEDGER_HASH: u64 = 62;
     pub const REMOTE_LEDGER_HASH: u64 = 64;
+    // QuorumJoinRequest compensation proposal
+    pub const COMPENSATION_BPS: u64 = 66;
+    pub const COMPENSATION_DEPOSIT_ID: u64 = 68;
+    pub const COMPENSATION_FREQUENCY_BLOCKS: u64 = 70;
 }
 
 impl TlvEncode for CoordinationMsg {
@@ -1286,15 +1314,29 @@ impl TlvEncode for CoordinationMsg {
                 protocol_version,
                 timestamp,
                 signature,
-            } => TlvBuilder::new()
-                .u8_field(DISCRIMINANT, 2)
-                .pubkey_field(REQUESTER_PUBKEY, requester_pubkey)
-                .pubkey_field(OPERATOR_ID, operator_id)
-                .string_field(RESERVES_ID, reserves_id)
-                .u16_field(PROTOCOL_VERSION, *protocol_version)
-                .u64_field(TIMESTAMP, *timestamp)
-                .bytes_field(SIGNATURE, signature)
-                .build(),
+                compensation_bps,
+                compensation_deposit_id,
+                compensation_frequency_blocks,
+            } => {
+                let mut b = TlvBuilder::new()
+                    .u8_field(DISCRIMINANT, 2)
+                    .pubkey_field(REQUESTER_PUBKEY, requester_pubkey)
+                    .pubkey_field(OPERATOR_ID, operator_id)
+                    .string_field(RESERVES_ID, reserves_id)
+                    .u16_field(PROTOCOL_VERSION, *protocol_version)
+                    .u64_field(TIMESTAMP, *timestamp)
+                    .bytes_field(SIGNATURE, signature);
+                if let Some(v) = compensation_bps {
+                    b = b.u16_field(COMPENSATION_BPS, *v);
+                }
+                if let Some(v) = compensation_deposit_id {
+                    b = b.deposit_id_field(COMPENSATION_DEPOSIT_ID, v);
+                }
+                if let Some(v) = compensation_frequency_blocks {
+                    b = b.u32_field(COMPENSATION_FREQUENCY_BLOCKS, *v);
+                }
+                b.build()
+            }
             Self::QuorumVoteRequest {
                 vote_round_id,
                 operator_id,
@@ -1400,6 +1442,9 @@ impl TlvDecode for CoordinationMsg {
                 protocol_version: reader.read_u16(PROTOCOL_VERSION)?,
                 timestamp: reader.read_u64(TIMESTAMP)?,
                 signature: reader.read_bytes(SIGNATURE)?,
+                compensation_bps: reader.read_u16_opt(COMPENSATION_BPS)?,
+                compensation_deposit_id: reader.read_deposit_id_opt(COMPENSATION_DEPOSIT_ID)?,
+                compensation_frequency_blocks: reader.read_u32_opt(COMPENSATION_FREQUENCY_BLOCKS)?,
             }),
             3 => {
                 // Decode Vec<u64> from concatenated big-endian bytes

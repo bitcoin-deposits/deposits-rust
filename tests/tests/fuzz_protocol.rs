@@ -188,6 +188,9 @@ impl ProtocolSim {
                         service_response_blocks: None,
                         max_transfer_timeout_blocks: None,
                         max_descriptor_bytes: None,
+                        compensation_bps: None,
+                        compensation_deposit_id: None,
+                        compensation_frequency_blocks: None,
                     })
                     .unwrap();
             }

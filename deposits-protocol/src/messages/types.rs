@@ -373,6 +373,15 @@ pub enum LedgerOperation {
         max_transfer_timeout_blocks: Option<u32>,
         /// Maximum descriptor size (bytes) member will accept on deposits
         max_descriptor_bytes: Option<u32>,
+        /// Basis points of collected fees flowing to this member as
+        /// co-signing compensation. `None` means the member waived
+        /// compensation. See `DEFAULT_COMPENSATION_BPS` (300 = 3%).
+        compensation_bps: Option<u16>,
+        /// Deposit on the operator's ledger where compensation is paid.
+        /// Must already exist when the operation is appended.
+        compensation_deposit_id: Option<DepositId>,
+        /// Payout cadence in blocks. See `DEFAULT_COMPENSATION_FREQUENCY_BLOCKS`.
+        compensation_frequency_blocks: Option<u32>,
     },
     /// Remove a quorum member from the VoterSet
     QuorumRemoveMember {
@@ -718,6 +727,11 @@ pub(super) fn write_pubkey<W: Write>(w: &mut W, pk: &PublicKey) -> Result<(), Co
     Ok(())
 }
 
+pub(super) fn write_16<W: Write>(w: &mut W, v: &[u8; 16]) -> Result<(), CodecError> {
+    w.write_all(v)?;
+    Ok(())
+}
+
 pub(super) fn write_20<W: Write>(w: &mut W, v: &[u8; 20]) -> Result<(), CodecError> {
     w.write_all(v)?;
     Ok(())
@@ -802,6 +816,12 @@ pub(super) fn read_pubkey<R: Read>(r: &mut R) -> Result<PublicKey, CodecError> {
     let mut buf = [0u8; 33];
     r.read_exact(&mut buf)?;
     PublicKey::from_slice(&buf).map_err(|e| CodecError::InvalidData(e.to_string()))
+}
+
+pub(super) fn read_16<R: Read>(r: &mut R) -> Result<[u8; 16], CodecError> {
+    let mut buf = [0u8; 16];
+    r.read_exact(&mut buf)?;
+    Ok(buf)
 }
 
 pub(super) fn read_20<R: Read>(r: &mut R) -> Result<[u8; 20], CodecError> {
@@ -1546,6 +1566,9 @@ impl BinaryCodec for LedgerOperation {
                 service_response_blocks: None,
                 max_transfer_timeout_blocks: None,
                 max_descriptor_bytes: None,
+                compensation_bps: None,
+                compensation_deposit_id: None,
+                compensation_frequency_blocks: None,
             }),
             44 => Ok(Self::QuorumRemoveMember {
                 quorum_member: read_pubkey(r)?,

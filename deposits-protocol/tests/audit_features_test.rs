@@ -101,6 +101,9 @@ fn quorum_add_member_with_timing_params_tlv_roundtrip() {
         service_response_blocks: Some(72),
         max_transfer_timeout_blocks: Some(1008),
         max_descriptor_bytes: Some(500),
+        compensation_bps: Some(300),
+        compensation_deposit_id: Some([0x11; 16]),
+        compensation_frequency_blocks: Some(2016),
     };
 
     let encoded = original.tlv_encode();
@@ -120,6 +123,9 @@ fn quorum_add_member_with_timing_params_tlv_roundtrip() {
             service_response_blocks,
             max_transfer_timeout_blocks,
             max_descriptor_bytes,
+            compensation_bps,
+            compensation_deposit_id,
+            compensation_frequency_blocks,
         } => {
             assert_eq!(quorum_member, test_pubkey());
             assert_eq!(quorum_member_signature, [0xAA; 64]);
@@ -133,6 +139,9 @@ fn quorum_add_member_with_timing_params_tlv_roundtrip() {
             assert_eq!(service_response_blocks, Some(72));
             assert_eq!(max_transfer_timeout_blocks, Some(1008));
             assert_eq!(max_descriptor_bytes, Some(500));
+            assert_eq!(compensation_bps, Some(300));
+            assert_eq!(compensation_deposit_id, Some([0x11; 16]));
+            assert_eq!(compensation_frequency_blocks, Some(2016));
         }
         other => panic!(
             "Expected QuorumAddMember, got discriminant {}",
@@ -160,6 +169,9 @@ fn quorum_add_member_none_timing_params_tlv_roundtrip() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     };
 
     let encoded = original.tlv_encode();
@@ -179,6 +191,9 @@ fn quorum_add_member_none_timing_params_tlv_roundtrip() {
             service_response_blocks,
             max_transfer_timeout_blocks,
             max_descriptor_bytes,
+            compensation_bps,
+            compensation_deposit_id,
+            compensation_frequency_blocks,
         } => {
             assert_eq!(quorum_member, test_pubkey_2());
             assert_eq!(quorum_member_signature, [0xBB; 64]);
@@ -192,6 +207,9 @@ fn quorum_add_member_none_timing_params_tlv_roundtrip() {
             assert_eq!(service_response_blocks, None);
             assert_eq!(max_transfer_timeout_blocks, None);
             assert_eq!(max_descriptor_bytes, None);
+            assert_eq!(compensation_bps, None);
+            assert_eq!(compensation_deposit_id, None);
+            assert_eq!(compensation_frequency_blocks, None);
         }
         other => panic!(
             "Expected QuorumAddMember, got discriminant {}",
@@ -224,6 +242,9 @@ fn quorum_add_member_binary_roundtrip_with_timing_params() {
         service_response_blocks: Some(72),
         max_transfer_timeout_blocks: Some(1008),
         max_descriptor_bytes: Some(500),
+        compensation_bps: Some(300),
+        compensation_deposit_id: Some([0x22; 16]),
+        compensation_frequency_blocks: Some(2016),
     };
 
     let mut bytes = Vec::new();
@@ -244,6 +265,9 @@ fn quorum_add_member_binary_roundtrip_with_timing_params() {
             service_response_blocks,
             max_transfer_timeout_blocks,
             max_descriptor_bytes,
+            compensation_bps,
+            compensation_deposit_id,
+            compensation_frequency_blocks,
         } => {
             // Core fields survive the binary roundtrip
             assert_eq!(quorum_member, test_pubkey());
@@ -259,6 +283,9 @@ fn quorum_add_member_binary_roundtrip_with_timing_params() {
             assert_eq!(service_response_blocks, None);
             assert_eq!(max_transfer_timeout_blocks, None);
             assert_eq!(max_descriptor_bytes, None);
+            assert_eq!(compensation_bps, None);
+            assert_eq!(compensation_deposit_id, None);
+            assert_eq!(compensation_frequency_blocks, None);
         }
         other => panic!(
             "Expected QuorumAddMember, got discriminant {}",

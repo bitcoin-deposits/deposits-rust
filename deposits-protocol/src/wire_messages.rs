@@ -242,6 +242,11 @@ pub struct QuorumJoinRequestMsgWire {
     pub protocol_version: u16,
     pub timestamp: u64,
     pub signature: [u8; 64],
+    /// Member's proposed compensation rate (bips of collected fees). See
+    /// `DEFAULT_COMPENSATION_BPS` and `CoordinationMsg::QuorumJoinRequest`.
+    pub compensation_bps: Option<u16>,
+    pub compensation_deposit_id: Option<[u8; 16]>,
+    pub compensation_frequency_blocks: Option<u32>,
 }
 
 /// quorum join response message

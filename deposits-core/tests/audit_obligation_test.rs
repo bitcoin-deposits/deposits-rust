@@ -217,6 +217,9 @@ fn quorum_member_timing_fields_roundtrip() {
         service_response_blocks: Some(72),
         max_transfer_timeout_blocks: Some(1008),
         max_descriptor_bytes: Some(256),
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     };
 
     let json = serde_json::to_string(&member).unwrap();
@@ -249,6 +252,9 @@ fn quorum_member_timing_fields_default_to_none() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     };
 
     let json = serde_json::to_string(&member).unwrap();
@@ -312,6 +318,9 @@ fn quorum_member_missing_timing_fields_deserialize_as_none() {
         service_response_blocks: None,
         max_transfer_timeout_blocks: None,
         max_descriptor_bytes: None,
+        compensation_bps: None,
+        compensation_deposit_id: None,
+        compensation_frequency_blocks: None,
     };
 
     // Serialize to JSON (skip_serializing_if removes None fields)
