@@ -243,16 +243,31 @@ echo ""
 log_info "=== Phase 2: Reserves + Ledgers ==="
 current_block=$(get_block_height)
 
+# Diagnostic-mode Phase 2: on the first failure, print op/ledger index,
+# which CLI call failed, and its stderr. Previously any failure here
+# (e.g. daemon can't reach esplora, bitcoind RPC refusing, address not
+# matching regex) exited the script silently because the outer redirects
+# swallow stderr. Surfacing the first error saves an hour of guessing.
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     for l in $(seq 1 $LEDGERS_PER_OP); do
         utxo_sats=$((RESERVES_SATS + COLLATERAL_SATS))
-        output=$(run_cmd "$i" reserves create "$utxo_sats" 2>&1 | tee reserves-create.log)
+        output=$(run_cmd "$i" reserves create "$utxo_sats" 2>&1)
         reserves_id=$(echo "$output" | grep "Address:" | awk '{print $2}')
+        if [ -z "$reserves_id" ]; then
+            log_warn "op$i/L$l: reserves create produced no Address — full output:"
+            echo "$output" | sed 's/^/    /' >&2
+            exit 1
+        fi
         store "reserves_${i}_${l}" "$reserves_id"
 
         output=$(run_cmd "$i" ledger open \
             --advertise-relay "ws://localhost:$MSG_RELAY_PORT" 2>&1)
         ledger_id=$(echo "$output" | grep "Ledger ID:" | awk '{print $3}')
+        if [ -z "$ledger_id" ]; then
+            log_warn "op$i/L$l: ledger open produced no Ledger ID — full output:"
+            echo "$output" | sed 's/^/    /' >&2
+            exit 1
+        fi
         store "ledger_${i}_${l}" "$ledger_id"
     done
     echo -n "."
