@@ -44,7 +44,6 @@ NODE_COUNT=$((3 * Q + 1))
 LEDGERS_PER_OP=3
 RESERVES_SATS=40000000     # 0.4 BTC per ledger (40%)
 COLLATERAL_SATS=60000000   # 0.6 BTC per ledger (60%)
-ENFORCEMENT_DELAY=200
 
 LEDGER_RELAY_PORT=7779
 MSG_RELAY_PORT=7780
@@ -178,7 +177,9 @@ rm -rf "$DATA_ROOT"
 mkdir -p "$DATA_ROOT"
 start_relays
 
-# Fund all operators in one bitcoin batch
+# Fund all operators in one bitcoin batch. `address` and `info` are
+# read-only CLI commands that use a short-lived Node instance — they
+# don't need a running daemon.
 TOTAL_BTC=$(python3 -c "print(f'{($RESERVES_SATS + $COLLATERAL_SATS) * $LEDGERS_PER_OP / 100_000_000 + 0.5:.1f}')")
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     address=$(run_cmd "$i" address 2>&1 | grep -oE 'bcrt1[a-z0-9]+' | head -1)
@@ -191,21 +192,40 @@ log_ok "Funded $NODE_COUNT operators ($TOTAL_BTC BTC each)"
 echo ""
 
 # ============================================================================
+# Phase 1b: Start daemons
+# ============================================================================
+#
+# `reserves create`, `ledger open`, `quorum add`, and `quorum begin` are
+# now gift-wrapped Nostr requests that go to the running daemon (commit
+# 30c268a). Start the daemons now — *before* Phase 2 — so the requests
+# there have a daemon to talk to. Without this, Phase 2 times out after
+# 60s with "admin request timeout".
+
+log_info "=== Phase 1b: Start Daemons ==="
+for i in $(seq 0 $((NODE_COUNT - 1))); do
+    start_node "$i"
+done
+# Give the daemons time to open relay subscriptions and sync the wallet
+# against the funded UTXOs.
+sleep 5
+log_ok "Started $NODE_COUNT daemons"
+echo ""
+
+# ============================================================================
 # Phase 2: Create reserves + Open ledgers
 # ============================================================================
 
 log_info "=== Phase 2: Reserves + Ledgers ==="
 current_block=$(get_block_height)
-enforcement_block=$((current_block + ENFORCEMENT_DELAY))
 
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     for l in $(seq 1 $LEDGERS_PER_OP); do
         utxo_sats=$((RESERVES_SATS + COLLATERAL_SATS))
-        output=$(run_cmd "$i" reserves create "$utxo_sats" 2>&1)
+        output=$(run_cmd "$i" reserves create "$utxo_sats" 2>&1 | tee reserves-create.log)
         reserves_id=$(echo "$output" | grep "Address:" | awk '{print $2}')
         store "reserves_${i}_${l}" "$reserves_id"
 
-        output=$(run_cmd "$i" ledger open "$enforcement_block" \
+        output=$(run_cmd "$i" ledger open \
             --advertise-relay "ws://localhost:$MSG_RELAY_PORT" 2>&1)
         ledger_id=$(echo "$output" | grep "Ledger ID:" | awk '{print $3}')
         store "ledger_${i}_${l}" "$ledger_id"
@@ -218,15 +238,10 @@ log_ok "Created $((NODE_COUNT * LEDGERS_PER_OP)) ledgers"
 echo ""
 
 # ============================================================================
-# Phase 3: Start daemons + Form quorums
+# Phase 3: Form quorums
 # ============================================================================
 
-log_info "=== Phase 3: Start Daemons + Form Quorums (Q=$Q) ==="
-for i in $(seq 0 $((NODE_COUNT - 1))); do
-    start_node "$i"
-done
-sleep 5
-log_ok "Started $NODE_COUNT daemons"
+log_info "=== Phase 3: Form Quorums (Q=$Q) ==="
 
 # Assign quorum members: for operator i ledger l, pick Q members
 # dispersed across the remaining operators (stride-based, skip self)
