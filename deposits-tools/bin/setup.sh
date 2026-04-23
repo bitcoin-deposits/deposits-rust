@@ -288,6 +288,13 @@ echo ""
 
 log_info "=== Phase 3: Form Quorums (Q=$Q) ==="
 
+# Same set-e trap as Phase 2: `output=$(cmd)` with a failing cmd kills
+# the script before the grep + log_warn branch can run. Pipe through
+# tee so the substitution always exits 0 and the full transcript is
+# preserved for post-mortem.
+PHASE3_LOG="$DATA_ROOT/phase3.log"
+: > "$PHASE3_LOG"
+
 # Assign quorum members: for operator i ledger l, pick Q members
 # dispersed across the remaining operators (stride-based, skip self)
 for i in $(seq 0 $((NODE_COUNT - 1))); do
@@ -310,11 +317,13 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
             member_ledger_id=$(get "ledger_${m}_1")
             [ -z "$member_node_id" ] && continue
 
-            output=$(run_cmd "$i" quorum add "$ledger_id" "$member_node_id" "$member_ledger_id" 2>&1)
+            echo "--- op$i/L$l add op$m ---" >> "$PHASE3_LOG"
+            output=$(run_cmd "$i" quorum add "$ledger_id" "$member_node_id" "$member_ledger_id" 2>&1 \
+                | tee -a "$PHASE3_LOG")
             if echo "$output" | grep -qi "added\|member\|success"; then
                 added=$((added + 1))
             else
-                log_warn "op$i/L$l add op$m: $output"
+                log_warn "op$i/L$l add op$m failed — see $PHASE3_LOG"
             fi
         done
         echo -n "."
