@@ -230,12 +230,22 @@ log_info "=== Phase 4 resume: quorum_begin per ledger ==="
 PHASE4_LOG_DIR="$DATA_ROOT/quorum_begin_resume_logs"
 mkdir -p "$PHASE4_LOG_DIR"
 
+# Give the daemons a moment to broadcast any QuorumAddMember events
+# we just appended in Phase 3 resume. Without this, cosigners may not
+# have them imported yet when they're asked to cosign QuorumBegin,
+# which surfaces as "No quorum members to rotate to" on the operator
+# side for the staged-member consumer that's still catching up.
+sleep 5
+
 begin_pids=()
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     for l in $(seq 1 $LEDGERS_PER_OP); do
-        reserves_id=$(get "reserves_${i}_${l}")
-        [ -z "$reserves_id" ] && continue
-        run_cmd "$i" quorum begin "$reserves_id" \
+        # ledger_id is stable; reserves_id changes on rotation. Using
+        # ledger_id lets this succeed whether or not a prior
+        # QuorumBegin already rotated this ledger.
+        ledger_id=$(get "ledger_${i}_${l}")
+        [ -z "$ledger_id" ] && continue
+        run_cmd "$i" quorum begin "$ledger_id" \
             > "$PHASE4_LOG_DIR/op${i}_l${l}.log" 2>&1 &
         begin_pids+=("$!")
     done

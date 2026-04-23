@@ -358,9 +358,14 @@ mkdir -p "$BEGIN_LOG_DIR"
 begin_pids=()
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     for l in $(seq 1 $LEDGERS_PER_OP); do
-        reserves_id=$(get "reserves_${i}_${l}")
-        [ -z "$reserves_id" ] && continue
-        run_cmd "$i" quorum begin "$reserves_id" \
+        # Pass the stable ledger_id rather than reserves_id: after a
+        # successful rotation the reserves_key is the new Taproot
+        # address and the daemon no longer resolves the old bcrt1q
+        # address to a ledger. ledger_id is fixed from LedgerOpen and
+        # survives rotations, so a retry via setup-resume.sh works.
+        ledger_id=$(get "ledger_${i}_${l}")
+        [ -z "$ledger_id" ] && continue
+        run_cmd "$i" quorum begin "$ledger_id" \
             > "$BEGIN_LOG_DIR/op${i}_l${l}.log" 2>&1 &
         begin_pids+=("$!")
     done
