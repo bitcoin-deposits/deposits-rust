@@ -57,10 +57,10 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
     SEEDS["op$i"]=$(python3 -c "print('op$i'.encode().hex().ljust(64, '0'))")
 done
 
-# Electrs (shared). Override ELECTRS_URL if your electrs is bound to a
-# different port — 3201 matches the default bundled dev-environment but
-# alternate docker-compose setups (e.g. mempool/electrs) bind 3102, etc.
-ELECTRS_URL="${ELECTRS_URL:-http://localhost:3201}"
+# Electrs (shared). 3102 matches deposits-tools/docker-compose.yml which
+# maps the mempool/electrs container's 3002 → host 3102. Override
+# ELECTRS_URL if you run electrs under a different port.
+ELECTRS_URL="${ELECTRS_URL:-http://localhost:3102}"
 
 log_info "=========================================="
 log_info "  Setup: $NODE_COUNT operators, Q=$Q"
@@ -244,28 +244,33 @@ log_info "=== Phase 2: Reserves + Ledgers ==="
 current_block=$(get_block_height)
 
 # Diagnostic-mode Phase 2: on the first failure, print op/ledger index,
-# which CLI call failed, and its stderr. Previously any failure here
-# (e.g. daemon can't reach esplora, bitcoind RPC refusing, address not
-# matching regex) exited the script silently because the outer redirects
-# swallow stderr. Surfacing the first error saves an hour of guessing.
+# which CLI call failed, and the captured output. The pipe-through-tee
+# absorbs the non-zero exit status of the inner CLI (so `set -e` doesn't
+# kill the script before we can check the output) and persists the full
+# output to a log file for post-mortem.
+PHASE2_LOG="$DATA_ROOT/phase2.log"
+: > "$PHASE2_LOG"
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     for l in $(seq 1 $LEDGERS_PER_OP); do
         utxo_sats=$((RESERVES_SATS + COLLATERAL_SATS))
-        output=$(run_cmd "$i" reserves create "$utxo_sats" 2>&1)
+        output=$(run_cmd "$i" reserves create "$utxo_sats" 2>&1 | tee -a "$PHASE2_LOG")
         reserves_id=$(echo "$output" | grep "Address:" | awk '{print $2}')
         if [ -z "$reserves_id" ]; then
             log_warn "op$i/L$l: reserves create produced no Address — full output:"
             echo "$output" | sed 's/^/    /' >&2
+            log_warn "full Phase 2 transcript at $PHASE2_LOG"
             exit 1
         fi
         store "reserves_${i}_${l}" "$reserves_id"
 
         output=$(run_cmd "$i" ledger open \
-            --advertise-relay "ws://localhost:$MSG_RELAY_PORT" 2>&1)
+            --advertise-relay "ws://localhost:$MSG_RELAY_PORT" 2>&1 \
+            | tee -a "$PHASE2_LOG")
         ledger_id=$(echo "$output" | grep "Ledger ID:" | awk '{print $3}')
         if [ -z "$ledger_id" ]; then
             log_warn "op$i/L$l: ledger open produced no Ledger ID — full output:"
             echo "$output" | sed 's/^/    /' >&2
+            log_warn "full Phase 2 transcript at $PHASE2_LOG"
             exit 1
         fi
         store "ledger_${i}_${l}" "$ledger_id"
