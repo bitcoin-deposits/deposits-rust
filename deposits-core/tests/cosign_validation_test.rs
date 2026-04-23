@@ -344,11 +344,12 @@ fn open_invoice_lock_cleared_on_fail() {
         !ledger.state.open_invoice_locks.contains_key(&payment_id),
         "Fail should clear the lock"
     );
-    // Balance should be restored
+    // Balance is restored modulo the fixed fee charged on failure
+    // (TransferFeeSchedule::default().fixed_msats = 2).
     let deposit = ledger.state.deposits.get(&dep).unwrap();
     assert_eq!(
-        deposit.balance, 10_000,
-        "Balance should be restored after fail"
+        deposit.balance, 10_000 - 2,
+        "Balance should be restored after fail minus fixed operator fee"
     );
     assert_eq!(
         deposit.locked_balance, 0,

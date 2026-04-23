@@ -156,9 +156,10 @@ fn transfer_fail_returns_funds_to_source() {
         .apply_operation(&fail_op)
         .unwrap();
 
-    // Source: gets everything back
+    // Source: amount + proportional fee refunded; fixed operator fee
+    // (TransferFeeSchedule::default().fixed_msats = 2) stays with the operator.
     let src = net.op("alice").ledger.state.deposits.get(&src_id).unwrap();
-    assert_eq!(src.balance, 100_000); // fully restored
+    assert_eq!(src.balance, 100_000 - 2);
     assert_eq!(src.locked_balance, 0);
 
     // Destination: nothing

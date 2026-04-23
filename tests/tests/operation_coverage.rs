@@ -151,9 +151,11 @@ fn onchain_fail_returns_funds() {
         })
         .unwrap();
 
-    // OnchainFail releases the lock — balance untouched, locked goes to 0.
+    // OnchainFail releases the lock and charges the fixed operator fee
+    // (TransferFeeSchedule::default().fixed_msats = 2). Locked goes to 0;
+    // balance drops by the fixed fee.
     let deposit = net.op("alice").ledger.state.deposits.get(&did).unwrap();
-    assert_eq!(deposit.balance, 200_000, "balance unchanged by fail");
+    assert_eq!(deposit.balance, 200_000 - 2, "fixed fee charged on fail");
     assert_eq!(deposit.locked_balance, 0, "fail releases the lock");
     assert!(
         !net.op("alice")
@@ -208,9 +210,12 @@ fn invoice_fail_unlocks_funds() {
 
     let deposit = net.op("alice").ledger.state.deposits.get(&did).unwrap();
     assert_eq!(deposit.locked_balance, 0, "InvoiceFail should unlock");
+    // InvoiceFail restores the balance minus the fixed operator fee
+    // (TransferFeeSchedule::default().fixed_msats = 2).
     assert_eq!(
-        deposit.balance, 100_000,
-        "InvoiceFail should restore balance"
+        deposit.balance,
+        100_000 - 2,
+        "InvoiceFail restores balance minus fixed operator fee"
     );
 }
 

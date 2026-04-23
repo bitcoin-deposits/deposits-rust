@@ -84,6 +84,16 @@ pub struct LedgerState {
     /// Prevents double-crediting the same lightning payment.
     #[serde(default)]
     pub credited_payments: std::collections::HashSet<String>,
+    /// Running total of fees the operator has accrued on this ledger
+    /// (msats), across both maintenance fees (FeeCollect) and per-transfer
+    /// fees captured on TransferComplete. On-chain withdrawal fees are
+    /// *not* included — those go to miners, not the operator.
+    ///
+    /// This is the substrate for quorum-member compensation payouts. It is
+    /// monotonically non-decreasing; a future payout operation will be
+    /// responsible for debiting it.
+    #[serde(default)]
+    pub fees_accumulated: u64,
     /// Current sequence number.
     pub sequence: u64,
     /// Hash chain tip — SHA256(prev_hash || update_message) for the latest update.
@@ -154,6 +164,7 @@ impl LedgerState {
             open_invoice_locks: HashMap::new(),
             pending_withdrawals: HashMap::new(),
             credited_payments: std::collections::HashSet::new(),
+            fees_accumulated: 0,
             sequence: 0,
             chain_tip_hash: [0u8; 32],
             joined_quorums: Vec::new(),
@@ -324,6 +335,14 @@ impl LedgerState {
                     .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.unlock(*amount);
+                // Even on failure, the fixed portion of the transfer fee
+                // applies (the variable portion is zero since no amount
+                // moved). Charged best-effort from current balance —
+                // saturating_sub guards the edge where balance dipped
+                // below the fixed fee between lock and fail.
+                let charged = deposit.transfer_fees.fixed_msats.min(deposit.balance);
+                deposit.balance -= charged;
+                next.fees_accumulated = next.fees_accumulated.saturating_add(charged);
                 next.open_invoice_locks.remove(payment_id);
             }
             LedgerOperation::InvoiceFulfill {
@@ -387,7 +406,7 @@ impl LedgerState {
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 // Release the full lock (amount + fee_sats) recorded at
                 // OnchainLock. The withdrawal didn't happen, so both the
-                // amount and the reserved fee stay with the deposit.
+                // amount and the reserved miner fee stay with the deposit.
                 // If the withdrawal_id isn't tracked (e.g. replay on a state
                 // that never saw the lock), silently ignore — mirrors the
                 // TransferFail pattern of `if let Some(pending) = ...`.
@@ -395,6 +414,12 @@ impl LedgerState {
                     if let Some(deposit) = next.deposits.get_mut(&pending.deposit_id) {
                         let total = pending.amount.saturating_add(pending.fee_sats);
                         deposit.unlock(total);
+                        // Fixed operator fee applies even on failure;
+                        // variable portion is zero. fee_sats was the miner
+                        // fee, unrelated to operator revenue.
+                        let charged = deposit.transfer_fees.fixed_msats.min(deposit.balance);
+                        deposit.balance -= charged;
+                        next.fees_accumulated = next.fees_accumulated.saturating_add(charged);
                     }
                 }
             }
@@ -434,6 +459,7 @@ impl LedgerState {
                     }
                     deposit.balance = deposit.balance.saturating_sub(*amount);
                     deposit.last_fee_assessment = *block_height;
+                    next.fees_accumulated = next.fees_accumulated.saturating_add(*amount);
                 }
             }
             LedgerOperation::QuorumAddMember {
@@ -448,6 +474,9 @@ impl LedgerState {
                 service_response_blocks,
                 max_transfer_timeout_blocks,
                 max_descriptor_bytes,
+                compensation_bps,
+                compensation_deposit_id,
+                compensation_frequency_blocks,
                 ..
             } => {
                 let already_active = next
@@ -471,6 +500,9 @@ impl LedgerState {
                         service_response_blocks: *service_response_blocks,
                         max_transfer_timeout_blocks: *max_transfer_timeout_blocks,
                         max_descriptor_bytes: *max_descriptor_bytes,
+                        compensation_bps: *compensation_bps,
+                        compensation_deposit_id: *compensation_deposit_id,
+                        compensation_frequency_blocks: *compensation_frequency_blocks,
                     });
                 }
             }
@@ -574,16 +606,27 @@ impl LedgerState {
                     if let Some(dest) = next.deposits.get_mut(&pending.destination_deposit_id) {
                         dest.balance = dest.balance.saturating_add(pending.amount);
                     }
+                    // The transfer fee is operator income — tally it for later
+                    // distribution to quorum members (see QuorumMember.compensation_*).
+                    next.fees_accumulated = next.fees_accumulated.saturating_add(pending.fee);
                 }
             }
             LedgerOperation::TransferFail { transfer_id, .. } => {
                 if let Some(pending) = next.pending_transfers.remove(transfer_id) {
                     let total = pending.total_locked();
+                    let mut charged = 0u64;
                     if let Some(source) = next.deposits.get_mut(&pending.source_deposit_id) {
-                        // Lock released; `balance` was never decremented, so
-                        // there's nothing to restore — obligation is unchanged.
+                        // Lock released — the amount + proportional fee are
+                        // refunded to the depositor. The fixed portion of
+                        // the fee still applies, since the operator did
+                        // real work holding the lock; the variable portion
+                        // is zero because no amount moved. Read from the
+                        // deposit's current schedule — sufficient for v1.
                         source.locked_balance = source.locked_balance.saturating_sub(total);
+                        charged = source.transfer_fees.fixed_msats.min(source.balance);
+                        source.balance -= charged;
                     }
+                    next.fees_accumulated = next.fees_accumulated.saturating_add(charged);
                 }
             }
             LedgerOperation::DeliveryEmbed { .. } => {

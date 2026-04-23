@@ -2461,10 +2461,14 @@ fn credit_lock_credit_fail_stays_within_reserves() {
         })
         .unwrap();
 
-    assert_eq!(
+    // The fixed portion of the transfer fee (2 msats by default) is charged
+    // to the operator on fail, so the total drops slightly below reserves.
+    // The invariant the test is guarding is sum(balances) <= reserves.
+    assert!(
+        ledger.state.total_deposit_balance() <= reserves_amount,
+        "TransferFail must not push total obligation over reserves (total={}, reserves={})",
         ledger.state.total_deposit_balance(),
         reserves_amount,
-        "TransferFail must not push total obligation over reserves"
     );
     assert!(
         ledger.state.total_deposit_balance() <= ledger.state.reserves_amount,

@@ -2301,9 +2301,13 @@ mod tests {
         // Verify pending transfer was removed
         assert!(ledger.state.pending_transfers.is_empty());
 
-        // Verify source got all funds back (amount + fee)
+        // Source gets amount + proportional portion of fee back; the fixed
+        // portion (TransferFeeSchedule::default().fixed_msats = 2) is
+        // charged to the operator even on failure and shows up on
+        // fees_accumulated.
         let source = ledger.state.deposits.get(&source_id).unwrap();
         assert_eq!(source.locked_balance, 0);
-        assert_eq!(source.balance, 100_000); // fully restored
+        assert_eq!(source.balance, 100_000 - 2);
+        assert_eq!(ledger.state.fees_accumulated, 2);
     }
 }
