@@ -673,19 +673,20 @@ impl Node {
     ///
     /// # Returns
     /// The new Taproot reserves address and txid, or error if rotation fails
-    pub fn rotate_reserves_to_quorum(
+    pub async fn rotate_reserves_to_quorum(
         &self,
         ledger_id: &str,
     ) -> Result<RotateReservesResult, Error> {
-        // Get the ledger
-        let ledgers = self.handler.ledgers.lock().unwrap();
-        let ledger_arc = ledgers
-            .get(ledger_id)
-            .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-            .clone();
-        drop(ledgers);
+        // --- Phase 1: snapshot membership + ledger state ---
+        let ledger_arc = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .get(ledger_id)
+                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
+                .clone()
+        };
 
-        let (quorum_members, quorum_expiries, ledger_hash, _current_reserves) = {
+        let (quorum_members, quorum_expiries, ledger_hash, total_collateral) = {
             let ledger = ledger_arc.read().unwrap();
 
             // QuorumBegin promotes next_quorum_members -> quorum_members, so at rotation
@@ -714,9 +715,9 @@ impl Node {
             let expiries: Vec<u32> = members.iter().map(|_| default_expiry).collect();
 
             let hash = ledger.hash();
-            let reserves = ledger.state.reserves_amount;
+            let collateral = ledger.state.total_collateral();
 
-            (members, expiries, hash, reserves)
+            (members, expiries, hash, collateral)
         };
 
         if quorum_members.is_empty() {
@@ -725,14 +726,12 @@ impl Node {
             ));
         }
 
-        // Rotate the existing P2WSH reserves to new Taproot output
+        // --- Phase 2: construct + broadcast rotation tx ---
         let result = self.wallet.rotate_reserves_to_taproot(
             quorum_members.clone(),
             quorum_expiries.clone(),
             ledger_hash,
         )?;
-
-        // Broadcast the rotation transaction
         let txid = self.wallet.broadcast(&result.tx)?;
 
         tracing::info!(
@@ -743,56 +742,55 @@ impl Node {
             result.quorum_expiry
         );
 
-        // Append QuorumBegin operation to the ledger for audit trail
-        {
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let block_hash = [0u8; 32]; // We don't have the block hash yet since tx is just broadcast
+        // --- Phase 3: wait for the UTXO to reach the cosigner's required depth ---
+        //
+        // Staged members will refuse to cosign a QuorumBegin whose referenced
+        // UTXO hasn't confirmed yet (they independently verify via Esplora).
+        // Without this wait the cosign round immediately times out on every
+        // first QuorumBegin. Timeout is generous so block-time variance
+        // doesn't sporadically fail legitimate rotations; tune shorter if a
+        // genuine bad-UTXO is suspected.
+        let required_confs =
+            deposits_core::quorum_policy::default_quorum_begin_confs(self.wallet.network());
+        wait_for_outpoint_confs(
+            &self.wallet,
+            txid,
+            result.outpoint.vout,
+            required_confs,
+            std::time::Duration::from_secs(600),
+        )
+        .await?;
 
-            // Convert txid to bytes
-            let txid_bytes: [u8; 32] = {
-                let mut bytes = txid.to_byte_array();
-                bytes.reverse(); // Bitcoin txids are displayed in reverse byte order
-                bytes
-            };
+        // --- Phase 4: stage + cosign + commit the QuorumBegin operation ---
+        let txid_bytes: [u8; 32] = {
+            let mut bytes = txid.to_byte_array();
+            bytes.reverse(); // Bitcoin txids are displayed in reverse byte order
+            bytes
+        };
+        let operation = LedgerOperation::QuorumBegin {
+            reserves_id: result.address.to_string(),
+            spending_txid: txid_bytes,
+            new_outpoint_txid: txid_bytes,
+            new_outpoint_vout: result.outpoint.vout,
+            amount: result.amount.saturating_mul(1000),
+            quorum_expiry: result.quorum_expiry,
+            ledger_hash,
+            quorum_members: quorum_members.clone(),
+            collateral_amount: total_collateral,
+        };
 
-            // Calculate quorum parameters
-            let total_collateral = ledger_arc.read().unwrap().state.total_collateral();
-            let operation = LedgerOperation::QuorumBegin {
-                reserves_id: result.address.to_string(),
-                spending_txid: txid_bytes,
-                new_outpoint_txid: txid_bytes,
-                new_outpoint_vout: result.outpoint.vout,
-                amount: result.amount.saturating_mul(1000),
-                quorum_expiry: result.quorum_expiry,
-                ledger_hash,
-                quorum_members: quorum_members.clone(),
-                collateral_amount: total_collateral,
-            };
+        // commit_operation runs the full stage → cosign → operator-sign →
+        // apply → persist → broadcast flow. For a first QuorumBegin (state
+        // is still PreQuorum here) it goes through request_cosign against
+        // next_quorum_members and embeds their signatures into the update,
+        // producing a result that peers' validators will accept.
+        self.commit_operation(ledger_id, operation).await?;
 
-            let mut ledger = ledger_arc.write().unwrap();
-            ledger
-                .append_operation_with_block(operation, block_height, block_hash)
-                .map_err(|e| {
-                    Error::Protocol(format!("Failed to record reserves rotation: {:?}", e))
-                })?;
-
-            tracing::info!(
-                "Appended QuorumBegin operation to ledger: txid={}, quorum={} members",
-                txid,
-                quorum_members.len()
-            );
-        }
-
-        // Sign the update
-        self.sign_last_update(ledger_id)?;
-
-        // Validate chain before persisting
-        self.validate_chain_before_persist(ledger_id)?;
-
-        // Persist the ledger with the new operation
-        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-            tracing::error!("Failed to persist ledger after rotation: {}", e);
-        }
+        tracing::info!(
+            "Committed QuorumBegin operation to ledger: txid={}, quorum={} members",
+            txid,
+            quorum_members.len()
+        );
 
         Ok(RotateReservesResult {
             txid: txid.to_string(),
@@ -1822,5 +1820,67 @@ impl Node {
             .unwrap()
             .insert(canonical_id, (result, history_len));
         result
+    }
+}
+
+/// Poll the chain until the given outpoint has at least `required` confirmations,
+/// or `timeout` elapses (whichever first). Used by first-QuorumBegin flow where
+/// the operator has just broadcast the rotation tx and must wait before
+/// requesting cosigs — staged members refuse to cosign an under-confirmed UTXO.
+async fn wait_for_outpoint_confs(
+    wallet: &crate::wallet::Wallet,
+    txid: bitcoin::Txid,
+    vout: u32,
+    required: u32,
+    timeout: std::time::Duration,
+) -> Result<u32, Error> {
+    let start = std::time::Instant::now();
+    let poll_interval = std::time::Duration::from_secs(3);
+    loop {
+        match wallet.get_outpoint_value_and_confs(txid, vout) {
+            Ok(Some((_, confs))) if confs >= required => {
+                tracing::debug!(
+                    "Outpoint {}:{} reached {} confirmations (required {})",
+                    txid,
+                    vout,
+                    confs,
+                    required
+                );
+                return Ok(confs);
+            }
+            Ok(Some((_, confs))) => {
+                tracing::debug!(
+                    "Outpoint {}:{} has {} of {} required confirmations, waiting…",
+                    txid,
+                    vout,
+                    confs,
+                    required
+                );
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    "Outpoint {}:{} not yet visible on-chain, waiting…",
+                    txid,
+                    vout
+                );
+            }
+            Err(e) => {
+                // Transient Esplora errors shouldn't abort the whole rotation;
+                // log and keep polling until the deadline.
+                tracing::warn!(
+                    "Outpoint {}:{} lookup error (will retry): {}",
+                    txid,
+                    vout,
+                    e
+                );
+            }
+        }
+        if start.elapsed() > timeout {
+            return Err(Error::Protocol(format!(
+                "Timed out waiting for {}:{} to reach {} confirmations",
+                txid, vout, required
+            )));
+        }
+        tokio::time::sleep(poll_interval).await;
     }
 }

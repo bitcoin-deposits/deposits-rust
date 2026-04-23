@@ -284,16 +284,52 @@ echo ""
 # ============================================================================
 
 log_info "=== Phase 4: Activate Quorums ==="
+
+# Each `quorum begin`:
+#   1. broadcasts the rotation tx on-chain (goes to the mempool),
+#   2. waits for it to reach `default_quorum_begin_confs` (1 on regtest)
+#      before requesting staged-member cosigs — staged members independently
+#      verify the outpoint has enough depth, and refuse to cosign otherwise,
+#   3. runs the cosign round and commits the QuorumBegin update.
+#
+# Step 2 will hang forever in regtest if nobody mines. So: background all
+# the begin calls (they broadcast, then block in step 2 together), mine a
+# block to confirm the batch of rotation txs, then wait for the backgrounded
+# calls to drain.
+
+BEGIN_LOG_DIR="$DATA_ROOT/quorum_begin_logs"
+mkdir -p "$BEGIN_LOG_DIR"
+begin_pids=()
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     for l in $(seq 1 $LEDGERS_PER_OP); do
         reserves_id=$(get "reserves_${i}_${l}")
         [ -z "$reserves_id" ] && continue
-        run_cmd "$i" quorum begin "$reserves_id" >/dev/null 2>&1 && echo -n "." || echo -n "x"
+        run_cmd "$i" quorum begin "$reserves_id" \
+            > "$BEGIN_LOG_DIR/op${i}_l${l}.log" 2>&1 &
+        begin_pids+=("$!")
     done
 done
+
+# Give the rotation txs a moment to hit mempool, then mine so cosigners'
+# confs checks pass and the begin calls can proceed through cosig + commit.
+sleep 3
 mine_blocks 1
+
+# Drain backgrounded begin calls. Each should now find its outpoint
+# confirmed, collect cosigs, and commit.
+ok=0
+fail=0
+for pid in "${begin_pids[@]}"; do
+    if wait "$pid"; then
+        ok=$((ok + 1))
+        echo -n "."
+    else
+        fail=$((fail + 1))
+        echo -n "x"
+    fi
+done
 echo ""
-log_ok "Quorums active"
+log_ok "Quorums active ($ok ok, $fail failed — see $BEGIN_LOG_DIR/)"
 echo ""
 
 # ============================================================================

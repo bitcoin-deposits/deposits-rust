@@ -4252,12 +4252,11 @@ impl Node {
             tracing::warn!("Wallet sync failed before quorum_begin: {}", e);
         }
 
-        match self.rotate_reserves_to_quorum(&ledger_id) {
+        match self.rotate_reserves_to_quorum(&ledger_id).await {
             Ok(result) => {
-                // Broadcast the update to Nostr
-                if let Err(e) = self.broadcast_last_update(&ledger_id).await {
-                    tracing::warn!("Failed to broadcast reserves rotation: {}", e);
-                }
+                // commit_operation inside rotate_reserves_to_quorum already
+                // broadcasts the cosigned update via Nostr, so no separate
+                // broadcast_last_update is needed here.
 
                 let response = serde_json::json!({
                     "status": "SUCCESS",
