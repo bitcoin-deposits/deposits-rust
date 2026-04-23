@@ -2781,6 +2781,92 @@ impl Node {
                             }
                         }
                     }
+
+                    // For QuorumBegin, verify the referenced reserves outpoint
+                    // exists on-chain, is unspent, has enough confirmations,
+                    // and carries the declared value. Without this, a
+                    // cosigner attesting the rotation would be rubber-
+                    // stamping a UTXO they never checked — exactly the gap
+                    // that motivated this check.
+                    if let LedgerOperation::QuorumBegin {
+                        new_outpoint_txid,
+                        new_outpoint_vout,
+                        amount: reserves_amount_msats,
+                        collateral_amount: collateral_amount_msats,
+                        ..
+                    } = &operation
+                    {
+                        let required_confs =
+                            deposits_core::quorum_policy::default_quorum_begin_confs(
+                                self.wallet.network(),
+                            );
+                        let expected_sats = reserves_amount_msats
+                            .saturating_add(*collateral_amount_msats)
+                            / 1000;
+                        let txid = bitcoin::Txid::from_raw_hash(
+                            bitcoin::hashes::sha256d::Hash::from_byte_array(
+                                *new_outpoint_txid,
+                            ),
+                        );
+                        match self
+                            .wallet
+                            .get_outpoint_value_and_confs(txid, *new_outpoint_vout)
+                        {
+                            Ok(Some((value_sats, confs))) => {
+                                if value_sats != expected_sats {
+                                    let msg = format!(
+                                        "QuorumBegin UTXO value mismatch: \
+                                         outpoint {}:{} has {} sats, op declares {} sats \
+                                         (reserves {} msats + collateral {} msats)",
+                                        txid,
+                                        new_outpoint_vout,
+                                        value_sats,
+                                        expected_sats,
+                                        reserves_amount_msats,
+                                        collateral_amount_msats,
+                                    );
+                                    tracing::warn!("Refusing cosign: {}", msg);
+                                    return (false, None, Some(msg));
+                                }
+                                if confs < required_confs {
+                                    let msg = format!(
+                                        "QuorumBegin UTXO under-confirmed: \
+                                         outpoint {}:{} has {} confs, need {} on network {:?}",
+                                        txid,
+                                        new_outpoint_vout,
+                                        confs,
+                                        required_confs,
+                                        self.wallet.network(),
+                                    );
+                                    tracing::warn!("Refusing cosign: {}", msg);
+                                    return (false, None, Some(msg));
+                                }
+                                tracing::debug!(
+                                    "QuorumBegin UTXO verified: {}:{} = {} sats, {} confs",
+                                    txid,
+                                    new_outpoint_vout,
+                                    value_sats,
+                                    confs
+                                );
+                            }
+                            Ok(None) => {
+                                let msg = format!(
+                                    "QuorumBegin UTXO not found or already spent: {}:{}",
+                                    txid, new_outpoint_vout
+                                );
+                                tracing::warn!("Refusing cosign: {}", msg);
+                                return (false, None, Some(msg));
+                            }
+                            Err(e) => {
+                                let msg = format!(
+                                    "QuorumBegin UTXO lookup failed for {}:{}: {}",
+                                    txid, new_outpoint_vout, e
+                                );
+                                tracing::warn!("Refusing cosign: {}", msg);
+                                return (false, None, Some(msg));
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Cosign: failed to decode operation TLV: {}", e);

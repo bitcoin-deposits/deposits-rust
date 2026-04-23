@@ -73,6 +73,7 @@ pub mod logging;
 pub mod message_handlers;
 pub mod message_validation;
 pub mod operation_validation;
+pub mod quorum_policy;
 pub mod recovery;
 pub mod recovery_claim;
 pub mod tapscript_reserves;

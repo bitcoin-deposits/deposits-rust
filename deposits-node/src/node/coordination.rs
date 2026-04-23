@@ -333,14 +333,29 @@ impl Node {
             }
         }
 
-        // Determine cosig threshold: floor(n/2) + 1
+        // Determine cosig threshold: floor(n/2) + 1.
+        //
+        // Normally the threshold is drawn from the active quorum_members,
+        // but the *first* QuorumBegin is a special case: state is still
+        // PreQuorum when we issue the request, the active list is empty,
+        // and the members we want attesting this rotation are the ones
+        // staged via QuorumAddMember — i.e. next_quorum_members. They are
+        // the ones who will be cosigners after this update applies, and
+        // they are the ones with skin in the game for verifying the
+        // reserves UTXO before signing.
         let threshold = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
                 .get(ledger_id)
                 .map(|arc| {
                     let l = arc.read().unwrap();
-                    let n = l.state.quorum_members.len();
+                    let active_members = &l.state.quorum_members;
+                    let members = if active_members.is_empty() {
+                        &l.state.next_quorum_members
+                    } else {
+                        active_members
+                    };
+                    let n = members.len();
                     if n == 0 {
                         1
                     } else {

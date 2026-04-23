@@ -213,9 +213,20 @@ impl Node {
                 .map_err(|e| Error::Protocol(format!("Stage failed: {}", e)))?
         };
 
-        // 2. Cosign (if quorum active — collect majority cosignatures)
+        // 2. Cosign. We collect majority cosignatures in two cases:
+        //   (a) quorum is active — the usual post-rotation cosig requirement.
+        //   (b) the op itself is a QuorumBegin — even the *first* one, issued
+        //       while state is still PreQuorum, needs attestation from the
+        //       members it's about to activate. Without this the operator
+        //       could unilaterally transition with a fabricated member list
+        //       or an unconfirmed reserves UTXO.
         let quorum_active = self.is_quorum_active(ledger_id);
-        if quorum_active {
+        let is_first_quorum_begin = !quorum_active
+            && matches!(
+                &staged.operation,
+                deposits_core::messages::LedgerOperation::QuorumBegin { .. }
+            );
+        if quorum_active || is_first_quorum_begin {
             let entries = self.request_cosign(ledger_id, &staged.update).await?;
             // Sort by pubkey and set on update
             let mut sorted = entries;

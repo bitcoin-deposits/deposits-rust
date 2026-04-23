@@ -481,6 +481,60 @@ impl Wallet {
         self.operator_secret
     }
 
+    /// Look up an on-chain outpoint and report its value (sats) and
+    /// confirmation depth. Returns `Ok(None)` if the tx is known but the
+    /// vout is out of range, or if the vout is already spent. Used by
+    /// quorum members to verify the reserves UTXO referenced by a first
+    /// `QuorumBegin` before co-signing.
+    pub fn get_outpoint_value_and_confs(
+        &self,
+        txid: bitcoin::Txid,
+        vout: u32,
+    ) -> Result<Option<(u64, u32)>, Error> {
+        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
+
+        // Transaction lookup — None if the tx doesn't exist on-chain yet.
+        let tx = match client
+            .get_tx(&txid)
+            .map_err(|e| Error::Wallet(format!("Failed to fetch tx: {}", e)))?
+        {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        let output = match tx.output.get(vout as usize) {
+            Some(o) => o,
+            None => return Ok(None),
+        };
+        let value_sats = output.value.to_sat();
+
+        // Check unspent.
+        let spent = client
+            .get_output_status(&txid, vout as u64)
+            .map_err(|e| Error::Wallet(format!("Failed to get output status: {}", e)))?
+            .map(|s| s.spent)
+            .unwrap_or(false);
+        if spent {
+            return Ok(None);
+        }
+
+        // Confirmation depth. A TxStatus without a block_height means
+        // mempool / unconfirmed → 0 confirmations.
+        let status = client
+            .get_tx_status(&txid)
+            .map_err(|e| Error::Wallet(format!("Failed to get tx status: {}", e)))?;
+        let tx_height = match status.block_height {
+            Some(h) => h,
+            None => return Ok(Some((value_sats, 0))),
+        };
+        let tip = client
+            .get_height()
+            .map_err(|e| Error::Wallet(format!("Failed to get chain tip: {}", e)))?;
+        // Tip - tx_height + 1 (a tx in the tip block itself is 1 confirmation).
+        let confs = tip.saturating_sub(tx_height).saturating_add(1);
+        Ok(Some((value_sats, confs)))
+    }
+
     /// Fetch current block info from esplora and update cache
     pub fn fetch_block_info(&self) -> Result<(u32, [u8; 32]), Error> {
         let client = EsploraBuilder::new(&self.electrum_url).build_blocking();

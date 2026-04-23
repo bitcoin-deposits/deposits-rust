@@ -429,6 +429,44 @@ impl Ledger {
             }
         }
 
+        // 6. First QuorumBegin must be cosigned by a majority of the staged
+        // members. The state still reads PreQuorum at this point (the
+        // transition to Active happens in apply_state_changes), so check 5
+        // above hasn't fired. Without this gate, the operator could
+        // unilaterally append a QuorumBegin — making up a membership set
+        // and/or pointing to a reserves outpoint that doesn't exist or
+        // hasn't confirmed — with no peer attestation.
+        if self.state.quorum_state == QuorumState::PreQuorum
+            && matches!(operation, LedgerOperation::QuorumBegin { .. })
+        {
+            let staged: Vec<bitcoin::secp256k1::PublicKey> = self
+                .state
+                .next_quorum_members
+                .iter()
+                .map(|m| m.pubkey)
+                .collect();
+            if staged.is_empty() {
+                return Err(DepositsError::ProtocolViolation {
+                    violation_type: "empty_quorum".to_string(),
+                    details: "QuorumBegin with no staged members is not allowed — \
+                        append QuorumAddMember entries before QuorumBegin"
+                        .to_string(),
+                });
+            }
+            let threshold = staged.len() / 2 + 1;
+            update
+                .verify_cosign_signatures(&staged, threshold)
+                .map_err(|e| DepositsError::ProtocolViolation {
+                    violation_type: "missing_cosignature".to_string(),
+                    details: format!(
+                        "First QuorumBegin requires {} of {} staged-member cosignatures: {}",
+                        threshold,
+                        staged.len(),
+                        e
+                    ),
+                })?;
+        }
+
         Ok(())
     }
 

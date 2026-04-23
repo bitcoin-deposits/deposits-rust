@@ -46,9 +46,16 @@ When a quorum is established or refreshed, the operator constructs a new Taproot
 - **quorum_members**: the pubkeys included in the new multisig. MUST match the set of members staged via prior `QuorumAddMember` operations (and not since removed by `QuorumRemoveMember`) — `QuorumBegin` promotes exactly that staged set to the new active quorum (see DEP-05 §QuorumBegin).
 - **quorum_expiry**: block height when the quorum expires (shortest member commitment)
 
-The on-chain UTXO value MUST equal `reserves_amount + collateral_amount`. Co-signers MUST verify this before signing.
+The on-chain UTXO value MUST equal `reserves_amount + collateral_amount`. Cosigners MUST verify, against their own chain source, that the referenced outpoint (`new_outpoint_txid`, `new_outpoint_vout`):
 
-After `QuorumBegin`, co-signatures become required for all subsequent updates. A new `QuorumBegin` MUST be appended before `quorum_expiry` (see DEP-11).
+1. exists on-chain,
+2. is unspent,
+3. carries a value (in sats) equal to `(reserves_amount + collateral_amount) / 1000`,
+4. has at least a network-dependent minimum number of confirmations.
+
+The per-network default confirmation thresholds used by an honest cosigner with no explicit override are: 6 for mainnet, 3 for testnet/signet, 1 for regtest. These are policy (not consensus) — a stricter cosigner is free to refuse a request a laxer cosigner would accept. A cosigner receiving a first `QuorumBegin` that fails any of the checks above MUST refuse to sign and MAY emit a diagnostic error; the operator's cosign collector then waits for another responder or times out.
+
+After `QuorumBegin`, co-signatures become required for all subsequent updates. The *first* `QuorumBegin` itself must also carry cosignatures — see DEP-05 §QuorumBegin and DEP-02 §Cosignatures. A new `QuorumBegin` MUST be appended before `quorum_expiry` (see DEP-11).
 
 ### On-Chain State Anchor
 
