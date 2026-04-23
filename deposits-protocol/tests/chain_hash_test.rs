@@ -396,3 +396,98 @@ fn chain_of_three_survives_tlv_roundtrip() {
     assert_eq!(d1.chain_hash(), u1.chain_hash());
     assert_eq!(d2.chain_hash(), u2.chain_hash());
 }
+
+// =========================================================================
+// Cosignature ordering is canonicalized — same set, different insertion
+// orders must produce identical current_hash, operator_signing_data, and
+// wire bytes. Guards against signature malleability.
+// =========================================================================
+
+fn pubkey_from_seed(seed: u8) -> bitcoin::secp256k1::PublicKey {
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    let mut bytes = [0u8; 32];
+    bytes[0] = seed;
+    bytes[31] = 0x42;
+    let sk = SecretKey::from_slice(&bytes).unwrap();
+    PublicKey::from_secret_key(&Secp256k1::new(), &sk)
+}
+
+fn entry(pubkey: bitcoin::secp256k1::PublicKey, sig_byte: u8) -> deposits_protocol::types::CosignEntry {
+    deposits_protocol::types::CosignEntry {
+        cosigner_pubkey: pubkey,
+        cosign_signature: [sig_byte; 64],
+        member_ledger_hash: [sig_byte.wrapping_add(1); 32],
+    }
+}
+
+#[test]
+fn cosignature_order_does_not_affect_current_hash() {
+    let pk_a = pubkey_from_seed(1);
+    let pk_b = pubkey_from_seed(2);
+    let pk_c = pubkey_from_seed(3);
+
+    let mut u_sorted = make_update(1, [0u8; 32], b"msg");
+    u_sorted.cosignatures = {
+        let mut v = vec![entry(pk_a, 0xA), entry(pk_b, 0xB), entry(pk_c, 0xC)];
+        v.sort_by(|a, b| {
+            a.cosigner_pubkey
+                .serialize()
+                .cmp(&b.cosigner_pubkey.serialize())
+        });
+        v
+    };
+    u_sorted.current_hash = u_sorted.compute_hash();
+
+    // Same entries, deliberately reversed (unsorted) storage.
+    let mut u_unsorted = make_update(1, [0u8; 32], b"msg");
+    u_unsorted.cosignatures = {
+        let mut v = u_sorted.cosignatures.clone();
+        v.reverse();
+        v
+    };
+    u_unsorted.current_hash = u_unsorted.compute_hash();
+
+    assert_eq!(
+        u_sorted.current_hash, u_unsorted.current_hash,
+        "insertion order must not change current_hash"
+    );
+    assert_eq!(
+        u_sorted.operator_signing_data(),
+        u_unsorted.operator_signing_data(),
+        "insertion order must not change operator_signing_data"
+    );
+}
+
+#[test]
+fn cosignature_order_does_not_affect_tlv_bytes() {
+    use deposits_protocol::tlv::{TlvDecode, TlvEncode};
+
+    let pk_a = pubkey_from_seed(1);
+    let pk_b = pubkey_from_seed(2);
+    let pk_c = pubkey_from_seed(3);
+
+    let mut u_forward = make_update(1, [0u8; 32], b"msg");
+    u_forward.cosignatures = vec![entry(pk_a, 0xA), entry(pk_b, 0xB), entry(pk_c, 0xC)];
+    u_forward.current_hash = u_forward.compute_hash();
+
+    let mut u_reversed = make_update(1, [0u8; 32], b"msg");
+    u_reversed.cosignatures = vec![entry(pk_c, 0xC), entry(pk_b, 0xB), entry(pk_a, 0xA)];
+    u_reversed.current_hash = u_reversed.compute_hash();
+
+    assert_eq!(
+        u_forward.tlv_encode(),
+        u_reversed.tlv_encode(),
+        "encode produces canonical bytes regardless of storage order"
+    );
+
+    // Decode also canonicalizes storage.
+    let decoded = SignedLedgerUpdate::tlv_decode(&u_reversed.tlv_encode()).unwrap();
+    let decoded_pks: Vec<_> = decoded
+        .cosignatures
+        .iter()
+        .map(|e| e.cosigner_pubkey.serialize())
+        .collect();
+    let mut expected = decoded_pks.clone();
+    expected.sort();
+    assert_eq!(decoded_pks, expected, "decoder stores cosignatures sorted");
+}

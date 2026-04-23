@@ -82,6 +82,23 @@ pub struct SignedLedgerUpdate {
 }
 
 impl SignedLedgerUpdate {
+    /// Return cosignature entries sorted by cosigner_pubkey, for use anywhere
+    /// a byte-canonical view is required (hashing, signing, wire encoding).
+    ///
+    /// The hash and signing paths must always iterate this view — never
+    /// `&self.cosignatures` directly — otherwise a writer that leaves the
+    /// Vec unsorted produces a different-but-otherwise-valid current_hash
+    /// for the same logical content. That's signature malleability.
+    fn sorted_cosignatures(&self) -> Vec<&CosignEntry> {
+        let mut refs: Vec<&CosignEntry> = self.cosignatures.iter().collect();
+        refs.sort_by(|a, b| {
+            a.cosigner_pubkey
+                .serialize()
+                .cmp(&b.cosigner_pubkey.serialize())
+        });
+        refs
+    }
+
     /// Compute current_hash: commits to content, causal ordering, and co-signatures.
     ///
     /// Multi-cosig format (cosignatures non-empty):
@@ -98,8 +115,9 @@ impl SignedLedgerUpdate {
         hasher.update(&self.message);
 
         if !self.cosignatures.is_empty() {
-            // Multi-cosig: include all entries sorted by pubkey
-            for entry in &self.cosignatures {
+            // Multi-cosig: include all entries sorted by pubkey (canonical
+            // ordering — see sorted_cosignatures).
+            for entry in self.sorted_cosignatures() {
                 hasher.update(entry.member_ledger_hash);
                 hasher.update(entry.cosign_signature);
             }
@@ -175,7 +193,7 @@ impl SignedLedgerUpdate {
     pub fn operator_signing_data(&self) -> Vec<u8> {
         let mut data = self.cosign_data();
         if !self.cosignatures.is_empty() {
-            for entry in &self.cosignatures {
+            for entry in self.sorted_cosignatures() {
                 data.extend_from_slice(&entry.cosign_signature);
             }
         } else {
@@ -1076,9 +1094,10 @@ impl TlvEncode for SignedLedgerUpdate {
             builder = builder.bytes_field(signed_update_fields::BLOCK_HASH, &self.block_hash);
         }
         if !self.cosignatures.is_empty() {
-            // Multi-cosig: encode as tag 22 (length-prefixed entries)
+            // Multi-cosig: encode as tag 22 (length-prefixed entries),
+            // sorted by pubkey so the wire bytes are canonical.
             let mut cosig_bytes = Vec::new();
-            for entry in &self.cosignatures {
+            for entry in self.sorted_cosignatures() {
                 let entry_len: u16 = 129; // 33 + 64 + 32
                 cosig_bytes.extend_from_slice(&entry_len.to_be_bytes());
                 cosig_bytes.extend_from_slice(&entry.cosigner_pubkey.serialize());
@@ -1147,6 +1166,15 @@ impl TlvDecode for SignedLedgerUpdate {
                 });
                 off += entry_len;
             }
+            // Canonicalize storage: even if the wire bytes arrived out of
+            // order (from a buggy or malicious sender), keep the in-memory
+            // Vec sorted by pubkey so any downstream consumer that iterates
+            // `.cosignatures` directly still sees the canonical order.
+            entries.sort_by(|a, b| {
+                a.cosigner_pubkey
+                    .serialize()
+                    .cmp(&b.cosigner_pubkey.serialize())
+            });
             entries
         } else {
             Vec::new()
