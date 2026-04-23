@@ -115,19 +115,29 @@ impl FeeStructure {
     }
 
     /// Calculate fee for a given balance and number of blocks elapsed.
+    ///
+    /// Intermediate products are computed in u128 to prevent silent u64
+    /// wrap-around. Realistic inputs overflow u64 easily: e.g. a ~$1M
+    /// balance (≈10¹⁶ msats) × 100% bps (10_000) × a few thousand blocks
+    /// exceeds 2⁶⁴ before the divisor rescues it. The final quotient fits
+    /// in u64 for any sane balance, but we saturate the downcast
+    /// defensively so a pathological input returns `u64::MAX` rather than
+    /// wrapping to a small number.
     pub fn calculate_fee(&self, balance: u64, blocks_elapsed: u32) -> u64 {
         // Blocks per year (approximately)
-        const BLOCKS_PER_YEAR: u64 = 52560; // 365.25 * 144
+        const BLOCKS_PER_YEAR: u128 = 52560; // 365.25 * 144
 
-        let blocks = blocks_elapsed as u64;
+        let blocks = blocks_elapsed as u128;
 
         // Fixed fee portion (pro-rated for blocks elapsed)
-        let fixed_fee = (self.annualized_msats * blocks) / BLOCKS_PER_YEAR;
+        let fixed_fee = (self.annualized_msats as u128 * blocks) / BLOCKS_PER_YEAR;
 
         // Percentage fee portion (pro-rated)
-        let bps_fee = (balance * self.annualized_bps as u64 * blocks) / (BLOCKS_PER_YEAR * 10000);
+        let bps_fee = (balance as u128 * self.annualized_bps as u128 * blocks)
+            / (BLOCKS_PER_YEAR * 10_000);
 
-        fixed_fee + bps_fee
+        let total = fixed_fee + bps_fee;
+        u64::try_from(total).unwrap_or(u64::MAX)
     }
 }
 
@@ -166,8 +176,12 @@ impl TransferFeeSchedule {
     }
 
     /// Calculate the transfer fee for a given amount in msats.
+    ///
+    /// `amount_msats * rate_bps` can exceed u64 for large amounts — compute
+    /// the proportional part in u128 and saturate the downcast.
     pub fn calculate_fee(&self, amount_msats: u64) -> u64 {
-        let proportional = (amount_msats * self.rate_bps as u64) / 10_000;
+        let proportional = (amount_msats as u128 * self.rate_bps as u128) / 10_000;
+        let proportional = u64::try_from(proportional).unwrap_or(u64::MAX);
         self.fixed_msats.saturating_add(proportional)
     }
 }
