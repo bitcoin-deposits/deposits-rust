@@ -383,69 +383,109 @@ async fn bootstrap_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Err
         return Ok(());
     }
 
-    // Ping-rank peers. Need at least `quorum_size - 1` non-self peers.
+    // Sleep between rounds when something transient fails. Long enough to
+    // not hammer the relay, short enough to converge within minutes when
+    // peers do come up. Block time (~10 min) would be cheaper but less
+    // responsive for the common "peer booted a minute ago" case.
+    const RETRY_SLEEP_SECS: u64 = 300; // 5 min
+
+    let need = quorum_size - 1;
     let mut round = 0;
-    let peers = loop {
+    loop {
         round += 1;
+        println!();
+        println!("bootstrap quorum: round {}", round);
+
+        // --- Discovery ---
         let candidates = discover_candidate_peers(&config, &our_pubkey_hex).await?;
-        println!(
-            "bootstrap quorum: round {}: {} candidate peer(s)",
-            round,
-            candidates.len()
-        );
-        if candidates.len() < quorum_size - 1 {
+        println!("  discovery: {} candidate peer(s)", candidates.len());
+        if candidates.len() < need {
             println!(
-                "  not enough peers ({} found, need {}); retrying in 30s",
+                "  need {}, have {} — sleeping {}s",
+                need,
                 candidates.len(),
-                quorum_size - 1
+                RETRY_SLEEP_SECS
             );
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            tokio::time::sleep(Duration::from_secs(RETRY_SLEEP_SECS)).await;
             continue;
         }
+
+        // --- Ping ranking ---
         let ranked = rank_peers_by_ping(&config, &candidates).await?;
-        if ranked.len() >= quorum_size - 1 {
-            break ranked;
+        println!("  ping:      {} peer(s) responded", ranked.len());
+        if ranked.len() < need {
+            println!(
+                "  need {} responders, have {} — sleeping {}s",
+                need,
+                ranked.len(),
+                RETRY_SLEEP_SECS
+            );
+            tokio::time::sleep(Duration::from_secs(RETRY_SLEEP_SECS)).await;
+            continue;
         }
-        println!(
-            "  only {} peers responded to ping; retrying in 30s",
-            ranked.len()
-        );
-        tokio::time::sleep(Duration::from_secs(30)).await;
-    };
 
-    let selected = &peers[..quorum_size - 1];
-    println!("bootstrap quorum: selected {} peer(s):", selected.len());
-    for (i, (pk, lid, rtt_ms)) in selected.iter().enumerate() {
-        println!(
-            "  {}. {}... (ledger {}...) rtt={}ms",
-            i + 1,
-            &pk[..16],
-            &lid[..16],
-            rtt_ms
-        );
-    }
+        let selected: Vec<_> = ranked.into_iter().take(need).collect();
+        println!("  selected {} peer(s):", selected.len());
+        for (i, (pk, lid, rtt_ms)) in selected.iter().enumerate() {
+            println!(
+                "    {}. {}... (ledger {}...) rtt={}ms",
+                i + 1,
+                &pk[..16],
+                &lid[..16],
+                rtt_ms
+            );
+        }
 
-    // Add each peer as a quorum member via the daemon.
-    for (pk, member_ledger_id, _) in selected {
-        println!("bootstrap quorum: quorum_add {}...", &pk[..16]);
-        let params = serde_json::json!({
-            "member_pubkey": pk,
-            "member_ledger_id": member_ledger_id,
-        });
-        match send_daemon_request(&config, &ledger_id, "quorum_add", params).await {
-            Ok(_) => println!("  added"),
-            Err(e) => {
-                return Err(format!("quorum_add failed for {}: {}", &pk[..16], e).into());
+        // --- Add members ---
+        //
+        // On any failure, we restart from discovery after a sleep rather
+        // than retrying just the failed add — the peer set may have
+        // shifted, and a different selection may succeed. Re-adding a
+        // member who already landed in next_quorum_members is safe: the
+        // state machine dedupes at apply() (ledger_state.rs).
+        let mut add_ok = true;
+        for (pk, member_ledger_id, _) in &selected {
+            println!("  quorum_add: {}...", &pk[..16]);
+            let params = serde_json::json!({
+                "member_pubkey": pk,
+                "member_ledger_id": member_ledger_id,
+            });
+            match send_daemon_request(&config, &ledger_id, "quorum_add", params).await {
+                Ok(_) => println!("    added"),
+                Err(e) => {
+                    println!("    FAILED: {}", e);
+                    add_ok = false;
+                    break;
+                }
             }
         }
-    }
+        if !add_ok {
+            println!(
+                "  quorum_add failed — sleeping {}s and restarting from discovery",
+                RETRY_SLEEP_SECS
+            );
+            tokio::time::sleep(Duration::from_secs(RETRY_SLEEP_SECS)).await;
+            continue;
+        }
 
-    // Seal the quorum.
-    println!("bootstrap quorum: quorum_begin");
-    let params = serde_json::json!({});
-    match send_daemon_request(&config, &ledger_id, "quorum_begin", params).await {
-        Ok(_) => println!("bootstrap quorum: active"),
-        Err(e) => return Err(format!("quorum_begin failed: {}", e).into()),
+        // --- Seal ---
+        println!("  quorum_begin");
+        match send_daemon_request(&config, &ledger_id, "quorum_begin", serde_json::json!({}))
+            .await
+        {
+            Ok(_) => {
+                println!("bootstrap quorum: active");
+                break;
+            }
+            Err(e) => {
+                println!(
+                    "    FAILED: {} — sleeping {}s and retrying",
+                    e, RETRY_SLEEP_SECS
+                );
+                tokio::time::sleep(Duration::from_secs(RETRY_SLEEP_SECS)).await;
+                continue;
+            }
+        }
     }
 
     // Mark complete so a container restart doesn't re-try.

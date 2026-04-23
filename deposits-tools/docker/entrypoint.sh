@@ -29,6 +29,20 @@ set -e
 #                                      swap-listen in the background so
 #                                      the node serves as its own courier.
 #                                      Omit to skip courier mode.
+#   SKIP_QUORUM                      - when set to any non-empty value
+#                                      other than "0"/"false", skip Phase
+#                                      3 entirely. The daemon comes up
+#                                      with a solo ledger and no quorum.
+#                                      Use this to bring up the first few
+#                                      nodes in a brand-new network, when
+#                                      there are no peers to discover
+#                                      yet. Run
+#                                        deposits-node bootstrap quorum
+#                                      manually via docker exec once
+#                                      enough peers are online.
+#                                      Incompatible with COURIER_RESERVES_SATS
+#                                      (courier mode requires an active
+#                                      quorum).
 #
 # Access control (passed through to the daemon via env):
 #   DEPOSIT_ACCESS_CONTROL           - "true" to gate deposit_open on the
@@ -191,8 +205,30 @@ if [ ! -f "$DATA_DIR/reserves_ready.marker" ]; then
     touch "$DATA_DIR/reserves_ready.marker"
 fi
 
-# --- Phase 3: discover peers + form Q=5 quorum (via daemon) ---
-if [ ! -f "$DATA_DIR/quorum_active.marker" ]; then
+# --- Phase 3: discover peers + form quorum (via daemon) ---
+#
+# Skipped entirely when SKIP_QUORUM is set (anything but unset/0/false) —
+# used to bring up the first nodes in a fresh network. Otherwise bootstrap
+# quorum retries every ~5 min indefinitely until enough peers are online
+# and all join steps succeed; the container is effectively blocked in
+# Phase 3 until then.
+case "${SKIP_QUORUM:-}" in
+    ""|"0"|"false"|"False"|"FALSE")
+        skip_quorum=0
+        ;;
+    *)
+        skip_quorum=1
+        ;;
+esac
+
+if [ "$skip_quorum" = "1" ]; then
+    echo ""
+    echo "Phase 3: SKIP_QUORUM set — running solo, no quorum formation"
+    echo "         form a quorum later with:"
+    echo "         docker exec <container> deposits-node bootstrap quorum \\"
+    echo "             --seed <seed> --data-dir $DATA_DIR --network $NETWORK \\"
+    echo "             --esplora $ELECTRUM_URL --relay $BOOT_RELAY --quorum-size $QUORUM_SIZE"
+elif [ ! -f "$DATA_DIR/quorum_active.marker" ]; then
     echo ""
     echo "Phase 3: discovering peers + forming quorum (Q=$QUORUM_SIZE)..."
     if deposits-node bootstrap quorum \
@@ -204,8 +240,12 @@ if [ ! -f "$DATA_DIR/quorum_active.marker" ]; then
         --quorum-size "$QUORUM_SIZE"; then
         echo "Bootstrap complete — operator is live."
     else
-        echo "WARN: quorum formation failed; operator still running with solo ledger."
-        echo "      Rerun 'deposits-node bootstrap quorum' when more peers are available."
+        # bootstrap quorum retries internally, so reaching this branch
+        # means a fast-fail condition (bad config, missing ledger, etc.)
+        # rather than "peers not online yet".
+        echo "WARN: quorum formation failed with a non-retriable error."
+        echo "      Check the log above; rerun the command or set SKIP_QUORUM=1"
+        echo "      to run solo until the issue is resolved."
     fi
 fi
 
@@ -216,7 +256,13 @@ fi
 # the liquidity source for swaps into its ledger — the operator is a
 # natural courier for their own freshly-opened ledger (no external
 # courier has reason to park capacity there yet).
-if [ -n "$COURIER_RESERVES_SATS" ]; then
+if [ -n "$COURIER_RESERVES_SATS" ] && [ "$skip_quorum" = "1" ]; then
+    echo ""
+    echo "Phase 4: COURIER_RESERVES_SATS set but SKIP_QUORUM=1 — skipping."
+    echo "         courier mode requires an active quorum to cosign the"
+    echo "         buffer's InvoiceCredit. Form a quorum first, then"
+    echo "         restart without SKIP_QUORUM to enable courier."
+elif [ -n "$COURIER_RESERVES_SATS" ]; then
     echo ""
     echo "Phase 4: opening courier buffer ($COURIER_RESERVES_SATS sats)..."
 
