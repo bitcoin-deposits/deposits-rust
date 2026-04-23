@@ -2,16 +2,18 @@
 # Wrapper for deposits-wallet CLI
 #
 # Usage:
-#   ./bin/wallet.sh discover                    Find available ledgers
-#   ./bin/wallet.sh info <ledger_id>            Get ledger details
-#   ./bin/wallet.sh open <ledger_id>            Create a deposit account (no funding yet)
-#   ./bin/wallet.sh offer <alias> <sats>        Request a funding address for an existing deposit
-#   ./bin/wallet.sh balance                     Show all balances
-#   ./bin/wallet.sh withdraw <alias> <amt>      Withdraw from a deposit
-#   ./bin/wallet.sh list                        List deposits with aliases
+#   ./bin/wallet.sh discover                        Find available ledgers
+#   ./bin/wallet.sh info <ledger_id>                Get ledger details
+#   ./bin/wallet.sh open <ledger_id>                Create a deposit account
+#   ./bin/wallet.sh offer <alias> <sats>            Request an on-chain funding address
+#   ./bin/wallet.sh make_invoice <alias> <sats>     Get a Lightning invoice to fund the deposit
+#   ./bin/wallet.sh pay_invoice <alias> <bolt11>    Pay a Lightning invoice from the deposit
+#   ./bin/wallet.sh balance                         Show all balances
+#   ./bin/wallet.sh withdraw <alias> <amt>          Withdraw from a deposit
+#   ./bin/wallet.sh list                            List deposits with aliases
 #
 # Regtest helpers (only work against the local docker bitcoind):
-#   ./bin/wallet.sh faucet <alias|addr> [sats]  Send from faucet to deposit
+#   ./bin/wallet.sh faucet <alias|addr> [sats]      Send from faucet to deposit
 #
 # Environment:
 #   WALLET_SEED     - 32-byte hex seed (optional, generates if missing)
@@ -42,17 +44,24 @@ print_usage() {
     echo "Usage: $0 <command> [options]"
     echo ""
     echo "Commands:"
-    echo "  discover                    Find available ledgers on the network"
-    echo "  info <ledger_id>            Get details about a specific ledger"
-    echo "  open <ledger_id>            Create a deposit account (no funding yet)"
-    echo "  offer <alias> <sats>        Request a funding address for a deposit"
-    echo "  balance                     Show balances across all deposits"
-    echo "  sync                        Sync deposit statuses from daemon"
-    echo "  withdraw <alias> <amt>      Withdraw from a deposit"
-    echo "  list                        List all your deposits with aliases"
+    echo "  discover                        Find available ledgers on the network"
+    echo "  info <ledger_id>                Get details about a specific ledger"
+    echo "  open <ledger_id>                Create a deposit account (no funding yet)"
+    echo ""
+    echo "Funding (pick one; combine freely):"
+    echo "  offer <alias> <sats>            Request an on-chain funding address"
+    echo "  make_invoice <alias> <sats>     Get a BOLT11 invoice to fund via Lightning"
+    echo "  pay_invoice <alias> <bolt11>    Pay a BOLT11 from a deposit (outgoing)"
+    echo "  transfer <from> <to> <sats>     Transfer between two of your deposits"
+    echo ""
+    echo "Management:"
+    echo "  balance                         Show balances across all deposits"
+    echo "  sync                            Sync deposit statuses from daemon"
+    echo "  withdraw <alias> <amt>          Withdraw from a deposit"
+    echo "  list                            List all your deposits with aliases"
     echo ""
     echo "Regtest helpers:"
-    echo "  faucet <alias|addr> [sats]  Send from faucet to deposit (local docker)"
+    echo "  faucet <alias|addr> [sats]      Send from faucet to deposit (local docker)"
     echo ""
     echo "Options:"
     echo "  --relay <url>       Nostr relay URL (default: $RELAY)"
@@ -69,7 +78,8 @@ print_usage() {
     echo "Examples:"
     echo "  $0 discover"
     echo "  $0 open abc123... --alias savings"
-    echo "  $0 offer savings 50000              # returns a funding address"
+    echo "  $0 offer savings 50000              # on-chain: returns a funding address"
+    echo "  $0 make_invoice savings 50000       # lightning: returns a BOLT11 to pay"
     echo "  $0 faucet savings                   # regtest: send faucet sats to it"
     echo "  $0 withdraw savings 25000 --to bc1q..."
     echo "  $0 balance"
