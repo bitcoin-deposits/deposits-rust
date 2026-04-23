@@ -43,7 +43,7 @@ When a quorum is established or refreshed, the operator constructs a new Taproot
 - **spending_txid**: the txid spending the old reserves
 - **new_outpoint_txid**: the txid of the new reserves output
 - **new_outpoint_vout**: the vout index
-- **quorum_members**: the pubkeys included in the new multisig
+- **quorum_members**: the pubkeys included in the new multisig. MUST match the set of members staged via prior `QuorumAddMember` operations (and not since removed by `QuorumRemoveMember`) — `QuorumBegin` promotes exactly that staged set to the new active quorum (see DEP-05 §QuorumBegin).
 - **quorum_expiry**: block height when the quorum expires (shortest member commitment)
 
 The on-chain UTXO value MUST equal `reserves_amount + collateral_amount`. Co-signers MUST verify this before signing.

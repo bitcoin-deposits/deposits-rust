@@ -15,6 +15,8 @@ An operator requests another operator to join their quorum. The request includes
 
 If the member accepts, the operator appends `QuorumAddMember` (disc 43) to their own ledger, and the member appends `QuorumJoin` (disc 46) to their own ledger. This creates a two-sided auditable record.
 
+`QuorumAddMember` **stages** the member: they are appended to a pending list (`next_quorum_members` in the state model) and gain no voting power yet. A subsequent `QuorumBegin` promotes all staged members to active in a single atomic step (see below). This lets an operator add several members across separate ledger updates and activate them together.
+
 To serve as a quorum member, an operator must have at least `min_member_collateral` collateral at stake on their own ledger(s). This ensures quorum members have skin in the game — misbehavior as a quorum member (e.g., co-signing a non-conforming update) can result in slashing on their own ledger.
 
 ### Member Terms
@@ -49,11 +51,18 @@ These fields are per-member, not reduced to a quorum-wide minimum — different 
 
 ### QuorumBegin (disc 12)
 
-Once members are added, the operator rotates reserves into a new Taproot multisig UTXO (see DEP-03). After `QuorumBegin`, every subsequent update MUST carry co-signatures from a strict majority (`floor(n/2) + 1`) of quorum members. This prevents the operator from maintaining parallel chains — a majority of cosigners will have seen and validated the canonical chain before signing any new update. `QuorumBegin` records the `quorum_expiry` (shortest membership duration) and `collateral_amount_msats`.
+`QuorumBegin` does two things atomically:
+
+1. **Promotes the staged membership.** The pending set (`next_quorum_members`, populated by `QuorumAddMember`) **replaces** the active voting set wholesale. Anything not in the staged set at `QuorumBegin` time is dropped. This means refreshing an existing quorum requires re-staging every member the operator wants to keep by issuing a fresh `QuorumAddMember` for each before the new `QuorumBegin`.
+2. **Rotates the on-chain multisig.** The operator spends the old reserves UTXO into a new Taproot output whose script reflects the new active member set (see DEP-03).
+
+After `QuorumBegin`, every subsequent update MUST carry co-signatures from a strict majority (`floor(n/2) + 1`) of the new active quorum. This prevents the operator from maintaining parallel chains — a majority of cosigners will have seen and validated the canonical chain before signing any new update. `QuorumBegin` also records the `quorum_expiry` (shortest membership duration) and `collateral_amount_msats`.
 
 ### Removing Members
 
-`QuorumRemoveMember` (disc 44) removes a member from the quorum. This requires a new `QuorumBegin` to update the multisig.
+`QuorumRemoveMember` (disc 44) takes effect **immediately** on the ledger — the named member is dropped from both the active set and the pending set on apply. No subsequent `QuorumBegin` is required for the member to lose voting rights. However, the on-chain Taproot UTXO still encodes the pre-remove member set, so spends continue to require the removed member's signature until the next `QuorumBegin` rotates the multisig. This creates a window in which ledger-level cosig thresholds use the shrunken quorum while on-chain spends cannot proceed without the departing member — operators typically follow a `QuorumRemoveMember` with a `QuorumBegin` in the next ledger update to close the window.
+
+Unlike `QuorumAddMember` (staged) the remove is immediate because the point of removing a member is usually that they have misbehaved or gone silent; making the operator wait until the next rotation to strip voting rights would let a captured member keep vetoing updates in the meantime.
 
 ## Collateral
 
