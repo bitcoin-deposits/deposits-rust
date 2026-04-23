@@ -57,9 +57,10 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
     SEEDS["op$i"]=$(python3 -c "print('op$i'.encode().hex().ljust(64, '0'))")
 done
 
-# Electrs (shared)
-# Find first available electrs port
-ELECTRS_URL="http://localhost:3201"
+# Electrs (shared). Override ELECTRS_URL if your electrs is bound to a
+# different port — 3201 matches the default bundled dev-environment but
+# alternate docker-compose setups (e.g. mempool/electrs) bind 3102, etc.
+ELECTRS_URL="${ELECTRS_URL:-http://localhost:3201}"
 
 log_info "=========================================="
 log_info "  Setup: $NODE_COUNT operators, Q=$Q"
@@ -180,6 +181,26 @@ stop_relays
 rm -rf "$DATA_ROOT"
 mkdir -p "$DATA_ROOT"
 start_relays
+
+# Ensure the faucet wallet exists with mature coinbase funds. bitcoind
+# comes up with zero wallets; we either load an existing "faucet" from
+# a previous run or create it, then mine 101 blocks (coinbase maturity)
+# on first init. Without this, every `bitcoin_cli -rpcwallet=faucet
+# sendtoaddress` below returns error -18 and, because stderr is
+# redirected to /dev/null, `set -e` silently kills the script right
+# after start_relays with no diagnostic.
+if ! bitcoin_cli loadwallet "faucet" >/dev/null 2>&1; then
+    bitcoin_cli createwallet "faucet" >/dev/null 2>&1 || true
+fi
+faucet_balance=$(bitcoin_cli -rpcwallet=faucet getbalance 2>/dev/null || echo "0")
+# `< 1` check as integer — bash comparison on decimal doesn't work, but
+# any real balance above 1 BTC is plenty for any Q we support.
+if [ "${faucet_balance%.*}" = "0" ]; then
+    log_info "Mining 101 blocks for coinbase maturity..."
+    bitcoin_cli -rpcwallet=faucet -generate 101 >/dev/null
+    faucet_balance=$(bitcoin_cli -rpcwallet=faucet getbalance 2>/dev/null || echo "0")
+fi
+log_ok "Faucet wallet: $faucet_balance BTC available"
 
 # Fund all operators in one bitcoin batch. `address` and `info` are
 # read-only CLI commands that use a short-lived Node instance — they
