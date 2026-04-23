@@ -280,7 +280,16 @@ for pid in "${begin_pids[@]}"; do
                 idx=$((idx + 1))
             done
         done
-        if [ -n "$fail_log" ] && grep -qi "already\|active\|quorum.*begin.*exists" "$fail_log"; then
+        # A prior successful QuorumBegin surfaces on retry as one of:
+        #   - "No existing reserves to rotate"  (wallet: P2WSH already spent)
+        #   - "already active" / "already a quorum member"
+        #   - "Ledger not found for: bcrt1q..."  (obsolete reserves_key
+        #     lookup; shouldn't happen now that we pass ledger_id, but
+        #     included defensively for state written by older setup.sh)
+        # All three mean "the rotation is done, nothing to do here."
+        if [ -n "$fail_log" ] && grep -qi \
+            "already\|no existing reserves\|ledger not found for:" \
+            "$fail_log"; then
             already=$((already + 1))
             echo -n "a"
         else
