@@ -62,8 +62,9 @@ start_all_watches() {
 
     echo ""
     log_success "Operators are now watching for requests"
-    log_info "Test with: ./bin/wallet.sh discover"
-    log_info "Then:      ./bin/wallet.sh open <ledger_id> <sats> --alias test"
+    log_info "Test with: deposits-wallet discover --relay ws://localhost:<port>"
+    log_info "Then:      deposits-wallet open <ledger_id> --alias test"
+    log_info "           deposits-wallet offer test 50000"
 }
 
 case "${1:-all}" in

@@ -58,6 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "history" => wallet_cli::payments::show_history(&args[2..]).await,
         "list" => wallet_cli::deposit::list_deposits(&args[2..]).await,
         "ledger" => wallet_cli::ledger::ledger_command(&args[2..]).await,
+        "regtest-faucet" => wallet_cli::regtest::faucet(&args[2..]).await,
         "help" | "--help" | "-h" => {
             print_usage(&args[0]);
             Ok(())

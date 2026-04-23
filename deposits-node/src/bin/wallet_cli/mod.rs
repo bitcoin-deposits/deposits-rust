@@ -4,6 +4,7 @@ pub mod deposit;
 pub mod discover;
 pub mod ledger;
 pub mod payments;
+pub mod regtest;
 pub mod swap;
 
 use bitcoin::hashes::{sha256, Hash};
@@ -84,72 +85,108 @@ pub fn print_usage(program: &str) {
     eprintln!();
     eprintln!("Usage: {} <command> [options]", program);
     eprintln!();
-    eprintln!("Commands:");
-    eprintln!("  discover                    Find available ledgers on the network");
-    eprintln!("  info <ledger_id>            Get details about a specific ledger");
-    eprintln!("  open <ledger_id> <sats>     Open a new deposit on a ledger");
-    eprintln!("  offer <alias> <sats>        Add funds to an existing deposit");
-    eprintln!("  balance                     Show balances across all deposits");
-    eprintln!("  sync                        Sync deposit statuses from daemon");
-    eprintln!("  withdraw <alias> <amt>      Withdraw from a deposit (on-chain)");
-    eprintln!("  send <alias> <amt> --to <dst>  Happy-path intra-ledger transfer (lock+complete)");
-    eprintln!("  transfer <alias> <amt>      Lock funds for conditional transfer (HTLC)");
-    eprintln!("  transfer_complete <id>      Complete a transfer with preimage");
-    eprintln!("  swap-advertise <alias> <sats>  Publish an open swap offer");
-    eprintln!("  swap-list                   Discover open swap advertisements");
-    eprintln!("  route <from> <to> <amt>     Send across ledgers via a courier");
-    eprintln!("  spread <amt> [--count N]    Open deposits across N operators");
-    eprintln!("  make_invoice <alias> <amt>  Create Lightning invoice for deposit");
-    eprintln!("  pay_invoice <alias> <bolt11> Pay Lightning invoice from deposit");
-    eprintln!("  history <alias>             Show transaction history");
-    eprintln!("  list                        List all your deposits with aliases");
+    eprintln!("Discovery:");
+    eprintln!("  discover                         Find available ledgers on the network");
+    eprintln!("  info <ledger_id>                 Get details about a specific ledger");
     eprintln!();
-    eprintln!("Ledger inspection (read-only from Nostr):");
-    eprintln!("  ledger list                 List all ledgers on the relay");
-    eprintln!("  ledger show <id>            Show all updates for a ledger");
-    eprintln!("  ledger validate <id>        Validate ledger hash chain");
-    eprintln!(
-        "  ledger custody <id>         Trace custody chain (rotations, disputes, acquisitions)"
-    );
+    eprintln!("Deposits:");
+    eprintln!("  open <ledger_id>                 Create a deposit account (no funding yet)");
+    eprintln!("  list                             List all your deposits with aliases");
+    eprintln!("  balance                          Show balances across all deposits");
+    eprintln!("  sync                             Sync deposit statuses from daemon");
+    eprintln!();
+    eprintln!("Funding (pick one; combine freely):");
+    eprintln!("  offer <alias> <sats>             Request an on-chain funding address");
+    eprintln!("  make_invoice <alias> <sats>      Get a BOLT11 invoice to fund via Lightning");
+    eprintln!("  spread <total> [--count N]       Open + offer across N discovered operators");
+    eprintln!();
+    eprintln!("Outgoing payments:");
+    eprintln!("  pay_invoice <alias> <bolt11>     Pay a BOLT11 from a deposit");
+    eprintln!("  send <alias> <amt> --to <dst>    Happy-path intra-ledger transfer");
+    eprintln!("  transfer <alias> <amt>           Lock funds for conditional transfer (HTLC)");
+    eprintln!("  transfer_complete <id>           Complete a locked transfer with preimage");
+    eprintln!("  withdraw <alias> <amt> --to <dst> On-chain withdrawal");
+    eprintln!("  route <from> <to> <amt>          Send across ledgers via a courier");
+    eprintln!();
+    eprintln!("Swaps:");
+    eprintln!("  swap-advertise <alias> <sats>    Publish an open swap offer");
+    eprintln!("  swap-list                        Discover open swap advertisements");
+    eprintln!("  swap-request / swap-listen       Initiate / serve swap requests");
+    eprintln!();
+    eprintln!("History & inspection:");
+    eprintln!("  history <alias>                  Show transaction history");
+    eprintln!("  ledger list                      List all ledgers on the relay");
+    eprintln!("  ledger show <id>                 Show all updates for a ledger");
+    eprintln!("  ledger validate <id>             Validate ledger hash chain");
+    eprintln!("  ledger custody <id>              Trace rotations / disputes / acquisitions");
+    eprintln!();
+    eprintln!("Identity:");
+    eprintln!("  attest / revoke / subkeys        Manage subkey delegation (DEP-04)");
+    eprintln!();
+    eprintln!("Regtest helpers (network=regtest only):");
+    eprintln!("  regtest-faucet <alias|addr> [sats]  Send faucet sats + mine a block");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --relay <url>       Nostr relay URL (required)");
+    eprintln!("  --relay <url>       Nostr relay URL (required; pass multiple for fallback)");
     eprintln!(
         "  --network <net>     Network: bitcoin, testnet, signet, regtest (default: regtest)"
     );
     eprintln!("  --data-dir <path>   Data directory (default: ~/.deposits-wallet)");
     eprintln!("  --seed <hex>        Wallet seed (32 bytes hex)");
-    eprintln!("  --nsec-file <path>  Override Nostr identity. The file must contain");
-    eprintln!("                      an nsec1... bech32 or 64-char hex secret key.");
-    eprintln!("                      Use this to sign as your own npub instead of the");
-    eprintln!("                      seed-derived key — required when an operator gates");
-    eprintln!("                      deposits behind a lightning-verify attestation tied");
-    eprintln!("                      to your identity. (The key is read from a file,");
-    eprintln!("                      never taken on the command line, so it doesn't leak");
-    eprintln!("                      through argv/shell history.)");
     eprintln!("  --alias <name>      Local alias for the deposit (for open command)");
+    eprintln!("  --nsec-file <path>  Override Nostr identity. The file must contain an");
+    eprintln!("                      nsec1… bech32 or 64-char hex secret key. Use this to");
+    eprintln!("                      sign as your own npub instead of the seed-derived key");
+    eprintln!("                      — required when an operator gates deposits behind a");
+    eprintln!("                      lightning-verify attestation tied to your identity.");
+    eprintln!();
+    eprintln!("Environment (defaults when the matching flag isn't passed):");
+    eprintln!("  WALLET_SEED          64-char hex seed");
+    eprintln!("  WALLET_NETWORK       bitcoin / testnet / signet / regtest");
+    eprintln!("  WALLET_DATA_DIR      Directory for seed + deposits.json");
+    eprintln!("  WALLET_RELAY         Single relay URL (use --relay for multiple)");
+    eprintln!("  BITCOIN_RPC_{{HOST,PORT,USER,PASS,WALLET}}  regtest-faucet RPC target");
     eprintln!();
     eprintln!("Examples:");
-    eprintln!("  {} discover --relay ws://localhost:8080", program);
-    eprintln!(
-        "  {} open abc123... 100000 --alias savings --relay ws://localhost:8080",
-        program
-    );
-    eprintln!(
-        "  {} offer savings 50000 --relay ws://localhost:8080",
-        program
-    );
-    eprintln!(
-        "  {} withdraw savings 25000 --to bc1q... --relay ws://localhost:8080",
-        program
-    );
+    eprintln!("  {} discover --relay ws://localhost:7779", program);
+    eprintln!("  {} open abc123... --alias savings", program);
+    eprintln!("  {} offer savings 50000          # on-chain: returns funding address", program);
+    eprintln!("  {} make_invoice savings 50000   # lightning: returns BOLT11", program);
+    eprintln!("  {} regtest-faucet savings       # fund locally (regtest only)", program);
 }
 
 pub fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error::Error>> {
-    let mut seed: Option<[u8; 32]> = None;
-    let mut network = bitcoin::Network::Regtest;
-    let mut data_dir: Option<PathBuf> = None;
-    let mut relays = Vec::new();
+    // Env var fallbacks — used when the corresponding CLI flag isn't
+    // supplied. Explicit flags always win.
+    //   WALLET_SEED      — 64-char hex seed
+    //   WALLET_NETWORK   — bitcoin / testnet / signet / regtest
+    //   WALLET_DATA_DIR  — absolute path
+    //   WALLET_RELAY     — a single relay URL; pass --relay multiple times
+    //                      for more.
+    let mut seed: Option<[u8; 32]> = if let Ok(hex) = std::env::var("WALLET_SEED") {
+        let b = hex::decode(hex.trim())?;
+        if b.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            Some(arr)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut network = match std::env::var("WALLET_NETWORK").as_deref() {
+        Ok("bitcoin") | Ok("mainnet") => bitcoin::Network::Bitcoin,
+        Ok("testnet") => bitcoin::Network::Testnet,
+        Ok("signet") => bitcoin::Network::Signet,
+        Ok("regtest") | Ok("") | Err(_) => bitcoin::Network::Regtest,
+        Ok(other) => return Err(format!("Unknown WALLET_NETWORK: {}", other).into()),
+    };
+    let mut data_dir: Option<PathBuf> = std::env::var("WALLET_DATA_DIR").ok().map(PathBuf::from);
+    let mut relays = match std::env::var("WALLET_RELAY") {
+        Ok(url) if !url.is_empty() => vec![url],
+        _ => Vec::new(),
+    };
     let mut nostr_nsec: Option<SecretKey> = None;
     let mut subkey_account: Option<String> = None;
     let mut subkey_attestation: Option<String> = None;
