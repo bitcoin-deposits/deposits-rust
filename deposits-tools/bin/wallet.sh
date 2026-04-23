@@ -4,12 +4,14 @@
 # Usage:
 #   ./bin/wallet.sh discover                    Find available ledgers
 #   ./bin/wallet.sh info <ledger_id>            Get ledger details
-#   ./bin/wallet.sh open <ledger_id> [sats]     Open a new deposit (default: 10000 sats)
-#   ./bin/wallet.sh faucet <alias|addr> [sats]  Send from faucet to deposit (regtest)
-#   ./bin/wallet.sh offer <alias> <sats>        Add funds to existing deposit
+#   ./bin/wallet.sh open <ledger_id>            Create a deposit account (no funding yet)
+#   ./bin/wallet.sh offer <alias> <sats>        Request a funding address for an existing deposit
 #   ./bin/wallet.sh balance                     Show all balances
 #   ./bin/wallet.sh withdraw <alias> <amt>      Withdraw from a deposit
 #   ./bin/wallet.sh list                        List deposits with aliases
+#
+# Regtest helpers (only work against the local docker bitcoind):
+#   ./bin/wallet.sh faucet <alias|addr> [sats]  Send from faucet to deposit
 #
 # Environment:
 #   WALLET_SEED     - 32-byte hex seed (optional, generates if missing)
@@ -42,13 +44,15 @@ print_usage() {
     echo "Commands:"
     echo "  discover                    Find available ledgers on the network"
     echo "  info <ledger_id>            Get details about a specific ledger"
-    echo "  open <ledger_id> <sats>     Open a new deposit on a ledger"
-    echo "  faucet <alias|addr> [sats]  Send from faucet to deposit (regtest only)"
-    echo "  offer <alias> <sats>        Add funds to an existing deposit"
+    echo "  open <ledger_id>            Create a deposit account (no funding yet)"
+    echo "  offer <alias> <sats>        Request a funding address for a deposit"
     echo "  balance                     Show balances across all deposits"
     echo "  sync                        Sync deposit statuses from daemon"
     echo "  withdraw <alias> <amt>      Withdraw from a deposit"
     echo "  list                        List all your deposits with aliases"
+    echo ""
+    echo "Regtest helpers:"
+    echo "  faucet <alias|addr> [sats]  Send from faucet to deposit (local docker)"
     echo ""
     echo "Options:"
     echo "  --relay <url>       Nostr relay URL (default: $RELAY)"
@@ -64,9 +68,9 @@ print_usage() {
     echo ""
     echo "Examples:"
     echo "  $0 discover"
-    echo "  $0 open abc123... 100000 --alias savings"
-    echo "  $0 faucet mydeposit"
-    echo "  $0 offer savings 50000"
+    echo "  $0 open abc123... --alias savings"
+    echo "  $0 offer savings 50000              # returns a funding address"
+    echo "  $0 faucet savings                   # regtest: send faucet sats to it"
     echo "  $0 withdraw savings 25000 --to bc1q..."
     echo "  $0 balance"
 }
@@ -244,16 +248,6 @@ esac
 
 # Build args array
 ARGS=("$@")
-
-# For 'open' command, insert default amount if not provided
-# Usage: open <ledger_id> [sats] [--alias name]
-if [ "$1" = "open" ] && [ -n "$2" ]; then
-    # Check if $3 is missing, empty, or starts with --
-    if [ -z "$3" ] || [[ "$3" == --* ]]; then
-        # Insert default amount (10000 sats) after ledger_id
-        ARGS=("open" "$2" "10000" "${@:3}")
-    fi
-fi
 
 # Add default relay and network if not specified in args
 if ! printf '%s\n' "${ARGS[@]}" | grep -q -- '--relay'; then

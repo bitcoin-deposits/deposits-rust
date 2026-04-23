@@ -7,14 +7,12 @@ use super::{
     NostrTransportBuilder,
 };
 
-/// Open a new deposit on a ledger
+/// Open a new deposit account on a ledger. Only creates the empty
+/// account — use `offer <alias> <sats>` afterward to request an
+/// on-chain funding address, or fund by lightning / incoming transfer.
 pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use std::str::FromStr;
-
     let mut ledger_id: Option<String> = None;
-    let mut amount_sats: Option<u64> = None;
     let mut alias: Option<String> = None;
-    let mut skip_cosign_verify = false;
     let mut cli_fee_bps: Option<u64> = None;
     let mut cli_fee_fixed: Option<u64> = None;
     let mut cli_fee_period: Option<u64> = None;
@@ -31,9 +29,6 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
             "--lightning-address" | "--ln-address" if i + 1 < args.len() => {
                 lightning_address = Some(args[i + 1].clone());
                 i += 1;
-            }
-            "--skip-cosign-verify" => {
-                skip_cosign_verify = true;
             }
             "--fee-bps" if i + 1 < args.len() => {
                 cli_fee_bps = Some(args[i + 1].parse().unwrap_or(0));
@@ -57,18 +52,16 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
             _ => {
                 if ledger_id.is_none() {
                     ledger_id = Some(args[i].clone());
-                } else if amount_sats.is_none() {
-                    amount_sats = Some(args[i].parse()?);
                 }
+                // Extra positional args are ignored — sats used to live
+                // here; it belongs on `offer <alias> <sats>` now.
             }
         }
         i += 1;
     }
 
-    let ledger_id = ledger_id.ok_or(
-        "Usage: deposits-wallet open <ledger_id> <amount_sats> [--alias <name>] --relay <url>",
-    )?;
-    let amount_sats = amount_sats.ok_or("Missing amount")?;
+    let ledger_id = ledger_id
+        .ok_or("Usage: deposits-wallet open <ledger_id> [--alias <name>] --relay <url>")?;
     let config = parse_config(&config_args)?;
 
     if config.relays.is_empty() {
@@ -131,9 +124,8 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
         (ledger_id, ad)
     };
 
-    println!("Opening deposit...");
+    println!("Opening deposit account...");
     println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
-    println!("  Amount: {} sats", amount_sats);
     if let Some(ref a) = alias {
         println!("  Alias: {}", a);
     }
@@ -171,7 +163,7 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
     };
     println!();
 
-    // Step 1: Send deposit_open request to create the deposit account
+    // Send deposit_open request to create the deposit account.
     let open_params = serde_json::json!({
         "deposit_pubkey": hex::encode(our_pubkey.serialize()),
         "fee_fixed": fee_fixed,
@@ -291,212 +283,11 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
         return Err(format!("deposit_open failed: {}", err_str).into());
     }
 
-    // Step 2: Send make_offer request to get a funding address
-    // max_sats = requested amount, min_sats = 1 (or less than max), blocks_valid = 144 (~1 day)
-    let min_sats = std::cmp::min(1000_u64, amount_sats.saturating_sub(1).max(1));
-    let offer_params = serde_json::json!({
-        "deposit_pubkey": hex::encode(our_pubkey.serialize()),
-        "max_sats": amount_sats,
-        "min_sats": min_sats,
-        "blocks_valid": 144_u64,
-        "fee_fixed": fee_fixed,
-        "fee_bps": fee_bps,
-        "fee_frequency": fee_frequency,
-    });
-
-    println!("Sending make_offer request for funding address...");
-
-    let request_id = transport
-        .send_ledger_request(&ledger_id, "make_offer", offer_params)
-        .await?;
-
-    println!("  Request ID: {}...", &request_id[..16]);
-    println!();
-
-    // Wait for a valid response using real-time subscription
-    // For co-signature validation, we may reject invalid responses and wait for valid ones
-    println!("Waiting for operator response...");
-
-    let ledger_id_clone = ledger_id.clone();
-    let response = transport
-        .wait_for_valid_response(&request_id, 60000, |response| {
-            // Reject error responses from rogue operators and wait for a valid one
-            if !response.success {
-                let error = response.error.as_deref().unwrap_or("");
-                eprintln!("Warning: Rejecting error response: {}", error);
-                return false;
-            }
-
-            // Check if co-signature validation is needed
-            if let Some(result) = &response.result {
-                let cosign_required = result
-                    .get("cosign_required")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-
-                if !cosign_required {
-                    return true; // No co-signature needed, accept
-                }
-
-                // Validate co-signature fields
-                let address = result.get("funding_address").and_then(|v| v.as_str());
-                let offer_id_hex = result.get("offer_id").and_then(|v| v.as_str());
-                let operator_id_str = result.get("operator_id").and_then(|v| v.as_str());
-                let deadline_block = result.get("deadline_block").and_then(|v| v.as_u64());
-                let cosigner_pubkey_str = result.get("cosigner_pubkey").and_then(|v| v.as_str());
-                let cosigner_ledger_hash_hex =
-                    result.get("cosigner_ledger_hash").and_then(|v| v.as_str());
-                let cosign_signature_hex = result.get("cosign_signature").and_then(|v| v.as_str());
-
-                if let (
-                    Some(addr),
-                    Some(offer_hex),
-                    Some(op_str),
-                    Some(deadline),
-                    Some(cosigner_str),
-                    Some(hash_hex),
-                    Some(sig_hex),
-                ) = (
-                    address,
-                    offer_id_hex,
-                    operator_id_str,
-                    deadline_block,
-                    cosigner_pubkey_str,
-                    cosigner_ledger_hash_hex,
-                    cosign_signature_hex,
-                ) {
-                    // Parse and verify co-signature
-                    let offer_id_bytes: [u8; 32] = match hex::decode(offer_hex) {
-                        Ok(b) if b.len() == 32 => {
-                            let mut arr = [0u8; 32];
-                            arr.copy_from_slice(&b);
-                            arr
-                        }
-                        _ => {
-                            eprintln!("Warning: Invalid offer_id format, rejecting response");
-                            return false;
-                        }
-                    };
-
-                    let cosigner_pubkey = match PublicKey::from_str(cosigner_str) {
-                        Ok(pk) => pk,
-                        Err(_) => {
-                            eprintln!("Warning: Invalid cosigner_pubkey, rejecting response");
-                            return false;
-                        }
-                    };
-
-                    let operator_id = match PublicKey::from_str(op_str) {
-                        Ok(pk) => pk,
-                        Err(_) => {
-                            eprintln!("Warning: Invalid operator_id, rejecting response");
-                            return false;
-                        }
-                    };
-
-                    let member_ledger_hash: [u8; 32] = match hex::decode(hash_hex) {
-                        Ok(b) if b.len() == 32 => {
-                            let mut arr = [0u8; 32];
-                            arr.copy_from_slice(&b);
-                            arr
-                        }
-                        _ => {
-                            eprintln!("Warning: Invalid cosigner_ledger_hash, rejecting response");
-                            return false;
-                        }
-                    };
-
-                    let signature: [u8; 64] = match hex::decode(sig_hex) {
-                        Ok(b) if b.len() == 64 => {
-                            let mut arr = [0u8; 64];
-                            arr.copy_from_slice(&b);
-                            arr
-                        }
-                        _ => {
-                            eprintln!("Warning: Invalid cosign_signature, rejecting response");
-                            return false;
-                        }
-                    };
-
-                    // Verify the signature
-                    if !verify_offer_cosignature(
-                        &ledger_id_clone,
-                        &offer_id_bytes,
-                        &operator_id,
-                        addr,
-                        deadline as u32,
-                        &cosigner_pubkey,
-                        &member_ledger_hash,
-                        &signature,
-                    ) {
-                        eprintln!(
-                            "Warning: Invalid co-signature, rejecting response from rogue operator"
-                        );
-                        return false;
-                    }
-
-                    // Note: quorum membership check happens after we accept the response
-                    // since it requires async call which we can't do in the validator
-                    true
-                } else {
-                    eprintln!(
-                        "Warning: Response requires co-signature but missing fields, rejecting"
-                    );
-                    false
-                }
-            } else {
-                true // Accept responses without result (will be handled as error below)
-            }
-        })
-        .await?;
-
-    // Process the accepted response
-    if !response.success {
-        let error = response.error.as_deref().unwrap_or("Unknown error");
-        return Err(format!("Deposit request failed: {}", error).into());
-    }
-
-    let result = response
-        .result
-        .as_ref()
-        .ok_or("Response missing result data")?;
-
-    let address = result
-        .get("funding_address")
-        .and_then(|v| v.as_str())
-        .ok_or("Response missing funding_address")?;
-    let offer_id_hex = result
-        .get("offer_id")
-        .and_then(|v| v.as_str())
-        .ok_or("Response missing offer_id")?;
-    let min_sats = result.get("min_sats").and_then(|v| v.as_u64()).unwrap_or(1);
-    let max_sats = result
-        .get("max_sats")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(amount_sats);
-
-    // Verify quorum membership for co-signed responses (async check)
-    let cosign_required = result
-        .get("cosign_required")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if cosign_required && !skip_cosign_verify {
-        if let Some(cosigner_str) = result.get("cosigner_pubkey").and_then(|v| v.as_str()) {
-            if let Ok(cosigner_pubkey) = PublicKey::from_str(cosigner_str) {
-                if !verify_quorum_membership(&transport, &ledger_id, &cosigner_pubkey).await {
-                    return Err("Cosigner is not a quorum member".into());
-                }
-                println!(
-                    "  Co-signature verified from quorum member {}...",
-                    &cosigner_str[..16.min(cosigner_str.len())]
-                );
-            }
-        }
-    } else if cosign_required && skip_cosign_verify {
-        println!("  Skipping co-signature verification (--skip-cosign-verify)");
-    }
-
-    // Save deposit to local storage with alias
+    // Save the deposit account to local storage. No funding address
+    // or amount yet — those come from `offer <alias> <sats>`, which
+    // calls make_offer against the operator and writes the returned
+    // address + min/max back into this record. Alternatively the
+    // account can be funded by incoming lightning or transfer.
     let deposits_file = config.data_dir.join("deposits.json");
     let mut deposits: Vec<serde_json::Value> = if deposits_file.exists() {
         let data = std::fs::read_to_string(&deposits_file)?;
@@ -511,24 +302,22 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
 
     deposits.push(serde_json::json!({
         "alias": final_alias,
-        "offer_id": offer_id_hex,
         "ledger_id": ledger_id,
-        "funding_address": address,
         "deposit_pubkey": hex::encode(our_pubkey.serialize()),
         "key_index": key_index,
-        "min_sats": min_sats,
-        "max_sats": max_sats,
-        "status": "pending",
+        "status": "open",
         "created_at": Utc::now().to_rfc3339(),
     }));
     std::fs::write(&deposits_file, serde_json::to_string_pretty(&deposits)?)?;
 
     save_deposit_key_index(&config.data_dir, key_index + 1)?;
 
-    println!("Deposit '{}' created!", final_alias);
     println!();
-    println!("Fund with {}-{} sats:", min_sats, max_sats);
-    println!("  {}", address);
+    println!("Deposit account '{}' created.", final_alias);
+    println!();
+    println!("Next: request an on-chain funding address with");
+    println!("    deposits-wallet offer {} <sats>", final_alias);
+    println!("or fund by incoming lightning invoice / transfer.");
     Ok(())
 }
 

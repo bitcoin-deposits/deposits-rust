@@ -1,6 +1,6 @@
 use bitcoin::secp256k1::Secp256k1;
 
-use super::deposit::open_new_deposit;
+use super::deposit::{add_offer, open_new_deposit};
 use super::{derive_secret_key, derive_secret_key_at_index, parse_config, NostrTransportBuilder};
 
 /// Withdraw from a deposit
@@ -990,41 +990,50 @@ pub async fn spread_deposits(args: &[String]) -> Result<(), Box<dyn std::error::
             alias
         );
 
-        // Build open command args — use operator's advertised relay
-        let mut open_args = vec![
-            ledger_id.clone(),
-            deposit_amount.to_string(),
-            "--alias".to_string(),
-            alias,
-            "--skip-cosign-verify".to_string(),
-        ];
-        // Operator's relay first (where they listen for requests)
+        // Shared config args — operator's relay first (where they
+        // listen for requests), then user's relays as fallback.
+        let mut shared_args: Vec<String> = Vec::new();
         if let Some(ref relay_url) = ad.relay_url {
-            open_args.push("--relay".to_string());
-            open_args.push(relay_url.clone());
+            shared_args.push("--relay".to_string());
+            shared_args.push(relay_url.clone());
         }
-        // Then user's relays as fallback
         for r in &config.relays {
             if ad.relay_url.as_deref() != Some(r.as_str()) {
-                open_args.push("--relay".to_string());
-                open_args.push(r.clone());
+                shared_args.push("--relay".to_string());
+                shared_args.push(r.clone());
             }
         }
-        open_args.push("--seed".to_string());
-        open_args.push(hex::encode(config.seed));
-        open_args.push("--network".to_string());
-        open_args.push(network_str.to_string());
-        open_args.push("--data-dir".to_string());
-        open_args.push(config.data_dir.to_string_lossy().to_string());
+        shared_args.push("--seed".to_string());
+        shared_args.push(hex::encode(config.seed));
+        shared_args.push("--network".to_string());
+        shared_args.push(network_str.to_string());
+        shared_args.push("--data-dir".to_string());
+        shared_args.push(config.data_dir.to_string_lossy().to_string());
 
-        match open_new_deposit(&open_args).await {
-            Ok(()) => {
-                opened += 1;
-            }
-            Err(e) => {
-                eprintln!("    Failed: {}", e);
-            }
+        // Step 1: create the empty deposit account.
+        let mut open_args: Vec<String> = vec![
+            ledger_id.clone(),
+            "--alias".to_string(),
+            alias.clone(),
+        ];
+        open_args.extend_from_slice(&shared_args);
+
+        if let Err(e) = open_new_deposit(&open_args).await {
+            eprintln!("    Failed to open: {}", e);
+            continue;
         }
+
+        // Step 2: request an on-chain funding address via make_offer.
+        // Failures here leave the account created but unfunded —
+        // recoverable with a manual `offer` command.
+        let mut offer_args: Vec<String> = vec![alias, deposit_amount.to_string()];
+        offer_args.extend_from_slice(&shared_args);
+
+        if let Err(e) = add_offer(&offer_args).await {
+            eprintln!("    Opened, but offer failed: {}", e);
+            continue;
+        }
+        opened += 1;
     }
 
     println!();
