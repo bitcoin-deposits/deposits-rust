@@ -251,6 +251,11 @@ types:
   #   256 = service_response_blocks (u32, QuorumAddMember)
   #   258 = max_transfer_timeout_blocks (u32, QuorumAddMember)
   #   262 = max_descriptor_bytes (u32, QuorumAddMember)
+  #   264 = compensation_bps (u16, QuorumAddMember — bips of collected fees
+  #                           paid to this member)
+  #   266 = compensation_deposit_id (16 bytes, QuorumAddMember — deposit on
+  #                                  operator's ledger where payout lands)
+  #   268 = compensation_frequency_blocks (u32, QuorumAddMember — payout cadence)
   #
   # Delivery:
   #   270 = request_hash (32 bytes, DeliveryEmbed)
