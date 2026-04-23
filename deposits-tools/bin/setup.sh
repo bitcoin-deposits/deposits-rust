@@ -166,8 +166,10 @@ stop_nodes() {
 # State storage
 # ============================================================================
 
-STATE_DIR=$(mktemp -d)
-trap "rm -rf $STATE_DIR" EXIT
+# Persisted under $DATA_ROOT so a partial run can be resumed via
+# ./bin/setup-resume.sh without losing the ledger/reserves/node_id
+# IDs that were resolved on the first try.
+STATE_DIR="$DATA_ROOT/state"
 store() { echo "$2" > "$STATE_DIR/$1"; }
 get() { [ -f "$STATE_DIR/$1" ] && cat "$STATE_DIR/$1"; }
 
@@ -179,7 +181,7 @@ log_info "=== Phase 1: Reset + Fund ==="
 stop_nodes
 stop_relays
 rm -rf "$DATA_ROOT"
-mkdir -p "$DATA_ROOT"
+mkdir -p "$DATA_ROOT" "$STATE_DIR"
 start_relays
 
 # Ensure the faucet wallet exists with mature coinbase funds. bitcoind
