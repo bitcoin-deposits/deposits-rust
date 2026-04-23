@@ -127,7 +127,7 @@ async fn buffer_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         println!("  deposit_id: {}", did);
     }
     if let Some(lid) = result.get("ledger_id").and_then(|v| v.as_str()) {
-        println!("  ledger:   {}...", &lid[..16.min(lid.len())]);
+        println!("  ledger:   {}", lid);
     }
 
     // If --amount-sats was provided, immediately fill to that amount.

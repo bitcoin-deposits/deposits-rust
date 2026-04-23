@@ -22,6 +22,13 @@ set -e
 #   METRICS_PORT                     - prometheus metrics port (default: 9100)
 #   NODE_NAME                        - operator name for advertisements
 #   QUORUM_SIZE                      - default 5
+#   COURIER_RESERVES_SATS            - open a buffer deposit of this many
+#                                      sats on the operator's own ledger
+#                                      after quorum, publish a Swap
+#                                      advertisement for it, and run
+#                                      swap-listen in the background so
+#                                      the node serves as its own courier.
+#                                      Omit to skip courier mode.
 #
 # Access control (passed through to the daemon via env):
 #   DEPOSIT_ACCESS_CONTROL           - "true" to gate deposit_open on the
@@ -199,6 +206,81 @@ if [ ! -f "$DATA_DIR/quorum_active.marker" ]; then
     else
         echo "WARN: quorum formation failed; operator still running with solo ledger."
         echo "      Rerun 'deposits-node bootstrap quorum' when more peers are available."
+    fi
+fi
+
+# --- Phase 4 (optional): courier mode ---
+# If the admin set COURIER_RESERVES_SATS, open a buffer deposit funded at
+# that amount, bridge it into a wallet state file, publish a swap ad, and
+# run swap-listen as a background service. The node's own buffer becomes
+# the liquidity source for swaps into its ledger — the operator is a
+# natural courier for their own freshly-opened ledger (no external
+# courier has reason to park capacity there yet).
+if [ -n "$COURIER_RESERVES_SATS" ]; then
+    echo ""
+    echo "Phase 4: opening courier buffer ($COURIER_RESERVES_SATS sats)..."
+
+    # Admin open + fill in one step. Output is human-readable; parse
+    # the index / pubkey / ledger_id out with grep — small and stable
+    # enough that a dedicated --json flag isn't worth the churn.
+    BUFFER_OUT=$(deposits-node admin buffer open \
+        --amount-sats "$COURIER_RESERVES_SATS" \
+        --seed "$NODE_SEED" \
+        --data-dir "$DATA_DIR" \
+        --network "$NETWORK" \
+        --esplora "$ELECTRUM_URL" \
+        --relay "$BOOT_RELAY" 2>&1)
+
+    BUF_INDEX=$(echo "$BUFFER_OUT" | awk '/^  index:/ {print $2}')
+    BUF_PUBKEY=$(echo "$BUFFER_OUT" | awk '/^  pubkey:/ {print $2}')
+    BUF_LEDGER=$(echo "$BUFFER_OUT" | awk '/^  ledger:/ {print $2}')
+
+    if [ -z "$BUF_INDEX" ] || [ -z "$BUF_PUBKEY" ] || [ -z "$BUF_LEDGER" ]; then
+        echo "$BUFFER_OUT" | tail -10
+        echo "WARN: buffer open parse failed — skipping courier setup"
+    else
+        echo "  buffer index: $BUF_INDEX"
+        echo "  pubkey:       ${BUF_PUBKEY:0:16}..."
+        echo "  ledger:       $BUF_LEDGER"
+
+        # Build a wallet data-dir so swap-advertise and swap-listen can
+        # reason about the buffer as a named deposit.
+        WALLET_DIR="$DATA_DIR/courier-wallet"
+        mkdir -p "$WALLET_DIR"
+        echo "$NODE_SEED" > "$WALLET_DIR/seed.hex"
+        cat > "$WALLET_DIR/deposits.json" <<EOF
+[
+  {
+    "alias": "courier",
+    "ledger_id": "$BUF_LEDGER",
+    "key_index": $BUF_INDEX,
+    "deposit_pubkey": "$BUF_PUBKEY",
+    "status": "funded"
+  }
+]
+EOF
+
+        # Publish a SwapAdvertisement from the courier deposit.
+        echo "  publishing swap advertisement..."
+        deposits-wallet swap-advertise courier "$COURIER_RESERVES_SATS" \
+            --data-dir "$WALLET_DIR" \
+            --network "$NETWORK" \
+            --relay "$BOOT_RELAY" \
+            --expires-hours 168 \
+            > /dev/null 2>&1 || \
+            echo "  WARN: swap-advertise failed"
+
+        # Run swap-listen in the background so the courier actually
+        # responds to swap_request events.
+        echo "  launching swap-listen..."
+        deposits-wallet swap-listen \
+            --data-dir "$WALLET_DIR" \
+            --network "$NETWORK" \
+            --relay "$BOOT_RELAY" \
+            > "$DATA_DIR/swap-listen.log" 2>&1 &
+        SWAP_PID=$!
+        echo "  swap-listen pid: $SWAP_PID"
+        echo "Courier live."
     fi
 fi
 
