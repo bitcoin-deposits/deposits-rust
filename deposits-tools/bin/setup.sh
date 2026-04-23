@@ -77,11 +77,15 @@ echo ""
 generate_relay_config() {
     local name=$1 port=$2 dir="$DATA_ROOT/relays/$name"
     mkdir -p "$dir"
+    # `nofiles` must fit under the invoking shell's hard RLIMIT_NOFILE;
+    # 1_000_000 matches the system's typical hard cap and leaves plenty
+    # of headroom for bursty CLI connection churn.
     cat > "$dir/strfry.conf" << CONF
 db = "$dir"
 relay {
     bind = "0.0.0.0"
     port = $port
+    nofiles = 1000000
     info {
         name = "$name relay"
     }
