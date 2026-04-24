@@ -85,9 +85,7 @@ tempfile = "3"
 name = "deposits-node"
 path = "src/bin/deposits-node.rs"
 
-[[bin]]
-name = "deposits-wallet"
-path = "src/bin/deposits-wallet.rs"
+# deposits-wallet moved to its own crate at ../deposits-wallet/
 
 [[bin]]
 name = "nostr-ping"

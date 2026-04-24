@@ -3,6 +3,7 @@ members = [
     "deposits-protocol",
     "deposits-core",
     "deposits-node",
+    "deposits-wallet",
     "deposits-tools",
     "tests",
 ]
