@@ -1,0 +1,491 @@
+//! Quorum request handlers — split out of the monolithic
+//! request_handlers.rs. See the sibling mod.rs.
+
+use super::super::*;
+
+impl Node {
+    pub(crate) async fn process_quorum_add_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        use std::str::FromStr;
+
+        tracing::info!(
+            "Processing quorum_add request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
+
+        let member_pubkey_hex = match request.params.get("member_pubkey").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing member_pubkey parameter".to_string()),
+                )
+            }
+        };
+        let member_ledger_id = match request
+            .params
+            .get("member_ledger_id")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => s.to_string(),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing member_ledger_id parameter".to_string()),
+                )
+            }
+        };
+
+        let quorum_member = match PublicKey::from_str(member_pubkey_hex) {
+            Ok(pk) => pk,
+            Err(e) => return (false, None, Some(format!("Invalid member_pubkey: {}", e))),
+        };
+
+        if member_ledger_id.len() != 64 || !member_ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return (
+                false,
+                None,
+                Some("member_ledger_id must be 64 hex chars".to_string()),
+            );
+        }
+
+        // Resolve ledger_id
+        let ledger_id = if request.ledger_id.len() == 64
+            && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            request.ledger_id.clone()
+        } else {
+            match self.get_ledger_by_reserves_key(&request.ledger_id) {
+                Some((_, ledger)) => ledger.ledger_id_hex(),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Ledger not found: {}", &request.ledger_id[..16])),
+                    )
+                }
+            }
+        };
+
+        // Request consent from the member — they sign and record QuorumJoin
+        let consent_signature = match self.request_consent(&member_ledger_id, &ledger_id).await {
+            Ok(result) => result.consent_signature,
+            Err(e) => {
+                tracing::error!("Consent request failed: {}", e);
+                return (false, None, Some(format!("Member consent failed: {}", e)));
+            }
+        };
+
+        // Extract fee limits the member is imposing (from their advertisement)
+        let min_fee_bps = request
+            .params
+            .get("min_fee_bps")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u16);
+        let min_fee_fixed = request.params.get("min_fee_fixed").and_then(|v| v.as_u64());
+        let max_fee_period = request
+            .params
+            .get("max_fee_period")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        // Extract membership duration from request
+        let membership_until = request
+            .params
+            .get("membership_until")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        match self
+            .add_quorum_member(
+                &ledger_id,
+                quorum_member,
+                &member_ledger_id,
+                consent_signature,
+                min_fee_bps,
+                min_fee_fixed,
+                max_fee_period,
+                membership_until,
+            )
+            .await
+        {
+            Ok(event_id) => {
+                let result = serde_json::json!({
+                    "status": "SUCCESS",
+                    "event_id": event_id,
+                    "member": member_pubkey_hex,
+                    "member_ledger_id": member_ledger_id,
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!("quorum_add failed: {}", e);
+                (false, None, Some(e.to_string()))
+            }
+        }
+    }
+
+    pub(crate) async fn process_quorum_remove_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        use std::str::FromStr;
+
+        let member_pubkey_hex = match request.params.get("member_pubkey").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing member_pubkey parameter".to_string()),
+                )
+            }
+        };
+
+        let quorum_member = match PublicKey::from_str(member_pubkey_hex) {
+            Ok(pk) => pk,
+            Err(e) => return (false, None, Some(format!("Invalid member_pubkey: {}", e))),
+        };
+
+        let ledger_id = &request.ledger_id;
+
+        tracing::info!(
+            "Removing quorum member {}... from ledger {}...",
+            &member_pubkey_hex[..16.min(member_pubkey_hex.len())],
+            &ledger_id[..16.min(ledger_id.len())]
+        );
+
+        let operation = LedgerOperation::QuorumRemoveMember {
+            quorum_member,
+            operator_signature: [0u8; 64], // filled by commit_operation
+        };
+
+        match self.commit_operation(ledger_id, operation).await {
+            Ok(_) => {
+                tracing::info!(
+                    "Quorum member removed: {}...",
+                    &member_pubkey_hex[..16.min(member_pubkey_hex.len())]
+                );
+                let result = serde_json::json!({ "removed": member_pubkey_hex });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => (
+                false,
+                None,
+                Some(format!("Failed to remove quorum member: {}", e)),
+            ),
+        }
+    }
+
+    pub(crate) async fn process_quorum_join_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        use std::str::FromStr;
+
+        tracing::info!(
+            "Processing quorum_join request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
+
+        let target_operator_hex = match request
+            .params
+            .get("target_operator")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => s,
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing target_operator parameter".to_string()),
+                )
+            }
+        };
+        let target_ledger_id = match request
+            .params
+            .get("target_ledger_id")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => s.to_string(),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing target_ledger_id parameter".to_string()),
+                )
+            }
+        };
+        let membership_expires = match request
+            .params
+            .get("membership_expires")
+            .and_then(|v| v.as_u64())
+        {
+            Some(v) => v as u32,
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing membership_expires parameter".to_string()),
+                )
+            }
+        };
+
+        let target_operator = match PublicKey::from_str(target_operator_hex) {
+            Ok(pk) => pk,
+            Err(e) => return (false, None, Some(format!("Invalid target_operator: {}", e))),
+        };
+
+        if target_ledger_id.len() != 64 || !target_ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return (
+                false,
+                None,
+                Some("target_ledger_id must be 64 hex chars".to_string()),
+            );
+        }
+
+        // Resolve our ledger_id
+        let our_ledger_id = if request.ledger_id.len() == 64
+            && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            request.ledger_id.clone()
+        } else {
+            match self.get_ledger_by_reserves_key(&request.ledger_id) {
+                Some((_, ledger)) => ledger.ledger_id_hex(),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Ledger not found: {}", &request.ledger_id[..16])),
+                    )
+                }
+            }
+        };
+
+        // Sign consent: COLLATERAL_CONSENT || operator_pubkey(33 bytes) || ledger_id(string bytes)
+        let _signature = {
+            use bitcoin::hashes::{sha256, Hash};
+            use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+
+            let mut sign_content = Vec::new();
+            sign_content.extend_from_slice(b"COLLATERAL_CONSENT");
+            sign_content.extend_from_slice(&target_operator.serialize());
+            sign_content.extend_from_slice(target_ledger_id.as_bytes());
+
+            let hash = sha256::Hash::hash(&sign_content);
+            let secp_msg = Message::from_digest(hash.to_byte_array());
+            let secp = Secp256k1::new();
+            let keypair = Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+            let sig = secp.sign_schnorr_no_aux_rand(&secp_msg, &keypair);
+            sig.serialize()
+        };
+
+        match self
+            .record_quorum_join(
+                &our_ledger_id,
+                target_operator,
+                &target_ledger_id,
+                membership_expires,
+            )
+            .await
+        {
+            Ok(event_id) => {
+                let result = serde_json::json!({
+                    "status": "SUCCESS",
+                    "event_id": event_id,
+                    "target_operator": target_operator_hex,
+                    "target_ledger_id": target_ledger_id,
+                    "membership_expires": membership_expires,
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!("quorum_join failed: {}", e);
+                (false, None, Some(e.to_string()))
+            }
+        }
+    }
+
+    /// Handle a consent_request from an operator wanting us to join their quorum.
+    ///
+    /// Auto-consents: signs the consent content, records QuorumJoin on our ledger,
+    /// and returns the signature so the operator can record QuorumAddMember.
+    pub(crate) async fn process_consent_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        use std::str::FromStr;
+
+        tracing::info!(
+            "Processing consent_request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
+
+        let operator_pubkey_hex = match request
+            .params
+            .get("operator_pubkey")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => s,
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing operator_pubkey parameter".to_string()),
+                )
+            }
+        };
+        let operator_ledger_id = match request
+            .params
+            .get("operator_ledger_id")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => s.to_string(),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing operator_ledger_id parameter".to_string()),
+                )
+            }
+        };
+
+        let operator_pubkey = match PublicKey::from_str(operator_pubkey_hex) {
+            Ok(pk) => pk,
+            Err(e) => return (false, None, Some(format!("Invalid operator_pubkey: {}", e))),
+        };
+
+        if operator_ledger_id.len() != 64
+            || !operator_ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return (
+                false,
+                None,
+                Some("operator_ledger_id must be 64 hex chars".to_string()),
+            );
+        }
+
+        // Sign consent: COLLATERAL_CONSENT || operator_pubkey(33 bytes) || ledger_id(string bytes)
+        let mut sign_content = Vec::new();
+        sign_content.extend_from_slice(b"COLLATERAL_CONSENT");
+        sign_content.extend_from_slice(&operator_pubkey.serialize());
+        sign_content.extend_from_slice(operator_ledger_id.as_bytes());
+
+        let signature = {
+            use bitcoin::hashes::{sha256, Hash};
+            use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+
+            let hash = sha256::Hash::hash(&sign_content);
+            let secp_msg = Message::from_digest(hash.to_byte_array());
+            let secp = Secp256k1::new();
+            let keypair = Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
+            let sig = secp.sign_schnorr_no_aux_rand(&secp_msg, &keypair);
+            sig.serialize()
+        };
+
+        // Record QuorumJoin on our own ledger
+        let our_ledger_id = request.ledger_id.clone();
+        let current_block = self.wallet.get_block_height().unwrap_or(0);
+        let membership_expires = current_block + 1000; // ~1 week at 10 min/block
+
+        match self
+            .record_quorum_join(
+                &our_ledger_id,
+                operator_pubkey,
+                &operator_ledger_id,
+                membership_expires,
+            )
+            .await
+        {
+            Ok(_event_id) => {
+                tracing::info!(
+                    "Consent granted: recorded QuorumJoin for operator {}... on our ledger {}...",
+                    &operator_pubkey_hex[..16.min(operator_pubkey_hex.len())],
+                    &our_ledger_id[..16]
+                );
+                let result = serde_json::json!({
+                    "status": "CONSENT_GRANTED",
+                    "consent_signature": hex::encode(signature),
+                    "membership_expires": membership_expires,
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!("Failed to record QuorumJoin: {}", e);
+                (
+                    false,
+                    None,
+                    Some(format!("Failed to record QuorumJoin: {}", e)),
+                )
+            }
+        }
+    }
+
+    pub(crate) async fn process_quorum_begin_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        tracing::info!(
+            "Processing quorum_begin request for ledger {}...",
+            &request.ledger_id[..16.min(request.ledger_id.len())]
+        );
+
+        // Resolve ledger_id
+        let ledger_id = if request.ledger_id.len() == 64
+            && request.ledger_id.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            request.ledger_id.clone()
+        } else {
+            match self.get_ledger_by_reserves_key(&request.ledger_id) {
+                Some((_, ledger)) => ledger.ledger_id_hex(),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Ledger not found: {}", &request.ledger_id[..16])),
+                    )
+                }
+            }
+        };
+
+        // Reload reserves from disk (CLI may have created them after daemon started)
+        if let Err(e) = self.wallet.reload_reserves_from_disk() {
+            tracing::warn!("Failed to reload reserves from disk: {}", e);
+        }
+
+        // Sync wallet to see current UTXOs
+        if let Err(e) = self.wallet.sync() {
+            tracing::warn!("Wallet sync failed before quorum_begin: {}", e);
+        }
+
+        match self.rotate_reserves_to_quorum(&ledger_id).await {
+            Ok(result) => {
+                // commit_operation inside rotate_reserves_to_quorum already
+                // broadcasts the cosigned update via Nostr, so no separate
+                // broadcast_last_update is needed here.
+
+                let response = serde_json::json!({
+                    "status": "SUCCESS",
+                    "txid": result.txid,
+                    "new_address": result.new_address,
+                    "amount_sats": result.amount_sats,
+                    "quorum_member_count": result.quorum_member_count,
+                    "quorum_expiry": result.quorum_expiry,
+                    "ledger_hash": hex::encode(&result.ledger_hash[..8]),
+                });
+                (true, Some(response.to_string()), None)
+            }
+            Err(e) => {
+                tracing::error!("quorum_begin failed: {}", e);
+                (false, None, Some(e.to_string()))
+            }
+        }
+    }
+
+}
