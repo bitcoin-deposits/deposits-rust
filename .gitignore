@@ -2,6 +2,21 @@
 Cargo.lock
 deposits-tools/certs/
 deposits-tools/bin/strfry
+# Symlinks dropped by ./bin/build-cmds.sh — local build artifacts,
+# shouldn't be committed.
+deposits-tools/bin/deposits-node
+deposits-tools/bin/deposits-wallet
+deposits-tools/bin/nostr-ping
+deposits-tools/bin/nostr-bench
+deposits-tools/bin/transfer-simulator
+deposits-tools/bin/htlc-agent
+deposits-tools/bin/decode-updates
+deposits-tools/bin/treasury-address
+deposits-tools/bin/treasury-send
+deposits-tools/bin/standalone-reserves-demo
+deposits-tools/bin/discover
+deposits-tools/bin/replay-ledger
+deposits-tools/bin/deposits-lnurl
 __pycache__/
 simulator-ledger.db
 simulator-ledger.db-wal
