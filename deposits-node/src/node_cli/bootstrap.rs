@@ -19,7 +19,7 @@
 //!    `QuorumBegin`. Must run AFTER the daemon is started (it delegates to
 //!    the daemon over Nostr).
 
-use super::{parse_config, send_daemon_request};
+use super::{derive_operator_secret, parse_config, send_daemon_request};
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
 use bitcoin::Network;
 use crate::nostr::NostrTransportBuilder;
@@ -213,7 +213,7 @@ async fn derive_funding_address(
 }
 
 fn derive_node_pubkey(seed: &[u8; 32], network: Network) -> Result<String, Box<dyn std::error::Error>> {
-    let sk = crate::cli::common::derive_operator_secret(seed, network)?;
+    let sk = derive_operator_secret(seed, network)?;
     let secp = Secp256k1::new();
     let pk = PublicKey::from_secret_key(&secp, &sk);
     Ok(hex::encode(pk.serialize()))
@@ -226,7 +226,7 @@ async fn send_private_msg_nip17(
     recipient: &nostr_sdk::PublicKey,
     body: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let sk = crate::cli::common::derive_operator_secret(seed, network)?;
+    let sk = derive_operator_secret(seed, network)?;
     let nostr_sk = nostr_sdk::SecretKey::from_slice(&sk.secret_bytes())
         .map_err(|e| format!("nostr key: {}", e))?;
     let keys = Keys::new(nostr_sk);
@@ -365,7 +365,7 @@ async fn bootstrap_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Err
         let pk = hex::encode(
             PublicKey::from_secret_key(
                 &Secp256k1::new(),
-                &crate::cli::common::derive_operator_secret(&config.seed, config.network)?,
+                &derive_operator_secret(&config.seed, config.network)?,
             )
             .serialize(),
         );
@@ -501,7 +501,7 @@ async fn discover_candidate_peers(
     config: &NodeConfig,
     our_pubkey_hex: &str,
 ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-    let sk = crate::cli::common::derive_operator_secret(&config.seed, config.network)?;
+    let sk = derive_operator_secret(&config.seed, config.network)?;
     let transport = NostrTransportBuilder::new(sk)
         .relay(&config.relays[0])
         .build()
@@ -536,7 +536,7 @@ async fn rank_peers_by_ping(
     config: &NodeConfig,
     candidates: &[(String, String)],
 ) -> Result<Vec<(String, String, u64)>, Box<dyn std::error::Error>> {
-    let sk = crate::cli::common::derive_operator_secret(&config.seed, config.network)?;
+    let sk = derive_operator_secret(&config.seed, config.network)?;
     let transport = NostrTransportBuilder::new(sk)
         .relay(&config.relays[0])
         .build()

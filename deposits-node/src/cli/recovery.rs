@@ -20,7 +20,7 @@ use bdk_esplora::esplora_client::Builder as EsploraBuilder;
 use nostr_sdk::prelude::*;
 use tokio::sync::Mutex;
 
-use super::common::{derive_operator_secret, parse_config};
+use crate::node_cli::{derive_operator_secret, parse_config};
 
 /// Cached nostr client for recovery commands
 static RECOVERY_NOSTR_CLIENT: OnceLock<Mutex<Option<(String, Client)>>> = OnceLock::new();

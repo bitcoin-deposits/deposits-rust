@@ -21,7 +21,7 @@ use crate::nostr::{
 };
 use crate::Node;
 
-use super::common::{derive_operator_secret, parse_config};
+use crate::node_cli::{derive_operator_secret, parse_config};
 
 /// Cached nostr client for CLI commands
 static NOSTR_CLIENT: OnceLock<Mutex<Option<(String, Client)>>> = OnceLock::new();
