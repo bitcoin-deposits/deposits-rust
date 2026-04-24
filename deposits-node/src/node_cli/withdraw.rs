@@ -7,7 +7,7 @@
 
 use super::parse_config;
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
-use deposits_node::Node;
+use crate::Node;
 use std::str::FromStr;
 
 /// Handle withdraw subcommands

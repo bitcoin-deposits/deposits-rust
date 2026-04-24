@@ -7,7 +7,7 @@
 
 use super::parse_config;
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
-use deposits_node::Node;
+use crate::Node;
 
 /// Handle reserves subcommands
 pub async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -293,7 +293,7 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 if seed_bytes.len() == 32 {
                     let mut seed = [0u8; 32];
                     seed.copy_from_slice(&seed_bytes);
-                    if let Ok(sk) = super::super::derive_operator_secret(&seed, config.network) {
+                    if let Ok(sk) = super::derive_operator_secret(&seed, config.network) {
                         let pk = PublicKey::from_secret_key(&secp, &sk);
                         let label = seed_file
                             .parent()

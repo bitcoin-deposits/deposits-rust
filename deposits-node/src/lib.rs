@@ -47,6 +47,7 @@ pub mod handler;
 pub mod ldk_cli;
 pub mod metrics;
 pub mod node;
+pub mod node_cli;
 pub mod nostr;
 pub mod wallet;
 

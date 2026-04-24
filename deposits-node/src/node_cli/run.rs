@@ -6,7 +6,7 @@
 // accordance with one or both of these licenses.
 
 use super::parse_config;
-use deposits_node::Node;
+use crate::Node;
 use std::sync::Arc;
 
 pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -30,7 +30,7 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     // Initialize metrics if port specified
     if let Some(port) = metrics_port {
-        if let Err(e) = deposits_node::metrics::init_metrics(port) {
+        if let Err(e) = crate::metrics::init_metrics(port) {
             tracing::warn!("Failed to initialize metrics: {}", e);
         }
     }
@@ -41,7 +41,7 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     tracing::info!(
         "Relays: {:?}",
         if config.relays.is_empty() {
-            deposits_node::nostr::DEFAULT_RELAYS
+            crate::nostr::DEFAULT_RELAYS
                 .iter()
                 .map(|s| s.to_string())
                 .collect()

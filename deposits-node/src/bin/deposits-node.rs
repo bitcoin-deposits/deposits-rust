@@ -16,32 +16,8 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-mod node_cli;
-
-use bitcoin::bip32::{DerivationPath, Xpriv};
-use bitcoin::secp256k1::{Secp256k1, SecretKey};
-use bitcoin::Network;
 use deposits_node::cli::{nostr_commands, recovery};
-use std::str::FromStr;
-
-/// Derive the operator secret key from a seed using HD derivation.
-/// This matches what the Wallet does, ensuring consistent key usage across the codebase.
-fn derive_operator_secret(seed: &[u8; 32], network: Network) -> Result<SecretKey, String> {
-    let secp = Secp256k1::new();
-
-    let xpriv = Xpriv::new_master(network, seed)
-        .map_err(|e| format!("Failed to create master key: {}", e))?;
-
-    // Use the same derivation path as the Wallet: m/86'/0'/0'/0/0
-    let operator_path = DerivationPath::from_str("m/86'/0'/0'/0/0")
-        .map_err(|e| format!("Invalid derivation path: {}", e))?;
-
-    let operator_xpriv = xpriv
-        .derive_priv(&secp, &operator_path)
-        .map_err(|e| format!("Failed to derive operator key: {}", e))?;
-
-    Ok(operator_xpriv.private_key)
-}
+use deposits_node::node_cli;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Install ring as the default rustls crypto provider (required by nostr-sdk).

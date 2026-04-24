@@ -8,7 +8,7 @@
 use super::{
     auto_advertise_ledger, format_operation, parse_config, send_daemon_request, FeeScheduleArgs,
 };
-use deposits_node::Node;
+use crate::Node;
 
 /// Handle ledger subcommands
 pub async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -877,7 +877,7 @@ async fn ledger_import(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
 /// Publish a ledger advertisement to Nostr
 async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use deposits_node::nostr::LedgerAdvertisement;
+    use crate::nostr::LedgerAdvertisement;
 
     // Parse arguments: <reserves_id> [options]
     let mut reserves_id: Option<String> = None;
@@ -1134,7 +1134,7 @@ async fn ledger_republish(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
 /// Discover ledgers advertising on Nostr
 pub async fn ledger_discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use deposits_node::nostr::NostrTransportBuilder;
+    use crate::nostr::NostrTransportBuilder;
 
     let mut config_args = Vec::new();
 
@@ -1168,7 +1168,7 @@ pub async fn ledger_discover(args: &[String]) -> Result<(), Box<dyn std::error::
     println!("Discovering ledgers on {} network...", network);
     println!();
 
-    let secret_key = super::super::derive_operator_secret(&config.seed, config.network)?;
+    let secret_key = super::derive_operator_secret(&config.seed, config.network)?;
     let transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
         .build()

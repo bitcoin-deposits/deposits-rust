@@ -6,7 +6,7 @@
 // accordance with one or both of these licenses.
 
 use super::{parse_config, send_daemon_request};
-use deposits_node::Node;
+use crate::Node;
 
 pub async fn health_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {

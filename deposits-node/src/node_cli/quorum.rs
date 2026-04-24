@@ -7,7 +7,7 @@
 
 use super::{parse_config, send_daemon_request};
 use bitcoin::secp256k1::PublicKey;
-use deposits_node::Node;
+use crate::Node;
 use std::str::FromStr;
 
 pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {

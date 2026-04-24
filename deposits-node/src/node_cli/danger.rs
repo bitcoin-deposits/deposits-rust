@@ -8,7 +8,7 @@
 //! Dangerous testing commands - only available with the `dangerous-testing` feature.
 
 use super::parse_config;
-use deposits_node::Node;
+use crate::Node;
 
 pub async fn danger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
@@ -33,7 +33,7 @@ pub async fn danger_command(args: &[String]) -> Result<(), Box<dyn std::error::E
 async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
     use deposits_core::SignedLedgerUpdate;
-    use deposits_node::nostr::NostrTransportBuilder;
+    use crate::nostr::NostrTransportBuilder;
     use sha2::{Digest, Sha256};
 
     if args.len() < 2 {
@@ -62,7 +62,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
 
-    let secret_key = super::super::derive_operator_secret(&config.seed, config.network)?;
+    let secret_key = super::derive_operator_secret(&config.seed, config.network)?;
     let secp = Secp256k1::new();
 
     // Get the node to access the ledger

@@ -7,7 +7,7 @@
 
 use super::parse_config;
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
-use deposits_node::Node;
+use crate::Node;
 use std::str::FromStr;
 
 /// Handle lightning (ln) subcommands
@@ -57,7 +57,7 @@ pub async fn lightning_command(args: &[String]) -> Result<(), Box<dyn std::error
 }
 
 async fn lightning_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use deposits_node::ldk_cli::LdkCli;
+    use crate::ldk_cli::LdkCli;
 
     if args.is_empty() {
         eprintln!("Usage: deposits-node lightning invoice <amount_sats> [description]");
@@ -80,7 +80,7 @@ async fn lightning_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Er
 }
 
 async fn lightning_pay(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use deposits_node::ldk_cli::LdkCli;
+    use crate::ldk_cli::LdkCli;
 
     if args.is_empty() {
         eprintln!("Usage: deposits-node lightning pay <bolt11_invoice>");
@@ -100,7 +100,7 @@ async fn lightning_pay(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 }
 
 async fn lightning_balance(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use deposits_node::ldk_cli::LdkCli;
+    use crate::ldk_cli::LdkCli;
 
     let cli = LdkCli::from_env();
     let balances = cli.get_balances()?;
@@ -126,7 +126,7 @@ async fn lightning_balance(_args: &[String]) -> Result<(), Box<dyn std::error::E
 }
 
 async fn lightning_info(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use deposits_node::ldk_cli::LdkCli;
+    use crate::ldk_cli::LdkCli;
 
     let cli = LdkCli::from_env();
     let info = cli.get_node_info()?;
@@ -141,7 +141,7 @@ async fn lightning_info(_args: &[String]) -> Result<(), Box<dyn std::error::Erro
 }
 
 async fn lightning_channels(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use deposits_node::ldk_cli::LdkCli;
+    use crate::ldk_cli::LdkCli;
 
     let cli = LdkCli::from_env();
     let response = cli.list_channels()?;
@@ -178,7 +178,7 @@ async fn lightning_channels(_args: &[String]) -> Result<(), Box<dyn std::error::
 }
 
 async fn lightning_payments(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use deposits_node::ldk_cli::LdkCli;
+    use crate::ldk_cli::LdkCli;
 
     let cli = LdkCli::from_env();
     let response = cli.list_payments()?;
@@ -241,7 +241,7 @@ async fn lightning_open_locks(args: &[String]) -> Result<(), Box<dyn std::error:
         println!("{} open lock(s) total.", total);
 
         // If LDK is available, show payment status for each
-        use deposits_node::ldk_cli::LdkCli;
+        use crate::ldk_cli::LdkCli;
         let cli = LdkCli::from_env();
         if let Ok(resp) = cli.list_payments() {
             println!("\nLDK payment status:");
@@ -521,7 +521,7 @@ async fn lightning_fulfill(args: &[String]) -> Result<(), Box<dyn std::error::Er
 /// Send a Lightning payment FROM a deposit (combined lock + pay + fulfill)
 async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use bitcoin::secp256k1::SecretKey;
-    use deposits_node::ldk_cli::LdkCli;
+    use crate::ldk_cli::LdkCli;
 
     let mut positional: Vec<String> = Vec::new();
     let mut config_args = Vec::new();

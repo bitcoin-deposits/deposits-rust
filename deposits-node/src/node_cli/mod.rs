@@ -22,10 +22,32 @@ pub mod withdraw;
 #[cfg(feature = "dangerous-testing")]
 pub mod danger;
 
-use bitcoin::secp256k1::PublicKey;
+use bitcoin::bip32::{DerivationPath, Xpriv};
+use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::Network;
-use deposits_node::{Node, NodeConfig};
+use crate::{Node, NodeConfig};
 use std::path::PathBuf;
+use std::str::FromStr;
+
+/// Derive the operator secret key from a seed using HD derivation.
+/// Matches what the Wallet does, ensuring consistent key usage across
+/// the codebase. Shared by all node_cli subcommands that need to
+/// reconstruct the operator's signing key from the seed.
+pub fn derive_operator_secret(
+    seed: &[u8; 32],
+    network: Network,
+) -> Result<SecretKey, String> {
+    let secp = Secp256k1::new();
+    let xpriv = Xpriv::new_master(network, seed)
+        .map_err(|e| format!("Failed to create master key: {}", e))?;
+    // Use the same derivation path as the Wallet: m/86'/0'/0'/0/0
+    let operator_path = DerivationPath::from_str("m/86'/0'/0'/0/0")
+        .map_err(|e| format!("Invalid derivation path: {}", e))?;
+    let operator_xpriv = xpriv
+        .derive_priv(&secp, &operator_path)
+        .map_err(|e| format!("Failed to derive operator key: {}", e))?;
+    Ok(operator_xpriv.private_key)
+}
 
 pub fn print_usage(program: &str) {
     println!(
@@ -348,13 +370,13 @@ pub async fn send_admin_daemon_request(
     action: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    use deposits_node::nostr::NostrTransportBuilder;
+    use crate::nostr::NostrTransportBuilder;
 
     if config.relays.is_empty() {
         return Err("No relay configured. Use --relay <url>".into());
     }
 
-    let secret_key = super::derive_operator_secret(&config.seed, config.network)?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
     let (xonly, _) = PublicKey::from_secret_key(&bitcoin::secp256k1::Secp256k1::new(), &secret_key)
         .x_only_public_key();
     let recipient = hex::encode(xonly.serialize());
@@ -398,13 +420,13 @@ pub async fn send_daemon_request(
     action: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    use deposits_node::nostr::NostrTransportBuilder;
+    use crate::nostr::NostrTransportBuilder;
 
     if config.relays.is_empty() {
         return Err("No relay configured. Use --relay <url>".into());
     }
 
-    let secret_key = super::derive_operator_secret(&config.seed, config.network)?;
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
 
     let transport = NostrTransportBuilder::new(secret_key)
         .relays(config.relays.iter().cloned())
@@ -508,7 +530,7 @@ pub async fn auto_advertise_ledger(
     operator_name: Option<&str>,
     fee_schedule: &FeeScheduleArgs,
 ) {
-    use deposits_node::nostr::LedgerAdvertisement;
+    use crate::nostr::LedgerAdvertisement;
 
     // Resolve identifier to ledger (supports both ledger_id and reserves_key)
     let ledger = match node.get_ledger_with_id(identifier) {

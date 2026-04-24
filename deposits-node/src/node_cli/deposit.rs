@@ -7,7 +7,7 @@
 
 use super::{parse_config, send_daemon_request};
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
-use deposits_node::Node;
+use crate::Node;
 use std::str::FromStr;
 
 /// Handle deposit subcommands
@@ -40,7 +40,7 @@ pub async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::
 
 /// Create a deposit offer for on-chain funding
 async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use deposits_node::nostr::NostrTransportBuilder;
+    use crate::nostr::NostrTransportBuilder;
 
     // Parse positional arguments:
     // <reserves_id> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid>
@@ -103,7 +103,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         .first()
         .ok_or("No relay configured. Use --relay <url>")?
         .clone();
-    let secret_key = super::super::derive_operator_secret(&config.seed, config.network)?;
+    let secret_key = super::derive_operator_secret(&config.seed, config.network)?;
     let transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
         .build()
@@ -779,7 +779,7 @@ async fn deposit_complete(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
 /// Verify the current custodian of a ledger by querying quorum members
 async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use deposits_node::nostr::{TAG_EVENT_REF, TAG_LEDGER_REQ};
+    use crate::nostr::{TAG_EVENT_REF, TAG_LEDGER_REQ};
     use nostr_sdk::prelude::*;
     use std::collections::HashMap;
 
@@ -833,7 +833,7 @@ async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::er
 
     // Publish request (use "l" tag for ledger_id and "action" tag like other requests)
     let request_event = EventBuilder::new(
-        Kind::Custom(deposits_node::nostr::KIND_LEDGER_REQUEST),
+        Kind::Custom(crate::nostr::KIND_LEDGER_REQUEST),
         request_content.to_string(),
     )
     .tag(Tag::custom(
@@ -856,7 +856,7 @@ async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::er
 
     // Fetch responses
     let response_filter = Filter::new()
-        .kind(Kind::Custom(deposits_node::nostr::KIND_LEDGER_RESPONSE))
+        .kind(Kind::Custom(crate::nostr::KIND_LEDGER_RESPONSE))
         .custom_tag(TAG_EVENT_REF, [request_event_id.as_str()])
         .limit(20);
 
