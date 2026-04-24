@@ -16,8 +16,8 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-use deposits_node::cli::{nostr_commands, recovery};
 use deposits_node::node_cli;
+use deposits_node::node_cli::{nostr_commands, recovery};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Install ring as the default rustls crypto provider (required by nostr-sdk).

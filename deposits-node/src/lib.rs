@@ -41,7 +41,6 @@
 //! | Wallet | Channel manager | BDK wallet |
 //! | Peer discovery | LN peer connections | Nostr pubkeys |
 
-pub mod cli;
 pub mod error;
 pub mod handler;
 pub mod ldk_cli;
@@ -49,6 +48,8 @@ pub mod metrics;
 pub mod node;
 pub mod node_cli;
 pub mod nostr;
+// deposits-node/src/cli was split: nostr_commands + recovery moved to
+// node_cli/; handlers.rs was dead code (zero callers) and got deleted.
 pub mod wallet;
 
 pub use error::Error;
