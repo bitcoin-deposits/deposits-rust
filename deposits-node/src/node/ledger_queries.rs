@@ -762,11 +762,11 @@ impl Node {
         .await?;
 
         // --- Phase 4: stage + cosign + commit the QuorumBegin operation ---
-        let txid_bytes: [u8; 32] = {
-            let mut bytes = txid.to_byte_array();
-            bytes.reverse(); // Bitcoin txids are displayed in reverse byte order
-            bytes
-        };
+        // Store the rotation txid in internal sha256d byte order (the natural
+        // `to_byte_array()`). Cosigners reconstruct via `Txid::from_raw_hash`
+        // which expects internal order, and the other QuorumBegin writer in
+        // this file (`*rotate_txid.as_ref()`) uses the same convention.
+        let txid_bytes: [u8; 32] = txid.to_byte_array();
         let operation = LedgerOperation::QuorumBegin {
             reserves_id: result.address.to_string(),
             spending_txid: txid_bytes,

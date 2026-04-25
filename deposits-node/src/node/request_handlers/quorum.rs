@@ -404,6 +404,11 @@ impl Node {
             .await
         {
             Ok(_event_id) => {
+                // Subscribe to the operator's ledger so future cosign requests
+                // (kind 20101 with #l = operator_ledger_id) aren't dropped by
+                // the interested-ledgers filter before they reach the handler.
+                self.nostr.add_interested_ledger(operator_ledger_id.clone());
+
                 tracing::info!(
                     "Consent granted: recorded QuorumJoin for operator {}... on our ledger {}...",
                     &operator_pubkey_hex[..16.min(operator_pubkey_hex.len())],
