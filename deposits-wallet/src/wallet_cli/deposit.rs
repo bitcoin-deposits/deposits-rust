@@ -631,18 +631,58 @@ pub async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         Ok(response) => {
             if response.success {
                 println!("Offer accepted!");
-                if let Some(result) = &response.result {
-                    if let Some(address) = result.get("funding_address").and_then(|v| v.as_str()) {
-                        println!();
-                        println!("Send {} sats to:", amount_sats);
-                        println!("  {}", address);
-                        println!();
-                        println!("After funding, the deposit will be automatically completed.");
-                    }
-                    if let Some(offer_id) = result.get("offer_id").and_then(|v| v.as_str()) {
-                        println!("Offer ID: {}", offer_id);
+                let result = response.result.as_ref();
+                let funding_address = result
+                    .and_then(|r| r.get("funding_address").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string());
+                let offer_id = result
+                    .and_then(|r| r.get("offer_id").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string());
+
+                if let Some(ref address) = funding_address {
+                    println!();
+                    println!("Send {} sats to:", amount_sats);
+                    println!("  {}", address);
+                    println!();
+                    println!("After funding, the deposit will be automatically completed.");
+                }
+                if let Some(ref id) = offer_id {
+                    println!("Offer ID: {}", id);
+                }
+
+                // Persist offer details back into the deposit record so
+                // downstream commands (regtest-faucet, list) can see them.
+                let mut deposits: Vec<serde_json::Value> =
+                    serde_json::from_str(&std::fs::read_to_string(&deposits_file)?)?;
+                for d in deposits.iter_mut() {
+                    if d.get("alias").and_then(|v| v.as_str()) == Some(&alias) {
+                        if let Some(obj) = d.as_object_mut() {
+                            if let Some(addr) = &funding_address {
+                                obj.insert(
+                                    "funding_address".to_string(),
+                                    serde_json::Value::String(addr.clone()),
+                                );
+                            }
+                            if let Some(id) = &offer_id {
+                                obj.insert(
+                                    "offer_id".to_string(),
+                                    serde_json::Value::String(id.clone()),
+                                );
+                            }
+                            obj.insert(
+                                "min_sats".to_string(),
+                                serde_json::Value::Number(1000u64.into()),
+                            );
+                            obj.insert(
+                                "max_sats".to_string(),
+                                serde_json::Value::Number(amount_sats.into()),
+                            );
+                        }
+                        break;
                     }
                 }
+                std::fs::write(&deposits_file, serde_json::to_string_pretty(&deposits)?)?;
+
                 Ok(())
             } else {
                 let error = response.error.as_deref().unwrap_or("Unknown error");

@@ -739,12 +739,15 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
     }
     let timeout = block_height + 288;
 
-    // Get operator fee from advertisement
-    let op_ads = transport.fetch_ledger_advertisements(network_str).await?;
-    let op_ad = op_ads.iter().find(|a| a.ledger_id == from_ledger);
-    let operator_fee = op_ad
-        .map(|a| a.transfer_fee_fixed_msats + amount_msats * a.transfer_fee_rate_bps as u64 / 10000)
-        .unwrap_or(2000);
+    // Operator's per-transfer fee matches the default schedule stored on the
+    // deposit at make_offer time. Advertisements don't always carry it, so
+    // compute it the same way `send` does.
+    let operator_fee = {
+        let default = deposits_core::types::TransferFeeSchedule::default();
+        default
+            .fixed_msats
+            .saturating_add(amount_msats.saturating_mul(default.rate_bps as u64) / 10_000)
+    };
 
     let completion_script = format!("sha256({})", hash_hex);
     let mut nonce = [0u8; 32];

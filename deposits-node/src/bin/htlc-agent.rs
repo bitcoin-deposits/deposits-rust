@@ -1385,7 +1385,7 @@ fn handle_request_route(request: &str, state: &SharedState) -> (&'static str, St
     }
 
     let json = serde_json::json!({
-        "agent_deposit_id": agent_in.deposit_id,
+        "courier_deposit_id": agent_in.deposit_id,
         "hash": hash_hex,
         "fee_msats": total_fee,
         "forward_amount_msats": forward_amount,
@@ -1627,12 +1627,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("Connected to {} relays", relay_urls.len());
 
-    // Apply operator transfer fees to deposits
+    // Apply operator transfer fees to deposits. If the advertisement
+    // omits them (older operators), fall back to the protocol's default
+    // schedule — that's what operators enforce when no fee was agreed
+    // at make_offer time.
+    let default_fee = deposits_core::types::TransferFeeSchedule::default();
     for d in &mut deposits {
-        if let Some(info) = ledger_ad_map.get(&d.ledger_id) {
-            d.operator_fee_fixed_msats = info.transfer_fee_fixed_msats;
-            d.operator_fee_rate_bps = info.transfer_fee_rate_bps;
-        }
+        let (fixed, rate) = match ledger_ad_map.get(&d.ledger_id) {
+            Some(info) if info.transfer_fee_fixed_msats > 0 || info.transfer_fee_rate_bps > 0 => {
+                (info.transfer_fee_fixed_msats, info.transfer_fee_rate_bps)
+            }
+            _ => (default_fee.fixed_msats, default_fee.rate_bps),
+        };
+        d.operator_fee_fixed_msats = fixed;
+        d.operator_fee_rate_bps = rate;
     }
 
     // Compute per-ledger directional fees:
@@ -2106,7 +2114,7 @@ fn process_route_request(params: &serde_json::Value, state: &SharedState) -> ser
     serde_json::json!({
         "success": true,
         "result": {
-            "agent_deposit_id": agent_in.deposit_id,
+            "courier_deposit_id": agent_in.deposit_id,
             "hash": hash_hex,
             "fee_msats": total_fee,
             "forward_amount_msats": forward_amount,
