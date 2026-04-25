@@ -9,6 +9,7 @@
 
 use deposits_test::adversarial::*;
 use deposits_test::docker::*;
+use deposits_test::regtest::relay_ledgers;
 use std::process::Command;
 
 /// Check if Docker infrastructure is available.
@@ -178,7 +179,7 @@ fn docker_verify_ledger_relay_consistency() {
 
         // Replay from relay
         let output = Command::new(&replay)
-            .args([prefix, "--relay", "ws://localhost:7779"])
+            .args([prefix, "--relay", relay_ledgers()])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default();

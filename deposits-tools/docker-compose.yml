@@ -169,10 +169,12 @@ services:
     environment:
       # deposits-attest (Rust)
       VERIFY_NSEC_FILE: /run/secrets/verify_nsec
-      # Both relays: ledgers (7779) carries durable attestations (Kind 55502);
-      # messaging (7780) is where wallets gift-wrap kind 25500 verify
-      # requests. The attest service needs to see both.
-      VERIFY_RELAYS: ws://host.docker.internal:7779,ws://host.docker.internal:7780
+      # Both relays: the durable "ledgers" relay carries attestations
+      # (Kind 55502); the ephemeral "messaging" relay is where wallets
+      # gift-wrap kind 25500 verify requests. The attest service needs
+      # to see both. Defaults to 17779/17780 — override at compose time
+      # via $RELAY_LEDGERS_PORT / $RELAY_MESSAGING_PORT.
+      VERIFY_RELAYS: ws://host.docker.internal:${RELAY_LEDGERS_PORT:-17779},ws://host.docker.internal:${RELAY_MESSAGING_PORT:-17780}
       VERIFY_CHALLENGE_SATS: "1000"
       VERIFY_NUM_PAYMENTS: "3"
       VERIFY_TIMEOUT_SECS: "120"
@@ -180,6 +182,10 @@ services:
       # Short NIP-05 cache so test-side `nip05_register` calls aren't
       # stalled by stale per-domain name maps from a previous run.
       VERIFY_NIP05_CACHE_SECS: "5"
+      # Cover refresh — keep short for tests so a freshly-published
+      # kind:3 makes it into the cover within seconds. Production
+      # deployments override to a much longer value (1 hour+).
+      VERIFY_COVER_REFRESH_SECS: "5"
       VERIFY_CA_CERT: /certs/ca.crt
       # `proclaim` action: lets a signer who's on op0's manual allowlist
       # vouch for an arbitrary npub. Op0's allowlist is bind-mounted ro

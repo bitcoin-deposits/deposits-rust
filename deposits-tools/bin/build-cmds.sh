@@ -88,5 +88,5 @@ for b in "${BINS[@]}"; do
 done
 echo ""
 echo "Use them from the repo root:"
-echo "  ./bin/deposits-wallet discover --relay ws://localhost:7779"
+echo "  ./bin/deposits-wallet discover --relay ws://localhost:17779"
 echo "  ./bin/deposits-node info"

@@ -11,9 +11,37 @@ use std::process::Command;
 use std::time::Duration;
 
 pub const OP0_SEED: &str = "6f70300000000000000000000000000000000000000000000000000000000000";
-pub const RELAY_LEDGERS: &str = "ws://localhost:7779";
-pub const RELAY_MESSAGING: &str = "ws://localhost:7780";
 pub const ELECTRS_URL: &str = "http://localhost:3102";
+
+/// Default ledgers (durable) relay URL.
+///
+/// Tests read `RELAY_LEDGERS` from the environment with this fallback.
+/// Centralized here so a port change touches one constant; the matching
+/// shell-side default lives in `deposits-tools/bin/_common.sh`. Override
+/// for ad-hoc runs: `RELAY_LEDGERS=ws://localhost:9999 cargo test ...`.
+const DEFAULT_RELAY_LEDGERS: &str = "ws://localhost:17779";
+const DEFAULT_RELAY_MESSAGING: &str = "ws://localhost:17780";
+
+/// URL of the ledgers (durable) relay. Reads `RELAY_LEDGERS` env var
+/// with [`DEFAULT_RELAY_LEDGERS`] as the fallback. Cached on first call
+/// so subsequent calls return the same `&'static str` — interchangeable
+/// with the previous `pub const RELAY_LEDGERS`.
+pub fn relay_ledgers() -> &'static str {
+    use std::sync::OnceLock;
+    static URL: OnceLock<String> = OnceLock::new();
+    URL.get_or_init(|| {
+        std::env::var("RELAY_LEDGERS").unwrap_or_else(|_| DEFAULT_RELAY_LEDGERS.to_string())
+    })
+}
+
+/// URL of the messaging (ephemeral) relay. See [`relay_ledgers`].
+pub fn relay_messaging() -> &'static str {
+    use std::sync::OnceLock;
+    static URL: OnceLock<String> = OnceLock::new();
+    URL.get_or_init(|| {
+        std::env::var("RELAY_MESSAGING").unwrap_or_else(|_| DEFAULT_RELAY_MESSAGING.to_string())
+    })
+}
 
 pub fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -213,8 +241,8 @@ pub fn spawn_op0(extra_env: &[(&str, &str)]) {
         .args(["--network", "regtest"])
         .args(["--data-dir", op0_data_dir().to_str().unwrap()])
         .args(["--esplora", ELECTRS_URL])
-        .args(["--relay", RELAY_LEDGERS])
-        .args(["--relay", RELAY_MESSAGING])
+        .args(["--relay", relay_ledgers()])
+        .args(["--relay", relay_messaging()])
         .env("RUST_LOG", "warn")
         .stdout(log_out)
         .stderr(log_err);
@@ -230,7 +258,7 @@ pub fn discover_op0_ledger() -> String {
     let scratch = tempdir();
     let out = Command::new(wallet_bin())
         .args(["discover", "--json"])
-        .args(["--relay", RELAY_LEDGERS])
+        .args(["--relay", relay_ledgers()])
         .args(["--network", "regtest"])
         .args(["--data-dir", scratch.to_str().unwrap()])
         .output()
@@ -272,7 +300,7 @@ pub fn wallet_open(
         .args(["--alias", alias])
         .args(["--nsec-file", nsec_path.to_str().unwrap()])
         .args(["--data-dir", data_dir.to_str().unwrap()])
-        .args(["--relay", RELAY_MESSAGING])
+        .args(["--relay", relay_messaging()])
         .args(["--network", "regtest"]);
     for a in extra_args {
         cmd.arg(a);
@@ -295,7 +323,7 @@ pub fn wallet_attest(
         .args(["attest", subkey_xonly])
         .args(["--nsec-file", account_nsec.to_str().unwrap()])
         .args(["--data-dir", data_dir.to_str().unwrap()])
-        .args(["--relay", RELAY_MESSAGING])
+        .args(["--relay", relay_messaging()])
         .args(["--network", "regtest"])
         .output()
         .expect("wallet attest invocation failed");
@@ -321,7 +349,7 @@ pub fn wallet_revoke(subkey_xonly: &str, account_nsec: &Path, data_dir: &Path) {
         .args(["revoke", subkey_xonly])
         .args(["--nsec-file", account_nsec.to_str().unwrap()])
         .args(["--data-dir", data_dir.to_str().unwrap()])
-        .args(["--relay", RELAY_MESSAGING])
+        .args(["--relay", relay_messaging()])
         .args(["--network", "regtest"])
         .output();
 }

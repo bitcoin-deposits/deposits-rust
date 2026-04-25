@@ -8,7 +8,7 @@ Two shared relays handle all traffic:
 
 - **Purpose**: Persistent storage of all ledger state. The single source of
   truth for discovery, audit, and historical queries.
-- **Port**: 7779
+- **Port**: 17779 (override via `$RELAY_LEDGERS_PORT` or `$RELAY_LEDGERS`).
 - **Retention**: Persists all events indefinitely.
 
 The ledgers relay contains:
@@ -21,7 +21,7 @@ The ledgers relay contains:
 
 - **Purpose**: Real-time delivery of ephemeral events (cosign requests,
   balance queries, deposit operations). High throughput, low latency.
-- **Port**: 7780
+- **Port**: 17780 (override via `$RELAY_MESSAGING_PORT` or `$RELAY_MESSAGING`).
 - **Retention**: Ephemeral. Events expire after a few minutes.
 
 ## Node Architecture
@@ -32,7 +32,7 @@ Each operator runs `deposits-node run` as a native process:
 deposits-node run \
     --seed <hex> --name <name> --network regtest \
     --esplora http://localhost:3201 \
-    --relay ws://localhost:7779 --relay ws://localhost:7780 \
+    --relay ws://localhost:17779 --relay ws://localhost:17780 \
     --data-dir ./data/<name>
 ```
 
@@ -64,7 +64,7 @@ requests and responds.
 
 `setup.sh Q` runs:
 1. **Reset**: Stop nodes + relays, clear data
-2. **Start relays**: Ledgers (7779) + messaging (7780)
+2. **Start relays**: Ledgers (17779) + messaging (17780) — defaults; both overridable
 3. **Fund**: Create BDK wallets, send regtest BTC to each
 4. **Reserves + Ledgers**: Create UTXOs, open 3 ledgers per operator
 5. **Start daemons**: One `deposits-node run` per operator

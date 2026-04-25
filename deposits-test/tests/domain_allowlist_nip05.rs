@@ -93,8 +93,8 @@ async fn domain_allowlist_nip05_unlocks_deposit_open() {
 
     let address = format!("{}@{}", username, FIXTURE_DOMAIN);
     let transport = NostrTransportBuilder::new(nip05_secret_key)
-        .relay(RELAY_LEDGERS)
-        .relay(RELAY_MESSAGING)
+        .relay(relay_ledgers())
+        .relay(relay_messaging())
         .build()
         .await
         .expect("nostr transport");
@@ -153,7 +153,7 @@ async fn domain_allowlist_nip05_unlocks_deposit_open() {
         "attested",
         &ephemeral_nsec,
         &wallet_dir,
-        &["--relay", RELAY_LEDGERS],
+        &["--relay", relay_ledgers()],
     );
     assert!(
         ok && (out.contains("Deposit account created") || out.contains("Deposit account already exists")),

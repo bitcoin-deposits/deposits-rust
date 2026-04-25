@@ -68,8 +68,8 @@ jobs:
         run: |
           source bin/_common.sh && init_topology
 
-          echo "=== Ledgers on slow relay ==="
-          ../target/release/replay-ledger --relay ws://localhost:7779 2>/dev/null || true
+          echo "=== Ledgers on slow relay ($RELAY_LEDGERS) ==="
+          ../target/release/replay-ledger --relay "$RELAY_LEDGERS" 2>/dev/null || true
 
           FAILURES=0
           for op in alice bob charlie diana; do
@@ -77,7 +77,7 @@ jobs:
               | grep "Ledger ID:" | grep -oE '[0-9a-f]{48,}' | head -1)
             [ -z "$LEDGER_ID" ] && continue
             PREFIX="${LEDGER_ID:0:8}"
-            OUTPUT=$(../target/release/replay-ledger "$PREFIX" --relay ws://localhost:7779 2>/dev/null) || true
+            OUTPUT=$(../target/release/replay-ledger "$PREFIX" --relay "$RELAY_LEDGERS" 2>/dev/null) || true
             if echo "$OUTPUT" | grep -q "updates in chain"; then
               echo "  $op ($PREFIX): OK"
             else

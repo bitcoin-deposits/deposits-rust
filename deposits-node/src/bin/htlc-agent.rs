@@ -15,7 +15,7 @@
 //! Usage:
 //!   htlc-agent \
 //!     --relay ws://localhost:7801 \
-//!     --ledgers-relay ws://localhost:7779 \
+//!     --ledgers-relay ws://localhost:17779 \
 //!     --node sim:~/.deposits-wallet \
 //!     --fee-fixed 100 --fee-bps 10
 
@@ -994,7 +994,8 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut config = Config {
         relay: "ws://localhost:7801".to_string(),
-        ledgers_relay: "ws://localhost:7779".to_string(),
+        ledgers_relay: std::env::var("RELAY_LEDGERS")
+            .unwrap_or_else(|_| "ws://localhost:17779".to_string()),
         network: bitcoin::Network::Regtest,
         nodes: Vec::new(),
         margin_fixed_msats: 100,
@@ -1067,7 +1068,7 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
                 eprintln!(
                     "  --relay <url>              Primary relay (default: ws://localhost:7801)"
                 );
-                eprintln!("  --ledgers-relay <url>      Durable relay for advertisements (default: ws://localhost:7779)");
+                eprintln!("  --ledgers-relay <url>      Durable relay for advertisements (default: $RELAY_LEDGERS or ws://localhost:17779)");
                 eprintln!("  --network <net>            Network (default: regtest)");
                 eprintln!("  --node <name:data_dir>     Node identity and data directory");
                 eprintln!(

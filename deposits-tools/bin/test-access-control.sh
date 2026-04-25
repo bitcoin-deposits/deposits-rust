@@ -30,7 +30,8 @@ DEPOSITS_WALLET="$REPO_ROOT/target/release/deposits-wallet"
 OP_DATA="$REPO_ROOT/deposits-tools/data/op0"
 OP_SEED="6f70300000000000000000000000000000000000000000000000000000000000"
 
-RELAY="ws://localhost:7779"
+RELAY="${RELAY_LEDGERS:-ws://localhost:17779}"
+RELAY_MSG="${RELAY_MESSAGING:-ws://localhost:17780}"
 ELECTRUM="http://localhost:3201"
 TEST_WALLET_DIR=$(mktemp -d)
 
@@ -101,7 +102,7 @@ start_op0_acl() {
         --seed "$OP_SEED" --name op0 \
         --network regtest --data-dir "$OP_DATA" \
         --esplora "$ELECTRUM" \
-        --relay ws://localhost:7779 --relay ws://localhost:7780 \
+        --relay "$RELAY" --relay "$RELAY_MSG" \
         >> "$OP_DATA/daemon.log" 2>&1 &
     NEW_PID=$!
     echo "$NEW_PID" > "$OP_DATA/daemon.pid"
@@ -127,7 +128,7 @@ restore_op0() {
         --seed "$OP_SEED" --name op0 \
         --network regtest --data-dir "$OP_DATA" \
         --esplora "$ELECTRUM" \
-        --relay ws://localhost:7779 --relay ws://localhost:7780 \
+        --relay "$RELAY" --relay "$RELAY_MSG" \
         >> "$OP_DATA/daemon.log" 2>&1 &
     echo $! > "$OP_DATA/daemon.pid"
     log "op0 restored"

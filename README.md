@@ -45,7 +45,7 @@ cargo run --release --bin deposits-node -- run \
     --network regtest \
     --esplora http://localhost:3000 \
     --relay ws://localhost:7777 \
-    --slow-relay ws://localhost:7779 \
+    --slow-relay ws://localhost:17779 \
     --data-dir ./data
 ```
 

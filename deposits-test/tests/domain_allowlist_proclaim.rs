@@ -83,11 +83,11 @@ async fn proclaim_unlocks_deposit_open() {
     );
 
     // Connect a Nostr transport signing as the account_key. The
-    // verifier subscribes on both 7779 and 7780 (configured in compose
-    // for the NIP-05 path); either reaches it.
+    // verifier subscribes on both the ledgers and messaging relays
+    // (configured in compose for the NIP-05 path); either reaches it.
     let transport = NostrTransportBuilder::new(account_secret_key)
-        .relay(RELAY_LEDGERS)
-        .relay(RELAY_MESSAGING)
+        .relay(relay_ledgers())
+        .relay(relay_messaging())
         .build()
         .await
         .expect("nostr transport");
@@ -142,7 +142,7 @@ async fn proclaim_unlocks_deposit_open() {
         "proclaimed",
         &ephemeral_nsec,
         &wallet_dir,
-        &["--relay", RELAY_LEDGERS],
+        &["--relay", relay_ledgers()],
     );
     assert!(
         ok && (out.contains("Deposit account created") || out.contains("Deposit account already exists")),

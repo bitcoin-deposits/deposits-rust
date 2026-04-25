@@ -40,8 +40,8 @@ Q="${Q:-${1:-5}}"
 NODE_COUNT=$((3 * Q + 1))
 LEDGERS_PER_OP=3
 
-LEDGER_RELAY_PORT=7779
-MSG_RELAY_PORT=7780
+LEDGER_RELAY_PORT="${RELAY_LEDGERS_PORT:-17779}"
+MSG_RELAY_PORT="${RELAY_MESSAGING_PORT:-17780}"
 RELAY_ARGS="--relay ws://localhost:$LEDGER_RELAY_PORT --relay ws://localhost:$MSG_RELAY_PORT"
 
 STATE_DIR="$DATA_ROOT/state"
@@ -81,7 +81,12 @@ run_cmd() {
 # ============================================================================
 
 ensure_relay() {
-    local name=$1 port=$2 dir="$DATA_ROOT/relays/$name"
+    local name=$1 port=$2
+    if [ -z "$name" ] || [ -z "$port" ]; then
+        log_warn "ensure_relay: missing name or port (name='$name' port='$port')"
+        return 1
+    fi
+    local dir="$DATA_ROOT/relays/$name"
     local pidfile="$dir/relay.pid"
     if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
         return 0

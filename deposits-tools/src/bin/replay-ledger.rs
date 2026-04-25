@@ -11,9 +11,9 @@
 //   replay-ledger <ledger_id_prefix> --until <hash_prefix>    # Stop at a specific chain_hash
 //
 //   # Nostr mode
-//   replay-ledger --relay ws://localhost:7779                 # List ledgers on relay
-//   replay-ledger 183c --relay ws://localhost:7779            # Prefix match on relay
-//   replay-ledger <ledger_id> --relay ws://localhost:7779     # Fetch from relay
+//   replay-ledger --relay ws://localhost:17779                 # List ledgers on relay
+//   replay-ledger 183c --relay ws://localhost:17779            # Prefix match on relay
+//   replay-ledger <ledger_id> --relay ws://localhost:17779     # Fetch from relay
 //
 //   # Common options
 //   replay-ledger <ledger_id_prefix> --verbose                # Print each operation as applied
@@ -2573,9 +2573,9 @@ fn print_help() {
     eprintln!("  replay-ledger 183c --dump 5                 # Dump seq 5 to file");
     eprintln!("  replay-ledger 183c --browse                 # TUI browser");
     eprintln!("  replay-ledger 183c --browse --decode 5      # Browse starting at seq 5");
-    eprintln!("  replay-ledger --relay ws://localhost:7779    # List ledgers on relay");
-    eprintln!("  replay-ledger 183c --relay ws://localhost:7779        # Prefix match");
-    eprintln!("  replay-ledger 183c96af... --relay ws://localhost:7779 # Full replay");
+    eprintln!("  replay-ledger --relay ws://localhost:17779    # List ledgers on relay");
+    eprintln!("  replay-ledger 183c --relay ws://localhost:17779        # Prefix match");
+    eprintln!("  replay-ledger 183c96af... --relay ws://localhost:17779 # Full replay");
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -42,8 +42,22 @@ ELECTRS_URL="http://$ELECTRS_HOST:$ELECTRS_PORT"
 ELECTRS_IMAGE="mempool/electrs:v3.2.0"
 ELECTRS_DOCKER_NETWORK="deposits-tools_regtest"
 
-# Relay URLs (dynamic — rebuilt by init_topology)
-RELAY_LEDGERS="ws://localhost:7779"
+# ── Relay endpoints ──────────────────────────────────────────────────
+#
+# Single source of truth for the durable "ledgers" relay and the
+# ephemeral "messaging" relay. Override any of these env vars before
+# sourcing this file (or before running setup.sh / cargo test) to
+# point the cluster at different ports — e.g. when 17779/17780 are
+# already in use, or when running multiple clusters side-by-side.
+#
+# Everything else (setup scripts, docker-compose, integration tests,
+# CI) reads from these — no other place in the tree should hardcode a
+# port number for these relays.
+export RELAY_LEDGERS_PORT="${RELAY_LEDGERS_PORT:-17779}"
+export RELAY_MESSAGING_PORT="${RELAY_MESSAGING_PORT:-17780}"
+export RELAY_LEDGERS="${RELAY_LEDGERS:-ws://localhost:$RELAY_LEDGERS_PORT}"
+export RELAY_MESSAGING="${RELAY_MESSAGING:-ws://localhost:$RELAY_MESSAGING_PORT}"
+
 ALL_RELAYS=()
 # Legacy aliases (set by init_topology for backward compat when NODE_COUNT=4)
 RELAY_ALICE=""
@@ -58,7 +72,11 @@ STRFRY_BIN="${STRFRY_BIN:-$SCRIPT_DIR/strfry}"
 get_relay_port() {
     local name=$1
     if [ "$name" = "ledgers" ]; then
-        echo 7779
+        echo "$RELAY_LEDGERS_PORT"
+        return
+    fi
+    if [ "$name" = "messaging" ]; then
+        echo "$RELAY_MESSAGING_PORT"
         return
     fi
     local idx=$(get_node_index "$name")
@@ -73,6 +91,10 @@ get_relay_port() {
 # Usage: generate_relay_config <name>
 generate_relay_config() {
     local name=$1
+    if [ -z "$name" ]; then
+        log_error "generate_relay_config: missing relay name"
+        return 1
+    fi
     local port=$(get_relay_port "$name")
     local db_dir="$DATA_ROOT/relays/$name"
     local conf="$db_dir/strfry.conf"
@@ -107,6 +129,10 @@ generate_relay_config() {
 # Usage: start_relay <name>
 start_relay() {
     local name=$1
+    if [ -z "$name" ]; then
+        log_error "start_relay: missing relay name"
+        return 1
+    fi
     local port=$(get_relay_port "$name")
     local db_dir="$DATA_ROOT/relays/$name"
     local conf="$db_dir/strfry.conf"
@@ -496,7 +522,7 @@ wait_for_nostr() {
     for node in "${NODES[@]}"; do
         ports+=("$(get_relay_port "$node")")
     done
-    ports+=(7779)  # ledgers relay
+    ports+=("$RELAY_LEDGERS_PORT")  # ledgers relay
     for port in "${ports[@]}"; do
         local attempt=0
         while ! curl -s "http://localhost:$port" >/dev/null 2>&1; do

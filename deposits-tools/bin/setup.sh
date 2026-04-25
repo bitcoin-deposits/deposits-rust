@@ -45,8 +45,11 @@ LEDGERS_PER_OP=3
 RESERVES_SATS=40000000     # 0.4 BTC per ledger (40%)
 COLLATERAL_SATS=60000000   # 0.6 BTC per ledger (60%)
 
-LEDGER_RELAY_PORT=7779
-MSG_RELAY_PORT=7780
+# Relay ports — overridable via env. Default to 17779/17780 to stay
+# clear of low-numbered ports that commonly collide with other dev
+# services. See bin/_common.sh for the canonical defaults.
+LEDGER_RELAY_PORT="${RELAY_LEDGERS_PORT:-17779}"
+MSG_RELAY_PORT="${RELAY_MESSAGING_PORT:-17780}"
 
 # Generate operator names and seeds
 OPERATORS=()
@@ -76,7 +79,12 @@ echo ""
 # ============================================================================
 
 generate_relay_config() {
-    local name=$1 port=$2 dir="$DATA_ROOT/relays/$name"
+    local name=$1 port=$2
+    if [ -z "$name" ] || [ -z "$port" ]; then
+        log_warn "generate_relay_config: missing name or port (name='$name' port='$port')"
+        return 1
+    fi
+    local dir="$DATA_ROOT/relays/$name"
     mkdir -p "$dir"
     # `nofiles` must fit under the invoking shell's hard RLIMIT_NOFILE;
     # 1_000_000 matches the system's typical hard cap and leaves plenty
@@ -265,9 +273,7 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
         fi
         store "reserves_${i}_${l}" "$reserves_id"
 
-        output=$(run_cmd "$i" ledger open \
-            --advertise-relay "ws://localhost:$MSG_RELAY_PORT" 2>&1 \
-            | tee -a "$PHASE2_LOG")
+        output=$(run_cmd "$i" ledger open 2>&1 | tee -a "$PHASE2_LOG")
         ledger_id=$(echo "$output" | grep "Ledger ID:" | awk '{print $3}')
         if [ -z "$ledger_id" ]; then
             log_warn "op$i/L$l: ledger open produced no Ledger ID — full output:"
@@ -277,6 +283,17 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
         fi
         store "ledger_${i}_${l}" "$ledger_id"
     done
+    # Per-op advertisement pass — `ledger advertise` walks the operator's
+    # ledgers and publishes a kind:39100 for each. Without this, wallet
+    # `discover` returns nothing because `ledger open` doesn't advertise
+    # on its own. Send to the durable relay so the ad survives the
+    # duration of the test run; the messaging relay drops events.
+    run_cmd "$i" ledger advertise \
+        --name "op$i" \
+        --advertise-relay "ws://localhost:$LEDGER_RELAY_PORT" \
+        >> "$PHASE2_LOG" 2>&1 || {
+            log_warn "op$i: ledger advertise failed — see $PHASE2_LOG"
+        }
     echo -n "."
 done
 mine_blocks 1

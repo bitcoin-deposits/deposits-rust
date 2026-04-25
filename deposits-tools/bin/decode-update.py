@@ -9,9 +9,9 @@ runtime from deposits-protocol/deposits_protocol.ksy (the Kaitai schema),
 so this tool stays in sync automatically.
 
 Usage:
-  nak req ws://localhost:7779 | tail -n1 | jq -r .content | base64 -d | python3 bin/decode-update.py
+  nak req ws://localhost:17779 | tail -n1 | jq -r .content | base64 -d | python3 bin/decode-update.py
   echo <base64> | python3 bin/decode-update.py --base64
-  python3 bin/decode-update.py --relay ws://localhost:7779 [--filter '{"kinds":[30078]}'] [--last]
+  python3 bin/decode-update.py --relay ws://localhost:17779 [--filter '{"kinds":[30078]}'] [--last]
 """
 
 import sys
@@ -487,7 +487,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Decode and annotate a SignedLedgerUpdate TLV blob",
         epilog="Examples:\n"
-               "  nak req ws://localhost:7779 | tail -n1 | jq -r .content | base64 -d | %(prog)s\n"
+               "  nak req ws://localhost:17779 | tail -n1 | jq -r .content | base64 -d | %(prog)s\n"
                "  echo <base64> | %(prog)s --base64\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

@@ -77,16 +77,21 @@ def _db_size_bytes(name: str) -> int | None:
 
 def _active_connections(name: str) -> int | None:
     """Estimate active WebSocket connections from /proc/net/tcp."""
-    port_hex = {
-        "alice": "1E79",    # 7801
-        "bob": "1E7A",      # 7802
-        "charlie": "1E7B",  # 7803
-        "diana": "1E7C",    # 7804
-        "ledgers": "1E63",  # 7779
+    # Per-node ports follow 7800 + index (alice=7801, bob=7802, ...).
+    # Ledgers/messaging come from env vars set by _common.sh, with the
+    # 17779/17780 fallback matching the Rust + shell defaults.
+    name_to_port = {
+        "alice": 7801,
+        "bob": 7802,
+        "charlie": 7803,
+        "diana": 7804,
+        "ledgers": int(os.environ.get("RELAY_LEDGERS_PORT", "17779")),
+        "messaging": int(os.environ.get("RELAY_MESSAGING_PORT", "17780")),
     }
-    hexport = port_hex.get(name)
-    if not hexport:
+    port = name_to_port.get(name)
+    if port is None:
         return None
+    hexport = f"{port:04X}"
     try:
         with open("/proc/net/tcp") as f:
             count = sum(1 for line in f if f":{hexport}" in line.split()[1])

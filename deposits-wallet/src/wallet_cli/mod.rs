@@ -148,7 +148,7 @@ pub fn print_usage(program: &str) {
     eprintln!("  BITCOIN_RPC_{{HOST,PORT,USER,PASS,WALLET}}  regtest-faucet RPC target");
     eprintln!();
     eprintln!("Examples:");
-    eprintln!("  {} discover --relay ws://localhost:7779", program);
+    eprintln!("  {} discover --relay ws://localhost:17779", program);
     eprintln!("  {} open abc123... --alias savings", program);
     eprintln!("  {} offer savings 50000          # on-chain: returns funding address", program);
     eprintln!("  {} make_invoice savings 50000   # lightning: returns BOLT11", program);

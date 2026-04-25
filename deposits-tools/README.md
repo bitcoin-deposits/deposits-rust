@@ -45,8 +45,8 @@ Each operator runs a `deposits-node run` daemon that manages BDK wallets, commun
 |---------|-----------|-------------|
 | bitcoind | 18543 (RPC) | Regtest node |
 | electrs | 3201+ | Blockchain indexer (per-group) |
-| strfry (ledgers) | 7779 | Durable relay for ledger updates |
-| strfry (messaging) | 7780 | Ephemeral relay for request/response |
+| strfry (ledgers) | 17779 | Durable relay for ledger updates (override via `$RELAY_LEDGERS_PORT`) |
+| strfry (messaging) | 17780 | Ephemeral relay for request/response (override via `$RELAY_MESSAGING_PORT`) |
 
 ## Manual Operations
 

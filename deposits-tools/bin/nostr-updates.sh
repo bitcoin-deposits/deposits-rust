@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WALLET_BIN="$REPO_ROOT/target/release/deposits-wallet"
 
 # Default relay (can be overridden with --relay)
-RELAY_URL="ws://localhost:7779"
+RELAY_URL="${RELAY_LEDGERS:-ws://localhost:17779}"
 
 # Parse arguments
 COMMAND=""

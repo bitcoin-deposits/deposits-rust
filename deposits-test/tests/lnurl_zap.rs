@@ -49,7 +49,7 @@ impl LnurlServer {
     fn spawn(port: u16, domain: &str) -> Self {
         let child = Command::new(lnurl_bin())
             .env("LNURL_NSEC", "4c4e55524c746573740000000000000000000000000000000000000000000001")
-            .env("LNURL_RELAYS", RELAY_MESSAGING)
+            .env("LNURL_RELAYS", relay_messaging())
             .env("LNURL_DOMAIN", domain)
             .env("LNURL_LISTEN", format!("127.0.0.1:{}", port))
             .env("RUST_LOG", "warn")

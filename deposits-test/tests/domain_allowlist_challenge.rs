@@ -183,8 +183,8 @@ async fn domain_allowlist_challenge_unlocks_deposit_open() {
     // both the ledgers and messaging relays after our compose change in
     // case (3); publishing to either reaches it.
     let transport = NostrTransportBuilder::new(user_secret_key)
-        .relay(RELAY_LEDGERS)
-        .relay(RELAY_MESSAGING)
+        .relay(relay_ledgers())
+        .relay(relay_messaging())
         .build()
         .await
         .expect("nostr transport");
@@ -316,7 +316,7 @@ async fn domain_allowlist_challenge_unlocks_deposit_open() {
             "--lightning-address",
             &address,
             "--relay",
-            RELAY_LEDGERS,
+            relay_ledgers(),
         ],
     );
     // With the attestation already on relays, op0 accepts the very
