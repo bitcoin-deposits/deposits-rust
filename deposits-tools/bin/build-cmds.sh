@@ -33,6 +33,7 @@ EXTRA_BINS=(
     discover
     replay-ledger
     deposits-lnurl
+    deposits-attest
 )
 BINS=("${CORE_BINS[@]}")
 

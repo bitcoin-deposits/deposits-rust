@@ -4,8 +4,10 @@ members = [
     "deposits-core",
     "deposits-node",
     "deposits-wallet",
+    "deposits-attestation",
+    "deposits-lnurl",
     "deposits-tools",
-    "tests",
+    "deposits-test",
 ]
 resolver = "2"
 

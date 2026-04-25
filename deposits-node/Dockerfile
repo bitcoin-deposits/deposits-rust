@@ -19,18 +19,18 @@ COPY deposits-protocol/ deposits-protocol/
 COPY deposits-core/ deposits-core/
 COPY deposits-node/ deposits-node/
 
-# Stub out deposits-tools + tests so the workspace resolves without
+# Stub out deposits-tools + deposits-test so the workspace resolves without
 # pulling in their sources (they're not built in this image).
 COPY deposits-tools/Cargo.toml deposits-tools/Cargo.toml
 RUN mkdir -p deposits-tools/src && echo "" > deposits-tools/src/lib.rs && \
     mkdir -p deposits-tools/src/bin && \
     for bin in decode-updates treasury-address \
-               treasury-send standalone_reserves_demo discover replay-ledger deposits-lnurl; do \
+               treasury-send standalone_reserves_demo discover replay-ledger; do \
         echo "fn main() {}" > deposits-tools/src/bin/$bin.rs; \
     done
 
-COPY tests/Cargo.toml tests/Cargo.toml
-RUN mkdir -p tests/src && echo "" > tests/src/lib.rs
+COPY deposits-test/Cargo.toml deposits-test/Cargo.toml
+RUN mkdir -p deposits-test/src && echo "" > deposits-test/src/lib.rs
 
 # native-tls (pulled in transitively) wants system openssl; point it at
 # Alpine's static libs so the final binary has no runtime .so dependencies

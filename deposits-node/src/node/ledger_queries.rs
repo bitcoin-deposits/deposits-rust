@@ -1225,13 +1225,24 @@ impl Node {
         }
     }
 
-    /// Query relays for a lightning-verify attestation (kind 55502) for the given
-    /// sender pubkey. If found, extract the lightning address domain and check it
-    /// against the domain allowlist. Returns the matched domain on success.
-    pub(crate) async fn check_attestation_domain(
+    /// Query relays for a lightning-verify attestation (kind 55502)
+    /// for the given sender pubkey, then accept on either of two paths:
+    ///
+    ///   * `lightning_address` whose `@`-domain is in
+    ///     `deposit_domain_allowlist` — the canonical NIP-05 / challenge
+    ///     attestation flow.
+    ///   * `allowlist_npub` that itself appears in `deposit_allowlist`
+    ///     — the `proclaim` flow, where an already-trusted account
+    ///     vouches for an ephemeral key without going through any
+    ///     external proof.
+    ///
+    /// Returns a short matched-reason string on success (e.g.
+    /// `"domain=example.com"` or `"allowlist_npub=ab12…"`) for logging.
+    pub(crate) async fn check_attestation(
         &self,
         sender_hex: &str,
         allowed_domains: &std::collections::HashSet<String>,
+        allowed_pubkeys: &std::collections::HashSet<String>,
     ) -> Option<String> {
         let verifier_hex = self.attestation_verifier_pubkey.as_ref()?;
 
@@ -1273,16 +1284,27 @@ impl Node {
             }
         };
 
-        // Check if any attestation has a lightning address on an allowed domain
         for event in events.iter() {
-            if let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) {
-                if let Some(address) = content.get("lightning_address").and_then(|v| v.as_str()) {
-                    if let Some(domain) = address.split('@').nth(1) {
-                        let domain_lower = domain.to_lowercase();
-                        if allowed_domains.contains(&domain_lower) {
-                            return Some(domain_lower);
-                        }
+            let content: serde_json::Value = match serde_json::from_str(&event.content) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Path A: lightning_address → domain allowlist
+            if let Some(address) = content.get("lightning_address").and_then(|v| v.as_str()) {
+                if let Some(domain) = address.split('@').nth(1) {
+                    let domain_lower = domain.to_lowercase();
+                    if allowed_domains.contains(&domain_lower) {
+                        return Some(format!("domain={}", domain_lower));
                     }
+                }
+            }
+
+            // Path B: allowlist_npub → manual pubkey allowlist (proclaim)
+            if let Some(npub) = content.get("allowlist_npub").and_then(|v| v.as_str()) {
+                let npub_lower = npub.to_lowercase();
+                if allowed_pubkeys.contains(&npub_lower) {
+                    return Some(format!("allowlist_npub={}", &npub_lower[..16.min(npub_lower.len())]));
                 }
             }
         }

@@ -70,33 +70,44 @@ impl Node {
             }
 
             if self.deposit_access_control {
-                let on_allowlist = self
-                    .deposit_allowlist
-                    .read()
-                    .unwrap()
-                    .contains(&effective_sender);
+                // Snapshot all three lists up front so we can drop the
+                // RwLock guards before any .await (the future has to be
+                // Send across the attestation query).
+                let allowlist: std::collections::HashSet<String> =
+                    self.deposit_allowlist.read().unwrap().clone();
+                let domains: std::collections::HashSet<String> =
+                    self.deposit_domain_allowlist.read().unwrap().clone();
+
+                let on_allowlist = allowlist.contains(&effective_sender);
 
                 if on_allowlist {
                     // Explicitly allowed
                 } else {
-                    // Check for a lightning-verify attestation with an allowed domain
-                    let domains: std::collections::HashSet<String> =
-                        self.deposit_domain_allowlist.read().unwrap().clone();
+                    // Look for a lightning-verify attestation that
+                    // authorizes this sender. Two paths inside
+                    // `check_attestation`:
+                    //   - lightning_address whose domain is in `domains`
+                    //   - allowlist_npub that's in `allowlist` (proclaim)
+                    // Either path needs a configured verifier; if there
+                    // are no domains AND no allowlist, attestation
+                    // can't help anyway.
+                    let attestation_possible =
+                        self.attestation_verifier_pubkey.is_some()
+                            && (!domains.is_empty() || !allowlist.is_empty());
 
-                    let has_domains = !domains.is_empty();
-                    let authorized = if has_domains {
-                        self.check_attestation_domain(&effective_sender, &domains)
+                    let authorized = if attestation_possible {
+                        self.check_attestation(&effective_sender, &domains, &allowlist)
                             .await
                     } else {
                         None
                     };
 
                     match authorized {
-                        Some(domain) => {
+                        Some(reason) => {
                             tracing::info!(
-                                "Deposit open authorized via attestation: sender {} domain {}",
+                                "Deposit open authorized via attestation: sender {} ({})",
                                 &effective_sender[..16.min(effective_sender.len())],
-                                domain
+                                reason
                             );
                         }
                         None => {
@@ -104,18 +115,20 @@ impl Node {
                                 "Deposit open rejected: effective sender {} not on allowlist and no valid attestation",
                                 &effective_sender[..16.min(effective_sender.len())]
                             );
-                            let code = if has_domains {
+                            let code = if attestation_possible {
                                 "attestation_required"
                             } else {
                                 "not_authorized"
                             };
                             let mut err_data = serde_json::json!({"code": code});
-                            if has_domains {
+                            if attestation_possible {
                                 if let Some(ref vk) = self.attestation_verifier_pubkey {
                                     err_data["verifier_pubkey"] = serde_json::json!(vk);
                                 }
-                                let domain_list: Vec<String> = domains.iter().cloned().collect();
-                                err_data["allowed_domains"] = serde_json::json!(domain_list);
+                                if !domains.is_empty() {
+                                    let domain_list: Vec<String> = domains.iter().cloned().collect();
+                                    err_data["allowed_domains"] = serde_json::json!(domain_list);
+                                }
                             }
                             return (
                                 false,

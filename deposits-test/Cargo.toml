@@ -1,0 +1,27 @@
+[package]
+name = "deposits-test"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+deposits-protocol = { path = "../deposits-protocol" }
+deposits-core = { path = "../deposits-core" }
+bitcoin = { version = "0.32", features = ["serde"] }
+hex = "0.4"
+# JSON parsing for the docker-backed tests in `src/regtest.rs`.
+serde_json = "1"
+
+[dev-dependencies]
+# HTTP client for the lnurl "zap" integration test.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# The challenge-flow attestation test drives the verifier directly
+# over Nostr, reusing the wallet's gift-wrap helpers on
+# `NostrTransport`.
+deposits-node = { path = "../deposits-node" }
+nostr-sdk = { version = "0.37", features = ["nip44", "nip47", "nip59"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+rustls = { version = "0.23", features = ["ring"] }
+
+[lints]
+workspace = true

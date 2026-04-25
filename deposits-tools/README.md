@@ -35,7 +35,7 @@ Each operator runs a `deposits-node run` daemon that manages BDK wallets, commun
 |--------|-------------|
 | `bin/setup.sh Q` | Set up a Q-quorum network from scratch |
 | `bin/redeploy.sh` | Rebuild binaries, restart nodes (preserves data) |
-| `bin/setup-verifier.sh` | Set up lightning address verification service |
+| `bin/setup-attestation.sh` | Set up lightning-address attestation service (lnaddr-attest) |
 | `bin/setup-htlc-agent.sh` | Set up HTLC routing agent |
 | `bin/setup-lnurl.sh` | Set up LNURL server |
 

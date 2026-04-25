@@ -1,0 +1,49 @@
+[package]
+name = "deposits-attestation"
+version = "0.1.0"
+edition = "2021"
+description = "Nostr-native lightning-address attestation service (ln-address ↔ npub link proofs)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "deposits-attest"
+path = "src/bin/deposits-attest.rs"
+
+[dependencies]
+# Bitcoin / Lightning
+bitcoin = { version = "0.32", default-features = false }
+lightning-invoice = "0.32"
+lightning-types = "0.1"
+
+# Nostr — nip04 for the attest service's gift-wrap envelope
+nostr-sdk = { version = "0.37", features = ["nip04"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP client (LNURL resolution). Matches the workspace reqwest version so
+# Cargo doesn't pull a second copy.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Async
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync"] }
+
+# Crypto
+rand = "0.8"
+
+# Time
+chrono = "0.4"
+
+# Hex
+hex = "0.4"
+
+# Logging
+log = "0.4"
+env_logger = "0.10"
+
+[lints]
+workspace = true
