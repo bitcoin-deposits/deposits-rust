@@ -5,6 +5,7 @@ pub mod discover;
 pub mod ledger;
 pub mod payments;
 pub mod regtest;
+pub mod ringsig;
 pub mod swap;
 
 use bitcoin::hashes::{sha256, Hash};

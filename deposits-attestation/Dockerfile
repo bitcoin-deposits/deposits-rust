@@ -10,9 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Workspace root + real sources for this crate
+# Workspace root + real sources for this crate AND for `deposits-ringsig`
+# (a path-dep of deposits-attestation, real sources required).
 COPY Cargo.toml Cargo.lock ./
 COPY deposits-attestation ./deposits-attestation
+COPY deposits-ringsig     ./deposits-ringsig
 
 # Stub out other workspace members so the workspace manifest resolves
 # without pulling their dependency trees.

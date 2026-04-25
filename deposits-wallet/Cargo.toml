@@ -15,6 +15,8 @@ deposits-core = { path = "../deposits-core" }
 # into its own deposits-transport crate if the wallet needs to
 # decouple.
 deposits-node = { path = "../deposits-node" }
+# Anonymous web-of-trust gate (NIP-XX). Used by `ringsig-link`.
+deposits-ringsig = { path = "../deposits-ringsig" }
 
 # Bitcoin
 bitcoin = { version = "0.32", features = ["serde"] }

@@ -45,5 +45,9 @@ hex = "0.4"
 log = "0.4"
 env_logger = "0.10"
 
+# Anonymous web-of-trust gate (NIP-XX). bLSAG ring-signature verification
+# and bound-pubkey binding proofs.
+deposits-ringsig = { path = "../deposits-ringsig" }
+
 [lints]
 workspace = true

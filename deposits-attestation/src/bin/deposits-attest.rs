@@ -505,6 +505,12 @@ struct AttestationContent {
     /// against `deposit_allowlist` (the explicit pubkey allowlist).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     allowlist_npub: Option<String>,
+    /// Set for the `ringsig` method. The 32-byte presentation
+    /// nullifier (hex) — diagnostic only; op0 trusts the verifier's
+    /// signature on the attestation rather than re-verifying ring
+    /// membership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nullifier: Option<String>,
 }
 
 // -- Application state --
@@ -533,6 +539,13 @@ struct AppState {
     /// vouch for a fresh ephemeral key. `None` disables the proclaim
     /// flow entirely.
     allowlist_file: Option<std::path::PathBuf>,
+    /// Nullifier-double-spend table for ringsig first-contact events.
+    /// Keyed on (cover d-tag, 33-byte compressed key image). The value
+    /// is the bound pubkey `P` we recorded on the first valid request
+    /// — a second first-contact whose recomputed `I` matches but whose
+    /// `P` differs is a forgery attempt and gets rejected.
+    ringsig_bindings:
+        RwLock<HashMap<(String, [u8; 33]), bitcoin::secp256k1::PublicKey>>,
 }
 
 // -- Event handling --
@@ -1060,6 +1073,7 @@ async fn publish_attestation(
         verified_at: Utc::now().to_rfc3339(),
         lightning_address: lightning_address.map(String::from),
         allowlist_npub: allowlist_npub.map(String::from),
+        nullifier: None,
     };
     let attestation_json =
         serde_json::to_string(&attestation).map_err(|e| format!("Serialization error: {}", e))?;
@@ -1202,6 +1216,550 @@ async fn send_response(
         .map_err(|e| format!("Failed to send response: {}", e))?;
 
     Ok(())
+}
+
+// ─── Cover construction (NIP-XX kind 35500) ───────────────────────────
+//
+// On startup and on a configurable refresh tick, the verifier fetches
+// the *anchor* user's kind:3 contact list, samples its `p` tags into
+// one or more rings, and publishes a kind:35500 cover signed by its
+// own key. The anchor defaults to the verifier itself (so a verifier
+// runs against its own social graph), but can be retargeted at any
+// other Nostr identity via env.
+//
+// Env knobs (all optional):
+//
+//   VERIFY_COVER_ANCHOR       xonly hex; default = verifier's own pk
+//   VERIFY_COVER_KMIN         minimum ring size (default 5)
+//   VERIFY_COVER_PCT          ring size as percentage of |F_0| (default 100)
+//   VERIFY_COVER_NUM_RINGS    number of rings in the cover (default 1)
+//   VERIFY_COVER_DTAG         cover `d` tag (default "default")
+//   VERIFY_COVER_REFRESH_SECS refresh interval (default 3600)
+
+#[derive(Clone)]
+struct CoverConfig {
+    anchor_xonly: String,
+    k_min: u32,
+    pct: u32,
+    num_rings: u32,
+    d_tag: String,
+    refresh_secs: u64,
+}
+
+impl CoverConfig {
+    fn from_env(verifier_xonly: &str) -> Self {
+        Self {
+            anchor_xonly: env_or_file("VERIFY_COVER_ANCHOR")
+                .unwrap_or_else(|| verifier_xonly.to_string()),
+            k_min: env_or_file("VERIFY_COVER_KMIN")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5),
+            pct: env_or_file("VERIFY_COVER_PCT")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100)
+                .min(100),
+            num_rings: env_or_file("VERIFY_COVER_NUM_RINGS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1)
+                .max(1),
+            d_tag: env_or_file("VERIFY_COVER_DTAG").unwrap_or_else(|| "default".to_string()),
+            refresh_secs: env_or_file("VERIFY_COVER_REFRESH_SECS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3600),
+        }
+    }
+}
+
+async fn build_and_publish_cover(state: &Arc<AppState>, cfg: &CoverConfig) -> Result<(), String> {
+    use deposits_ringsig::wire::{Cover, Ring, KIND_RINGSIG_COVER};
+
+    // Resolve the anchor's xonly into a Nostr-typed PublicKey for the
+    // contact-list fetch filter.
+    let anchor_pk = nostr_sdk::PublicKey::from_hex(&cfg.anchor_xonly)
+        .map_err(|e| format!("VERIFY_COVER_ANCHOR not a valid xonly: {}", e))?;
+
+    // No `limit` — strfry's default ordering returns events in
+    // insertion order, not by `created_at`, so a `limit(1)` query
+    // can hand back a stale kind:3 if older copies are still in
+    // storage. Pull whatever's there and pick the newest.
+    let filter = Filter::new().kind(Kind::ContactList).author(anchor_pk);
+    let events = state
+        .client
+        .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+        .await
+        .map_err(|e| format!("fetch contact list: {}", e))?;
+    let events_count = events.len();
+    let contact_list = events
+        .into_iter()
+        .max_by_key(|e| e.created_at.as_u64())
+        .ok_or_else(|| format!("no kind:3 found for anchor {}", &cfg.anchor_xonly[..16]))?;
+    log::info!(
+        "cover-builder picked kind:3 id={}… ts={} from {} candidate(s)",
+        &contact_list.id.to_hex()[..16],
+        contact_list.created_at.as_u64(),
+        events_count,
+    );
+
+    // Pull `p` tags. Reject anything that isn't a 64-char xonly hex —
+    // ring members must be valid keys we can lift to even-y points.
+    let mut follows: Vec<String> = contact_list
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let v = t.clone().to_vec();
+            if v.first().map(String::as_str) == Some("p") {
+                v.get(1).cloned()
+            } else {
+                None
+            }
+        })
+        .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(|s| s.to_lowercase())
+        .collect();
+    // De-dup before checking k_min so we don't count repeats.
+    follows.sort();
+    follows.dedup();
+
+    if (follows.len() as u32) < cfg.k_min {
+        return Err(format!(
+            "anchor has {} valid follows; need ≥ k_min ({})",
+            follows.len(),
+            cfg.k_min
+        ));
+    }
+
+    // Each ring contains max(k_min, pct% of |F_0|) members, sampled
+    // uniformly without replacement. Multiple rings → independent
+    // samples that share probabilistic overlap.
+    let pct_target = ((cfg.pct as usize) * follows.len() + 99) / 100; // ceil
+    let target_size = pct_target.max(cfg.k_min as usize).min(follows.len());
+
+    let mut rings = Vec::with_capacity(cfg.num_rings as usize);
+    {
+        use bitcoin::secp256k1::rand::rngs::OsRng;
+        use bitcoin::secp256k1::rand::seq::SliceRandom;
+        let mut rng = OsRng;
+        for i in 0..cfg.num_rings {
+            let mut sample = follows.clone();
+            if target_size < sample.len() {
+                sample.shuffle(&mut rng);
+                sample.truncate(target_size);
+            }
+            // Spec requires lex-sorted, deduped members.
+            sample.sort();
+            sample.dedup();
+            rings.push(Ring {
+                id: format!("r{}", i),
+                members: sample,
+            });
+        }
+    }
+
+    let cover = Cover {
+        d_tag: cfg.d_tag.clone(),
+        snapshot: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        k_min: cfg.k_min,
+        rings,
+    };
+
+    let cover_tags: Vec<Tag> = cover
+        .to_tags()
+        .into_iter()
+        .map(|row| {
+            let kind = TagKind::Custom(row[0].clone().into());
+            let values: Vec<String> = row.into_iter().skip(1).collect();
+            Tag::custom(kind, values)
+        })
+        .collect();
+    let event = EventBuilder::new(Kind::Custom(KIND_RINGSIG_COVER), "")
+        .tags(cover_tags)
+        .sign_with_keys(&state.keys)
+        .map_err(|e| format!("cover sign: {}", e))?;
+
+    let publish_client = state.attestation_client.as_ref().unwrap_or(&state.client);
+    publish_client
+        .send_event(event.clone())
+        .await
+        .map_err(|e| format!("cover publish: {}", e))?;
+
+    log::info!(
+        "published cover d={} ({} ring(s), {} members each, anchor {}…)",
+        cfg.d_tag,
+        cover.rings.len(),
+        target_size,
+        &cfg.anchor_xonly[..16],
+    );
+    Ok(())
+}
+
+async fn cover_builder_loop(state: Arc<AppState>, cfg: CoverConfig) {
+    log::info!(
+        "Cover builder: anchor={}…  k_min={}  pct={}  rings={}  d-tag={}  refresh={}s",
+        &cfg.anchor_xonly[..16.min(cfg.anchor_xonly.len())],
+        cfg.k_min,
+        cfg.pct,
+        cfg.num_rings,
+        cfg.d_tag,
+        cfg.refresh_secs,
+    );
+    loop {
+        if let Err(e) = build_and_publish_cover(&state, &cfg).await {
+            // Anchor's contact list may not yet be on the relay (very
+            // common during cluster startup). Keep retrying on the
+            // refresh tick.
+            log::warn!("cover build skipped: {}", e);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(cfg.refresh_secs)).await;
+    }
+}
+
+// ─── Ringsig (NIP-XX) ─────────────────────────────────────────────────
+//
+// kind 25502 events arrive plain-signed (BIP-340 by the bound pubkey
+// `P`), not gift-wrapped. The relay has already verified the BIP-340
+// `sig` for us; here we run the deeper checks:
+//
+//  - parse the cover/ring/nullifier/ringsig/binding tags
+//  - fetch the cover event from the relay (kind 35500)
+//  - recompute the canonical digest with `ringsig`+`binding` tags removed
+//  - verify the ring signature against the ring members
+//  - verify the bound-pubkey binding proof against the ring sig
+//  - confirm the published presentation nullifier matches `H_τ(I‖ctx)`
+//  - reject if `(cover_id, I)` is already bound to a different `P`
+//
+// On success: publish a kind 55502 attestation tagged `["p", P]` with
+// `method: "ringsig"`, then reply with a kind 25503 response.
+
+async fn handle_ringsig_event(state: &Arc<AppState>, event: &Event) {
+    // Decide the dispatch from the event content's `action` field.
+    let req: deposits_ringsig::wire::RingsigRequest =
+        match serde_json::from_str(&event.content) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("ringsig: invalid request body from {}: {}", event.pubkey, e);
+                let _ = send_ringsig_error(state, event, "invalid_request", &e.to_string()).await;
+                return;
+            }
+        };
+
+    let result = match req {
+        deposits_ringsig::wire::RingsigRequest::FirstContact { .. } => {
+            handle_ringsig_first_contact(state, event).await
+        }
+        deposits_ringsig::wire::RingsigRequest::Continuation { .. } => {
+            // The deposits use case is "register P, then deposit_open
+            // signed by P" — once op0 sees the attestation it doesn't
+            // need the verifier in the loop again. So we acknowledge
+            // continuation events without doing anything substantive.
+            // A future revision can add policy here (rate limits,
+            // session payloads, etc.).
+            Err("continuation requests are not implemented".to_string())
+        }
+    };
+
+    if let Err(why) = result {
+        log::warn!("ringsig first-contact rejected: {}", why);
+        let _ = send_ringsig_error(state, event, "rejected", &why).await;
+    }
+}
+
+async fn handle_ringsig_first_contact(
+    state: &Arc<AppState>,
+    event: &Event,
+) -> Result<(), String> {
+    // ─── 1. Pull the tags we need ──────────────────────────────────
+    let tags_vec: Vec<Vec<String>> = event
+        .tags
+        .iter()
+        .map(|t| t.clone().to_vec())
+        .collect();
+
+    let p_tag = tag_first_value(&tags_vec, "p")?;
+    let cover_d_tag = tag_nth_value(&tags_vec, "cover", 1)?;
+    let ring_id = tag_first_value(&tags_vec, "ring")?;
+    let nullifier_hex = tag_first_value(&tags_vec, "nullifier")?;
+    let ringsig_hex = tag_first_value(&tags_vec, "ringsig")?;
+    let binding_hex = tag_first_value(&tags_vec, "binding")?;
+
+    if p_tag != state.keys.public_key().to_hex() {
+        return Err(format!(
+            "request addressed to {} but we are {}",
+            &p_tag[..16.min(p_tag.len())],
+            &state.keys.public_key().to_hex()[..16]
+        ));
+    }
+
+    // ─── 2. Fetch the cover this request points at ─────────────────
+    let cover_event = fetch_cover_event(state, &cover_d_tag).await?;
+    let cover_typed: Vec<Vec<String>> = cover_event
+        .tags
+        .iter()
+        .map(|t| t.clone().to_vec())
+        .collect();
+    let cover = deposits_ringsig::wire::Cover::from_tags(&cover_typed)
+        .map_err(|e| format!("malformed cover event: {}", e))?;
+
+    let ring = cover
+        .rings
+        .iter()
+        .find(|r| r.id == ring_id)
+        .ok_or_else(|| format!("ring `{}` not in cover", ring_id))?;
+    if (ring.members.len() as u32) < cover.k_min {
+        return Err(format!(
+            "ring `{}` has {} members; cover declares k_min = {}",
+            ring.id,
+            ring.members.len(),
+            cover.k_min
+        ));
+    }
+
+    // Convert member hex pubkeys (xonly, 32 bytes) into PublicKeys.
+    // Members are stored xonly in covers because they're Nostr npubs;
+    // bLSAG operates over compressed (33-byte) so we lift each one.
+    let mut ring_pks: Vec<bitcoin::secp256k1::PublicKey> =
+        Vec::with_capacity(ring.members.len());
+    for m in &ring.members {
+        let pk = lift_xonly_hex(m).map_err(|e| format!("ring member `{}`: {}", m, e))?;
+        ring_pks.push(pk);
+    }
+
+    // ─── 3. Decode signature and binding proof ─────────────────────
+    let ringsig = deposits_ringsig::wire::ringsig_from_hex(&ringsig_hex, ring_pks.len())
+        .map_err(|e| format!("ringsig decode: {}", e))?;
+    let binding = deposits_ringsig::wire::binding_from_hex(&binding_hex)
+        .map_err(|e| format!("binding decode: {}", e))?;
+
+    // ─── 4. Reproduce the canonical digest the ring sig covers ─────
+    //
+    // Strip out the ringsig and binding tags before recomputing — they
+    // reference values that depend on the digest and so can't be in it.
+    let digest_tags: Vec<Vec<String>> = tags_vec
+        .iter()
+        .filter(|t| {
+            let name = t.first().map(String::as_str).unwrap_or("");
+            name != "ringsig" && name != "binding"
+        })
+        .cloned()
+        .collect();
+    // The bound pubkey P is the event's pubkey field — it's stored
+    // xonly on the event, but bLSAG signed over compressed encodings.
+    // To make the wallet/verifier digest match exactly, we use the
+    // hex pubkey string the event already carries (Nostr canonical
+    // form), not the lifted PublicKey.
+    let pubkey_hex = event.pubkey.to_hex();
+    let digest = deposits_ringsig::wire::canonical_event_digest(
+        &pubkey_hex,
+        event.created_at.as_u64(),
+        event.kind.as_u16(),
+        &digest_tags,
+        &event.content,
+    );
+
+    // ─── 5. Verify the ring signature ──────────────────────────────
+    let secp = Secp256k1::new();
+    deposits_ringsig::blsag::verify(&secp, &ring_pks, &digest, &ringsig)
+        .map_err(|e| format!("ring signature: {:?}", e))?;
+
+    // ─── 6. Verify the bound-pubkey binding proof ──────────────────
+    let bound_p = lift_xonly_hex(&pubkey_hex)
+        .map_err(|e| format!("bound pubkey lift: {}", e))?;
+    deposits_ringsig::binding::verify(&secp, &bound_p, &ringsig, &binding)
+        .map_err(|e| format!("binding proof: {:?}", e))?;
+
+    // ─── 7. Recompute the presentation nullifier ───────────────────
+    let ctx = format!(
+        "{}/{}",
+        state.keys.public_key().to_hex(),
+        cover.d_tag
+    );
+    let expected_nullifier =
+        deposits_ringsig::presentation_nullifier(&ringsig.key_image, ctx.as_bytes());
+    let provided_nullifier = hex::decode(nullifier_hex.trim())
+        .map_err(|e| format!("nullifier hex: {}", e))?;
+    if provided_nullifier.len() != 32 || provided_nullifier[..] != expected_nullifier[..] {
+        return Err("nullifier tag does not match the recomputed presentation hash".to_string());
+    }
+
+    // ─── 8. Double-spend check on (cover, key image) ───────────────
+    let key_image_bytes = ringsig.key_image.serialize();
+    {
+        let table = state.ringsig_bindings.read().await;
+        if let Some(prev_p) = table.get(&(cover.d_tag.clone(), key_image_bytes)) {
+            if *prev_p != bound_p {
+                return Err(format!(
+                    "key image already bound to a different P under cover `{}`",
+                    cover.d_tag
+                ));
+            }
+            // Same P, idempotent re-issue. Fall through to publish
+            // again so the wallet gets a fresh attestation event id
+            // if the prior one fell off the relay.
+        }
+    }
+
+    // ─── 9. Publish the durable attestation ────────────────────────
+    //
+    // Cross over from `bitcoin::secp256k1::PublicKey` (33-byte
+    // compressed) to `nostr_sdk::PublicKey` (32-byte xonly) for the
+    // bech32 npub and for the `#p` tag the relay indexes.
+    let bound_p_xonly = bound_p.serialize()[1..].to_vec();
+    let bound_p_nostr = nostr_sdk::PublicKey::from_slice(&bound_p_xonly)
+        .map_err(|e| format!("bound pk → nostr: {}", e))?;
+    let npub_bech = bound_p_nostr
+        .to_bech32()
+        .map_err(|e| format!("bech32 encode: {}", e))?;
+    let attestation = AttestationContent {
+        npub: npub_bech.clone(),
+        method: "ringsig".to_string(),
+        verified_at: Utc::now().to_rfc3339(),
+        lightning_address: None,
+        allowlist_npub: None,
+        nullifier: Some(hex::encode(expected_nullifier)),
+    };
+    let attestation_json = serde_json::to_string(&attestation)
+        .map_err(|e| format!("attestation serialize: {}", e))?;
+    let attestation_event = EventBuilder::new(Kind::Custom(KIND_ATTESTATION), &attestation_json)
+        .tag(Tag::public_key(bound_p_nostr))
+        .sign_with_keys(&state.keys)
+        .map_err(|e| format!("attestation sign: {}", e))?;
+    let attestation_event_id = attestation_event.id.to_hex();
+
+    let publish_client = state.attestation_client.as_ref().unwrap_or(&state.client);
+    publish_client
+        .send_event(attestation_event)
+        .await
+        .map_err(|e| format!("attestation publish: {}", e))?;
+
+    // Record the binding only after successful publish.
+    state
+        .ringsig_bindings
+        .write()
+        .await
+        .insert((cover.d_tag.clone(), key_image_bytes), bound_p);
+
+    log::info!(
+        "ringsig first-contact verified: cover `{}` ring `{}` size {} → P {}…, attestation {}…",
+        cover.d_tag,
+        ring.id,
+        ring_pks.len(),
+        &pubkey_hex[..16],
+        &attestation_event_id[..16]
+    );
+
+    // ─── 10. Reply ─────────────────────────────────────────────────
+    send_ringsig_response(
+        state,
+        event,
+        deposits_ringsig::wire::RingsigResponse::Accepted {
+            attestation_event_id: Some(attestation_event_id),
+            result: None,
+        },
+    )
+    .await
+}
+
+async fn fetch_cover_event(
+    state: &Arc<AppState>,
+    cover_d_tag: &str,
+) -> Result<Event, String> {
+    let filter = Filter::new()
+        .kind(Kind::Custom(deposits_ringsig::wire::KIND_RINGSIG_COVER))
+        .author(state.keys.public_key())
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [cover_d_tag]);
+
+    let events = state
+        .client
+        .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+        .await
+        .map_err(|e| format!("fetch cover: {}", e))?;
+
+    // Parameterized-replaceable: latest wins. nostr-sdk's relay should
+    // already serve only the latest, but pick max created_at to be safe.
+    events
+        .into_iter()
+        .max_by_key(|e| e.created_at.as_u64())
+        .ok_or_else(|| format!("cover `{}` not found on relay", cover_d_tag))
+}
+
+fn tag_first_value(tags: &[Vec<String>], name: &str) -> Result<String, String> {
+    tags.iter()
+        .find(|t| t.first().map(String::as_str) == Some(name))
+        .and_then(|t| t.get(1))
+        .cloned()
+        .ok_or_else(|| format!("missing `{}` tag", name))
+}
+
+fn tag_nth_value(tags: &[Vec<String>], name: &str, n: usize) -> Result<String, String> {
+    tags.iter()
+        .find(|t| t.first().map(String::as_str) == Some(name))
+        .and_then(|t| t.get(n))
+        .cloned()
+        .ok_or_else(|| format!("`{}` tag missing index {}", name, n))
+}
+
+/// Lift a 32-byte xonly hex (Nostr-canonical form) into a secp256k1
+/// `PublicKey` with even-y, matching BIP-340's lift_x convention.
+///
+/// Important: the return type is `bitcoin::secp256k1::PublicKey`
+/// (33-byte compressed) rather than `nostr_sdk::PublicKey` (32-byte
+/// xonly), because the ringsig crate's primitives operate over the
+/// secp256k1 type directly.
+fn lift_xonly_hex(xonly_hex: &str) -> Result<bitcoin::secp256k1::PublicKey, String> {
+    let bytes = hex::decode(xonly_hex.trim()).map_err(|_| "bad hex".to_string())?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "expected 32-byte xonly pubkey, got {} bytes",
+            bytes.len()
+        ));
+    }
+    let mut compressed = [0u8; 33];
+    compressed[0] = 0x02;
+    compressed[1..].copy_from_slice(&bytes);
+    bitcoin::secp256k1::PublicKey::from_slice(&compressed)
+        .map_err(|e| format!("not on curve: {}", e))
+}
+
+async fn send_ringsig_response(
+    state: &Arc<AppState>,
+    request_event: &Event,
+    body: deposits_ringsig::wire::RingsigResponse,
+) -> Result<(), String> {
+    let content = serde_json::to_string(&body)
+        .map_err(|e| format!("response serialize: {}", e))?;
+    let event = EventBuilder::new(
+        Kind::Custom(deposits_ringsig::wire::KIND_RINGSIG_RESPONSE),
+        &content,
+    )
+    .tag(Tag::event(request_event.id))
+    .tag(Tag::public_key(request_event.pubkey))
+    .sign_with_keys(&state.keys)
+    .map_err(|e| format!("response sign: {}", e))?;
+    state
+        .client
+        .send_event(event)
+        .await
+        .map_err(|e| format!("response publish: {}", e))?;
+    Ok(())
+}
+
+async fn send_ringsig_error(
+    state: &Arc<AppState>,
+    request_event: &Event,
+    code: &str,
+    message: &str,
+) -> Result<(), String> {
+    send_ringsig_response(
+        state,
+        request_event,
+        deposits_ringsig::wire::RingsigResponse::Rejected {
+            code: code.to_string(),
+            message: Some(message.to_string()),
+        },
+    )
+    .await
 }
 
 // -- Main --
@@ -1363,15 +1921,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Subscribe to verification requests tagged with our pubkey
+    // Subscribe to verification requests tagged with our pubkey:
+    //   - kind 25500: gift-wrapped link/challenge/verify (lightning-verify path)
+    //   - kind 25502: plain-signed ringsig first-contact / continuation
+    // Both are filtered by the `p` tag pointing at the verifier so the
+    // relay does the routing and we don't see traffic for other anchors.
     let our_pubkey = keys.public_key();
-    let filter = Filter::new()
+    let verify_filter = Filter::new()
         .kind(Kind::Custom(KIND_VERIFY_REQUEST))
         .custom_tag(SingleLetterTag::lowercase(Alphabet::P), [our_pubkey.to_hex()])
         .since(Timestamp::now());
+    let ringsig_filter = Filter::new()
+        .kind(Kind::Custom(deposits_ringsig::wire::KIND_RINGSIG_REQUEST))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), [our_pubkey.to_hex()])
+        .since(Timestamp::now());
 
-    client.subscribe(vec![filter], None).await?;
-    log::info!("Subscribed to kind {} events", KIND_VERIFY_REQUEST);
+    client.subscribe(vec![verify_filter, ringsig_filter], None).await?;
+    log::info!(
+        "Subscribed to kinds {} (verify) and {} (ringsig)",
+        KIND_VERIFY_REQUEST,
+        deposits_ringsig::wire::KIND_RINGSIG_REQUEST
+    );
 
     // Build shared state
     let state = Arc::new(AppState {
@@ -1406,7 +1976,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         nip05_cache_secs,
         allowlist_file: env_or_file("VERIFY_ALLOWLIST_FILE")
             .map(std::path::PathBuf::from),
+        ringsig_bindings: RwLock::new(HashMap::new()),
     });
+
+    // Spawn the cover-builder background task. It re-fetches the
+    // anchor's kind:3 every refresh_secs and republishes a kind:35500
+    // cover. Survives anchor-not-yet-on-relay races by retrying.
+    let cover_cfg = CoverConfig::from_env(&our_pubkey.to_hex());
+    {
+        let state_clone = state.clone();
+        tokio::spawn(async move { cover_builder_loop(state_clone, cover_cfg).await });
+    }
 
     // Event loop
     log::info!("Listening for verification requests...");
@@ -1414,10 +1994,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match rx.recv().await {
             Ok(RelayPoolNotification::Event { event, .. }) => {
-                if event.kind.as_u16() == KIND_VERIFY_REQUEST {
+                let kind = event.kind.as_u16();
+                if kind == KIND_VERIFY_REQUEST {
                     let state = state.clone();
                     tokio::spawn(async move {
                         handle_event(&state, &event).await;
+                    });
+                } else if kind == deposits_ringsig::wire::KIND_RINGSIG_REQUEST {
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        handle_ringsig_event(&state, &event).await;
                     });
                 }
             }

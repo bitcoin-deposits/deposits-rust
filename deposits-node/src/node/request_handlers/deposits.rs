@@ -84,16 +84,19 @@ impl Node {
                     // Explicitly allowed
                 } else {
                     // Look for a lightning-verify attestation that
-                    // authorizes this sender. Two paths inside
-                    // `check_attestation`:
+                    // authorizes this sender. `check_attestation`
+                    // tries three paths:
                     //   - lightning_address whose domain is in `domains`
                     //   - allowlist_npub that's in `allowlist` (proclaim)
-                    // Either path needs a configured verifier; if there
-                    // are no domains AND no allowlist, attestation
-                    // can't help anyway.
+                    //   - method = "ringsig" (anonymity-set membership;
+                    //     no further allowlist matching, the verifier's
+                    //     signature is the authorization)
+                    // All three need a configured verifier — without
+                    // one, no attestation can be trusted. Empty domain
+                    // and pubkey allowlists are fine; the ringsig path
+                    // doesn't depend on either.
                     let attestation_possible =
-                        self.attestation_verifier_pubkey.is_some()
-                            && (!domains.is_empty() || !allowlist.is_empty());
+                        self.attestation_verifier_pubkey.is_some();
 
                     let authorized = if attestation_possible {
                         self.check_attestation(&effective_sender, &domains, &allowlist)

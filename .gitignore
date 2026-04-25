@@ -21,3 +21,11 @@ __pycache__/
 simulator-ledger.db
 simulator-ledger.db-wal
 simulator-ledger.db-shm
+
+# Claude Code state — runtime locks and per-project memory pointers,
+# not source.
+.claude/
+
+# Stray top-level logs from `tee`-based script debugging. The cluster's
+# own logs live under `deposits-tools/data/` (already ignored).
+/*.log

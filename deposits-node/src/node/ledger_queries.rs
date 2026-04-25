@@ -1307,6 +1307,17 @@ impl Node {
                     return Some(format!("allowlist_npub={}", &npub_lower[..16.min(npub_lower.len())]));
                 }
             }
+
+            // Path C: method = "ringsig" → trust the verifier wholesale.
+            // The verifier has already confirmed ring membership and the
+            // bound-pubkey binding proof; op0's job here is just to
+            // confirm the attestation is signed by the configured
+            // verifier (already enforced by the filter's `author`
+            // clause above). No domain or pubkey allowlist applies —
+            // the anonymity-set membership IS the access criterion.
+            if content.get("method").and_then(|v| v.as_str()) == Some("ringsig") {
+                return Some("method=ringsig".to_string());
+            }
         }
 
         None
