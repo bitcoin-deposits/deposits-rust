@@ -40,10 +40,6 @@ use crate::Error;
 /// Beyond this limit, add_quorum_member requests will be rejected.
 pub const MAX_QUORUM_MEMBERS: usize = 8;
 
-/// Maximum number of quorums a node will join (QuorumJoin operations).
-/// Beyond this limit, quorum join requests will be rejected.
-pub const MAX_QUORUMS_JOINED: usize = 12;
-
 /// Configuration for the deposits-node node
 #[derive(Clone)]
 pub struct NodeConfig {

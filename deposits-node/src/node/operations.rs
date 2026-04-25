@@ -528,28 +528,12 @@ impl Node {
         target_ledger_id: &str,
         membership_expires: u32,
     ) -> Result<String, Error> {
-        // Pre-validate
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers
-                .get(our_ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", our_ledger_id)))?;
-            let ledger = ledger_arc.read().unwrap();
-
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-
-            // Count active (non-expired) quorum memberships from derived state
-            let active_quorums = ledger
-                .state
-                .joined_quorums
-                .iter()
-                .filter(|jq| jq.membership_expires > block_height)
-                .count();
-
-            if active_quorums >= MAX_QUORUMS_JOINED {
+            if !ledgers.contains_key(our_ledger_id) {
                 return Err(Error::Protocol(format!(
-                    "Maximum active quorums joined reached ({} quorums)",
-                    MAX_QUORUMS_JOINED
+                    "Ledger not found: {}",
+                    our_ledger_id
                 )));
             }
         }
