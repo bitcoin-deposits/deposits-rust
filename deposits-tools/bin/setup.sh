@@ -135,15 +135,16 @@ run_cmd() {
     local name="op$idx"
     local seed="${SEEDS[$name]}"
     local data_dir="$DATA_ROOT/$name"
-    # Some commands (reserves, quorum) need esplora; info/address don't accept it
-    local esplora_arg=""
-    case "$cmd" in
-        reserves|quorum|ledger|daemon|deposit|collateral) esplora_arg="--esplora $ELECTRS_URL" ;;
-    esac
+    # `info` and `address` previously skipped `--esplora` based on a
+    # stale comment claiming they didn't accept it (they do — see
+    # `parse_config`). Without it, the daemon falls back to the public
+    # `mempool.space/signet/api` default, which is slow at best and
+    # hangs Phase 1 outright when the public endpoint is throttling
+    # us. Always pass the local electrs URL.
     RUST_LOG=error "$DEPOSITS_NODE" "$cmd" "$@" \
         --seed "$seed" --name "$name" \
         --network regtest --data-dir "$data_dir" \
-        $esplora_arg \
+        --esplora "$ELECTRS_URL" \
         $RELAY_ARGS 2>&1
 }
 
@@ -388,17 +389,47 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
     done
 done
 
-# Give the rotation txs a moment to hit mempool, then mine so cosigners'
-# confs checks pass and the begin calls can proceed through cosig + commit.
-sleep 3
-mine_blocks 1
-
-# Drain backgrounded begin calls. Each should now find its outpoint
-# confirmed, collect cosigs, and commit.
+# Mine periodically while begin calls drain. Some daemons broadcast
+# their rotation tx later than others (16 ops × 3 ledgers, all racing
+# for the wallet/network), so a single early `mine_blocks 1` only
+# confirms whoever happened to broadcast in the first few seconds.
+# Daemons that broadcast later see their tx sitting in mempool while
+# the drain proceeds, then time out their cosign deadline. Loop:
+# tick once a second, and every few ticks drop a block so any newly
+# broadcast tx gets included quickly. Keep going until every begin
+# pid has exited.
 ok=0
 fail=0
+done_count=0
+total=${#begin_pids[@]}
+tick=0
+while [ $done_count -lt $total ]; do
+    sleep 1
+    tick=$((tick + 1))
+    # Mine every 3 ticks. Multiple blocks during a long drain confirm
+    # any rotation tx that hit mempool after the previous mine.
+    if [ $((tick % 3)) -eq 0 ]; then
+        mine_blocks 1 2>/dev/null
+    fi
+    # Reap any pids that have exited; can't `wait` blockingly here
+    # because we still need to mine concurrently with the drain.
+    new_done=0
+    for pid in "${begin_pids[@]}"; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            new_done=$((new_done + 1))
+        fi
+    done
+    done_count=$new_done
+    # Hard cap: don't loop forever if a daemon is wedged.
+    if [ $tick -gt 120 ]; then
+        break
+    fi
+done
+
+# Now harvest exit codes. Pids that died with non-zero status =
+# Phase 4 failures we'll surface in the resume log.
 for pid in "${begin_pids[@]}"; do
-    if wait "$pid"; then
+    if wait "$pid" 2>/dev/null; then
         ok=$((ok + 1))
         echo -n "."
     else
