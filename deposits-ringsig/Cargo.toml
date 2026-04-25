@@ -1,0 +1,21 @@
+[package]
+name = "deposits-ringsig"
+version = "0.1.0"
+edition = "2021"
+description = "bLSAG ring signatures over secp256k1 (NIP-XX). Anonymity within a Nostr web-of-trust ring."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# secp256k1 primitives — point ops, scalar field, BIP-340 Schnorr.
+# `rand-std` re-exports the `rand` crate so callers and tests can pull
+# `RngCore` / `OsRng` without us taking a separate `rand` dep.
+bitcoin = { version = "0.32", default-features = false, features = ["secp-recovery", "rand-std"] }
+# SHA-256 for tagged hashes and the hash-to-curve seed.
+sha2 = "0.10"
+# Wire format helpers for callers that want to ship signatures.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+[lints]
+workspace = true

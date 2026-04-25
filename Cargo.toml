@@ -6,6 +6,7 @@ members = [
     "deposits-wallet",
     "deposits-attestation",
     "deposits-lnurl",
+    "deposits-ringsig",
     "deposits-tools",
     "deposits-test",
 ]
