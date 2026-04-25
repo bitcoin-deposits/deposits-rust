@@ -57,13 +57,13 @@ types:
       A signed ledger update, broadcast as Kind 9100 Nostr events.
 
       Multi-cosig format (tag 22 present):
-        current_hash = SHA256(seq || prev_hash || message || for each sorted entry: member_hash || cosig)
+        content_hash = SHA256(seq || prev_hash || message || for each sorted entry: member_hash || cosig)
       Legacy single-cosig format (tag 22 absent):
-        current_hash = SHA256(seq || prev_hash || message [|| member_ledger_hash] [|| cosign_signature])
-      chain_hash   = SHA256(current_hash || operator_signature)
+        content_hash = SHA256(seq || prev_hash || message [|| member_ledger_hash] [|| cosign_signature])
+      chain_hash   = SHA256(content_hash || operator_signature)
       next update's previous_hash = chain_hash
 
-      current_hash is NOT on the wire -- it is derived by the receiver.
+      content_hash is NOT on the wire -- it is derived by the receiver.
       message_type is NOT on the wire -- it is derived from the operation discriminant.
 
       Layout: identity -> chain -> payload -> context -> cosign -> signatures

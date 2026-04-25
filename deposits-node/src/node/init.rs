@@ -217,7 +217,7 @@ impl Node {
             );
         }
 
-        // Finalize state.hash = chain_hash = SHA256(current_hash || operator_signature)
+        // Finalize state.hash = chain_hash = SHA256(content_hash || operator_signature)
         // so the next append_operation uses chain_hash as prev_hash (per protocol spec).
         ledger.finalize_chain_hash();
 
@@ -254,7 +254,7 @@ impl Node {
             )));
         }
 
-        // The protocol chains via chain_hash = SHA256(current_hash || operator_signature),
+        // The protocol chains via chain_hash = SHA256(content_hash || operator_signature),
         // so previous_hash of the next entry must equal chain_hash() of the prior entry.
         let prev_chain_hash = prev.chain_hash();
         if last.previous_hash != prev_chain_hash {

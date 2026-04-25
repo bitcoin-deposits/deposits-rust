@@ -146,7 +146,7 @@ impl Node {
         updates.dedup_by(|a, b| {
             a.sequence_number == b.sequence_number
                 && a.operator_id == b.operator_id
-                && a.current_hash == b.current_hash
+                && a.content_hash == b.content_hash
         });
 
         // Find the original operator (the one who opened the ledger)
@@ -196,12 +196,12 @@ impl Node {
             }
 
             let computed_hash = update.compute_hash();
-            if computed_hash != update.current_hash {
+            if computed_hash != update.content_hash {
                 found_violation = true;
                 break;
             }
 
-            last_valid_hash = update.current_hash;
+            last_valid_hash = update.content_hash;
             validated_sequence = update.sequence_number as i64;
         }
 

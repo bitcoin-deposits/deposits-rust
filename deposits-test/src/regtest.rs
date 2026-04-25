@@ -62,6 +62,70 @@ pub fn op0_data_dir() -> PathBuf {
     repo_root().join("deposits-tools/data/op0")
 }
 
+/// Seed for operator at index `i`. Matches setup.sh's convention:
+///   SEEDS["op$i"] = python3 -c "print('op$i'.encode().hex().ljust(64, '0'))"
+/// So op0 → "6f7030..." (= "op0" hex, zero-padded to 64).
+pub fn op_seed(i: usize) -> String {
+    let label = format!("op{}", i);
+    let mut hex = hex::encode(label.as_bytes());
+    while hex.len() < 64 {
+        hex.push('0');
+    }
+    hex
+}
+
+/// Data dir for operator at index `i` under the running cluster.
+pub fn op_data_dir(i: usize) -> PathBuf {
+    repo_root().join(format!("deposits-tools/data/op{}", i))
+}
+
+/// Build (or rebuild) `deposits-node` with the `dangerous-testing` feature
+/// enabled and return the binary path. The release build at
+/// `target/release/deposits-node` is replaced; `cluster_available()` will
+/// continue to find it. Re-runs are cheap (cargo no-ops).
+pub fn build_node_with_danger() -> PathBuf {
+    let status = Command::new("cargo")
+        .current_dir(repo_root())
+        .args([
+            "build",
+            "--release",
+            "-p",
+            "deposits-node",
+            "--features",
+            "dangerous-testing",
+        ])
+        .status()
+        .expect("cargo build deposits-node --features dangerous-testing");
+    assert!(status.success(), "build failed");
+    node_bin()
+}
+
+/// Run `deposits-node ledger health <ledger_id>` from operator `op_idx`'s
+/// perspective and return the combined stdout+stderr. The output
+/// includes a `Dispute: <state>` line which is the canonical place
+/// integration tests assert on for dispute-flow visibility.
+///
+/// Use op0 to observe its own ledgers' state, or any quorum-member op
+/// to observe a partner ledger.
+pub fn ledger_health(op_idx: usize, ledger_id: &str) -> String {
+    let seed = op_seed(op_idx);
+    let data_dir = op_data_dir(op_idx);
+    let name = format!("op{}", op_idx);
+    let out = Command::new(node_bin())
+        .args(["ledger", "health", ledger_id])
+        .args(["--seed", &seed])
+        .args(["--name", &name])
+        .args(["--network", "regtest"])
+        .args(["--data-dir", data_dir.to_str().unwrap()])
+        .args(["--esplora", ELECTRS_URL])
+        .args(["--relay", relay_ledgers()])
+        .output()
+        .expect("deposits-node ledger health");
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    combined
+}
+
 /// True iff bitcoind is reachable AND the release binaries are built.
 pub fn cluster_available() -> bool {
     let bitcoind = Command::new("docker")

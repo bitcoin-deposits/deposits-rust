@@ -301,7 +301,7 @@ impl Node {
         let mut params = serde_json::json!({
             "sequence_number": update.sequence_number,
             "cosign_data_hex": hex::encode(&cosign_data),
-            "current_hash_hex": hex::encode(update.current_hash),
+            "content_hash_hex": hex::encode(update.content_hash),
             "message_type": update.message_type,
             "t0_us": t0_us,
         });

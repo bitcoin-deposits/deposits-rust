@@ -59,7 +59,7 @@ pub struct SyncResponseMsg {
     /// Signed updates since last_known_sequence
     pub updates: Vec<SignedLedgerUpdate>,
     pub current_sequence: u64,
-    pub current_hash: [u8; 32],
+    pub content_hash: [u8; 32],
 }
 
 // ============================================================================
@@ -175,7 +175,7 @@ pub enum CoordinationResponseMsg {
         members: Vec<PublicKey>,
         threshold: u16,
         last_sequence: u64,
-        current_hash: [u8; 32],
+        content_hash: [u8; 32],
         rejection_reason: Option<String>,
     },
     /// Quorum state sync
@@ -226,7 +226,7 @@ impl DepositsMessage {
                 m.operation.write_to(w)?;
                 write_u64(w, m.sequence_number)?;
                 write_32(w, &m.previous_hash)?;
-                write_32(w, &m.current_hash)?;
+                write_32(w, &m.content_hash)?;
                 write_64(w, &m.operator_signature)?;
             }
             Self::LedgerUpdateResponse(m) => {
@@ -266,7 +266,7 @@ impl DepositsMessage {
                 write_32(w, &m.request_hash)?;
                 write_vec(w, &m.updates, |w, u| u.write_to(w))?;
                 write_u64(w, m.current_sequence)?;
-                write_32(w, &m.current_hash)?;
+                write_32(w, &m.content_hash)?;
             }
             Self::Coordination(m) => m.write_to(w)?,
             Self::CoordinationResponse(m) => m.write_to(w)?,
@@ -295,7 +295,7 @@ impl DepositsMessage {
                 operation: LedgerOperation::read_from(r)?,
                 sequence_number: read_u64(r)?,
                 previous_hash: read_32(r)?,
-                current_hash: read_32(r)?,
+                content_hash: read_32(r)?,
                 operator_signature: read_64(r)?,
             })),
             LEDGER_UPDATE_RESPONSE => Ok(Self::LedgerUpdateResponse(LedgerUpdateResponseMsg {
@@ -344,7 +344,7 @@ impl DepositsMessage {
                 request_hash: read_32(r)?,
                 updates: read_vec(r, SignedLedgerUpdate::read_from)?,
                 current_sequence: read_u64(r)?,
-                current_hash: read_32(r)?,
+                content_hash: read_32(r)?,
             })),
             COORDINATION => Ok(Self::Coordination(CoordinationMsg::read_from(r)?)),
             COORDINATION_RESPONSE => Ok(Self::CoordinationResponse(
@@ -599,7 +599,7 @@ impl BinaryCodec for CoordinationResponseMsg {
                 members,
                 threshold,
                 last_sequence,
-                current_hash,
+                content_hash,
                 rejection_reason,
             } => {
                 write_u8(w, 2)?;
@@ -608,7 +608,7 @@ impl BinaryCodec for CoordinationResponseMsg {
                 write_vec(w, members, |w, pk| write_pubkey(w, pk))?;
                 write_u16(w, *threshold)?;
                 write_u64(w, *last_sequence)?;
-                write_32(w, current_hash)?;
+                write_32(w, content_hash)?;
                 write_option(w, rejection_reason, |w, s| write_string(w, s))?;
             }
             Self::QuorumStateSync {
@@ -676,7 +676,7 @@ impl BinaryCodec for CoordinationResponseMsg {
                 members: read_vec(r, read_pubkey)?,
                 threshold: read_u16(r)?,
                 last_sequence: read_u64(r)?,
-                current_hash: read_32(r)?,
+                content_hash: read_32(r)?,
                 rejection_reason: read_option(r, read_string)?,
             }),
             3 => Ok(Self::QuorumStateSync {

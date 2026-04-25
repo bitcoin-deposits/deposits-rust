@@ -626,12 +626,12 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // Include operator_id in sort/dedup to preserve different operators' updates at same sequence
     // (e.g., parallel DisputeEnters from different quorum members)
     for updates in ledgers.values_mut() {
-        updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.current_hash));
+        updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.content_hash));
         // Deduplicate exact copies only (same seq, same operator, same hash)
         updates.dedup_by(|a, b| {
             a.sequence_number == b.sequence_number
                 && a.operator_id == b.operator_id
-                && a.current_hash == b.current_hash
+                && a.content_hash == b.content_hash
         });
     }
 
@@ -737,9 +737,9 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
         // branch that contains DisputeAcquire (or the longest if tied).
         let longest_chain = {
             let mut chain: Vec<&SignedLedgerUpdate> = Vec::new();
-            let mut current_hash = [0u8; 32];
+            let mut content_hash = [0u8; 32];
             loop {
-                let Some(children) = by_prev.get(&current_hash) else {
+                let Some(children) = by_prev.get(&content_hash) else {
                     break;
                 };
                 let next = if children.len() == 1 {
@@ -751,10 +751,10 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                     for &child in children {
                         let has_acquire = chain_has_custody_acquire(&[child]);
                         let mut depth = 1usize;
-                        let mut h = child.current_hash;
+                        let mut h = child.content_hash;
                         while let Some(next_children) = by_prev.get(&h) {
                             if let Some(first) = next_children.first() {
-                                h = first.current_hash;
+                                h = first.content_hash;
                                 depth += 1;
                             } else {
                                 break;
@@ -774,7 +774,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                         None => break,
                     }
                 };
-                current_hash = next.current_hash;
+                content_hash = next.content_hash;
                 chain.push(next);
             }
             chain
@@ -914,17 +914,17 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 }
             }
 
-            // Find the actual invalid updates (those whose current_hash matches an invalid hash)
+            // Find the actual invalid updates (those whose content_hash matches an invalid hash)
             // Also find the branch point hash (last valid hash before the invalid update)
             let mut branch_point_hash: Option<[u8; 32]> = None;
             for update in updates {
-                if invalid_hashes.contains(&update.current_hash) {
+                if invalid_hashes.contains(&update.content_hash) {
                     invalid_updates.push(update);
                     // Find the branch point: the update at sequence - 1
                     if update.sequence_number > 0 {
                         for prev_update in updates {
                             if prev_update.sequence_number == update.sequence_number - 1 {
-                                branch_point_hash = Some(prev_update.current_hash);
+                                branch_point_hash = Some(prev_update.content_hash);
                                 break;
                             }
                         }
@@ -966,7 +966,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                         if child.operator_id == operator || is_cd {
                             let depth = 1 + get_chain_depth(
                                 children,
-                                child.current_hash,
+                                child.content_hash,
                                 child.operator_id,
                             );
                             max_depth = max_depth.max(depth);
@@ -1012,7 +1012,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                                 };
 
                             // Also show invalid updates (so they can blink)
-                            let is_invalid = invalid_hashes.contains(&update.current_hash);
+                            let is_invalid = invalid_hashes.contains(&update.content_hash);
 
                             // DisputeEnter can branch from anyone
                             // Invalid updates should be shown (with blinking)
@@ -1027,9 +1027,9 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                     // Sort: invalid updates first (blinking), then by chain depth (ascending)
                     // so invalid updates are visible and surviving chains come last
                     filtered_kids.sort_by_key(|update| {
-                        let is_invalid = invalid_hashes.contains(&update.current_hash);
+                        let is_invalid = invalid_hashes.contains(&update.content_hash);
                         let depth =
-                            get_chain_depth(children, update.current_hash, update.operator_id);
+                            get_chain_depth(children, update.content_hash, update.operator_id);
                         // Invalid updates get priority 0, others get their depth + 1000
                         if is_invalid {
                             0
@@ -1042,7 +1042,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                         let is_last = i == filtered_kids.len() - 1;
                         let seq = update.sequence_number;
                         let prev = &update.previous_hash;
-                        let curr = &update.current_hash;
+                        let curr = &update.content_hash;
 
                         // Determine signature status and signer
                         let has_partner_sig = update.cosign_signature != [0u8; 64];
@@ -1084,7 +1084,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                         } else {
                             ""
                         };
-                        let is_invalid = invalid_hashes.contains(&update.current_hash);
+                        let is_invalid = invalid_hashes.contains(&update.content_hash);
                         let style_start = if is_invalid {
                             format!("{}{}", invalid_style, color)
                         } else {
@@ -1117,7 +1117,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
                         // Check how many children this update has (considering operator continuity)
                         let child_count = if let Some(child_kids) =
-                            children.get(&update.current_hash)
+                            children.get(&update.content_hash)
                         {
                             child_kids
                                 .iter()
@@ -1146,7 +1146,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                         let has_multiple_children = child_count > 1;
                         print_tree(
                             children,
-                            update.current_hash,
+                            update.content_hash,
                             Some(update.operator_id),
                             &new_prefix,
                             has_multiple_children,
@@ -1450,7 +1450,7 @@ pub async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::E
     updates.dedup_by(|a, b| {
         a.sequence_number == b.sequence_number
             && a.operator_id == b.operator_id
-            && a.current_hash == b.current_hash
+            && a.content_hash == b.content_hash
     });
 
     println!(
@@ -1492,11 +1492,11 @@ pub async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::E
 
         // Verify the update's own hash
         let computed_hash = update.compute_hash();
-        if computed_hash != update.current_hash {
+        if computed_hash != update.content_hash {
             let err = format!(
                 "Hash mismatch: computed {}... != stored {}...",
                 &hex::encode(computed_hash)[..8],
-                &hex::encode(update.current_hash)[..8]
+                &hex::encode(update.content_hash)[..8]
             );
             errors.push(err.clone());
             println!("  [FAIL] seq={}: {}", update.sequence_number, err);
@@ -2031,7 +2031,7 @@ pub async fn nostr_export(args: &[String]) -> Result<(), Box<dyn std::error::Err
             println!(
                 "    seq={} hash={}... event={}",
                 update.sequence_number,
-                &hex::encode(update.current_hash)[..16],
+                &hex::encode(update.content_hash)[..16],
                 &event_id[..16],
             );
             total_exported += 1;

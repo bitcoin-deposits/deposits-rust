@@ -114,9 +114,9 @@ pub fn handle_ledger_update<C: HandlerContext>(
         if is_idempotent {
             // For idempotent operations, return current ledger state for ACK
             // Don't append to history, just send ACK with current state
-            let current_hash = ledger.tail_hash();
+            let content_hash = ledger.tail_hash();
             let current_seq = ledger.state.sequence;
-            (current_hash, current_hash, current_seq, Vec::new(), true)
+            (content_hash, content_hash, current_seq, Vec::new(), true)
         } else {
             // Operation-specific validation
             match &operation {

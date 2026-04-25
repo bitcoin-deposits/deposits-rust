@@ -701,7 +701,7 @@ impl Node {
                     .unwrap()
                     .history
                     .last()
-                    .map(|u| u.current_hash)
+                    .map(|u| u.content_hash)
                     .unwrap_or([0u8; 32]),
                 None => return (false, None, Some("Member ledger not found".to_string())),
             }

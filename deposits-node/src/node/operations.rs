@@ -239,7 +239,7 @@ impl Node {
             staged.update.cosigner_pubkey = None;
             staged.update.member_ledger_hash = None;
             staged.update.cosign_signature = [0u8; 64];
-            staged.update.current_hash = staged.update.compute_hash();
+            staged.update.content_hash = staged.update.compute_hash();
         }
 
         // 3. Operator sign using operator_signing_data() (covers content + all cosignatures)
@@ -372,7 +372,7 @@ impl Node {
                         .ok_or_else(|| Error::Protocol("Ledger not found".to_string()))?;
                     let mut ledger = ledger_arc.write().unwrap();
 
-                    // Apply majority cosignatures, recompute current_hash
+                    // Apply majority cosignatures, recompute content_hash
                     ledger.apply_cosignatures(entries);
 
                     tracing::debug!(

@@ -279,7 +279,7 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
     for update in &ledger.history {
         let seq = update.sequence_number;
         let prev = &update.previous_hash;
-        let curr = &update.current_hash;
+        let curr = &update.content_hash;
 
         // Determine signature status and signer
         let has_partner_sig = update.cosign_signature != [0u8; 64];

@@ -179,18 +179,18 @@ pub async fn health_chains(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
             // Verify the update's own hash
             let computed = update.compute_hash();
-            if computed != update.current_hash {
+            if computed != update.content_hash {
                 println!(
                     "  Chain:      BREAK at seq {} (hash mismatch: computed {}... stored {}...)",
                     i,
                     hex::encode(&computed[..4]),
-                    hex::encode(&update.current_hash[..4])
+                    hex::encode(&update.content_hash[..4])
                 );
                 chain_ok = false;
                 break;
             }
 
-            prev_hash = update.current_hash;
+            prev_hash = update.content_hash;
         }
 
         if chain_ok {

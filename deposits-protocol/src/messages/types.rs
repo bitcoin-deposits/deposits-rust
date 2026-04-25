@@ -115,7 +115,7 @@ pub struct LedgerUpdateMsg {
     /// Hash of the previous ledger state
     pub previous_hash: [u8; 32],
     /// Hash after applying this operation
-    pub current_hash: [u8; 32],
+    pub content_hash: [u8; 32],
     /// Operator's signature over the update
     pub operator_signature: [u8; 64],
 }
@@ -1624,7 +1624,7 @@ impl BinaryCodec for LedgerUpdateMsg {
         self.operation.write_to(w)?;
         write_u64(w, self.sequence_number)?;
         write_32(w, &self.previous_hash)?;
-        write_32(w, &self.current_hash)?;
+        write_32(w, &self.content_hash)?;
         write_64(w, &self.operator_signature)?;
         Ok(())
     }
@@ -1636,7 +1636,7 @@ impl BinaryCodec for LedgerUpdateMsg {
             operation: LedgerOperation::read_from(r)?,
             sequence_number: read_u64(r)?,
             previous_hash: read_32(r)?,
-            current_hash: read_32(r)?,
+            content_hash: read_32(r)?,
             operator_signature: read_64(r)?,
         })
     }
@@ -1680,7 +1680,7 @@ impl BinaryCodec for SignedLedgerUpdate {
             ledger_id,
             sequence_number,
             previous_hash,
-            current_hash: [0u8; 32],
+            content_hash: [0u8; 32],
             block_height,
             block_hash,
             cosign_signature,
@@ -1689,7 +1689,7 @@ impl BinaryCodec for SignedLedgerUpdate {
             member_ledger_hash,
             cosignatures: Vec::new(),
         };
-        update.current_hash = update.compute_hash();
+        update.content_hash = update.compute_hash();
         Ok(update)
     }
 }

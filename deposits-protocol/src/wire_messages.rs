@@ -256,7 +256,7 @@ pub struct QuorumJoinResponseMsgWire {
     pub members: Vec<PublicKey>,
     pub threshold: u16,
     pub last_sequence: u64,
-    pub current_hash: [u8; 32],
+    pub content_hash: [u8; 32],
     pub rejection_reason: Option<String>,
 }
 

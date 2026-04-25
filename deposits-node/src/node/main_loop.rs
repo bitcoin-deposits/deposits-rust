@@ -269,11 +269,11 @@ impl Node {
             }
 
             // Sort by sequence, dedup exact copies
-            updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.current_hash));
+            updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.content_hash));
             updates.dedup_by(|a, b| {
                 a.sequence_number == b.sequence_number
                     && a.operator_id == b.operator_id
-                    && a.current_hash == b.current_hash
+                    && a.content_hash == b.content_hash
             });
 
             // Find LedgerOpen to get metadata
@@ -320,9 +320,9 @@ impl Node {
             // branch that contains DisputeAcquire (or the longest if tied).
             let best_chain = {
                 let mut chain: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
-                let mut current_hash = [0u8; 32];
+                let mut content_hash = [0u8; 32];
                 loop {
-                    let Some(children) = by_prev.get(&current_hash) else {
+                    let Some(children) = by_prev.get(&content_hash) else {
                         break;
                     };
                     // Single child (common case): just follow it
@@ -339,10 +339,10 @@ impl Node {
                                 .unwrap_or(false);
                             // Count chain length from this child (iterative peek)
                             let mut depth = 1usize;
-                            let mut h = child.current_hash;
+                            let mut h = child.content_hash;
                             while let Some(next_children) = by_prev.get(&h) {
                                 if let Some(first) = next_children.first() {
-                                    h = first.current_hash;
+                                    h = first.content_hash;
                                     depth += 1;
                                 } else {
                                     break;
@@ -362,7 +362,7 @@ impl Node {
                             None => break,
                         }
                     };
-                    current_hash = next.current_hash;
+                    content_hash = next.content_hash;
                     chain.push(next);
                 }
                 chain
@@ -629,11 +629,11 @@ impl Node {
         if need_full_reimport {
             // --- Slow path: new ledger, full import from genesis ---
             let mut updates: Vec<deposits_core::SignedLedgerUpdate> = all_fetched;
-            updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.current_hash));
+            updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.content_hash));
             updates.dedup_by(|a, b| {
                 a.sequence_number == b.sequence_number
                     && a.operator_id == b.operator_id
-                    && a.current_hash == b.current_hash
+                    && a.content_hash == b.content_hash
             });
 
             let ledger_open = updates.iter().find_map(|u| {
@@ -669,9 +669,9 @@ impl Node {
 
             let best_chain = {
                 let mut chain: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
-                let mut current_hash = [0u8; 32];
+                let mut content_hash = [0u8; 32];
                 loop {
-                    let Some(children) = by_prev.get(&current_hash) else {
+                    let Some(children) = by_prev.get(&content_hash) else {
                         break;
                     };
                     let next = if children.len() == 1 {
@@ -685,10 +685,10 @@ impl Node {
                                 .map(|op| matches!(op, LedgerOperation::DisputeAcquire { .. }))
                                 .unwrap_or(false);
                             let mut depth = 1usize;
-                            let mut h = child.current_hash;
+                            let mut h = child.content_hash;
                             while let Some(next_children) = by_prev.get(&h) {
                                 if let Some(first) = next_children.first() {
-                                    h = first.current_hash;
+                                    h = first.content_hash;
                                     depth += 1;
                                 } else {
                                     break;
@@ -708,7 +708,7 @@ impl Node {
                             None => break,
                         }
                     };
-                    current_hash = next.current_hash;
+                    content_hash = next.content_hash;
                     chain.push(next);
                 }
                 chain
@@ -829,7 +829,7 @@ impl Node {
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
                     let _ = ledger.apply_state_changes(&op);
                 }
-                tip_hash = update.current_hash;
+                tip_hash = update.content_hash;
                 ledger.state.sequence = update.sequence_number;
                 ledger.state.chain_tip_hash = update.chain_hash();
                 ledger.history.push(update);

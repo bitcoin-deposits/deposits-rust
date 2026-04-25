@@ -608,11 +608,11 @@ impl LedgerExport {
             .unwrap_or([0u8; 32])
     }
 
-    /// Get the tail hash (last update's current_hash).
+    /// Get the tail hash (last update's content_hash).
     pub fn tail_hash(&self) -> [u8; 32] {
         self.updates
             .last()
-            .map(|u| u.current_hash)
+            .map(|u| u.content_hash)
             .unwrap_or([0u8; 32])
     }
 }
@@ -663,7 +663,7 @@ pub struct ChainStatus {
     /// Genesis hash (first update's previous_hash).
     #[serde(with = "crate::types::serde_32")]
     pub genesis_hash: [u8; 32],
-    /// Tail hash (last valid update's current_hash).
+    /// Tail hash (last valid update's content_hash).
     #[serde(with = "crate::types::serde_32")]
     pub tail_hash: [u8; 32],
 }
@@ -833,19 +833,19 @@ impl LedgerConformanceValidator {
 
             // Verify computed hash matches stored hash
             let computed = update.compute_hash();
-            if computed != update.current_hash {
+            if computed != update.content_hash {
                 return Err(ValidationError::HashChainBroken {
                     sequence: update.sequence_number,
                     reason: format!(
                         "hash mismatch: update claims hash {}..., but recomputed hash is {}... (message content may have been altered)",
-                        &hex::encode(update.current_hash)[..16],
+                        &hex::encode(update.content_hash)[..16],
                         &hex::encode(computed)[..16]
                     ),
                 });
             }
 
-            // The chain links via `chain_hash()`, not `current_hash`.
-            // `chain_hash() = SHA256(current_hash || operator_signature)` —
+            // The chain links via `chain_hash()`, not `content_hash`.
+            // `chain_hash() = SHA256(content_hash || operator_signature)` —
             // see `commit_staged` in `ledger.rs`, which sets
             // `state.chain_tip_hash = staged.update.chain_hash()`. The next
             // update reads chain_tip_hash as its `previous_hash`, so the
@@ -983,7 +983,7 @@ impl LedgerConformanceValidator {
 
         // Rule 4: hash matches computed hash (final state)
         let final_hash_valid = if let Some(last_update) = ledger.history.last() {
-            last_update.current_hash == ledger.state.chain_tip_hash
+            last_update.content_hash == ledger.state.chain_tip_hash
         } else {
             ledger.state.chain_tip_hash == [0u8; 32]
         };

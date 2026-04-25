@@ -423,7 +423,7 @@ fn compute_hash_changes_with_member_ledger_hash() {
         ledger_id: [0x12; 32],
         sequence_number: 1,
         previous_hash: [0u8; 32],
-        current_hash: [0u8; 32],
+        content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
         cosign_signature: [0u8; 64],
@@ -471,7 +471,7 @@ fn compute_hash_without_member_hash_is_backward_compatible() {
         ledger_id: [0x12; 32],
         sequence_number: 1,
         previous_hash: [0u8; 32],
-        current_hash: [0u8; 32],
+        content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
         cosign_signature: [0u8; 64],
@@ -511,7 +511,7 @@ fn compute_hash_includes_cosign_signature() {
         ledger_id: [0x12; 32],
         sequence_number: 1,
         previous_hash: [0u8; 32],
-        current_hash: [0u8; 32],
+        content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
         cosign_signature: [0u8; 64],
@@ -559,7 +559,7 @@ fn chain_hash_includes_operator_signature() {
         ledger_id: [0x12; 32],
         sequence_number: 1,
         previous_hash: [0u8; 32],
-        current_hash: [0u8; 32],
+        content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
         cosign_signature: [0u8; 64],
@@ -568,7 +568,7 @@ fn chain_hash_includes_operator_signature() {
         member_ledger_hash: None,
         cosignatures: Vec::new(),
     };
-    update.current_hash = update.compute_hash();
+    update.content_hash = update.compute_hash();
 
     let chain_no_sig = update.chain_hash();
 
@@ -579,16 +579,16 @@ fn chain_hash_includes_operator_signature() {
         chain_no_sig, chain_with_sig,
         "operator_signature should change chain_hash"
     );
-    // chain_hash != current_hash
+    // chain_hash != content_hash
     assert_ne!(
         update.chain_hash(),
-        update.current_hash,
-        "chain_hash should differ from current_hash"
+        update.content_hash,
+        "chain_hash should differ from content_hash"
     );
 }
 
 #[test]
-fn chain_hash_is_sha256_of_current_hash_and_operator_sig() {
+fn chain_hash_is_sha256_of_content_hash_and_operator_sig() {
     use deposits_protocol::types::SignedLedgerUpdate;
     use sha2::{Digest, Sha256};
 
@@ -607,7 +607,7 @@ fn chain_hash_is_sha256_of_current_hash_and_operator_sig() {
         ledger_id: [0x12; 32],
         sequence_number: 1,
         previous_hash: [0u8; 32],
-        current_hash: [0u8; 32],
+        content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
         cosign_signature: [0xAA; 64],
@@ -616,11 +616,11 @@ fn chain_hash_is_sha256_of_current_hash_and_operator_sig() {
         member_ledger_hash: Some([0xCC; 32]),
         cosignatures: Vec::new(),
     };
-    update.current_hash = update.compute_hash();
+    update.content_hash = update.compute_hash();
 
     // Manual chain_hash computation
     let mut hasher = Sha256::new();
-    hasher.update(update.current_hash);
+    hasher.update(update.content_hash);
     hasher.update(update.operator_signature);
     let expected: [u8; 32] = hasher.finalize().into();
 

@@ -2583,7 +2583,7 @@ impl ProtocolSim {
     /// Chain continuity + sequence monotonicity on operator i's authoritative
     /// history. Each entry's sequence_number must be one more than the prior
     /// entry's; each entry's previous_hash must equal the prior entry's
-    /// `current_hash` (the pre-signing hash, which is what
+    /// `content_hash` (the pre-signing hash, which is what
     /// `Ledger::append_operation_with_block` stores in `chain_tip_hash` and
     /// passes to the next update as `previous_hash`).
     fn check_history_integrity(&self, i: usize) -> Vec<String> {
@@ -2606,7 +2606,7 @@ impl ProtocolSim {
                     ));
                 }
             }
-            prev_current = Some(update.current_hash);
+            prev_current = Some(update.content_hash);
             expected_seq = update.sequence_number.saturating_add(1);
         }
         v

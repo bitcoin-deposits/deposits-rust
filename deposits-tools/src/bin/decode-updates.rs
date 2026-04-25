@@ -61,7 +61,7 @@ fn print_update(idx: usize, update: &SignedLedgerUpdate) {
     println!("      operator: {}", format_pubkey(&update.operator_id));
     println!("      ledger_id: {}", hex::encode(update.ledger_id));
     println!("      prev_hash: {}", format_hash(&update.previous_hash));
-    println!("      curr_hash: {}", format_hash(&update.current_hash));
+    println!("      curr_hash: {}", format_hash(&update.content_hash));
     if update.block_height != 0 {
         println!(
             "      block: {} ({})",
@@ -128,16 +128,16 @@ fn decode_and_print(data: &[u8], record_num: usize) {
                         println!(
                             "  {} -> {}",
                             format_hash(&update.previous_hash),
-                            format_hash(&update.current_hash)
+                            format_hash(&update.content_hash)
                         );
                     } else {
                         let prev = &log.updates[idx - 1];
-                        let chain_ok = update.previous_hash == prev.current_hash;
+                        let chain_ok = update.previous_hash == prev.content_hash;
                         let status = if chain_ok { "OK" } else { "BROKEN!" };
                         println!(
                             "  {} -> {} [{}]",
                             format_hash(&update.previous_hash),
-                            format_hash(&update.current_hash),
+                            format_hash(&update.content_hash),
                             status
                         );
                     }

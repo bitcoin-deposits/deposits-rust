@@ -119,7 +119,7 @@ impl Node {
         let quorum_expiry = expiry_block;
 
         // Compute ledger hash
-        let ledger_hash = our_latest.current_hash;
+        let ledger_hash = our_latest.content_hash;
 
         // Build Taproot reserves with default config
         let tapscript_builder =
@@ -211,13 +211,13 @@ impl Node {
         let sequence = our_latest.sequence_number + 1;
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&our_latest.current_hash);
+        hash_input.extend_from_slice(&our_latest.content_hash);
         hash_input.extend_from_slice(&message_bytes);
         let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
         let update_msg = format!(
             "deposits:ledger:{}:{}:{}",
-            hex::encode(our_latest.current_hash),
+            hex::encode(our_latest.content_hash),
             sequence,
             hex::encode(new_hash)
         );
@@ -243,8 +243,8 @@ impl Node {
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
-            previous_hash: our_latest.current_hash,
-            current_hash: new_hash,
+            previous_hash: our_latest.content_hash,
+            content_hash: new_hash,
             block_height: current_block,
             block_hash,
         };
@@ -359,13 +359,13 @@ impl Node {
             let sequence = our_latest.sequence_number + 1;
             let mut hash_input = Vec::new();
             hash_input.extend_from_slice(&sequence.to_le_bytes());
-            hash_input.extend_from_slice(&our_latest.current_hash);
+            hash_input.extend_from_slice(&our_latest.content_hash);
             hash_input.extend_from_slice(&message_bytes);
             let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
             let update_msg = format!(
                 "deposits:ledger:{}:{}:{}",
-                hex::encode(our_latest.current_hash),
+                hex::encode(our_latest.content_hash),
                 sequence,
                 hex::encode(new_hash)
             );
@@ -390,8 +390,8 @@ impl Node {
                 operator_id: our_pubkey,
                 ledger_id: ledger_id_bytes,
                 sequence_number: sequence,
-                previous_hash: our_latest.current_hash,
-                current_hash: new_hash,
+                previous_hash: our_latest.content_hash,
+                content_hash: new_hash,
                 block_height: current_block,
                 block_hash,
             };

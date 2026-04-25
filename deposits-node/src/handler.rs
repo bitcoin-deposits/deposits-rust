@@ -114,7 +114,7 @@ pub struct DepositsHandler {
     appends_since_compaction: Mutex<HashMap<String, usize>>,
 
     /// Content-addressed event store for ledger sync.
-    /// Events are indexed by current_hash with memoized validation.
+    /// Events are indexed by content_hash with memoized validation.
     pub event_store: Mutex<EventStore>,
 }
 
@@ -525,7 +525,7 @@ impl DepositsHandler {
 
         if let Some(last_update) = updates.last() {
             ledger_state.sequence = last_update.sequence_number;
-            // Use chain_hash (SHA256(current_hash || operator_signature)) so the next
+            // Use chain_hash (SHA256(content_hash || operator_signature)) so the next
             // append_operation sets prev_hash = chain_hash, matching the protocol spec.
             ledger_state.chain_tip_hash = last_update.chain_hash();
         }
@@ -935,7 +935,7 @@ impl DepositsHandler {
         ledger
     }
 
-    /// Read the chain tip (last sequence_number and current_hash) from the JSONL file on disk.
+    /// Read the chain tip (last sequence_number and content_hash) from the JSONL file on disk.
     ///
     /// Returns None if the file doesn't exist or has no Update lines.
     pub fn read_disk_chain_tip(&self, ledger_id: &str) -> Option<(u64, [u8; 32])> {
@@ -956,11 +956,11 @@ impl DepositsHandler {
                 match best_seq {
                     None => {
                         best_seq = Some(u.sequence_number);
-                        best_hash = u.current_hash;
+                        best_hash = u.content_hash;
                     }
                     Some(s) if u.sequence_number > s => {
                         best_seq = Some(u.sequence_number);
-                        best_hash = u.current_hash;
+                        best_hash = u.content_hash;
                     }
                     _ => {}
                 }
@@ -1344,7 +1344,7 @@ impl DepositsHandler {
             let mut sig_input = Vec::new();
             sig_input.extend_from_slice(&update.sequence_number.to_le_bytes());
             sig_input.extend_from_slice(&update.previous_hash);
-            sig_input.extend_from_slice(&update.current_hash);
+            sig_input.extend_from_slice(&update.content_hash);
             sig_input.extend_from_slice(&update.message);
 
             let hash = sha256::Hash::hash(&sig_input);
@@ -1357,7 +1357,7 @@ impl DepositsHandler {
             tracing::debug!("Signed update seq={}", update.sequence_number);
         }
 
-        // Finalize state.hash = chain_hash = SHA256(current_hash || operator_signature)
+        // Finalize state.hash = chain_hash = SHA256(content_hash || operator_signature)
         // so the next append_operation uses chain_hash as prev_hash (per protocol spec).
         ledger.finalize_chain_hash();
     }

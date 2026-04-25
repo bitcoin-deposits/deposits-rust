@@ -552,7 +552,7 @@ fn invariant_s2_hash_chain_integrity() {
         .ledger
         .history
         .iter()
-        .map(|u| u.current_hash)
+        .map(|u| u.content_hash)
         .collect();
 
     // Each hash should be different
@@ -565,12 +565,12 @@ fn invariant_s2_hash_chain_integrity() {
         }
     }
 
-    // Hash chain links: each previous_hash == prior current_hash
+    // Hash chain links: each previous_hash == prior content_hash
     for i in 1..net.op("alice").ledger.history.len() {
         let prev = &net.op("alice").ledger.history[i - 1];
         let curr = &net.op("alice").ledger.history[i];
         // previous_hash links to the prior update's hash
-        // (the exact linkage depends on whether it's current_hash or chain_hash)
+        // (the exact linkage depends on whether it's content_hash or chain_hash)
         assert_ne!(
             curr.previous_hash, [0u8; 32],
             "S2: non-genesis update must have non-zero previous_hash"

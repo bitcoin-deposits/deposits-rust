@@ -433,7 +433,7 @@ fn signed_ledger_update_compute_hash_deterministic() {
         ledger_id: [0xaa; 32],
         sequence_number: 0,
         previous_hash: [0u8; 32],
-        current_hash: [0u8; 32], // will be computed
+        content_hash: [0u8; 32], // will be computed
         block_height: 0,
         block_hash: [0u8; 32],
         cosign_signature: [0u8; 64],
@@ -460,7 +460,7 @@ fn signed_ledger_update_hash_changes_with_sequence() {
         ledger_id: [0xaa; 32],
         sequence_number: 0,
         previous_hash: [0u8; 32],
-        current_hash: [0u8; 32],
+        content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
         cosign_signature: [0u8; 64],
@@ -490,7 +490,7 @@ fn signed_ledger_update_hash_changes_with_previous_hash() {
         ledger_id: [0xaa; 32],
         sequence_number: 5,
         previous_hash: [0u8; 32],
-        current_hash: [0u8; 32],
+        content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
         cosign_signature: [0u8; 64],
@@ -520,7 +520,7 @@ fn signed_ledger_update_hash_changes_with_message() {
         ledger_id: [0xaa; 32],
         sequence_number: 0,
         previous_hash: [0u8; 32],
-        current_hash: [0u8; 32],
+        content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
         cosign_signature: [0u8; 64],
@@ -555,7 +555,7 @@ fn signed_ledger_update_tlv_round_trip() {
         ledger_id: [0xbb; 32],
         sequence_number: 7,
         previous_hash: [0x11; 32],
-        current_hash: [0u8; 32],
+        content_hash: [0u8; 32],
         block_height: 800_000,
         block_hash: [0x22; 32],
         cosign_signature: [0x33; 64],
@@ -564,7 +564,7 @@ fn signed_ledger_update_tlv_round_trip() {
         member_ledger_hash: None,
         cosignatures: vec![],
     };
-    update.current_hash = update.compute_hash();
+    update.content_hash = update.compute_hash();
 
     let encoded = update.tlv_encode();
     assert!(!encoded.is_empty());
@@ -575,7 +575,7 @@ fn signed_ledger_update_tlv_round_trip() {
     assert_eq!(decoded.ledger_id, update.ledger_id);
     assert_eq!(decoded.sequence_number, update.sequence_number);
     assert_eq!(decoded.previous_hash, update.previous_hash);
-    assert_eq!(decoded.current_hash, update.current_hash);
+    assert_eq!(decoded.content_hash, update.content_hash);
     assert_eq!(decoded.block_height, update.block_height);
     assert_eq!(decoded.operator_signature, update.operator_signature);
     assert_eq!(decoded.cosign_signature, update.cosign_signature);
@@ -719,7 +719,7 @@ fn hash_chain_links_correctly() {
             ledger_id: [0xaa; 32],
             sequence_number: seq,
             previous_hash: prev_hash,
-            current_hash: [0u8; 32],
+            content_hash: [0u8; 32],
             block_height: 0,
             block_hash: [0u8; 32],
             cosign_signature: [0u8; 64],
@@ -728,18 +728,18 @@ fn hash_chain_links_correctly() {
             member_ledger_hash: None,
             cosignatures: vec![],
         };
-        update.current_hash = update.compute_hash();
-        prev_hash = update.current_hash;
+        update.content_hash = update.compute_hash();
+        prev_hash = update.content_hash;
         updates.push(update);
     }
 
     // Verify chain linkage
     assert_eq!(updates[0].previous_hash, [0u8; 32]); // genesis
-    assert_eq!(updates[1].previous_hash, updates[0].current_hash);
-    assert_eq!(updates[2].previous_hash, updates[1].current_hash);
+    assert_eq!(updates[1].previous_hash, updates[0].content_hash);
+    assert_eq!(updates[2].previous_hash, updates[1].content_hash);
 
     // All hashes are unique
-    let hashes: Vec<_> = updates.iter().map(|u| u.current_hash).collect();
+    let hashes: Vec<_> = updates.iter().map(|u| u.content_hash).collect();
     assert_ne!(hashes[0], hashes[1]);
     assert_ne!(hashes[1], hashes[2]);
     assert_ne!(hashes[0], hashes[2]);
@@ -756,7 +756,7 @@ fn hash_chain_detects_tampering() {
         ledger_id: [0xaa; 32],
         sequence_number: 0,
         previous_hash: [0u8; 32],
-        current_hash: [0u8; 32],
+        content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
         cosign_signature: [0u8; 64],
@@ -765,7 +765,7 @@ fn hash_chain_detects_tampering() {
         member_ledger_hash: None,
         cosignatures: vec![],
     };
-    update0.current_hash = update0.compute_hash();
+    update0.content_hash = update0.compute_hash();
 
     let mut update1 = SignedLedgerUpdate {
         message: vec![1],
@@ -773,8 +773,8 @@ fn hash_chain_detects_tampering() {
         operator_id: test_pubkey(),
         ledger_id: [0xaa; 32],
         sequence_number: 1,
-        previous_hash: update0.current_hash,
-        current_hash: [0u8; 32],
+        previous_hash: update0.content_hash,
+        content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
         cosign_signature: [0u8; 64],
@@ -783,17 +783,17 @@ fn hash_chain_detects_tampering() {
         member_ledger_hash: None,
         cosignatures: vec![],
     };
-    update1.current_hash = update1.compute_hash();
+    update1.content_hash = update1.compute_hash();
 
     // Tamper with update0's message after the fact
     let tampered_message = vec![99];
     let mut tampered_update0 = update0.clone();
     tampered_update0.message = tampered_message;
 
-    // The recomputed hash won't match the stored current_hash
+    // The recomputed hash won't match the stored content_hash
     let recomputed = tampered_update0.compute_hash();
     assert_ne!(
-        recomputed, tampered_update0.current_hash,
+        recomputed, tampered_update0.content_hash,
         "tampered update should have mismatched hash"
     );
 

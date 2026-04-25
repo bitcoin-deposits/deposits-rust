@@ -13,7 +13,7 @@ impl Node {
 
     /// they send us a co-sign request. We validate the update and return our ECDSA signature.
     ///
-    /// The signature covers: cosign_data || our_ledger_current_hash
+    /// The signature covers: cosign_data || our_ledger_content_hash
     /// This binds the co-signature to the current state of our own ledger.
     pub(crate) async fn process_cosign_request(
         &self,
@@ -205,9 +205,9 @@ impl Node {
             }
         };
 
-        let current_hash_hex = match request
+        let content_hash_hex = match request
             .params
-            .get("current_hash_hex")
+            .get("content_hash_hex")
             .and_then(|v| v.as_str())
         {
             Some(hex) => hex.to_string(),
@@ -215,7 +215,7 @@ impl Node {
                 return (
                     false,
                     None,
-                    Some("Missing current_hash_hex parameter".to_string()),
+                    Some("Missing content_hash_hex parameter".to_string()),
                 )
             }
         };
@@ -227,7 +227,7 @@ impl Node {
         };
 
         // Decode current hash (used for validation logging)
-        let _current_hash: [u8; 32] = match hex::decode(&current_hash_hex) {
+        let _content_hash: [u8; 32] = match hex::decode(&content_hash_hex) {
             Ok(bytes) if bytes.len() == 32 => {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&bytes);
@@ -237,14 +237,14 @@ impl Node {
                 return (
                     false,
                     None,
-                    Some("current_hash_hex must be 32 bytes".to_string()),
+                    Some("content_hash_hex must be 32 bytes".to_string()),
                 )
             }
             Err(e) => {
                 return (
                     false,
                     None,
-                    Some(format!("Invalid current_hash_hex: {}", e)),
+                    Some(format!("Invalid content_hash_hex: {}", e)),
                 )
             }
         };
@@ -336,7 +336,7 @@ impl Node {
             }
 
             if let Some(last_update) = ledger.history.last() {
-                let prev_hash = last_update.current_hash;
+                let prev_hash = last_update.content_hash;
                 tracing::trace!(
                     "Validating co-sign for seq {} (prev_hash: {}...)",
                     sequence_number,
@@ -439,7 +439,7 @@ impl Node {
                     let hash = ledger
                         .history
                         .last()
-                        .map(|u| u.current_hash)
+                        .map(|u| u.content_hash)
                         .unwrap_or([0u8; 32]);
                     tracing::trace!(
                         "Member ledger {} hash {}...",
@@ -844,7 +844,7 @@ impl Node {
                         ledger
                             .history
                             .last()
-                            .map(|u| u.current_hash)
+                            .map(|u| u.content_hash)
                             .unwrap_or([0u8; 32]),
                     );
                     break;

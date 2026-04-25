@@ -69,7 +69,7 @@ pub struct LedgerUpdate {
     /// Hash of the previous update.
     pub previous_hash: [u8; 32],
     /// Hash of this update.
-    pub current_hash: [u8; 32],
+    pub content_hash: [u8; 32],
 }
 
 impl LedgerUpdate {
@@ -79,9 +79,9 @@ impl LedgerUpdate {
             sequence_number,
             operation,
             previous_hash,
-            current_hash: [0u8; 32],
+            content_hash: [0u8; 32],
         };
-        update.current_hash = update.compute_hash();
+        update.content_hash = update.compute_hash();
         update
     }
 
@@ -101,7 +101,7 @@ impl LedgerUpdate {
 
     /// Verify the hash chain.
     pub fn verify_hash(&self) -> bool {
-        self.compute_hash() == self.current_hash
+        self.compute_hash() == self.content_hash
     }
 }
 
@@ -377,7 +377,7 @@ impl Ledger {
                 let tip_hash = self
                     .history
                     .last()
-                    .map(|u| u.current_hash)
+                    .map(|u| u.content_hash)
                     .unwrap_or([0u8; 32]);
                 if update.previous_hash != tip_hash {
                     return Err(DepositsError::ProtocolViolation {
@@ -493,7 +493,7 @@ impl Ledger {
 
             if update.sequence_number == next_seq {
                 // Expected next update — previous_hash must match our tip's chain_hash
-                // chain_hash = SHA256(current_hash || operator_signature)
+                // chain_hash = SHA256(content_hash || operator_signature)
                 let tip_hash = self
                     .history
                     .last()
@@ -738,7 +738,7 @@ impl Ledger {
     /// Get the chain hash of the last update (tail hash).
     /// Returns zero hash if no updates exist yet.
     ///
-    /// chain_hash = SHA256(current_hash || operator_signature), which is
+    /// chain_hash = SHA256(content_hash || operator_signature), which is
     /// the value the next update must use as its previous_hash.
     pub fn tail_hash(&self) -> [u8; 32] {
         self.history
@@ -765,7 +765,7 @@ impl Ledger {
             return Some(0);
         }
         for update in &self.history {
-            if &update.current_hash == target_hash {
+            if &update.content_hash == target_hash {
                 return Some(update.sequence_number);
             }
         }
@@ -897,7 +897,7 @@ impl Ledger {
 
         // Update sequence and hash
         self.state.sequence = update.sequence_number;
-        self.state.chain_tip_hash = update.current_hash;
+        self.state.chain_tip_hash = update.content_hash;
 
         Ok(update)
     }
@@ -991,7 +991,7 @@ impl Ledger {
             ledger_id: self.state.ledger_id,
             sequence_number: sequence,
             previous_hash: prev_hash,
-            current_hash: new_hash,
+            content_hash: new_hash,
             block_height,
             block_hash,
         };
@@ -999,7 +999,7 @@ impl Ledger {
         // Apply state changes
         self.apply_state_changes(&operation)?;
 
-        // Update state.hash to current_hash for now — will be updated to
+        // Update state.hash to content_hash for now — will be updated to
         // chain_hash() after operator signing via finalize_chain_hash()
         self.state.chain_tip_hash = new_hash;
 
@@ -1085,7 +1085,7 @@ impl Ledger {
             ledger_id: self.state.ledger_id,
             sequence_number: sequence,
             previous_hash: prev_hash,
-            current_hash: new_hash,
+            content_hash: new_hash,
             block_height,
             block_hash,
         };
@@ -1157,11 +1157,11 @@ impl Ledger {
         }
     }
 
-    /// Apply co-signer info and recompute current_hash.
+    /// Apply co-signer info and recompute content_hash.
     ///
     /// Sets member_ledger_hash, cosigner_pubkey, and co-signer's signature, then
-    /// recomputes current_hash to include all three. Must be called BEFORE
-    /// operator signing, since the operator signs current_hash.
+    /// recomputes content_hash to include all three. Must be called BEFORE
+    /// operator signing, since the operator signs content_hash.
     pub fn apply_cosigner_hash(
         &mut self,
         member_ledger_hash: [u8; 32],
@@ -1172,10 +1172,10 @@ impl Ledger {
             update.member_ledger_hash = Some(member_ledger_hash);
             update.cosigner_pubkey = Some(cosigner_pubkey);
             update.cosign_signature = cosign_signature;
-            // Recompute current_hash: includes message + member_ledger_hash + cosign_signature
-            update.current_hash = update.compute_hash();
-            // state.hash tracks current_hash until finalize_chain_hash
-            self.state.chain_tip_hash = update.current_hash;
+            // Recompute content_hash: includes message + member_ledger_hash + cosign_signature
+            update.content_hash = update.compute_hash();
+            // state.hash tracks content_hash until finalize_chain_hash
+            self.state.chain_tip_hash = update.content_hash;
         }
     }
 
@@ -1194,15 +1194,15 @@ impl Ledger {
             update.cosigner_pubkey = None;
             update.member_ledger_hash = None;
             update.cosign_signature = [0u8; 64];
-            // Recompute current_hash to include all cosig entries
-            update.current_hash = update.compute_hash();
-            self.state.chain_tip_hash = update.current_hash;
+            // Recompute content_hash to include all cosig entries
+            update.content_hash = update.compute_hash();
+            self.state.chain_tip_hash = update.content_hash;
         }
     }
 
     /// Finalize state.hash to chain_hash after operator signing.
     ///
-    /// chain_hash = SHA256(current_hash || operator_signature)
+    /// chain_hash = SHA256(content_hash || operator_signature)
     /// This becomes the next update's previous_hash.
     pub fn finalize_chain_hash(&mut self) {
         if let Some(update) = self.history.last() {
@@ -1430,18 +1430,18 @@ impl Ledger {
     pub fn reconstruct(initial_state: LedgerState, updates: Vec<SignedLedgerUpdate>) -> Self {
         // Validate and apply each update to reconstruct the state chain
         // The stored state should already be the final state, but we verify continuity
-        let mut current_hash = initial_state.chain_tip_hash;
+        let mut content_hash = initial_state.chain_tip_hash;
 
         for update in &updates {
             // Verify this update continues the chain
-            if update.previous_hash != current_hash {
+            if update.previous_hash != content_hash {
                 tracing::warn!(
                     "Update {} has mismatched previous_hash, chain may be corrupted",
                     update.sequence_number
                 );
             }
-            // Update current_hash to this update's hash for next iteration
-            current_hash = update.current_hash;
+            // Update content_hash to this update's hash for next iteration
+            content_hash = update.content_hash;
         }
 
         // Return ledger with the final state and all history
@@ -1541,7 +1541,7 @@ impl LedgerValidator {
 
             // Next update's `previous_hash` references this update's
             // `chain_hash()` (which folds in `operator_signature`), NOT
-            // `current_hash`. See `commit_staged`.
+            // `content_hash`. See `commit_staged`.
             expected_previous_hash = update.chain_hash();
         }
 
@@ -1641,7 +1641,7 @@ impl LedgerValidator {
 
         // Search through history for matching hash
         for update in &ledger.history {
-            if update.current_hash == *target_hash {
+            if update.content_hash == *target_hash {
                 return Some(update.sequence_number);
             }
         }
@@ -1936,7 +1936,7 @@ impl LedgerManager {
 
         // Apply the genesis operation
         let update = ledger.apply_operation(&genesis_operation)?;
-        let genesis_hash = update.current_hash;
+        let genesis_hash = update.content_hash;
 
         Ok((Self::new(ledger), genesis_hash))
     }
@@ -1977,7 +1977,7 @@ impl LedgerManager {
 
         // Apply the credit operation
         let credit_update = self.ledger.apply_operation(&credit_operation)?;
-        hashes.push(credit_update.current_hash);
+        hashes.push(credit_update.content_hash);
 
         Ok(hashes)
     }

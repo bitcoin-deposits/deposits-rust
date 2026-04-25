@@ -1281,7 +1281,7 @@ impl NostrTransport {
         // - `n`: sequence number (single-letter, relay-filterable)
         // - `t`: operation type discriminant (single-letter, relay-filterable)
         // - `i`: affected deposit IDs (single-letter, relay-filterable)
-        // Hash chain data (prev_hash, current_hash) is in the TLV content.
+        // Hash chain data (prev_hash, content_hash) is in the TLV content.
         let mut builder = EventBuilder::new(Kind::Custom(KIND_LEDGER_UPDATE), &content)
             .tag(Tag::custom(
                 TagKind::SingleLetter(TAG_LEDGER_ID),
@@ -1337,7 +1337,7 @@ impl NostrTransport {
             "Broadcast ledger update: ledger={}, seq={}, hash={}",
             ledger_id,
             update.sequence_number,
-            &hex::encode(update.current_hash)[..16]
+            &hex::encode(update.content_hash)[..16]
         );
 
         Ok(event_id)
@@ -3808,7 +3808,7 @@ impl NostrTransport {
             "Received ledger update: ledger={}, seq={}, hash={}",
             &ledger_id[..16],
             update.sequence_number,
-            &hex::encode(update.current_hash)[..16]
+            &hex::encode(update.content_hash)[..16]
         );
 
         Ok(InboundLedgerUpdate {

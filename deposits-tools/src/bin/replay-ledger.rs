@@ -530,12 +530,12 @@ fn replay_chain(
 
         // Validate hash
         let computed = update.compute_hash();
-        if computed != update.current_hash {
+        if computed != update.content_hash {
             errors.push(format!(
                 "seq={}: hash mismatch (computed={} stored={})",
                 update.sequence_number,
                 short_hex(&computed),
-                short_hex(&update.current_hash)
+                short_hex(&update.content_hash)
             ));
         }
 
@@ -1174,7 +1174,7 @@ async fn run_nostr(
     // Sort by sequence, dedup by content hash (keep different chains)
     updates.sort_by_key(|u| u.sequence_number);
     updates.dedup_by(|a, b| {
-        a.sequence_number == b.sequence_number && a.current_hash == b.current_hash
+        a.sequence_number == b.sequence_number && a.content_hash == b.content_hash
     });
 
     if graph {
@@ -1736,7 +1736,7 @@ fn decode_update(update: &SignedLedgerUpdate) {
 
     // Derived values
     println!("\n{}", col.bold("--- Derived ---"));
-    println!("  current_hash:  {}", hex::encode(update.current_hash));
+    println!("  content_hash:  {}", hex::encode(update.content_hash));
     println!("  chain_hash:    {}", hex::encode(update.chain_hash()));
 
     if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
@@ -1826,7 +1826,7 @@ fn dump_update_json(update: &SignedLedgerUpdate) -> String {
         "block_height": update.block_height,
         "block_hash": hex::encode(update.block_hash),
         "previous_hash": hex::encode(update.previous_hash),
-        "current_hash": hex::encode(update.current_hash),
+        "content_hash": hex::encode(update.content_hash),
         "chain_hash": hex::encode(update.chain_hash()),
         "cosign_signature": hex::encode(update.cosign_signature),
         "operator_signature": hex::encode(update.operator_signature),
@@ -2330,8 +2330,8 @@ fn decode_lines(update: &SignedLedgerUpdate) -> Vec<Line<'static>> {
     lines.push(Line::raw(""));
     lines.push(Line::styled("--- Derived ---".to_string(), bold_s));
     lines.push(Line::raw(format!(
-        "  current_hash:  {}",
-        hex::encode(update.current_hash)
+        "  content_hash:  {}",
+        hex::encode(update.content_hash)
     )));
     lines.push(Line::raw(format!(
         "  chain_hash:    {}",

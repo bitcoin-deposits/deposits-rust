@@ -1,6 +1,6 @@
 //! Content-addressed event store for ledger sync.
 //!
-//! Events are the durable unit — stored by `current_hash`, validated via
+//! Events are the durable unit — stored by `content_hash`, validated via
 //! memoized hash-chain verification, and gaps are normal/recoverable.
 //! Ledger state is derived from validated chains.
 
@@ -36,15 +36,15 @@ type TipKey = ([u8; 32], [u8; 33]);
 
 /// Content-addressed event store.
 ///
-/// Primary key is `current_hash`. Secondary index maps
-/// `(ledger_id, operator_id, seq)` to `current_hash`.
+/// Primary key is `content_hash`. Secondary index maps
+/// `(ledger_id, operator_id, seq)` to `content_hash`.
 /// Validation is memoized — O(1) steady state after initial chain walk.
 pub struct EventStore {
-    /// Primary index: current_hash → stored event.
+    /// Primary index: content_hash → stored event.
     events: HashMap<[u8; 32], StoredEvent>,
-    /// Secondary index: (ledger_id, operator_id_bytes, seq) → current_hash.
+    /// Secondary index: (ledger_id, operator_id_bytes, seq) → content_hash.
     by_seq: HashMap<SeqKey, [u8; 32]>,
-    /// Reverse index: previous_hash → list of child current_hashes.
+    /// Reverse index: previous_hash → list of child content_hashes.
     /// Used by propagate_forward for O(1) child lookup instead of O(N) full scan.
     by_parent: HashMap<[u8; 32], Vec<[u8; 32]>>,
     /// Tip: (ledger_id, operator_id_bytes) → highest validated sequence number.
@@ -109,7 +109,7 @@ impl EventStore {
     /// 2. Check parent's validity to determine this event's validity
     /// 3. If marked `Valid`, propagate forward to any waiting children
     pub fn insert(&mut self, update: SignedLedgerUpdate) -> bool {
-        let hash = update.current_hash;
+        let hash = update.content_hash;
 
         // Duplicate check — already stored
         if self.events.contains_key(&hash) {
@@ -150,7 +150,7 @@ impl EventStore {
         true
     }
 
-    /// Primary lookup by current_hash.
+    /// Primary lookup by content_hash.
     pub fn get(&self, hash: &[u8; 32]) -> Option<&StoredEvent> {
         self.events.get(hash)
     }
@@ -301,8 +301,8 @@ impl EventStore {
             if update.previous_hash != [0u8; 32] {
                 return Validity::Invalid;
             }
-            // Verify hash: SHA256(seq || prev_hash || message) == current_hash
-            if update.compute_hash() == update.current_hash {
+            // Verify hash: SHA256(seq || prev_hash || message) == content_hash
+            if update.compute_hash() == update.content_hash {
                 return Validity::Valid;
             } else {
                 return Validity::Invalid;
@@ -314,7 +314,7 @@ impl EventStore {
             Some(parent) => match parent.validity {
                 Validity::Valid => {
                     // Parent valid — verify our hash
-                    if update.compute_hash() == update.current_hash {
+                    if update.compute_hash() == update.content_hash {
                         Validity::Valid
                     } else {
                         Validity::Invalid
@@ -395,7 +395,7 @@ impl EventStore {
             // Re-validate the child
             let valid = {
                 let child = &self.events[&child_hash];
-                child.update.compute_hash() == child.update.current_hash
+                child.update.compute_hash() == child.update.content_hash
             };
 
             let new_validity = if valid {
@@ -459,7 +459,7 @@ mod tests {
         prev_hash: [u8; 32],
         message: &[u8],
     ) -> SignedLedgerUpdate {
-        let current_hash = compute_hash(seq, &prev_hash, message);
+        let content_hash = compute_hash(seq, &prev_hash, message);
         SignedLedgerUpdate {
             message: message.to_vec(),
             message_type: 0x0001,
@@ -467,7 +467,7 @@ mod tests {
             ledger_id,
             sequence_number: seq,
             previous_hash: prev_hash,
-            current_hash,
+            content_hash,
             block_height: 100 + seq as u32,
             block_hash: [0u8; 32],
             cosign_signature: [0u8; 64],
@@ -490,7 +490,7 @@ mod tests {
         for seq in 0..count {
             let msg = format!("lid-{:02x}-msg-{}", ledger_id[0], seq).into_bytes();
             let update = make_update(ledger_id, operator_id, seq, prev, &msg);
-            prev = update.current_hash;
+            prev = update.content_hash;
             chain.push(update);
         }
         chain
@@ -509,8 +509,8 @@ mod tests {
         assert_eq!(store.len(), 3);
 
         // Get by hash
-        assert!(store.get(&chain[0].current_hash).is_some());
-        assert!(store.get(&chain[2].current_hash).is_some());
+        assert!(store.get(&chain[0].content_hash).is_some());
+        assert!(store.get(&chain[2].content_hash).is_some());
 
         // Get by seq
         assert!(store.get_by_seq(&lid, &pk, 0).is_some());
@@ -541,7 +541,7 @@ mod tests {
 
         // All should be Valid
         for u in &chain {
-            let stored = store.get(&u.current_hash).unwrap();
+            let stored = store.get(&u.content_hash).unwrap();
             assert_eq!(
                 stored.validity,
                 Validity::Valid,
@@ -566,39 +566,39 @@ mod tests {
         store.insert(chain[2].clone());
         store.insert(chain[3].clone());
         assert_eq!(
-            store.get(&chain[2].current_hash).unwrap().validity,
+            store.get(&chain[2].content_hash).unwrap().validity,
             Validity::Unknown
         );
         assert_eq!(
-            store.get(&chain[3].current_hash).unwrap().validity,
+            store.get(&chain[3].content_hash).unwrap().validity,
             Validity::Unknown
         );
 
         // Insert seq 0 — valid (root)
         store.insert(chain[0].clone());
         assert_eq!(
-            store.get(&chain[0].current_hash).unwrap().validity,
+            store.get(&chain[0].content_hash).unwrap().validity,
             Validity::Valid
         );
 
         // seq 1 still missing, so 2 and 3 remain Unknown
         assert_eq!(
-            store.get(&chain[2].current_hash).unwrap().validity,
+            store.get(&chain[2].content_hash).unwrap().validity,
             Validity::Unknown
         );
 
         // Insert seq 1 — should trigger forward propagation to 2 and 3
         store.insert(chain[1].clone());
         assert_eq!(
-            store.get(&chain[1].current_hash).unwrap().validity,
+            store.get(&chain[1].content_hash).unwrap().validity,
             Validity::Valid
         );
         assert_eq!(
-            store.get(&chain[2].current_hash).unwrap().validity,
+            store.get(&chain[2].content_hash).unwrap().validity,
             Validity::Valid
         );
         assert_eq!(
-            store.get(&chain[3].current_hash).unwrap().validity,
+            store.get(&chain[3].content_hash).unwrap().validity,
             Validity::Valid
         );
 
@@ -614,13 +614,13 @@ mod tests {
         let mut store = EventStore::new();
         store.insert(chain[0].clone());
 
-        // Create a tampered update — wrong current_hash
+        // Create a tampered update — wrong content_hash
         let mut bad = chain[1].clone();
-        bad.current_hash = [0xFF; 32]; // wrong hash
+        bad.content_hash = [0xFF; 32]; // wrong hash
         store.insert(bad.clone());
 
         assert_eq!(
-            store.get(&bad.current_hash).unwrap().validity,
+            store.get(&bad.content_hash).unwrap().validity,
             Validity::Invalid
         );
         assert_eq!(store.validated_tip(&lid, &pk), Some(0)); // only seq 0
@@ -639,19 +639,19 @@ mod tests {
 
         // Tamper seq 1
         let mut bad1 = chain[1].clone();
-        bad1.current_hash = [0xFF; 32];
+        bad1.content_hash = [0xFF; 32];
         store.insert(bad1.clone());
 
         // Now insert something that chains off the bad hash
-        let bad_child = make_update(lid, pk, 2, bad1.current_hash, b"child-of-bad");
+        let bad_child = make_update(lid, pk, 2, bad1.content_hash, b"child-of-bad");
         store.insert(bad_child.clone());
 
         assert_eq!(
-            store.get(&bad1.current_hash).unwrap().validity,
+            store.get(&bad1.content_hash).unwrap().validity,
             Validity::Invalid
         );
         assert_eq!(
-            store.get(&bad_child.current_hash).unwrap().validity,
+            store.get(&bad_child.content_hash).unwrap().validity,
             Validity::Invalid
         );
     }
@@ -738,12 +738,12 @@ mod tests {
         let mut update = make_update(lid, pk, 0, [0u8; 32], b"genesis");
         update.previous_hash = [0x01; 32];
         // Recompute hash with wrong prev
-        update.current_hash = compute_hash(0, &update.previous_hash, &update.message);
+        update.content_hash = compute_hash(0, &update.previous_hash, &update.message);
 
         let mut store = EventStore::new();
         store.insert(update.clone());
         assert_eq!(
-            store.get(&update.current_hash).unwrap().validity,
+            store.get(&update.content_hash).unwrap().validity,
             Validity::Invalid
         );
     }
@@ -784,11 +784,11 @@ mod tests {
 
         // Oldest events (seq 0-4) should be gone
         for u in &chain[..5] {
-            assert!(store.get(&u.current_hash).is_none());
+            assert!(store.get(&u.content_hash).is_none());
         }
         // Newest events (seq 5-9) should remain
         for u in &chain[5..] {
-            assert!(store.get(&u.current_hash).is_some());
+            assert!(store.get(&u.content_hash).is_some());
         }
     }
 

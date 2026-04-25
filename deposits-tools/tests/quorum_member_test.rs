@@ -238,7 +238,7 @@ mod tests {
                 compensation_frequency_blocks: None,
             })
             .unwrap();
-        let hash_after_add = update.current_hash;
+        let hash_after_add = update.content_hash;
         assert_ne!(
             hash_before, hash_after_add,
             "Hash should change after QuorumAddMember"
@@ -258,7 +258,7 @@ mod tests {
                 collateral_amount: 50_000,
             })
             .unwrap();
-        let hash_after_begin = update.current_hash;
+        let hash_after_begin = update.content_hash;
         assert_ne!(
             hash_after_add, hash_after_begin,
             "Hash should change after QuorumBegin"
@@ -271,7 +271,7 @@ mod tests {
                 operator_signature: [0xBB; 64],
             })
             .unwrap();
-        let hash_after_remove = update.current_hash;
+        let hash_after_remove = update.content_hash;
         assert_ne!(
             hash_after_begin, hash_after_remove,
             "Hash should change after QuorumRemoveMember"

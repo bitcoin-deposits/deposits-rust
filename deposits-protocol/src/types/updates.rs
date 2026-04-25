@@ -56,7 +56,7 @@ pub struct SignedLedgerUpdate {
     pub previous_hash: [u8; 32],
     /// Hash of current ledger state after this update.
     #[serde(with = "serde_32")]
-    pub current_hash: [u8; 32],
+    pub content_hash: [u8; 32],
     /// Block height when this update was created.
     #[serde(default)]
     pub block_height: u32,
@@ -87,7 +87,7 @@ impl SignedLedgerUpdate {
     ///
     /// The hash and signing paths must always iterate this view — never
     /// `&self.cosignatures` directly — otherwise a writer that leaves the
-    /// Vec unsorted produces a different-but-otherwise-valid current_hash
+    /// Vec unsorted produces a different-but-otherwise-valid content_hash
     /// for the same logical content. That's signature malleability.
     fn sorted_cosignatures(&self) -> Vec<&CosignEntry> {
         let mut refs: Vec<&CosignEntry> = self.cosignatures.iter().collect();
@@ -99,7 +99,7 @@ impl SignedLedgerUpdate {
         refs
     }
 
-    /// Compute current_hash: commits to content, causal ordering, and co-signatures.
+    /// Compute content_hash: commits to content, causal ordering, and co-signatures.
     ///
     /// Multi-cosig format (cosignatures non-empty):
     ///   `SHA256(seq || prev_hash || message || for each sorted entry: member_hash || cosig)`
@@ -139,7 +139,7 @@ impl SignedLedgerUpdate {
 
     /// Compute the chain hash: the value used as previous_hash for the next update.
     ///
-    /// `SHA256(current_hash || operator_signature)`
+    /// `SHA256(content_hash || operator_signature)`
     ///
     /// This folds the operator's signature into the chain without circularity.
     /// The next update's previous_hash = this update's chain_hash().
@@ -147,7 +147,7 @@ impl SignedLedgerUpdate {
         use sha2::{Digest, Sha256};
 
         let mut hasher = Sha256::new();
-        hasher.update(self.current_hash);
+        hasher.update(self.content_hash);
         hasher.update(self.operator_signature);
 
         let result = hasher.finalize();
@@ -156,9 +156,9 @@ impl SignedLedgerUpdate {
         hash
     }
 
-    /// Verify current_hash matches the computed value.
+    /// Verify content_hash matches the computed value.
     pub fn verify_hash(&self) -> bool {
-        self.compute_hash() == self.current_hash
+        self.compute_hash() == self.content_hash
     }
 
     /// Get the ledger ID as a hex string.
@@ -174,7 +174,7 @@ impl SignedLedgerUpdate {
     ///
     /// Co-signer signs: sequence || prev_hash || message
     /// Matches TLV field order: identity → chain → payload.
-    /// Does NOT include current_hash — the hash is finalized after co-signing
+    /// Does NOT include content_hash — the hash is finalized after co-signing
     /// (it incorporates member_ledger_hash for causal ordering).
     /// Co-signer signs ONLY the content, NOT any operator signature.
     /// This prevents operator from tricking co-signer into endorsing invalid state.
@@ -451,7 +451,7 @@ pub struct QuorumJoinResponseMsg {
     pub last_sequence: u64,
     /// Current state hash.
     #[serde(with = "serde_32")]
-    pub current_hash: [u8; 32],
+    pub content_hash: [u8; 32],
     /// Rejection reason (if rejected).
     pub rejection_reason: Option<String>,
 }
@@ -610,7 +610,7 @@ impl SignedLedgerUpdateLog {
         }
 
         // Verify chain continuity. The chain links via `chain_hash()`,
-        // not `current_hash` — see docstring on `SignedLedgerUpdate::chain_hash`
+        // not `content_hash` — see docstring on `SignedLedgerUpdate::chain_hash`
         // and the canonical setter in `ledger::commit_staged`.
         let expected_prev = if let Some(last) = self.updates.last() {
             last.chain_hash()
@@ -636,7 +636,7 @@ impl SignedLedgerUpdateLog {
     /// Checks that:
     /// - Sequence numbers are contiguous starting from 0
     /// - Each update's previous_hash matches the prior update's chain_hash
-    ///   (which folds the operator signature into current_hash; see
+    ///   (which folds the operator signature into content_hash; see
     ///   `SignedLedgerUpdate::chain_hash`)
     pub fn verify_chain(&self) -> Result<(), crate::DepositsError> {
         let mut expected_prev = [0u8; 32];
@@ -673,7 +673,7 @@ impl SignedLedgerUpdateLog {
     pub fn tail_hash(&self) -> [u8; 32] {
         self.updates
             .last()
-            .map(|u| u.current_hash)
+            .map(|u| u.content_hash)
             .unwrap_or([0u8; 32])
     }
 
@@ -1127,7 +1127,7 @@ impl TlvEncode for SignedLedgerUpdate {
         // Note: TLV is sorted by tag number, so operator_signature (tag 20) appears
         // before cosignatures (tag 22) on wire. This is cosmetic — the operator signs
         // over operator_signing_data() which includes cosignatures in the hash input,
-        // and current_hash also incorporates all cosignatures. The tag ordering doesn't
+        // and content_hash also incorporates all cosignatures. The tag ordering doesn't
         // affect signature validity.
         builder = builder.bytes_field(
             signed_update_fields::OPERATOR_SIGNATURE,
@@ -1191,7 +1191,7 @@ impl TlvDecode for SignedLedgerUpdate {
             ledger_id: reader.read_bytes(signed_update_fields::LEDGER_ID)?,
             sequence_number: reader.read_u64(signed_update_fields::SEQUENCE_NUMBER)?,
             previous_hash: reader.read_bytes(signed_update_fields::PREVIOUS_HASH)?,
-            current_hash: [0u8; 32],
+            content_hash: [0u8; 32],
             block_height: reader
                 .read_u32_opt(signed_update_fields::BLOCK_HEIGHT)?
                 .unwrap_or(0),
@@ -1206,8 +1206,8 @@ impl TlvDecode for SignedLedgerUpdate {
             member_ledger_hash: reader.read_bytes_opt(signed_update_fields::MEMBER_LEDGER_HASH)?,
             cosignatures,
         };
-        // Derive current_hash from content (not stored on wire)
-        update.current_hash = update.compute_hash();
+        // Derive content_hash from content (not stored on wire)
+        update.content_hash = update.compute_hash();
         Ok(update)
     }
 }
@@ -1287,7 +1287,7 @@ mod tests {
             ledger_id: [0x12; 32],
             sequence_number: 1,
             previous_hash: [0u8; 32],
-            current_hash: [0u8; 32],
+            content_hash: [0u8; 32],
             block_height: 0,
             block_hash: [0u8; 32],
             cosign_signature: [0u8; 64],
@@ -1311,7 +1311,7 @@ mod tests {
             ledger_id: [0x12; 32],
             sequence_number: 1,
             previous_hash: [0u8; 32],
-            current_hash: [0u8; 32],
+            content_hash: [0u8; 32],
             block_height: 0,
             block_hash: [0u8; 32],
             cosign_signature: [0u8; 64],

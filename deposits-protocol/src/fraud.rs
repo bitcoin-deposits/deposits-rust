@@ -185,7 +185,7 @@ pub struct ProofEmbedding {
     pub ledger_id: String,
     /// Sequence number of the update containing the hash.
     pub sequence: u64,
-    /// The current_hash of that update.
+    /// The content_hash of that update.
     pub update_hash: String,
     /// Which field contains the proof hash (e.g., "transfer_nonce").
     pub field: String,
@@ -201,7 +201,7 @@ pub struct CausalLink {
     pub ledger_id: String,
     /// Sequence number.
     pub sequence: u64,
-    /// The current_hash of this update.
+    /// The content_hash of this update.
     pub update_hash: String,
     /// The member_ledger_hash included in the co-signature.
     /// This hash is from the previous link's ledger (or the embedding ledger).

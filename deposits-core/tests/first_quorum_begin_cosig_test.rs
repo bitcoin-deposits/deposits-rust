@@ -80,7 +80,7 @@ fn build_unsigned_update(operator_pk: PublicKey, op: &LedgerOperation) -> Signed
         ledger_id: [0x12; 32],
         sequence_number: 1,
         previous_hash: [0u8; 32],
-        current_hash: [0u8; 32],
+        content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
         cosign_signature: [0u8; 64],
@@ -89,7 +89,7 @@ fn build_unsigned_update(operator_pk: PublicKey, op: &LedgerOperation) -> Signed
         member_ledger_hash: None,
         cosignatures: Vec::new(),
     };
-    u.current_hash = u.compute_hash();
+    u.content_hash = u.compute_hash();
     u
 }
 
@@ -177,7 +177,7 @@ fn first_quorum_begin_with_insufficient_cosigs_is_rejected() {
     // Instead of the full validate path, we want to assert the rule at
     // step 6 fires. Simplest: inline the rule check.
     update.cosignatures = vec![make_cosig_entry(&update, &m1_sk, [0x77; 32])];
-    update.current_hash = update.compute_hash();
+    update.content_hash = update.compute_hash();
 
     // Directly exercise verify_cosign_signatures the way the validator does.
     let staged: Vec<PublicKey> = [m1_pk, m2_pk, m3_pk].to_vec();
@@ -204,7 +204,7 @@ fn first_quorum_begin_with_nonmember_cosig_is_rejected() {
         make_cosig_entry(&update, &m1_sk, [0xAA; 32]),
         make_cosig_entry(&update, &outsider_sk, [0xBB; 32]),
     ];
-    update.current_hash = update.compute_hash();
+    update.content_hash = update.compute_hash();
 
     let staged = vec![m1_pk, m2_pk];
     let threshold = 2;
@@ -234,7 +234,7 @@ fn first_quorum_begin_with_majority_cosigs_is_accepted() {
         make_cosig_entry(&update, &m1_sk, [0xAA; 32]),
         make_cosig_entry(&update, &m2_sk, [0xBB; 32]),
     ];
-    update.current_hash = update.compute_hash();
+    update.content_hash = update.compute_hash();
 
     let staged = vec![m1_pk, m2_pk, m3_pk];
     let threshold = staged.len() / 2 + 1; // 2

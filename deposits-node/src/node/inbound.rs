@@ -396,7 +396,7 @@ impl Node {
             // Check validity after insert
             let validity_str = {
                 let store = self.handler.event_store.lock().unwrap();
-                match store.get(&inbound.update.current_hash) {
+                match store.get(&inbound.update.content_hash) {
                     Some(stored) => match stored.validity {
                         deposits_core::event_store::Validity::Valid => "valid",
                         deposits_core::event_store::Validity::Invalid => "invalid",

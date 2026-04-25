@@ -210,7 +210,7 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
     updates.dedup_by(|a, b| {
         a.sequence_number == b.sequence_number
             && a.operator_id == b.operator_id
-            && a.current_hash == b.current_hash
+            && a.content_hash == b.content_hash
     });
 
     println!("  Found {} updates", updates.len());
@@ -250,19 +250,19 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
         }
 
         let computed_hash = update.compute_hash();
-        if computed_hash != update.current_hash {
+        if computed_hash != update.content_hash {
             violation_details = format!(
                 "Invalid hash at seq {}: computed {}..., stored {}...",
                 update.sequence_number,
                 hex::encode(&computed_hash[..4]),
-                hex::encode(&update.current_hash[..4])
+                hex::encode(&update.content_hash[..4])
             );
             violation_sequence = Some(update.sequence_number);
             break;
         }
 
         // Chain links via chain_hash() (folds in operator_signature),
-        // not current_hash. See `commit_staged` in deposits-core/src/ledger.rs
+        // not content_hash. See `commit_staged` in deposits-core/src/ledger.rs
         // which sets `state.chain_tip_hash = update.chain_hash()`.
         last_valid_hash = update.chain_hash();
         last_valid_sequence = update.sequence_number as i64;
@@ -428,7 +428,7 @@ pub async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::E
     updates.dedup_by(|a, b| {
         a.sequence_number == b.sequence_number
             && a.operator_id == b.operator_id
-            && a.current_hash == b.current_hash
+            && a.content_hash == b.content_hash
     });
 
     println!("  Found {} updates", updates.len());
@@ -457,7 +457,7 @@ pub async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::E
         }
 
         let computed_hash = update.compute_hash();
-        if computed_hash != update.current_hash {
+        if computed_hash != update.content_hash {
             found_violation = true;
             break;
         }
@@ -638,7 +638,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     updates.dedup_by(|a, b| {
         a.sequence_number == b.sequence_number
             && a.operator_id == b.operator_id
-            && a.current_hash == b.current_hash
+            && a.content_hash == b.content_hash
     });
 
     println!("  Found {} updates", updates.len());
@@ -659,7 +659,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
 
         if idx > 0 {
             let prev = &updates[idx - 1];
-            if update.previous_hash != prev.current_hash {
+            if update.previous_hash != prev.content_hash {
                 violation_details = format!("Hash chain broken at seq {}", update.sequence_number);
                 break;
             }
@@ -754,7 +754,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
         previous_hash: last_valid_hash,
-        current_hash: new_hash,
+        content_hash: new_hash,
         block_height: current_block_height,
         block_hash: entropy_block_hash,
     };
@@ -896,13 +896,13 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
     let sequence = our_armed.sequence_number + 1;
     let mut hash_input = Vec::new();
     hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&our_armed.current_hash);
+    hash_input.extend_from_slice(&our_armed.content_hash);
     hash_input.extend_from_slice(&message_bytes);
     let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
     let update_msg = format!(
         "deposits:ledger:{}:{}:{}",
-        hex::encode(our_armed.current_hash),
+        hex::encode(our_armed.content_hash),
         sequence,
         hex::encode(new_hash)
     );
@@ -929,8 +929,8 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
-        previous_hash: our_armed.current_hash,
-        current_hash: new_hash,
+        previous_hash: our_armed.content_hash,
+        content_hash: new_hash,
         block_height: current_block_height,
         block_hash: [0u8; 32],
     };
@@ -1080,7 +1080,7 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
                 "Sequence gap: expected {}, got {}",
                 expected_seq, update.sequence_number
             );
-            invalid_update_hash = Some(update.current_hash);
+            invalid_update_hash = Some(update.content_hash);
             break;
         }
 
@@ -1097,19 +1097,19 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
                 hex::encode(&expected_prev[..4]),
                 hex::encode(&update.previous_hash[..4])
             );
-            invalid_update_hash = Some(update.current_hash);
+            invalid_update_hash = Some(update.content_hash);
             break;
         }
 
         let computed_hash = update.compute_hash();
-        if computed_hash != update.current_hash {
+        if computed_hash != update.content_hash {
             violation_details = format!(
                 "Invalid hash at seq {}: computed {}..., stored {}...",
                 update.sequence_number,
                 hex::encode(&computed_hash[..4]),
-                hex::encode(&update.current_hash[..4])
+                hex::encode(&update.content_hash[..4])
             );
-            invalid_update_hash = Some(update.current_hash);
+            invalid_update_hash = Some(update.content_hash);
             break;
         }
 
@@ -1194,7 +1194,7 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
         previous_hash: last_valid_hash,
-        current_hash: new_hash,
+        content_hash: new_hash,
         block_height: current_block_height,
         block_hash: [0u8; 32],
     };
@@ -1375,13 +1375,13 @@ pub async fn recovery_rebuild_quorum_add(
     let sequence = our_latest.sequence_number + 1;
     let mut hash_input = Vec::new();
     hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&our_latest.current_hash);
+    hash_input.extend_from_slice(&our_latest.content_hash);
     hash_input.extend_from_slice(&message_bytes);
     let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
     let update_msg = format!(
         "deposits:ledger:{}:{}:{}",
-        hex::encode(our_latest.current_hash),
+        hex::encode(our_latest.content_hash),
         sequence,
         hex::encode(new_hash)
     );
@@ -1408,8 +1408,8 @@ pub async fn recovery_rebuild_quorum_add(
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
-        previous_hash: our_latest.current_hash,
-        current_hash: new_hash,
+        previous_hash: our_latest.content_hash,
+        content_hash: new_hash,
         block_height: current_block_height,
         block_hash: [0u8; 32],
     };
@@ -1696,13 +1696,13 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let sequence = latest.sequence_number + 1;
     let mut hash_input = Vec::new();
     hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&latest.current_hash);
+    hash_input.extend_from_slice(&latest.content_hash);
     hash_input.extend_from_slice(&message_bytes);
     let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
     let update_msg = format!(
         "deposits:ledger:{}:{}:{}",
-        hex::encode(latest.current_hash),
+        hex::encode(latest.content_hash),
         sequence,
         hex::encode(new_hash)
     );
@@ -1729,8 +1729,8 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
-        previous_hash: latest.current_hash,
-        current_hash: new_hash,
+        previous_hash: latest.content_hash,
+        content_hash: new_hash,
         block_height: current_block_height,
         block_hash: [0u8; 32],
     };
@@ -1950,13 +1950,13 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         let sequence = our_latest.sequence_number + 1;
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&our_latest.current_hash);
+        hash_input.extend_from_slice(&our_latest.content_hash);
         hash_input.extend_from_slice(&message_bytes);
         let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
         let update_msg = format!(
             "deposits:ledger:{}:{}:{}",
-            hex::encode(our_latest.current_hash),
+            hex::encode(our_latest.content_hash),
             sequence,
             hex::encode(new_hash)
         );
@@ -1983,8 +1983,8 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
-            previous_hash: our_latest.current_hash,
-            current_hash: new_hash,
+            previous_hash: our_latest.content_hash,
+            content_hash: new_hash,
             block_height: current_block_height,
             block_hash: entropy_block_hash,
         };
@@ -2011,13 +2011,13 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         let sequence = our_latest.sequence_number + 1;
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&our_latest.current_hash);
+        hash_input.extend_from_slice(&our_latest.content_hash);
         hash_input.extend_from_slice(&message_bytes);
         let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
         let update_msg = format!(
             "deposits:ledger:{}:{}:{}",
-            hex::encode(our_latest.current_hash),
+            hex::encode(our_latest.content_hash),
             sequence,
             hex::encode(new_hash)
         );
@@ -2044,8 +2044,8 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
-            previous_hash: our_latest.current_hash,
-            current_hash: new_hash,
+            previous_hash: our_latest.content_hash,
+            content_hash: new_hash,
             block_height: current_block_height,
             block_hash: entropy_block_hash,
         };
@@ -2178,7 +2178,7 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
     println!(
         "  Your latest: seq {} (hash: {}...)",
         latest.sequence_number,
-        hex::encode(&latest.current_hash[..8])
+        hex::encode(&latest.content_hash[..8])
     );
 
     // Use first deposit_id or derive from our pubkey
@@ -2220,7 +2220,7 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
     for op_num in 0..count {
         let mut payment_hash = [0u8; 32];
         payment_hash[0..8].copy_from_slice(&(op_num as u64).to_le_bytes());
-        payment_hash[8..16].copy_from_slice(&latest.current_hash[0..8]);
+        payment_hash[8..16].copy_from_slice(&latest.content_hash[0..8]);
 
         let operation = LedgerOperation::InvoiceCredit {
             payment_hash,
@@ -2235,13 +2235,13 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
         let sequence = latest.sequence_number + 1;
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&latest.current_hash);
+        hash_input.extend_from_slice(&latest.content_hash);
         hash_input.extend_from_slice(&message_bytes);
         let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
         let update_msg = format!(
             "deposits:ledger:{}:{}:{}",
-            hex::encode(latest.current_hash),
+            hex::encode(latest.content_hash),
             sequence,
             hex::encode(new_hash)
         );
@@ -2260,8 +2260,8 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
-            previous_hash: latest.current_hash,
-            current_hash: new_hash,
+            previous_hash: latest.content_hash,
+            content_hash: new_hash,
             block_height: current_block_height,
             block_hash,
         };
@@ -2286,7 +2286,7 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
     println!(
         "  New latest: seq {} (hash: {}...)",
         latest.sequence_number,
-        hex::encode(&latest.current_hash[..8])
+        hex::encode(&latest.content_hash[..8])
     );
 
     Ok(())
@@ -3345,14 +3345,14 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     let sequence = our_armed.sequence_number + 1;
     let mut hash_input = Vec::new();
     hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&our_armed.current_hash);
+    hash_input.extend_from_slice(&our_armed.content_hash);
     hash_input.extend_from_slice(&message_bytes);
     let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
     // Sign the update
     let update_msg = format!(
         "deposits:ledger:{}:{}:{}",
-        hex::encode(our_armed.current_hash),
+        hex::encode(our_armed.content_hash),
         sequence,
         hex::encode(new_hash)
     );
@@ -3381,8 +3381,8 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
-        previous_hash: our_armed.current_hash,
-        current_hash: new_hash,
+        previous_hash: our_armed.content_hash,
+        content_hash: new_hash,
         block_height: current_block_height,
         block_hash: current_block_hash,
     };
@@ -3497,7 +3497,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     updates.dedup_by(|a, b| {
         a.sequence_number == b.sequence_number
             && a.operator_id == b.operator_id
-            && a.current_hash == b.current_hash
+            && a.content_hash == b.content_hash
     });
 
     // Find our updates (we're the new operator after DisputeAcquire)
@@ -3602,7 +3602,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     );
 
     // Compute ledger hash for Taproot address derivation
-    let ledger_hash: [u8; 32] = our_latest.current_hash;
+    let ledger_hash: [u8; 32] = our_latest.content_hash;
 
     // Build Taproot quorum address
     let voter_set = VoterSet::new(our_pubkey, quorum_members.clone());
@@ -3715,13 +3715,13 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     let sequence = our_latest.sequence_number + 1;
     let mut hash_input = Vec::new();
     hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&our_latest.current_hash);
+    hash_input.extend_from_slice(&our_latest.content_hash);
     hash_input.extend_from_slice(&message_bytes);
     let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
     let update_msg = format!(
         "deposits:ledger:{}:{}:{}",
-        hex::encode(our_latest.current_hash),
+        hex::encode(our_latest.content_hash),
         sequence,
         hex::encode(new_hash)
     );
@@ -3749,8 +3749,8 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
-        previous_hash: our_latest.current_hash,
-        current_hash: new_hash,
+        previous_hash: our_latest.content_hash,
+        content_hash: new_hash,
         block_height: current_block_height,
         block_hash,
     };

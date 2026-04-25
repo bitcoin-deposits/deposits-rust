@@ -248,8 +248,8 @@ pub struct DepositsProtocol_SignedLedgerUpdate {
     pub _self: SharedType<Self>,
     records: RefCell<Vec<OptRc<DepositsProtocol_TlvRecord>>>,
     _io: RefCell<BytesReader>,
-    f_current_hash: Cell<bool>,
-    current_hash: RefCell<Vec<u8>>,
+    f_content_hash: Cell<bool>,
+    content_hash: RefCell<Vec<u8>>,
     f_ledger_id: Cell<bool>,
     ledger_id: RefCell<Vec<u8>>,
     f_message: Cell<bool>,
@@ -306,17 +306,17 @@ impl DepositsProtocol_SignedLedgerUpdate {
     /**
      * 32-byte hash of this update (type 12)
      */
-    pub fn current_hash(&self) -> KResult<Ref<'_, Vec<u8>>> {
+    pub fn content_hash(&self) -> KResult<Ref<'_, Vec<u8>>> {
         let _io = self._io.borrow();
         let _rrc = self._root.get_value().borrow().upgrade();
         let _prc = self._parent.get_value().borrow().upgrade();
         let _r = _rrc.as_ref().unwrap();
-        if self.f_current_hash.get() {
-            return Ok(self.current_hash.borrow());
+        if self.f_content_hash.get() {
+            return Ok(self.content_hash.borrow());
         }
-        self.f_current_hash.set(true);
-        *self.current_hash.borrow_mut() = self.records()[6_usize].value().to_vec();
-        Ok(self.current_hash.borrow())
+        self.f_content_hash.set(true);
+        *self.content_hash.borrow_mut() = self.records()[6_usize].value().to_vec();
+        Ok(self.content_hash.borrow())
     }
 
     /**

@@ -272,7 +272,7 @@ async fn ledger_show(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     updates.sort_by_key(|u| u.sequence_number);
-    updates.dedup_by_key(|u| (u.sequence_number, u.current_hash));
+    updates.dedup_by_key(|u| (u.sequence_number, u.content_hash));
 
     println!(
         "=== Ledger {} ({} updates) ===",
@@ -292,7 +292,7 @@ async fn ledger_show(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             Err(_) => (format!("type=0x{:04X}", update.message_type), None),
         };
 
-        let hash_short = &hex::encode(update.current_hash)[..8];
+        let hash_short = &hex::encode(update.content_hash)[..8];
 
         // Show deposit_id if present, otherwise operator
         let (id_label, id_short) = if let Some(did) = deposit_id {
@@ -476,7 +476,7 @@ async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
     for update in &updates {
         if update.sequence_number == 0 {
-            prev_hash = update.current_hash;
+            prev_hash = update.content_hash;
             continue;
         }
 
@@ -489,7 +489,7 @@ async fn ledger_validate(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             println!("    got:      {}", hex::encode(update.previous_hash));
             errors += 1;
         }
-        prev_hash = update.current_hash;
+        prev_hash = update.content_hash;
     }
 
     if errors == 0 {

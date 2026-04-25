@@ -79,7 +79,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
 
     let last_update = ledger.history.last().unwrap();
     let current_seq = last_update.sequence_number;
-    let current_hash = last_update.current_hash;
+    let content_hash = last_update.content_hash;
 
     println!("=== DANGER: Publishing Invalid Ledger Update ===");
     println!();
@@ -88,7 +88,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
     println!();
     println!("Ledger: {}", ledger_id);
     println!("Current sequence: {}", current_seq);
-    println!("Current hash: {}...", &hex::encode(current_hash)[..16]);
+    println!("Current hash: {}...", &hex::encode(content_hash)[..16]);
     println!("Violation type: {}", violation_type);
     println!();
 
@@ -96,7 +96,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
     let invalid_update: SignedLedgerUpdate = match violation_type.as_str() {
         "invalid-hash" => {
             let wrong_prev_hash = {
-                let mut h = current_hash;
+                let mut h = content_hash;
                 h[0] ^= 0xFF;
                 h[1] ^= 0xAA;
                 h
@@ -139,7 +139,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 ledger_id: ledger.ledger_id(),
                 sequence_number: new_seq,
                 previous_hash: wrong_prev_hash,
-                current_hash: computed_hash,
+                content_hash: computed_hash,
                 block_height: 0,
                 block_hash: [0u8; 32],
                 cosign_signature: [0u8; 64],
@@ -159,7 +159,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
             let computed_hash = {
                 let mut hasher = Sha256::new();
                 hasher.update(&skipped_seq.to_le_bytes());
-                hasher.update(&current_hash);
+                hasher.update(&content_hash);
                 hasher.update(&dummy_message);
                 let result = hasher.finalize();
                 let mut hash = [0u8; 32];
@@ -172,7 +172,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 data.extend_from_slice(&dummy_message);
                 data.extend_from_slice(&message_type.to_le_bytes());
                 data.extend_from_slice(&skipped_seq.to_le_bytes());
-                data.extend_from_slice(&current_hash);
+                data.extend_from_slice(&content_hash);
                 data.extend_from_slice(&computed_hash);
                 data
             };
@@ -188,8 +188,8 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 operator_id: node.node_id,
                 ledger_id: ledger.ledger_id(),
                 sequence_number: skipped_seq,
-                previous_hash: current_hash,
-                current_hash: computed_hash,
+                previous_hash: content_hash,
+                content_hash: computed_hash,
                 block_height: 0,
                 block_hash: [0u8; 32],
                 cosign_signature: [0u8; 64],
@@ -214,7 +214,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 data.extend_from_slice(&replayed.message_type.to_le_bytes());
                 data.extend_from_slice(&replayed.sequence_number.to_le_bytes());
                 data.extend_from_slice(&replayed.previous_hash);
-                data.extend_from_slice(&replayed.current_hash);
+                data.extend_from_slice(&replayed.content_hash);
                 data
             };
 
@@ -245,7 +245,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
     );
     println!(
         "  Current hash: {}...",
-        &hex::encode(invalid_update.current_hash)[..16]
+        &hex::encode(invalid_update.content_hash)[..16]
     );
 
     // Broadcast to Nostr

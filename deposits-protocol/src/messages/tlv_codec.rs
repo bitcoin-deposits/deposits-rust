@@ -737,7 +737,7 @@ impl TlvEncode for LedgerUpdateMsg {
             .nested(OPERATION, &self.operation)
             .u64_field(SEQUENCE_NUMBER, self.sequence_number)
             .bytes_field(PREVIOUS_HASH, &self.previous_hash)
-            .bytes_field(CURRENT_HASH, &self.current_hash)
+            .bytes_field(CURRENT_HASH, &self.content_hash)
             .bytes_field(OPERATOR_SIGNATURE, &self.operator_signature)
             .build()
     }
@@ -753,7 +753,7 @@ impl TlvDecode for LedgerUpdateMsg {
             operation: reader.read_nested(OPERATION)?,
             sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
             previous_hash: reader.read_bytes(PREVIOUS_HASH)?,
-            current_hash: reader.read_bytes(CURRENT_HASH)?,
+            content_hash: reader.read_bytes(CURRENT_HASH)?,
             operator_signature: reader.read_bytes(OPERATOR_SIGNATURE)?,
         })
     }
@@ -944,7 +944,7 @@ impl TlvEncode for SyncResponseMsg {
             .bytes_field(REQUEST_HASH, &self.request_hash)
             .vec_field(UPDATES, &self.updates)
             .u64_field(CURRENT_SEQUENCE, self.current_sequence)
-            .bytes_field(CURRENT_HASH, &self.current_hash)
+            .bytes_field(CURRENT_HASH, &self.content_hash)
             .build()
     }
 }
@@ -958,7 +958,7 @@ impl TlvDecode for SyncResponseMsg {
             request_hash: reader.read_bytes(REQUEST_HASH)?,
             updates: reader.read_vec(UPDATES)?,
             current_sequence: reader.read_u64(CURRENT_SEQUENCE)?,
-            current_hash: reader.read_bytes(CURRENT_HASH)?,
+            content_hash: reader.read_bytes(CURRENT_HASH)?,
         })
     }
 }
@@ -1287,7 +1287,7 @@ impl TlvEncode for CoordinationResponseMsg {
                 members,
                 threshold,
                 last_sequence,
-                current_hash,
+                content_hash,
                 rejection_reason,
             } => {
                 // Encode Vec<PublicKey> as concatenated compressed pubkey bytes (33 bytes each)
@@ -1299,7 +1299,7 @@ impl TlvEncode for CoordinationResponseMsg {
                     .bytes_field(MEMBERS, &members_bytes)
                     .u16_field(THRESHOLD, *threshold)
                     .u64_field(LAST_SEQUENCE, *last_sequence)
-                    .bytes_field(CURRENT_STATE_HASH, current_hash);
+                    .bytes_field(CURRENT_STATE_HASH, content_hash);
                 if let Some(reason) = rejection_reason {
                     builder = builder.string_field(REJECTION_REASON, reason);
                 }
@@ -1390,7 +1390,7 @@ impl TlvDecode for CoordinationResponseMsg {
                     members,
                     threshold: reader.read_u16(THRESHOLD)?,
                     last_sequence: reader.read_u64(LAST_SEQUENCE)?,
-                    current_hash: reader.read_bytes(CURRENT_STATE_HASH)?,
+                    content_hash: reader.read_bytes(CURRENT_STATE_HASH)?,
                     rejection_reason: reader.read_string_opt(REJECTION_REASON)?,
                 })
             }
@@ -1679,7 +1679,7 @@ mod tests {
             },
             sequence_number: 1,
             previous_hash: [0u8; 32],
-            current_hash: [0xAB; 32],
+            content_hash: [0xAB; 32],
             operator_signature: [0xCD; 64],
         });
 
@@ -1798,7 +1798,7 @@ mod tests {
             },
             sequence_number: 1,
             previous_hash: [0u8; 32],
-            current_hash: [0xAB; 32],
+            content_hash: [0xAB; 32],
             operator_signature: [0xCD; 64],
         };
 
@@ -1890,7 +1890,7 @@ mod tests {
             ledger_id: [0x12; 32],
             sequence_number: 1,
             previous_hash: [0xCC; 32],
-            current_hash: [0u8; 32], // will be computed
+            content_hash: [0u8; 32], // will be computed
             block_height: 12345,
             block_hash: [0x11; 32],
             cosign_signature: [0xFF; 64],
@@ -1899,14 +1899,14 @@ mod tests {
             member_ledger_hash: None,
             cosignatures: Vec::new(),
         };
-        update.current_hash = update.compute_hash();
+        update.content_hash = update.compute_hash();
 
         let msg = SyncResponseMsg {
             ledger_id: [0x12; 32],
             request_hash: [0xAA; 32],
             updates: vec![update],
             current_sequence: 10,
-            current_hash: [0xBB; 32],
+            content_hash: [0xBB; 32],
         };
 
         let encoded = msg.tlv_encode();
@@ -1971,7 +1971,7 @@ mod tests {
                 members: vec![test_pubkey(), test_pubkey()],
                 threshold: 2,
                 last_sequence: 100,
-                current_hash: [0xDD; 32],
+                content_hash: [0xDD; 32],
                 rejection_reason: None,
             },
         ];
@@ -1998,7 +1998,7 @@ mod tests {
                 },
                 sequence_number: 1,
                 previous_hash: [0xBB; 32],
-                current_hash: [0xCC; 32],
+                content_hash: [0xCC; 32],
                 operator_signature: [0xDD; 64],
             }),
             DepositsMessage::Handshake(HandshakeMsg {
