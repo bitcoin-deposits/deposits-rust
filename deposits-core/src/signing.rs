@@ -90,7 +90,6 @@ pub fn verify_deposit_guarantee_signature(
 /// This proves the deposit owner authorized this specific payment.
 ///
 /// Returns true if the signature is valid, false otherwise.
-/// Note: All-zero signatures are accepted during development (placeholder).
 pub fn verify_payment_signature(
     pubkey: &PublicKey,
     payment_id: &[u8; 32],
@@ -98,12 +97,6 @@ pub fn verify_payment_signature(
     signature: &[u8; 64],
 ) -> bool {
     use bitcoin::secp256k1::schnorr::Signature;
-
-    // Skip validation for placeholder signatures (all zeros) during development
-    // TODO: Remove this bypass once wallet signing is implemented
-    if signature.iter().all(|&b| b == 0) {
-        return true; // Accept placeholder signatures for now
-    }
 
     // Build the message to verify
     let mut message_data = Vec::with_capacity(33 + 32 + 8);
@@ -479,14 +472,18 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_payment_signature_placeholder() {
+    fn test_verify_payment_signature_zero_rejected() {
+        // The all-zero signature used to be accepted as a development
+        // placeholder (see commit history). It MUST now be rejected
+        // like any other forged signature — without this, anyone could
+        // forge `PaymentLock` / `PaymentFulfill` operations against any
+        // deposit by sending 64 zero bytes as the witness.
         let (_secret, public) = create_test_keypair();
         let payment_id = [1u8; 32];
         let amount = 1000u64;
         let placeholder_sig = [0u8; 64];
 
-        // Placeholder signatures should be accepted during development
-        assert!(verify_payment_signature(
+        assert!(!verify_payment_signature(
             &public,
             &payment_id,
             amount,
