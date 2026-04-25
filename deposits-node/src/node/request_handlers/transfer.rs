@@ -608,10 +608,22 @@ impl Node {
             }
         }
 
-        // Capture pending transfer info before appending (needed for rollback)
+        // Capture pending transfer info before appending (needed for rollback).
+        // The lock was released between the check above and this block, so the
+        // ledger could in principle have been removed by another thread —
+        // re-check rather than unwrap.
         let pending_transfer_backup = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            let ledger_arc = ledgers.get(ledger_id).unwrap().clone();
+            let ledger_arc = match ledgers.get(ledger_id) {
+                Some(l) => l.clone(),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Ledger disappeared mid-request: {}", ledger_id)),
+                    )
+                }
+            };
             let ledger = ledger_arc.read().unwrap();
             ledger.state.pending_transfers.get(&transfer_id).cloned()
         };
