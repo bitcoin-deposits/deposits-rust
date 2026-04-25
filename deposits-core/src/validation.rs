@@ -844,7 +844,13 @@ impl LedgerConformanceValidator {
                 });
             }
 
-            expected_prev = update.current_hash;
+            // The chain links via `chain_hash()`, not `current_hash`.
+            // `chain_hash() = SHA256(current_hash || operator_signature)` —
+            // see `commit_staged` in `ledger.rs`, which sets
+            // `state.chain_tip_hash = staged.update.chain_hash()`. The next
+            // update reads chain_tip_hash as its `previous_hash`, so the
+            // validator MUST compare against the same folded hash.
+            expected_prev = update.chain_hash();
         }
 
         Ok(())

@@ -1333,7 +1333,7 @@ pub async fn nostr_updates(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
         // Check if this update follows our chain
         if update.previous_hash == expected_prev_hash {
-            expected_prev_hash = update.current_hash;
+            expected_prev_hash = update.chain_hash();
             new_updates.push(update.clone());
         }
     }
@@ -1504,7 +1504,7 @@ pub async fn nostr_validate(args: &[String]) -> Result<(), Box<dyn std::error::E
         }
 
         // Update for next iteration
-        expected_prev_hash = update.current_hash;
+        expected_prev_hash = update.chain_hash();
         last_valid_seq = update.sequence_number as i64;
     }
 

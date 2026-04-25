@@ -261,7 +261,10 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
             break;
         }
 
-        last_valid_hash = update.current_hash;
+        // Chain links via chain_hash() (folds in operator_signature),
+        // not current_hash. See `commit_staged` in deposits-core/src/ledger.rs
+        // which sets `state.chain_tip_hash = update.chain_hash()`.
+        last_valid_hash = update.chain_hash();
         last_valid_sequence = update.sequence_number as i64;
     }
 
@@ -459,7 +462,7 @@ pub async fn recovery_agree(args: &[String]) -> Result<(), Box<dyn std::error::E
             break;
         }
 
-        last_valid_hash = update.current_hash;
+        last_valid_hash = update.chain_hash();
         last_valid_sequence = update.sequence_number as i64;
     }
 
@@ -663,7 +666,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
         }
 
         last_valid_sequence = update.sequence_number;
-        last_valid_hash = update.current_hash;
+        last_valid_hash = update.chain_hash();
     }
 
     if violation_details.is_empty() {
@@ -1110,7 +1113,7 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
             break;
         }
 
-        last_valid_hash = update.current_hash;
+        last_valid_hash = update.chain_hash();
         last_valid_sequence = update.sequence_number as i64;
     }
 

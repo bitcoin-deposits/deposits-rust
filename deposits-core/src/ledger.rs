@@ -1539,8 +1539,10 @@ impl LedgerValidator {
                 return i;
             }
 
-            // Next update should reference this update's hash
-            expected_previous_hash = update.current_hash;
+            // Next update's `previous_hash` references this update's
+            // `chain_hash()` (which folds in `operator_signature`), NOT
+            // `current_hash`. See `commit_staged`.
+            expected_previous_hash = update.chain_hash();
         }
 
         ledger.history.len()

@@ -609,9 +609,11 @@ impl SignedLedgerUpdateLog {
             )));
         }
 
-        // Verify chain continuity (previous hash should match last update's hash)
+        // Verify chain continuity. The chain links via `chain_hash()`,
+        // not `current_hash` — see docstring on `SignedLedgerUpdate::chain_hash`
+        // and the canonical setter in `ledger::commit_staged`.
         let expected_prev = if let Some(last) = self.updates.last() {
-            last.current_hash
+            last.chain_hash()
         } else {
             [0u8; 32]
         };
@@ -633,7 +635,9 @@ impl SignedLedgerUpdateLog {
     ///
     /// Checks that:
     /// - Sequence numbers are contiguous starting from 0
-    /// - Each update's previous_hash matches the prior update's current_hash
+    /// - Each update's previous_hash matches the prior update's chain_hash
+    ///   (which folds the operator signature into current_hash; see
+    ///   `SignedLedgerUpdate::chain_hash`)
     pub fn verify_chain(&self) -> Result<(), crate::DepositsError> {
         let mut expected_prev = [0u8; 32];
         for (i, update) in self.updates.iter().enumerate() {
@@ -649,7 +653,7 @@ impl SignedLedgerUpdateLog {
                     i
                 )));
             }
-            expected_prev = update.current_hash;
+            expected_prev = update.chain_hash();
         }
         Ok(())
     }
