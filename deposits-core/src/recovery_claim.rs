@@ -498,10 +498,20 @@ impl BroadcastResult {
     }
 }
 
-/// Build a claim from recovery state
+/// Build a claim from recovery state.
 ///
 /// This is the main entry point for creating a claim after recovery
 /// determines the operator is non-compliant.
+///
+/// **NOTE:** this function has no production callers today. The
+/// recovery state machine in `deposits_core::recovery` is built but
+/// not wired into the operator daemon (see
+/// `Node::recovery_manager()` in `deposits-node`, which currently
+/// returns `None`). When that hook is wired up, the caller MUST
+/// supply the real `ledger_hash` committed in the reserves UTXO's
+/// tapscript — the placeholder below will produce a claim whose
+/// reconstructed tapscript doesn't match the on-chain output, and
+/// the resulting transaction will be unspendable.
 pub fn build_claim_from_recovery(
     recovery_state: &RecoveryState,
     reserves_outpoint: OutPoint,
@@ -532,7 +542,10 @@ pub fn build_claim_from_recovery(
         voter_set,
         threshold_config,
         network: config.network,
-        ledger_hash: [0u8; 32], // TODO: Extract ledger_hash from on-chain reserves output
+        // Placeholder; see the function-level note above. Must be
+        // replaced with the real `ledger_hash` from the reserves UTXO
+        // before any production caller invokes this function.
+        ledger_hash: [0u8; 32],
     };
 
     ClaimAttempt::new(claimants, eligibility, reserves, config)
