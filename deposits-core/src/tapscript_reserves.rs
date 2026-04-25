@@ -516,10 +516,12 @@ impl TaprootReservesOutput {
         self.ledger_hash
     }
 
-    /// Verify that an on-chain script_pubkey matches this Taproot reserves output
+    /// Verify that an on-chain script_pubkey matches this Taproot reserves output.
     ///
-    /// This is used by the watchtower/recovery system to verify that a force-closed
-    /// channel's reserves output commits to the expected ledger state.
+    /// Used by dispute and confiscation paths to confirm that an on-chain
+    /// reserves output commits to the expected ledger state — the operator's
+    /// claimed `ledger_hash` is part of the tapscript, so any mismatch here
+    /// is provable evidence of non-conforming reserves.
     pub fn verify_script_pubkey(&self, on_chain_script: &ScriptBuf) -> bool {
         &self.script_pubkey() == on_chain_script
     }
@@ -528,13 +530,14 @@ impl TaprootReservesOutput {
 /// Verify that an on-chain script_pubkey corresponds to a Taproot reserves output
 /// with the given parameters. Returns true if the script matches.
 ///
-/// This is the primary verification method for force-close recovery:
-/// 1. Watchtower detects force-close with reserves output
-/// 2. Watchtower reconstructs expected Taproot address using known parameters
-/// 3. If scripts match, the ledger_hash in the reserves is verified
+/// 1. Reconstruct the expected Taproot address from the voter set, network,
+///    and expected `ledger_hash`.
+/// 2. Compare against the on-chain script. A match proves the reserves UTXO
+///    commits to the supplied `ledger_hash` (since `ledger_hash` is mixed
+///    into the tapscript leaf).
 ///
-/// Note: The ledger_hash cannot be directly extracted from a P2TR script_pubkey.
-/// Verification works by reconstruction and comparison.
+/// `ledger_hash` cannot be directly extracted from a P2TR `scriptPubkey`;
+/// verification works by reconstruction and equality check.
 pub fn verify_taproot_reserves(
     voter_set: VoterSet,
     network: bitcoin::Network,

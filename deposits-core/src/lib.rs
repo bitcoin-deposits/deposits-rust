@@ -74,8 +74,6 @@ pub mod message_handlers;
 pub mod message_validation;
 pub mod operation_validation;
 pub mod quorum_policy;
-pub mod recovery;
-pub mod recovery_claim;
 pub mod tapscript_reserves;
 pub mod time_utils;
 pub mod validation;
@@ -91,10 +89,6 @@ pub use ledger::{
     Ledger, LedgerManager, LedgerProtocolState, LedgerRole, LedgerValidator, StagedUpdate,
 };
 pub use messages::{DepositsMessage, HashStrategy, LedgerOperation};
-pub use recovery::{
-    select_recovery_partner, ClaimEligibility, RecoveryCandidate, RecoveryError, RecoveryManager,
-    RecoveryOutcome, RecoveryPhase, RecoveryPool, RecoveryVote,
-};
 pub use tapscript_reserves::{
     build_taproot_reserves_script, verify_taproot_reserves, ReservesSpendBuilder, SpendTxParams,
     TaprootReservesOutput, TapscriptReservesBuilder, ThresholdConfig, ThresholdTier, Voter,
@@ -254,11 +248,6 @@ pub use wire_messages::{
     ReceivingCosignInvoiceMsg,
     // Payment messages
     ReceivingCreditPaymentMsg,
-    RecoveryClaimCompleteMsg,
-    RecoveryClaimRequestMsg,
-    RecoveryClaimSignatureMsg,
-    // Recovery messages
-    RecoveryVoteMsg,
     // Reserves messages
     ReservesAddOutputMsg,
     ReservesRemoveOutputMsg,
@@ -268,6 +257,5 @@ pub use wire_messages::{
     SendingLockPaymentMsg,
     // Sync messages
     SyncRequestMsg,
-    UncreditedPaymentMsg,
     UpdateReservesMsg,
 };

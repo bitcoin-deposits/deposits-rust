@@ -1576,20 +1576,6 @@ impl HandlerContext for DepositsHandler {
         events.push(event);
     }
 
-    fn recovery_manager(&self) -> Option<Arc<Mutex<deposits_core::recovery::RecoveryManager>>> {
-        // Hook for the DEP-06 recovery flow. The trait method is
-        // declared in `HandlerContext` and tested from
-        // `recovery_handler_test`, but no production code path in
-        // deposits-node consumes it yet — the recovery state machine
-        // is built (`deposits_core::recovery`) but not wired into the
-        // operator daemon. Returning None is a signal to any future
-        // caller that recovery isn't running here, not silent skipping
-        // of an active flow. Wire up by stashing an
-        // `Arc<Mutex<RecoveryManager>>` on the handler at startup and
-        // returning a clone here.
-        None
-    }
-
     fn our_secret_key(&self) -> Option<SecretKey> {
         Some(self.secret_key)
     }

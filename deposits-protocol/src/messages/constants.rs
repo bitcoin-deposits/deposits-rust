@@ -22,8 +22,9 @@ pub mod consts {
     pub const HANDSHAKE_RESPONSE: u16 = 0x8007;
     pub const SYNC: u16 = 0x8009;
     pub const SYNC_RESPONSE: u16 = 0x800B;
-    pub const RECOVERY: u16 = 0x800D;
-    pub const RECOVERY_RESPONSE: u16 = 0x800F;
+    // Note: 0x800D and 0x800F are reserved (formerly RECOVERY/RECOVERY_RESPONSE
+    // for the Lightning-channel-era recovery flow, removed when the protocol
+    // moved to collateral-in-UTXO with a tapscript-spending dispute path).
     pub const COORDINATION: u16 = 0x8011;
     pub const COORDINATION_RESPONSE: u16 = 0x8013;
 
@@ -127,8 +128,6 @@ pub const ALL_ENVELOPE_MESSAGE_TYPES: &[u16] = &[
     HANDSHAKE_RESPONSE,
     SYNC,
     SYNC_RESPONSE,
-    RECOVERY,
-    RECOVERY_RESPONSE,
     COORDINATION,
     COORDINATION_RESPONSE,
 ];
@@ -277,7 +276,6 @@ pub fn get_message_category(message_type: u16) -> Option<&'static str> {
         LEDGER_UPDATE | LEDGER_UPDATE_RESPONSE => Some("ledger"),
         HANDSHAKE | HANDSHAKE_RESPONSE => Some("handshake"),
         SYNC | SYNC_RESPONSE => Some("sync"),
-        RECOVERY | RECOVERY_RESPONSE => Some("recovery"),
         COORDINATION | COORDINATION_RESPONSE => Some("coordination"),
 
         _ => None,
@@ -293,8 +291,6 @@ pub fn type_id_to_const_name(type_id: u16) -> &'static str {
         HANDSHAKE_RESPONSE => "HANDSHAKE_RESPONSE",
         SYNC => "SYNC",
         SYNC_RESPONSE => "SYNC_RESPONSE",
-        RECOVERY => "RECOVERY",
-        RECOVERY_RESPONSE => "RECOVERY_RESPONSE",
         COORDINATION => "COORDINATION",
         COORDINATION_RESPONSE => "COORDINATION_RESPONSE",
         _ => "UNKNOWN",
@@ -310,8 +306,6 @@ pub fn type_id_to_variant_name(type_id: u16) -> Option<&'static str> {
         HANDSHAKE_RESPONSE => Some("HandshakeResponse"),
         SYNC => Some("Sync"),
         SYNC_RESPONSE => Some("SyncResponse"),
-        RECOVERY => Some("Recovery"),
-        RECOVERY_RESPONSE => Some("RecoveryResponse"),
         COORDINATION => Some("Coordination"),
         COORDINATION_RESPONSE => Some("CoordinationResponse"),
         _ => None,

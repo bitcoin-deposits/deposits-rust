@@ -146,10 +146,7 @@ pub trait ValidationContext: Send + Sync {
 
 use crate::error::HandlerError;
 use crate::messages::DepositsMessage;
-use crate::recovery::RecoveryManager;
-use crate::recovery_claim::ClaimManager;
 use bitcoin::secp256k1::SecretKey;
-use std::sync::Mutex;
 
 /// Context for handling protocol messages.
 /// Extends ValidationContext with message sending, signing, and persistence.
@@ -159,14 +156,6 @@ pub trait HandlerContext: ValidationContext {
 
     /// Emit a protocol event (deposit event, recovery event, etc.)
     fn emit_event(&self, event: ProtocolEvent);
-
-    /// Get recovery manager access
-    fn recovery_manager(&self) -> Option<Arc<Mutex<RecoveryManager>>>;
-
-    /// Get claim manager access for recovery claims
-    fn claim_manager(&self) -> Option<Arc<Mutex<ClaimManager>>> {
-        None
-    }
 
     /// Get our secret key for signing (optional, for handlers that need it)
     fn our_secret_key(&self) -> Option<SecretKey> {
@@ -383,30 +372,6 @@ pub trait HandlerContext: ValidationContext {
     ) {
         let _ = (accused_operator, accusation_msg);
         // Default: no-op (LDK implementation handles channel closure and rebroadcast)
-    }
-
-    // ========================================================================
-    // Recovery Claim Management Methods
-    // ========================================================================
-
-    /// Add a claim signature and check if threshold is reached.
-    /// Returns Ok(true) if threshold is now reached, Ok(false) otherwise.
-    /// Emits RecoveryClaimReady event if threshold reached.
-    fn add_claim_signature(
-        &self,
-        operator: PublicKey,
-        partner: PublicKey,
-        signer: PublicKey,
-        signature: [u8; 64],
-    ) -> Result<bool, String> {
-        let _ = (operator, partner, signer, signature);
-        Ok(false) // Default: not implemented
-    }
-
-    /// Remove a completed recovery claim from tracking.
-    fn remove_claim(&self, operator: PublicKey, partner: PublicKey) {
-        let _ = (operator, partner);
-        // Default: no-op
     }
 
     // ========================================================================

@@ -963,270 +963,6 @@ impl TlvDecode for SyncResponseMsg {
     }
 }
 
-/// TLV for RecoveryMsg
-mod recovery_msg_tlv {
-    pub const DISCRIMINANT: u64 = 0;
-    pub const OPERATOR: u64 = 2;
-    pub const PARTNER: u64 = 4;
-    pub const VOTER: u64 = 6;
-    pub const IS_CONFORMING: u64 = 8;
-    pub const VALIDATED_HASH: u64 = 10;
-    pub const VALIDATED_SEQUENCE: u64 = 12;
-    pub const SUBSTITUTE_NOMINATION: u64 = 14;
-    pub const DISCOVERED_VIOLATION: u64 = 16;
-    pub const SIGNATURE: u64 = 18;
-    pub const CLAIMANT: u64 = 20;
-    pub const TIER_INDEX: u64 = 22;
-    pub const UNSIGNED_TX: u64 = 24;
-    pub const SIGHASH: u64 = 26;
-    pub const DESTINATION_SCRIPT: u64 = 28;
-    pub const BLOCK_HEIGHT: u64 = 30;
-    pub const NEW_OPERATOR: u64 = 32;
-    pub const CLAIM_TXID: u64 = 34;
-    pub const CONFIRMATION_BLOCK: u64 = 36;
-    pub const REASON_CODE: u64 = 38;
-    pub const PAYMENT_HASH: u64 = 40;
-    pub const PREIMAGE: u64 = 42;
-    pub const DEPOSIT_PUBKEY: u64 = 44;
-    pub const AMOUNT_MSAT: u64 = 46;
-    pub const INVOICE_COSIGNATURE: u64 = 48;
-    pub const SETTLEMENT_SEQUENCE: u64 = 50;
-    pub const SETTLEMENT_LEDGER_HASH: u64 = 52;
-    pub const SETTLEMENT_BLOCK_HEIGHT: u64 = 54;
-    pub const ACCUSER_SIGNATURE: u64 = 56;
-}
-
-impl TlvEncode for RecoveryMsg {
-    fn tlv_encode(&self) -> Vec<u8> {
-        use recovery_msg_tlv::*;
-        match self {
-            Self::Vote {
-                operator,
-                partner,
-                voter,
-                is_conforming,
-                validated_hash,
-                validated_sequence,
-                substitute_nomination,
-                discovered_violation,
-                signature,
-            } => {
-                let mut builder = TlvBuilder::new()
-                    .u8_field(DISCRIMINANT, 0)
-                    .pubkey_field(OPERATOR, operator)
-                    .pubkey_field(PARTNER, partner)
-                    .pubkey_field(VOTER, voter)
-                    .u8_field(IS_CONFORMING, if *is_conforming { 1 } else { 0 })
-                    .bytes_field(VALIDATED_HASH, validated_hash)
-                    .u64_field(VALIDATED_SEQUENCE, *validated_sequence);
-                if let Some(sub) = substitute_nomination {
-                    builder = builder.pubkey_field(SUBSTITUTE_NOMINATION, sub);
-                }
-                builder
-                    .u8_field(
-                        DISCOVERED_VIOLATION,
-                        if *discovered_violation { 1 } else { 0 },
-                    )
-                    .bytes_field(SIGNATURE, signature)
-                    .build()
-            }
-            Self::ClaimRequest {
-                operator,
-                partner,
-                claimant,
-                tier_index,
-                unsigned_tx,
-                sighash,
-                destination_script,
-                block_height,
-            } => TlvBuilder::new()
-                .u8_field(DISCRIMINANT, 1)
-                .pubkey_field(OPERATOR, operator)
-                .pubkey_field(PARTNER, partner)
-                .pubkey_field(CLAIMANT, claimant)
-                .u8_field(TIER_INDEX, *tier_index)
-                .bytes_field(UNSIGNED_TX, unsigned_tx)
-                .bytes_field(SIGHASH, sighash)
-                .bytes_field(DESTINATION_SCRIPT, destination_script)
-                .u32_field(BLOCK_HEIGHT, *block_height)
-                .build(),
-            Self::ClaimComplete {
-                operator,
-                partner,
-                new_operator,
-                claim_txid,
-                confirmation_block,
-                reason_code,
-            } => TlvBuilder::new()
-                .u8_field(DISCRIMINANT, 2)
-                .pubkey_field(OPERATOR, operator)
-                .pubkey_field(PARTNER, partner)
-                .pubkey_field(NEW_OPERATOR, new_operator)
-                .bytes_field(CLAIM_TXID, claim_txid)
-                .u32_field(CONFIRMATION_BLOCK, *confirmation_block)
-                .u8_field(REASON_CODE, *reason_code)
-                .build(),
-            Self::UncreditedPayment {
-                operator,
-                partner,
-                payment_hash,
-                preimage,
-                deposit_pubkey,
-                amount_msat,
-                invoice_cosignature,
-                settlement_sequence,
-                settlement_ledger_hash,
-                settlement_block_height,
-                accuser_signature,
-            } => TlvBuilder::new()
-                .u8_field(DISCRIMINANT, 3)
-                .pubkey_field(OPERATOR, operator)
-                .pubkey_field(PARTNER, partner)
-                .bytes_field(PAYMENT_HASH, payment_hash)
-                .bytes_field(PREIMAGE, preimage)
-                .pubkey_field(DEPOSIT_PUBKEY, deposit_pubkey)
-                .u64_field(AMOUNT_MSAT, *amount_msat)
-                .bytes_field(INVOICE_COSIGNATURE, invoice_cosignature)
-                .u64_field(SETTLEMENT_SEQUENCE, *settlement_sequence)
-                .bytes_field(SETTLEMENT_LEDGER_HASH, settlement_ledger_hash)
-                .u32_field(SETTLEMENT_BLOCK_HEIGHT, *settlement_block_height)
-                .bytes_field(ACCUSER_SIGNATURE, accuser_signature)
-                .build(),
-        }
-    }
-}
-
-impl TlvDecode for RecoveryMsg {
-    fn tlv_decode(data: &[u8]) -> TlvResult<Self> {
-        use recovery_msg_tlv::*;
-        let reader = TlvReader::new(data)?;
-        let discriminant = reader.read_u8(DISCRIMINANT)?;
-        match discriminant {
-            0 => Ok(Self::Vote {
-                operator: reader.read_pubkey(OPERATOR)?,
-                partner: reader.read_pubkey(PARTNER)?,
-                voter: reader.read_pubkey(VOTER)?,
-                is_conforming: reader.read_u8(IS_CONFORMING)? != 0,
-                validated_hash: reader.read_bytes(VALIDATED_HASH)?,
-                validated_sequence: reader.read_u64(VALIDATED_SEQUENCE)?,
-                substitute_nomination: reader.read_pubkey_opt(SUBSTITUTE_NOMINATION)?,
-                discovered_violation: reader.read_u8(DISCOVERED_VIOLATION)? != 0,
-                signature: reader.read_bytes(SIGNATURE)?,
-            }),
-            1 => Ok(Self::ClaimRequest {
-                operator: reader.read_pubkey(OPERATOR)?,
-                partner: reader.read_pubkey(PARTNER)?,
-                claimant: reader.read_pubkey(CLAIMANT)?,
-                tier_index: reader.read_u8(TIER_INDEX)?,
-                unsigned_tx: reader.read_raw(UNSIGNED_TX)?.to_vec(),
-                sighash: reader.read_bytes(SIGHASH)?,
-                destination_script: reader.read_raw(DESTINATION_SCRIPT)?.to_vec(),
-                block_height: reader.read_u32(BLOCK_HEIGHT)?,
-            }),
-            2 => Ok(Self::ClaimComplete {
-                operator: reader.read_pubkey(OPERATOR)?,
-                partner: reader.read_pubkey(PARTNER)?,
-                new_operator: reader.read_pubkey(NEW_OPERATOR)?,
-                claim_txid: reader.read_bytes(CLAIM_TXID)?,
-                confirmation_block: reader.read_u32(CONFIRMATION_BLOCK)?,
-                reason_code: reader.read_u8(REASON_CODE)?,
-            }),
-            3 => Ok(Self::UncreditedPayment {
-                operator: reader.read_pubkey(OPERATOR)?,
-                partner: reader.read_pubkey(PARTNER)?,
-                payment_hash: reader.read_bytes(PAYMENT_HASH)?,
-                preimage: reader.read_bytes(PREIMAGE)?,
-                deposit_pubkey: reader.read_pubkey(DEPOSIT_PUBKEY)?,
-                amount_msat: reader.read_u64(AMOUNT_MSAT)?,
-                invoice_cosignature: reader.read_bytes(INVOICE_COSIGNATURE)?,
-                settlement_sequence: reader.read_u64(SETTLEMENT_SEQUENCE)?,
-                settlement_ledger_hash: reader.read_bytes(SETTLEMENT_LEDGER_HASH)?,
-                settlement_block_height: reader.read_u32(SETTLEMENT_BLOCK_HEIGHT)?,
-                accuser_signature: reader.read_bytes(ACCUSER_SIGNATURE)?,
-            }),
-            d => Err(TlvError::InvalidFieldValue {
-                field_type: DISCRIMINANT,
-                reason: format!("unknown RecoveryMsg discriminant: {}", d),
-            }),
-        }
-    }
-}
-
-/// TLV for RecoveryResponseMsg
-mod recovery_response_tlv {
-    pub const DISCRIMINANT: u64 = 0;
-    pub const REQUEST_HASH: u64 = 2;
-    pub const RECORDED: u64 = 4;
-    pub const SIGNER: u64 = 6;
-    pub const SIGHASH: u64 = 8;
-    pub const SIGNATURE: u64 = 10;
-}
-
-impl TlvEncode for RecoveryResponseMsg {
-    fn tlv_encode(&self) -> Vec<u8> {
-        use recovery_response_tlv::*;
-        match self {
-            Self::VoteAck {
-                request_hash,
-                recorded,
-            } => TlvBuilder::new()
-                .u8_field(DISCRIMINANT, 0)
-                .bytes_field(REQUEST_HASH, request_hash)
-                .u8_field(RECORDED, if *recorded { 1 } else { 0 })
-                .build(),
-            Self::ClaimSignature {
-                request_hash,
-                signer,
-                sighash,
-                signature,
-            } => TlvBuilder::new()
-                .u8_field(DISCRIMINANT, 1)
-                .bytes_field(REQUEST_HASH, request_hash)
-                .pubkey_field(SIGNER, signer)
-                .bytes_field(SIGHASH, sighash)
-                .bytes_field(SIGNATURE, signature)
-                .build(),
-            Self::ClaimAck { request_hash } => TlvBuilder::new()
-                .u8_field(DISCRIMINANT, 2)
-                .bytes_field(REQUEST_HASH, request_hash)
-                .build(),
-            Self::UncreditedPaymentAck { request_hash } => TlvBuilder::new()
-                .u8_field(DISCRIMINANT, 3)
-                .bytes_field(REQUEST_HASH, request_hash)
-                .build(),
-        }
-    }
-}
-
-impl TlvDecode for RecoveryResponseMsg {
-    fn tlv_decode(data: &[u8]) -> TlvResult<Self> {
-        use recovery_response_tlv::*;
-        let reader = TlvReader::new(data)?;
-        let discriminant = reader.read_u8(DISCRIMINANT)?;
-        match discriminant {
-            0 => Ok(Self::VoteAck {
-                request_hash: reader.read_bytes(REQUEST_HASH)?,
-                recorded: reader.read_u8(RECORDED)? != 0,
-            }),
-            1 => Ok(Self::ClaimSignature {
-                request_hash: reader.read_bytes(REQUEST_HASH)?,
-                signer: reader.read_pubkey(SIGNER)?,
-                sighash: reader.read_bytes(SIGHASH)?,
-                signature: reader.read_bytes(SIGNATURE)?,
-            }),
-            2 => Ok(Self::ClaimAck {
-                request_hash: reader.read_bytes(REQUEST_HASH)?,
-            }),
-            3 => Ok(Self::UncreditedPaymentAck {
-                request_hash: reader.read_bytes(REQUEST_HASH)?,
-            }),
-            d => Err(TlvError::InvalidFieldValue {
-                field_type: DISCRIMINANT,
-                reason: format!("unknown RecoveryResponseMsg discriminant: {}", d),
-            }),
-        }
-    }
-}
 
 // ============================================================================
 // TLV Encoding for Coordination Messages
@@ -1802,8 +1538,6 @@ impl DepositsMessage {
             Self::HandshakeResponse(msg) => (HANDSHAKE_RESPONSE, msg.tlv_encode()),
             Self::Sync(msg) => (SYNC, msg.tlv_encode()),
             Self::SyncResponse(msg) => (SYNC_RESPONSE, msg.tlv_encode()),
-            Self::Recovery(msg) => (RECOVERY, msg.tlv_encode()),
-            Self::RecoveryResponse(msg) => (RECOVERY_RESPONSE, msg.tlv_encode()),
             Self::Coordination(msg) => (COORDINATION, msg.tlv_encode()),
             Self::CoordinationResponse(msg) => (COORDINATION_RESPONSE, msg.tlv_encode()),
             Self::ReservesAddOutput(msg) => (RESERVES_ADD_OUTPUT, msg.tlv_encode()),
@@ -1832,10 +1566,6 @@ impl DepositsMessage {
             )?)),
             SYNC => Ok(Self::Sync(SyncMsg::tlv_decode(body)?)),
             SYNC_RESPONSE => Ok(Self::SyncResponse(SyncResponseMsg::tlv_decode(body)?)),
-            RECOVERY => Ok(Self::Recovery(RecoveryMsg::tlv_decode(body)?)),
-            RECOVERY_RESPONSE => Ok(Self::RecoveryResponse(RecoveryResponseMsg::tlv_decode(
-                body,
-            )?)),
             COORDINATION => Ok(Self::Coordination(CoordinationMsg::tlv_decode(body)?)),
             COORDINATION_RESPONSE => Ok(Self::CoordinationResponse(
                 CoordinationResponseMsg::tlv_decode(body)?,
@@ -1877,8 +1607,6 @@ mod tests {
         assert_eq!(HANDSHAKE_RESPONSE & 1, 1);
         assert_eq!(SYNC & 1, 1);
         assert_eq!(SYNC_RESPONSE & 1, 1);
-        assert_eq!(RECOVERY & 1, 1);
-        assert_eq!(RECOVERY_RESPONSE & 1, 1);
         assert_eq!(COORDINATION & 1, 1);
         assert_eq!(COORDINATION_RESPONSE & 1, 1);
     }
@@ -1979,25 +1707,6 @@ mod tests {
     }
 
     #[test]
-    fn test_recovery_message_roundtrip() {
-        let msg = DepositsMessage::Recovery(RecoveryMsg::Vote {
-            operator: test_pubkey(),
-            partner: test_pubkey(),
-            voter: test_pubkey(),
-            is_conforming: true,
-            validated_hash: [0xAB; 32],
-            validated_sequence: 100,
-            substitute_nomination: Some(test_pubkey()),
-            discovered_violation: false,
-            signature: [0xCD; 64],
-        });
-
-        let encoded = msg.encode();
-        let decoded = DepositsMessage::decode(&encoded).unwrap();
-        assert_eq!(msg, decoded);
-    }
-
-    #[test]
     fn test_coordination_message_roundtrip() {
         let msg = DepositsMessage::Coordination(CoordinationMsg::CosignInvoice {
             operator_id: test_pubkey(),
@@ -2025,8 +1734,6 @@ mod tests {
             HANDSHAKE_RESPONSE,
             SYNC,
             SYNC_RESPONSE,
-            RECOVERY,
-            RECOVERY_RESPONSE,
             COORDINATION,
             COORDINATION_RESPONSE,
         ];
@@ -2205,41 +1912,6 @@ mod tests {
         let encoded = msg.tlv_encode();
         let decoded = SyncResponseMsg::tlv_decode(&encoded).unwrap();
         assert_eq!(msg, decoded);
-    }
-
-    #[test]
-    fn test_recovery_msg_tlv_roundtrip() {
-        use crate::tlv::{TlvDecode, TlvEncode};
-
-        let msgs = vec![
-            RecoveryMsg::Vote {
-                operator: test_pubkey(),
-                partner: test_pubkey(),
-                voter: test_pubkey(),
-                is_conforming: true,
-                validated_hash: [0xAA; 32],
-                validated_sequence: 100,
-                substitute_nomination: None,
-                discovered_violation: false,
-                signature: [0xBB; 64],
-            },
-            RecoveryMsg::ClaimRequest {
-                operator: test_pubkey(),
-                partner: test_pubkey(),
-                claimant: test_pubkey(),
-                tier_index: 1,
-                unsigned_tx: vec![0xCC; 200],
-                sighash: [0xDD; 32],
-                destination_script: vec![0xEE; 25],
-                block_height: 850000,
-            },
-        ];
-
-        for msg in msgs {
-            let encoded = msg.tlv_encode();
-            let decoded = RecoveryMsg::tlv_decode(&encoded).unwrap();
-            assert_eq!(msg, decoded);
-        }
     }
 
     #[test]

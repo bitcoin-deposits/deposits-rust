@@ -17,8 +17,11 @@
 //! | LEDGER_UPDATE (0x8001) | LEDGER_UPDATE_RESPONSE (0x8003) | All ledger operations |
 //! | HANDSHAKE (0x8005)     | HANDSHAKE_RESPONSE (0x8007)     | Protocol negotiation  |
 //! | SYNC (0x8009)          | SYNC_RESPONSE (0x800B)          | State synchronization |
-//! | RECOVERY (0x800D)      | RECOVERY_RESPONSE (0x800F)      | Recovery voting/claims|
 //! | COORDINATION (0x8011)  | COORDINATION_RESPONSE (0x8013)  | Invoice cosigning etc |
+//!
+//! Type IDs 0x800D and 0x800F are reserved (formerly RECOVERY /
+//! RECOVERY_RESPONSE for the Lightning-channel-era recovery flow,
+//! removed when the protocol moved to collateral-in-UTXO).
 
 use bitcoin::secp256k1::PublicKey;
 use std::io::{self, Read, Write};

@@ -204,30 +204,6 @@ pub enum ResponseData {
         invoice_id: String,
         bolt11: String,
     },
-    /// Recovery claim request validated - signer should sign and return signature
-    RecoveryClaimRequestValidated {
-        operator: PublicKey,
-        partner: PublicKey,
-        claimant: PublicKey,
-        tier_index: u8,
-        sighash: [u8; 32],
-    },
-    /// Recovery claim signature received - check if threshold reached
-    RecoveryClaimSignatureReceived {
-        operator: PublicKey,
-        partner: PublicKey,
-        signer: PublicKey,
-        signature: [u8; 64],
-        threshold_reached: bool,
-    },
-    /// Recovery claim completed - cleanup and emit event
-    RecoveryClaimCompleted {
-        old_operator: PublicKey,
-        partner: PublicKey,
-        new_operator: PublicKey,
-        claim_txid: [u8; 32],
-        confirmation_block: u32,
-    },
     /// Quorum state sync processed
     QuorumStateSyncProcessed {
         applied: u32,

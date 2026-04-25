@@ -13,8 +13,6 @@ pub enum DepositsMessage {
     HandshakeResponse(HandshakeResponseMsg),
     Sync(SyncMsg),
     SyncResponse(SyncResponseMsg),
-    Recovery(RecoveryMsg),
-    RecoveryResponse(RecoveryResponseMsg),
     Coordination(CoordinationMsg),
     CoordinationResponse(CoordinationResponseMsg),
     /// Reserves add output - peer message to add reserves to commitment (not a ledger operation)
@@ -32,8 +30,6 @@ impl DepositsMessage {
             Self::HandshakeResponse(_) => HANDSHAKE_RESPONSE,
             Self::Sync(_) => SYNC,
             Self::SyncResponse(_) => SYNC_RESPONSE,
-            Self::Recovery(_) => RECOVERY,
-            Self::RecoveryResponse(_) => RECOVERY_RESPONSE,
             Self::Coordination(_) => COORDINATION,
             Self::CoordinationResponse(_) => COORDINATION_RESPONSE,
             Self::ReservesAddOutput(_) => RESERVES_ADD_OUTPUT,
@@ -49,8 +45,6 @@ impl DepositsMessage {
             Self::HandshakeResponse(_) => "HandshakeResponse",
             Self::Sync(_) => "Sync",
             Self::SyncResponse(_) => "SyncResponse",
-            Self::Recovery(_) => "Recovery",
-            Self::RecoveryResponse(_) => "RecoveryResponse",
             Self::Coordination(_) => "Coordination",
             Self::CoordinationResponse(_) => "CoordinationResponse",
             Self::ReservesAddOutput(_) => "ReservesAddOutput",
@@ -67,8 +61,6 @@ impl DepositsMessage {
             Self::HandshakeResponse(m) => Some(m.reserves_id.clone()),
             Self::Sync(_) => None,         // Uses ledger_id now
             Self::SyncResponse(_) => None, // Uses ledger_id now
-            Self::Recovery(m) => m.reserves_id(),
-            Self::RecoveryResponse(m) => m.reserves_id(),
             Self::Coordination(m) => m.reserves_id(),
             Self::CoordinationResponse(m) => m.reserves_id(),
             Self::ReservesAddOutput(m) => Some(m.reserves_id.clone()),
