@@ -542,21 +542,17 @@ pub struct LedgerAdvertisement {
     // information should either (a) discover a courier who already
     // holds funds on this ledger, or (b) trust the protocol invariant
     // `reserves ≥ obligations` enforced by the quorum's co-signers.
-    /// Current total reserves backing the ledger (sats)
+    /// Current total reserves backing the ledger (msats). Mirrors the
+    /// `reserves_amount_msats` declared on this ledger's most recent
+    /// `LedgerOpen` / `QuorumBegin` (DEP-02).
     pub reserves_amount_msats: u64,
 
-    /// Total received collateral from quorum members (msats)
+    /// Operator-declared collateral on this ledger (msats). The non-reserves
+    /// portion of the operator's on-chain UTXO; forfeit on proven
+    /// non-conformance (DEP-05). Mirrors `collateral_amount_msats` on the
+    /// most recent `LedgerOpen` / `QuorumBegin`.
     #[serde(default)]
-    pub received_collateral_msats: u64,
-
-    /// Total collateral attestations attached to this ledger (msats)
-    #[serde(default)]
-    pub attested_collateral_msats: u64,
-
-    /// Total collateral held by other operators on this ledger (msats)
-    /// Subtract from reserves to get effective reserves backing customer deposits
-    #[serde(default)]
-    pub held_collateral_msats: u64,
+    pub collateral_amount_msats: u64,
 
     // === Connectivity ===
     /// Relay URL where this operator publishes responses
@@ -799,9 +795,7 @@ impl LedgerAdvertisement {
             max_deposit_msats: u64::MAX,
             min_deposit_msats: 0,
             reserves_amount_msats: 0,
-            received_collateral_msats: 0,
-            attested_collateral_msats: 0,
-            held_collateral_msats: 0,
+            collateral_amount_msats: 0,
             relay_url: None,
             access_control: false,
             allowed_domains: Vec::new(),

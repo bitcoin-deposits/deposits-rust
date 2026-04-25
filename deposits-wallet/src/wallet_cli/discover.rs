@@ -103,10 +103,10 @@ pub async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             ad.reserves_amount_msats as f64 / 100_000_000_000.0
         );
         println!(
-            "   Deposited collateral: {} msats",
-            ad.attested_collateral_msats
+            "   Collateral: {} sats ({} BTC)",
+            ad.collateral_amount_msats / 1000,
+            ad.collateral_amount_msats as f64 / 100_000_000_000.0
         );
-        println!("   Held collateral: {} msats", ad.held_collateral_msats);
 
         // Fee summary
         let annual_pct = ad.annual_fee_bps as f64 / 100.0;
@@ -311,21 +311,18 @@ pub async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("Ledger ID: {}", ad.ledger_id);
     println!("Reserves Address: {}", ad.reserves_address);
     println!();
-    println!("Reserves");
-    println!("--------");
+    println!("Reserves & Collateral");
+    println!("---------------------");
     println!(
-        "Total: {} sats ({} BTC)",
+        "Reserves: {} sats ({} BTC)",
         ad.reserves_amount_msats / 1000,
         ad.reserves_amount_msats as f64 / 100_000_000_000.0
     );
-    println!();
-    println!("Trust & Security");
-    println!("----------------");
     println!(
-        "Attested Collateral: {} msats",
-        ad.attested_collateral_msats
+        "Collateral: {} sats ({} BTC)",
+        ad.collateral_amount_msats / 1000,
+        ad.collateral_amount_msats as f64 / 100_000_000_000.0
     );
-    println!("Held Collateral: {} msats", ad.held_collateral_msats);
     println!();
     println!("Fee Structure");
     println!("-------------");

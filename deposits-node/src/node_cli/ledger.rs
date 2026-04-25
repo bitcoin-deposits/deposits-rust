@@ -1027,16 +1027,12 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         ad.max_deposit_msats = max_deposit_msats;
         ad.min_deposit_msats = min_deposit_msats;
         ad.reserves_amount_msats = ledger.reserves_amount();
+        ad.collateral_amount_msats = ledger.state.collateral_amount;
 
         // Obligations and headroom deliberately NOT advertised — both are
         // trivially inflatable by the operator via self-paid Lightning
         // invoices, so they aren't reliable trust signals. Wallets discover
         // capacity through couriers (swap ads).
-
-        // Collateral
-        ad.received_collateral_msats = ledger.state.total_collateral();
-        ad.attested_collateral_msats = ledger.state.total_collateral();
-        ad.held_collateral_msats = ledger.state.collateral_amount;
 
         // Chain tip — lets wallets pick transfer timeouts without a balance_query.
         // Use the last ledger update's block_height (matches operator's validator).
@@ -1049,11 +1045,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         println!("Publishing ledger advertisement...");
         println!("  Ledger ID: {}...", &ledger_id[..16]);
         println!("  Reserves: {} msats", ad.reserves_amount_msats);
-        println!(
-            "  Attested collateral: {} msats",
-            ad.attested_collateral_msats
-        );
-        println!("  Held collateral: {} msats", ad.held_collateral_msats);
+        println!("  Collateral: {} msats", ad.collateral_amount_msats);
         let periods_per_year = 52560u64 / ad.fee_period_blocks.max(1) as u64;
         let annualized_msats = ad.min_fee_sats.saturating_mul(periods_per_year);
         let annual_pct = ad.annual_fee_bps as f64 / 100.0;
@@ -1196,11 +1188,7 @@ pub async fn ledger_discover(args: &[String]) -> Result<(), Box<dyn std::error::
             &ad.ledger_id[..16.min(ad.ledger_id.len())]
         );
         println!("  Reserves: {} msats", ad.reserves_amount_msats);
-        println!(
-            "  Attested collateral: {} msats",
-            ad.attested_collateral_msats
-        );
-        println!("  Held collateral: {} msats", ad.held_collateral_msats);
+        println!("  Collateral: {} msats", ad.collateral_amount_msats);
         println!("  Fees:");
         println!(
             "    Annual: {}bps ({}%)",

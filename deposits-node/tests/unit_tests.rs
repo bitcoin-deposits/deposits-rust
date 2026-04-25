@@ -78,8 +78,6 @@ fn advertisement_new_defaults_limits() {
     );
     assert_eq!(ad.max_deposit_msats, u64::MAX);
     assert_eq!(ad.min_deposit_msats, 0);
-    assert_eq!(ad.total_obligations_msats, 0);
-    assert_eq!(ad.available_headroom_msats, 0);
     assert_eq!(ad.reserves_amount_msats, 0);
 }
 
@@ -825,19 +823,6 @@ fn to_fee_structure_with_max_u32_period() {
     // 52560 / u32::MAX = 0
     assert_eq!(fs.annualized_msats, 0);
     assert_eq!(fs.frequency_blocks, u32::MAX);
-}
-
-#[test]
-fn advertisement_collateral_fields_default() {
-    let ad = LedgerAdvertisement::new(
-        String::new(),
-        String::new(),
-        String::new(),
-        "regtest".to_string(),
-    );
-    assert_eq!(ad.received_collateral_msats, 0);
-    assert_eq!(ad.attested_collateral_msats, 0);
-    assert_eq!(ad.held_collateral_msats, 0);
 }
 
 // ============================================================================

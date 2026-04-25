@@ -560,9 +560,7 @@ pub async fn auto_advertise_ledger(
     ad.operator_name = operator_name.map(|s| s.to_string());
     ad.relay_url = fee_schedule.advertise_relay.clone();
     ad.reserves_amount_msats = ledger.reserves_amount();
-    ad.received_collateral_msats = ledger.state.total_collateral();
-    ad.attested_collateral_msats = ledger.state.total_collateral();
-    ad.held_collateral_msats = ledger.state.collateral_amount;
+    ad.collateral_amount_msats = ledger.state.collateral_amount;
 
     // Apply fee schedule from CLI flags
     if let Some(bps) = fee_schedule.annual_fee_bps {
@@ -690,26 +688,17 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
                     .last()
                     .map(|u| u.block_height)
                     .unwrap_or(wallet_tip);
-                (
-                    l.reserves_amount(),
-                    l.state.total_collateral(),
-                    l.state.collateral_amount,
-                    last_block,
-                )
+                (l.reserves_amount(), l.state.collateral_amount, last_block)
             })
         };
-        let Some((reserves, total_collateral, held_collateral, last_block)) =
-            refreshed
-        else {
+        let Some((reserves, collateral, last_block)) = refreshed else {
             continue;
         };
 
         ad.reserves_amount_msats = reserves;
+        ad.collateral_amount_msats = collateral;
         // obligations/headroom intentionally omitted — see comment at the
         // populate site in auto_advertise_ledger.
-        ad.received_collateral_msats = total_collateral;
-        ad.attested_collateral_msats = total_collateral;
-        ad.held_collateral_msats = held_collateral;
         ad.current_block = last_block;
 
         match node.nostr.publish_ledger_advertisement(&ad).await {

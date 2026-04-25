@@ -102,7 +102,7 @@ This allows wallet restoration from seed alone, without requiring a remote state
 
 - [DEP-02](DEP-02.md): Wire format (DepositOpen, DepositClose, DepositKeyRotate fields)
 - [DEP-04](DEP-04.md): Peer messaging (domain attestation, subkey management, verification protocol)
-- [DEP-05](DEP-05.md): Quorum and collateral (collateral deposits, obligation limits)
+- [DEP-05](DEP-05.md): Quorum and collateral (collateral declared at LedgerOpen, obligation limits)
 - [DEP-07](DEP-07.md): Fee schedules (periodic and transfer fees, fee changes)
 - [DEP-09](DEP-09.md): Transfers (two-phase transfer protocol)
 - [DEP-10](DEP-10.md): Payment channels (on-chain and lightning funding)

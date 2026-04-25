@@ -115,11 +115,15 @@ Wallets send ephemeral Kind 20101 events to operator relays. The content is JSON
 Operators publish NIP-33 replaceable events advertising their terms. The `d` tag is the ledger_id, ensuring only the latest advertisement per ledger is retained. Content includes:
 
 - Operator name and pubkey
-- Reserves amount, obligations, available headroom
+- Reserves amount (the deposit-capacity portion of the on-chain UTXO)
+- Collateral amount (the security-bond portion; mirrors `collateral_amount_msats` from the ledger's most recent `LedgerOpen` / `QuorumBegin`)
 - Fee schedules (periodic and transfer)
 - Deposit limits (min/max)
+- Access-control flags (whether `deposit_open` requires an attestation; allowed lightning-address domains)
 - Relay URL
-- Collateral enforcement block
+- Operator's observed Bitcoin chain tip at publish time
+
+Earlier drafts also carried `total_obligations` and `available_headroom`. Both were dropped — the operator can trivially inflate them with self-paid Lightning invoices, so they're not reliable trust signals. Wallets that need capacity information should either discover a courier already holding funds on this ledger, or trust the protocol invariant `reserves ≥ obligations` enforced by the quorum's co-signers.
 
 Wallets discover operators by fetching Kind 39100 events from ledger relays.
 
