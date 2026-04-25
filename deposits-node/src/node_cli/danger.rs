@@ -117,11 +117,6 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 hash
             };
 
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
             let signing_data = {
                 let mut data = Vec::new();
                 data.extend_from_slice(&dummy_message);
@@ -129,7 +124,6 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 data.extend_from_slice(&new_seq.to_le_bytes());
                 data.extend_from_slice(&wrong_prev_hash);
                 data.extend_from_slice(&computed_hash);
-                data.extend_from_slice(&timestamp.to_le_bytes());
                 data
             };
 
@@ -146,13 +140,13 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 sequence_number: new_seq,
                 previous_hash: wrong_prev_hash,
                 current_hash: computed_hash,
-                timestamp,
                 block_height: 0,
                 block_hash: [0u8; 32],
                 cosign_signature: [0u8; 64],
                 operator_signature,
                 cosigner_pubkey: None,
                 member_ledger_hash: None,
+                cosignatures: Vec::new(),
             }
         }
 
@@ -173,11 +167,6 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 hash
             };
 
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
             let signing_data = {
                 let mut data = Vec::new();
                 data.extend_from_slice(&dummy_message);
@@ -185,7 +174,6 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 data.extend_from_slice(&skipped_seq.to_le_bytes());
                 data.extend_from_slice(&current_hash);
                 data.extend_from_slice(&computed_hash);
-                data.extend_from_slice(&timestamp.to_le_bytes());
                 data
             };
 
@@ -202,13 +190,13 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 sequence_number: skipped_seq,
                 previous_hash: current_hash,
                 current_hash: computed_hash,
-                timestamp,
                 block_height: 0,
                 block_hash: [0u8; 32],
                 cosign_signature: [0u8; 64],
                 operator_signature,
                 cosigner_pubkey: None,
                 member_ledger_hash: None,
+                cosignatures: Vec::new(),
             }
         }
 
