@@ -486,16 +486,26 @@ impl Wallet {
     /// vout is out of range, or if the vout is already spent. Used by
     /// quorum members to verify the reserves UTXO referenced by a first
     /// `QuorumBegin` before co-signing.
-    pub fn get_outpoint_value_and_confs(
+    ///
+    /// Async path: this is the cosign-handler hot path. A blocking
+    /// version of this function held a tokio worker for four serial
+    /// HTTP round-trips, which under load (16 daemons all hitting
+    /// Phase 4 simultaneously) saturated the runtime worker pool and
+    /// caused the 5s cosign deadline to time out across the cluster
+    /// — even when the operator's electrs already saw the tx confirmed.
+    pub async fn get_outpoint_value_and_confs(
         &self,
         txid: bitcoin::Txid,
         vout: u32,
     ) -> Result<Option<(u64, u32)>, Error> {
-        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
+        let client = EsploraBuilder::new(&self.electrum_url)
+            .build_async()
+            .map_err(|e| Error::Wallet(format!("Failed to build esplora client: {}", e)))?;
 
         // Transaction lookup — None if the tx doesn't exist on-chain yet.
         let tx = match client
             .get_tx(&txid)
+            .await
             .map_err(|e| Error::Wallet(format!("Failed to fetch tx: {}", e)))?
         {
             Some(t) => t,
@@ -511,6 +521,7 @@ impl Wallet {
         // Check unspent.
         let spent = client
             .get_output_status(&txid, vout as u64)
+            .await
             .map_err(|e| Error::Wallet(format!("Failed to get output status: {}", e)))?
             .map(|s| s.spent)
             .unwrap_or(false);
@@ -522,6 +533,7 @@ impl Wallet {
         // mempool / unconfirmed → 0 confirmations.
         let status = client
             .get_tx_status(&txid)
+            .await
             .map_err(|e| Error::Wallet(format!("Failed to get tx status: {}", e)))?;
         let tx_height = match status.block_height {
             Some(h) => h,
@@ -529,6 +541,7 @@ impl Wallet {
         };
         let tip = client
             .get_height()
+            .await
             .map_err(|e| Error::Wallet(format!("Failed to get chain tip: {}", e)))?;
         // Tip - tx_height + 1 (a tx in the tip block itself is 1 confirmation).
         let confs = tip.saturating_sub(tx_height).saturating_add(1);
