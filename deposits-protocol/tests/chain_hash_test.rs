@@ -458,6 +458,105 @@ fn cosignature_order_does_not_affect_content_hash() {
     );
 }
 
+// =========================================================================
+// Equivocation defense
+// =========================================================================
+//
+// Equivocation = the operator signs two distinct updates at the same
+// {ledger_id, sequence_number, previous_hash} but with different message
+// content. The protocol's defense lives in the chain itself: a cosigner's
+// view of the chain is committed via their replica's `chain_tip_hash`
+// (= chain_hash of the last applied update). Once they apply U_A, any
+// subsequent U_C on a competing fork that extends U_B (i.e.
+// U_C.previous_hash == chain_hash(U_B)) cannot satisfy the cosigner's
+// continuity check (they need previous_hash == chain_hash(U_A)).
+//
+// These tests demonstrate the structural primitive: same {seq, prev_hash}
+// with different message produces distinct content_hash (and therefore
+// distinct chain_hash), so the two forks are bit-identifiable to anyone
+// who sees both.
+
+#[test]
+fn equivocation_distinct_messages_produce_distinct_chain_hashes() {
+    let prev = [0x42u8; 32];
+
+    // Same operator, same chain seq, same prev_hash, DIFFERENT message.
+    let u_a = make_update(5, prev, b"credit-A");
+    let u_b = make_update(5, prev, b"credit-B");
+
+    // Each update is well-formed in isolation.
+    assert_eq!(u_a.sequence_number, u_b.sequence_number);
+    assert_eq!(u_a.previous_hash, u_b.previous_hash);
+    assert_ne!(u_a.message, u_b.message);
+
+    // The protocol distinguishes them via content_hash, which then folds
+    // into chain_hash. Both diverge.
+    assert_ne!(u_a.content_hash, u_b.content_hash);
+    assert_ne!(u_a.chain_hash(), u_b.chain_hash());
+}
+
+#[test]
+fn equivocation_chain_extension_breaks_continuity_for_other_fork() {
+    let prev_at_seq_4 = [0x42u8; 32];
+
+    // Two competing updates at seq=5.
+    let u_a = make_update(5, prev_at_seq_4, b"credit-A");
+    let u_b = make_update(5, prev_at_seq_4, b"credit-B");
+
+    // The adversary builds U_C extending U_B's fork (i.e. signs another
+    // update with previous_hash = chain_hash(U_B)). Any cosigner who has
+    // already applied U_A holds chain_tip_hash = chain_hash(U_A).
+    let chain_tip_after_a = u_a.chain_hash();
+    let u_c_extends_b = make_update(6, u_b.chain_hash(), b"credit-C");
+
+    // The cosigner's continuity check is: U_C.previous_hash ==
+    // their chain_tip_hash. For a cosigner committed to U_A, U_C's
+    // previous_hash points at U_B's chain_hash — which doesn't match.
+    assert_ne!(
+        u_c_extends_b.previous_hash, chain_tip_after_a,
+        "U_C's previous_hash must not match U_A-committed cosigner's chain_tip"
+    );
+
+    // Conversely, a cosigner committed to U_B accepts U_C (their chain_tip
+    // = chain_hash(U_B), which IS U_C.previous_hash). That's the fork.
+    let chain_tip_after_b = u_b.chain_hash();
+    assert_eq!(
+        u_c_extends_b.previous_hash, chain_tip_after_b,
+        "U_C extends U_B's fork — the U_B-committed cosigner accepts it"
+    );
+}
+
+#[test]
+fn equivocation_witness_is_observable_to_anyone_with_both_updates() {
+    // The "witness" of equivocation is just the pair (U_A, U_B) with:
+    //   - same operator_id
+    //   - same ledger_id
+    //   - same sequence_number
+    //   - same previous_hash
+    //   - different content_hash (and hence different operator_signing_data)
+    // Any third party that collects both can prove the operator signed
+    // conflicting histories without trusting any cosigner — this is the
+    // primitive a future FraudProofType::Equivocation would build on.
+
+    let prev = [0xABu8; 32];
+    let u_a = make_update(7, prev, b"transfer-to-X");
+    let u_b = make_update(7, prev, b"transfer-to-Y");
+
+    // The 4-tuple equivocation key is identical; only message + content_hash
+    // differ. Cheap to detect with a hash-set keyed on (operator, ledger,
+    // seq, prev_hash) → content_hash; collision triggers proof emission.
+    let key_a = (u_a.operator_id, u_a.ledger_id, u_a.sequence_number, u_a.previous_hash);
+    let key_b = (u_b.operator_id, u_b.ledger_id, u_b.sequence_number, u_b.previous_hash);
+    assert_eq!(key_a, key_b, "equivocating updates share the (op, ledger, seq, prev) key");
+    assert_ne!(u_a.content_hash, u_b.content_hash, "but content differs");
+    assert_ne!(
+        u_a.operator_signing_data(),
+        u_b.operator_signing_data(),
+        "operator's signing data also differs — both signatures are individually valid \
+         but bind the operator to incompatible histories"
+    );
+}
+
 #[test]
 fn cosignature_order_does_not_affect_tlv_bytes() {
     use deposits_protocol::tlv::{TlvDecode, TlvEncode};

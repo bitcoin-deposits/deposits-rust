@@ -2188,6 +2188,69 @@ fn step1_honest_cosigners_block_over_reserve_credit() {
 }
 
 // =========================================================================
+// Equivocation defense: cross-replica chain_tip_hash consistency
+// =========================================================================
+//
+// The fuzzer's `propose` updates the owning operator's ledger and every
+// co-signer's replica atomically, so legitimate runs cannot produce
+// equivocation. This canary verifies the cross-replica invariant
+// actually fires when a replica's chain_tip_hash is forced to diverge —
+// catches regressions if a future propose-flow change quietly stops
+// keeping replicas in sync at applied seqs.
+
+#[test]
+fn equivocation_invariant_fires_on_divergent_replica() {
+    // At construction, every replica is seeded directly from the owner's
+    // post-QuorumBegin state, so chain_tip_hash agrees by construction.
+    // We tamper one to simulate a cosigner that quietly committed to a
+    // different history at the same chain seq — the invariant must catch it.
+    let mut sim = ProtocolSim::new(5, &[]);
+
+    // Sanity: fresh sim has no equivocation flags.
+    let before: Vec<_> = sim
+        .check_all_invariants()
+        .into_iter()
+        .filter(|s| s.contains("equivocation"))
+        .collect();
+    assert!(
+        before.is_empty(),
+        "fresh sim should have no equivocation flags: {:?}",
+        before
+    );
+
+    // Force the divergence on op0's first quorum member's replica of op0.
+    let cosigner_idx = sim.operators[0].quorum_members[0];
+    let owner_seq = sim.operators[0].ledger.state.sequence;
+    {
+        let replica = sim.operators[cosigner_idx]
+            .replicas
+            .get_mut(&0)
+            .expect("cosigner has replica of op 0");
+        // Confirm the precondition we rely on: replica seq matches owner.
+        assert_eq!(
+            replica.sequence, owner_seq,
+            "freshly-seeded replica must be at owner's seq"
+        );
+        replica.chain_tip_hash = [0xEE; 32];
+    }
+
+    let flagged: Vec<_> = sim
+        .check_all_invariants()
+        .into_iter()
+        .filter(|s| s.contains("equivocation"))
+        .collect();
+    assert!(
+        !flagged.is_empty(),
+        "invariant must flag the tampered replica's chain_tip"
+    );
+    assert!(
+        flagged.iter().any(|s| s.contains("possible equivocation")),
+        "flagged messages should mention equivocation: {:?}",
+        flagged
+    );
+}
+
+// =========================================================================
 // Step 2: small fuzz — 100 runs × 50 ops, verify invariants on honest ledgers.
 // =========================================================================
 
@@ -2573,6 +2636,27 @@ impl ProtocolSim {
                             i, owner, r_total, replica.reserves_amount
                         ));
                     }
+                }
+
+                // Equivocation defense (cross-replica consistency): if a
+                // replica's sequence equals the owning operator's current
+                // sequence, the chain_tip_hash MUST agree. Disagreement
+                // would mean the cosigner committed to a state the owner
+                // doesn't have — i.e. the operator equivocated and got two
+                // different histories signed at the same chain seq.
+                let owner_state = &self.operators[owner].ledger.state;
+                if replica.sequence == owner_state.sequence
+                    && replica.chain_tip_hash != owner_state.chain_tip_hash
+                {
+                    v.push(format!(
+                        "op {} replica of op {} at seq={}: chain_tip {:02x?} disagrees with \
+                         owner {:02x?} — possible equivocation",
+                        i,
+                        owner,
+                        replica.sequence,
+                        &replica.chain_tip_hash[..4],
+                        &owner_state.chain_tip_hash[..4]
+                    ));
                 }
             }
         }
