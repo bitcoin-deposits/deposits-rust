@@ -707,24 +707,20 @@ impl Node {
             }
         };
 
-        // Build tagged hash: SHA256(tag || tag || signing_data || member_ledger_hash)
-        let signing_data = Self::build_invoice_signing_data(
+        // Canonical signing message lives in
+        // `deposits_protocol::invoice_cosign_signing_message` so verifiers
+        // (wallet, fraud-proof verifier) reproduce the same hash without
+        // duplicating the tagged-hash construction.
+        let msg_hash = deposits_core::signature_utils::invoice_cosign_signing_message(
             &request.ledger_id,
             &payment_hash,
             &deposit_id,
             amount_msat,
+            &member_ledger_hash,
         );
-        let tag = b"deposits/invoice_cosign";
-        let tag_hash = sha256::Hash::hash(tag);
-        let mut tagged_input = Vec::new();
-        tagged_input.extend_from_slice(tag_hash.as_byte_array());
-        tagged_input.extend_from_slice(tag_hash.as_byte_array());
-        tagged_input.extend_from_slice(&signing_data);
-        tagged_input.extend_from_slice(&member_ledger_hash);
-        let hash = sha256::Hash::hash(&tagged_input);
 
         let secp = &self.secp;
-        let msg = Message::from_digest(hash.to_byte_array());
+        let msg = Message::from_digest(msg_hash);
         let secret = self.wallet.operator_secret();
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(secp, &secret);
         let sig = secp.sign_schnorr(&msg, &keypair);

@@ -403,24 +403,6 @@ pub fn save_deposit_key_index(
     std::fs::write(&index_file, index.to_string())
 }
 
-/// Build canonical signing data for deposit offer co-signatures (must match server-side)
-pub fn build_offer_signing_data(
-    ledger_id: &str,
-    offer_id: &[u8; 32],
-    operator_id: &PublicKey,
-    funding_address: &str,
-    deadline_block: u32,
-) -> Vec<u8> {
-    let mut data = Vec::new();
-    data.extend_from_slice(ledger_id.as_bytes());
-    data.extend_from_slice(offer_id);
-    data.extend_from_slice(&operator_id.serialize()[1..]);
-    let addr_bytes = funding_address.as_bytes();
-    data.push(addr_bytes.len() as u8);
-    data.extend_from_slice(addr_bytes);
-    data.extend_from_slice(&deadline_block.to_le_bytes());
-    data
-}
 
 /// Verify an offer co-signature from a quorum member
 pub fn verify_offer_cosignature(
@@ -433,30 +415,19 @@ pub fn verify_offer_cosignature(
     member_ledger_hash: &[u8; 32],
     signature: &[u8; 64],
 ) -> bool {
-    // Build the offer signing data
-    let signing_data = build_offer_signing_data(
+    // Canonical signing message in deposits-protocol; same routine the
+    // operator uses to produce the signature.
+    let msg_hash = deposits_core::signature_utils::offer_cosign_signing_message(
         ledger_id,
         offer_id,
         operator_id,
         funding_address,
         deadline_block,
+        member_ledger_hash,
     );
 
-    // Build tagged hash following BIP-340 convention
-    let tag = b"deposits/offer_cosign";
-    let tag_hash = sha256::Hash::hash(tag);
-
-    let mut tagged_input = Vec::new();
-    tagged_input.extend_from_slice(tag_hash.as_byte_array());
-    tagged_input.extend_from_slice(tag_hash.as_byte_array());
-    tagged_input.extend_from_slice(&signing_data);
-    tagged_input.extend_from_slice(member_ledger_hash);
-
-    let hash = sha256::Hash::hash(&tagged_input);
-
-    // Verify Schnorr (BIP-340) signature
     let secp = Secp256k1::verification_only();
-    let msg = Message::from_digest(hash.to_byte_array());
+    let msg = Message::from_digest(msg_hash);
 
     let (xonly, _parity) = cosigner_pubkey.x_only_public_key();
     match schnorr::Signature::from_slice(signature) {

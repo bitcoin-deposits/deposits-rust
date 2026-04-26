@@ -867,30 +867,20 @@ impl Node {
             }
         };
 
-        // Build the offer signing data
-        let signing_data = Self::build_offer_signing_data(
+        // Canonical signing message lives in
+        // `deposits_protocol::offer_cosign_signing_message`.
+        let msg_hash = deposits_core::signature_utils::offer_cosign_signing_message(
             &request.ledger_id,
             &offer_id,
             &operator_id,
             &funding_address,
             deadline_block,
+            &member_ledger_hash,
         );
-
-        // Build tagged hash following BIP-340 convention
-        let tag = b"deposits/offer_cosign";
-        let tag_hash = sha256::Hash::hash(tag);
-
-        let mut tagged_input = Vec::new();
-        tagged_input.extend_from_slice(tag_hash.as_byte_array());
-        tagged_input.extend_from_slice(tag_hash.as_byte_array());
-        tagged_input.extend_from_slice(&signing_data);
-        tagged_input.extend_from_slice(&member_ledger_hash);
-
-        let hash = sha256::Hash::hash(&tagged_input);
 
         // Sign with Schnorr (BIP-340)
         let secp = &self.secp;
-        let msg = Message::from_digest(hash.to_byte_array());
+        let msg = Message::from_digest(msg_hash);
         let secret = self.wallet.operator_secret();
         let keypair = bitcoin::secp256k1::Keypair::from_secret_key(secp, &secret);
         let sig = secp.sign_schnorr(&msg, &keypair);
