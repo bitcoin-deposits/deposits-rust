@@ -322,6 +322,22 @@ impl Node {
     ) -> (bool, Option<String>, Option<String>) {
         use std::str::FromStr;
 
+        // The relay broadcasts kind:20101 events to every interested
+        // subscriber, and our consent-time piggyback adds the operator's
+        // ledger to our interested set. As a side effect, future
+        // consent_requests targeting that operator's *member* ledger also
+        // reach us — we'd then try to record QuorumJoin on a ledger we
+        // don't operate, which the state machine rejects with
+        // `quorum_join_wrong_role`. Drop silently when we're not the
+        // intended recipient.
+        if !self.is_operator_of_ledger(&request.ledger_id) {
+            tracing::debug!(
+                "Ignoring consent_request for ledger {}... (not our operator ledger)",
+                &request.ledger_id[..16.min(request.ledger_id.len())]
+            );
+            return (false, None, None);
+        }
+
         tracing::info!(
             "Processing consent_request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]

@@ -283,6 +283,17 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
             exit 1
         fi
         store "ledger_${i}_${l}" "$ledger_id"
+        # Confirm before the next reserves create and let the daemon's
+        # wallet finish its post-mine esplora sync. Without the mine the
+        # wallet may pick the same input for the next reserves tx and
+        # collide in mempool ("insufficient fee, rejecting replacement").
+        # Without the sleep the daemon hasn't yet observed the new tip
+        # and may still serve the now-spent UTXO ("bad-txns-inputs-
+        # missingorspent"). Both surfaced on Q=3 runs.
+        mine_blocks 1
+        # 3s gives electrs time to index the new block and BDK time to
+        # pull it via esplora. 1s wasn't enough on Q=3 retries.
+        sleep 3
     done
     # Per-op advertisement pass — `ledger advertise` walks the operator's
     # ledgers and publishes a kind:39100 for each. Without this, wallet

@@ -72,6 +72,12 @@ impl Node {
             "quorum_remove",
             "quorum_join",
             "quorum_begin",
+            // consent_request targets the operator of the *member's*
+            // collateral ledger (`#l = member_ledger_id`). Any non-operator
+            // who happens to subscribe to that ledger (e.g. via the consent
+            // piggyback's add_interested_ledger) would otherwise process it
+            // and reply with a malformed `false / no error` response.
+            "consent_request",
             "resync",
         ];
         if operator_only_actions.contains(&request.action.as_str())
