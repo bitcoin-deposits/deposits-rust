@@ -63,6 +63,60 @@ impl Node {
             }
         }
 
+        // ── Step 2 of the per-ledger-actor migration ──
+        // Spawn one tokio task per loaded ledger. Each actor owns a clone
+        // of the Ledger. Step 2 actors are idle stubs — they don't yet
+        // receive any inbound or commit events. The handler.ledgers map
+        // is still authoritative. This step validates that the actor
+        // pool spins up cleanly (one channel + task per ledger) and that
+        // the shared outbox drainer doesn't leak.
+        let (actor_outbox_tx, actor_outbox_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(
+                String,
+                super::ledger_actor::LedgerOutbound,
+            )>();
+        let mut ledger_actors: HashMap<
+            String,
+            super::ledger_actor::LedgerActorHandle,
+        > = HashMap::new();
+        {
+            let ledgers = handler_arc.ledgers.lock().unwrap();
+            for (lid, arc) in ledgers.iter() {
+                let ledger_clone = arc.read().unwrap().clone();
+                let (tx, rx) = tokio::sync::mpsc::channel::<
+                    super::ledger_actor::LedgerEvent,
+                >(64);
+                let actor = super::ledger_actor::LedgerActor {
+                    inbox: rx,
+                    outbox: actor_outbox_tx.clone(),
+                    ledger: ledger_clone,
+                    ledger_id: lid.clone(),
+                };
+                tokio::spawn(actor.run());
+                ledger_actors.insert(
+                    lid.clone(),
+                    super::ledger_actor::LedgerActorHandle { inbox: tx },
+                );
+            }
+        }
+        // Drop our local clone of the outbox sender so the channel
+        // closes naturally if every actor has shut down (otherwise the
+        // drainer would block forever waiting on a sender we hold).
+        drop(actor_outbox_tx);
+        // Step 2 outbox drainer: actors don't emit anything yet, but we
+        // start the drain task so step 3 only has to swap the body.
+        tokio::spawn(async move {
+            let mut rx = actor_outbox_rx;
+            while let Some((lid, ev)) = rx.recv().await {
+                tracing::debug!(
+                    "actor_outbox: ledger={}… event={:?}",
+                    &lid[..16.min(lid.len())],
+                    std::mem::discriminant(&ev)
+                );
+            }
+            tracing::info!("actor_outbox drainer: all actors gone, exiting");
+        });
+
         // Subscribe globally (4 compacted kind filters for all event types).
         // CLI commands don't call start(), so we do this here too.
         if let Err(e) = nostr.subscribe_global().await {
@@ -97,6 +151,7 @@ impl Node {
             active_ledger_tasks: Mutex::new(HashMap::new()),
             ledger_workers: Mutex::new(HashMap::new()),
             cosign_workers: Mutex::new(HashMap::new()),
+            ledger_actors: Mutex::new(ledger_actors),
             deposit_access_control: std::env::var("DEPOSIT_ACCESS_CONTROL")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),

@@ -332,6 +332,18 @@ pub struct Node {
     cosign_workers:
         Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<crate::nostr::LedgerRequest>>>,
 
+    /// Per-ledger actor handles. Step 2 of the per-ledger-actor migration:
+    /// every loaded ledger gets a tokio task that owns a snapshot of its
+    /// `Ledger`. Actors are idle in this step (run loop is a stub); steps
+    /// 3+ start routing inbound and commit events through them. The
+    /// authoritative `handler.ledgers` map is unchanged.
+    ///
+    /// The shared outbox receiver isn't stored on `Node` — `init.rs`
+    /// spawns a drainer task that takes ownership of it. Step 3 replaces
+    /// the drainer with real fan-in to broadcast / wallet / spawn paths.
+    pub(crate) ledger_actors:
+        Mutex<HashMap<String, ledger_actor::LedgerActorHandle>>,
+
     /// Whether deposit access control is enabled (DEPOSIT_ACCESS_CONTROL=true).
     /// When false, all deposit opens are allowed (denylist still checked).
     deposit_access_control: bool,

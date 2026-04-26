@@ -135,6 +135,12 @@ impl LedgerActorHandle {
     }
 }
 
+/// Shared-shape outbox: each actor sends `(ledger_id, outbound_event)`
+/// into a single coordinator-side receiver. Easier multiplexing than
+/// per-actor channels and matches how the coordinator's main loop
+/// already handles fan-in for Nostr / wallet operations.
+pub type SharedOutbox = mpsc::UnboundedSender<(String, LedgerOutbound)>;
+
 /// The actor itself. Step 1 leaves this as the type sketch; subsequent
 /// steps fill in `run()` with the real state-machine driver, move
 /// `Ledger` ownership in, and add persistence.
@@ -142,19 +148,34 @@ pub struct LedgerActor {
     /// Inbox the actor reads from. Owned here so dropping the actor
     /// closes the channel naturally on shutdown.
     pub inbox: mpsc::Receiver<LedgerEvent>,
-    /// Outbox to the coordinator.
-    pub outbox: mpsc::Sender<LedgerOutbound>,
+    /// Shared outbox to the coordinator (tagged with this actor's
+    /// `ledger_id` on every send).
+    pub outbox: SharedOutbox,
     /// The owned ledger. Wrapped so steps 2-3 can move ownership in
     /// without forcing a full rewrite of every existing access site
     /// in one PR.
     pub ledger: deposits_core::ledger::Ledger,
-    /// Stable identifier for log lines.
+    /// Stable identifier for log lines and outbox tagging.
     pub ledger_id: String,
 }
 
 impl LedgerActor {
-    /// Stub run loop for Step 1 — drains the inbox and logs each event
-    /// type. Step 3 fills this in with the real state machine.
+    /// Convenience: send to the shared outbox tagged with this
+    /// actor's ledger_id.
+    #[allow(dead_code)] // becomes used in step 3+
+    fn emit(&self, ev: LedgerOutbound) {
+        if let Err(e) = self.outbox.send((self.ledger_id.clone(), ev)) {
+            tracing::warn!(
+                "LedgerActor[{}…] outbox send failed (coordinator gone?): {}",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                e
+            );
+        }
+    }
+
+    /// Stub run loop for Step 2 — drains the inbox and logs each event
+    /// type. Real behavior moves in at Step 3 (Inbound), Step 4
+    /// (LocalCommit, Cosign).
     pub async fn run(mut self) {
         tracing::info!(
             "LedgerActor[{}…] starting (stub run loop)",
@@ -169,7 +190,7 @@ impl LedgerActor {
                     );
                 }
                 LedgerEvent::Cosign { reply, .. } => {
-                    // Step 1: refuse to cosign — keeps existing daemon
+                    // Step 2: refuse to cosign — keeps existing daemon
                     // path authoritative until step 4.
                     let _ = reply.send(None);
                 }
@@ -188,5 +209,9 @@ impl LedgerActor {
                 }
             }
         }
+        tracing::info!(
+            "LedgerActor[{}…] inbox closed; exiting",
+            &self.ledger_id[..16.min(self.ledger_id.len())]
+        );
     }
 }
