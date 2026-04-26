@@ -29,8 +29,8 @@ pub use constants::{
 pub use error::{DepositsError, DepositsResult, HandlerError};
 pub use messages::{DepositsMessage, HashStrategy, LedgerOperation};
 pub use signature_utils::{
-    compute_transfer_id, invoice_lock_signing_message, transfer_lock_signing_message,
-    withdrawal_signing_message,
+    compute_transfer_id, invoice_cosign_signing_message, invoice_lock_signing_message,
+    offer_cosign_signing_message, transfer_lock_signing_message, withdrawal_signing_message,
 };
 pub use tlv::{TlvBuilder, TlvDecode, TlvEncode, TlvError, TlvReader, TlvResult, TlvStream};
 pub use types::{

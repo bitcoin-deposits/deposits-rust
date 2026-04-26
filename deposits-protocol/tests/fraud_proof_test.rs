@@ -17,7 +17,10 @@ fn make_onchain_proof() -> FraudProof {
         evidence: FraudEvidence::UncreditedOnchain {
             offer_id: "bb".repeat(16),
             funding_address: "bcrt1qtest".to_string(),
+            accused_operator_pubkey: "02".to_string() + &"ab".repeat(32),
+            deadline_block: 600,
             cosigner_pubkey: "02".to_string() + &"cc".repeat(32),
+            cosigner_ledger_hash: "00".repeat(32),
             cosign_signature: "dd".repeat(32),
             txid: "ee".repeat(32),
             vout: 0,
@@ -37,7 +40,10 @@ fn make_lightning_proof() -> FraudProof {
         evidence: FraudEvidence::UncreditedLightning {
             invoice: "lnbcrt1test".to_string(),
             payment_hash: "ff".repeat(32),
+            deposit_id: deposits_protocol::DepositId::default(),
+            amount_msat: 1_000_000,
             cosigner_pubkey: "02".to_string() + &"cc".repeat(32),
+            cosigner_ledger_hash: "00".repeat(32),
             cosign_signature: "dd".repeat(32),
             preimage: "11".repeat(32),
             proof_sequence: 50,
@@ -827,6 +833,37 @@ mod uncredited_lightning {
         .unwrap()
     }
 
+    /// Build a real BIP-340 schnorr cosignature over the canonical
+    /// invoice signing message. Returns (cosigner_pubkey, sig_hex,
+    /// cosigner_ledger_hash).
+    fn cosign_invoice(
+        ledger_id: &str,
+        payment_hash: &[u8; 32],
+        deposit_id: &deposits_protocol::DepositId,
+        amount_msat: u64,
+        cosigner_seed: u8,
+    ) -> (bitcoin::secp256k1::PublicKey, String, [u8; 32]) {
+        use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+
+        let cosigner_ledger_hash = [0xCC; 32];
+        let secp = Secp256k1::new();
+        let secret = bitcoin::secp256k1::SecretKey::from_slice(&[cosigner_seed; 32]).unwrap();
+        let keypair = Keypair::from_secret_key(&secp, &secret);
+        let cosigner_pubkey = keypair.public_key();
+
+        let msg_hash = deposits_protocol::invoice_cosign_signing_message(
+            ledger_id,
+            payment_hash,
+            deposit_id,
+            amount_msat,
+            &cosigner_ledger_hash,
+        );
+        let msg = Message::from_digest(msg_hash);
+        let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+
+        (cosigner_pubkey, hex::encode(sig.serialize()), cosigner_ledger_hash)
+    }
+
     fn fixture_update(seq: u64, op: LedgerOperation) -> SignedLedgerUpdate {
         SignedLedgerUpdate {
             message: op.tlv_encode(),
@@ -868,15 +905,24 @@ mod uncredited_lightning {
             h.update(preimage);
             h.finalize().into()
         };
+        let ledger_id = hex::encode([0xAA; 32]);
+        let deposit_id = deposits_protocol::DepositId::default();
+        let amount_msat = 1_000_000u64;
+        let (cosigner_pk, sig_hex, cosigner_ledger_hash) =
+            cosign_invoice(&ledger_id, &payment_hash, &deposit_id, amount_msat, 0xAA);
+
         FraudProof {
             proof_type: FraudProofType::UncreditedLightningPayment,
             accused: "02".to_string() + &"ab".repeat(32),
-            ledger_id: hex::encode([0xAA; 32]),
+            ledger_id,
             evidence: FraudEvidence::UncreditedLightning {
                 invoice: "lnbcrt1ptest".to_string(),
                 payment_hash: hex::encode(payment_hash),
-                cosigner_pubkey: "02".to_string() + &"cc".repeat(32),
-                cosign_signature: "dd".repeat(32),
+                deposit_id,
+                amount_msat,
+                cosigner_pubkey: hex::encode(cosigner_pk.serialize()),
+                cosigner_ledger_hash: hex::encode(cosigner_ledger_hash),
+                cosign_signature: sig_hex,
                 preimage: hex::encode(preimage),
                 proof_sequence,
             },
@@ -1010,6 +1056,57 @@ mod uncredited_lightning {
         let history = vec![fixture_update(50, dummy_op())];
         let err = verify_uncredited_lightning(&proof, &history).unwrap_err();
         assert!(err.contains("wrong evidence type"), "wrong error: {}", err);
+    }
+
+    #[test]
+    fn rejects_invalid_cosignature() {
+        // Signature that's syntactically a 64-byte schnorr but doesn't
+        // verify against the canonical signing message. We swap in a
+        // signature from a different message so structure passes but
+        // verification fails.
+        let other_proof = proof_for([0xCC; 32], 99); // signs a different message
+        let other_sig = match &other_proof.evidence {
+            FraudEvidence::UncreditedLightning { cosign_signature, .. } => {
+                cosign_signature.clone()
+            }
+            _ => unreachable!(),
+        };
+
+        let mut proof = proof_for([0xBE; 32], 50);
+        if let FraudEvidence::UncreditedLightning {
+            cosign_signature, ..
+        } = &mut proof.evidence
+        {
+            *cosign_signature = other_sig;
+        }
+        let history = vec![fixture_update(50, dummy_op())];
+        let err = verify_uncredited_lightning(&proof, &history).unwrap_err();
+        assert!(
+            err.contains("invoice cosignature failed BIP-340 verification"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_signature_over_wrong_message() {
+        // Cosignature is over a DIFFERENT amount_msat than what evidence claims.
+        // Anyone tampering with the amount field after the cosig was made
+        // should be detected.
+        let mut proof = proof_for([0xBE; 32], 50);
+        if let FraudEvidence::UncreditedLightning {
+            amount_msat, ..
+        } = &mut proof.evidence
+        {
+            *amount_msat = 9_999_999; // tampered
+        }
+        let history = vec![fixture_update(50, dummy_op())];
+        let err = verify_uncredited_lightning(&proof, &history).unwrap_err();
+        assert!(
+            err.contains("invoice cosignature failed BIP-340 verification"),
+            "wrong error: {}",
+            err
+        );
     }
 }
 
@@ -1251,6 +1348,50 @@ mod uncredited_onchain {
         }
     }
 
+    /// Build a deterministic accused operator keypair so the offer-cosig
+    /// signing message can be reproduced (operator pubkey is part of the
+    /// hash). Returns (accused_pubkey, accused_pubkey_hex).
+    fn accused_op() -> (bitcoin::secp256k1::PublicKey, String) {
+        use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
+        let secp = Secp256k1::new();
+        let secret = SecretKey::from_slice(&[0xAB; 32]).unwrap();
+        let keypair = Keypair::from_secret_key(&secp, &secret);
+        let pk = keypair.public_key();
+        (pk, hex::encode(pk.serialize()))
+    }
+
+    /// Sign an offer cosig with a deterministic cosigner key. Returns
+    /// (cosigner_pubkey_hex, sig_hex, cosigner_ledger_hash).
+    fn cosign_offer(
+        ledger_id: &str,
+        offer_id: &[u8; 32],
+        accused_pk: &bitcoin::secp256k1::PublicKey,
+        funding_address: &str,
+        deadline_block: u32,
+    ) -> (String, String, [u8; 32]) {
+        use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
+        let cosigner_ledger_hash = [0xDD; 32];
+        let secp = Secp256k1::new();
+        let secret = SecretKey::from_slice(&[0xCD; 32]).unwrap();
+        let keypair = Keypair::from_secret_key(&secp, &secret);
+        let cosigner_pk = keypair.public_key();
+        let msg_hash = deposits_protocol::offer_cosign_signing_message(
+            ledger_id,
+            offer_id,
+            accused_pk,
+            funding_address,
+            deadline_block,
+            &cosigner_ledger_hash,
+        );
+        let msg = Message::from_digest(msg_hash);
+        let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+        (
+            hex::encode(cosigner_pk.serialize()),
+            hex::encode(sig.serialize()),
+            cosigner_ledger_hash,
+        )
+    }
+
     fn fixture(
         elapsed_blocks: u32,
         required_confs: u32,
@@ -1258,6 +1399,9 @@ mod uncredited_onchain {
         let funding_block_hash = [0xBB; 32];
         let proof_block_hash = [0xCC; 32];
         let txid_bytes = [0xEE; 32];
+        let offer_id = [0xBB; 32];
+        let funding_address = "bcrt1qtest";
+        let deadline_block = 600u32;
 
         let mut oracle = HashMap::new();
         oracle.insert(funding_block_hash, 1000u32);
@@ -1265,15 +1409,28 @@ mod uncredited_onchain {
 
         let history = vec![fixture_update(50, proof_block_hash, dummy_op())];
 
+        let (accused_pk, accused_hex) = accused_op();
+        let ledger_id = hex::encode([0xAA; 32]);
+        let (cosigner_pk_hex, sig_hex, cosigner_ledger_hash) = cosign_offer(
+            &ledger_id,
+            &offer_id,
+            &accused_pk,
+            funding_address,
+            deadline_block,
+        );
+
         let proof = FraudProof {
             proof_type: FraudProofType::UncreditedOnchainPayment,
-            accused: "02".to_string() + &"ab".repeat(32),
-            ledger_id: hex::encode([0xAA; 32]),
+            accused: accused_hex.clone(),
+            ledger_id,
             evidence: FraudEvidence::UncreditedOnchain {
-                offer_id: "deadbeef".to_string(),
-                funding_address: "bcrt1qtest".to_string(),
-                cosigner_pubkey: "02".to_string() + &"cc".repeat(32),
-                cosign_signature: "dd".repeat(32),
+                offer_id: hex::encode(offer_id),
+                funding_address: funding_address.to_string(),
+                accused_operator_pubkey: accused_hex,
+                deadline_block,
+                cosigner_pubkey: cosigner_pk_hex,
+                cosigner_ledger_hash: hex::encode(cosigner_ledger_hash),
+                cosign_signature: sig_hex,
                 txid: hex::encode(txid_bytes),
                 vout: 0,
                 amount_sats: 100_000,
@@ -1326,30 +1483,20 @@ mod uncredited_onchain {
 
     #[test]
     fn rejects_unconfirmed_proof_sequence_block() {
-        // Funding block is confirmed; the operator-update's block_hash isn't.
-        let funding_block_hash = [0xBB; 32];
+        // Build the genuine fixture, then drop the proof-block entry
+        // from the oracle so only the funding block is confirmed.
+        let (proof, history, oracle, _) = fixture(10, 6);
+        let funding_block_hash =
+            if let FraudEvidence::UncreditedOnchain { confirmed_at_block_hash, .. } =
+                &proof.evidence
+            {
+                *confirmed_at_block_hash
+            } else {
+                unreachable!()
+            };
         let mut oracle_map = HashMap::new();
-        oracle_map.insert(funding_block_hash, 1000u32);
+        oracle_map.insert(funding_block_hash, oracle.0[&funding_block_hash]);
         let oracle = MockOracle(oracle_map);
-
-        let history = vec![fixture_update(50, [0xCC; 32], dummy_op())];
-        let proof = FraudProof {
-            proof_type: FraudProofType::UncreditedOnchainPayment,
-            accused: "02".to_string() + &"ab".repeat(32),
-            ledger_id: hex::encode([0xAA; 32]),
-            evidence: FraudEvidence::UncreditedOnchain {
-                offer_id: "deadbeef".to_string(),
-                funding_address: "bcrt1qtest".to_string(),
-                cosigner_pubkey: "02".to_string() + &"cc".repeat(32),
-                cosign_signature: "dd".repeat(32),
-                txid: hex::encode([0xEE; 32]),
-                vout: 0,
-                amount_sats: 100_000,
-                confirmed_at_block_hash: funding_block_hash,
-                required_confirmations: 6,
-                proof_sequence: 50,
-            },
-        };
         let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
         assert!(
             err.contains("proof_sequence update's block_hash") && err.contains("not in verifier"),
@@ -1416,6 +1563,41 @@ mod uncredited_onchain {
         };
         let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
         assert!(err.contains("wrong evidence type"), "wrong error: {}", err);
+    }
+
+    #[test]
+    fn rejects_offer_signature_over_wrong_message() {
+        // Tamper with deadline_block after the cosig was made.
+        let (mut proof, history, oracle, _) = fixture(10, 6);
+        if let FraudEvidence::UncreditedOnchain {
+            deadline_block, ..
+        } = &mut proof.evidence
+        {
+            *deadline_block = 999_999;
+        }
+        let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
+        assert!(
+            err.contains("offer cosignature failed BIP-340 verification"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_offer_signature_with_swapped_funding_address() {
+        let (mut proof, history, oracle, _) = fixture(10, 6);
+        if let FraudEvidence::UncreditedOnchain {
+            funding_address, ..
+        } = &mut proof.evidence
+        {
+            *funding_address = "bcrt1qother".to_string();
+        }
+        let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
+        assert!(
+            err.contains("offer cosignature failed BIP-340 verification"),
+            "wrong error: {}",
+            err
+        );
     }
 }
 

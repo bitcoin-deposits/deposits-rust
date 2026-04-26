@@ -68,7 +68,15 @@ pub enum FraudEvidence {
         /// The cosigned offer (hex offer_id, funding_address, cosignature).
         offer_id: String,
         funding_address: String,
+        /// Operator pubkey that issued the offer (binds the cosigner's
+        /// signature to a specific operator).
+        accused_operator_pubkey: String,
+        /// Block height the offer commits to as its expiration.
+        deadline_block: u32,
         cosigner_pubkey: String,
+        /// Cosigner's own ledger hash at cosign time. Required to
+        /// reconstruct the offer signing message.
+        cosigner_ledger_hash: String,
         cosign_signature: String,
         /// On-chain payment.
         txid: String,
@@ -90,10 +98,19 @@ pub enum FraudEvidence {
 
     /// Operator didn't credit a lightning payment.
     UncreditedLightning {
-        /// The cosigned invoice.
+        /// The cosigned invoice (BOLT11).
         invoice: String,
         payment_hash: String,
+        /// Deposit the invoice was minted against.
+        #[serde(with = "crate::types::serde_deposit_id")]
+        deposit_id: crate::types::DepositId,
+        /// Invoice amount in millisatoshis (signed over by the cosigner).
+        amount_msat: u64,
         cosigner_pubkey: String,
+        /// The cosigner's own ledger hash at cosign time. Required to
+        /// reconstruct the BIP-340 signing message; without it the
+        /// cosig signature can't be verified.
+        cosigner_ledger_hash: String,
         cosign_signature: String,
         /// The preimage proving payment.
         preimage: String,
@@ -355,8 +372,11 @@ pub fn verify_uncredited_lightning(
     let FraudEvidence::UncreditedLightning {
         invoice: _,
         payment_hash,
-        cosigner_pubkey: _,
-        cosign_signature: _,
+        deposit_id,
+        amount_msat,
+        cosigner_pubkey,
+        cosigner_ledger_hash,
+        cosign_signature,
         preimage,
         proof_sequence,
     } = &proof.evidence
@@ -365,6 +385,8 @@ pub fn verify_uncredited_lightning(
     };
 
     let payment_hash_bytes = parse_hex32(payment_hash, "payment_hash")?;
+    let cosigner_ledger_hash_bytes =
+        parse_hex32(cosigner_ledger_hash, "cosigner_ledger_hash")?;
     let preimage_bytes = parse_hex32(preimage, "preimage")?;
 
     // (1) hash(preimage) == payment_hash.
@@ -375,6 +397,43 @@ pub fn verify_uncredited_lightning(
             hex::encode(&computed[..8]),
             hex::encode(&payment_hash_bytes[..8])
         ));
+    }
+
+    // (1b) cosignature on the invoice is a valid BIP-340 schnorr sig
+    // from cosigner_pubkey over the canonical invoice signing message.
+    {
+        use bitcoin::secp256k1::{schnorr::Signature, Message, PublicKey, Secp256k1};
+        use std::str::FromStr;
+
+        let cosigner_pk = PublicKey::from_str(cosigner_pubkey)
+            .map_err(|e| format!("invalid cosigner_pubkey: {}", e))?;
+        let sig_bytes = hex::decode(cosign_signature)
+            .map_err(|e| format!("cosign_signature hex decode: {}", e))?;
+        let sig_arr: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| "cosign_signature: expected 64 bytes".to_string())?;
+        let sig = Signature::from_slice(&sig_arr)
+            .map_err(|e| format!("cosign_signature parse: {}", e))?;
+
+        let msg_hash = crate::signature_utils::invoice_cosign_signing_message(
+            &proof.ledger_id,
+            &payment_hash_bytes,
+            deposit_id,
+            *amount_msat,
+            &cosigner_ledger_hash_bytes,
+        );
+        let msg = Message::from_digest(msg_hash);
+        let (xonly, _) = cosigner_pk.x_only_public_key();
+
+        if Secp256k1::verification_only()
+            .verify_schnorr(&sig, &msg, &xonly)
+            .is_err()
+        {
+            return Err(format!(
+                "invoice cosignature failed BIP-340 verification (cosigner {})",
+                hex::encode(&cosigner_pk.serialize()[..8])
+            ));
+        }
     }
 
     // (2) accused has an update at proof_sequence (operator was alive).
@@ -542,10 +601,13 @@ pub fn verify_uncredited_onchain(
     use crate::tlv::TlvDecode;
 
     let FraudEvidence::UncreditedOnchain {
-        offer_id: _,
-        funding_address: _,
-        cosigner_pubkey: _,
-        cosign_signature: _,
+        offer_id,
+        funding_address,
+        accused_operator_pubkey,
+        deadline_block,
+        cosigner_pubkey,
+        cosigner_ledger_hash,
+        cosign_signature,
         txid,
         vout,
         amount_sats: _,
@@ -558,6 +620,49 @@ pub fn verify_uncredited_onchain(
     };
 
     let txid_bytes = parse_hex32(txid, "txid")?;
+    let offer_id_bytes = parse_hex32(offer_id, "offer_id")?;
+    let cosigner_ledger_hash_bytes =
+        parse_hex32(cosigner_ledger_hash, "cosigner_ledger_hash")?;
+
+    // (0) cosignature on the offer is a valid BIP-340 schnorr sig from
+    //     cosigner_pubkey over the canonical offer signing message.
+    {
+        use bitcoin::secp256k1::{schnorr::Signature, Message, PublicKey, Secp256k1};
+        use std::str::FromStr;
+
+        let accused_op_pk = PublicKey::from_str(accused_operator_pubkey)
+            .map_err(|e| format!("invalid accused_operator_pubkey: {}", e))?;
+        let cosigner_pk = PublicKey::from_str(cosigner_pubkey)
+            .map_err(|e| format!("invalid cosigner_pubkey: {}", e))?;
+        let sig_bytes = hex::decode(cosign_signature)
+            .map_err(|e| format!("cosign_signature hex decode: {}", e))?;
+        let sig_arr: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| "cosign_signature: expected 64 bytes".to_string())?;
+        let sig = Signature::from_slice(&sig_arr)
+            .map_err(|e| format!("cosign_signature parse: {}", e))?;
+
+        let msg_hash = crate::signature_utils::offer_cosign_signing_message(
+            &proof.ledger_id,
+            &offer_id_bytes,
+            &accused_op_pk,
+            funding_address,
+            *deadline_block,
+            &cosigner_ledger_hash_bytes,
+        );
+        let msg = Message::from_digest(msg_hash);
+        let (xonly, _) = cosigner_pk.x_only_public_key();
+
+        if Secp256k1::verification_only()
+            .verify_schnorr(&sig, &msg, &xonly)
+            .is_err()
+        {
+            return Err(format!(
+                "offer cosignature failed BIP-340 verification (cosigner {})",
+                hex::encode(&cosigner_pk.serialize()[..8])
+            ));
+        }
+    }
 
     // (1) confirmed-at block in the verifier's chain.
     let confirmed_height = block_oracle
@@ -790,6 +895,7 @@ impl FraudEvidence {
         match self {
             Self::UncreditedOnchain {
                 offer_id,
+                deadline_block,
                 txid,
                 vout,
                 amount_sats,
@@ -797,6 +903,7 @@ impl FraudEvidence {
                 ..
             } => {
                 out.extend_from_slice(offer_id.as_bytes());
+                out.extend_from_slice(&deadline_block.to_le_bytes());
                 out.extend_from_slice(txid.as_bytes());
                 out.extend_from_slice(&vout.to_le_bytes());
                 out.extend_from_slice(&amount_sats.to_le_bytes());
@@ -804,10 +911,14 @@ impl FraudEvidence {
             }
             Self::UncreditedLightning {
                 payment_hash,
+                deposit_id,
+                amount_msat,
                 preimage,
                 ..
             } => {
                 out.extend_from_slice(payment_hash.as_bytes());
+                out.extend_from_slice(deposit_id);
+                out.extend_from_slice(&amount_msat.to_le_bytes());
                 out.extend_from_slice(preimage.as_bytes());
             }
             Self::StaleCosign {
@@ -860,7 +971,10 @@ mod tests {
             evidence: FraudEvidence::UncreditedOnchain {
                 offer_id: "bb".repeat(16),
                 funding_address: "bcrt1qtest".to_string(),
+                accused_operator_pubkey: "02".to_string() + &"ab".repeat(32),
+                deadline_block: 600,
                 cosigner_pubkey: "02".to_string() + &"cc".repeat(32),
+                cosigner_ledger_hash: "00".repeat(32),
                 cosign_signature: "dd".repeat(32),
                 txid: "ee".repeat(32),
                 vout: 0,
