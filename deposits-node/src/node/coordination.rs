@@ -460,9 +460,32 @@ impl Node {
         member_ledger_id: &str,
         our_ledger_id: &str,
     ) -> Result<ConsentResult, Error> {
+        // Piggyback our full ledger history so the member can validate the
+        // chain end-to-end (LedgerOpen → tip) and import the ledger before
+        // attesting. Without this the member would have to scrape the relay
+        // — which races against the operator's own publish path and silently
+        // produces "consenting blind" memberships when the import doesn't
+        // land in time. Same shape as the cosign piggyback above.
+        let history_b64: Vec<String> = {
+            use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+            use deposits_core::TlvEncode;
+
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = ledgers.get(our_ledger_id).ok_or_else(|| {
+                Error::Protocol(format!("Our ledger not found: {}", our_ledger_id))
+            })?;
+            let ledger = arc.read().unwrap();
+            ledger
+                .history
+                .iter()
+                .map(|u| BASE64.encode(u.tlv_encode()))
+                .collect()
+        };
+
         let params = serde_json::json!({
             "operator_pubkey": self.node_id_hex,
             "operator_ledger_id": our_ledger_id,
+            "ledger_history": history_b64,
         });
 
         let (tx, rx) = tokio::sync::oneshot::channel();

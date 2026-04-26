@@ -371,6 +371,154 @@ impl Node {
             );
         }
 
+        // Validate the operator's ledger before consenting. The operator
+        // piggybacks its full update history in `ledger_history`; we decode,
+        // validate the chain via LedgerConformanceValidator (inside
+        // import_ledger), and only sign if the ledger is well-formed and the
+        // claimed operator_pubkey/operator_ledger_id match what's in the
+        // genesis. Without this gate a member would attest blind, and the
+        // dispute path later can't fork a ledger we never imported.
+        {
+            use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+            use deposits_core::messages::LedgerOperation;
+            use deposits_core::validation::LedgerExport;
+            use deposits_core::types::SignedLedgerUpdate;
+            use deposits_core::types::LedgerState;
+            use deposits_core::{TlvDecode, TlvEncode as _};
+
+            let history_b64 = match request.params.get("ledger_history") {
+                Some(serde_json::Value::Array(arr)) => arr,
+                _ => {
+                    return (
+                        false,
+                        None,
+                        Some(
+                            "Missing ledger_history (operator must piggyback ledger updates)"
+                                .to_string(),
+                        ),
+                    );
+                }
+            };
+
+            let mut updates: Vec<SignedLedgerUpdate> = Vec::with_capacity(history_b64.len());
+            for (i, entry) in history_b64.iter().enumerate() {
+                let s = match entry.as_str() {
+                    Some(s) => s,
+                    None => {
+                        return (
+                            false,
+                            None,
+                            Some(format!("ledger_history[{}] is not a string", i)),
+                        );
+                    }
+                };
+                let bytes = match BASE64.decode(s) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return (
+                            false,
+                            None,
+                            Some(format!("ledger_history[{}] base64 decode failed: {}", i, e)),
+                        );
+                    }
+                };
+                match SignedLedgerUpdate::tlv_decode(&bytes) {
+                    Ok(u) => updates.push(u),
+                    Err(e) => {
+                        return (
+                            false,
+                            None,
+                            Some(format!("ledger_history[{}] tlv decode failed: {:?}", i, e)),
+                        );
+                    }
+                }
+            }
+
+            // Genesis must be the first update and a LedgerOpen.
+            let (claimed_operator, reserves_id, genesis_block) = match updates.first() {
+                Some(u) => match LedgerOperation::tlv_decode(&u.message) {
+                    Ok(LedgerOperation::LedgerOpen {
+                        operator_id,
+                        reserves_id,
+                        genesis_block,
+                        ..
+                    }) => (operator_id, reserves_id, genesis_block),
+                    _ => {
+                        return (
+                            false,
+                            None,
+                            Some(
+                                "ledger_history[0] must be a LedgerOpen operation".to_string(),
+                            ),
+                        );
+                    }
+                },
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some("ledger_history is empty (no LedgerOpen)".to_string()),
+                    );
+                }
+            };
+
+            // The claimed operator_pubkey must match the LedgerOpen's operator_id.
+            if claimed_operator != operator_pubkey {
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "operator_pubkey mismatch: param={}, LedgerOpen={}",
+                        operator_pubkey_hex,
+                        hex::encode(claimed_operator.serialize())
+                    )),
+                );
+            }
+
+            // The computed ledger_id must match the claimed operator_ledger_id.
+            let computed_ledger_id = LedgerState::compute_ledger_id(
+                &claimed_operator,
+                &reserves_id,
+                genesis_block,
+            );
+            if hex::encode(computed_ledger_id) != operator_ledger_id {
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "operator_ledger_id mismatch: param={}, computed={}",
+                        operator_ledger_id,
+                        hex::encode(computed_ledger_id)
+                    )),
+                );
+            }
+
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let export = LedgerExport::new(
+                computed_ledger_id,
+                genesis_block,
+                claimed_operator,
+                reserves_id,
+                updates,
+                block_height,
+            );
+
+            if let Err(e) = self.handler.import_ledger(export) {
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "Refusing consent: operator's ledger failed validation: {}",
+                        e
+                    )),
+                );
+            }
+            tracing::info!(
+                "Validated and imported operator ledger {}... before consenting",
+                &operator_ledger_id[..16]
+            );
+        }
+
         // Sign consent: COLLATERAL_CONSENT || operator_pubkey(33 bytes) || ledger_id(string bytes)
         let mut sign_content = Vec::new();
         sign_content.extend_from_slice(b"COLLATERAL_CONSENT");

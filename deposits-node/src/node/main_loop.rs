@@ -293,14 +293,17 @@ impl Node {
             });
 
             let Some((operator_id, reserves_id, genesis_block)) = ledger_open else {
-                tracing::warn!(
-                    "No LedgerOpen found for ledger {} — cannot import",
+                // The operator may not have published its LedgerOpen to this
+                // relay yet (Phase 2 vs Phase 3 ordering races, slow relay
+                // replication, etc.). Treat this as transient — same posture
+                // as `events.is_empty()` above. Marking the ledger imported
+                // here would give up forever even after the LedgerOpen later
+                // arrives, leaving the member unable to fork the ledger when
+                // a dispute fires.
+                tracing::debug!(
+                    "No LedgerOpen yet for ledger {}, will retry",
                     &ledger_id[..16]
                 );
-                self.imported_joined_ledgers
-                    .lock()
-                    .unwrap()
-                    .insert(ledger_id.clone());
                 continue;
             };
 
