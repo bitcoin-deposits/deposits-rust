@@ -21,12 +21,249 @@ pub async fn danger_command(args: &[String]) -> Result<(), Box<dyn std::error::E
     match args[0].as_str() {
         "publish-invalid" => danger_publish_invalid(&args[1..]).await,
         "forge-stale-cosig" => danger_forge_stale_cosig(&args[1..]).await,
+        "fork-update" => danger_fork_update(&args[1..]).await,
         cmd => {
             eprintln!("Unknown danger subcommand: {}", cmd);
-            eprintln!("Available: publish-invalid, forge-stale-cosig");
+            eprintln!("Available: publish-invalid, forge-stale-cosig, fork-update");
             Ok(())
         }
     }
+}
+
+/// Mint two `SignedLedgerUpdate`s at the same `{sequence, previous_hash}`
+/// with different message content, both signed by the operator and
+/// cosigned by majority of the operator's quorum (using cosigner seeds
+/// passed as `--cosigner-seed <hex>`). Broadcasts U_A first, waits, then
+/// broadcasts U_B.
+///
+/// Honest quorum members ingest U_A and apply it to their replicas. By
+/// the time U_B arrives, their `chain_tip_hash` matches `U_A.chain_hash()`,
+/// so U_B fails the chain-continuity check (`previous_hash` doesn't match)
+/// and is rejected. Anyone who collects both U_A and U_B has cryptographic
+/// evidence of operator equivocation — the witness for a future
+/// `FraudProofType::Equivocation`.
+///
+/// The "as of now" semantics: any seq later than the equivocation point
+/// continues to extend U_A's chain (U_A is what cosigners signed and
+/// applied). Late discovery of U_B is evidence of past misbehavior, not
+/// grounds for unwinding the chain — chain rewriting would invalidate
+/// downstream legitimate operations.
+///
+/// Usage: `danger fork-update <reserves_id> [--cosigner-seed <hex>]+`
+async fn danger_fork_update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::nostr::NostrTransportBuilder;
+    use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::types::CosignEntry;
+    use deposits_core::SignedLedgerUpdate;
+    use deposits_core::TlvEncode;
+    use sha2::{Digest, Sha256};
+
+    if args.is_empty() {
+        eprintln!(
+            "Usage: deposits-node danger fork-update <reserves_id> [--cosigner-seed <hex>]+"
+        );
+        return Ok(());
+    }
+
+    let reserves_id = &args[0];
+
+    // Pull --cosigner-seed values out separately from other config args.
+    let mut cosigner_seeds: Vec<[u8; 32]> = Vec::new();
+    let mut config_args = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--cosigner-seed" && i + 1 < args.len() {
+            let raw = hex::decode(&args[i + 1])
+                .map_err(|e| format!("--cosigner-seed must be 64-char hex: {}", e))?;
+            let arr: [u8; 32] = raw
+                .try_into()
+                .map_err(|_| "--cosigner-seed must be 32 bytes")?;
+            cosigner_seeds.push(arr);
+            i += 2;
+            continue;
+        }
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            config_args.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&config_args)?;
+    let relay_url = config
+        .relays
+        .first()
+        .ok_or("No relay configured")?
+        .clone();
+    let data_dir = config.data_dir.clone();
+
+    let secp = Secp256k1::new();
+    let operator_secret = super::derive_operator_secret(&config.seed, config.network)?;
+    let operator_keypair = Keypair::from_secret_key(&secp, &operator_secret);
+    let operator_pubkey = operator_keypair.public_key();
+
+    let node = Node::new(config).await?;
+    let (ledger_id, ledger) = node
+        .get_ledger_with_id(reserves_id)
+        .ok_or_else(|| format!("Ledger not found: {}", reserves_id))?;
+    let last = ledger
+        .history
+        .last()
+        .ok_or("Ledger has no history")?
+        .clone();
+    let next_seq = last.sequence_number + 1;
+    let prev_chain_hash = last.chain_hash();
+
+    // Match cosigner seeds against the active quorum members so we only
+    // sign with seeds that actually correspond to a member.
+    let active_member_pks: Vec<bitcoin::secp256k1::PublicKey> = ledger
+        .state
+        .quorum_members
+        .iter()
+        .map(|m| m.pubkey)
+        .collect();
+    let threshold = (active_member_pks.len() / 2) + 1;
+
+    let mut active_cosigners: Vec<(Keypair, bitcoin::secp256k1::PublicKey)> = Vec::new();
+    for seed in &cosigner_seeds {
+        let sk = super::derive_operator_secret(seed, bitcoin::Network::Regtest)?;
+        let kp = Keypair::from_secret_key(&secp, &sk);
+        let pk = kp.public_key();
+        if active_member_pks.contains(&pk) {
+            active_cosigners.push((kp, pk));
+        }
+    }
+    if active_cosigners.len() < threshold {
+        return Err(format!(
+            "need {} cosigner-seed(s) matching the ledger's {} quorum members; \
+             got {} matching seeds",
+            threshold,
+            active_member_pks.len(),
+            active_cosigners.len()
+        )
+        .into());
+    }
+    // Use only the threshold-many cosigners — the bare minimum for a
+    // valid update. This makes the equivocation construction precise:
+    // both U_A and U_B carry the same set of cosigner signatures.
+    active_cosigners.truncate(threshold);
+
+    // Build the two competing messages — DeliveryEmbed with different
+    // request_hash bytes so the message body diverges (and so does
+    // content_hash, even with identical {seq, prev_hash, cosigs}).
+    let msg_a = LedgerOperation::DeliveryEmbed {
+        request_hash: [0xAA; 32],
+        target_ledger_id: ledger.state.ledger_id,
+        target_operator: operator_pubkey,
+    }
+    .tlv_encode();
+    let msg_b = LedgerOperation::DeliveryEmbed {
+        request_hash: [0xBB; 32],
+        target_ledger_id: ledger.state.ledger_id,
+        target_operator: operator_pubkey,
+    }
+    .tlv_encode();
+
+    // Helper: produce a fully-signed SignedLedgerUpdate at the given
+    // {next_seq, prev_chain_hash} with the supplied message body.
+    let build_update = |message: Vec<u8>, message_type: u16| -> SignedLedgerUpdate {
+        // cosign_data = seq || prev_hash || message
+        let mut cosign_data = Vec::new();
+        cosign_data.extend_from_slice(&next_seq.to_le_bytes());
+        cosign_data.extend_from_slice(&prev_chain_hash);
+        cosign_data.extend_from_slice(&message);
+        let cosign_msg_hash = Sha256::digest(&cosign_data);
+        let cosign_msg = Message::from_digest(cosign_msg_hash.into());
+
+        let mut entries: Vec<CosignEntry> = active_cosigners
+            .iter()
+            .map(|(kp, pk)| CosignEntry {
+                cosigner_pubkey: *pk,
+                cosign_signature: secp
+                    .sign_schnorr_no_aux_rand(&cosign_msg, kp)
+                    .serialize(),
+                member_ledger_hash: [0u8; 32], // not relevant for this scenario
+            })
+            .collect();
+        // Canonical sort to match what receivers expect on TLV decode.
+        entries.sort_by(|a, b| {
+            a.cosigner_pubkey
+                .serialize()
+                .cmp(&b.cosigner_pubkey.serialize())
+        });
+
+        let mut update = SignedLedgerUpdate {
+            message,
+            message_type,
+            operator_id: operator_pubkey,
+            ledger_id: ledger.state.ledger_id,
+            sequence_number: next_seq,
+            previous_hash: prev_chain_hash,
+            content_hash: [0u8; 32],
+            block_height: 0,
+            block_hash: [0u8; 32],
+            cosign_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: entries,
+        };
+        update.content_hash = update.compute_hash();
+
+        // Operator sign over content + all cosigs
+        let signing_data = update.operator_signing_data();
+        let mut h = [0u8; 32];
+        h.copy_from_slice(&Sha256::digest(&signing_data));
+        let op_msg = Message::from_digest(h);
+        update.operator_signature = secp
+            .sign_schnorr_no_aux_rand(&op_msg, &operator_keypair)
+            .serialize();
+
+        update
+    };
+
+    let message_type =
+        deposits_core::messages::LedgerOperation::message_type_from_bytes(&msg_a);
+    let update_a = build_update(msg_a, message_type);
+    let update_b = build_update(msg_b, message_type);
+
+    println!("Forked updates at seq={} prev_hash={}", next_seq, hex::encode(prev_chain_hash));
+    // Full hashes on dedicated, parseable lines so an integration test
+    // can pull them out of stdout deterministically.
+    println!("U_A content_hash={}", hex::encode(update_a.content_hash));
+    println!("U_A chain_hash={}", hex::encode(update_a.chain_hash()));
+    println!("U_B content_hash={}", hex::encode(update_b.content_hash));
+    println!("U_B chain_hash={}", hex::encode(update_b.chain_hash()));
+
+    let transport = NostrTransportBuilder::new(operator_secret)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    let event_a = transport.broadcast_ledger_update(&update_a).await?;
+    println!("Broadcast U_A: {}", event_a);
+    // Give honest quorum members time to ingest U_A and advance their
+    // replicas; U_B arrives after the chain_tip_hash has moved past.
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+
+    let event_b = transport.broadcast_ledger_update(&update_b).await?;
+    println!("Broadcast U_B: {}", event_b);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    transport.disconnect().await;
+
+    // Append U_A only to the operator's own JSONL — the daemon's
+    // "skip own-ledger inbound" guard would otherwise leave op0's disk
+    // out of sync with cosigners. U_B isn't appended (cosigners reject
+    // it; op0's loader would dedup the duplicate seq anyway).
+    append_update_to_local_jsonl(&data_dir, &ledger_id, &update_a)?;
+
+    Ok(())
 }
 
 /// Publish a SignedLedgerUpdate signed by the operator that carries a
