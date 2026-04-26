@@ -256,12 +256,7 @@ async fn danger_fork_update(args: &[String]) -> Result<(), Box<dyn std::error::E
     println!("Broadcast U_B: {}", event_b);
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     transport.disconnect().await;
-
-    // Append U_A only to the operator's own JSONL — the daemon's
-    // "skip own-ledger inbound" guard would otherwise leave op0's disk
-    // out of sync with cosigners. U_B isn't appended (cosigners reject
-    // it; op0's loader would dedup the duplicate seq anyway).
-    append_update_to_local_jsonl(&data_dir, &ledger_id, &update_a)?;
+    let _ = (data_dir, ledger_id); // step 3: own-ledger inbound is no longer skipped
 
     Ok(())
 }
@@ -409,12 +404,7 @@ async fn danger_forge_stale_cosig(args: &[String]) -> Result<(), Box<dyn std::er
     // (sub-millisecond) tears the WebSocket down before strfry sees it.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     transport.disconnect().await;
-
-    // Op0's daemon skips inbound updates on its own ledger (`handle_ledger_update`
-    // returns early when operator_key == self.node_id) so the daemon won't
-    // persist this forge. Append directly to the JSONL so subsequent CLI
-    // invocations and disk-readers see the chain at the new tip.
-    append_update_to_local_jsonl(&data_dir, &ledger_id, &update)?;
+    let _ = (data_dir, ledger_id); // step 3: own-ledger inbound is no longer skipped
 
     println!("Broadcast: {}", event_id);
     Ok(())

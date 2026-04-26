@@ -433,14 +433,37 @@ impl Node {
             return; // Ledger not found locally
         };
 
-        // Don't validate updates on our own ledger — we're the operator, not a monitor.
-        // Without this, stale in-memory state causes the daemon to dispute itself.
+        // Step 3 of the per-ledger-actor migration: also forward this
+        // update to the ledger's actor. The actor's run loop is still a
+        // stub (no-op processing) — this exercises the routing path
+        // without changing observable behavior. Step 4 fills in the
+        // actor's real Inbound handler.
+        if let Some(handle) = self
+            .ledger_actors
+            .lock()
+            .unwrap()
+            .get(&inbound.ledger_id)
         {
-            let ledger = ledger_arc.read().unwrap();
-            if ledger.operator_key() == self.node_id {
-                return;
-            }
+            handle.try_send(super::ledger_actor::LedgerEvent::Inbound(Box::new(
+                inbound.update.clone(),
+            )));
         }
+
+        // Previously: skip if it's our own ledger ("stale in-memory state
+        // causes the daemon to dispute itself"). Auditing the post-skip
+        // flow shows the worry is already covered by other guards:
+        //   - validate_incoming_update_hash_chain returns Ok for any
+        //     update with seq < next_seq, so echoes of our own commits
+        //     pass validation.
+        //   - The apply branch only fires when seq == next_seq AND
+        //     prev_hash == tip_hash; echoes (seq < next_seq) are skipped.
+        //   - The auto-arm branch has its own `is_operator_of_ledger`
+        //     guard (lines below) preventing self-dispute even if
+        //     validation fails.
+        // Dropping the skip lets the daemon ingest its own broadcasts
+        // back from the relay as a normal idempotent path — eliminates
+        // the `append_update_to_local_jsonl` workaround that the
+        // dangerous-testing CLIs needed to keep their disk in sync.
 
         // Decide what kind of sender this update came from. Three categories:
         //   1. Current operator — legitimate chain extension. Validate; if it

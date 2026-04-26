@@ -3891,15 +3891,7 @@ pub async fn recovery_embed_hash(
     let event_id = transport.broadcast_ledger_update(&update).await?;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     transport.disconnect().await;
-
-    // The running daemon skips inbound updates on its own ledger; append
-    // directly so subsequent CLI invocations chain from the right tip.
-    #[cfg(feature = "dangerous-testing")]
-    crate::node_cli::danger::append_update_to_local_jsonl(&data_dir, &ledger_id, &update)?;
-    // Without dangerous-testing, the daemon's commit_operation path
-    // already persists; this fallback path isn't invoked there.
-    #[cfg(not(feature = "dangerous-testing"))]
-    let _ = data_dir;
+    let _ = data_dir; // step 3: own-ledger inbound is no longer skipped
 
     println!("Broadcast: {}", event_id);
     Ok(())
