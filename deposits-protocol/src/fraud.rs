@@ -143,6 +143,8 @@ pub enum FraudEvidence {
         #[serde(with = "crate::types::serde_32")]
         original_fraud_block_hash: [u8; 32],
         required_response_blocks: u32,
+        /// The inactive member's collateral ledger.
+        member_ledger_id: String,
         /// Member was active after the window (proving they were online).
         /// The block_hash for this update is read directly off the
         /// referenced SignedLedgerUpdate and confirmed by the verifier.
@@ -513,6 +515,7 @@ pub fn verify_inactive_quorum_member(
         original_fraud_hash: _,
         original_fraud_block_hash,
         required_response_blocks,
+        member_ledger_id: _,
         member_active_sequence,
         member_pubkey,
     } = &proof.evidence
@@ -814,6 +817,150 @@ pub struct CausalLink {
     pub source_ledger_id: String,
 }
 
+/// Provider for ledger histories, supplied by the verifying daemon (or
+/// a test mock). Lookups return `None` for unknown ledger IDs.
+pub trait LedgerProvider {
+    fn ledger_history(&self, ledger_id: &str) -> Option<Vec<crate::types::SignedLedgerUpdate>>;
+}
+
+impl<F> LedgerProvider for F
+where
+    F: Fn(&str) -> Option<Vec<crate::types::SignedLedgerUpdate>>,
+{
+    fn ledger_history(&self, ledger_id: &str) -> Option<Vec<crate::types::SignedLedgerUpdate>> {
+        self(ledger_id)
+    }
+}
+
+/// Top-level fraud-broadcast verifier. Composes:
+///   1. Structural sanity (`verify_chain_structure`).
+///   2. Embedding presence in the claimed ledger history.
+///   3. Causal-link presence at the claimed (ledger, sequence,
+///      member_ledger_hash) on each link's ledger.
+///   4. Per-type evidence verification (the actual fraud claim).
+///
+/// Returns `Ok(())` if every layer passes — the broadcast represents
+/// real, anchored, attributable fraud. Returns the first failure
+/// otherwise.
+pub fn verify_fraud_broadcast(
+    broadcast: &FraudBroadcast,
+    ledgers: &dyn LedgerProvider,
+    block_oracle: &dyn BlockOracle,
+) -> Result<(), String> {
+    // (1) structural
+    broadcast.verify_chain_structure()?;
+
+    let proof_hash = broadcast.proof.proof_hash();
+
+    // (2) embedding in claimed ledger
+    let embed_history = ledgers
+        .ledger_history(&broadcast.embedding.ledger_id)
+        .ok_or_else(|| {
+            format!(
+                "embedding ledger {} not available to verifier",
+                &broadcast.embedding.ledger_id[..16.min(broadcast.embedding.ledger_id.len())]
+            )
+        })?;
+    if !broadcast
+        .embedding
+        .verify_in_history(&embed_history, &proof_hash)
+    {
+        return Err(format!(
+            "proof_hash {} not embedded at seq {} on ledger {}",
+            hex::encode(&proof_hash[..8]),
+            broadcast.embedding.sequence,
+            &broadcast.embedding.ledger_id[..16.min(broadcast.embedding.ledger_id.len())]
+        ));
+    }
+
+    // (3) every causal-chain link is present in its ledger.
+    for link in &broadcast.causal_chain {
+        let history = ledgers.ledger_history(&link.ledger_id).ok_or_else(|| {
+            format!(
+                "link ledger {} not available to verifier",
+                &link.ledger_id[..16.min(link.ledger_id.len())]
+            )
+        })?;
+        let link_ok = history.iter().any(|u| {
+            u.sequence_number == link.sequence
+                && u.member_ledger_hash.map(hex::encode) == Some(link.member_ledger_hash.clone())
+        });
+        if !link_ok {
+            return Err(format!(
+                "causal link not found at seq {} on ledger {}",
+                link.sequence,
+                &link.ledger_id[..16.min(link.ledger_id.len())]
+            ));
+        }
+    }
+
+    // (4) per-type evidence verification.
+    let proof = &broadcast.proof;
+    match proof.proof_type {
+        FraudProofType::StaleCosignature => {
+            let FraudEvidence::StaleCosign {
+                member_ledger_id, ..
+            } = &proof.evidence
+            else {
+                return Err("StaleCosignature: wrong evidence type".into());
+            };
+            let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
+                format!(
+                    "accused ledger {} not available",
+                    &proof.ledger_id[..16.min(proof.ledger_id.len())]
+                )
+            })?;
+            let member_history = ledgers.ledger_history(member_ledger_id).ok_or_else(|| {
+                format!(
+                    "member ledger {} not available",
+                    &member_ledger_id[..16.min(member_ledger_id.len())]
+                )
+            })?;
+            verify_stale_cosignature(proof, &accused_history, &member_history)?;
+        }
+        FraudProofType::UncreditedLightningPayment => {
+            let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
+                format!(
+                    "accused ledger {} not available",
+                    &proof.ledger_id[..16.min(proof.ledger_id.len())]
+                )
+            })?;
+            verify_uncredited_lightning(proof, &accused_history)?;
+        }
+        FraudProofType::InactiveQuorumMember => {
+            let FraudEvidence::InactiveQuorum {
+                member_ledger_id, ..
+            } = &proof.evidence
+            else {
+                return Err("InactiveQuorumMember: wrong evidence type".into());
+            };
+            let member_history = ledgers.ledger_history(member_ledger_id).ok_or_else(|| {
+                format!(
+                    "member ledger {} not available",
+                    &member_ledger_id[..16.min(member_ledger_id.len())]
+                )
+            })?;
+            verify_inactive_quorum_member(proof, &member_history, block_oracle)?;
+        }
+        FraudProofType::UncreditedOnchainPayment => {
+            let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
+                format!(
+                    "accused ledger {} not available",
+                    &proof.ledger_id[..16.min(proof.ledger_id.len())]
+                )
+            })?;
+            verify_uncredited_onchain(proof, &accused_history, block_oracle)?;
+        }
+        FraudProofType::NonConformingUpdate => {
+            // Not yet implemented at this layer — placeholder accept.
+            // Receiver-side validator dispatch is a separate piece of
+            // work tracked alongside the conformance test surface.
+        }
+    }
+
+    Ok(())
+}
+
 impl FraudBroadcast {
     /// Verify the causal chain integrity.
     ///
@@ -934,11 +1081,13 @@ impl FraudEvidence {
             Self::InactiveQuorum {
                 original_fraud_hash,
                 original_fraud_block_hash,
+                member_ledger_id,
                 member_pubkey,
                 ..
             } => {
                 out.extend_from_slice(original_fraud_hash.as_bytes());
                 out.extend_from_slice(original_fraud_block_hash);
+                out.extend_from_slice(member_ledger_id.as_bytes());
                 out.extend_from_slice(member_pubkey.as_bytes());
             }
             Self::NonConforming {

@@ -75,6 +75,7 @@ fn make_inactive_proof() -> FraudProof {
         evidence: FraudEvidence::InactiveQuorum {
             original_fraud_hash: "66".repeat(32),
             original_fraud_block_hash: [0xAA; 32],
+            member_ledger_id: hex::encode([0xBB; 32]),
             required_response_blocks: 144,
             member_active_sequence: 200,
             member_pubkey: "02".to_string() + &"77".repeat(32),
@@ -590,6 +591,641 @@ fn chain_hash_includes_operator_signature() {
         update.content_hash,
         "chain_hash should differ from content_hash"
     );
+}
+
+// =========================================================================
+// Receiver-level dispatch (verify_fraud_broadcast)
+// =========================================================================
+//
+// `verify_fraud_broadcast` is the entry point the daemon calls. It composes:
+//
+//   1. structural sanity (`verify_chain_structure`)
+//   2. embedding present in claimed ledger
+//   3. causal-link presence per chain hop
+//   4. per-type evidence verifier
+//
+// The tests below construct the smallest valid setup per fraud type and
+// confirm the full pipeline accepts the genuine case + rejects each
+// individual component being broken. The per-type verifiers themselves
+// are unit-tested separately in `mod stale_cosignature` etc. above —
+// these tests cover the *composition* of structural + embedding +
+// chain + evidence checks.
+
+mod dispatch {
+    use deposits_protocol::fraud::*;
+    use deposits_protocol::messages::LedgerOperation;
+    use deposits_protocol::tlv::TlvEncode;
+    use deposits_protocol::types::{CosignEntry, SignedLedgerUpdate};
+    use sha2::{Digest, Sha256};
+    use std::collections::HashMap;
+
+    fn pk_from_seed(seed: u8) -> bitcoin::secp256k1::PublicKey {
+        use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
+        let secp = Secp256k1::new();
+        let secret = SecretKey::from_slice(&[seed; 32]).unwrap();
+        Keypair::from_secret_key(&secp, &secret).public_key()
+    }
+
+    fn sign_invoice_cosig(
+        cosigner_seed: u8,
+        ledger_id: &str,
+        payment_hash: &[u8; 32],
+        deposit_id: &deposits_protocol::DepositId,
+        amount_msat: u64,
+        cosigner_ledger_hash: &[u8; 32],
+    ) -> ([u8; 64], bitcoin::secp256k1::PublicKey) {
+        use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
+        let secp = Secp256k1::new();
+        let secret = SecretKey::from_slice(&[cosigner_seed; 32]).unwrap();
+        let keypair = Keypair::from_secret_key(&secp, &secret);
+        let msg_hash = deposits_protocol::invoice_cosign_signing_message(
+            ledger_id,
+            payment_hash,
+            deposit_id,
+            amount_msat,
+            cosigner_ledger_hash,
+        );
+        let msg = Message::from_digest(msg_hash);
+        let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+        (sig.serialize(), keypair.public_key())
+    }
+
+    fn sign_offer_cosig(
+        cosigner_seed: u8,
+        ledger_id: &str,
+        offer_id: &[u8; 32],
+        accused_op: &bitcoin::secp256k1::PublicKey,
+        funding_address: &str,
+        deadline_block: u32,
+        cosigner_ledger_hash: &[u8; 32],
+    ) -> ([u8; 64], bitcoin::secp256k1::PublicKey) {
+        use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
+        let secp = Secp256k1::new();
+        let secret = SecretKey::from_slice(&[cosigner_seed; 32]).unwrap();
+        let keypair = Keypair::from_secret_key(&secp, &secret);
+        let msg_hash = deposits_protocol::offer_cosign_signing_message(
+            ledger_id,
+            offer_id,
+            accused_op,
+            funding_address,
+            deadline_block,
+            cosigner_ledger_hash,
+        );
+        let msg = Message::from_digest(msg_hash);
+        let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+        (sig.serialize(), keypair.public_key())
+    }
+
+    /// LedgerProvider backed by a HashMap<String, Vec<SignedLedgerUpdate>>.
+    fn provider_from(
+        m: HashMap<String, Vec<SignedLedgerUpdate>>,
+    ) -> impl LedgerProvider {
+        move |id: &str| m.get(id).cloned()
+    }
+
+    /// BlockOracle backed by a static map. Tests that don't need block
+    /// confirmations just pass an empty map.
+    struct MockOracle(HashMap<[u8; 32], u32>);
+    impl BlockOracle for MockOracle {
+        fn confirms(&self, h: &[u8; 32]) -> Option<u32> {
+            self.0.get(h).copied()
+        }
+    }
+
+    /// Build a SignedLedgerUpdate carrying `op` at `seq`. Stale-cosig and
+    /// embedding tests need control over `block_height`, `cosignatures`,
+    /// and `content_hash`; we accept overrides for those.
+    fn update_with(
+        seq: u64,
+        ledger_id: [u8; 32],
+        op: LedgerOperation,
+        cosigs_with_member_hashes: &[[u8; 32]],
+        block_height: u32,
+        member_ledger_hash: Option<[u8; 32]>,
+    ) -> SignedLedgerUpdate {
+        SignedLedgerUpdate {
+            message: op.tlv_encode(),
+            message_type: op.message_type(),
+            operator_id: pk_from_seed(0xAB),
+            ledger_id,
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash: [0u8; 32],
+            block_height,
+            block_hash: [0u8; 32],
+            cosign_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash,
+            cosignatures: cosigs_with_member_hashes
+                .iter()
+                .map(|h| CosignEntry {
+                    cosigner_pubkey: pk_from_seed(0xCD),
+                    cosign_signature: [0u8; 64],
+                    member_ledger_hash: *h,
+                })
+                .collect(),
+        }
+    }
+
+    fn dummy_transfer_lock(nonce: [u8; 32]) -> LedgerOperation {
+        LedgerOperation::TransferLock {
+            nonce,
+            source_deposit_id: deposits_protocol::DepositId::default(),
+            destination_deposit_id: deposits_protocol::DepositId::default(),
+            amount: 1,
+            fee: 0,
+            completion_script: String::new(),
+            timeout_height: 0,
+            transfer_id: [0u8; 32],
+            witness: Default::default(),
+        }
+    }
+
+    // ---------------- StaleCosignature -----------------
+
+    /// Build a verified stale-cosig scenario:
+    ///   - Member ledger M has chain_hash H_old at seq 5 (block 90),
+    ///     advances at blocks 95/100.
+    ///   - Accused operator A cosigns at seq 30 (block 110) declaring H_old.
+    ///   - Embedding: a TransferLock at seq 50 on A whose nonce = proof_hash.
+    fn stale_cosig_scenario() -> (
+        FraudBroadcast,
+        HashMap<String, Vec<SignedLedgerUpdate>>,
+    ) {
+        let accused_ledger = [0xAA; 32];
+        let member_ledger = [0xBB; 32];
+
+        // Member history.
+        let member_history = vec![
+            update_with(5, member_ledger, dummy_transfer_lock([0; 32]), &[], 90, None),
+            update_with(6, member_ledger, dummy_transfer_lock([1; 32]), &[], 95, None),
+            update_with(7, member_ledger, dummy_transfer_lock([2; 32]), &[], 100, None),
+        ];
+        let h_old = member_history[0].chain_hash();
+        let later_hash = member_history[2].chain_hash();
+
+        // Build the proof to compute proof_hash; embedding nonce = proof_hash.
+        let stale_content = [0x33; 32];
+        let proof_template = FraudProof {
+            proof_type: FraudProofType::StaleCosignature,
+            accused: hex::encode(pk_from_seed(0xAB).serialize()),
+            ledger_id: hex::encode(accused_ledger),
+            evidence: FraudEvidence::StaleCosign {
+                stale_update_sequence: 30,
+                stale_update_hash: hex::encode(stale_content),
+                declared_member_hash: hex::encode(h_old),
+                member_later_sequence: 7,
+                member_later_hash: hex::encode(later_hash),
+                member_ledger_id: hex::encode(member_ledger),
+            },
+        };
+        let proof_hash = proof_template.proof_hash();
+
+        // Accused history: seq 30 = stale cosign update; seq 50 = embedding TL.
+        let mut stale_update = update_with(
+            30,
+            accused_ledger,
+            dummy_transfer_lock([0; 32]),
+            &[h_old],
+            110,
+            None,
+        );
+        stale_update.content_hash = stale_content;
+        let embedding_update = update_with(
+            50,
+            accused_ledger,
+            dummy_transfer_lock(proof_hash),
+            &[],
+            120,
+            None,
+        );
+        let accused_history = vec![stale_update, embedding_update];
+
+        let broadcast = FraudBroadcast {
+            embedding: ProofEmbedding {
+                ledger_id: hex::encode(accused_ledger),
+                sequence: 50,
+                update_hash: hex::encode([0u8; 32]),
+                field: "transfer_nonce".into(),
+            },
+            causal_chain: vec![],
+            proof: proof_template,
+        };
+
+        let mut histories = HashMap::new();
+        histories.insert(hex::encode(accused_ledger), accused_history);
+        histories.insert(hex::encode(member_ledger), member_history);
+        (broadcast, histories)
+    }
+
+    #[test]
+    fn dispatch_accepts_genuine_stale_cosignature() {
+        let (broadcast, histories) = stale_cosig_scenario();
+        let provider = provider_from(histories);
+        let oracle = MockOracle(HashMap::new());
+        verify_fraud_broadcast(&broadcast, &provider, &oracle).unwrap();
+    }
+
+    #[test]
+    fn dispatch_rejects_stale_cosig_with_missing_embedding() {
+        let (mut broadcast, histories) = stale_cosig_scenario();
+        broadcast.embedding.sequence = 999; // no update at this seq
+        let provider = provider_from(histories);
+        let oracle = MockOracle(HashMap::new());
+        let err = verify_fraud_broadcast(&broadcast, &provider, &oracle).unwrap_err();
+        assert!(err.contains("not embedded"), "wrong error: {}", err);
+    }
+
+    #[test]
+    fn dispatch_rejects_stale_cosig_when_evidence_lies() {
+        // Genuine setup, but flip the evidence to claim a later_sequence
+        // that doesn't show member advancing past declared_member_hash.
+        let (mut broadcast, histories) = stale_cosig_scenario();
+        if let FraudEvidence::StaleCosign {
+            member_later_sequence,
+            ..
+        } = &mut broadcast.proof.evidence
+        {
+            *member_later_sequence = 5; // = the declared hash itself, no advancement
+        }
+        // proof_hash changes when evidence changes — re-embed.
+        let proof_hash = broadcast.proof.proof_hash();
+        let mut histories = histories;
+        let accused_id = broadcast.embedding.ledger_id.clone();
+        let accused_history = histories.get_mut(&accused_id).unwrap();
+        accused_history[1] = update_with(
+            50,
+            [0xAA; 32],
+            dummy_transfer_lock(proof_hash),
+            &[],
+            120,
+            None,
+        );
+        let provider = provider_from(histories);
+        let oracle = MockOracle(HashMap::new());
+        let err = verify_fraud_broadcast(&broadcast, &provider, &oracle).unwrap_err();
+        assert!(
+            err.contains("did not advance past")
+                || err.contains("doesn't appear in member history"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    // ---------------- UncreditedLightning -----------------
+
+    fn uncredited_lightning_scenario() -> (
+        FraudBroadcast,
+        HashMap<String, Vec<SignedLedgerUpdate>>,
+    ) {
+        let accused_ledger = [0xAA; 32];
+        let preimage = [0xBE; 32];
+        let payment_hash: [u8; 32] = {
+            let mut h = Sha256::new();
+            h.update(preimage);
+            h.finalize().into()
+        };
+        let deposit_id = deposits_protocol::DepositId::default();
+        let amount_msat = 1_000_000u64;
+        let cosigner_ledger_hash = [0xCC; 32];
+
+        let ledger_id_hex = hex::encode(accused_ledger);
+        let (sig, cosigner_pk) = sign_invoice_cosig(
+            0xAA,
+            &ledger_id_hex,
+            &payment_hash,
+            &deposit_id,
+            amount_msat,
+            &cosigner_ledger_hash,
+        );
+
+        let proof_template = FraudProof {
+            proof_type: FraudProofType::UncreditedLightningPayment,
+            accused: hex::encode(pk_from_seed(0xAB).serialize()),
+            ledger_id: ledger_id_hex.clone(),
+            evidence: FraudEvidence::UncreditedLightning {
+                invoice: "lnbcrt1ptest".into(),
+                payment_hash: hex::encode(payment_hash),
+                deposit_id,
+                amount_msat,
+                cosigner_pubkey: hex::encode(cosigner_pk.serialize()),
+                cosigner_ledger_hash: hex::encode(cosigner_ledger_hash),
+                cosign_signature: hex::encode(sig),
+                preimage: hex::encode(preimage),
+                proof_sequence: 50,
+            },
+        };
+        let proof_hash = proof_template.proof_hash();
+
+        let accused_history = vec![update_with(
+            50,
+            accused_ledger,
+            dummy_transfer_lock(proof_hash),
+            &[],
+            0,
+            None,
+        )];
+
+        let broadcast = FraudBroadcast {
+            embedding: ProofEmbedding {
+                ledger_id: ledger_id_hex.clone(),
+                sequence: 50,
+                update_hash: hex::encode([0u8; 32]),
+                field: "transfer_nonce".into(),
+            },
+            causal_chain: vec![],
+            proof: proof_template,
+        };
+
+        let mut histories = HashMap::new();
+        histories.insert(ledger_id_hex, accused_history);
+        (broadcast, histories)
+    }
+
+    #[test]
+    fn dispatch_accepts_genuine_uncredited_lightning() {
+        let (broadcast, histories) = uncredited_lightning_scenario();
+        verify_fraud_broadcast(
+            &broadcast,
+            &provider_from(histories),
+            &MockOracle(HashMap::new()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn dispatch_rejects_uncredited_lightning_with_credit_present() {
+        let (broadcast, mut histories) = uncredited_lightning_scenario();
+        let payment_hash_bytes = match &broadcast.proof.evidence {
+            FraudEvidence::UncreditedLightning { payment_hash, .. } => {
+                let v = hex::decode(payment_hash).unwrap();
+                let mut a = [0u8; 32];
+                a.copy_from_slice(&v);
+                a
+            }
+            _ => unreachable!(),
+        };
+        // Add an InvoiceCredit for this payment_hash before proof_sequence.
+        let credit_op = LedgerOperation::InvoiceCredit {
+            payment_hash: payment_hash_bytes,
+            deposit_id: deposits_protocol::DepositId::default(),
+            amount: 1000,
+            invoice_id: "x".into(),
+            sequence_number: 30,
+        };
+        let id = broadcast.embedding.ledger_id.clone();
+        let v = histories.get_mut(&id).unwrap();
+        v.insert(0, update_with(30, [0xAA; 32], credit_op, &[], 0, None));
+        let err = verify_fraud_broadcast(
+            &broadcast,
+            &provider_from(histories),
+            &MockOracle(HashMap::new()),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("InvoiceCredit found"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    // ---------------- InactiveQuorumMember -----------------
+
+    fn inactive_quorum_scenario(
+        elapsed: u32,
+        required: u32,
+    ) -> (
+        FraudBroadcast,
+        HashMap<String, Vec<SignedLedgerUpdate>>,
+        HashMap<[u8; 32], u32>,
+    ) {
+        let accused_ledger = [0xAA; 32];
+        let member_ledger = [0xBB; 32];
+        let original_block = [0xDD; 32];
+        let member_block = [0xEE; 32];
+
+        let mut blocks = HashMap::new();
+        blocks.insert(original_block, 1000);
+        blocks.insert(member_block, 1000 + elapsed);
+
+        let member_pk = pk_from_seed(0xEF);
+        let mut member_active_update =
+            update_with(200, member_ledger, dummy_transfer_lock([0; 32]), &[], 0, None);
+        member_active_update.operator_id = member_pk;
+        member_active_update.block_hash = member_block;
+
+        let proof_template = FraudProof {
+            proof_type: FraudProofType::InactiveQuorumMember,
+            accused: hex::encode(pk_from_seed(0xAB).serialize()),
+            ledger_id: hex::encode(accused_ledger),
+            evidence: FraudEvidence::InactiveQuorum {
+                original_fraud_hash: "66".repeat(32),
+                original_fraud_block_hash: original_block,
+                required_response_blocks: required,
+                member_ledger_id: hex::encode(member_ledger),
+                member_active_sequence: 200,
+                member_pubkey: hex::encode(member_pk.serialize()),
+            },
+        };
+        let proof_hash = proof_template.proof_hash();
+
+        // Embedding lives on the accused's ledger.
+        let embedding_update =
+            update_with(50, accused_ledger, dummy_transfer_lock(proof_hash), &[], 0, None);
+
+        let mut histories = HashMap::new();
+        histories.insert(hex::encode(accused_ledger), vec![embedding_update]);
+        histories.insert(hex::encode(member_ledger), vec![member_active_update]);
+
+        let broadcast = FraudBroadcast {
+            embedding: ProofEmbedding {
+                ledger_id: hex::encode(accused_ledger),
+                sequence: 50,
+                update_hash: hex::encode([0u8; 32]),
+                field: "transfer_nonce".into(),
+            },
+            causal_chain: vec![],
+            proof: proof_template,
+        };
+        (broadcast, histories, blocks)
+    }
+
+    #[test]
+    fn dispatch_accepts_genuine_inactive_quorum_member() {
+        let (broadcast, histories, blocks) = inactive_quorum_scenario(200, 144);
+        verify_fraud_broadcast(
+            &broadcast,
+            &provider_from(histories),
+            &MockOracle(blocks),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn dispatch_rejects_inactive_quorum_within_window() {
+        let (broadcast, histories, blocks) = inactive_quorum_scenario(100, 144);
+        let err = verify_fraud_broadcast(
+            &broadcast,
+            &provider_from(histories),
+            &MockOracle(blocks),
+        )
+        .unwrap_err();
+        assert!(err.contains("only 100 blocks past"), "wrong error: {}", err);
+    }
+
+    #[test]
+    fn dispatch_rejects_inactive_quorum_with_unconfirmed_block() {
+        // Empty oracle → original_fraud_block_hash isn't in the chain.
+        let (broadcast, histories, _) = inactive_quorum_scenario(200, 144);
+        let err = verify_fraud_broadcast(
+            &broadcast,
+            &provider_from(histories),
+            &MockOracle(HashMap::new()),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("not in verifier's confirmed chain"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    // ---------------- UncreditedOnchain -----------------
+
+    fn uncredited_onchain_scenario(
+        elapsed: u32,
+        required: u32,
+    ) -> (
+        FraudBroadcast,
+        HashMap<String, Vec<SignedLedgerUpdate>>,
+        HashMap<[u8; 32], u32>,
+    ) {
+        let accused_ledger = [0xAA; 32];
+        let funding_block = [0xDD; 32];
+        let proof_block = [0xEE; 32];
+        let txid = [0xCC; 32];
+        let offer_id = [0x33; 32];
+        let funding_address = "bcrt1qtest";
+        let deadline_block = 600u32;
+
+        let mut blocks = HashMap::new();
+        blocks.insert(funding_block, 1000);
+        blocks.insert(proof_block, 1000 + elapsed);
+
+        let accused_op = pk_from_seed(0xAB);
+        let cosigner_ledger_hash = [0x44; 32];
+        let ledger_id_hex = hex::encode(accused_ledger);
+        let (sig, cosigner_pk) = sign_offer_cosig(
+            0xAA,
+            &ledger_id_hex,
+            &offer_id,
+            &accused_op,
+            funding_address,
+            deadline_block,
+            &cosigner_ledger_hash,
+        );
+
+        let proof_template = FraudProof {
+            proof_type: FraudProofType::UncreditedOnchainPayment,
+            accused: hex::encode(accused_op.serialize()),
+            ledger_id: ledger_id_hex.clone(),
+            evidence: FraudEvidence::UncreditedOnchain {
+                offer_id: hex::encode(offer_id),
+                funding_address: funding_address.into(),
+                accused_operator_pubkey: hex::encode(accused_op.serialize()),
+                deadline_block,
+                cosigner_pubkey: hex::encode(cosigner_pk.serialize()),
+                cosigner_ledger_hash: hex::encode(cosigner_ledger_hash),
+                cosign_signature: hex::encode(sig),
+                txid: hex::encode(txid),
+                vout: 0,
+                amount_sats: 100_000,
+                confirmed_at_block_hash: funding_block,
+                required_confirmations: required,
+                proof_sequence: 50,
+            },
+        };
+        let proof_hash = proof_template.proof_hash();
+
+        let mut proof_update = update_with(
+            50,
+            accused_ledger,
+            dummy_transfer_lock(proof_hash),
+            &[],
+            0,
+            None,
+        );
+        proof_update.block_hash = proof_block;
+
+        let mut histories = HashMap::new();
+        histories.insert(ledger_id_hex.clone(), vec![proof_update]);
+
+        let broadcast = FraudBroadcast {
+            embedding: ProofEmbedding {
+                ledger_id: ledger_id_hex,
+                sequence: 50,
+                update_hash: hex::encode([0u8; 32]),
+                field: "transfer_nonce".into(),
+            },
+            causal_chain: vec![],
+            proof: proof_template,
+        };
+        (broadcast, histories, blocks)
+    }
+
+    #[test]
+    fn dispatch_accepts_genuine_uncredited_onchain() {
+        let (broadcast, histories, blocks) = uncredited_onchain_scenario(10, 6);
+        verify_fraud_broadcast(
+            &broadcast,
+            &provider_from(histories),
+            &MockOracle(blocks),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn dispatch_rejects_uncredited_onchain_with_insufficient_confs() {
+        let (broadcast, histories, blocks) = uncredited_onchain_scenario(3, 6);
+        let err = verify_fraud_broadcast(
+            &broadcast,
+            &provider_from(histories),
+            &MockOracle(blocks),
+        )
+        .unwrap_err();
+        assert!(err.contains("only 3 blocks past"), "wrong error: {}", err);
+    }
+
+    #[test]
+    fn dispatch_rejects_uncredited_onchain_with_tampered_offer() {
+        let (mut broadcast, histories, blocks) = uncredited_onchain_scenario(10, 6);
+        // Tamper with deadline_block — invalidates cosig.
+        if let FraudEvidence::UncreditedOnchain { deadline_block, .. } = &mut broadcast.proof.evidence {
+            *deadline_block = 9999;
+        }
+        // Re-anchor embedding since proof_hash changed.
+        let new_hash = broadcast.proof.proof_hash();
+        let id = broadcast.embedding.ledger_id.clone();
+        let mut histories = histories;
+        let v = histories.get_mut(&id).unwrap();
+        v[0] = {
+            let mut u = update_with(50, [0xAA; 32], dummy_transfer_lock(new_hash), &[], 0, None);
+            u.block_hash = [0xEE; 32];
+            u
+        };
+        let err = verify_fraud_broadcast(
+            &broadcast,
+            &provider_from(histories),
+            &MockOracle(blocks),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("offer cosignature failed BIP-340"),
+            "wrong error: {}",
+            err
+        );
+    }
 }
 
 // =========================================================================
@@ -1180,6 +1816,7 @@ mod inactive_quorum_member {
                 original_fraud_hash: "66".repeat(32),
                 original_fraud_block_hash,
                 required_response_blocks: required_blocks,
+                member_ledger_id: hex::encode([0xBB; 32]),
                 member_active_sequence: 200,
                 member_pubkey: hex::encode(member_pk().serialize()),
             },
@@ -1245,6 +1882,7 @@ mod inactive_quorum_member {
                 original_fraud_hash: "66".repeat(32),
                 original_fraud_block_hash,
                 required_response_blocks: 144,
+                member_ledger_id: hex::encode([0xBB; 32]),
                 member_active_sequence: 200,
                 member_pubkey: hex::encode(member_pk().serialize()),
             },

@@ -763,83 +763,62 @@ impl Node {
             &ledger_id[..16.min(ledger_id.len())]
         );
 
-        // 1. Verify proof hash matches embedding
-        let proof_hash = broadcast.proof.proof_hash();
-        let proof_hash_hex = hex::encode(proof_hash);
+        // 1-3. Structural sanity, embedding, causal chain, AND per-type
+        // evidence verification — all live in
+        // `deposits_protocol::fraud::verify_fraud_broadcast` so unit tests
+        // can exercise the full receiver pipeline against in-memory
+        // ledger fixtures + a mock block oracle.
+        let proof_hash_hex = hex::encode(broadcast.proof.proof_hash());
 
-        // 2. Verify the embedding: locate the update at the claimed
-        // (ledger_id, sequence) and confirm it carries `proof_hash` in
-        // a supported embedding field (TransferLock.nonce,
-        // DeliveryEmbed.request_hash, …). Logic lives in
-        // `ProofEmbedding::verify_in_history` so unit tests can exercise
-        // it without standing up a daemon.
-        let embedding = &broadcast.embedding;
-        let embedding_verified = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers
-                .get(&embedding.ledger_id)
-                .map(|arc| {
-                    let ledger = arc.read().unwrap();
-                    embedding.verify_in_history(&ledger.history, &proof_hash)
-                })
-                .unwrap_or(false)
+        struct DaemonLedgers<'a> {
+            handler: &'a Arc<crate::handler::DepositsHandler>,
+        }
+        impl<'a> deposits_core::fraud::LedgerProvider for DaemonLedgers<'a> {
+            fn ledger_history(
+                &self,
+                ledger_id: &str,
+            ) -> Option<Vec<deposits_core::types::SignedLedgerUpdate>> {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(ledger_id)
+                    .map(|arc| arc.read().unwrap().history.clone())
+            }
+        }
+
+        // Block oracle: today returns None for all hashes — leaves
+        // UncreditedOnchain / InactiveQuorum proofs unverifiable until
+        // a real bitcoind/esplora-backed oracle lands. StaleCosignature
+        // and UncreditedLightning don't need it.
+        struct StubOracle;
+        impl deposits_core::fraud::BlockOracle for StubOracle {
+            fn confirms(&self, _hash: &[u8; 32]) -> Option<u32> {
+                None
+            }
+        }
+
+        let provider = DaemonLedgers {
+            handler: &self.handler,
         };
-
-        if !embedding_verified {
+        if let Err(e) = deposits_core::fraud::verify_fraud_broadcast(
+            broadcast,
+            &provider,
+            &StubOracle,
+        ) {
             tracing::warn!(
-                "Fraud proof embedding not verified — hash {} not found at seq {} on ledger {}",
+                "Fraud proof rejected ({}...): {}",
                 &proof_hash_hex[..16],
-                embedding.sequence,
-                &embedding.ledger_id[..16]
+                e
             );
-            // Don't act on unverified proofs, but log for manual review
             return;
         }
 
         tracing::warn!(
-            "Fraud proof embedding VERIFIED: hash {} at seq {} on {}",
+            "Fraud proof VERIFIED: {} at seq {} on {}, evidence type {:?}",
             &proof_hash_hex[..16],
-            embedding.sequence,
-            &embedding.ledger_id[..16]
+            broadcast.embedding.sequence,
+            &broadcast.embedding.ledger_id[..16.min(broadcast.embedding.ledger_id.len())],
+            broadcast.proof.proof_type,
         );
-
-        // 3. Verify causal chain (if indirect embedding)
-        if embedding.ledger_id != *ledger_id {
-            // Verify each causal link exists
-            let mut chain_verified = true;
-            for link in &broadcast.causal_chain {
-                let link_ok = {
-                    let ledgers = self.handler.ledgers.lock().unwrap();
-                    if let Some(arc) = ledgers.get(&link.ledger_id) {
-                        let ledger = arc.read().unwrap();
-                        ledger.history.iter().any(|u| {
-                            u.sequence_number == link.sequence
-                                && u.member_ledger_hash.map(hex::encode)
-                                    == Some(link.member_ledger_hash.clone())
-                        })
-                    } else {
-                        false
-                    }
-                };
-                if !link_ok {
-                    tracing::warn!(
-                        "Causal link not verified: seq {} on ledger {}",
-                        link.sequence,
-                        &link.ledger_id[..16]
-                    );
-                    chain_verified = false;
-                    break;
-                }
-            }
-            if !chain_verified {
-                tracing::warn!("Fraud proof causal chain not fully verified — skipping");
-                return;
-            }
-            tracing::warn!(
-                "Fraud proof causal chain verified ({} links)",
-                broadcast.causal_chain.len()
-            );
-        }
 
         // 4. Check if we're a quorum member of the accused ledger
         if !self.is_quorum_member_of_ledger(ledger_id) {
@@ -894,7 +873,7 @@ impl Node {
                         ledger_id,
                         &reason,
                         &format!("Fraud proof verified: {}", &fp.event_id[..16]),
-                        proof_hash,
+                        broadcast.proof.proof_hash(),
                         last_valid_seq,
                         None,
                         &keypair,
