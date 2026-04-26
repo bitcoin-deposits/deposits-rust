@@ -599,6 +599,21 @@ impl Node {
             );
             tracing::warn!("  Sequence: {}", inbound.update.sequence_number);
 
+            // The operator must not auto-arm its OWN ledger. Members fork
+            // when they detect invalid history; the operator only initiates
+            // recovery from the legitimate side. If the operator forks
+            // itself in response to a member's fork update (which validates
+            // as "invalid" against the operator's main chain), we end up
+            // with a self-fork whose reconstructed Taproot voter set
+            // disagrees with the on-chain UTXO — every confiscation attempt
+            // then fails with "Witness program hash mismatch".
+            if self.is_operator_of_ledger(&inbound.ledger_id) {
+                tracing::debug!(
+                    "Operator does not auto-arm own ledger — fork updates are normal during dispute"
+                );
+                return;
+            }
+
             // Get the last valid sequence number (the one before this invalid update)
             let last_valid_seq = if inbound.update.sequence_number > 0 {
                 inbound.update.sequence_number - 1

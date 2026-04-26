@@ -1173,12 +1173,23 @@ impl Node {
                 Err(_) => continue,
             };
 
-            // Extract DisputeArmed participants, quorum members, and reserves info
+            // Extract DisputeArmed participants, quorum members, and reserves info.
+            //
+            // The voter set committed in the on-chain Taproot UTXO is exactly
+            // what the operator put in the latest `QuorumBegin.quorum_members`
+            // — that's the canonical source. Inferring it from QuorumAddMember
+            // updates was unreliable: forks rebroadcast the operator's history
+            // alongside their own additions; even with the patch that retags
+            // fork additions to the forker's pubkey, dispute-time noise (e.g.
+            // late QuorumJoin records, multi-fork interactions) added stray
+            // members and broke the Taproot reconstruction with a
+            // "Witness program hash mismatch".
             let mut participants: Vec<LotteryParticipant> = Vec::new();
             let mut quorum_members: Vec<PublicKey> = Vec::new();
             let mut reserves_address: Option<String> = None;
             let mut ledger_hash: Option<[u8; 32]> = None;
             let mut original_operator: Option<PublicKey> = None;
+            let mut latest_quorum_begin_seq: Option<u64> = None;
 
             for event in events.iter() {
                 if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
@@ -1196,25 +1207,24 @@ impl Node {
                                         reserves_address = Some(reserves_id);
                                     }
                                 }
-                                LedgerOperation::QuorumAddMember { quorum_member, .. } => {
-                                    // Only use QuorumAddMember from the original operator's updates
-                                    // (fork updates also contain QuorumAddMember for dispute bookkeeping,
-                                    // but those inflate the voter count and break Taproot address matching)
-                                    let is_from_original = original_operator
-                                        .map(|op| update.operator_id == op)
-                                        .unwrap_or(true);
-                                    if is_from_original && !quorum_members.contains(&quorum_member)
-                                    {
-                                        quorum_members.push(quorum_member);
-                                    }
-                                }
                                 LedgerOperation::QuorumBegin {
                                     reserves_id,
                                     ledger_hash: lh,
+                                    quorum_members: qm,
                                     ..
                                 } => {
-                                    reserves_address = Some(reserves_id);
-                                    ledger_hash = Some(lh);
+                                    // Keep the latest QuorumBegin (highest sequence) since
+                                    // multiple rotations may exist on the relay.
+                                    let seq = update.sequence_number;
+                                    if latest_quorum_begin_seq
+                                        .map(|cur| seq > cur)
+                                        .unwrap_or(true)
+                                    {
+                                        latest_quorum_begin_seq = Some(seq);
+                                        reserves_address = Some(reserves_id);
+                                        ledger_hash = Some(lh);
+                                        quorum_members = qm;
+                                    }
                                 }
                                 LedgerOperation::DisputeArmed {
                                     commitment_hash,
@@ -1384,6 +1394,35 @@ impl Node {
                     continue;
                 }
             };
+
+            // Diagnostic: confirm the reconstructed Taproot script_pubkey
+            // matches the on-chain reserves UTXO. A mismatch here is the
+            // root cause of `Witness program hash mismatch` at broadcast,
+            // and indicates the reconstruction inputs (voter_set,
+            // ledger_hash, threshold_config) drifted from what was used
+            // when the rotation tx was built.
+            {
+                let reconstructed = taproot_output.script_pubkey();
+                let on_chain = reserves_addr.script_pubkey();
+                if reconstructed != on_chain {
+                    tracing::warn!(
+                        "Confiscation Taproot mismatch for ledger {}: \
+                         reconstructed={}, on-chain={}, voter_count={}, \
+                         ledger_hash={}, original_operator={}, members=[{}]",
+                        ledger_prefix,
+                        hex::encode(reconstructed.as_bytes()),
+                        hex::encode(on_chain.as_bytes()),
+                        voter_count,
+                        hex::encode(ledger_hash_val),
+                        hex::encode(original_operator.serialize()),
+                        quorum_members
+                            .iter()
+                            .map(|m| hex::encode(&m.serialize()[..8]))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
+                }
+            }
 
             // Use quorum-override tier (threshold without tie-breaker)
             let (tier_index, tier) = match threshold_config
