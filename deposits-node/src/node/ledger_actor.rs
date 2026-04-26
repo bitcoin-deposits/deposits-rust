@@ -173,25 +173,112 @@ impl LedgerActor {
         }
     }
 
-    /// Stub run loop for Step 2 — drains the inbox and logs each event
-    /// type. Real behavior moves in at Step 3 (Inbound), Step 4
-    /// (LocalCommit, Cosign).
+    /// Apply an inbound `SignedLedgerUpdate` to the actor's shadow
+    /// `Ledger`. Step 4 implementation: idempotent dedup on
+    /// `(sequence_number, content_hash)`, then chain-continuity check
+    /// (next slot only — gaps and out-of-order are dropped), then
+    /// `apply_state_changes` and tip advancement. Mirrors what the
+    /// authoritative `handler.ledgers` path does for non-self updates.
+    /// Self-broadcasts echoed back from the relay land here too and
+    /// dedup correctly via content_hash.
+    ///
+    /// No persistence in step 4 — actor state is in-memory shadow only.
+    /// Step 5 adds persistence and makes the actor authoritative.
+    fn apply_inbound(&mut self, update: deposits_core::types::SignedLedgerUpdate) {
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tlv::TlvDecode;
+
+        // Dedup on (seq, content_hash). Same content at same seq → no-op.
+        // Different content at same seq → equivocation evidence; log and
+        // refuse to apply (keeps the actor consistent with whichever
+        // arrived first).
+        if let Some(existing) = self
+            .ledger
+            .history
+            .iter()
+            .find(|u| u.sequence_number == update.sequence_number)
+        {
+            if existing.content_hash != update.content_hash {
+                tracing::warn!(
+                    "LedgerActor[{}…] equivocation at seq {}: existing content {} vs new {}",
+                    &self.ledger_id[..16.min(self.ledger_id.len())],
+                    update.sequence_number,
+                    hex::encode(&existing.content_hash[..8]),
+                    hex::encode(&update.content_hash[..8])
+                );
+            }
+            return;
+        }
+
+        // Chain-continuity: only apply if this is the exact next slot
+        // AND the previous_hash matches our tip's chain_hash. Gaps and
+        // out-of-order updates are dropped — the authoritative handler
+        // path may have already accepted via event-store catch-up; the
+        // actor's shadow stays slightly behind in that case (will be
+        // reconciled when the actor takes over persistence in step 5).
+        let expected_seq = self.ledger.state.sequence + 1;
+        if update.sequence_number != expected_seq {
+            tracing::trace!(
+                "LedgerActor[{}…] dropping seq {} (expected {})",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                update.sequence_number,
+                expected_seq
+            );
+            return;
+        }
+        let expected_prev = self.ledger.state.chain_tip_hash;
+        if update.previous_hash != expected_prev {
+            tracing::warn!(
+                "LedgerActor[{}…] chain-break at seq {}: previous_hash {} vs tip {}",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                update.sequence_number,
+                hex::encode(&update.previous_hash[..8]),
+                hex::encode(&expected_prev[..8])
+            );
+            return;
+        }
+
+        let op = match LedgerOperation::tlv_decode(&update.message) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(
+                    "LedgerActor[{}…] decode failed at seq {}: {}",
+                    &self.ledger_id[..16.min(self.ledger_id.len())],
+                    update.sequence_number,
+                    e
+                );
+                return;
+            }
+        };
+        if let Err(e) = self.ledger.state.apply(&op) {
+            tracing::warn!(
+                "LedgerActor[{}…] apply failed at seq {}: {}",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                update.sequence_number,
+                e
+            );
+            return;
+        }
+        self.ledger.state.sequence = update.sequence_number;
+        self.ledger.state.chain_tip_hash = update.chain_hash();
+        self.ledger.history.push(update);
+    }
+
+    /// Run loop. Step 4 implements `Inbound` to keep an in-memory
+    /// shadow of the ledger; LocalCommit + Cosign are still stubs.
     pub async fn run(mut self) {
         tracing::info!(
-            "LedgerActor[{}…] starting (stub run loop)",
+            "LedgerActor[{}…] starting",
             &self.ledger_id[..16.min(self.ledger_id.len())]
         );
         while let Some(event) = self.inbox.recv().await {
             match event {
-                LedgerEvent::Inbound(_) => {
-                    tracing::debug!(
-                        "LedgerActor[{}…] received Inbound (stub: dropped)",
-                        &self.ledger_id[..16.min(self.ledger_id.len())]
-                    );
+                LedgerEvent::Inbound(update) => {
+                    self.apply_inbound(*update);
                 }
                 LedgerEvent::Cosign { reply, .. } => {
-                    // Step 2: refuse to cosign — keeps existing daemon
-                    // path authoritative until step 4.
+                    // Step 4: still refuse to cosign — handler path is
+                    // authoritative until step 5.
                     let _ = reply.send(None);
                 }
                 LedgerEvent::LocalCommit(_) => {
