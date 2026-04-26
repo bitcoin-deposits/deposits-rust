@@ -1,5 +1,5 @@
 //! Tier 1 of the dispute integration suite: fraud-proof publish →
-//! quorum-member dispute → operator-side state transition.
+//! quorum-member dispute → custody confiscation.
 //!
 //! Flow:
 //!   1. Discover one of op0's ledgers.
@@ -9,35 +9,34 @@
 //!      The update is signed under op0's real key but breaks the hash
 //!      chain, so any chain-validating quorum member will detect the
 //!      violation.
-//!   3. Run `deposits-node recovery dispute <ledger>` from another
+//!   3. Run `deposits-node recovery start <ledger>` from another
 //!      operator's CLI (op1). That command independently scans the
 //!      ledger, finds the violation, and publishes the kind:9103
 //!      dispute event.
-//!   4. Op0's daemon receives the dispute event and transitions its
-//!      ledger's `dispute_state` from `Normal` to `Disputed`.
-//!   5. Poll `deposits-wallet ledger show <ledger>` until the printed
-//!      `Dispute:` line shows the new state.
+//!   4. Quorum members receive the kind:9103, auto-arm by forking
+//!      the ledger and applying DisputeEnter + DisputeArmed on the
+//!      fork branch. The lottery resolves; one member broadcasts the
+//!      confiscation transaction; bitcoind confirms it; that member
+//!      writes a `confiscated_<prefix>.marker` file.
+//!   5. Poll for the marker on disk on any quorum member's data dir.
+//!
+//! NOTE on the assertion: tier 1 deliberately does NOT check op0's
+//! main-ledger `dispute_state`. The protocol model is that a fork
+//! branch carries the dispute; the operator's main chain only flips
+//! state on a confirmed `DisputeAcquire` (custody transfer) or
+//! `DisputeYield`. Neither happens here — we stop at the on-chain
+//! confiscation step. Tier 2/3 should exercise the post-confiscation
+//! flows once they exist.
 //!
 //! Sibling tests:
 //!   - `dispute_arm.rs`            (tier 2: through the arm phase)
 //!   - `dispute_confiscation.rs`   (tier 3: full confiscation tx)
 //!
 //! Requires:
-//!   ./bin/setup.sh                                              (cluster)
+//!   ./bin/setup.sh 3                                            (cluster)
 //!
-//! AND requires that op0's ledger has been successfully rotated to
-//! quorum control (`rotated: yes` in `ledger health`, `Quorum: N
-//! members` with N >= 3). Without an active quorum, op0's daemon
-//! receives the kind:9103 dispute event but auto_arm_for_dispute
-//! fails with "Cannot arm without any quorum members" and
-//! `dispute_state` stays at Normal — the test will time out at the
-//! polling step.
-//!
-//! As of this writing the cluster's Phase 4 / quorum_begin path is
-//! flaky for several reasons (cosign timeouts when the rotation tx
-//! hasn't been broadcast/indexed yet, etc.) — see open work on
-//! orchestration. When that's stable, this test should pass against
-//! a fresh `setup.sh 5` cluster.
+//! Q=3 keeps the lottery within its 4-participant cap. With Q>=4 the
+//! confiscation step fails to build the lottery script.
 //!
 //! Run with:
 //!   cargo test -p deposits-test --test dispute_initiation -- --ignored
@@ -128,19 +127,32 @@ fn fraud_proof_triggers_dispute_state() {
         stdout
     );
 
-    // ── 4. Poll op0's ledger until dispute_state flips ────────────
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut last_seen = String::new();
+    // ── 4. Poll for confiscation completion ──────────────────────
+    //
+    // Quorum members write `confiscated_<prefix>.marker` after their
+    // confiscation TX confirms on-chain. Any member's marker proves
+    // the dispute pipeline ran end-to-end: detection → fork →
+    // DisputeArmed → lottery → confiscation TX broadcast and
+    // accepted. Auto-arm + arm + confiscate take ~90s on regtest, so
+    // poll generously.
+    let prefix = &ledger[..16];
+    let marker_name = format!("confiscated_{}.marker", prefix);
+    let deadline = Instant::now() + Duration::from_secs(180);
     while Instant::now() < deadline {
-        last_seen = ledger_health(0, &ledger);
-        if last_seen.contains("Dispute:") && last_seen.contains("Disputed") {
-            eprintln!("[ok] op0 ledger transitioned to Disputed");
-            return;
+        for op_idx in 0..10 {
+            let path = op_data_dir(op_idx).join(&marker_name);
+            if path.exists() {
+                eprintln!(
+                    "[ok] confiscation completed: marker at op{}/{}",
+                    op_idx, marker_name
+                );
+                return;
+            }
         }
         std::thread::sleep(Duration::from_secs(2));
     }
     panic!(
-        "ledger never transitioned to Disputed within 60s; last `ledger show`:\n{}",
-        last_seen
+        "no confiscation marker `{}` found on any operator data dir within 180s",
+        marker_name
     );
 }
