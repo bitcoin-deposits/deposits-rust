@@ -160,6 +160,150 @@ pub fn read_setup_state(key: &str) -> String {
         .to_string()
 }
 
+/// True iff the htlc-agent process is running. Tests that exercise
+/// cross-ledger routing through a courier need this; start it with
+/// `./bin/setup-htlc-agent.sh` after the cluster is up.
+pub fn htlc_agent_available() -> bool {
+    Command::new("pgrep")
+        .args(["-f", "htlc-agent --"])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+/// Credit `amount_msats` to `deposit_pubkey_hex` on `ledger_id` via
+/// `deposits-node deposit credit` from `op_idx`'s data dir. This is the
+/// fast fund-a-deposit path used by setup-htlc-agent — bypasses real
+/// on-chain confirmation, so tests run in seconds.
+///
+/// `invoice_id` should be unique per call (using `payment_hash` style).
+/// Returns combined stdout+stderr; panics on non-zero exit.
+pub fn operator_credit_deposit(
+    op_idx: usize,
+    ledger_id: &str,
+    deposit_pubkey_hex: &str,
+    amount_msats: u64,
+    invoice_id: &str,
+) -> String {
+    let seed = op_seed(op_idx);
+    let data_dir = op_data_dir(op_idx);
+    let name = format!("op{}", op_idx);
+    let out = Command::new(node_bin())
+        .args([
+            "deposit",
+            "credit",
+            ledger_id,
+            deposit_pubkey_hex,
+            &amount_msats.to_string(),
+            invoice_id,
+        ])
+        .args(["--seed", &seed])
+        .args(["--name", &name])
+        .args(["--network", "regtest"])
+        .args(["--data-dir", data_dir.to_str().unwrap()])
+        .args(["--esplora", ELECTRS_URL])
+        .args(["--relay", relay_ledgers()])
+        .output()
+        .expect("invoke deposit credit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "deposit credit failed:\n{}",
+        combined
+    );
+    combined
+}
+
+/// Drive the wallet's `route` command — performs a cross-ledger transfer
+/// via an htlc-agent courier. Returns combined stdout+stderr and exit
+/// success. The wallet must have deposits with both aliases in the
+/// given `data_dir`'s deposits.json.
+pub fn wallet_route(
+    data_dir: &Path,
+    nsec_path: &Path,
+    from_alias: &str,
+    to_alias: &str,
+    amount_sats: u64,
+) -> (bool, String) {
+    let out = Command::new(wallet_bin())
+        .args([
+            "route",
+            from_alias,
+            to_alias,
+            &amount_sats.to_string(),
+        ])
+        .args(["--nsec-file", nsec_path.to_str().unwrap()])
+        .args(["--data-dir", data_dir.to_str().unwrap()])
+        .args(["--relay", relay_ledgers()])
+        .args(["--network", "regtest"])
+        .output()
+        .expect("invoke wallet route");
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), combined)
+}
+
+/// Look up the htlc-agent's deposit on `ledger_id` and return the
+/// deposit_pubkey hex (33-byte compressed). Returns `None` if the
+/// agent doesn't have a deposit on that ledger or if its deposits.json
+/// is missing. Useful for tests that need to credit the agent's
+/// destination deposit before triggering a route.
+pub fn htlc_agent_deposit_pubkey(ledger_id: &str) -> Option<String> {
+    let path = repo_root()
+        .join("deposits-tools/data/htlc-agent/deposits.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&raw).ok()?;
+    for d in deposits {
+        if d.get("ledger_id").and_then(|v| v.as_str()) == Some(ledger_id) {
+            return d
+                .get("deposit_pubkey")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+    }
+    None
+}
+
+/// Read a wallet's `deposits.json` and return `(deposit_pubkey_hex,
+/// amount_sats)` for the deposit with the given alias. `amount_sats`
+/// is `0` for a deposit that hasn't been funded yet (the field is
+/// absent on the freshly-opened "open" status). Returns `None` if no
+/// deposit with that alias is present.
+pub fn wallet_lookup_deposit(
+    data_dir: &Path,
+    alias: &str,
+) -> Option<(String, u64)> {
+    let path = data_dir.join("deposits.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&raw).ok()?;
+    for d in deposits {
+        if d.get("alias").and_then(|v| v.as_str()) == Some(alias) {
+            let pk = d.get("deposit_pubkey")?.as_str()?.to_string();
+            let amount = d.get("amount_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+            return Some((pk, amount));
+        }
+    }
+    None
+}
+
+/// Run `deposits-wallet sync` to refresh local balances from the
+/// operator daemons. Used after a route to observe credited amounts.
+pub fn wallet_sync(data_dir: &Path, nsec_path: &Path) -> bool {
+    Command::new(wallet_bin())
+        .args(["sync"])
+        .args(["--nsec-file", nsec_path.to_str().unwrap()])
+        .args(["--data-dir", data_dir.to_str().unwrap()])
+        .args(["--relay", relay_ledgers()])
+        .args(["--network", "regtest"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Scan every imported ledger in `op_idx`'s data dir for the
 /// non-zero update with the lowest `block_height`, returning its
 /// `block_hash`. Useful as an "earlier confirmed block" anchor in
