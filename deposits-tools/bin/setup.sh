@@ -160,6 +160,7 @@ start_node() {
         --network regtest --data-dir "$data_dir" \
         --esplora "$ELECTRS_URL" \
         --metrics-port "$metrics_port" \
+        --fast-poll \
         $RELAY_ARGS >> "$data_dir/daemon.log" 2>&1 &
     echo "$!" > "$data_dir/daemon.pid"
 }
