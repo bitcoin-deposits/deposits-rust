@@ -70,15 +70,22 @@ pub enum FraudEvidence {
         funding_address: String,
         cosigner_pubkey: String,
         cosign_signature: String,
-        /// On-chain proof.
+        /// On-chain payment.
         txid: String,
+        vout: u32,
         amount_sats: u64,
-        confirmed_at_block: u32,
+        /// Block hash anchoring when the payment confirmed. Verifier
+        /// independently confirms this hash is in its chain — the
+        /// height is read out of the verifier's chain, not trusted from
+        /// the proof.
+        #[serde(with = "crate::types::serde_32")]
+        confirmed_at_block_hash: [u8; 32],
         required_confirmations: u32,
-        /// Operator signed an update at this block height, proving they
-        /// saw sufficient confirmations but didn't credit.
+        /// Operator signed an update at this sequence — its `block_hash`
+        /// (read from the SignedLedgerUpdate, also confirmed via the
+        /// oracle) proves the operator saw enough confirmations but
+        /// still didn't credit by then.
         proof_sequence: u64,
-        proof_block_height: u32,
     },
 
     /// Operator didn't credit a lightning payment.
@@ -111,11 +118,18 @@ pub enum FraudEvidence {
     InactiveQuorum {
         /// Hash of the original fraud proof that was ignored.
         original_fraud_hash: String,
-        evidence_available_at_block: u32,
+        /// Block hash anchoring when the original fraud proof became
+        /// knowable (e.g. the block_hash of the update where the
+        /// proof_hash was embedded). The verifier confirms this hash is
+        /// in its own confirmed chain — the block height alone is not
+        /// trusted, only its presence in the chain.
+        #[serde(with = "crate::types::serde_32")]
+        original_fraud_block_hash: [u8; 32],
         required_response_blocks: u32,
         /// Member was active after the window (proving they were online).
+        /// The block_hash for this update is read directly off the
+        /// referenced SignedLedgerUpdate and confirmed by the verifier.
         member_active_sequence: u64,
-        member_active_block: u32,
         member_pubkey: String,
     },
 
@@ -152,6 +166,461 @@ impl FraudProof {
     pub fn verify_embedding(&self, embedded_hash: &[u8; 32]) -> bool {
         &self.proof_hash() == embedded_hash
     }
+}
+
+// ============================================================================
+// Per-type evidence verifiers (pure)
+// ============================================================================
+//
+// Each verifier consumes a `FraudProof` and the ledger views it needs to
+// confirm the claim, returning `Ok(())` if the evidence demonstrates real
+// fraud and `Err(...)` describing the first reason it doesn't. The
+// verifiers don't perform I/O — block-confirmation and ledger fetching are
+// the caller's responsibility, supplied as either slice references or a
+// `BlockOracle` callback.
+
+/// Block-confirmation oracle. Daemon implementations look the hash up
+/// against bitcoind/esplora and return the height if the hash is part of
+/// the validator's confirmed chain. Test implementations use a static
+/// `HashMap<[u8; 32], u32>`.
+pub trait BlockOracle {
+    fn confirms(&self, block_hash: &[u8; 32]) -> Option<u32>;
+}
+
+impl<F: Fn(&[u8; 32]) -> Option<u32>> BlockOracle for F {
+    fn confirms(&self, block_hash: &[u8; 32]) -> Option<u32> {
+        self(block_hash)
+    }
+}
+
+fn parse_hex32(s: &str, label: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(s).map_err(|e| format!("{}: {}", label, e))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| format!("{}: expected 32 bytes", label))?;
+    Ok(arr)
+}
+
+/// Verify a `StaleCosignature` claim.
+///
+/// The accusation: the cosigner declared a `member_ledger_hash` that
+/// referred to an already-stale state of their own ledger when they
+/// signed. To prove this, evidence must show:
+///   1. The accused operator's ledger has a SignedLedgerUpdate at
+///      `stale_update_sequence` whose `content_hash` matches.
+///   2. That update carries a `CosignEntry` whose `member_ledger_hash`
+///      matches `declared_member_hash`.
+///   3. The member's ledger has a SignedLedgerUpdate at
+///      `member_later_sequence` whose `chain_hash()` matches
+///      `member_later_hash`.
+///   4. The member's chain reached past `declared_member_hash` BEFORE
+///      the accused operator cosigned. Concretely: there exists a
+///      sequence S on the member's chain whose `chain_hash()` matches
+///      `declared_member_hash` (so the declared hash WAS valid at some
+///      point), AND at least one later member update has a block_height
+///      no greater than the accused's stale-update block_height (member
+///      had advanced before the operator's cosign).
+///
+/// Cosignature signature validity is intentionally *not* checked here —
+/// that's a separate concern (see todo for `verify_cosignatures`). The
+/// staleness check is about temporal ordering of ledger states.
+pub fn verify_stale_cosignature(
+    proof: &FraudProof,
+    accused_history: &[crate::types::SignedLedgerUpdate],
+    member_history: &[crate::types::SignedLedgerUpdate],
+) -> Result<(), String> {
+    let FraudEvidence::StaleCosign {
+        stale_update_sequence,
+        stale_update_hash,
+        declared_member_hash,
+        member_later_sequence,
+        member_later_hash,
+        member_ledger_id: _,
+    } = &proof.evidence
+    else {
+        return Err("verify_stale_cosignature: wrong evidence type".into());
+    };
+
+    let stale_hash_bytes = parse_hex32(stale_update_hash, "stale_update_hash")?;
+    let declared_bytes = parse_hex32(declared_member_hash, "declared_member_hash")?;
+    let later_hash_bytes = parse_hex32(member_later_hash, "member_later_hash")?;
+
+    // (1) accused has the stale update at the claimed sequence + content hash.
+    let stale_update = accused_history
+        .iter()
+        .find(|u| u.sequence_number == *stale_update_sequence)
+        .ok_or_else(|| {
+            format!(
+                "stale_update_sequence {} not in accused history",
+                stale_update_sequence
+            )
+        })?;
+    if stale_update.content_hash != stale_hash_bytes {
+        return Err(format!(
+            "stale_update_hash mismatch at seq {}: claimed {}, actual {}",
+            stale_update_sequence,
+            hex::encode(&stale_hash_bytes[..8]),
+            hex::encode(&stale_update.content_hash[..8])
+        ));
+    }
+
+    // (2) the declared_member_hash appears in one of that update's CosignEntries.
+    let cosig_present = stale_update
+        .cosignatures
+        .iter()
+        .any(|c| c.member_ledger_hash == declared_bytes);
+    if !cosig_present {
+        return Err(format!(
+            "declared_member_hash {} not found among CosignEntries on stale update",
+            hex::encode(&declared_bytes[..8])
+        ));
+    }
+
+    // (3) member has the later update at the claimed sequence + chain hash.
+    let later_update = member_history
+        .iter()
+        .find(|u| u.sequence_number == *member_later_sequence)
+        .ok_or_else(|| {
+            format!(
+                "member_later_sequence {} not in member history",
+                member_later_sequence
+            )
+        })?;
+    if later_update.chain_hash() != later_hash_bytes {
+        return Err(format!(
+            "member_later_hash mismatch at seq {}: claimed {}, actual {}",
+            member_later_sequence,
+            hex::encode(&later_hash_bytes[..8]),
+            hex::encode(&later_update.chain_hash()[..8])
+        ));
+    }
+
+    // (4) prove staleness: declared_member_hash WAS the member's chain_hash
+    //     at some sequence S < member_later_sequence, AND the member has
+    //     advanced past it at a block_height ≤ the accused's stale-update
+    //     block_height (so at the time of cosign, the member was past S).
+    let s_match = member_history.iter().find(|u| {
+        u.chain_hash() == declared_bytes && u.sequence_number < *member_later_sequence
+    });
+    let s = s_match.ok_or_else(|| {
+        format!(
+            "declared_member_hash {} doesn't appear in member history before seq {}",
+            hex::encode(&declared_bytes[..8]),
+            member_later_sequence
+        )
+    })?;
+
+    let advance_at_or_before_cosign = member_history.iter().any(|u| {
+        u.sequence_number > s.sequence_number
+            && u.sequence_number <= *member_later_sequence
+            && u.block_height <= stale_update.block_height
+    });
+    if !advance_at_or_before_cosign {
+        return Err(format!(
+            "member did not advance past declared_member_hash before cosign at block {}",
+            stale_update.block_height
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify an `UncreditedLightningPayment` claim.
+///
+/// The accusation: operator cosigned a Lightning invoice, the preimage
+/// was revealed (so the payment definitively succeeded), and yet the
+/// operator never credited the deposit.
+///
+/// Checks:
+///   1. `sha256(preimage) == payment_hash` — proof of payment.
+///   2. The accused's ledger has a SignedLedgerUpdate at `proof_sequence`
+///      (operator was alive after the preimage was knowable).
+///   3. No `InvoiceCredit` or `InvoiceFulfill` for `payment_hash` in
+///      accused history at sequence ≤ `proof_sequence` (operator did
+///      not credit).
+///
+/// Cosignature signature validity is **not** checked here — that would
+/// need the canonical "cosigned-invoice" signing message format, which
+/// isn't yet centralized. The cosignature anchors the operator's
+/// commitment, but for the *uncredited* claim what matters is whether
+/// the credit happened, given the preimage. A later patch should add
+/// cosig signature checking once the format is locked.
+pub fn verify_uncredited_lightning(
+    proof: &FraudProof,
+    accused_history: &[crate::types::SignedLedgerUpdate],
+) -> Result<(), String> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::TlvDecode;
+
+    let FraudEvidence::UncreditedLightning {
+        invoice: _,
+        payment_hash,
+        cosigner_pubkey: _,
+        cosign_signature: _,
+        preimage,
+        proof_sequence,
+    } = &proof.evidence
+    else {
+        return Err("verify_uncredited_lightning: wrong evidence type".into());
+    };
+
+    let payment_hash_bytes = parse_hex32(payment_hash, "payment_hash")?;
+    let preimage_bytes = parse_hex32(preimage, "preimage")?;
+
+    // (1) hash(preimage) == payment_hash.
+    let computed: [u8; 32] = sha256::Hash::hash(&preimage_bytes).to_byte_array();
+    if computed != payment_hash_bytes {
+        return Err(format!(
+            "preimage doesn't hash to payment_hash: computed {} vs claimed {}",
+            hex::encode(&computed[..8]),
+            hex::encode(&payment_hash_bytes[..8])
+        ));
+    }
+
+    // (2) accused has an update at proof_sequence (operator was alive).
+    let _proof_update = accused_history
+        .iter()
+        .find(|u| u.sequence_number == *proof_sequence)
+        .ok_or_else(|| {
+            format!(
+                "proof_sequence {} not in accused history",
+                proof_sequence
+            )
+        })?;
+
+    // (3) no InvoiceCredit / InvoiceFulfill for this payment_hash
+    //     anywhere at seq ≤ proof_sequence.
+    for u in accused_history
+        .iter()
+        .filter(|u| u.sequence_number <= *proof_sequence)
+    {
+        let Ok(op) = LedgerOperation::tlv_decode(&u.message) else {
+            continue;
+        };
+        match op {
+            LedgerOperation::InvoiceCredit {
+                payment_hash: ph, ..
+            } if ph == payment_hash_bytes => {
+                return Err(format!(
+                    "InvoiceCredit found at seq {} — operator did credit, not fraud",
+                    u.sequence_number
+                ));
+            }
+            // InvoiceFulfill carries a `preimage` field rather than a
+            // payment_hash — match by hashing preimage.
+            LedgerOperation::InvoiceFulfill {
+                preimage: ff_preimage,
+                ..
+            } if sha256::Hash::hash(&ff_preimage).to_byte_array() == payment_hash_bytes => {
+                return Err(format!(
+                    "InvoiceFulfill found at seq {} — operator fulfilled, not fraud",
+                    u.sequence_number
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify an `InactiveQuorumMember` claim.
+///
+/// The accusation: member was online (their ledger has updates) past
+/// the required response window after a fraud proof was knowable, but
+/// failed to act on it.
+///
+/// Checks:
+///   1. `original_fraud_block_hash` is in the verifier's confirmed chain.
+///      The verifier's `BlockOracle` returns its height — the proof
+///      doesn't trust any height claimed by the proof creator.
+///   2. The member's ledger has a SignedLedgerUpdate at
+///      `member_active_sequence`. Its `block_hash` is also confirmed
+///      via the oracle.
+///   3. `member_active_height - original_fraud_height >= required_response_blocks`.
+///      The member was demonstrably online past the deadline.
+///   4. The update at `member_active_sequence` is signed by
+///      `member_pubkey` (operator_id of that update). Without this,
+///      anyone could plant an update on a third party's ledger and
+///      blame the wrong member.
+pub fn verify_inactive_quorum_member(
+    proof: &FraudProof,
+    member_history: &[crate::types::SignedLedgerUpdate],
+    block_oracle: &dyn BlockOracle,
+) -> Result<(), String> {
+    use std::str::FromStr;
+
+    let FraudEvidence::InactiveQuorum {
+        original_fraud_hash: _,
+        original_fraud_block_hash,
+        required_response_blocks,
+        member_active_sequence,
+        member_pubkey,
+    } = &proof.evidence
+    else {
+        return Err("verify_inactive_quorum_member: wrong evidence type".into());
+    };
+
+    // (1) original-fraud block confirmed by the verifier.
+    let original_height = block_oracle
+        .confirms(original_fraud_block_hash)
+        .ok_or_else(|| {
+            format!(
+                "original_fraud_block_hash {} not in verifier's confirmed chain",
+                hex::encode(&original_fraud_block_hash[..8])
+            )
+        })?;
+
+    // (2) member-active update exists, and its block_hash is confirmed.
+    let member_update = member_history
+        .iter()
+        .find(|u| u.sequence_number == *member_active_sequence)
+        .ok_or_else(|| {
+            format!(
+                "member_active_sequence {} not in member history",
+                member_active_sequence
+            )
+        })?;
+
+    let member_height = block_oracle
+        .confirms(&member_update.block_hash)
+        .ok_or_else(|| {
+            format!(
+                "member-active update's block_hash {} not in verifier's confirmed chain",
+                hex::encode(&member_update.block_hash[..8])
+            )
+        })?;
+
+    // (3) member was online past the deadline.
+    let elapsed = member_height.saturating_sub(original_height);
+    if elapsed < *required_response_blocks {
+        return Err(format!(
+            "member-active block {} only {} blocks past original-fraud block {}; need {}",
+            member_height, elapsed, original_height, required_response_blocks
+        ));
+    }
+
+    // (4) the member-active update is signed by the accused member.
+    let claimed_pk = bitcoin::secp256k1::PublicKey::from_str(member_pubkey)
+        .map_err(|e| format!("invalid member_pubkey: {}", e))?;
+    if member_update.operator_id != claimed_pk {
+        return Err(format!(
+            "member-active update at seq {} signed by {} not member_pubkey {}",
+            member_active_sequence,
+            hex::encode(&member_update.operator_id.serialize()[..8]),
+            hex::encode(&claimed_pk.serialize()[..8])
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify an `UncreditedOnchainPayment` claim.
+///
+/// The accusation: a cosigned offer was issued, a Bitcoin tx funded the
+/// offer's address with sufficient confirmations, and the operator
+/// signed at least one further update without crediting the deposit.
+///
+/// Checks:
+///   1. `confirmed_at_block_hash` is in the verifier's confirmed chain.
+///   2. The accused has a SignedLedgerUpdate at `proof_sequence`. Its
+///      `block_hash` is also confirmed via the oracle.
+///   3. The proof-sequence block is at least `required_confirmations`
+///      blocks past the funding block (proves operator saw enough confs
+///      before signing).
+///   4. No `OnchainCredit` for `(txid, vout)` in accused history at
+///      sequence ≤ `proof_sequence` (operator did not credit).
+///
+/// Cosignature signature validity over the offer is intentionally NOT
+/// checked here — same caveat as `verify_uncredited_lightning`.
+pub fn verify_uncredited_onchain(
+    proof: &FraudProof,
+    accused_history: &[crate::types::SignedLedgerUpdate],
+    block_oracle: &dyn BlockOracle,
+) -> Result<(), String> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::TlvDecode;
+
+    let FraudEvidence::UncreditedOnchain {
+        offer_id: _,
+        funding_address: _,
+        cosigner_pubkey: _,
+        cosign_signature: _,
+        txid,
+        vout,
+        amount_sats: _,
+        confirmed_at_block_hash,
+        required_confirmations,
+        proof_sequence,
+    } = &proof.evidence
+    else {
+        return Err("verify_uncredited_onchain: wrong evidence type".into());
+    };
+
+    let txid_bytes = parse_hex32(txid, "txid")?;
+
+    // (1) confirmed-at block in the verifier's chain.
+    let confirmed_height = block_oracle
+        .confirms(confirmed_at_block_hash)
+        .ok_or_else(|| {
+            format!(
+                "confirmed_at_block_hash {} not in verifier's confirmed chain",
+                hex::encode(&confirmed_at_block_hash[..8])
+            )
+        })?;
+
+    // (2) proof_sequence update exists, and its block_hash is confirmed.
+    let proof_update = accused_history
+        .iter()
+        .find(|u| u.sequence_number == *proof_sequence)
+        .ok_or_else(|| {
+            format!(
+                "proof_sequence {} not in accused history",
+                proof_sequence
+            )
+        })?;
+    let proof_height = block_oracle
+        .confirms(&proof_update.block_hash)
+        .ok_or_else(|| {
+            format!(
+                "proof_sequence update's block_hash {} not in verifier's confirmed chain",
+                hex::encode(&proof_update.block_hash[..8])
+            )
+        })?;
+
+    // (3) operator saw at least required_confirmations confs before signing.
+    let elapsed = proof_height.saturating_sub(confirmed_height);
+    if elapsed < *required_confirmations {
+        return Err(format!(
+            "proof_sequence block {} only {} blocks past funding block {}; need {} confs",
+            proof_height, elapsed, confirmed_height, required_confirmations
+        ));
+    }
+
+    // (4) no OnchainCredit for this (txid, vout) at seq ≤ proof_sequence.
+    for u in accused_history
+        .iter()
+        .filter(|u| u.sequence_number <= *proof_sequence)
+    {
+        let Ok(op) = LedgerOperation::tlv_decode(&u.message) else {
+            continue;
+        };
+        if let LedgerOperation::OnchainCredit {
+            txid: credit_txid,
+            vout: credit_vout,
+            ..
+        } = op
+        {
+            if credit_txid == txid_bytes && credit_vout == *vout {
+                return Err(format!(
+                    "OnchainCredit found at seq {} — operator did credit, not fraud",
+                    u.sequence_number
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -322,14 +791,16 @@ impl FraudEvidence {
             Self::UncreditedOnchain {
                 offer_id,
                 txid,
+                vout,
                 amount_sats,
-                confirmed_at_block,
+                confirmed_at_block_hash,
                 ..
             } => {
                 out.extend_from_slice(offer_id.as_bytes());
                 out.extend_from_slice(txid.as_bytes());
+                out.extend_from_slice(&vout.to_le_bytes());
                 out.extend_from_slice(&amount_sats.to_le_bytes());
-                out.extend_from_slice(&confirmed_at_block.to_le_bytes());
+                out.extend_from_slice(confirmed_at_block_hash);
             }
             Self::UncreditedLightning {
                 payment_hash,
@@ -351,13 +822,13 @@ impl FraudEvidence {
             }
             Self::InactiveQuorum {
                 original_fraud_hash,
+                original_fraud_block_hash,
                 member_pubkey,
-                evidence_available_at_block,
                 ..
             } => {
                 out.extend_from_slice(original_fraud_hash.as_bytes());
+                out.extend_from_slice(original_fraud_block_hash);
                 out.extend_from_slice(member_pubkey.as_bytes());
-                out.extend_from_slice(&evidence_available_at_block.to_le_bytes());
             }
             Self::NonConforming {
                 sequence,
@@ -392,11 +863,11 @@ mod tests {
                 cosigner_pubkey: "02".to_string() + &"cc".repeat(32),
                 cosign_signature: "dd".repeat(32),
                 txid: "ee".repeat(32),
+                vout: 0,
                 amount_sats: 100_000,
-                confirmed_at_block: 500,
+                confirmed_at_block_hash: [0xAA; 32],
                 required_confirmations: 6,
                 proof_sequence: 42,
-                proof_block_height: 510,
             },
         }
     }

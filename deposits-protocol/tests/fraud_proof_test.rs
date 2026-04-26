@@ -20,11 +20,11 @@ fn make_onchain_proof() -> FraudProof {
             cosigner_pubkey: "02".to_string() + &"cc".repeat(32),
             cosign_signature: "dd".repeat(32),
             txid: "ee".repeat(32),
+            vout: 0,
             amount_sats: 100_000,
-            confirmed_at_block: 500,
+            confirmed_at_block_hash: [0xAA; 32],
             required_confirmations: 6,
             proof_sequence: 42,
-            proof_block_height: 510,
         },
     }
 }
@@ -68,10 +68,9 @@ fn make_inactive_proof() -> FraudProof {
         ledger_id: make_ledger_id(),
         evidence: FraudEvidence::InactiveQuorum {
             original_fraud_hash: "66".repeat(32),
-            evidence_available_at_block: 1000,
+            original_fraud_block_hash: [0xAA; 32],
             required_response_blocks: 144,
             member_active_sequence: 200,
-            member_active_block: 1200,
             member_pubkey: "02".to_string() + &"77".repeat(32),
         },
     }
@@ -585,6 +584,839 @@ fn chain_hash_includes_operator_signature() {
         update.content_hash,
         "chain_hash should differ from content_hash"
     );
+}
+
+// =========================================================================
+// Per-type evidence verifiers
+// =========================================================================
+
+mod stale_cosignature {
+    use deposits_protocol::fraud::*;
+    use deposits_protocol::types::{CosignEntry, SignedLedgerUpdate};
+
+    fn dummy_pk() -> bitcoin::secp256k1::PublicKey {
+        use std::str::FromStr;
+        bitcoin::secp256k1::PublicKey::from_str(
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap()
+    }
+
+    fn member_pk() -> bitcoin::secp256k1::PublicKey {
+        use std::str::FromStr;
+        bitcoin::secp256k1::PublicKey::from_str(
+            "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        )
+        .unwrap()
+    }
+
+    /// Build a SignedLedgerUpdate with controllable hash + block_height
+    /// + cosignatures. Other fields are dummies — staleness verification
+    /// only cares about the named ones.
+    fn member_update(seq: u64, content_hash: [u8; 32], block_height: u32) -> SignedLedgerUpdate {
+        SignedLedgerUpdate {
+            message: vec![],
+            message_type: 1,
+            operator_id: member_pk(),
+            ledger_id: [0xBB; 32],
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash,
+            block_height,
+            block_hash: [0u8; 32],
+            cosign_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: Vec::new(),
+        }
+    }
+
+    fn accused_update(
+        seq: u64,
+        content_hash: [u8; 32],
+        block_height: u32,
+        cosigs_with_member_hashes: &[[u8; 32]],
+    ) -> SignedLedgerUpdate {
+        SignedLedgerUpdate {
+            message: vec![],
+            message_type: 1,
+            operator_id: dummy_pk(),
+            ledger_id: [0xAA; 32],
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash,
+            block_height,
+            block_hash: [0u8; 32],
+            cosign_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: cosigs_with_member_hashes
+                .iter()
+                .map(|h| CosignEntry {
+                    cosigner_pubkey: member_pk(),
+                    cosign_signature: [0u8; 64],
+                    member_ledger_hash: *h,
+                })
+                .collect(),
+        }
+    }
+
+    /// Build a `StaleCosignature` proof + the matching ledger histories.
+    /// The "genuine fraud" scenario: at member seq 5, member's chain_hash
+    /// is H_old; member advances to seq 6/7 at blocks 95/100; accused
+    /// operator cosigns at seq 30 at block 110 declaring H_old.
+    ///
+    /// `cosign_block_height` controls when the accused cosigned — set
+    /// > 100 for fraud (member already advanced) or < 100 for not-fraud.
+    fn build_fixture(
+        cosign_block_height: u32,
+    ) -> (FraudProof, Vec<SignedLedgerUpdate>, Vec<SignedLedgerUpdate>) {
+        // Member history. content_hashes are arbitrary; what matters is
+        // chain_hash() of each entry (= sha256(content_hash || op_sig)).
+        // With op_sig = [0; 64], chain_hash() is deterministic from
+        // content_hash, so we just compute it after-the-fact and use it
+        // as the declared_member_hash.
+        let member_history = vec![
+            member_update(5, [0x11; 32], 90),
+            member_update(6, [0xAB; 32], 95),
+            member_update(7, [0x22; 32], 100),
+        ];
+        let h_old = member_history[0].chain_hash(); // member's chain at seq 5
+
+        let stale_content_hash = [0x33; 32];
+        let accused_history = vec![accused_update(
+            30,
+            stale_content_hash,
+            cosign_block_height,
+            &[h_old],
+        )];
+
+        let later_chain_hash = member_history[2].chain_hash();
+
+        let proof = FraudProof {
+            proof_type: FraudProofType::StaleCosignature,
+            accused: "02".to_string() + &"ab".repeat(32),
+            ledger_id: hex::encode([0xAA; 32]),
+            evidence: FraudEvidence::StaleCosign {
+                stale_update_sequence: 30,
+                stale_update_hash: hex::encode(stale_content_hash),
+                declared_member_hash: hex::encode(h_old),
+                member_later_sequence: 7,
+                member_later_hash: hex::encode(later_chain_hash),
+                member_ledger_id: hex::encode([0xBB; 32]),
+            },
+        };
+
+        (proof, accused_history, member_history)
+    }
+
+    fn genuine_fraud_fixture() -> (FraudProof, Vec<SignedLedgerUpdate>, Vec<SignedLedgerUpdate>)
+    {
+        // Cosign at block 110 — AFTER member advanced at block 100. Stale.
+        build_fixture(110)
+    }
+
+    #[test]
+    fn accepts_genuine_stale_cosignature() {
+        let (proof, accused, member) = genuine_fraud_fixture();
+        verify_stale_cosignature(&proof, &accused, &member).unwrap();
+    }
+
+    #[test]
+    fn rejects_when_member_didnt_advance_before_cosign() {
+        // Cosign at block 80 — BEFORE member's seq 6/7 (blocks 95/100).
+        // Member only had seq 5 = declared_member_hash at the cosign moment,
+        // hadn't advanced past it yet → not stale.
+        let (proof, accused, member) = build_fixture(80);
+        let err = verify_stale_cosignature(&proof, &accused, &member).unwrap_err();
+        assert!(
+            err.contains("did not advance past"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_when_declared_hash_never_appears_in_member_history() {
+        let (mut proof, accused, member) = genuine_fraud_fixture();
+        if let FraudEvidence::StaleCosign {
+            declared_member_hash,
+            ..
+        } = &mut proof.evidence
+        {
+            *declared_member_hash = "ff".repeat(32);
+        }
+        let err = verify_stale_cosignature(&proof, &accused, &member).unwrap_err();
+        // The declared hash isn't among the cosignatures on the stale update,
+        // so we fail at that earlier check.
+        assert!(
+            err.contains("not found among CosignEntries"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_when_stale_update_seq_missing() {
+        let (mut proof, accused, member) = genuine_fraud_fixture();
+        if let FraudEvidence::StaleCosign {
+            stale_update_sequence,
+            ..
+        } = &mut proof.evidence
+        {
+            *stale_update_sequence = 999;
+        }
+        let err = verify_stale_cosignature(&proof, &accused, &member).unwrap_err();
+        assert!(err.contains("not in accused history"), "wrong error: {}", err);
+    }
+
+    #[test]
+    fn rejects_when_member_later_seq_missing() {
+        let (mut proof, accused, member) = genuine_fraud_fixture();
+        if let FraudEvidence::StaleCosign {
+            member_later_sequence,
+            ..
+        } = &mut proof.evidence
+        {
+            *member_later_sequence = 999;
+        }
+        let err = verify_stale_cosignature(&proof, &accused, &member).unwrap_err();
+        assert!(err.contains("not in member history"), "wrong error: {}", err);
+    }
+
+    #[test]
+    fn rejects_when_stale_update_hash_doesnt_match() {
+        let (mut proof, accused, member) = genuine_fraud_fixture();
+        if let FraudEvidence::StaleCosign {
+            stale_update_hash, ..
+        } = &mut proof.evidence
+        {
+            *stale_update_hash = "ff".repeat(32);
+        }
+        let err = verify_stale_cosignature(&proof, &accused, &member).unwrap_err();
+        assert!(err.contains("stale_update_hash mismatch"), "wrong error: {}", err);
+    }
+
+    #[test]
+    fn rejects_wrong_evidence_type() {
+        let (mut proof, accused, member) = genuine_fraud_fixture();
+        proof.evidence = FraudEvidence::NonConforming {
+            sequence: 1,
+            update_b64: "AA==".to_string(),
+            violation: "x".to_string(),
+        };
+        let err = verify_stale_cosignature(&proof, &accused, &member).unwrap_err();
+        assert!(err.contains("wrong evidence type"), "wrong error: {}", err);
+    }
+}
+
+mod uncredited_lightning {
+    use deposits_protocol::fraud::*;
+    use deposits_protocol::messages::LedgerOperation;
+    use deposits_protocol::tlv::TlvEncode;
+    use deposits_protocol::types::SignedLedgerUpdate;
+    use sha2::{Digest, Sha256};
+
+    fn dummy_pk() -> bitcoin::secp256k1::PublicKey {
+        use std::str::FromStr;
+        bitcoin::secp256k1::PublicKey::from_str(
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap()
+    }
+
+    fn fixture_update(seq: u64, op: LedgerOperation) -> SignedLedgerUpdate {
+        SignedLedgerUpdate {
+            message: op.tlv_encode(),
+            message_type: op.message_type(),
+            operator_id: dummy_pk(),
+            ledger_id: [0xAA; 32],
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash: [0u8; 32],
+            block_height: 0,
+            block_hash: [0u8; 32],
+            cosign_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: Vec::new(),
+        }
+    }
+
+    /// Tiny placeholder TransferLock used as "an update at this seq" when
+    /// the test only cares about the seq (not the op contents).
+    fn dummy_op() -> LedgerOperation {
+        LedgerOperation::TransferLock {
+            nonce: [0u8; 32],
+            source_deposit_id: deposits_protocol::DepositId::default(),
+            destination_deposit_id: deposits_protocol::DepositId::default(),
+            amount: 1,
+            fee: 0,
+            completion_script: String::new(),
+            timeout_height: 0,
+            transfer_id: [0u8; 32],
+            witness: Default::default(),
+        }
+    }
+
+    fn proof_for(preimage: [u8; 32], proof_sequence: u64) -> FraudProof {
+        let payment_hash: [u8; 32] = {
+            let mut h = Sha256::new();
+            h.update(preimage);
+            h.finalize().into()
+        };
+        FraudProof {
+            proof_type: FraudProofType::UncreditedLightningPayment,
+            accused: "02".to_string() + &"ab".repeat(32),
+            ledger_id: hex::encode([0xAA; 32]),
+            evidence: FraudEvidence::UncreditedLightning {
+                invoice: "lnbcrt1ptest".to_string(),
+                payment_hash: hex::encode(payment_hash),
+                cosigner_pubkey: "02".to_string() + &"cc".repeat(32),
+                cosign_signature: "dd".repeat(32),
+                preimage: hex::encode(preimage),
+                proof_sequence,
+            },
+        }
+    }
+
+    #[test]
+    fn accepts_genuine_uncredited_payment() {
+        let preimage = [0xBE; 32];
+        let proof = proof_for(preimage, 50);
+        // Accused's history has unrelated updates, none crediting this payment.
+        let history = vec![fixture_update(50, dummy_op())];
+        verify_uncredited_lightning(&proof, &history).unwrap();
+    }
+
+    #[test]
+    fn rejects_when_preimage_doesnt_match_payment_hash() {
+        let preimage = [0xBE; 32];
+        let mut proof = proof_for(preimage, 50);
+        if let FraudEvidence::UncreditedLightning {
+            payment_hash, ..
+        } = &mut proof.evidence
+        {
+            *payment_hash = "ff".repeat(32); // doesn't match hash(preimage)
+        }
+        let history = vec![fixture_update(50, dummy_op())];
+        let err = verify_uncredited_lightning(&proof, &history).unwrap_err();
+        assert!(
+            err.contains("preimage doesn't hash to payment_hash"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_when_invoice_credit_present() {
+        let preimage = [0xBE; 32];
+        let proof = proof_for(preimage, 50);
+        let payment_hash: [u8; 32] = {
+            let mut h = Sha256::new();
+            h.update(preimage);
+            h.finalize().into()
+        };
+        // Accused DID credit the deposit at seq 30 (before proof_sequence=50).
+        let credit_op = LedgerOperation::InvoiceCredit {
+            payment_hash,
+            deposit_id: deposits_protocol::DepositId::default(),
+            amount: 1000,
+            invoice_id: "test".to_string(),
+            sequence_number: 30,
+        };
+        let history = vec![
+            fixture_update(30, credit_op),
+            fixture_update(50, dummy_op()),
+        ];
+        let err = verify_uncredited_lightning(&proof, &history).unwrap_err();
+        assert!(
+            err.contains("InvoiceCredit found"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_when_invoice_fulfill_present() {
+        let preimage = [0xBE; 32];
+        let proof = proof_for(preimage, 50);
+        // Accused fulfilled the invoice (preimage in InvoiceFulfill).
+        let fulfill_op = LedgerOperation::InvoiceFulfill {
+            deposit_id: deposits_protocol::DepositId::default(),
+            amount: 1000,
+            payment_id: [0u8; 32],
+            sequence_number: 30,
+            witness: Default::default(),
+            preimage,
+        };
+        let history = vec![
+            fixture_update(30, fulfill_op),
+            fixture_update(50, dummy_op()),
+        ];
+        let err = verify_uncredited_lightning(&proof, &history).unwrap_err();
+        assert!(
+            err.contains("InvoiceFulfill found"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_when_proof_sequence_missing() {
+        let preimage = [0xBE; 32];
+        let proof = proof_for(preimage, 50);
+        let history = vec![fixture_update(49, dummy_op())]; // 50 missing
+        let err = verify_uncredited_lightning(&proof, &history).unwrap_err();
+        assert!(err.contains("not in accused history"), "wrong error: {}", err);
+    }
+
+    #[test]
+    fn ignores_credit_after_proof_sequence() {
+        // If operator credits AFTER proof_sequence, that's irrelevant — by
+        // proof_sequence they should already have credited. Still fraud.
+        let preimage = [0xBE; 32];
+        let proof = proof_for(preimage, 50);
+        let payment_hash: [u8; 32] = {
+            let mut h = Sha256::new();
+            h.update(preimage);
+            h.finalize().into()
+        };
+        let credit_op = LedgerOperation::InvoiceCredit {
+            payment_hash,
+            deposit_id: deposits_protocol::DepositId::default(),
+            amount: 1000,
+            invoice_id: "test".to_string(),
+            sequence_number: 60,
+        };
+        let history = vec![
+            fixture_update(50, dummy_op()),
+            fixture_update(60, credit_op), // after proof_sequence
+        ];
+        verify_uncredited_lightning(&proof, &history).unwrap();
+    }
+
+    #[test]
+    fn rejects_wrong_evidence_type() {
+        let mut proof = proof_for([0xBE; 32], 50);
+        proof.evidence = FraudEvidence::NonConforming {
+            sequence: 1,
+            update_b64: "AA==".to_string(),
+            violation: "x".to_string(),
+        };
+        let history = vec![fixture_update(50, dummy_op())];
+        let err = verify_uncredited_lightning(&proof, &history).unwrap_err();
+        assert!(err.contains("wrong evidence type"), "wrong error: {}", err);
+    }
+}
+
+mod inactive_quorum_member {
+    use deposits_protocol::fraud::*;
+    use deposits_protocol::types::SignedLedgerUpdate;
+    use std::collections::HashMap;
+
+    fn member_pk() -> bitcoin::secp256k1::PublicKey {
+        use std::str::FromStr;
+        bitcoin::secp256k1::PublicKey::from_str(
+            "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        )
+        .unwrap()
+    }
+
+    fn other_pk() -> bitcoin::secp256k1::PublicKey {
+        use std::str::FromStr;
+        bitcoin::secp256k1::PublicKey::from_str(
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap()
+    }
+
+    fn member_update_at(seq: u64, block_hash: [u8; 32], signer: bitcoin::secp256k1::PublicKey) -> SignedLedgerUpdate {
+        SignedLedgerUpdate {
+            message: vec![],
+            message_type: 1,
+            operator_id: signer,
+            ledger_id: [0xBB; 32],
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash: [0u8; 32],
+            block_height: 0,
+            block_hash,
+            cosign_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: Vec::new(),
+        }
+    }
+
+    /// Mock oracle backed by a HashMap.
+    struct MockOracle(HashMap<[u8; 32], u32>);
+    impl BlockOracle for MockOracle {
+        fn confirms(&self, hash: &[u8; 32]) -> Option<u32> {
+            self.0.get(hash).copied()
+        }
+    }
+
+    fn fixture(
+        elapsed_blocks: u32,
+        required_blocks: u32,
+        signer: bitcoin::secp256k1::PublicKey,
+    ) -> (FraudProof, Vec<SignedLedgerUpdate>, MockOracle) {
+        let original_fraud_block_hash = [0xAA; 32];
+        let member_block_hash = [0xCC; 32];
+
+        let mut oracle = HashMap::new();
+        oracle.insert(original_fraud_block_hash, 1000u32);
+        oracle.insert(member_block_hash, 1000 + elapsed_blocks);
+
+        let history = vec![member_update_at(200, member_block_hash, signer)];
+
+        let proof = FraudProof {
+            proof_type: FraudProofType::InactiveQuorumMember,
+            accused: "02".to_string() + &"ab".repeat(32),
+            ledger_id: hex::encode([0xAA; 32]),
+            evidence: FraudEvidence::InactiveQuorum {
+                original_fraud_hash: "66".repeat(32),
+                original_fraud_block_hash,
+                required_response_blocks: required_blocks,
+                member_active_sequence: 200,
+                member_pubkey: hex::encode(member_pk().serialize()),
+            },
+        };
+
+        (proof, history, MockOracle(oracle))
+    }
+
+    #[test]
+    fn accepts_genuine_inactive_member() {
+        // Member published 200 blocks after the fraud, deadline was 144.
+        let (proof, history, oracle) = fixture(200, 144, member_pk());
+        verify_inactive_quorum_member(&proof, &history, &oracle).unwrap();
+    }
+
+    #[test]
+    fn rejects_when_window_not_yet_elapsed() {
+        // Member published only 100 blocks after fraud — within the 144 window.
+        let (proof, history, oracle) = fixture(100, 144, member_pk());
+        let err = verify_inactive_quorum_member(&proof, &history, &oracle).unwrap_err();
+        assert!(
+            err.contains("only 100 blocks past"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_unconfirmed_original_fraud_block() {
+        // Oracle returns None for the original-fraud block hash.
+        let (mut proof, history, _) = fixture(200, 144, member_pk());
+        if let FraudEvidence::InactiveQuorum {
+            original_fraud_block_hash,
+            ..
+        } = &mut proof.evidence
+        {
+            *original_fraud_block_hash = [0xFF; 32]; // unknown
+        }
+        let oracle = MockOracle(HashMap::new());
+        let err = verify_inactive_quorum_member(&proof, &history, &oracle).unwrap_err();
+        assert!(
+            err.contains("original_fraud_block_hash") && err.contains("not in verifier"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_unconfirmed_member_active_block() {
+        // Member's update has a block_hash unknown to the oracle.
+        let original_fraud_block_hash = [0xAA; 32];
+        let mut oracle_map = HashMap::new();
+        oracle_map.insert(original_fraud_block_hash, 1000u32);
+        // Note: we deliberately do NOT insert the member's block hash.
+        let oracle = MockOracle(oracle_map);
+
+        let history = vec![member_update_at(200, [0xCC; 32], member_pk())];
+        let proof = FraudProof {
+            proof_type: FraudProofType::InactiveQuorumMember,
+            accused: "02".to_string() + &"ab".repeat(32),
+            ledger_id: hex::encode([0xAA; 32]),
+            evidence: FraudEvidence::InactiveQuorum {
+                original_fraud_hash: "66".repeat(32),
+                original_fraud_block_hash,
+                required_response_blocks: 144,
+                member_active_sequence: 200,
+                member_pubkey: hex::encode(member_pk().serialize()),
+            },
+        };
+        let err = verify_inactive_quorum_member(&proof, &history, &oracle).unwrap_err();
+        assert!(
+            err.contains("member-active update's block_hash") && err.contains("not in verifier"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_when_member_active_seq_missing() {
+        let (proof, _history, oracle) = fixture(200, 144, member_pk());
+        let history: Vec<SignedLedgerUpdate> = vec![]; // no update at seq 200
+        let err = verify_inactive_quorum_member(&proof, &history, &oracle).unwrap_err();
+        assert!(err.contains("not in member history"), "wrong error: {}", err);
+    }
+
+    #[test]
+    fn rejects_when_member_active_signed_by_someone_else() {
+        // Update at the right sequence but signed by a different operator.
+        // Prevents framing a member by planting an update with their seq
+        // number on someone else's ledger.
+        let (proof, _, oracle) = fixture(200, 144, other_pk());
+        let history = vec![member_update_at(200, [0xCC; 32], other_pk())];
+        let err = verify_inactive_quorum_member(&proof, &history, &oracle).unwrap_err();
+        assert!(
+            err.contains("signed by") && err.contains("not member_pubkey"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_evidence_type() {
+        let (mut proof, history, oracle) = fixture(200, 144, member_pk());
+        proof.evidence = FraudEvidence::NonConforming {
+            sequence: 1,
+            update_b64: "AA==".to_string(),
+            violation: "x".to_string(),
+        };
+        let err = verify_inactive_quorum_member(&proof, &history, &oracle).unwrap_err();
+        assert!(err.contains("wrong evidence type"), "wrong error: {}", err);
+    }
+}
+
+mod uncredited_onchain {
+    use deposits_protocol::fraud::*;
+    use deposits_protocol::messages::LedgerOperation;
+    use deposits_protocol::tlv::TlvEncode;
+    use deposits_protocol::types::SignedLedgerUpdate;
+    use std::collections::HashMap;
+
+    fn dummy_pk() -> bitcoin::secp256k1::PublicKey {
+        use std::str::FromStr;
+        bitcoin::secp256k1::PublicKey::from_str(
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap()
+    }
+
+    struct MockOracle(HashMap<[u8; 32], u32>);
+    impl BlockOracle for MockOracle {
+        fn confirms(&self, hash: &[u8; 32]) -> Option<u32> {
+            self.0.get(hash).copied()
+        }
+    }
+
+    fn fixture_update(seq: u64, block_hash: [u8; 32], op: LedgerOperation) -> SignedLedgerUpdate {
+        SignedLedgerUpdate {
+            message: op.tlv_encode(),
+            message_type: op.message_type(),
+            operator_id: dummy_pk(),
+            ledger_id: [0xAA; 32],
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash: [0u8; 32],
+            block_height: 0,
+            block_hash,
+            cosign_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: Vec::new(),
+        }
+    }
+
+    fn dummy_op() -> LedgerOperation {
+        LedgerOperation::TransferLock {
+            nonce: [0u8; 32],
+            source_deposit_id: deposits_protocol::DepositId::default(),
+            destination_deposit_id: deposits_protocol::DepositId::default(),
+            amount: 1,
+            fee: 0,
+            completion_script: String::new(),
+            timeout_height: 0,
+            transfer_id: [0u8; 32],
+            witness: Default::default(),
+        }
+    }
+
+    fn fixture(
+        elapsed_blocks: u32,
+        required_confs: u32,
+    ) -> (FraudProof, Vec<SignedLedgerUpdate>, MockOracle, [u8; 32]) {
+        let funding_block_hash = [0xBB; 32];
+        let proof_block_hash = [0xCC; 32];
+        let txid_bytes = [0xEE; 32];
+
+        let mut oracle = HashMap::new();
+        oracle.insert(funding_block_hash, 1000u32);
+        oracle.insert(proof_block_hash, 1000 + elapsed_blocks);
+
+        let history = vec![fixture_update(50, proof_block_hash, dummy_op())];
+
+        let proof = FraudProof {
+            proof_type: FraudProofType::UncreditedOnchainPayment,
+            accused: "02".to_string() + &"ab".repeat(32),
+            ledger_id: hex::encode([0xAA; 32]),
+            evidence: FraudEvidence::UncreditedOnchain {
+                offer_id: "deadbeef".to_string(),
+                funding_address: "bcrt1qtest".to_string(),
+                cosigner_pubkey: "02".to_string() + &"cc".repeat(32),
+                cosign_signature: "dd".repeat(32),
+                txid: hex::encode(txid_bytes),
+                vout: 0,
+                amount_sats: 100_000,
+                confirmed_at_block_hash: funding_block_hash,
+                required_confirmations: required_confs,
+                proof_sequence: 50,
+            },
+        };
+
+        (proof, history, MockOracle(oracle), txid_bytes)
+    }
+
+    #[test]
+    fn accepts_genuine_uncredited_onchain() {
+        // Operator's update is 10 blocks past funding; required = 6.
+        let (proof, history, oracle, _) = fixture(10, 6);
+        verify_uncredited_onchain(&proof, &history, &oracle).unwrap();
+    }
+
+    #[test]
+    fn rejects_when_not_enough_confirmations() {
+        // Operator's update only 3 blocks past funding; required = 6.
+        let (proof, history, oracle, _) = fixture(3, 6);
+        let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
+        assert!(
+            err.contains("only 3 blocks past funding"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_unconfirmed_funding_block() {
+        let (mut proof, history, _, _) = fixture(10, 6);
+        if let FraudEvidence::UncreditedOnchain {
+            confirmed_at_block_hash,
+            ..
+        } = &mut proof.evidence
+        {
+            *confirmed_at_block_hash = [0xFF; 32];
+        }
+        let err = verify_uncredited_onchain(&proof, &history, &MockOracle(HashMap::new()))
+            .unwrap_err();
+        assert!(
+            err.contains("confirmed_at_block_hash") && err.contains("not in verifier"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_unconfirmed_proof_sequence_block() {
+        // Funding block is confirmed; the operator-update's block_hash isn't.
+        let funding_block_hash = [0xBB; 32];
+        let mut oracle_map = HashMap::new();
+        oracle_map.insert(funding_block_hash, 1000u32);
+        let oracle = MockOracle(oracle_map);
+
+        let history = vec![fixture_update(50, [0xCC; 32], dummy_op())];
+        let proof = FraudProof {
+            proof_type: FraudProofType::UncreditedOnchainPayment,
+            accused: "02".to_string() + &"ab".repeat(32),
+            ledger_id: hex::encode([0xAA; 32]),
+            evidence: FraudEvidence::UncreditedOnchain {
+                offer_id: "deadbeef".to_string(),
+                funding_address: "bcrt1qtest".to_string(),
+                cosigner_pubkey: "02".to_string() + &"cc".repeat(32),
+                cosign_signature: "dd".repeat(32),
+                txid: hex::encode([0xEE; 32]),
+                vout: 0,
+                amount_sats: 100_000,
+                confirmed_at_block_hash: funding_block_hash,
+                required_confirmations: 6,
+                proof_sequence: 50,
+            },
+        };
+        let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
+        assert!(
+            err.contains("proof_sequence update's block_hash") && err.contains("not in verifier"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_when_onchain_credit_present() {
+        let (proof, _hist, oracle, txid_bytes) = fixture(10, 6);
+        let credit_op = LedgerOperation::OnchainCredit {
+            txid: txid_bytes,
+            vout: 0,
+            deposit_id: deposits_protocol::DepositId::default(),
+            amount: 100_000,
+            funding_address: "bcrt1qtest".to_string(),
+        };
+        let history = vec![
+            fixture_update(40, [0xCC; 32], credit_op),
+            fixture_update(50, [0xCC; 32], dummy_op()),
+        ];
+        let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
+        assert!(
+            err.contains("OnchainCredit found"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn ignores_credit_for_different_outpoint() {
+        let (proof, _hist, oracle, _) = fixture(10, 6);
+        // OnchainCredit exists but for a different (txid, vout).
+        let credit_op = LedgerOperation::OnchainCredit {
+            txid: [0x00; 32],
+            vout: 99,
+            deposit_id: deposits_protocol::DepositId::default(),
+            amount: 100_000,
+            funding_address: "bcrt1qother".to_string(),
+        };
+        let history = vec![
+            fixture_update(40, [0xCC; 32], credit_op),
+            fixture_update(50, [0xCC; 32], dummy_op()),
+        ];
+        verify_uncredited_onchain(&proof, &history, &oracle).unwrap();
+    }
+
+    #[test]
+    fn rejects_when_proof_sequence_missing() {
+        let (proof, _, oracle, _) = fixture(10, 6);
+        let history: Vec<SignedLedgerUpdate> = vec![]; // no update at seq 50
+        let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
+        assert!(err.contains("not in accused history"), "wrong error: {}", err);
+    }
+
+    #[test]
+    fn rejects_wrong_evidence_type() {
+        let (mut proof, history, oracle, _) = fixture(10, 6);
+        proof.evidence = FraudEvidence::NonConforming {
+            sequence: 1,
+            update_b64: "AA==".to_string(),
+            violation: "x".to_string(),
+        };
+        let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
+        assert!(err.contains("wrong evidence type"), "wrong error: {}", err);
+    }
 }
 
 // =========================================================================
