@@ -107,6 +107,222 @@ pub fn build_node_with_danger() -> PathBuf {
 ///
 /// Use op0 to observe its own ledgers' state, or any quorum-member op
 /// to observe a partner ledger.
+/// Read a ledger's append-only JSONL log from disk and extract the
+/// list of `SignedLedgerUpdate` entries (skipping the Role + State
+/// header rows). Returns updates in chronological order.
+///
+/// Used by integration tests that need to inspect existing ledger
+/// state to construct fraud proofs or verify post-conditions.
+pub fn read_ledger_history(
+    data_dir: &Path,
+    ledger_id: &str,
+) -> Vec<deposits_protocol::types::SignedLedgerUpdate> {
+    use std::io::{BufRead, BufReader};
+
+    let path = data_dir
+        .join("wallet/ledgers")
+        .join(format!("{}.jsonl", ledger_id));
+    let file = std::fs::File::open(&path)
+        .unwrap_or_else(|e| panic!("opening {}: {}", path.display(), e));
+    let reader = BufReader::new(file);
+    let mut updates = Vec::new();
+    for line in reader.lines() {
+        let line = line.expect("read line");
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut value: serde_json::Value =
+            serde_json::from_str(&line).expect("ledger jsonl line is valid JSON");
+        // Header rows have type ∈ {"Role","State"}; skip them. Update
+        // rows are tagged "Update" with the rest of the fields being a
+        // SignedLedgerUpdate.
+        if value.get("type").and_then(|t| t.as_str()) != Some("Update") {
+            continue;
+        }
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("type");
+        }
+        let update: deposits_protocol::types::SignedLedgerUpdate =
+            serde_json::from_value(value).expect("Update row deserializes");
+        updates.push(update);
+    }
+    updates
+}
+
+/// Look up a ledger ID stored under `data_dir/state/<key>` by `setup.sh`.
+pub fn read_setup_state(key: &str) -> String {
+    let path = repo_root()
+        .join("deposits-tools/data/state")
+        .join(key);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e))
+        .trim()
+        .to_string()
+}
+
+/// Scan every imported ledger in `op_idx`'s data dir for the
+/// non-zero update with the lowest `block_height`, returning its
+/// `block_hash`. Useful as an "earlier confirmed block" anchor in
+/// fraud-proof tests where the accused ledger's own updates may all
+/// share a single block (e.g. activation-only quorum ledgers).
+///
+/// Returns `None` if no non-zero block_hash is found anywhere in the
+/// op's ledger directory.
+pub fn earliest_anchored_block_hash(op_idx: usize) -> Option<[u8; 32]> {
+    let ledgers_dir = op_data_dir(op_idx).join("wallet/ledgers");
+    let entries = std::fs::read_dir(&ledgers_dir).ok()?;
+    let mut best: Option<(u32, [u8; 32])> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let ledger_id = path.file_stem()?.to_str()?.to_string();
+        for u in read_ledger_history(&op_data_dir(op_idx), &ledger_id) {
+            if u.block_hash == [0u8; 32] {
+                continue;
+            }
+            if best.map(|(h, _)| u.block_height < h).unwrap_or(true) {
+                best = Some((u.block_height, u.block_hash));
+            }
+        }
+    }
+    best.map(|(_, h)| h)
+}
+
+/// Find any operator (other than `exclude_op_idx`) whose `wallet/ledgers`
+/// directory contains a JSONL file for `ledger_id`. Useful for tests
+/// that need to read an accused ledger from a quorum member's view —
+/// they don't know in advance which ops are quorum members, since
+/// setup.sh's assignment is randomized.
+pub fn find_peer_with_ledger(ledger_id: &str, exclude_op_idx: usize) -> Option<usize> {
+    for op_idx in 0..10 {
+        if op_idx == exclude_op_idx {
+            continue;
+        }
+        let path = op_data_dir(op_idx)
+            .join("wallet/ledgers")
+            .join(format!("{}.jsonl", ledger_id));
+        if path.exists() {
+            return Some(op_idx);
+        }
+    }
+    None
+}
+
+/// Embed a fraud-proof hash on `op_idx`'s ledger via the
+/// `recovery embed-hash` CLI, then re-read the ledger from `peer_op_idx`
+/// (a quorum member of the accused ledger) and return the resulting
+/// embedding update. Looking from a peer's view sidesteps the daemon's
+/// "skip own-ledger inbound" guard — see project_own_ledger_inbound_skip.
+pub fn embed_proof_hash(
+    node_bin: &Path,
+    op_idx: usize,
+    peer_op_idx: usize,
+    ledger_id: &str,
+    proof_hash: [u8; 32],
+) -> deposits_protocol::types::SignedLedgerUpdate {
+    let seed = op_seed(op_idx);
+    let data_dir = op_data_dir(op_idx);
+    let name = format!("op{}", op_idx);
+    let out = Command::new(node_bin)
+        .args(["recovery", "embed-hash", ledger_id, &hex::encode(proof_hash)])
+        .args(["--seed", &seed])
+        .args(["--name", &name])
+        .args(["--network", "regtest"])
+        .args(["--data-dir", data_dir.to_str().unwrap()])
+        .args(["--esplora", ELECTRS_URL])
+        .args(["--relay", relay_ledgers()])
+        .output()
+        .expect("invoke recovery embed-hash");
+    assert!(
+        out.status.success(),
+        "embed-hash failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::thread::sleep(Duration::from_secs(3));
+
+    use deposits_protocol::messages::LedgerOperation;
+    use deposits_protocol::tlv::TlvDecode;
+    read_ledger_history(&op_data_dir(peer_op_idx), ledger_id)
+        .into_iter()
+        .rev()
+        .find(|u| {
+            LedgerOperation::tlv_decode(&u.message)
+                .ok()
+                .and_then(|op| op.embedded_hash().copied())
+                .map(|h| h == proof_hash)
+                .unwrap_or(false)
+        })
+        .expect("embedding update should be in peer's view of accused history")
+}
+
+/// Publish a `FraudBroadcast` as a kind:9101 Nostr event from `op_idx`'s
+/// daemon-key context using the `recovery publish-fraud-broadcast` CLI.
+pub fn publish_fraud_broadcast(
+    node_bin: &Path,
+    op_idx: usize,
+    broadcast: &deposits_protocol::fraud::FraudBroadcast,
+) {
+    let seed = op_seed(op_idx);
+    let data_dir = op_data_dir(op_idx);
+    let name = format!("op{}", op_idx);
+    let json = serde_json::to_string(broadcast).unwrap();
+    let json_path = std::env::temp_dir().join(format!(
+        "fp_broadcast_op{}_{}.json",
+        op_idx,
+        broadcast.proof.proof_hash().iter().take(4).fold(String::new(), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{:02x}", b);
+            s
+        })
+    ));
+    std::fs::write(&json_path, &json).unwrap();
+    let out = Command::new(node_bin)
+        .args([
+            "recovery",
+            "publish-fraud-broadcast",
+            json_path.to_str().unwrap(),
+        ])
+        .args(["--seed", &seed])
+        .args(["--name", &name])
+        .args(["--network", "regtest"])
+        .args(["--data-dir", data_dir.to_str().unwrap()])
+        .args(["--esplora", ELECTRS_URL])
+        .args(["--relay", relay_ledgers()])
+        .output()
+        .expect("invoke publish-fraud-broadcast");
+    assert!(
+        out.status.success(),
+        "publish-fraud-broadcast failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Poll all operator data dirs (op0..op9) for
+/// `confiscated_<ledger_id[..16]>.marker`. Returns the operator index
+/// whose dir produced the marker, or panics on timeout.
+pub fn poll_confiscation_marker(ledger_id: &str, timeout: Duration) -> usize {
+    let prefix = &ledger_id[..16];
+    let marker_name = format!("confiscated_{}.marker", prefix);
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        for op_idx in 0..10 {
+            let path = op_data_dir(op_idx).join(&marker_name);
+            if path.exists() {
+                return op_idx;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    panic!(
+        "no confiscation marker `{}` on any operator data dir within {:?}",
+        marker_name, timeout
+    );
+}
+
 pub fn ledger_health(op_idx: usize, ledger_id: &str) -> String {
     let seed = op_seed(op_idx);
     let data_dir = op_data_dir(op_idx);

@@ -98,6 +98,8 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
     }
 
     match args[0].as_str() {
+        "embed-hash" => recovery_embed_hash(&args[1..]).await,
+        "publish-fraud-broadcast" => recovery_publish_fraud_broadcast(&args[1..]).await,
         // New dispute protocol commands
         "dispute" => recovery_dispute(&args[1..]).await,
         "rebuild" => recovery_rebuild(&args[1..]).await,
@@ -3775,5 +3777,199 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     );
     println!("  Sequence: {}", sequence);
 
+    Ok(())
+}
+
+/// Append a `DeliveryEmbed` operation to the operator's ledger that
+/// records `request_hash` for causal-tree purposes. Used by wallets and
+/// fraud-proof producers to entangle a hash into the operator's chain
+/// without going through the full transfer-cosign flow.
+///
+/// Usage: `recovery embed-hash <reserves_id> <hash_hex>`
+pub async fn recovery_embed_hash(
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::nostr::NostrTransportBuilder;
+    use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::SignedLedgerUpdate;
+    use deposits_core::TlvEncode;
+    use sha2::{Digest, Sha256};
+
+    if args.len() < 2 {
+        eprintln!("Usage: deposits-node recovery embed-hash <reserves_id> <hash_hex>");
+        return Ok(());
+    }
+
+    let reserves_id = &args[0];
+    let request_hash: [u8; 32] = {
+        let bytes = hex::decode(&args[1])?;
+        bytes
+            .try_into()
+            .map_err(|_| "hash must be 32 bytes hex")?
+    };
+
+    let mut config_args = Vec::new();
+    let mut i = 2;
+    while i < args.len() {
+        config_args.push(args[i].clone());
+        if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+            config_args.push(args[i + 1].clone());
+            i += 1;
+        }
+        i += 1;
+    }
+    let config = parse_config(&config_args)?;
+    let relay_url = config
+        .relays
+        .first()
+        .ok_or("No relay configured")?
+        .clone();
+    let data_dir = config.data_dir.clone();
+
+    let secp = Secp256k1::new();
+    let secret_key = super::derive_operator_secret(&config.seed, config.network)?;
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let operator_pubkey = keypair.public_key();
+
+    let node = crate::Node::new(config).await?;
+    let (ledger_id, ledger) = node
+        .get_ledger_with_id(reserves_id)
+        .ok_or_else(|| format!("Ledger not found: {}", reserves_id))?;
+    let last = ledger
+        .history
+        .last()
+        .ok_or("Ledger has no history")?
+        .clone();
+    let next_seq = last.sequence_number + 1;
+    let prev_chain_hash = last.chain_hash();
+
+    let op = LedgerOperation::DeliveryEmbed {
+        request_hash,
+        target_ledger_id: ledger.state.ledger_id,
+        target_operator: operator_pubkey,
+    };
+    let message_bytes = op.tlv_encode();
+    // content_hash is derived via the protocol's formula so the on-disk
+    // value matches what receivers compute on TLV decode.
+    let mut update = SignedLedgerUpdate {
+        message: message_bytes,
+        message_type: op.message_type(),
+        operator_id: operator_pubkey,
+        ledger_id: ledger.state.ledger_id,
+        sequence_number: next_seq,
+        previous_hash: prev_chain_hash,
+        content_hash: [0u8; 32],
+        block_height: 0,
+        block_hash: [0u8; 32],
+        cosign_signature: [0u8; 64],
+        operator_signature: [0u8; 64],
+        cosigner_pubkey: None,
+        member_ledger_hash: None,
+        cosignatures: Vec::new(),
+    };
+    update.content_hash = update.compute_hash();
+    let content_hash = update.content_hash;
+
+    let signing_data = update.operator_signing_data();
+    let mut hash_bytes = [0u8; 32];
+    hash_bytes.copy_from_slice(&Sha256::digest(&signing_data));
+    let msg = Message::from_digest(hash_bytes);
+    update.operator_signature = secp.sign_schnorr_no_aux_rand(&msg, &keypair).serialize();
+
+    println!("DeliveryEmbed update:");
+    println!("  Ledger:        {}", ledger_id);
+    println!("  Sequence:      {}", next_seq);
+    println!("  request_hash:  {}", hex::encode(request_hash));
+    println!("  content_hash:  {}", hex::encode(content_hash));
+    println!();
+
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+    let event_id = transport.broadcast_ledger_update(&update).await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    transport.disconnect().await;
+
+    // The running daemon skips inbound updates on its own ledger; append
+    // directly so subsequent CLI invocations chain from the right tip.
+    #[cfg(feature = "dangerous-testing")]
+    crate::node_cli::danger::append_update_to_local_jsonl(&data_dir, &ledger_id, &update)?;
+    // Without dangerous-testing, the daemon's commit_operation path
+    // already persists; this fallback path isn't invoked there.
+    #[cfg(not(feature = "dangerous-testing"))]
+    let _ = data_dir;
+
+    println!("Broadcast: {}", event_id);
+    Ok(())
+}
+
+/// Read a `FraudBroadcast` from a JSON file (or `-` for stdin) and
+/// publish it as a kind:9101 Nostr event. The publisher's operator
+/// secret is used to sign the outer Nostr event; the broadcast itself
+/// already binds to the accused operator via its embedded `proof`.
+///
+/// Usage: `recovery publish-fraud-broadcast <broadcast.json|->`
+pub async fn recovery_publish_fraud_broadcast(
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_core::fraud::FraudBroadcast;
+    use nostr_sdk::{Client, EventBuilder, Keys, Kind, SecretKey as NostrSecret};
+
+    if args.is_empty() {
+        eprintln!("Usage: deposits-node recovery publish-fraud-broadcast <broadcast.json|->");
+        return Ok(());
+    }
+
+    let json_source = &args[0];
+    let json = if json_source == "-" {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s)?;
+        s
+    } else {
+        std::fs::read_to_string(json_source)?
+    };
+    let broadcast: FraudBroadcast = serde_json::from_str(&json)
+        .map_err(|e| format!("Failed to parse FraudBroadcast JSON: {}", e))?;
+
+    let mut config_args = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        config_args.push(args[i].clone());
+        if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+            config_args.push(args[i + 1].clone());
+            i += 1;
+        }
+        i += 1;
+    }
+    let config = parse_config(&config_args)?;
+    let relay_url = config.relays.first().ok_or("No relay configured")?;
+
+    let secret_key = super::derive_operator_secret(&config.seed, config.network)?;
+    let nostr_sk = NostrSecret::from_slice(&secret_key.secret_bytes())?;
+    let keys = Keys::new(nostr_sk);
+
+    let client = Client::new(keys.clone());
+    client.add_relay(relay_url).await?;
+    client.connect().await;
+
+    // Re-serialize through our own serializer (no extra fields, etc.).
+    let content = serde_json::to_string(&broadcast)?;
+    // KIND_FRAUD_PROOF = 9101
+    let event = EventBuilder::new(Kind::Custom(9101), &content).build(keys.public_key()).sign_with_keys(&keys)?;
+    let event_id = event.id;
+    client.send_event(event).await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let _ = client.disconnect().await;
+
+    println!("Published fraud-broadcast (kind:9101)");
+    println!("  event_id: {}", event_id);
+    println!("  proof:    {:?}", broadcast.proof.proof_type);
+    println!(
+        "  accused:  {}",
+        &broadcast.proof.accused[..16.min(broadcast.proof.accused.len())]
+    );
     Ok(())
 }

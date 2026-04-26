@@ -702,6 +702,23 @@ impl Node {
                     ledger.state.sequence = inbound.update.sequence_number;
                     ledger.state.chain_tip_hash = inbound.update.chain_hash();
                     ledger.history.push(inbound.update.clone());
+                    drop(ledger);
+                    drop(ledgers);
+                    // Persist so disk state matches the in-memory append.
+                    // Without this, restarts and on-disk readers (test
+                    // harnesses, manual inspection) see a stale chain
+                    // even though the daemon has already accepted the
+                    // update.
+                    if let Err(e) = self
+                        .handler
+                        .persist_ledger_to_disk(&inbound.ledger_id)
+                    {
+                        tracing::warn!(
+                            "Persist after inbound apply failed for {}: {}",
+                            &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                            e
+                        );
+                    }
                 }
             }
         }
