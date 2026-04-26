@@ -592,6 +592,21 @@ impl Wallet {
         }
     }
 
+    /// Resolve an arbitrary block hash against the verifier's confirmed
+    /// chain. Returns `Some(height)` iff the block is in our best
+    /// chain; `None` if unknown / not confirmed / network error.
+    /// Network errors map to `None` deliberately — fraud-proof verifiers
+    /// reject on `None`, so the conservative failure mode is "not
+    /// confirmed" rather than crashing the verifier.
+    pub fn confirms_block(&self, block_hash: &[u8; 32]) -> Option<u32> {
+        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
+        let bh = bitcoin::BlockHash::from_byte_array(*block_hash);
+        match client.get_block_status(&bh) {
+            Ok(status) if status.in_best_chain => status.height,
+            _ => None,
+        }
+    }
+
     /// Get the total reserves balance (sum of all tracked reserves outputs)
     pub fn get_reserves_balance(&self) -> Result<u64, Error> {
         let reserves = self.reserves.read().unwrap();

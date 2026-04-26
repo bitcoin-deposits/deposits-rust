@@ -785,24 +785,30 @@ impl Node {
             }
         }
 
-        // Block oracle: today returns None for all hashes — leaves
-        // UncreditedOnchain / InactiveQuorum proofs unverifiable until
-        // a real bitcoind/esplora-backed oracle lands. StaleCosignature
-        // and UncreditedLightning don't need it.
-        struct StubOracle;
-        impl deposits_core::fraud::BlockOracle for StubOracle {
-            fn confirms(&self, _hash: &[u8; 32]) -> Option<u32> {
-                None
+        // Block oracle resolves arbitrary block hashes against esplora
+        // (same client `Wallet::fetch_block_info` uses for tip queries).
+        // `Wallet::confirms_block` returns `None` on unknown / not-in-
+        // best-chain / network error, so the verifier's "is the block
+        // in my chain?" check fails closed.
+        struct WalletOracle<'a> {
+            wallet: &'a crate::wallet::Wallet,
+        }
+        impl<'a> deposits_core::fraud::BlockOracle for WalletOracle<'a> {
+            fn confirms(&self, hash: &[u8; 32]) -> Option<u32> {
+                self.wallet.confirms_block(hash)
             }
         }
 
         let provider = DaemonLedgers {
             handler: &self.handler,
         };
+        let oracle = WalletOracle {
+            wallet: &self.wallet,
+        };
         if let Err(e) = deposits_core::fraud::verify_fraud_broadcast(
             broadcast,
             &provider,
-            &StubOracle,
+            &oracle,
         ) {
             tracing::warn!(
                 "Fraud proof rejected ({}...): {}",
