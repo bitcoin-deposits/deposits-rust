@@ -442,71 +442,100 @@ impl Node {
             }
         }
 
-        // Drop updates from non-operators (except DisputeEnter, which any
-        // quorum member may publish).  Non-operator writes are never legitimate
-        // and must not trigger a dispute — they're just noise.
+        // Decide what kind of sender this update came from. Three categories:
+        //   1. Current operator — legitimate chain extension. Validate; if it
+        //      doesn't extend our chain, that's evidence of operator fraud
+        //      (members react), or our own local view is stale (we resync).
+        //   2. Active quorum member publishing DisputeEnter — a fork branch
+        //      start. Don't apply to main; the dispute lives on the fork and
+        //      resolves via the lottery, not by mirroring on this chain.
+        //   3. Anyone else — random junk. Anyone can sign anything and tag
+        //      it with a ledger_id; that doesn't make it our problem.
         //
-        // Exception: if the ledger is in a non-Normal dispute state and we see
-        // an update from a different key, the operator may have changed via
-        // DisputeAcquire.  Re-import the ledger to pick up the custody transfer,
-        // then re-check.
-        {
+        // After DisputeAcquire, the operator key changes. If we see a
+        // non-operator update on a disputed ledger, re-import via Nostr to
+        // pick up the custody transfer before discarding.
+        let sender_role = {
             let ledger = ledger_arc.read().unwrap();
-            let is_from_operator = inbound.update.operator_id == ledger.state.parent_pubkey;
-            if !is_from_operator {
+            let is_from_operator =
+                inbound.update.operator_id == ledger.state.parent_pubkey;
+            let is_from_active_member = ledger
+                .state
+                .quorum_members
+                .iter()
+                .any(|m| m.pubkey == inbound.update.operator_id);
+            let is_dispute_enter = {
                 use deposits_core::tlv::TlvDecode;
-                let is_dispute =
-                    deposits_core::messages::LedgerOperation::tlv_decode(&inbound.update.message)
-                        .map(|op| {
-                            matches!(
-                                op,
-                                deposits_core::messages::LedgerOperation::DisputeEnter { .. }
-                            )
-                        })
-                        .unwrap_or(false);
-                if !is_dispute {
-                    // If the ledger is in a dispute state, the operator may have
-                    // changed (DisputeAcquire).  Re-import and re-check.
-                    let in_dispute =
-                        ledger.state.dispute_state != deposits_core::types::DisputeState::Normal;
-                    drop(ledger);
+                deposits_core::messages::LedgerOperation::tlv_decode(&inbound.update.message)
+                    .map(|op| {
+                        matches!(
+                            op,
+                            deposits_core::messages::LedgerOperation::DisputeEnter { .. }
+                        )
+                    })
+                    .unwrap_or(false)
+            };
+            let in_dispute =
+                ledger.state.dispute_state != deposits_core::types::DisputeState::Normal;
+            (
+                is_from_operator,
+                is_from_active_member,
+                is_dispute_enter,
+                in_dispute,
+            )
+        };
 
-                    if in_dispute {
-                        tracing::info!(
-                            "Non-operator update on disputed ledger {}... — re-importing to check for custody transfer",
-                            &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
-                        );
-                        let _ = self.reimport_joined_ledger(&inbound.ledger_id).await;
+        let (is_from_operator, is_from_active_member, is_dispute_enter, in_dispute) =
+            sender_role;
 
-                        // Re-check operator after reimport (re-fetch arc since import may replace it)
-                        let ledgers = self.handler.ledgers.lock().unwrap();
-                        let Some(fresh_arc) = ledgers.get(&inbound.ledger_id) else {
-                            return;
-                        };
-                        let fresh_ledger = fresh_arc.read().unwrap();
-                        let now_from_operator =
-                            inbound.update.operator_id == fresh_ledger.state.parent_pubkey;
-                        drop(fresh_ledger);
-                        drop(ledgers);
-                        if !now_from_operator {
-                            tracing::debug!(
-                                "Still non-operator after reimport — dropping update seq {} on ledger {}...",
-                                inbound.update.sequence_number,
-                                &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
-                            );
-                            return;
-                        }
-                        // Operator changed — fall through to continue processing
-                    } else {
-                        tracing::debug!(
-                            "Dropping update seq {} on ledger {}... from non-operator {}...",
-                            inbound.update.sequence_number,
-                            &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
-                            hex::encode(&inbound.update.operator_id.serialize()[..8]),
-                        );
-                        return;
-                    }
+        if !is_from_operator {
+            if is_from_active_member && is_dispute_enter {
+                // Member starting a fork branch. The dispute resolves on the
+                // member's fork (kind:9103 + lottery), not on this main
+                // chain. Acknowledge and move on without applying.
+                tracing::info!(
+                    "Fork DisputeEnter received on ledger {}... from quorum member {}... — not applying to main chain",
+                    &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                    hex::encode(&inbound.update.operator_id.serialize()[..8]),
+                );
+                return;
+            }
+
+            if in_dispute {
+                // Custody may have transferred via DisputeAcquire. Re-import
+                // to pick up the new operator key, then re-check.
+                tracing::info!(
+                    "Non-operator update on disputed ledger {}... — re-importing to check for custody transfer",
+                    &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                );
+                let _ = self.reimport_joined_ledger(&inbound.ledger_id).await;
+
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let Some(fresh_arc) = ledgers.get(&inbound.ledger_id) else {
+                    return;
+                };
+                let fresh_ledger = fresh_arc.read().unwrap();
+                let now_from_operator =
+                    inbound.update.operator_id == fresh_ledger.state.parent_pubkey;
+                drop(fresh_ledger);
+                drop(ledgers);
+                if !now_from_operator {
+                    tracing::debug!(
+                        "Still non-operator after reimport — dropping update seq {} on ledger {}...",
+                        inbound.update.sequence_number,
+                        &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                    );
+                    return;
                 }
+                // Operator changed — fall through.
+            } else {
+                tracing::debug!(
+                    "Dropping update seq {} on ledger {}... from non-operator non-member {}...",
+                    inbound.update.sequence_number,
+                    &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                    hex::encode(&inbound.update.operator_id.serialize()[..8]),
+                );
+                return;
             }
         }
 
