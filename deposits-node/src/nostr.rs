@@ -3638,6 +3638,19 @@ impl NostrTransport {
             // event.id is already computed by nostr-sdk, so this is just a HashSet lookup
             // on 32 bytes — much cheaper than tag extraction + JSON decode.
             let event_id_bytes = event.id.to_bytes();
+            // Span the per-event processing tagged with event_id + kind so a
+            // tracing-flame capture lets us see which events dominate
+            // wall-clock time and how many times each is re-delivered. Kept
+            // at debug level so production runs aren't swamped; enable with
+            // RUST_LOG=deposits_node::nostr=debug.
+            let event_id_short = event.id.to_hex();
+            let kind_num_for_span = event.kind.as_u16();
+            let _span = tracing::debug_span!(
+                "handle_notification",
+                event_id = &event_id_short[..16],
+                kind = kind_num_for_span,
+            )
+            .entered();
             {
                 let seen = self.seen_events.lock().unwrap();
                 if seen.contains(&event_id_bytes)
@@ -3647,6 +3660,7 @@ impl NostrTransport {
                         .unwrap()
                         .contains(&event_id_bytes)
                 {
+                    tracing::trace!(event_id = &event_id_short[..16], "dedup'd duplicate");
                     return false;
                 }
             }

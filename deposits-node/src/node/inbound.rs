@@ -390,7 +390,15 @@ impl Node {
     }
 
     /// Handle an incoming ledger update - validate and auto-dispute if invalid
-    #[tracing::instrument(name = "handle_ledger_update", skip(self, inbound), fields(ledger = &inbound.ledger_id[..16.min(inbound.ledger_id.len())], seq = inbound.update.sequence_number))]
+    #[tracing::instrument(
+        name = "handle_ledger_update",
+        skip(self, inbound),
+        fields(
+            ledger = &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+            seq = inbound.update.sequence_number,
+            content = hex::encode(&inbound.update.content_hash[..8]),
+        ),
+    )]
     pub(crate) async fn handle_ledger_update(&self, inbound: crate::nostr::InboundLedgerUpdate) {
         // Check if we care about this ledger (we're a quorum member)
         if !self.is_quorum_member_of_ledger(&inbound.ledger_id) {
@@ -749,6 +757,7 @@ impl Node {
     }
 
     /// Handle a dispute notification from Nostr
+    #[tracing::instrument(name = "handle_dispute", skip(self, dispute), fields(ledger = &dispute.ledger_id[..16.min(dispute.ledger_id.len())]))]
     pub(crate) async fn handle_dispute(&self, dispute: crate::nostr::LedgerDispute) {
         tracing::warn!(
             "!!! DISPUTE RECEIVED for ledger {}...: {} (by {}...)",
@@ -793,6 +802,7 @@ impl Node {
     ///
     /// Verifies the proof hash against the embedding, then checks if we're
     /// a quorum member. If so, initiates a custody dispute.
+    #[tracing::instrument(name = "handle_fraud_proof", skip(self, fp), fields(ledger = &fp.broadcast.proof.ledger_id[..16.min(fp.broadcast.proof.ledger_id.len())]))]
     pub(crate) async fn handle_fraud_proof(&self, fp: crate::nostr::FraudProofEvent) {
         let broadcast = &fp.broadcast;
         let ledger_id = &broadcast.proof.ledger_id;
