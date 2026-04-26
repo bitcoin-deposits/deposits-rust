@@ -767,32 +767,22 @@ impl Node {
         let proof_hash = broadcast.proof.proof_hash();
         let proof_hash_hex = hex::encode(proof_hash);
 
-        // 2. Fetch the embedding update and verify the hash is in the nonce
+        // 2. Verify the embedding: locate the update at the claimed
+        // (ledger_id, sequence) and confirm it carries `proof_hash` in
+        // a supported embedding field (TransferLock.nonce,
+        // DeliveryEmbed.request_hash, …). Logic lives in
+        // `ProofEmbedding::verify_in_history` so unit tests can exercise
+        // it without standing up a daemon.
         let embedding = &broadcast.embedding;
         let embedding_verified = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            if let Some(arc) = ledgers.get(&embedding.ledger_id) {
-                let ledger = arc.read().unwrap();
-                ledger.history.iter().any(|u| {
-                    if u.sequence_number != embedding.sequence {
-                        return false;
-                    }
-                    // Decode the operation and check the nonce field
-                    if let Ok(op) = deposits_core::messages::LedgerOperation::tlv_decode(&u.message)
-                    {
-                        if let deposits_core::messages::LedgerOperation::TransferLock {
-                            nonce,
-                            ..
-                        } = op
-                        {
-                            return nonce == proof_hash;
-                        }
-                    }
-                    false
+            ledgers
+                .get(&embedding.ledger_id)
+                .map(|arc| {
+                    let ledger = arc.read().unwrap();
+                    embedding.verify_in_history(&ledger.history, &proof_hash)
                 })
-            } else {
-                false
-            }
+                .unwrap_or(false)
         };
 
         if !embedding_verified {

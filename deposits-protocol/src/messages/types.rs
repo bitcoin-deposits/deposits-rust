@@ -498,6 +498,28 @@ pub enum LedgerOperation {
 }
 
 impl LedgerOperation {
+    /// Return the 32-byte hash this operation embeds in its causally-
+    /// significant fields, if any. Used by fraud-proof verification to
+    /// confirm a `proof_hash` is bound into a specific update.
+    ///
+    /// Supported sources:
+    /// - [`TransferLock::nonce`] — the canonical "wallet-controlled
+    ///   embed" path; the wallet picks the nonce and the operator
+    ///   cosigns it into the ledger.
+    /// - [`DeliveryEmbed::request_hash`] — the operator records a
+    ///   wallet's signed request payload by hash; same effect but a
+    ///   first-class entanglement op (no transfer required).
+    ///
+    /// Other op types return `None` and cannot serve as embedding
+    /// sources today.
+    pub fn embedded_hash(&self) -> Option<&[u8; 32]> {
+        match self {
+            Self::TransferLock { nonce, .. } => Some(nonce),
+            Self::DeliveryEmbed { request_hash, .. } => Some(request_hash),
+            _ => None,
+        }
+    }
+
     /// Get the operation type as a discriminant byte
     pub fn discriminant(&self) -> u8 {
         match self {

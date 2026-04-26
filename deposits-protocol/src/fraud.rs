@@ -191,6 +191,36 @@ pub struct ProofEmbedding {
     pub field: String,
 }
 
+impl ProofEmbedding {
+    /// Verify the claimed `proof_hash` is bound into the update at this
+    /// embedding's `(ledger_id, sequence)`. Returns true iff the update
+    /// is present in `history` at the claimed sequence and its operation
+    /// embeds the hash in a field supported by
+    /// [`LedgerOperation::embedded_hash`].
+    ///
+    /// `history` is the caller-provided update list for this embedding's
+    /// `ledger_id` — extracted by the caller so this remains a pure
+    /// function with no dependency on a ledger registry.
+    pub fn verify_in_history(
+        &self,
+        history: &[crate::types::SignedLedgerUpdate],
+        proof_hash: &[u8; 32],
+    ) -> bool {
+        use crate::messages::LedgerOperation;
+        use crate::tlv::TlvDecode;
+        history.iter().any(|u| {
+            if u.sequence_number != self.sequence {
+                return false;
+            }
+            LedgerOperation::tlv_decode(&u.message)
+                .ok()
+                .and_then(|op| op.embedded_hash().copied())
+                .map(|h| h == *proof_hash)
+                .unwrap_or(false)
+        })
+    }
+}
+
 /// A single link in the causal chain.
 ///
 /// Each link is a co-signed update on one ledger that includes
