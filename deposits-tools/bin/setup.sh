@@ -153,11 +153,13 @@ start_node() {
     local name="op$idx"
     local seed="${SEEDS[$name]}"
     local data_dir="$DATA_ROOT/$name"
+    local metrics_port=$((9100 + idx))
     mkdir -p "$data_dir"
     RUST_LOG=warn "$DEPOSITS_NODE" run \
         --seed "$seed" --name "$name" \
         --network regtest --data-dir "$data_dir" \
         --esplora "$ELECTRS_URL" \
+        --metrics-port "$metrics_port" \
         $RELAY_ARGS >> "$data_dir/daemon.log" 2>&1 &
     echo "$!" > "$data_dir/daemon.pid"
 }

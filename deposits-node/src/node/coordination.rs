@@ -274,6 +274,7 @@ impl Node {
     ///
     /// # Returns
     /// A CoSignResult containing the co-signer's signature and the member's ledger hash
+    #[tracing::instrument(name = "request_cosign", skip(self, update), fields(ledger = &ledger_id[..16.min(ledger_id.len())], seq = update.sequence_number))]
     pub async fn request_cosign(
         &self,
         ledger_id: &str,

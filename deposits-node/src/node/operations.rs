@@ -128,6 +128,7 @@ impl Node {
     /// 4. Persist: write to disk first (crash safety)
     /// 5. Apply: modify ledger state + push to history
     /// 6. Broadcast: publish to relays
+    #[tracing::instrument(name = "commit_operation", skip(self, operation), fields(ledger = &ledger_id[..16.min(ledger_id.len())]))]
     pub async fn commit_operation(
         &self,
         ledger_id: &str,
@@ -244,6 +245,7 @@ impl Node {
         Ok(event_id)
     }
 
+    #[tracing::instrument(name = "sign_and_broadcast", skip(self), fields(ledger = &ledger_id[..16.min(ledger_id.len())]))]
     pub async fn sign_and_broadcast(&self, ledger_id: &str) -> Result<String, Error> {
         let sab_start = std::time::Instant::now();
 

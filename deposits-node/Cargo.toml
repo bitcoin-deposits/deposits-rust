@@ -37,6 +37,10 @@ bincode = "1.3"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Span-to-flamegraph layer. Enabled when env var TRACING_FLAME_PATH=<file>
+# is set on `deposits-node run`; capture spans during a workload, then
+# render with `inferno-flamegraph < tracing.folded > flamegraph.svg`.
+tracing-flame = "0.2"
 
 # Metrics
 metrics = "0.24"

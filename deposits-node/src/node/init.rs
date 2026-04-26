@@ -2,6 +2,7 @@ use super::*;
 
 impl Node {
     /// Create a new node
+    #[tracing::instrument(name = "Node::new", skip(config))]
     pub async fn new(config: NodeConfig) -> Result<Self, Error> {
         let secp = Secp256k1::new();
 
@@ -70,6 +71,7 @@ impl Node {
         // is still authoritative. This step validates that the actor
         // pool spins up cleanly (one channel + task per ledger) and that
         // the shared outbox drainer doesn't leak.
+        let actor_pool_span = tracing::info_span!("actor_pool_spawn").entered();
         let (actor_outbox_tx, actor_outbox_rx) =
             tokio::sync::mpsc::unbounded_channel::<(
                 String,
@@ -99,6 +101,7 @@ impl Node {
                 );
             }
         }
+        drop(actor_pool_span);
         // Drop our local clone of the outbox sender so the channel
         // closes naturally if every actor has shut down (otherwise the
         // drainer would block forever waiting on a sender we hold).

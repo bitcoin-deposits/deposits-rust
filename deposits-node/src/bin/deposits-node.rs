@@ -35,13 +35,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging — RUST_LOG takes precedence, default to INFO
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Initialize logging + (optionally) span flamegraph capture.
+    //
+    // Set TRACING_FLAME_PATH=<file> to record `tracing` spans into a
+    // .folded file alongside normal log output. After the process
+    // exits cleanly, render with:
+    //   inferno-flamegraph < tracing.folded > flamegraph.svg
+    //
+    // Span density depends on `#[tracing::instrument]` attributes
+    // and `tracing::info_span!` calls in the codebase. Use this to
+    // see which call paths dominate wall-clock time during a test.
+    let _flame_guard: Option<tracing_flame::FlushGuard<std::io::BufWriter<std::fs::File>>> = {
+        use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+        let env_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info"));
+
+        let fmt_layer = tracing_subscriber::fmt::layer();
+
+        match std::env::var("TRACING_FLAME_PATH") {
+            Ok(path) if !path.is_empty() => {
+                let (flame_layer, guard) = tracing_flame::FlameLayer::with_file(&path)
+                    .map_err(|e| format!("TRACING_FLAME_PATH {}: {}", path, e))?;
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(fmt_layer)
+                    .with(flame_layer)
+                    .init();
+                eprintln!(
+                    "tracing-flame: capturing spans to {} (render with `inferno-flamegraph`)",
+                    path
+                );
+                Some(guard)
+            }
+            _ => {
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(fmt_layer)
+                    .init();
+                None
+            }
+        }
+    };
 
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();

@@ -987,6 +987,7 @@ impl DepositsHandler {
     /// On subsequent saves, only appends new Update lines to the JSONL file.
     /// State line is written every 100 appends (not every time) to reduce file bloat.
     /// Full compaction (rewrite) triggers every 1000 appends to cap file size.
+    #[tracing::instrument(name = "persist_ledger_to_disk", skip(self), fields(ledger = &ledger_id[..16.min(ledger_id.len())]))]
     pub fn persist_ledger_to_disk(&self, ledger_id: &str) -> Result<(), String> {
         let t0 = std::time::Instant::now();
 
