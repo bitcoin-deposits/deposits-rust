@@ -315,6 +315,44 @@ pub enum DepositsError {
     /// Transaction broadcast failed
     #[error("Broadcast failed: {0}")]
     BroadcastFailed(String),
+
+    // ========== Lottery / Confiscation Preconditions ==========
+    /// Recovery quorum is too small to ever sign the long-tail recovery
+    /// script. Without this minimum, a stalled lottery is unrecoverable.
+    #[error(
+        "Recovery quorum unreachable: {n_quorum} quorum members, {n_disputants} disputants, \
+         need at least {t_emergency} non-disputing signers"
+    )]
+    RecoveryQuorumUnreachable {
+        n_quorum: usize,
+        n_disputants: usize,
+        t_emergency: usize,
+    },
+
+    /// Disputed value is too small relative to the on-chain claim fee for
+    /// the lottery to be economically rational.
+    #[error(
+        "Lottery not economically rational: disputed value {disputed_value} sats < \
+         {min_required} sats (5x estimated claim fee)"
+    )]
+    LotteryNotEconomical {
+        disputed_value: u64,
+        min_required: u64,
+    },
+
+    /// A disputant's bond is below the per-regime ratio required to keep
+    /// defection irrational at this disputant count.
+    #[error(
+        "Insufficient bond at N={n}: bond {actual} sats < required {required} sats \
+         ({numerator}/{denominator} of disputed value)"
+    )]
+    InsufficientBondRatio {
+        n: usize,
+        actual: u64,
+        required: u64,
+        numerator: u64,
+        denominator: u64,
+    },
 }
 
 impl From<crate::messages::CodecError> for DepositsError {

@@ -2304,7 +2304,10 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use bitcoin::secp256k1::{Keypair, PublicKey, Secp256k1, XOnlyPublicKey};
     use deposits_core::messages::LedgerOperation;
-    use deposits_core::tapscript_reserves::{LotteryParticipant, LotteryScriptBuilder};
+    use deposits_core::tapscript_reserves::{
+        check_economic_precondition, check_recovery_quorum_precondition, LotteryParticipant,
+        LotteryScriptBuilder,
+    };
     use deposits_core::{SignedLedgerUpdate, TlvDecode};
     use nostr_sdk::prelude::*;
 
@@ -2448,6 +2451,17 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
 
     let recovery_threshold = (recovery_voters.len() / 2) + 1;
 
+    // Phase 2 precondition: recovery-quorum reachability.
+    //
+    // The lottery output's long-tail leaves degrade `T → T-1 → T-2` with
+    // CSV 144/1008/4032. If the non-disputing remainder of the quorum is
+    // smaller than the lowest tail threshold (`T-2`, floored at 1), no
+    // recovery leaf is ever satisfiable and the output is permanently
+    // unspendable when participants vanish.
+    let t_emergency = recovery_threshold.saturating_sub(2).max(1);
+    check_recovery_quorum_precondition(quorum_members.len(), participants.len(), t_emergency)
+        .map_err(|e| format!("{}", e))?;
+
     // Build the lottery output
     let lottery_builder = LotteryScriptBuilder::new(
         participants.clone(),
@@ -2511,6 +2525,12 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     let fee_rate = 2u64;
     let estimated_vsize = 200u64;
     let fee = fee_rate * estimated_vsize;
+
+    // Phase 2 precondition: economic rationality. If reserves can't cover
+    // 5x the on-chain claim fee, no winner has reason to spend the lottery
+    // output and it stays stuck.
+    check_economic_precondition(reserves_amount, fee).map_err(|e| format!("{}", e))?;
+
     let output_amount = reserves_amount.saturating_sub(fee);
 
     let confiscation_tx = Transaction {

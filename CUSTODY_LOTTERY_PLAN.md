@@ -37,25 +37,33 @@ Touches:
 
 **Risk:** small. The linear cascade scales linearly in script size — at N=5 we're adding ~150 bytes, well within witness budgets.
 
-### Phase 2 — Recovery long-tail + preconditions (safety floor)
+### Phase 2 — Recovery long-tail + preconditions (safety floor) — DONE
 
 **Goal:** make the lottery output unstuck-able even when participants vanish. Required before scaling N because high-N lotteries spend most time in recovery (per design doc, P(all reveal) drops below 60% by N=10 with 95% per-party reliability).
 
-Touches:
-- `tapscript_reserves.rs::build_lottery_script` — add three recovery leaves to the Taproot tree:
-  - Leaf k: `<csv_blocks> OP_CSV OP_DROP <threshold> <quorum_minus_disputants> OP_CHECKMULTISIG`
-  - Timeouts: 144 / 1008 / 4032 blocks
-  - Thresholds: `T` / `T-1` / `T-2` (where T is the configured emergency-recovery threshold)
-- `LotteryScriptBuilder::new` — accept the timeout/threshold tuples; expose `recovery_threshold_floor: u8` so callers can configure regime-specific floors.
-- New precondition checks in `recovery confiscate`:
-  1. `N_quorum - N_disputants >= T_emergency` — refuse to confiscate if recovery is unreachable
-  2. `disputed_value >= 5 * estimated_claim_fee` — refuse if the lottery isn't economically rational
-  3. Bond-ratio check from the regime table
-- New error variants for these in `deposits-core::error`.
+Status when Phase 2 was opened: the long-tail leaves were already wired into `LotteryReservesBuilder::build()` at CSV 144/1008/4032 with descending thresholds T/T-1/T-2 (`tapscript_reserves.rs:1007-1029`). Only the preconditions and error variants were missing.
 
-**Test:** unit tests for each precondition rejection. Integration test where one disputant skips reveal, verify the recovery leaf at CSV 144 spendable by quorum-minus-disputants.
+Landed in this phase:
+- New error variants on `DepositsError`: `RecoveryQuorumUnreachable`, `LotteryNotEconomical`, `InsufficientBondRatio`.
+- New helpers in `tapscript_reserves`:
+  - `bond_ratio_for_n(n) -> (num, den)` — `(N-1)/N` per the design table.
+  - `min_bond_for_disputed_value(n, v)` — `ceil((N-1)/N * v)`.
+  - `check_recovery_quorum_precondition(n_quorum, n_disputants, t_emergency)`.
+  - `check_economic_precondition(disputed_value, fee)` (multiple = `MIN_ECONOMIC_FEE_MULTIPLE = 5`).
+  - `check_bond_ratio_precondition(n, bond, disputed_value)` — pure helper for use at DisputeArmed ingest.
+- Preconditions wired into `recovery_confiscate` (deposits-node/src/node_cli/recovery.rs):
+  1. Recovery-quorum reachability: refuse if `N_quorum - N_disputants < T_emergency` (where T_emergency is the lowest tail threshold, `T-2` clamped to 1).
+  2. Economic rationality: refuse if `reserves_amount < 5 * estimated_fee`.
+- Bond-ratio enforcement is intentionally **not** wired into `recovery_confiscate`. By the time we're confiscating, every disputant has already submitted a `DisputeArmed`. The natural enforcement point is the `DisputeArmed` ingest handler, where the disputant's bond is in scope. The helper exists; the wiring is deferred to Phase 5 plumbing.
 
-**Risk:** moderate. The Taproot leaf set changes; the existing integration tests need to keep working. Helps to keep Phase 1's cap bump and Phase 2's leaves on separate commits.
+Tests (deposits-core/src/tapscript_reserves.rs#tests):
+- `test_bond_ratio_matches_design_table` — spot-checks the (N-1)/N table at N=3,4,5,10,15.
+- `test_min_bond_rounds_up` — ceil semantics at non-divisible cases.
+- `test_check_recovery_quorum_precondition_pass_and_fail`
+- `test_check_economic_precondition_pass_and_fail`
+- `test_check_bond_ratio_precondition_pass_and_fail`
+
+Integration coverage of the long-tail recovery leaves (CSV-144 spendability with one disputant skipping reveal) is left for Phase 5, when the reveal/lottery-claim CLIs land — that's the natural place to drive the scenario end-to-end.
 
 ### Phase 3 — Regime B (N=6–10, combined-table dispatch)
 

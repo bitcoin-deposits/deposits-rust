@@ -744,6 +744,92 @@ impl LotteryParticipant {
     }
 }
 
+/// Multiple of the estimated on-chain claim fee that the disputed value
+/// must exceed for the lottery to be economically rational.
+///
+/// Below this floor the winner's net payout would be eroded by fees and
+/// nobody has a reason to claim, leaving the output stuck.
+pub const MIN_ECONOMIC_FEE_MULTIPLE: u64 = 5;
+
+/// Per-regime bond ratio: the lower bound on `bond / disputed_value`
+/// required to keep defection-and-eat-the-slash irrational.
+///
+/// Returns `(numerator, denominator)` so callers can do exact integer math
+/// without floating point. The ratio is `(N-1)/N`, matching each disputant's
+/// expected loss probability if they refuse to reveal.
+pub fn bond_ratio_for_n(n: usize) -> (u64, u64) {
+    let n = n.max(1) as u64;
+    (n.saturating_sub(1), n)
+}
+
+/// Minimum bond a disputant must stake to keep defection irrational at
+/// the current disputant count. Computed as `((N-1)/N) * disputed_value`,
+/// rounded up so the operator pays the full required ratio.
+pub fn min_bond_for_disputed_value(n: usize, disputed_value: u64) -> u64 {
+    let (num, den) = bond_ratio_for_n(n);
+    if den == 0 {
+        return 0;
+    }
+    disputed_value.saturating_mul(num).div_ceil(den)
+}
+
+/// Refuse if the recovery long-tail couldn't be signed by the
+/// non-disputing remainder of the quorum. `t_emergency` is the floor
+/// threshold across the recovery leaves (typically `T-2` clamped to 1).
+pub fn check_recovery_quorum_precondition(
+    n_quorum: usize,
+    n_disputants: usize,
+    t_emergency: usize,
+) -> DepositsResult<()> {
+    let non_disputing = n_quorum.saturating_sub(n_disputants);
+    if non_disputing < t_emergency {
+        return Err(DepositsError::RecoveryQuorumUnreachable {
+            n_quorum,
+            n_disputants,
+            t_emergency,
+        });
+    }
+    Ok(())
+}
+
+/// Refuse if the disputed value is too small relative to the on-chain
+/// claim fee for the lottery to make economic sense. The threshold is
+/// `MIN_ECONOMIC_FEE_MULTIPLE × estimated_claim_fee`.
+pub fn check_economic_precondition(
+    disputed_value: u64,
+    estimated_claim_fee: u64,
+) -> DepositsResult<()> {
+    let min_required = estimated_claim_fee.saturating_mul(MIN_ECONOMIC_FEE_MULTIPLE);
+    if disputed_value < min_required {
+        return Err(DepositsError::LotteryNotEconomical {
+            disputed_value,
+            min_required,
+        });
+    }
+    Ok(())
+}
+
+/// Refuse if a disputant's bond is below the per-regime ratio. Belongs at
+/// `DisputeArmed` ingest where each disputant's collateral is known.
+pub fn check_bond_ratio_precondition(
+    n: usize,
+    bond: u64,
+    disputed_value: u64,
+) -> DepositsResult<()> {
+    let required = min_bond_for_disputed_value(n, disputed_value);
+    if bond < required {
+        let (numerator, denominator) = bond_ratio_for_n(n);
+        return Err(DepositsError::InsufficientBondRatio {
+            n,
+            actual: bond,
+            required,
+            numerator,
+            denominator,
+        });
+    }
+    Ok(())
+}
+
 /// Builder for lottery Tapscript outputs used in custody dispute resolution.
 ///
 /// The lottery mechanism uses preimage-size entropy:
@@ -1556,5 +1642,90 @@ mod tests {
             "error message should point to the regime boundary; got: {}",
             msg
         );
+    }
+
+    #[test]
+    fn test_bond_ratio_matches_design_table() {
+        // Spot-check the (N-1)/N ratios from CUSTODY_LOTTERY.md's summary table.
+        assert_eq!(bond_ratio_for_n(3), (2, 3));
+        assert_eq!(bond_ratio_for_n(4), (3, 4));
+        assert_eq!(bond_ratio_for_n(5), (4, 5));
+        assert_eq!(bond_ratio_for_n(10), (9, 10));
+        assert_eq!(bond_ratio_for_n(15), (14, 15));
+    }
+
+    #[test]
+    fn test_min_bond_rounds_up() {
+        // 2/3 of 100 = 66.67 → ceil = 67
+        assert_eq!(min_bond_for_disputed_value(3, 100), 67);
+        // 4/5 of 100 = 80 (exact)
+        assert_eq!(min_bond_for_disputed_value(5, 100), 80);
+        // 14/15 of 1_000_000 = 933_333.33 → 933_334
+        assert_eq!(min_bond_for_disputed_value(15, 1_000_000), 933_334);
+    }
+
+    #[test]
+    fn test_check_recovery_quorum_precondition_pass_and_fail() {
+        // 5-member quorum, 2 disputants, T_emergency=2 → 3 non-disputing >= 2: ok
+        assert!(check_recovery_quorum_precondition(5, 2, 2).is_ok());
+
+        // Same quorum but 4 disputants → only 1 non-disputing < 2: reject
+        let err = check_recovery_quorum_precondition(5, 4, 2).unwrap_err();
+        match err {
+            DepositsError::RecoveryQuorumUnreachable {
+                n_quorum,
+                n_disputants,
+                t_emergency,
+            } => {
+                assert_eq!(n_quorum, 5);
+                assert_eq!(n_disputants, 4);
+                assert_eq!(t_emergency, 2);
+            }
+            _ => panic!("expected RecoveryQuorumUnreachable, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_check_economic_precondition_pass_and_fail() {
+        // Fee 1000 sats, threshold 5000 sats. 10000 reserves: ok.
+        assert!(check_economic_precondition(10_000, 1_000).is_ok());
+        // Right at the boundary: 5000 reserves >= 5000 threshold: ok.
+        assert!(check_economic_precondition(5_000, 1_000).is_ok());
+        // Below threshold: reject.
+        let err = check_economic_precondition(4_999, 1_000).unwrap_err();
+        match err {
+            DepositsError::LotteryNotEconomical {
+                disputed_value,
+                min_required,
+            } => {
+                assert_eq!(disputed_value, 4_999);
+                assert_eq!(min_required, 5_000);
+            }
+            _ => panic!("expected LotteryNotEconomical, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_check_bond_ratio_precondition_pass_and_fail() {
+        // N=5, disputed value 100, required = 80. Bond 80: pass.
+        assert!(check_bond_ratio_precondition(5, 80, 100).is_ok());
+        // Bond 79: reject.
+        let err = check_bond_ratio_precondition(5, 79, 100).unwrap_err();
+        match err {
+            DepositsError::InsufficientBondRatio {
+                n,
+                actual,
+                required,
+                numerator,
+                denominator,
+            } => {
+                assert_eq!(n, 5);
+                assert_eq!(actual, 79);
+                assert_eq!(required, 80);
+                assert_eq!(numerator, 4);
+                assert_eq!(denominator, 5);
+            }
+            _ => panic!("expected InsufficientBondRatio, got {:?}", err),
+        }
     }
 }
