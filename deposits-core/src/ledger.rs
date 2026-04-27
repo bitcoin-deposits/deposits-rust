@@ -1229,6 +1229,31 @@ impl Ledger {
             });
         }
 
+        // Phase 5e — pre-release policy cap on quorum size. The lottery
+        // script supports up to MAX_DISPUTANTS=15 disputants but until
+        // we have production reliability data we refuse to begin a
+        // quorum with more than `MAX_QUORUM_SIZE_POLICY` total members
+        // (operator + cosigners). Smaller Q means smaller worst-case
+        // bond ratio and partial-reveal failure cases stay rare.
+        // Lifting this cap is a one-line constant change.
+        if let LedgerOperation::QuorumBegin { quorum_members, .. } = operation {
+            let total_quorum = quorum_members.len() + 1; // operator + cosigners
+            if total_quorum > crate::constants::MAX_QUORUM_SIZE_POLICY {
+                return Err(DepositsError::ProtocolViolation {
+                    violation_type: "quorum_size_policy_exceeded".to_string(),
+                    details: format!(
+                        "QuorumBegin total size {} exceeds the pre-release \
+                         policy cap of {} (operator + cosigners). The script \
+                         supports up to {} disputants but Q is policy-capped \
+                         until production reliability data justifies lifting it.",
+                        total_quorum,
+                        crate::constants::MAX_QUORUM_SIZE_POLICY,
+                        crate::constants::MAX_DISPUTANTS
+                    ),
+                });
+            }
+        }
+
         match operation {
             LedgerOperation::DepositOpen { deposit_id, .. } => {
                 if self.state.deposits.contains_key(deposit_id) {
@@ -2353,5 +2378,80 @@ mod tests {
         assert_eq!(source.locked_balance, 0);
         assert_eq!(source.balance, 100_000 - 2);
         assert_eq!(ledger.state.fees_accumulated, 2);
+    }
+
+    /// Phase 5e — `MAX_QUORUM_SIZE_POLICY` rejection at QuorumBegin.
+    ///
+    /// Constructs a QuorumBegin with `MAX_QUORUM_SIZE_POLICY` cosigners
+    /// (operator + MAX cosigners = MAX+1 total quorum) and asserts
+    /// validation rejects with `quorum_size_policy_exceeded`. The
+    /// at-cap case (operator + MAX-1 cosigners = MAX total) must NOT
+    /// trip the policy violation — it may still fail downstream
+    /// cosignature checks but that's a different error.
+    #[test]
+    fn quorum_begin_policy_cap_rejects_oversize() {
+        use crate::constants::MAX_QUORUM_SIZE_POLICY;
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+
+        fn pk(seed: u8) -> PublicKey {
+            let secp = Secp256k1::new();
+            let mut bytes = [0u8; 32];
+            bytes[31] = seed;
+            let sk = SecretKey::from_slice(&bytes).unwrap();
+            PublicKey::from_secret_key(&secp, &sk)
+        }
+
+        let operator = pk(1);
+        let mut ledger = Ledger::new(
+            operator,
+            "rid".to_string(),
+            LedgerRole::Operator,
+            Vec::new(),
+            100,
+        );
+        ledger.state.parent_pubkey = operator;
+        ledger.state.reserves_amount = 1_000_000;
+
+        let make_op = |cosigners: Vec<PublicKey>| LedgerOperation::QuorumBegin {
+            reserves_id: "rid".into(),
+            spending_txid: [0; 32],
+            new_outpoint_txid: [0; 32],
+            new_outpoint_vout: 0,
+            amount: 1_000_000,
+            quorum_expiry: 1_000_000,
+            ledger_hash: [0; 32],
+            quorum_members: cosigners,
+            collateral_amount: 0,
+        };
+
+        // At-cap: MAX-1 cosigners + 1 operator = MAX total. Policy
+        // gate must NOT fire; if validate_operation returns an error,
+        // it must be a different one.
+        let at_cap = make_op((2..=MAX_QUORUM_SIZE_POLICY as u8).map(pk).collect());
+        if let Err(DepositsError::ProtocolViolation { violation_type, .. }) =
+            ledger.validate_operation(&at_cap)
+        {
+            assert_ne!(
+                violation_type, "quorum_size_policy_exceeded",
+                "AT-cap quorum must NOT trip the policy violation"
+            );
+        }
+
+        // Over-cap: MAX cosigners + 1 operator = MAX+1 total. Must
+        // reject specifically with the policy violation.
+        let over_cap = make_op((2..=(MAX_QUORUM_SIZE_POLICY as u8 + 1)).map(pk).collect());
+        let err = ledger
+            .validate_operation(&over_cap)
+            .expect_err("over-cap quorum must be rejected");
+        match err {
+            DepositsError::ProtocolViolation {
+                violation_type,
+                details,
+            } => {
+                assert_eq!(violation_type, "quorum_size_policy_exceeded");
+                assert!(details.contains("policy cap"));
+            }
+            other => panic!("expected ProtocolViolation, got {:?}", other),
+        }
     }
 }

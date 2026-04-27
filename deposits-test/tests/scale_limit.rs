@@ -27,7 +27,10 @@ fn scale_limit_realistic_network() {
     );
     println!("{}", "-".repeat(55));
 
-    for (n, quorum_size) in [(4, 3), (8, 3), (16, 5), (32, 5), (64, 7), (100, 7)] {
+    // Cosigner counts here -- total Q (operator + cosigners) is one
+    // larger than each value. Capped at 6 so total Q stays at the
+    // pre-release policy limit (MAX_QUORUM_SIZE_POLICY = 7).
+    for (n, quorum_size) in [(4, 3), (8, 3), (16, 5), (32, 5), (64, 6), (100, 6)] {
         let names = operator_names(n);
         let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
 

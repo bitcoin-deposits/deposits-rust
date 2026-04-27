@@ -2441,6 +2441,27 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         .into());
     }
 
+    // Phase 5e: pre-release policy cap. Disputants are quorum members
+    // excluding the original operator (the operator is barred by
+    // `validate_update_signer` from arming on their own ledger), so
+    // max disputants = MAX_QUORUM_SIZE_POLICY - 1. QuorumBegin
+    // validation catches the policy violation earlier; we re-check
+    // here as defence-in-depth in case a pre-policy ledger reaches
+    // confiscate time.
+    let max_disputants_policy = deposits_core::MAX_QUORUM_SIZE_POLICY - 1;
+    if participants.len() > max_disputants_policy {
+        return Err(format!(
+            "Disputants {} exceeds the pre-release policy cap of {} \
+             (= MAX_QUORUM_SIZE_POLICY - 1). The lottery script supports \
+             up to {}, but Q is policy-capped until production reliability \
+             data justifies lifting it.",
+            participants.len(),
+            max_disputants_policy,
+            deposits_core::MAX_DISPUTANTS,
+        )
+        .into());
+    }
+
     // Sort participants by pubkey for deterministic order
     participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
 

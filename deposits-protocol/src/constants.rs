@@ -40,7 +40,8 @@ pub const COLLATERAL_REPORTING_PERIOD_BLOCKS: u32 = 144;
 /// Bitcoin Deposits Protocol Version
 pub const DEPOSITS_PROTOCOL_VERSION: u16 = 1;
 
-/// Maximum number of disputants in a single custody dispute lottery.
+/// Maximum number of disputants in a single custody dispute lottery —
+/// the on-chain script's hard cap.
 ///
 /// Past this size the on-chain construction stops being the right tool —
 /// witness sizes grow unwieldy, recovery quorums become impractical, and
@@ -49,6 +50,26 @@ pub const DEPOSITS_PROTOCOL_VERSION: u16 = 1;
 /// scripts for N > MAX_DISPUTANTS; recovery_confiscate refuses to
 /// proceed if it observes more DisputeArmed events than this cap.
 pub const MAX_DISPUTANTS: usize = 15;
+
+/// Pre-release policy cap on the total quorum size (operator + cosigners).
+///
+/// Distinct from `MAX_DISPUTANTS`: that's the protocol/script's hard
+/// cap on what's *technically* supported (15). This constant is the
+/// *operational* cap — until production reliability data justifies
+/// going higher, we refuse to begin a quorum with more than 8 members
+/// total.
+///
+/// Disputants in the lottery are quorum members *excluding* the
+/// original operator (the operator is the one being disputed and is
+/// structurally barred from arming on their own ledger by
+/// `validate_update_signer`). So `Q = 8` total → at most 7 disputants
+/// in any single lottery. Bond ratio worst case is 6/7 ≈ 86%;
+/// partial-reveal failure cases at p=0.99 per-party reveal stay below
+/// 1%.
+///
+/// Lifting this cap is a one-line constant change with no script or
+/// wire-format implications — the lottery already supports up to N=15.
+pub const MAX_QUORUM_SIZE_POLICY: usize = 8;
 
 /// CSV block delay for the very-final timeout-recovery leaf.
 ///

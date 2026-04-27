@@ -208,31 +208,20 @@ The kaitai schema (`deposits_protocol.ksy`) was updated to retire field IDs 106 
 
 **All 224+ tests across the workspace pass after the rework — zero regressions.**
 
-#### Phase 5e — Bond-ratio enforcement — pending (design recorded)
+#### Phase 5e — Q≤7 policy cap — DONE (replaces bond-ratio enforcement)
 
-The Phase 2 helper `check_bond_ratio_precondition(n, bond, disputed_value)` exists and is unit-tested but not yet wired. The wiring depends on a design call between two viable enforcement points:
+We initially planned to enforce a per-disputant bond ratio (`bond_locked` field on `DisputeArmed`, validator runs `check_bond_ratio_precondition` against the worst-case `(N-1)/N` at MAX_DISPUTANTS=15). After implementing it through the integration tests, the user reconsidered: simpler to cap quorum size for the pre-release period and avoid the wire-format addition entirely. Smaller quorums also keep the worst-case bond ratio modest (≤ 6/7 ≈ 86% at Q=8 total), which is the same goal the bond gate was chasing.
 
-**Option A — at `DisputeArmed` ingest, conservative against `MAX_DISPUTANTS=15`:**
-- Add `bond_locked: u64` to `DisputeArmed` (small wire-format addition; pre-release so safe). Disputants self-attest their bond at arm time.
-- Validators run `check_bond_ratio_precondition(MAX_DISPUTANTS, bond_locked, disputed_value)` — using the worst-case ratio `(N-1)/N = 14/15 ≈ 0.93×`. A disputant who arms with less is rejected before the dispute can progress.
-- Validators cross-check the attested `bond_locked` against the disputant's actual `collateral_amount` in their own ledger (which the watcher has from `QuorumJoin` flow).
-- Pros: fail-fast (rejection at arm time); single-attestation point; bond data already in scope.
-- Cons: conservative — a disputant who would be fine for the realized N=3 still has to over-bond against N=15.
+Landed:
+- `MAX_QUORUM_SIZE_POLICY = 8` constant in `deposits-protocol/src/constants.rs`. Total quorum size = operator + cosigners. Disputants are quorum members excluding the original operator (the operator is structurally barred by `validate_update_signer` from arming on their own ledger), so `Q = 8` → max 7 disputants.
+- `Ledger::validate_operation` rejects `QuorumBegin` whose `quorum_members.len() + 1 > MAX_QUORUM_SIZE_POLICY` with `quorum_size_policy_exceeded`.
+- `recovery_confiscate` re-checks `participants.len() <= MAX_QUORUM_SIZE_POLICY - 1` as defence-in-depth (the QuorumBegin gate catches it earlier in the lifecycle, but a pre-policy ledger reaching confiscate time would still be rejected).
+- The bond-ratio helper (`check_bond_ratio_precondition`) stays in `tapscript_reserves` as a pure utility for any future enforcement work — it just isn't wired into the validation path.
+- `scaling.rs`'s `for n in [4, 8, 12]` loops shrunk to `[4, 6, 8]` to stay under the cap.
 
-**Option B — at confiscation time, against realized N:**
-- `recovery confiscate` uses `participants.len()` (the realized count) and runs `check_bond_ratio_precondition(realized_n, ...)` for each disputant.
-- Per-disputant bond requires fetching each one's ledger from Nostr (their `collateral_amount`).
-- Pros: precise — bond ratio matches actual N.
-- Cons: significant Nostr fetch work in `recovery_confiscate`; failure mode is less ergonomic (dispute already armed before bond rejection bites).
+The lottery script still supports up to MAX_DISPUTANTS=15. Lifting this policy cap is a one-line constant change with no script or wire-format implications.
 
-**Recommendation: Option A.** The wire-format addition is cheap, the conservative ratio is a feature not a bug (it discourages thinly-bonded disputes from arming in the first place), and we avoid expanding `recovery_confiscate`'s fetch surface. Implementation:
-
-1. Add `bond_locked: u64` to `DisputeArmed` in `deposits-protocol/src/messages/types.rs` and the TLV codec (next free field ID, e.g. 124).
-2. Wire `check_bond_ratio_precondition(MAX_DISPUTANTS, bond_locked, disputed_value)` into `Ledger::validate_operation` for `DisputeArmed`.
-3. Cross-check `bond_locked` against the disputant's `collateral_amount` (watcher-side state) — refuse if attested > actual.
-4. `recovery arm` reads the operator's `collateral_amount` from local state and emits it as `bond_locked` in the constructed `DisputeArmed`.
-
-**Test:** unit test for the validator rejection at sub-threshold bond. Tier-3 integration test on a Q=5 cluster where one disputant under-bonds.
+Test (`quorum_begin_policy_cap_rejects_oversize`): constructs a `QuorumBegin` with MAX cosigners + 1 operator = MAX+1 total and asserts validation rejects with `quorum_size_policy_exceeded`. The at-cap case must NOT trip the policy violation (it may still fail downstream cosig checks but not this one).
 
 #### Phase 5f — Retry-depth orchestration counter — pending (design recorded)
 

@@ -54,7 +54,7 @@ fn setup_quorum(net: &mut TestNetwork, n: usize) {
 fn scaling_reserve_backing() {
     let mut log = AttackLog::new();
 
-    for n in [4, 8, 12] {
+    for n in [4, 6, 8] {
         let names = operator_names(n);
         let mut net = make_network(n, 1_000_000);
         let user = net.create_depositor("victim", 10);
@@ -113,7 +113,7 @@ fn scaling_slashing_deterrence() {
     println!("  N  | Quorum | Collateral at risk | Reserves | Ratio | Deterred");
     println!("  ---|--------|-------------------|----------|-------|--------");
 
-    for n in [4, 8, 12] {
+    for n in [4, 6, 8] {
         let reserves = 1_000_000u64;
         let collateral_per_member = 500_000u64;
         let quorum_size = n - 1; // full mesh minus self
@@ -151,7 +151,7 @@ fn scaling_slashing_deterrence() {
 fn scaling_dispute_state_gate() {
     let mut log = AttackLog::new();
 
-    for n in [4, 8, 12] {
+    for n in [4, 6, 8] {
         let names = operator_names(n);
         let mut net = make_network(n, 1_000_000);
 
@@ -211,7 +211,7 @@ fn scaling_dispute_state_gate() {
 fn scaling_witness_verification() {
     let mut log = AttackLog::new();
 
-    for n in [4, 8, 12] {
+    for n in [4, 6, 8] {
         let names = operator_names(n);
         let mut net = make_network(n, 1_000_000);
         let user = net.create_depositor("u", 10);
@@ -268,7 +268,7 @@ fn scaling_collateral_boundary() {
     println!("  N  | Min ratio | Min per-member | Total at min");
     println!("  ---|-----------|---------------|-------------");
 
-    for n in [4, 8, 12] {
+    for n in [4, 6, 8] {
         let reserves = 1_000_000u64;
         let quorum_size = (n - 1) as u64;
 
@@ -321,7 +321,7 @@ fn scaling_expiry_window() {
 
     let dispute_response_blocks = 144u32;
 
-    for n in [4, 8, 12] {
+    for n in [4, 6, 8] {
         // Network diameter in a full mesh is 1 (everyone is directly connected).
         // In a sparser graph, diameter grows. Model both cases.
         let diameter_full_mesh = 1u32;
@@ -370,7 +370,7 @@ fn scaling_sybil_resistance() {
     println!("  N  | Honest | Min sybils for 3-path | Cost (reserves per sybil)");
     println!("  ---|--------|----------------------|------------------------");
 
-    for n in [4, 8, 12] {
+    for n in [4, 6, 8] {
         // In a full mesh of N honest operators, a sybil needs to connect
         // to 3 honest nodes to pass a 3-path heuristic.
         // With N honest nodes in a full mesh, a single sybil connected
@@ -423,7 +423,7 @@ fn scaling_detection_probability() {
     println!("  N  | Watchers | P(all miss) | P(detect) | EV threshold");
     println!("  ---|----------|-------------|-----------|-------------");
 
-    for n in [4, 8, 12] {
+    for n in [4, 6, 8] {
         let watchers = n - 1; // quorum members watching
         let p_single_miss = 0.01f64; // 1% chance each watcher misses
         let p_all_miss = p_single_miss.powi(watchers);
