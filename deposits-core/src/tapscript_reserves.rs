@@ -1946,7 +1946,8 @@ mod tests {
                 .participants
                 .iter()
                 .enumerate()
-                .filter_map(|(j, p)| (j != missing_idx).then(|| p.clone()))
+                .filter(|(j, _)| *j != missing_idx)
+                .map(|(_, p)| p.clone())
                 .collect();
             let sub_builder = LotteryScriptBuilder::new(
                 revealers,
