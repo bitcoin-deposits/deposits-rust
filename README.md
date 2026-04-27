@@ -78,6 +78,8 @@ cargo build --release
 
 `setup.sh Q` creates `3*Q+1` operators, each with 3 ledgers and independent Q-member quorums. No collateral deposits needed -- collateral is part of the UTXO.
 
+For mainnet sandbox deployment (small real-money cluster for finding the things regtest hides), see [MAINNET_DEPLOYMENT.md](MAINNET_DEPLOYMENT.md).
+
 ### Docker
 
 ```bash
