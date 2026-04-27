@@ -256,20 +256,32 @@ impl Interp {
                 self.push_int(if a >= b { 1 } else { 0 });
             }
             // OP_CHECKSIG (stubbed): stack is [..., sig, pubkey] with
-            // pubkey on top. Pop pubkey first, then sig. Push 1.
+            // pubkey on top. An empty sig means "this slot didn't
+            // sign" — push 0. A non-empty sig is treated as valid for
+            // its paired pubkey — push 1 and record the pubkey.
             0xac => {
                 let pubkey = self.pop()?;
-                let _sig = self.pop()?;
-                self.last_checked_pubkey = Some(pubkey);
-                self.push_int(1);
+                let sig = self.pop()?;
+                if sig.is_empty() {
+                    self.push_int(0);
+                } else {
+                    self.last_checked_pubkey = Some(pubkey);
+                    self.push_int(1);
+                }
             }
             // OP_CHECKSIGADD (stubbed): stack is [..., sig, n, pubkey]
-            // with pubkey on top. Push n+1 (treat every sig as valid).
+            // with pubkey on top. Empty sig leaves n unchanged; non-
+            // empty sig increments n. Models the k-of-n CHECKSIGADD
+            // pattern where unused signature slots are pushed empty.
             0xba => {
                 let _pubkey = self.pop()?;
                 let n = self.pop_int()?;
-                let _sig = self.pop()?;
-                self.push_int(n + 1);
+                let sig = self.pop()?;
+                if sig.is_empty() {
+                    self.push_int(n);
+                } else {
+                    self.push_int(n + 1);
+                }
             }
             // OP_CHECKSEQUENCEVERIFY (no-op verify in our model)
             0xb2 => {
@@ -867,4 +879,371 @@ fn lottery_output_includes_all_expected_leaves() {
             threshold
         );
     }
+}
+
+// ============================================================================
+// High-Q integration tests
+// ============================================================================
+//
+// End-to-end scenarios that thread the full happy and unhappy paths
+// through the script side: build a LotteryOutput, simulate the
+// reveal/recovery flow, construct the appropriate witness for the
+// chosen spend leaf, and verify the script accepts it and dispatches
+// where calculate_winner says it should.
+//
+// **Scope.** These tests cover script construction, witness layout,
+// and dispatch logic. They do NOT validate Bitcoin-layer concerns:
+// Schnorr signatures (stubbed), OP_CSV nSequence enforcement (stubbed
+// no-op), Taproot key-path equivocation (NUMS prevents it), or the
+// confiscation TX path that lands the lottery output on chain.
+// Those need bitcoind regtest — see the Tier-3 follow-up in
+// CUSTODY_LOTTERY_PLAN.md "Tier-3 integration test target".
+
+/// Drive a full N=15 lottery: every disputant reveals, the winner is
+/// computed via `calculate_winner`, and the constructed claim
+/// witness unlocks the primary lottery leaf and dispatches to that
+/// winner.
+#[test]
+fn high_q_lottery_n15_full_reveal_happy_path() {
+    let n = 15usize;
+    // Mix contributions so the sum mod N isn't trivially 0.
+    // sum = 1+2+1+2+...+1 = 23, 23 mod 15 = 8.
+    let contributions: Vec<usize> = (0..n).map(|i| if i % 2 == 0 { 1 } else { 2 }).collect();
+
+    let mut participants = Vec::new();
+    let mut preimages = Vec::new();
+    for (i, c) in contributions.iter().enumerate() {
+        let (p, pre) = participant((i + 1) as u8, *c);
+        participants.push(p);
+        preimages.push(pre);
+    }
+
+    let builder = LotteryScriptBuilder::new(
+        participants,
+        standard_recovery_voters(),
+        3,
+        Network::Regtest,
+    );
+    let output = builder.build().expect("N=15 output should build");
+
+    // Sanity: the output has 1 lottery + 15 partial + 4 recovery = 20 leaves.
+    assert_eq!(output.partial_reveal_scripts.len(), 15);
+
+    // Every disputant reveals; calculate the winner off-chain.
+    let winner_idx = LotteryOutput::calculate_winner(&preimages).unwrap();
+    let expected_sum: usize = contributions.iter().sum();
+    assert_eq!(winner_idx, expected_sum % n);
+
+    // Construct the claim witness using the public helper and run it.
+    let sig = [0xAAu8; 64];
+    let witness = output.create_claim_witness(&sig, &preimages).unwrap();
+    let pk_won = run_witness_against_leaf(&output.lottery_script, &witness).unwrap();
+    assert_eq!(
+        pk_won,
+        pk((winner_idx + 1) as u8),
+        "N=15 full-reveal: sum={} winner_idx={}",
+        expected_sum,
+        winner_idx
+    );
+}
+
+/// At N=15, disputant index 7 fails to reveal. The remaining 14
+/// reveal and run the partial-reveal flow: their preimages get hashed
+/// to commit, the (sub-N=14) sub-lottery picks a winner among them,
+/// and the partial-reveal leaf for missing_idx=7 unlocks correctly.
+/// Sub-N=14 is in Regime C (Linear-after-mod) so this exercises the
+/// upper end of the lottery-after-mod path.
+#[test]
+fn high_q_partial_reveal_n15_missing_seven() {
+    let n = 15usize;
+    let missing_idx = 7usize;
+
+    // Contributions chosen so the sum-among-revealers gives a
+    // non-zero mod and a winner that isn't the first revealer.
+    // Revealers at i in {0,1,2,3,4,5,6,8,9,10,11,12,13,14}.
+    let contributions: Vec<usize> = (0..n).map(|i| 1 + (i % 5)).collect();
+
+    let mut participants = Vec::new();
+    let mut preimages = Vec::new();
+    for (i, c) in contributions.iter().enumerate() {
+        let (p, pre) = participant((i + 1) as u8, *c);
+        participants.push(p);
+        preimages.push(pre);
+    }
+
+    let output = LotteryScriptBuilder::new(
+        participants,
+        standard_recovery_voters(),
+        3,
+        Network::Regtest,
+    )
+    .build()
+    .unwrap();
+
+    // The revealer set excludes missing_idx, in disputant order.
+    let revealer_preimages: Vec<Vec<u8>> = preimages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| if i == missing_idx { None } else { Some(p.clone()) })
+        .collect();
+    let revealer_pks: Vec<XOnlyPublicKey> = (0..n)
+        .filter(|i| *i != missing_idx)
+        .map(|i| pk((i + 1) as u8))
+        .collect();
+
+    // Sub-lottery winner: sum of revealer contributions mod 14.
+    let sub_winner_idx = LotteryOutput::calculate_winner(&revealer_preimages).unwrap();
+    let sum: usize = revealer_preimages.iter().map(|p| p.len() - 16).sum();
+    assert_eq!(sub_winner_idx, sum % (n - 1));
+
+    let sig = [0xAAu8; 64];
+    let witness = output
+        .create_partial_reveal_witness(missing_idx, &sig, &revealer_preimages)
+        .unwrap();
+    let leaf = &output.partial_reveal_scripts[missing_idx];
+    let pk_won = run_witness_against_leaf(leaf, &witness).unwrap();
+
+    assert_eq!(
+        pk_won, revealer_pks[sub_winner_idx],
+        "N=15 missing={} sum_among_revealers={} mod 14 = {} → revealer #{}",
+        missing_idx, sum, sub_winner_idx, sub_winner_idx
+    );
+}
+
+/// At N=11, missing_idx=3. Sub-N=10, which falls in Regime B
+/// (CombinedTable). Verifies the regime-boundary partial-reveal path
+/// — the sub-lottery uses the 91-arm dispatch table rather than
+/// Linear-after-mod.
+#[test]
+fn high_q_partial_reveal_n11_missing_three_combined_table() {
+    let n = 11usize;
+    let missing_idx = 3usize;
+    let contributions: Vec<usize> = (0..n).map(|i| 1 + (i % 7)).collect();
+
+    let mut participants = Vec::new();
+    let mut preimages = Vec::new();
+    for (i, c) in contributions.iter().enumerate() {
+        let (p, pre) = participant((i + 1) as u8, *c);
+        participants.push(p);
+        preimages.push(pre);
+    }
+
+    let output = LotteryScriptBuilder::new(
+        participants,
+        standard_recovery_voters(),
+        3,
+        Network::Regtest,
+    )
+    .build()
+    .unwrap();
+
+    let revealer_preimages: Vec<Vec<u8>> = preimages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| if i == missing_idx { None } else { Some(p.clone()) })
+        .collect();
+    let revealer_pks: Vec<XOnlyPublicKey> = (0..n)
+        .filter(|i| *i != missing_idx)
+        .map(|i| pk((i + 1) as u8))
+        .collect();
+
+    let sub_winner_idx = LotteryOutput::calculate_winner(&revealer_preimages).unwrap();
+
+    let sig = [0xAAu8; 64];
+    let witness = output
+        .create_partial_reveal_witness(missing_idx, &sig, &revealer_preimages)
+        .unwrap();
+    let leaf = &output.partial_reveal_scripts[missing_idx];
+    let pk_won = run_witness_against_leaf(leaf, &witness).unwrap();
+
+    // Boundary check: this leaf uses the CombinedTable dispatch (91 arms).
+    let endif_count = leaf
+        .instructions()
+        .filter_map(|i| i.ok())
+        .filter(|i| {
+            matches!(
+                i,
+                bitcoin::script::Instruction::Op(op) if *op == bitcoin::opcodes::all::OP_ENDIF
+            )
+        })
+        .count();
+    assert_eq!(endif_count, 91, "N=11 partial leaf must be CombinedTable");
+
+    assert_eq!(
+        pk_won, revealer_pks[sub_winner_idx],
+        "N=11 missing={} CombinedTable sub-lottery: revealer #{}",
+        missing_idx, sub_winner_idx
+    );
+}
+
+/// Recovery long-tail leaf at CSV 144 with threshold T (=3 in our
+/// test setup). Three of the four recovery voters sign; the leaf
+/// should accept with the multisig 1+1+1 = 3 ≥ threshold(3).
+/// Verifies the CHECKSIG/CHECKSIGADD/GREATERTHANOREQUAL chain.
+#[test]
+fn high_q_recovery_leaf_csv144_threshold_t() {
+    let n = 15usize;
+    let mut participants = Vec::new();
+    for i in 0..n {
+        let (p, _) = participant((i + 1) as u8, 1);
+        participants.push(p);
+    }
+    let recovery_voters = standard_recovery_voters();
+
+    // Build the recovery leaf for CSV 144, threshold T=3.
+    let recovery_script = LotteryScriptBuilder::new(
+        participants,
+        recovery_voters.clone(),
+        3,
+        Network::Regtest,
+    )
+    .build_recovery_script(144)
+    .expect("recovery script should build at threshold 3");
+
+    // Build a witness: 4 voter slots, three sigs filled, one empty.
+    // Recovery script sorts pubkeys before laying out CHECKSIG/
+    // CHECKSIGADD, so the witness slots must align with sorted order.
+    // Multisig witness order (top to bottom of stack at CHECKSIG
+    // time): the *first* CHECKSIG pops the *top* sig, then later
+    // CHECKSIGADDs each pop the next. So the witness vec's last
+    // element is consumed first, matching the first sorted pubkey.
+    let mut sorted_voters = recovery_voters.clone();
+    sorted_voters.sort_by_key(|pk| pk.serialize());
+    let dummy_sig = vec![0xAAu8; 64];
+
+    // Sign with voters 0, 2, 3 (skip voter 1 → empty in slot 1).
+    // The witness is stack-bottom-to-stack-top, so reverse so
+    // sorted_voters[0]'s sig is on top.
+    let mut sig_slots: Vec<Vec<u8>> = vec![Vec::new(); 4];
+    sig_slots[0] = dummy_sig.clone();
+    sig_slots[2] = dummy_sig.clone();
+    sig_slots[3] = dummy_sig.clone();
+    let stack_inputs: Vec<Vec<u8>> = sig_slots.into_iter().rev().collect();
+
+    let mut interp = Interp::new(stack_inputs);
+    interp
+        .run(&recovery_script)
+        .expect("recovery leaf with 3-of-4 sigs should accept");
+
+    let top = interp.stack.last().expect("recovery left empty stack");
+    assert!(
+        read_scriptbool(top),
+        "recovery leaf returned FALSE: stack={:?}",
+        interp.stack
+    );
+}
+
+/// Recovery long-tail leaf at CSV 144 threshold T, but only TWO
+/// signatures provided. Should fail the threshold check
+/// (2 < 3 → GREATERTHANOREQUAL pushes 0 → script returns FALSE).
+#[test]
+fn high_q_recovery_leaf_rejects_below_threshold() {
+    let n = 15usize;
+    let mut participants = Vec::new();
+    for i in 0..n {
+        let (p, _) = participant((i + 1) as u8, 1);
+        participants.push(p);
+    }
+    let recovery_voters = standard_recovery_voters();
+
+    let recovery_script = LotteryScriptBuilder::new(
+        participants,
+        recovery_voters,
+        3,
+        Network::Regtest,
+    )
+    .build_recovery_script(144)
+    .unwrap();
+
+    // Only 2 sigs in 4 slots — below threshold 3.
+    let dummy_sig = vec![0xAAu8; 64];
+    let mut sig_slots: Vec<Vec<u8>> = vec![Vec::new(); 4];
+    sig_slots[0] = dummy_sig.clone();
+    sig_slots[3] = dummy_sig.clone();
+    let stack_inputs: Vec<Vec<u8>> = sig_slots.into_iter().rev().collect();
+
+    let mut interp = Interp::new(stack_inputs);
+    interp.run(&recovery_script).unwrap();
+
+    // Script ran but the GREATERTHANOREQUAL pushed 0 because 2 < 3.
+    let top = interp.stack.last().unwrap();
+    assert!(
+        !read_scriptbool(top),
+        "recovery leaf with sub-threshold sigs must return FALSE; stack={:?}",
+        interp.stack
+    );
+}
+
+/// Timeout-recovery leaf at CSV 8064 with threshold 1. A single
+/// recovery voter's signature suffices. This is the very-final
+/// escape hatch for retry-depth exhaustion.
+#[test]
+fn high_q_timeout_recovery_leaf_csv8064_threshold_one() {
+    let n = 15usize;
+    let mut participants = Vec::new();
+    for i in 0..n {
+        let (p, _) = participant((i + 1) as u8, 1);
+        participants.push(p);
+    }
+    let recovery_voters = standard_recovery_voters();
+
+    // Build the timeout-recovery leaf: CSV 8064, threshold 1.
+    let timeout_script = LotteryScriptBuilder::new(
+        participants,
+        recovery_voters,
+        1,
+        Network::Regtest,
+    )
+    .build_recovery_script(deposits_core::TIMEOUT_RECOVERY_CSV_BLOCKS)
+    .expect("timeout-recovery script should build at threshold 1");
+
+    // Single-sig case: recovery script emits a bare
+    // <pubkey> OP_CHECKSIG. Witness is just the sig.
+    let dummy_sig = vec![0xAAu8; 64];
+    let stack_inputs = vec![dummy_sig];
+
+    let mut interp = Interp::new(stack_inputs);
+    interp
+        .run(&timeout_script)
+        .expect("timeout-recovery should accept single sig");
+
+    let top = interp.stack.last().expect("script left empty stack");
+    assert!(
+        read_scriptbool(top),
+        "timeout-recovery leaf returned FALSE: stack={:?}",
+        interp.stack
+    );
+}
+
+/// Negative case for the timeout-recovery leaf: empty witness
+/// (nobody signed). The bare OP_CHECKSIG sees an empty sig and
+/// pushes 0, so the script returns FALSE.
+#[test]
+fn high_q_timeout_recovery_rejects_empty_signature() {
+    let n = 15usize;
+    let mut participants = Vec::new();
+    for i in 0..n {
+        let (p, _) = participant((i + 1) as u8, 1);
+        participants.push(p);
+    }
+    let recovery_voters = standard_recovery_voters();
+
+    let timeout_script = LotteryScriptBuilder::new(
+        participants,
+        recovery_voters,
+        1,
+        Network::Regtest,
+    )
+    .build_recovery_script(deposits_core::TIMEOUT_RECOVERY_CSV_BLOCKS)
+    .unwrap();
+
+    let stack_inputs: Vec<Vec<u8>> = vec![Vec::new()]; // empty sig
+    let mut interp = Interp::new(stack_inputs);
+    interp.run(&timeout_script).unwrap();
+
+    let top = interp.stack.last().unwrap();
+    assert!(
+        !read_scriptbool(top),
+        "timeout-recovery with empty sig must return FALSE"
+    );
 }

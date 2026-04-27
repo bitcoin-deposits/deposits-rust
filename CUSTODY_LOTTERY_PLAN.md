@@ -208,13 +208,55 @@ The kaitai schema (`deposits_protocol.ksy`) was updated to retire field IDs 106 
 
 **All 224+ tests across the workspace pass after the rework — zero regressions.**
 
-#### Phase 5e — Bond-ratio enforcement — pending
+#### Phase 5e — Bond-ratio enforcement — pending (design recorded)
 
-The Phase 2 helper `check_bond_ratio_precondition` is in place but unwired. The natural enforcement point depends on a design call: at `DisputeArmed` ingest (conservative against worst-case N=15) vs. at confiscation time (against realized N, but requires fetching each disputant's collateral from their own ledger — significant extra wiring). Defer until 5d lands so we can decide based on the new validation surface.
+The Phase 2 helper `check_bond_ratio_precondition(n, bond, disputed_value)` exists and is unit-tested but not yet wired. The wiring depends on a design call between two viable enforcement points:
 
-#### Phase 5f — Retry-depth orchestration counter — pending
+**Option A — at `DisputeArmed` ingest, conservative against `MAX_DISPUTANTS=15`:**
+- Add `bond_locked: u64` to `DisputeArmed` (small wire-format addition; pre-release so safe). Disputants self-attest their bond at arm time.
+- Validators run `check_bond_ratio_precondition(MAX_DISPUTANTS, bond_locked, disputed_value)` — using the worst-case ratio `(N-1)/N = 14/15 ≈ 0.93×`. A disputant who arms with less is rejected before the dispute can progress.
+- Validators cross-check the attested `bond_locked` against the disputant's actual `collateral_amount` in their own ledger (which the watcher has from `QuorumJoin` flow).
+- Pros: fail-fast (rejection at arm time); single-attestation point; bond data already in scope.
+- Cons: conservative — a disputant who would be fine for the realized N=3 still has to over-bond against N=15.
 
-Track failed lottery rounds at the dispute layer; declare the dispute void after `⌊N/2⌋` rounds and let the CSV-8064 timeout-recovery leaf become the only remaining spend path. Touches dispute orchestration that's still mid-actor-migration, so it's cleanest to land last.
+**Option B — at confiscation time, against realized N:**
+- `recovery confiscate` uses `participants.len()` (the realized count) and runs `check_bond_ratio_precondition(realized_n, ...)` for each disputant.
+- Per-disputant bond requires fetching each one's ledger from Nostr (their `collateral_amount`).
+- Pros: precise — bond ratio matches actual N.
+- Cons: significant Nostr fetch work in `recovery_confiscate`; failure mode is less ergonomic (dispute already armed before bond rejection bites).
+
+**Recommendation: Option A.** The wire-format addition is cheap, the conservative ratio is a feature not a bug (it discourages thinly-bonded disputes from arming in the first place), and we avoid expanding `recovery_confiscate`'s fetch surface. Implementation:
+
+1. Add `bond_locked: u64` to `DisputeArmed` in `deposits-protocol/src/messages/types.rs` and the TLV codec (next free field ID, e.g. 124).
+2. Wire `check_bond_ratio_precondition(MAX_DISPUTANTS, bond_locked, disputed_value)` into `Ledger::validate_operation` for `DisputeArmed`.
+3. Cross-check `bond_locked` against the disputant's `collateral_amount` (watcher-side state) — refuse if attested > actual.
+4. `recovery arm` reads the operator's `collateral_amount` from local state and emits it as `bond_locked` in the constructed `DisputeArmed`.
+
+**Test:** unit test for the validator rejection at sub-threshold bond. Tier-3 integration test on a Q=5 cluster where one disputant under-bonds.
+
+#### Phase 5f — Retry-depth orchestration counter — pending (design recorded)
+
+After a dispute reaches the lottery and the lottery fails (no winner claims within the primary CSV-144 window), the protocol can fall back to recovery. But cascading failures — recovery → new operator → new dispute → new lottery, repeating — should not be unbounded. The design specifies a hard cap of `⌊N/2⌋` lottery rounds before the dispute is declared void.
+
+**State to track:**
+- Add `dispute_round_count: u8` to `LedgerState` (0 in normal operation).
+- Increment in `apply()` for each `DisputeEnter` that transitions from `Normal` → `Disputed`.
+- The counter is per-ledger (not per-fork-branch) — it's about the disputed reserves UTXO's history, not any one disputant's behaviour.
+
+**Enforcement at `DisputeEnter`:**
+- If `dispute_round_count >= ⌊N/2⌋`, where N is the current armed-disputant count from the *previous* round, refuse the new `DisputeEnter`. Emit `DisputeRoundCapExhausted`.
+- Initial round: counter is 0, no check fires; the disputed ledger's first dispute always proceeds.
+
+**Void-declaration artifact:**
+- The CSV-8064 timeout-recovery leaf (added in Phase 4c) is the on-chain artifact. Once the dispute is declared void, the lottery output sits unspent for ~8 weeks until any single recovery voter can sweep it via the CSV-8064 leaf.
+- A `DisputeYield { reason: "retry-cap exhausted" }` message records the void at the ledger layer, transitioning to `Tombstoned`.
+
+**Where this overlaps with the actor migration:**
+The dispute orchestration logic lives in `deposits-node/src/node/dispute.rs` and handler.rs. The actor migration's open Step 8 ("event-driven dispute drivers") will rewrite this path to be reactive to ledger-state events rather than polling. Best to land 5f *after* Step 8 — otherwise we'd be wiring a counter into code that's about to be replaced.
+
+**Sequencing:** 5f is the last lottery-rollout phase. Its dependencies are (a) actor migration Step 8 (event-driven dispute drivers), (b) Phase 5e (bond-ratio gives us another reason to track per-disputant state at arm time, simplifying the counter wiring).
+
+**Test:** unit test on `LedgerState::apply` — sequence of DisputeEnter/Yield/Enter/Yield up to the cap. Tier-3 integration test where a malicious disputant repeatedly forces dispute rounds; verify the protocol caps at `⌊N/2⌋` and the CSV-8064 timeout-recovery leaf is the surviving spend path.
 
 **Tier-3 integration test target** (after 5b/5c/5d): end-to-end dispute on a Q=5 cluster: forge → arm → confiscate → reveal → claim → DisputeAcquire. Verify final ledger state has the new operator and the lottery output has been spent to the winner's reserves. With 5e/5f added, expand to a Q=11 partial-reveal scenario.
 
