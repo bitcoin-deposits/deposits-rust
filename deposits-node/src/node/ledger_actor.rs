@@ -30,7 +30,8 @@
 //! and finally drop the parallel `DepositsHandler::ledgers` map.
 //! See `MEMORY.md` references for the migration plan.
 
-use bitcoin::secp256k1::PublicKey;
+use bitcoin::secp256k1::{PublicKey, SecretKey};
+use deposits_core::messages::LedgerOperation;
 use deposits_core::types::{CosignEntry, SignedLedgerUpdate};
 use tokio::sync::{mpsc, oneshot};
 
@@ -67,8 +68,33 @@ pub enum LedgerEvent {
     /// this event and the actor drives staging + cosig + broadcast.
     LocalCommit(Box<SignedLedgerUpdate>),
 
+    /// True 8b — the actor drives a new commit end to end. Replaces
+    /// the legacy `Node::commit_operation` body: actor stages, runs
+    /// the cosig round (if quorum is active or this is a first
+    /// `QuorumBegin`), operator-signs, applies, persists, and
+    /// broadcasts. `Node::commit_operation` becomes a thin shim that
+    /// emits this event and awaits `reply`; on success it mirrors
+    /// the result onto `handler.ledgers` so legacy readers stay
+    /// consistent until 8c migrates them.
+    Commit {
+        operation: LedgerOperation,
+        block_height: u32,
+        block_hash: [u8; 32],
+        reply: oneshot::Sender<Result<CommitResult, String>>,
+    },
+
     /// Drained from the run loop on shutdown.
     Shutdown,
+}
+
+/// Result the actor returns on a successful `Commit`. The drainer-
+/// side `Node::commit_operation` shim mirrors `update` back into
+/// `handler.ledgers` (until 8c removes that map) and returns
+/// `event_id` to the caller.
+#[derive(Debug)]
+pub struct CommitResult {
+    pub event_id: String,
+    pub update: SignedLedgerUpdate,
 }
 
 /// Specification for an on-chain confiscation transaction the actor
@@ -91,8 +117,14 @@ pub struct ConfiscationSpec {
 /// so the actor can await majority cosignatures before sealing.
 #[derive(Debug)]
 pub enum LedgerOutbound {
-    /// Publish a fully-formed `SignedLedgerUpdate` over Nostr.
-    Broadcast(Box<SignedLedgerUpdate>),
+    /// Publish a fully-formed `SignedLedgerUpdate` over Nostr. The
+    /// optional `reply` is set when the caller needs the resulting
+    /// event id (e.g. the actor-driven commit path); fire-and-forget
+    /// when `None` (legacy and disposable broadcasts).
+    Broadcast {
+        update: Box<SignedLedgerUpdate>,
+        reply: Option<oneshot::Sender<Result<String, String>>>,
+    },
 
     /// Publish a kind:9101 fraud broadcast.
     BroadcastFraud(Box<deposits_core::fraud::FraudBroadcast>),
@@ -100,12 +132,14 @@ pub enum LedgerOutbound {
     /// Coordinator: collect cosignatures from the listed members for
     /// this update. When threshold reached (or timeout), respond via
     /// the oneshot. The actor blocks its run loop on this — it's the
-    /// only synchronous outbound path.
+    /// only synchronous outbound path. Reply is `Result` so the actor
+    /// can distinguish a real cosig failure (abort the commit) from
+    /// "no quorum needed yet" (proceed with operator-only signature).
     RequestCosig {
         update: Box<SignedLedgerUpdate>,
         members: Vec<PublicKey>,
         threshold: usize,
-        reply: oneshot::Sender<Vec<CosignEntry>>,
+        reply: oneshot::Sender<Result<Vec<CosignEntry>, String>>,
     },
 
     /// Coordinator + wallet: build, sign, and broadcast the on-chain
@@ -200,6 +234,12 @@ pub struct LedgerActor {
         bitcoin::secp256k1::PublicKey,
         ForkObservation,
     >,
+    /// Operator's signing key, captured at actor spawn from the
+    /// node's wallet. Used by `handle_commit` (true 8b) to sign new
+    /// updates the actor produces. Stable for the daemon's lifetime
+    /// — same key is used by the legacy `Node::commit_operation`
+    /// path, so no risk of key drift between paths.
+    pub operator_secret: SecretKey,
 }
 
 /// Step 8a — per-disputer fork-branch observation state.
@@ -668,6 +708,141 @@ impl LedgerActor {
         append_update_to(&self.persistence_path, update)
     }
 
+    /// True 8b — drive a new commit end to end on this ledger.
+    ///
+    /// Mirrors what `Node::commit_operation` used to do, but with the
+    /// actor's owned `Ledger` as the authoritative state and the
+    /// outbox as the only path back to the rest of the daemon
+    /// (cosig collection, broadcast). The async work happens inline
+    /// in the run loop because each actor is single-tasked — this
+    /// blocks other events on this ledger but not on others, which
+    /// matches the per-ledger staging-lock semantics the legacy
+    /// path used.
+    ///
+    /// Returns the broadcast event id and the fully-signed update
+    /// (so `Node::commit_operation`'s shim can mirror it onto
+    /// `handler.ledgers` for legacy readers until 8c migrates them).
+    async fn handle_commit(
+        &mut self,
+        operation: LedgerOperation,
+        block_height: u32,
+        block_hash: [u8; 32],
+    ) -> Result<CommitResult, String> {
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+
+        // 1. Stage on the actor's ledger. validate_operation runs
+        //    inside; mirrors what Node used to do via handler.ledgers.
+        let mut staged = self
+            .ledger
+            .stage_operation(operation, block_height, block_hash)
+            .map_err(|e| format!("stage failed: {}", e))?;
+
+        // 2. Cosign — required when the quorum is active OR when this
+        //    is the very first QuorumBegin (which transitions the
+        //    state machine PreQuorum -> Active and so needs member
+        //    attestation even though the state is still PreQuorum at
+        //    stage time). Same gate as the legacy path.
+        let quorum_active =
+            self.ledger.state.quorum_state == deposits_core::QuorumState::Active;
+        let is_first_quorum_begin = !quorum_active
+            && matches!(&staged.operation, LedgerOperation::QuorumBegin { .. });
+        if quorum_active || is_first_quorum_begin {
+            let members: Vec<PublicKey> = self
+                .ledger
+                .state
+                .quorum_members
+                .iter()
+                .map(|m| m.pubkey)
+                .collect();
+            let threshold = members.len() / 2 + 1;
+            let (tx, rx) = oneshot::channel::<Result<Vec<CosignEntry>, String>>();
+            let send_res = self.outbox.send((
+                self.ledger_id.clone(),
+                LedgerOutbound::RequestCosig {
+                    update: Box::new(staged.update.clone()),
+                    members: members.clone(),
+                    threshold,
+                    reply: tx,
+                },
+            ));
+            if let Err(e) = send_res {
+                return Err(format!("RequestCosig outbox send failed: {}", e));
+            }
+            let entries = rx
+                .await
+                .map_err(|_| "RequestCosig reply dropped".to_string())??;
+            let mut sorted = entries;
+            sorted.sort_by(|a, b| {
+                a.cosigner_pubkey
+                    .serialize()
+                    .cmp(&b.cosigner_pubkey.serialize())
+            });
+            staged.update.cosignatures = sorted;
+            staged.update.cosigner_pubkey = None;
+            staged.update.member_ledger_hash = None;
+            staged.update.cosign_signature = [0u8; 64];
+            staged.update.content_hash = staged.update.compute_hash();
+        }
+
+        // 3. Operator-sign with the actor's stored secret. The data
+        //    we sign covers content + every cosignature, matching
+        //    what `operator_signing_data()` builds — same shape as
+        //    the legacy path so peers' verifiers don't notice.
+        {
+            let secp = Secp256k1::new();
+            let data = staged.update.operator_signing_data();
+            let hash = sha256::Hash::hash(&data);
+            let msg = Message::from_digest(*hash.as_byte_array());
+            let keypair = Keypair::from_secret_key(&secp, &self.operator_secret);
+            staged.update.operator_signature = secp.sign_schnorr(&msg, &keypair).serialize();
+        }
+
+        // 4. Apply on the actor's ledger. After this point the
+        //    actor's view is authoritative; `handler.ledgers`
+        //    becomes the lagging mirror until 8c.
+        let update_for_return = staged.update.clone();
+        self.ledger
+            .commit_staged(staged)
+            .map_err(|e| format!("commit_staged failed: {}", e))?;
+
+        // 5. Persist to .actor.log so the on-disk shadow stays in
+        //    sync with the in-memory tip even if the daemon dies
+        //    before broadcast.
+        if let Err(e) = self.append_update_row(&update_for_return) {
+            tracing::warn!(
+                "LedgerActor[{}…] handle_commit persist seq {} failed: {}",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                update_for_return.sequence_number,
+                e
+            );
+        }
+
+        // 6. Broadcast over Nostr via the outbox. Wait for the
+        //    event id so callers (whose API contract returns
+        //    `String`) get the same answer they used to.
+        let (btx, brx) = oneshot::channel::<Result<String, String>>();
+        let send_res = self.outbox.send((
+            self.ledger_id.clone(),
+            LedgerOutbound::Broadcast {
+                update: Box::new(update_for_return.clone()),
+                reply: Some(btx),
+            },
+        ));
+        if let Err(e) = send_res {
+            return Err(format!("Broadcast outbox send failed: {}", e));
+        }
+        let event_id = brx
+            .await
+            .map_err(|_| "Broadcast reply dropped".to_string())?
+            .unwrap_or_default(); // legacy path also tolerates broadcast failure (see operations.rs)
+
+        Ok(CommitResult {
+            event_id,
+            update: update_for_return,
+        })
+    }
+
     /// Run loop. Step 4 implements `Inbound` to keep an in-memory
     /// shadow of the ledger; LocalCommit + Cosign are still stubs.
     pub async fn run(mut self) {
@@ -687,6 +862,17 @@ impl LedgerActor {
                 }
                 LedgerEvent::LocalCommit(update) => {
                     self.handle_local_commit_shadow(*update);
+                }
+                LedgerEvent::Commit {
+                    operation,
+                    block_height,
+                    block_hash,
+                    reply,
+                } => {
+                    let res = self
+                        .handle_commit(operation, block_height, block_hash)
+                        .await;
+                    let _ = reply.send(res);
                 }
                 LedgerEvent::Shutdown => {
                     tracing::info!(

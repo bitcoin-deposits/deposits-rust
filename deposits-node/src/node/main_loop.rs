@@ -984,26 +984,34 @@ impl Node {
                             );
                             node.dispute_wakeup.notify_one();
                         }
-                        LedgerOutbound::Broadcast(update) => {
-                            // Fire-and-forget broadcast over Nostr.
-                            // Spawn so a slow relay doesn't stall the
-                            // drainer (and other actors' events) on
-                            // this ledger's broadcast.
+                        LedgerOutbound::Broadcast { update, reply } => {
+                            // Fire-and-forget when reply is None;
+                            // sync (await event id) when set. Always
+                            // spawn so a slow relay can't stall the
+                            // drainer.
                             let node = Arc::clone(&node);
                             let lid = lid.clone();
                             tokio::spawn(async move {
-                                match node.nostr.broadcast_ledger_update(&update).await {
-                                    Ok(_) => tracing::trace!(
+                                let res = node
+                                    .nostr
+                                    .broadcast_ledger_update(&update)
+                                    .await;
+                                match (&res, &reply) {
+                                    (Ok(_), _) => tracing::trace!(
                                         "actor_outbox[{}…] Broadcast seq={} ok",
                                         &lid[..16.min(lid.len())],
                                         update.sequence_number
                                     ),
-                                    Err(e) => tracing::warn!(
+                                    (Err(e), _) => tracing::warn!(
                                         "actor_outbox[{}…] Broadcast seq={} failed: {}",
                                         &lid[..16.min(lid.len())],
                                         update.sequence_number,
                                         e
                                     ),
+                                }
+                                if let Some(reply) = reply {
+                                    let _ = reply
+                                        .send(res.map_err(|e| e.to_string()));
                                 }
                             });
                         }
@@ -1011,29 +1019,28 @@ impl Node {
                             // Cosig collection talks to peers over
                             // Nostr; spawn so the drainer doesn't
                             // serialize on a multi-second round-trip.
-                            // The actor awaits the oneshot and gets
-                            // an empty Vec on Err (matches the legacy
-                            // shape — Node::commit_operation already
-                            // tolerates short-cosig fallbacks).
+                            // Reply is Result so the actor can fail
+                            // its commit cleanly if cosig errors out
+                            // (vs. the legacy semantics of always
+                            // returning a Vec, which we kept for
+                            // Phase A's debug-only handler but the
+                            // actor needs error propagation).
                             let node = Arc::clone(&node);
                             let lid = lid.clone();
                             tokio::spawn(async move {
-                                let entries = match node
+                                let result = node
                                     .request_cosign(&lid, &update)
                                     .await
-                                {
-                                    Ok(e) => e,
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "actor_outbox[{}…] RequestCosig seq={} failed: {}",
-                                            &lid[..16.min(lid.len())],
-                                            update.sequence_number,
-                                            e
-                                        );
-                                        Vec::new()
-                                    }
-                                };
-                                let _ = reply.send(entries);
+                                    .map_err(|e| e.to_string());
+                                if let Err(ref e) = result {
+                                    tracing::warn!(
+                                        "actor_outbox[{}…] RequestCosig seq={} failed: {}",
+                                        &lid[..16.min(lid.len())],
+                                        update.sequence_number,
+                                        e
+                                    );
+                                }
+                                let _ = reply.send(result);
                             });
                         }
                         other => {

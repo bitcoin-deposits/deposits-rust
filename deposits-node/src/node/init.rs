@@ -108,6 +108,11 @@ impl Node {
                     // to load.
                     forks_dir: ledgers_dir,
                     fork_observations: std::collections::HashMap::new(),
+                    // 8b/8c phase B: operator's signing key for the
+                    // actor-driven commit path. Same key the legacy
+                    // path uses (wallet.operator_secret), captured
+                    // once at spawn — stable for the daemon's life.
+                    operator_secret: wallet.operator_secret(),
                 };
                 tokio::spawn(actor.run());
                 ledger_actors.insert(
@@ -340,6 +345,7 @@ impl Node {
             persistence_path,
             forks_dir: self.actor_ledgers_dir.clone(),
             fork_observations: std::collections::HashMap::new(),
+            operator_secret: self.wallet.operator_secret(),
         };
         tokio::spawn(actor.run());
         let mut map = self.ledger_actors.lock().unwrap();

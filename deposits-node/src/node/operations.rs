@@ -134,134 +134,97 @@ impl Node {
         ledger_id: &str,
         operation: deposits_core::messages::LedgerOperation,
     ) -> Result<String, Error> {
-        use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::Keypair;
         use deposits_core::ledger::StagedUpdate;
 
-        // Acquire per-ledger lock — one update at a time
+        // True 8b: the actor drives the commit end to end (stage,
+        // cosig, sign, apply, persist, broadcast). This shim:
+        //   1. acquires the per-ledger staging lock so two concurrent
+        //      commits on the same ledger can't both queue Commit
+        //      events at the actor (the actor would still serialize
+        //      via its mpsc, but that loses caller-error attribution),
+        //   2. snapshots block_height/block_hash from the wallet
+        //      (only Node has wallet access),
+        //   3. dispatches `LedgerEvent::Commit` to the actor and
+        //      awaits the reply,
+        //   4. mirrors the resulting update onto `handler.ledgers`
+        //      so legacy readers stay consistent until 8c migrates
+        //      them to the actor's query API.
         let _lock = self.acquire_staging_lock(ledger_id).await;
 
         let block_height = self.wallet.get_block_height().unwrap_or(0);
         let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
 
-        // 1. Stage: validate + build, no state changes
-        let mut staged: StagedUpdate = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone();
-            let ledger = arc.read().unwrap();
-            ledger
-                .stage_operation(operation, block_height, block_hash)
-                .map_err(|e| Error::Protocol(format!("Stage failed: {}", e)))?
+        let inbox = {
+            let map = self.ledger_actors.lock().unwrap();
+            map.get(ledger_id)
+                .ok_or_else(|| {
+                    Error::Protocol(format!(
+                        "No actor for ledger {} — cannot commit",
+                        ledger_id
+                    ))
+                })?
+                .inbox
+                .clone()
         };
 
-        // 2. Cosign. We collect majority cosignatures in two cases:
-        //   (a) quorum is active — the usual post-rotation cosig requirement.
-        //   (b) the op itself is a QuorumBegin — even the *first* one, issued
-        //       while state is still PreQuorum, needs attestation from the
-        //       members it's about to activate. Without this the operator
-        //       could unilaterally transition with a fabricated member list
-        //       or an unconfirmed reserves UTXO.
-        let quorum_active = self.is_quorum_active(ledger_id);
-        let is_first_quorum_begin = !quorum_active
-            && matches!(
-                &staged.operation,
-                deposits_core::messages::LedgerOperation::QuorumBegin { .. }
-            );
-        if quorum_active || is_first_quorum_begin {
-            let entries = self.request_cosign(ledger_id, &staged.update).await?;
-            // Sort by pubkey and set on update
-            let mut sorted = entries;
-            sorted.sort_by(|a, b| {
-                a.cosigner_pubkey
-                    .serialize()
-                    .cmp(&b.cosigner_pubkey.serialize())
-            });
-            staged.update.cosignatures = sorted;
-            staged.update.cosigner_pubkey = None;
-            staged.update.member_ledger_hash = None;
-            staged.update.cosign_signature = [0u8; 64];
-            staged.update.content_hash = staged.update.compute_hash();
-        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let operation_for_mirror = operation.clone();
+        inbox
+            .send(super::ledger_actor::LedgerEvent::Commit {
+                operation,
+                block_height,
+                block_hash,
+                reply: tx,
+            })
+            .await
+            .map_err(|e| Error::Protocol(format!("Actor inbox send failed: {}", e)))?;
 
-        // 3. Operator sign using operator_signing_data() (covers content + all cosignatures)
-        {
-            let secp = &self.secp;
-            let data = staged.update.operator_signing_data();
-            let hash = sha256::Hash::hash(&data);
-            let msg = bitcoin::secp256k1::Message::from_digest(*hash.as_byte_array());
-            let keypair = Keypair::from_secret_key(secp, &self.wallet.operator_secret());
-            let sig = secp.sign_schnorr(&msg, &keypair);
-            staged.update.operator_signature = sig.serialize();
-        }
+        let result = rx
+            .await
+            .map_err(|_| Error::Protocol("Actor dropped Commit reply".to_string()))?
+            .map_err(Error::Protocol)?;
 
-        // 4. Apply state changes (persist happens via dirty_ledgers after commit)
-        let update_clone = staged.update.clone();
+        // Mirror the actor's commit onto handler.ledgers + jsonl so
+        // every reader still backed by handler sees the new tip.
+        // 8c removes this when readers move to the actor query API.
         {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let arc = ledgers
-                .get(ledger_id)
-                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
-                .clone();
+            let arc = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(ledger_id)
+                    .ok_or_else(|| {
+                        Error::Protocol(format!(
+                            "handler.ledgers missing entry for {} after commit",
+                            ledger_id
+                        ))
+                    })?
+                    .clone()
+            };
             let mut ledger = arc.write().unwrap();
+            let staged = StagedUpdate {
+                operation: operation_for_mirror,
+                update: result.update.clone(),
+            };
             ledger
                 .commit_staged(staged)
-                .map_err(|e| Error::Protocol(format!("Commit failed: {}", e)))?;
+                .map_err(|e| Error::Protocol(format!("Mirror commit_staged: {}", e)))?;
         }
-
-        // 5. Persist to disk immediately (crash safety — before broadcast)
         if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-            tracing::warn!("Failed to persist ledger after commit: {}", e);
+            tracing::warn!("Mirror persist_ledger_to_disk failed: {}", e);
         }
-
-        // 6. Broadcast
-        let event_id = self
-            .nostr
-            .broadcast_ledger_update(&update_clone)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Failed to broadcast update seq={}: {}",
-                    update_clone.sequence_number,
-                    e
-                );
-                String::new()
-            });
 
         tracing::info!(
-            "Committed seq={} for ledger {}... (cosigned={}, event={})",
-            update_clone.sequence_number,
+            "Committed seq={} for ledger {}... (event={})",
+            result.update.sequence_number,
             &ledger_id[..16.min(ledger_id.len())],
-            quorum_active,
-            if event_id.len() > 16 {
-                &event_id[..16]
+            if result.event_id.len() > 16 {
+                &result.event_id[..16]
             } else {
-                &event_id
+                &result.event_id
             },
         );
 
-        // Step 8b (shadow): mirror the just-committed update onto the
-        // actor's view via `LocalCommit`. The actor records the
-        // outcome on its own `Ledger` shadow + persists to
-        // `.actor.log`, keeping its mirror current for both inbound
-        // (apply_inbound) AND outbound (this) updates. Fire-and-
-        // forget — the actor's failure to record the shadow doesn't
-        // unwind the authoritative commit we just made.
-        if let Some(inbox) = self
-            .ledger_actors
-            .lock()
-            .unwrap()
-            .get(ledger_id)
-            .map(|h| h.inbox.clone())
-        {
-            let _ = inbox.try_send(super::ledger_actor::LedgerEvent::LocalCommit(Box::new(
-                update_clone.clone(),
-            )));
-        }
-
-        Ok(event_id)
+        Ok(result.event_id)
     }
 
     #[tracing::instrument(name = "sign_and_broadcast", skip(self), fields(ledger = &ledger_id[..16.min(ledger_id.len())]))]
