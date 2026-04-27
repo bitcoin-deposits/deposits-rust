@@ -73,44 +73,53 @@ When a quorum member detects fraud (via Kind 9101 broadcast or direct observatio
 
 ### Lottery
 
-The lottery determines which quorum member takes custody of the disputed ledger. It uses on-chain entropy to prevent manipulation.
+The lottery determines which quorum member takes custody of the disputed ledger. Selection happens *on chain*, enforced by a Tapscript that only lets the script-determined winner spend the lottery output. Off-chain agreement on the outcome is not required. See DEP-03 §"Custody Lottery" and `CUSTODY_LOTTERY.md` for full script construction details.
 
-#### Phase 1: Commitment
+#### Phase 1: Commitment (DisputeArmed)
 
 Each participating quorum member appends `DisputeArmed` to their fork with:
 
-- **commitment_hash**: `HASH160(preimage)` where `preimage` is a 32-byte random value chosen by the member
-- **target_reserves**: the bitcoin address where the member wants reserves sent if they win
+- **commitment_hash**: `HASH160(preimage)` where `preimage` is a 17-to-`(16+N)`-byte random value chosen by the member. The preimage's *length* contributes the entropy: `contribution = LEN(preimage) - 16` lies in `1..=N`.
+- **target_reserves**: the bitcoin address where the member wants their winnings sent if they win
 - **armed_block**: the block height at time of arming
 
 Members must arm within `dispute_arm_blocks` after `DisputeEnter`. Late entries are excluded. `dispute_arm_blocks` is recorded in `QuorumAddMember` so all parties agree on the obligation at join time.
 
-#### Phase 2: Entropy
+The participant ordering (canonical, derived from sorted `quorum_pubkey`) and the committed hashes go into the lottery script that the confiscation transaction will lock funds into.
 
-The participants agree on an entropy block — a future bitcoin block whose hash is unpredictable at commitment time. The `DisputeAcquire` operation records the `entropy_block_height` and `entropy_block_hash`.
+#### Phase 2: Confiscation
 
-The entropy block is the first block mined after all participants have armed (or after the arm window closes).
+After the arm window closes, the recovery quorum (quorum members minus the disputants — the disputed operator + non-arming members) cosigns a confiscation transaction that spends the disputed reserves UTXO to a new Taproot output: the **lottery output**. Its tapscript tree contains:
 
-#### Phase 3: Reveal and Selection
+- A primary lottery claim leaf that dispatches to the `(sum mod N)`-th disputant on full reveal
+- For N≥11, K=1 partial-reveal leaves at CSV 72 (one per missing disputant) that handle the dominant single-non-revealer case
+- A long-tail recovery cascade at CSV 144 / 1008 / 4032 with thresholds T / T-1 / T-2
+- A timeout-recovery escape hatch at CSV 8064 with threshold 1
 
-Each participant reveals their preimage. The winner is selected by:
+#### Phase 3: Reveal (CustodyLotteryReveal)
 
-    score(participant) = SHA256(preimage || entropy_block_hash)
+Once the confiscation transaction confirms, each disputant publishes a `CustodyLotteryReveal` event (Nostr Kind 9105) carrying their preimage. The signature on the reveal binds `(ledger_id, preimage)` to the disputant's identity.
 
-The participant with the lowest score wins. This is verifiable by anyone with the preimages and the block hash.
+#### Phase 4: Claim and Settlement (DisputeAcquire)
 
-If a participant does not reveal their preimage within the reveal window, they forfeit.
-
-#### Phase 4: Settlement
+The script's selection rule: **winner index = sum(LEN(preimage_i) - 16) mod N**, where preimages are ordered by sorted disputant pubkey. Only the winner's signature satisfies the lottery claim leaf, so Bitcoin itself enforces the outcome.
 
 The winner:
 
-1. Constructs a transaction spending the old reserves UTXO to their `target_reserves` address (see DEP-03 for transaction format)
-2. Appends `DisputeAcquire` to their fork with the `spend_txid`, `new_reserves_address`, `new_custodian`, entropy block data
-3. Establishes a new quorum on the ledger
-4. Begins co-signing updates as the new operator
+1. Collects all revealed preimages from Nostr
+2. Computes the winning index off-chain via `LotteryOutput::calculate_winner` (must agree with what the script will accept)
+3. Constructs the claim transaction spending the lottery output to their `target_reserves` (see DEP-03 for witness construction)
+4. Broadcasts the claim TX
+5. Appends `DisputeAcquire` to their fork carrying `claim_txid` (the claim TX's hash), `new_custodian`, and `new_reserves_address`
+6. Establishes a new quorum on the ledger and begins co-signing updates as the new operator
 
 Losers append `DisputeYield` to their forks, transitioning them to Tombstoned state. Only the winner's fork continues as the canonical ledger.
+
+If exactly one disputant fails to reveal within the timeout, the remaining N-1 can spend through the partial-reveal leaf for that missing index — same lottery mechanics, just over the smaller revealer set. If 2+ fail to reveal, the dispute falls through to the CSV-144 recovery cascade.
+
+#### Pre-release policy cap
+
+The script supports up to N=15 disputants, but the operational policy in this release is `MAX_QUORUM_SIZE_POLICY = 8` total quorum members → at most 7 disputants per dispute (the operator is barred from disputing their own ledger by `validate_update_signer`). `Ledger::validate_operation` rejects `QuorumBegin` whose total exceeds the policy cap. Lifting it later is a one-line constant change with no script or wire-format implications.
 
 #### Respectful vs Punitive
 
@@ -130,11 +139,11 @@ Wallets continue addressing the same ledger by its `ledger_id`, accepting only r
 
 1. Query the network for dispute events (Kind 9103) on the ledger
 2. Replay ledger updates to identify the last valid sequence
-3. Look for `DisputeAcquire` events to identify the new operator
-4. Wait for the reserves UTXO spend to confirm on-chain and verify that the `DisputeAcquire` contains a `spend_txid` matching the confirmed transaction
+3. Look for `DisputeAcquire` events to identify the new operator and the `claim_txid`
+4. Wait for the lottery output's claim transaction to confirm on-chain and verify that the `DisputeAcquire`'s `claim_txid` matches a confirmed transaction that spends the expected lottery output (see DEP-03)
 5. Verify the new operator's quorum and begin accepting their co-signed updates
 
-Wallets must not accept post-dispute updates until the on-chain reserves spend is confirmed. This prevents an attacker from publishing fake `DisputeAcquire` events claiming custody before the lottery resolves.
+Wallets must not accept post-dispute updates until the on-chain claim transaction is confirmed. The claim transaction's witness satisfies the lottery script's `(sum mod N)`-th-disputant rule, so Bitcoin itself proves the new custodian is the script-selected winner. This prevents an attacker from publishing fake `DisputeAcquire` events claiming custody before the lottery resolves.
 
 ## Related DEPs
 

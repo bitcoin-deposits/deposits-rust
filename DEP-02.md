@@ -267,14 +267,14 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 |---|---|---|---|
 | 100 | reason | variable | DisputeEnter |
 | 102 | last_valid_sequence | 8 | DisputeEnter |
-| 116 | entropy_block_height | 4 | DisputeAcquire |
-| 106 | entropy_block_hash | 32 | DisputeAcquire |
 | 108 | new_custodian | 33 | DisputeAcquire |
+| 110 | claim_txid | 32 | DisputeAcquire |
 | 118 | armed_block | 4 | DisputeArmed |
-| 110 | spend_txid | 32 | DisputeAcquire |
 | 120 | new_reserves_address | variable | DisputeAcquire |
 | 112 | commitment_hash | 20 | DisputeArmed (HASH160) |
 | 122 | target_reserves | variable | DisputeArmed |
+
+Field IDs 106 (entropy_block_hash) and 116 (entropy_block_height) were used by an earlier entropy-block-based DisputeAcquire shape and are now retired. Selection moved to an on-chain Tapscript lottery (see DEP-03 §"Custody Lottery"); `claim_txid` records the on-chain spend that proves the script-determined winner.
 
 #### Delivery
 

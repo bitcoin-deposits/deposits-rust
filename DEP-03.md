@@ -65,15 +65,46 @@ The reserves rotation transaction should include an `OP_RETURN` output containin
 
 This is cheap (one additional output on a transaction the operator is already making) and provides a verifiable checkpoint for wallets that suspect relay censorship or data loss.
 
-## Lottery
+## Custody Lottery
 
-When a ledger becomes contested (dispute), quorum members compete for custody via a preimage-based lottery:
+When a ledger becomes contested (dispute), quorum members compete for custody via an on-chain Tapscript lottery. Selection is enforced by Bitcoin script — the (sum mod N)-th disputant in canonical order is the only one whose signature satisfies the claim leaf. Off-chain agreement on the outcome is not required.
 
-1. Each member publishes `DisputeArmed` with a `commitment_hash` (HASH160 of a secret preimage) and a `target_reserves` address
-2. After an entropy block is mined, preimages are revealed
-3. The winner is determined by which preimage, combined with the entropy block hash, produces the lowest value
-4. The winner appends `DisputeAcquire`, spending the reserves to their target address
-5. Losers append `DisputeYield`
+### Flow
+
+1. Each disputing member publishes `DisputeArmed` with a `commitment_hash = HASH160(preimage)` where `preimage` is a 17-to-`(16+N)`-byte random value. The preimage's *length* contributes the entropy: `contribution = LEN(preimage) - 16` lies in `1..=N`.
+2. After the arm window closes, the recovery quorum cosigns a confiscation transaction spending the disputed reserves UTXO into a new Taproot output: the **lottery output**.
+3. Each disputant publishes their preimage as a `CustodyLotteryReveal` event (Nostr Kind 9105).
+4. Once all reveals are observed, the script-determined winner = `(sum_of_contributions) mod N` constructs and broadcasts the **claim transaction**, providing all preimages and their signature in the witness.
+5. The winner appends `DisputeAcquire { new_custodian, claim_txid, new_reserves_address }` to their fork. Losers append `DisputeYield`.
+
+### Lottery Output Tapscript Tree
+
+The lottery output's tapscript tree contains:
+
+- **Leaf 0 — Primary lottery claim.** Verifies all N preimages, computes `sum mod N`, dispatches to the matching pubkey via `OP_CHECKSIG`. Three dispatch regimes by N:
+  - **Linear** (N=2..=5 and N=11..=15): repeated conditional subtraction for `sum mod N`, then linear `if/elif` cascade on the index
+  - **CombinedTable** (N=6..=10): skip the modulo; emit one dispatch arm per integer sum value in `[N, N²]` directly routing to `pubkey_(s mod N)`
+- **Leaves 1..=N** (only for N≥11): K=1 partial-reveal claim leaves, one per missing-disputant index, prefixed with `OP_PUSHNUM_72 OP_CSV OP_DROP`. Each is a sub-lottery for the (N-1) revealers excluding that index, picking its own dispatch regime by N-1.
+- **Long-tail recovery cascade**: `<csv> OP_CSV OP_DROP <threshold> <pubkeys> OP_CHECKMULTISIG` at CSV 144 / 1008 / 4032 with descending thresholds T / T-1 / T-2 (where T is the recovery threshold computed at confiscation time).
+- **Timeout-recovery escape hatch**: CSV 8064 (~8 weeks) with threshold 1 — any single recovery voter can sweep if all else has failed.
+
+The internal key is the BIP-341 NUMS point (no key-path spend possible).
+
+### Witness Construction
+
+For the primary claim leaf, the witness is:
+
+    [signature, preimage_{N-1}, ..., preimage_0, leaf_script, control_block]
+
+with the signature at the bottom of the stack. The script consumes preimages in disputant order, accumulates contributions on the altstack, computes the dispatch index, and verifies the signer's pubkey matches `pubkey_(sum mod N)`.
+
+For partial-reveal leaves (N≥11): identical layout, but only the `N-1` revealer preimages, and the spending input must have `nSequence >= 72`.
+
+For recovery leaves: standard tapscript multisig — `K` of `N` signature slots filled (with empty pushes for unused slots), and `nSequence >= csv_blocks`.
+
+### Pre-release policy cap
+
+The script supports up to N=15 disputants. The current policy in this release is `MAX_QUORUM_SIZE_POLICY = 8` (operator + cosigners), enforced at `QuorumBegin` validation — so disputes can have at most 7 disputants. Lifting this cap is a one-line constant change with no script or wire-format implications. See `CUSTODY_LOTTERY.md` for full design rationale.
 
 ### Respectful Custody
 
