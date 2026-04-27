@@ -97,6 +97,14 @@ pub const KIND_LEDGER_DISPUTE: u16 = 9103;
 /// Published in response to a dispute, signaling agreement to recover.
 pub const KIND_RECOVERY_AGREE: u16 = 9104;
 
+/// Custom Kind for custody-lottery preimage reveals.
+/// Uses range 1000-9999 for relay storage — other disputants must be able
+/// to fetch all reveals to compute the lottery winner. Published by each
+/// disputant during the reveal phase after `recovery confiscate` lands the
+/// lottery output on chain. The preimage is the secret committed via the
+/// `commitment_hash` field of an earlier `DisputeArmed`.
+pub const KIND_CUSTODY_LOTTERY_REVEAL: u16 = 9105;
+
 /// Custom Kind for ledger advertisement (operator terms)
 /// Uses NIP-33 parameterized replaceable events (30000-39999).
 /// Tag `d` = ledger_id ensures only latest ad per ledger is kept.
@@ -458,6 +466,42 @@ pub struct RecoveryAgreement {
     pub event_id: String,
 
     /// Timestamp
+    #[serde(skip)]
+    pub timestamp: u64,
+}
+
+/// A custody-lottery preimage reveal (one disputant publishing their
+/// secret during the reveal phase). Other disputants fetch all reveals
+/// for the same dispute to compute the lottery winner via
+/// `LotteryOutput::calculate_winner`.
+///
+/// Published as a Nostr event of `KIND_CUSTODY_LOTTERY_REVEAL` (9105).
+/// The event's pubkey identifies the revealing disputant; the
+/// `member_pubkey` field in the content is included for ergonomic
+/// JSON parsing without needing to cross-reference event metadata.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CustodyLotteryReveal {
+    /// The revealing disputant's secp256k1 pubkey (hex).
+    pub member_pubkey: String,
+
+    /// Ledger identifier this reveal applies to.
+    pub ledger_id: String,
+
+    /// The preimage bytes, hex-encoded. Length must be 17..=(16+N)
+    /// where N is the dispute's disputant count; HASH160 of these
+    /// bytes equals the `commitment_hash` from the disputant's
+    /// `DisputeArmed`.
+    pub preimage_hex: String,
+
+    /// Schnorr signature over the reveal (member binds the preimage
+    /// to their identity, hex).
+    pub signature: String,
+
+    /// Nostr event ID of this reveal.
+    #[serde(skip)]
+    pub event_id: String,
+
+    /// Timestamp.
     #[serde(skip)]
     pub timestamp: u64,
 }
@@ -2423,6 +2467,107 @@ impl NostrTransport {
         Ok(agreements)
     }
 
+    /// Publish a custody-lottery preimage reveal.
+    ///
+    /// Called by each disputant during the reveal phase after the
+    /// confiscation TX has confirmed on-chain. Other disputants fetch
+    /// these events to compute the lottery winner.
+    ///
+    /// The signature binds `(ledger_id, preimage)` to the revealing
+    /// disputant's identity, preventing a third party from re-publishing
+    /// the same preimage under a different `member_pubkey`.
+    pub async fn publish_custody_lottery_reveal(
+        &self,
+        ledger_id: &str,
+        preimage: &[u8],
+        keypair: &bitcoin::secp256k1::Keypair,
+    ) -> Result<String, Error> {
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::{Message, Secp256k1};
+
+        let mut sighash_input = Vec::new();
+        sighash_input.extend_from_slice(b"CustodyLotteryReveal:");
+        sighash_input.extend_from_slice(ledger_id.as_bytes());
+        sighash_input.push(0x00);
+        sighash_input.extend_from_slice(preimage);
+
+        let sighash = sha256::Hash::hash(&sighash_input);
+        let secp = Secp256k1::new();
+        let msg = Message::from_digest(sighash.to_byte_array());
+        let signature = secp.sign_schnorr(&msg, keypair);
+
+        let member_pubkey = hex::encode(keypair.public_key().serialize());
+
+        let reveal = CustodyLotteryReveal {
+            member_pubkey: member_pubkey.clone(),
+            ledger_id: ledger_id.to_string(),
+            preimage_hex: hex::encode(preimage),
+            signature: hex::encode(signature.serialize()),
+            event_id: String::new(),
+            timestamp: 0,
+        };
+
+        let content = serde_json::to_string(&reveal)
+            .map_err(|e| Error::Serialization(format!("Failed to serialize reveal: {}", e)))?;
+
+        let event = EventBuilder::new(Kind::Custom(KIND_CUSTODY_LOTTERY_REVEAL), &content)
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_ID),
+                [ledger_id],
+            ))
+            .tag(Tag::custom(TagKind::custom("member"), [&member_pubkey]))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign reveal event: {}", e)))?;
+
+        let event_id = event.id.to_hex();
+
+        self.send_event_with_timeout(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send reveal: {}", e)))?;
+
+        tracing::info!(
+            "Published custody-lottery reveal: ledger={}, member={}, event={}, preimage_len={}",
+            &ledger_id[..16.min(ledger_id.len())],
+            &member_pubkey[..16],
+            &event_id[..16],
+            preimage.len()
+        );
+
+        Ok(event_id)
+    }
+
+    /// Fetch all custody-lottery reveals for a given ledger.
+    ///
+    /// The caller is expected to filter by the disputant set (membership
+    /// in the original dispute) and verify each reveal's signature
+    /// against its `member_pubkey` before passing the preimages to
+    /// `LotteryOutput::calculate_winner`.
+    pub async fn fetch_custody_lottery_reveals(
+        &self,
+        ledger_id: &str,
+    ) -> Result<Vec<CustodyLotteryReveal>, Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_CUSTODY_LOTTERY_REVEAL))
+            .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id)]);
+
+        let events = self
+            .client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch reveals: {}", e)))?;
+
+        let mut reveals = Vec::new();
+        for event in events.iter() {
+            if let Ok(mut reveal) = serde_json::from_str::<CustodyLotteryReveal>(&event.content) {
+                reveal.event_id = event.id.to_hex();
+                reveal.timestamp = event.created_at.as_u64();
+                reveals.push(reveal);
+            }
+        }
+
+        Ok(reveals)
+    }
+
     /// Publish a ledger advertisement
     ///
     /// Uses NIP-33 parameterized replaceable events, so only the latest
@@ -4238,5 +4383,57 @@ impl NostrTransportBuilder {
             self.skip_nostr_verify,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod custody_lottery_reveal_tests {
+    use super::*;
+
+    #[test]
+    fn custody_lottery_reveal_json_roundtrip() {
+        // Locks down the on-the-wire JSON shape of CustodyLotteryReveal —
+        // any rename or field reorder would break wire compat with peers
+        // running an older release. Skipped fields (event_id, timestamp)
+        // must reset to defaults on parse.
+        let r = CustodyLotteryReveal {
+            member_pubkey: "02".to_string() + &"00".repeat(32),
+            ledger_id: "abc123".into(),
+            preimage_hex: "deadbeef".to_string() + &"00".repeat(15),
+            signature: "ff".repeat(64),
+            event_id: "should-not-serialize".into(),
+            timestamp: 999,
+        };
+
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"member_pubkey\""));
+        assert!(json.contains("\"ledger_id\""));
+        assert!(json.contains("\"preimage_hex\""));
+        assert!(json.contains("\"signature\""));
+        assert!(!json.contains("\"event_id\""), "event_id must be #[serde(skip)]");
+        assert!(!json.contains("\"timestamp\""), "timestamp must be #[serde(skip)]");
+
+        let parsed: CustodyLotteryReveal = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.member_pubkey, r.member_pubkey);
+        assert_eq!(parsed.ledger_id, r.ledger_id);
+        assert_eq!(parsed.preimage_hex, r.preimage_hex);
+        assert_eq!(parsed.signature, r.signature);
+        assert_eq!(parsed.event_id, "");
+        assert_eq!(parsed.timestamp, 0);
+    }
+
+    #[test]
+    fn custody_lottery_reveal_kind_is_durable() {
+        // KIND_CUSTODY_LOTTERY_REVEAL must be in the 1000-9999 range so
+        // relays retain the events. Other disputants need to fetch
+        // these reveals well after publish; ephemeral kinds (20000+)
+        // would be auto-deleted by the relay.
+        assert!(
+            (1000..=9999).contains(&KIND_CUSTODY_LOTTERY_REVEAL),
+            "KIND_CUSTODY_LOTTERY_REVEAL ({}) must be in the durable range",
+            KIND_CUSTODY_LOTTERY_REVEAL
+        );
+        // Sits in the dispute-related cluster (9100-9105).
+        assert_eq!(KIND_CUSTODY_LOTTERY_REVEAL, 9105);
     }
 }

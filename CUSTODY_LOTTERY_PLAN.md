@@ -172,9 +172,17 @@ Tests (4 new in `tests/lottery_script_execution.rs`):
 - `create_partial_reveal_witness_rejects_invalid_inputs` — out-of-range `missing_idx`, wrong preimage count.
 - `create_partial_reveal_witness_rejected_when_n_too_small` — N=10 has no partial-reveal leaves; helper refuses with a clear error.
 
-#### Phase 5b — `CustodyLotteryReveal` Nostr message — pending
+#### Phase 5b — `CustodyLotteryReveal` Nostr message — DONE
 
-Define the new operation/message type, allocate a Nostr event kind, add TLV codec. Doesn't break anything — additive.
+Landed:
+- `KIND_CUSTODY_LOTTERY_REVEAL = 9105` in `deposits-node/src/nostr.rs`, slotting next to the dispute-related cluster (`KIND_LEDGER_DISPUTE = 9103`, `KIND_RECOVERY_AGREE = 9104`). Durable kind (1000-9999 range) — relays must retain reveals so other disputants can fetch them well after publish.
+- `CustodyLotteryReveal` struct (member_pubkey, ledger_id, preimage_hex, signature, event_id, timestamp). Uses the same JSON-content + tagged Nostr-event pattern as `RecoveryAgreement`.
+- `NostrTransport::publish_custody_lottery_reveal(ledger_id, preimage, keypair)` — signs `SHA256("CustodyLotteryReveal:" || ledger_id || 0x00 || preimage)` to bind the reveal to the disputant's identity. Tagged with `TAG_LEDGER_ID` and `member`.
+- `NostrTransport::fetch_custody_lottery_reveals(ledger_id)` — fetches all reveals for a given ledger (caller filters by disputant set + verifies signatures before passing preimages to `LotteryOutput::calculate_winner`).
+
+Tests:
+- `custody_lottery_reveal_json_roundtrip` — locks down the wire-format JSON shape (field names + `#[serde(skip)]` on event_id/timestamp). Any rename or field reorder breaks the test.
+- `custody_lottery_reveal_kind_is_durable` — asserts the kind is in the 1000-9999 retention range (not the 20000+ ephemeral range).
 
 #### Phase 5c — `recovery reveal` + `recovery lottery-claim` CLIs — pending
 
