@@ -56,10 +56,16 @@ pub enum LedgerEvent {
         reply: oneshot::Sender<Option<CosignEntry>>,
     },
 
-    /// The local operator wants to commit a new operation. Actor stages,
-    /// requests cosignatures (synchronously), commits, persists, and
-    /// emits a `Broadcast`.
-    LocalCommit(Box<deposits_core::messages::LedgerOperation>),
+    /// The local operator just committed an update via the legacy
+    /// `Node::commit_operation` path; mirror it onto the actor's
+    /// shadow view and persist to `.actor.log`. This is 8b-shadow:
+    /// the actor isn't authoritative for outbound commits yet, but
+    /// it records every committed update so `actor.log` stays a
+    /// faithful mirror of `handler`'s `<id>.jsonl` for both inbound
+    /// AND outbound updates. A future commit ("true 8b") flips the
+    /// flow so `Node::commit_operation` *requests* the commit via
+    /// this event and the actor drives staging + cosig + broadcast.
+    LocalCommit(Box<SignedLedgerUpdate>),
 
     /// Drained from the run loop on shutdown.
     Shutdown,
@@ -506,6 +512,117 @@ impl LedgerActor {
         }
     }
 
+    /// Step 8b (shadow phase) — mirror an already-committed outbound
+    /// update onto the actor's view + persist to `.actor.log`.
+    ///
+    /// Called by the coordinator after `Node::commit_operation`
+    /// successfully finalizes a new update on `handler.ledgers`. The
+    /// actor doesn't drive the commit yet (cosig collection + Nostr
+    /// broadcast still flow through the legacy path); it just records
+    /// the outcome so `.actor.log` stays a faithful mirror of the
+    /// handler's `<id>.jsonl` for both inbound *and* outbound
+    /// updates. A future "true 8b" inverts this: the coordinator
+    /// dispatches via this event and the actor drives the full flow.
+    ///
+    /// The validation is the same as `apply_inbound`'s — operator-key
+    /// match, sequence continuity, dedup on `(seq, content_hash)` —
+    /// because in steady state the broadcast echoes back through
+    /// `apply_inbound` anyway. This shadow path just gets there
+    /// first; the echo is then dedup'd as a no-op.
+    fn handle_local_commit_shadow(
+        &mut self,
+        update: deposits_core::types::SignedLedgerUpdate,
+    ) {
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tlv::TlvDecode;
+
+        if update.operator_id != self.ledger.state.parent_pubkey {
+            tracing::warn!(
+                "LedgerActor[{}…] LocalCommit operator_id mismatch: update={} parent={}",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                hex::encode(&update.operator_id.serialize()[..8]),
+                hex::encode(&self.ledger.state.parent_pubkey.serialize()[..8])
+            );
+            return;
+        }
+
+        // Idempotent dedup — the relay echo will arrive via
+        // `apply_inbound` and we want a no-op there.
+        if let Some(existing) = self
+            .ledger
+            .history
+            .iter()
+            .find(|u| u.sequence_number == update.sequence_number)
+        {
+            if existing.content_hash != update.content_hash {
+                tracing::warn!(
+                    "LedgerActor[{}…] LocalCommit collision at seq {}: existing {} vs new {}",
+                    &self.ledger_id[..16.min(self.ledger_id.len())],
+                    update.sequence_number,
+                    hex::encode(&existing.content_hash[..8]),
+                    hex::encode(&update.content_hash[..8])
+                );
+            }
+            return;
+        }
+
+        let expected_seq = self.ledger.state.sequence + 1;
+        if update.sequence_number != expected_seq {
+            tracing::warn!(
+                "LedgerActor[{}…] LocalCommit out of order: got seq {}, expected {}",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                update.sequence_number,
+                expected_seq
+            );
+            return;
+        }
+        let expected_prev = self.ledger.state.chain_tip_hash;
+        if update.previous_hash != expected_prev {
+            tracing::warn!(
+                "LedgerActor[{}…] LocalCommit chain-break at seq {}: previous_hash {} vs tip {}",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                update.sequence_number,
+                hex::encode(&update.previous_hash[..8]),
+                hex::encode(&expected_prev[..8])
+            );
+            return;
+        }
+
+        let op = match LedgerOperation::tlv_decode(&update.message) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(
+                    "LedgerActor[{}…] LocalCommit decode failed at seq {}: {}",
+                    &self.ledger_id[..16.min(self.ledger_id.len())],
+                    update.sequence_number,
+                    e
+                );
+                return;
+            }
+        };
+        if let Err(e) = self.ledger.state.apply(&op) {
+            tracing::warn!(
+                "LedgerActor[{}…] LocalCommit apply failed at seq {}: {}",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                update.sequence_number,
+                e
+            );
+            return;
+        }
+        self.ledger.state.sequence = update.sequence_number;
+        self.ledger.state.chain_tip_hash = update.chain_hash();
+        self.ledger.history.push(update.clone());
+
+        if let Err(e) = self.append_update_row(&update) {
+            tracing::warn!(
+                "LedgerActor[{}…] LocalCommit persist seq {} failed: {}",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                update.sequence_number,
+                e
+            );
+        }
+    }
+
     /// Append the main-chain update to `self.persistence_path`. Thin
     /// wrapper around the free `append_update_to` so the fork path
     /// (8a) and main path share the same write logic.
@@ -533,11 +650,8 @@ impl LedgerActor {
                     // authoritative until step 5.
                     let _ = reply.send(None);
                 }
-                LedgerEvent::LocalCommit(_) => {
-                    tracing::debug!(
-                        "LedgerActor[{}…] received LocalCommit (stub: dropped)",
-                        &self.ledger_id[..16.min(self.ledger_id.len())]
-                    );
+                LedgerEvent::LocalCommit(update) => {
+                    self.handle_local_commit_shadow(*update);
                 }
                 LedgerEvent::Shutdown => {
                     tracing::info!(

@@ -242,6 +242,25 @@ impl Node {
             },
         );
 
+        // Step 8b (shadow): mirror the just-committed update onto the
+        // actor's view via `LocalCommit`. The actor records the
+        // outcome on its own `Ledger` shadow + persists to
+        // `.actor.log`, keeping its mirror current for both inbound
+        // (apply_inbound) AND outbound (this) updates. Fire-and-
+        // forget — the actor's failure to record the shadow doesn't
+        // unwind the authoritative commit we just made.
+        if let Some(inbox) = self
+            .ledger_actors
+            .lock()
+            .unwrap()
+            .get(ledger_id)
+            .map(|h| h.inbox.clone())
+        {
+            let _ = inbox.try_send(super::ledger_actor::LedgerEvent::LocalCommit(Box::new(
+                update_clone.clone(),
+            )));
+        }
+
         Ok(event_id)
     }
 
