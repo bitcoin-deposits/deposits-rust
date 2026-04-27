@@ -2423,6 +2423,19 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         .into());
     }
 
+    // Phase 4c precondition: protocol-level disputant cap. The lottery
+    // builder also enforces this via `n > MAX_DISPUTANTS`, but failing
+    // here gives a clearer error and avoids spending CPU on the build.
+    if participants.len() > deposits_core::MAX_DISPUTANTS {
+        return Err(format!(
+            "Too many disputants: {} found, MAX_DISPUTANTS = {}. \
+             The lottery construction's hard cap is N=15 — see CUSTODY_LOTTERY.md.",
+            participants.len(),
+            deposits_core::MAX_DISPUTANTS
+        )
+        .into());
+    }
+
     // Sort participants by pubkey for deterministic order
     participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
 

@@ -39,3 +39,23 @@ pub const COLLATERAL_REPORTING_PERIOD_BLOCKS: u32 = 144;
 
 /// Bitcoin Deposits Protocol Version
 pub const DEPOSITS_PROTOCOL_VERSION: u16 = 1;
+
+/// Maximum number of disputants in a single custody dispute lottery.
+///
+/// Past this size the on-chain construction stops being the right tool —
+/// witness sizes grow unwieldy, recovery quorums become impractical, and
+/// bond ratios approach 1.0× of disputed value (see CUSTODY_LOTTERY.md
+/// "Why N = 15 Is the Cap"). Builders refuse to construct lottery
+/// scripts for N > MAX_DISPUTANTS; recovery_confiscate refuses to
+/// proceed if it observes more DisputeArmed events than this cap.
+pub const MAX_DISPUTANTS: usize = 15;
+
+/// CSV block delay for the very-final timeout-recovery leaf.
+///
+/// After this many blocks (~8 weeks), a single quorum member can spend
+/// the lottery output back to a fallback custodian. This is the escape
+/// hatch for retry-depth exhaustion: if the dispute has cycled through
+/// `⌊N/2⌋` failed lotteries (cascading defection-and-re-dispute), the
+/// timeout-recovery leaf becomes spendable as a last resort. The long
+/// CSV ensures it cannot be used to short-circuit a healthy dispute.
+pub const TIMEOUT_RECOVERY_CSV_BLOCKS: u32 = 8064;

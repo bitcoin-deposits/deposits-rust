@@ -891,12 +891,12 @@ impl LotteryScriptBuilder {
                 "Lottery requires at least 2 participants".to_string(),
             ));
         }
-        if n > 15 {
-            return Err(DepositsError::InvalidState(
-                "Lottery dispatch supports at most 15 participants \
-                 (MAX_DISPUTANTS); the protocol's hard cap"
-                    .to_string(),
-            ));
+        if n > crate::constants::MAX_DISPUTANTS {
+            return Err(DepositsError::InvalidState(format!(
+                "Lottery dispatch supports at most {} participants \
+                 (MAX_DISPUTANTS); the protocol's hard cap",
+                crate::constants::MAX_DISPUTANTS
+            )));
         }
 
         let mut builder = Builder::new();
@@ -1141,12 +1141,15 @@ impl LotteryScriptBuilder {
     /// - Leaf 0: Lottery claim script (preimage reveal + winner sig)
     /// - Leaves 1..=N (when `N >= PARTIAL_REVEAL_MIN_N`): partial-reveal
     ///   claim, one per missing disputant index `j`, CSV 72
-    /// - Leaf -3: Recovery (CSV 144,  threshold T)
-    /// - Leaf -2: Recovery (CSV 1008, threshold T-1)
-    /// - Leaf -1: Recovery (CSV 4032, threshold T-2)
+    /// - Recovery long-tail:
+    ///   - CSV 144,  threshold T
+    ///   - CSV 1008, threshold T-1
+    ///   - CSV 4032, threshold T-2
+    /// - Timeout recovery: CSV 8064, threshold 1 (escape hatch for
+    ///   retry-depth exhaustion or total operator absence)
     ///
-    /// Total leaves: 4 for `N < PARTIAL_REVEAL_MIN_N`, `4 + N` otherwise.
-    /// At N=15 that's 19 leaves → Merkle depth `⌈log₂ 19⌉ = 5`.
+    /// Total leaves: 5 for `N < PARTIAL_REVEAL_MIN_N`, `5 + N` otherwise.
+    /// At N=15 that's 20 leaves → Merkle depth `⌈log₂ 20⌉ = 5`.
     pub fn build(&self) -> DepositsResult<LotteryOutput> {
         let secp = Secp256k1::new();
 
@@ -1156,14 +1159,21 @@ impl LotteryScriptBuilder {
         // Build partial-reveal claim leaves (empty for N < 11)
         let partial_reveal_scripts = self.build_partial_reveal_leaves()?;
 
-        // Build recovery scripts with degrading thresholds
+        // Build recovery scripts with degrading thresholds, plus a final
+        // CSV-8064 timeout-recovery leaf with threshold 1. The latter is
+        // the escape hatch for retry-depth exhaustion: if `⌊N/2⌋` lottery
+        // rounds have failed in cascading defection-and-re-dispute, the
+        // dispute is declared void at the orchestration layer and any
+        // single recovery voter can spend through this leaf.
         let recovery_specs = [
-            (144u32, self.recovery_threshold),                           // ~1 day
-            (1008, self.recovery_threshold.saturating_sub(1).max(1)),    // ~1 week
-            (4032, self.recovery_threshold.saturating_sub(2).max(1)),    // ~4 weeks
+            (144u32, self.recovery_threshold),                           // ~1 day, T
+            (1008, self.recovery_threshold.saturating_sub(1).max(1)),    // ~1 week, T-1
+            (4032, self.recovery_threshold.saturating_sub(2).max(1)),    // ~4 weeks, T-2
+            (crate::constants::TIMEOUT_RECOVERY_CSV_BLOCKS, 1usize),     // ~8 weeks, threshold 1
         ];
 
-        let mut leaves: Vec<ScriptBuf> = Vec::with_capacity(1 + partial_reveal_scripts.len() + 3);
+        let mut leaves: Vec<ScriptBuf> =
+            Vec::with_capacity(1 + partial_reveal_scripts.len() + recovery_specs.len());
         leaves.push(lottery_script.clone());
         leaves.extend(partial_reveal_scripts.iter().cloned());
         for (csv, threshold) in recovery_specs {
@@ -1719,6 +1729,28 @@ mod tests {
     }
 
     #[test]
+    fn test_max_disputants_constant_matches_script_cap() {
+        // Phase 4c: the script's hard cap should be sourced from the
+        // protocol's MAX_DISPUTANTS constant. Both the constant and the
+        // cap are 15 by design — see CUSTODY_LOTTERY.md "Why N = 15 Is
+        // the Cap". The script must accept exactly MAX_DISPUTANTS and
+        // reject MAX_DISPUTANTS + 1.
+        assert_eq!(crate::constants::MAX_DISPUTANTS, 15);
+
+        let max_builder = make_lottery_builder(crate::constants::MAX_DISPUTANTS);
+        assert!(
+            max_builder.build_lottery_script().is_ok(),
+            "exactly MAX_DISPUTANTS should be accepted"
+        );
+
+        let too_many = make_lottery_builder(crate::constants::MAX_DISPUTANTS + 1);
+        assert!(
+            too_many.build_lottery_script().is_err(),
+            "MAX_DISPUTANTS + 1 should be rejected"
+        );
+    }
+
+    #[test]
     fn test_lottery_reject_sixteen_participants() {
         // N=16 exceeds the protocol's MAX_DISPUTANTS=15 cap. The builder
         // must refuse so we never silently mint a lottery output for a
@@ -2074,9 +2106,12 @@ mod tests {
     }
 
     #[test]
-    fn test_lottery_output_legacy_shape_at_n5() {
-        // For N=5 (no partial-reveal) we still expect 4 leaves total:
-        // 1 lottery + 0 partial + 3 recovery. Tree should still finalize.
+    fn test_lottery_output_shape_at_n5() {
+        // For N=5 (no partial-reveal) we expect 5 leaves total:
+        // 1 lottery + 0 partial + 3 long-tail recovery + 1 timeout-recovery
+        // (CSV 8064, threshold 1).
+        // Tree depth ⌈log₂ 5⌉ = 3 for the deeper leaves; the primary
+        // lottery leaf is added first and lands at the d_max depth.
         let output = make_lottery_builder(5)
             .build()
             .expect("N=5 lottery output should build");
@@ -2090,11 +2125,40 @@ mod tests {
             ))
             .expect("primary lottery leaf must have a control block");
 
-        // 4 leaves → depth 2 → 33 + 32*2 = 97 bytes.
         assert_eq!(
             cb.serialize().len(),
-            33 + 32 * 2,
-            "N=5 control block should be depth-2"
+            33 + 32 * 3,
+            "N=5 primary lottery leaf should land at depth-3 in the 5-leaf tree"
+        );
+    }
+
+    #[test]
+    fn test_lottery_output_includes_timeout_recovery_leaf() {
+        // The timeout-recovery leaf (CSV 8064, threshold 1) must always
+        // be included regardless of N. Reconstruct the expected script
+        // and assert it can be located in the spend_info script_map.
+        let output = make_lottery_builder(5)
+            .build()
+            .expect("N=5 lottery output should build");
+
+        let timeout_script = LotteryScriptBuilder::new(
+            output.participants.clone(),
+            output.recovery_voters.clone(),
+            1, // threshold = 1 for timeout-recovery
+            output.network,
+        )
+        .build_recovery_script(crate::constants::TIMEOUT_RECOVERY_CSV_BLOCKS)
+        .expect("timeout-recovery script should build");
+
+        let cb = output
+            .spend_info
+            .control_block(&(
+                timeout_script.clone(),
+                bitcoin::taproot::LeafVersion::TapScript,
+            ));
+        assert!(
+            cb.is_some(),
+            "timeout-recovery leaf (CSV 8064, threshold 1) must be in the Taproot tree"
         );
     }
 

@@ -137,12 +137,24 @@ Tests (9 new):
 
 Witness construction for partial-reveal claim spends is deferred to Phase 5 plumbing alongside the `recovery reveal` / `recovery lottery-claim` CLIs — the leaves are present in the Taproot tree and the script bytes are exposed via `LotteryOutput::partial_reveal_scripts`, so the spending side just needs the right `create_partial_reveal_witness` helper and CLI dispatch.
 
-#### Phase 4c — MAX_DISPUTANTS + retry-depth bound — pending
+#### Phase 4c — MAX_DISPUTANTS + retry-depth fallback — DONE (script side)
 
-- `MAX_DISPUTANTS = 15` constant in deposits-protocol; `DisputeEnter` handler refuses 16+.
-- Retry-depth bound `⌊N/2⌋` in dispute orchestration. After this many failed lotteries (cascading defections), declare the dispute void and fall back to a manual quorum-resolution leaf at very high CSV (e.g. 8064 blocks ≈ 8 weeks) with threshold 1.
+Landed:
+- `MAX_DISPUTANTS = 15` and `TIMEOUT_RECOVERY_CSV_BLOCKS = 8064` constants in `deposits-protocol/src/constants.rs`, re-exported from `deposits-core`.
+- `build_lottery_script` cap now sources from the constant rather than a hardcoded 15.
+- `recovery_confiscate` short-circuits with a clear error if it observes more than `MAX_DISPUTANTS` DisputeArmed events (defence in depth — the script-level cap would also fire).
+- `LotteryReservesBuilder::build()` now adds a 4th recovery leaf: `<TIMEOUT_RECOVERY_CSV_BLOCKS> OP_CSV OP_DROP <threshold=1> ...` — any single recovery voter can spend after ~8 weeks. This is the escape hatch for retry-depth exhaustion.
+- Total-leaves accounting: `5` for `N < 11`, `5 + N` for `N ≥ 11`. At N=15: 20 leaves, Merkle depth still 5 (was already 5 with 19 leaves; 20 doesn't push us to 6).
 
-These two are independent of 4a/4b and can land separately. Retry-depth in particular touches dispute orchestration code that's still mid-actor-migration, so it may be cleaner to wait until that lands.
+Tests:
+- `test_max_disputants_constant_matches_script_cap` — `MAX_DISPUTANTS` accepted, +1 rejected.
+- `test_lottery_output_includes_timeout_recovery_leaf` — control-block lookup confirms the CSV-8064 threshold-1 leaf is in the tree.
+- `test_lottery_output_shape_at_n5` (renamed from `_legacy_shape_`) — primary lottery leaf lands at depth 3 in the new 5-leaf shape.
+
+#### Phase 4c — pending pieces (deferred to Phase 5)
+
+- **Retry-depth orchestration counter**: tracking the number of failed lottery rounds for a given dispute and declaring the dispute void after `⌊N/2⌋` rounds. This is dispute-orchestration logic — touches the dispute state machine that's still mid-actor-migration, so it's cleaner to land alongside the Phase 5 CLI work where dispute drivers are being rewritten anyway.
+- **`DisputeEnter` 16+ rejection at the protocol-message-validation layer**: the script-level cap is the enforcement mechanism today. A node-policy check on incoming DisputeEnter would catch the 16th+ attempt earlier and emit a `DisputeFull`-style response, but it requires knowing how many DisputeEnter forks already exist for the same parent — non-trivial bookkeeping that overlaps with Phase 5's `DisputeAcquire` rework.
 
 ### Phase 5 — Plumbing (DisputeAcquire rework, CustodyLotteryReveal, CLI)
 
