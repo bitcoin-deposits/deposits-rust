@@ -356,11 +356,26 @@ pub struct Node {
     /// Outbox sender shared with the actor pool. Held so that ledgers
     /// created after `Node::new` (via `ledger open`, `import_ledger`, or
     /// inbound discovery) can lazy-spawn an actor without restarting the
-    /// daemon. The drainer task in `init.rs` owns the matching receiver.
+    /// daemon. The matching receiver is parked in `actor_outbox_rx`
+    /// until `run()` takes it and spawns the drainer.
     pub(crate) actor_outbox_tx: tokio::sync::mpsc::UnboundedSender<(
         String,
         ledger_actor::LedgerOutbound,
     )>,
+
+    /// Parked receiver for the actor outbox. `Node::new` no longer
+    /// spawns the outbox drainer itself — `Self` doesn't exist yet, so
+    /// the drainer can't hold an `Arc<Node>` for callbacks. Instead the
+    /// rx is parked here and `main_loop.rs::run` takes it (with
+    /// `Arc::clone(self)` in scope) and spawns the drainer there.
+    /// Wrapped in `Option` so `take()` consumes it on first run; a
+    /// second call to `run()` would find `None` and skip spawning.
+    pub(crate) actor_outbox_rx: Mutex<Option<
+        tokio::sync::mpsc::UnboundedReceiver<(
+            String,
+            ledger_actor::LedgerOutbound,
+        )>,
+    >>,
 
     /// Directory the actor pool persists `*.actor.log` files to. Captured
     /// once at startup so lazy-spawn paths don't need to recompute it.

@@ -119,48 +119,22 @@ impl Node {
         drop(actor_pool_span);
         // Hand the outbox sender + ledgers_dir to the Node struct so
         // ledgers created post-startup (via `ledger open`, import, or
-        // inbound discovery) can lazy-spawn an actor on demand. The
-        // drainer task below holds its own clone via the closure
-        // capture, so dropping our local clone here is unnecessary.
-        let actor_outbox_tx_for_node = actor_outbox_tx.clone();
+        // inbound discovery) can lazy-spawn an actor on demand.
+        let actor_outbox_tx_for_node = actor_outbox_tx;
         let actor_ledgers_dir = config.data_dir.join("wallet/ledgers");
+        // Park the outbox receiver on `Self` for `run()` to pick up.
+        // Phase A of the 8b/8c migration: the drainer needs to call
+        // back into Node (`request_cosign`, broadcast, etc.) which
+        // requires `Arc<Node>` — a reference that doesn't exist until
+        // `Ok(Self {})` returns. `main_loop::run` takes `&Arc<Self>`
+        // and spawns the drainer there with the right scope.
+        let actor_outbox_rx_parked = Mutex::new(Some(actor_outbox_rx));
         // Step 8d — Notify shared between the outbox drainer (signal)
         // and main_loop's periodic block (await). Apply-edge events
         // like `MaybeConfiscate` set the Notify so the next periodic
         // task batch fires immediately rather than waiting up to
         // `periodic_interval` for the timer.
         let dispute_wakeup = Arc::new(tokio::sync::Notify::new());
-        let dispute_wakeup_for_drain = dispute_wakeup.clone();
-        // Outbox drainer: classify events and route the apply-edge
-        // signals to their handlers. Cosig collection + broadcast +
-        // fork spawning are still TODOs gated on the construction-
-        // reorg blocking true 8b/8c (they need Arc<Node> access).
-        tokio::spawn(async move {
-            let mut rx = actor_outbox_rx;
-            while let Some((lid, ev)) = rx.recv().await {
-                let lid_short = &lid[..16.min(lid.len())];
-                match ev {
-                    super::ledger_actor::LedgerOutbound::MaybeConfiscate {
-                        ledger_id,
-                    } => {
-                        tracing::debug!(
-                            "actor_outbox[{}…] MaybeConfiscate for {}… — waking dispute pipeline",
-                            lid_short,
-                            &ledger_id[..16.min(ledger_id.len())]
-                        );
-                        dispute_wakeup_for_drain.notify_one();
-                    }
-                    other => {
-                        tracing::debug!(
-                            "actor_outbox[{}…] event {:?} (not yet handled)",
-                            lid_short,
-                            std::mem::discriminant(&other)
-                        );
-                    }
-                }
-            }
-            tracing::info!("actor_outbox drainer: all actors gone, exiting");
-        });
 
         // Subscribe globally (4 compacted kind filters for all event types).
         // CLI commands don't call start(), so we do this here too.
@@ -199,6 +173,7 @@ impl Node {
             cosign_workers: Mutex::new(HashMap::new()),
             ledger_actors: Mutex::new(ledger_actors),
             actor_outbox_tx: actor_outbox_tx_for_node,
+            actor_outbox_rx: actor_outbox_rx_parked,
             actor_ledgers_dir,
             deposit_access_control: std::env::var("DEPOSIT_ACCESS_CONTROL")
                 .map(|v| v == "true" || v == "1")
