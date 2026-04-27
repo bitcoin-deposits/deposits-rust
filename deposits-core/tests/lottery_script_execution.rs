@@ -576,6 +576,223 @@ fn partial_reveal_leaf_excludes_missing_disputant() {
     );
 }
 
+/// Run an arbitrary leaf script with a Witness produced by one of
+/// the LotteryOutput witness helpers. Strips the trailing
+/// `[leaf_script, control_block]` items (consumed by Taproot
+/// validation, not by the script body), runs the body against the
+/// interpreter, and returns the recorded winner pubkey on success.
+fn run_witness_against_leaf(
+    leaf_script: &ScriptBuf,
+    witness: &bitcoin::Witness,
+) -> Result<XOnlyPublicKey, String> {
+    // Witness items order in rust-bitcoin's Witness: index 0 is the
+    // first push (= bottom of stack at validation time). The last two
+    // pushes are the leaf_script and control_block (Taproot Tapscript
+    // convention); the script-body's "input stack" is everything before
+    // those two.
+    let len = witness.len();
+    if len < 2 {
+        return Err(format!("witness has {} items, expected >= 2", len));
+    }
+    let stack_inputs: Vec<Vec<u8>> = witness
+        .iter()
+        .take(len - 2)
+        .map(|item| item.to_vec())
+        .collect();
+
+    let mut interp = Interp::new(stack_inputs);
+    interp.run(leaf_script)?;
+
+    let top = interp.stack.last().ok_or("script left empty stack")?;
+    if !read_scriptbool(top) {
+        return Err(format!("script returned FALSE: stack={:?}", interp.stack));
+    }
+    if interp.stack.len() != 1 {
+        return Err(format!(
+            "script left {} items on stack, expected 1",
+            interp.stack.len()
+        ));
+    }
+    let pubkey_bytes = interp
+        .last_checked_pubkey
+        .ok_or("OP_CHECKSIG was never executed")?;
+    XOnlyPublicKey::from_slice(&pubkey_bytes)
+        .map_err(|e| format!("recorded non-pubkey {}: {:?}", hex::encode(&pubkey_bytes), e))
+}
+
+#[test]
+fn create_claim_witness_unlocks_primary_lottery() {
+    // Build an output, construct the claim witness via the public
+    // helper, and run it through the interpreter. Verifies the
+    // witness layout is what the script expects.
+    let n = 5;
+    let contributions: Vec<usize> = (1..=n).collect();
+    let mut participants = Vec::new();
+    let mut preimages = Vec::new();
+    for (i, c) in contributions.iter().enumerate() {
+        let (p, pre) = participant((i + 1) as u8, *c);
+        participants.push(p);
+        preimages.push(pre);
+    }
+    let builder = LotteryScriptBuilder::new(
+        participants,
+        standard_recovery_voters(),
+        3,
+        Network::Regtest,
+    );
+    let output = builder.build().unwrap();
+
+    let sig = [0xAAu8; 64];
+    let witness = output.create_claim_witness(&sig, &preimages).unwrap();
+    let pk_won = run_witness_against_leaf(&output.lottery_script, &witness).unwrap();
+
+    let sum: usize = contributions.iter().sum(); // 15, mod 5 = 0
+    assert_eq!(pk_won, pk(1), "sum {} mod 5 = 0 → participant 1", sum);
+}
+
+#[test]
+fn create_partial_reveal_witness_unlocks_correct_leaf() {
+    // N=12 (Linear-after-mod regime for the sub-lottery N-1=11),
+    // missing index 5. Construct the partial-reveal witness and
+    // verify it unlocks the leaf and routes to the right revealer.
+    let n = 12usize;
+    let missing_idx = 5usize;
+    let contributions: Vec<usize> = (1..=n).collect();
+
+    let mut participants = Vec::new();
+    let mut preimages = Vec::new();
+    for (i, c) in contributions.iter().enumerate() {
+        let (p, pre) = participant((i + 1) as u8, *c);
+        participants.push(p);
+        preimages.push(pre);
+    }
+    let builder = LotteryScriptBuilder::new(
+        participants.clone(),
+        standard_recovery_voters(),
+        3,
+        Network::Regtest,
+    );
+    let output = builder.build().unwrap();
+
+    // Revealer preimages are everything except missing_idx, in
+    // disputant order. The witness helper pushes them in reverse so
+    // preimage_first_revealer ends up on top.
+    let revealer_preimages: Vec<Vec<u8>> = preimages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| if i == missing_idx { None } else { Some(p.clone()) })
+        .collect();
+    let revealer_pks: Vec<XOnlyPublicKey> = (0..n)
+        .filter(|i| *i != missing_idx)
+        .map(|i| pk((i + 1) as u8))
+        .collect();
+
+    let sig = [0xAAu8; 64];
+    let witness = output
+        .create_partial_reveal_witness(missing_idx, &sig, &revealer_preimages)
+        .expect("partial-reveal witness construction should succeed");
+
+    // The leaf for missing_idx is in output.partial_reveal_scripts.
+    let leaf = &output.partial_reveal_scripts[missing_idx];
+    let pk_won = run_witness_against_leaf(leaf, &witness).unwrap();
+
+    let revealer_contribs: Vec<usize> = contributions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| if i == missing_idx { None } else { Some(*c) })
+        .collect();
+    let sum: usize = revealer_contribs.iter().sum();
+    let expected_idx = sum % revealer_contribs.len();
+    assert_eq!(
+        pk_won, revealer_pks[expected_idx],
+        "N={} missing_idx={} sum {} mod {} = {} → revealer #{}",
+        n,
+        missing_idx,
+        sum,
+        revealer_contribs.len(),
+        expected_idx,
+        expected_idx
+    );
+
+    // Sanity: the witness includes leaf_script and control_block at
+    // the end. Total push count: 1 sig + (n-1) preimages + 2 = n+2.
+    assert_eq!(witness.len(), n + 2);
+}
+
+#[test]
+fn create_partial_reveal_witness_rejects_invalid_inputs() {
+    let n = 11usize;
+    let mut participants = Vec::new();
+    let mut preimages = Vec::new();
+    for i in 0..n {
+        let (p, pre) = participant((i + 1) as u8, 1);
+        participants.push(p);
+        preimages.push(pre);
+    }
+    let output = LotteryScriptBuilder::new(
+        participants,
+        standard_recovery_voters(),
+        3,
+        Network::Regtest,
+    )
+    .build()
+    .unwrap();
+
+    let sig = [0xAAu8; 64];
+    let revealers: Vec<Vec<u8>> = preimages.iter().take(n - 1).cloned().collect();
+
+    // Out-of-range missing_idx
+    assert!(output
+        .create_partial_reveal_witness(n, &sig, &revealers)
+        .is_err());
+    assert!(output
+        .create_partial_reveal_witness(99, &sig, &revealers)
+        .is_err());
+
+    // Wrong preimage count: should be N-1.
+    assert!(output
+        .create_partial_reveal_witness(0, &sig, &preimages)
+        .is_err());
+    assert!(output
+        .create_partial_reveal_witness(0, &sig, &[])
+        .is_err());
+}
+
+#[test]
+fn create_partial_reveal_witness_rejected_when_n_too_small() {
+    // N=10 has no partial-reveal leaves. The helper must refuse.
+    let n = 10usize;
+    let mut participants = Vec::new();
+    let mut preimages = Vec::new();
+    for i in 0..n {
+        let (p, pre) = participant((i + 1) as u8, 1);
+        participants.push(p);
+        preimages.push(pre);
+    }
+    let output = LotteryScriptBuilder::new(
+        participants,
+        standard_recovery_voters(),
+        3,
+        Network::Regtest,
+    )
+    .build()
+    .unwrap();
+
+    assert!(output.partial_reveal_scripts.is_empty());
+
+    let sig = [0xAAu8; 64];
+    let revealers: Vec<Vec<u8>> = preimages.iter().take(n - 1).cloned().collect();
+    let err = output
+        .create_partial_reveal_witness(0, &sig, &revealers)
+        .unwrap_err();
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("PARTIAL_REVEAL_MIN_N") || msg.contains("11") || msg.contains("only exist"),
+        "expected error to mention the threshold, got: {}",
+        msg
+    );
+}
+
 #[test]
 fn lottery_output_includes_all_expected_leaves() {
     // Defence-in-depth: verify that LotteryReservesBuilder::build()

@@ -1292,6 +1292,96 @@ impl LotteryOutput {
             .control_block(&(self.lottery_script.clone(), LeafVersion::TapScript))
     }
 
+    /// Get the control block for the partial-reveal leaf at index
+    /// `missing_idx`. Returns `None` if N < `PARTIAL_REVEAL_MIN_N` (no
+    /// partial-reveal leaves exist) or if `missing_idx` is out of
+    /// range.
+    pub fn partial_reveal_control_block(
+        &self,
+        missing_idx: usize,
+    ) -> Option<bitcoin::taproot::ControlBlock> {
+        let leaf = self.partial_reveal_scripts.get(missing_idx)?.clone();
+        self.spend_info
+            .control_block(&(leaf, LeafVersion::TapScript))
+    }
+
+    /// Create a witness for spending through the partial-reveal leaf
+    /// when disputant `missing_idx` failed to reveal.
+    ///
+    /// Caller responsibilities:
+    /// - The spending tx's input must have `nSequence >= PARTIAL_REVEAL_CSV_BLOCKS`,
+    ///   otherwise the OP_CSV at the leaf's prefix will reject.
+    /// - `winner_signature` must be a valid Schnorr sig over the tx
+    ///   sighash by the (sum mod (N-1))-th revealer (in disputant order
+    ///   excluding `missing_idx`).
+    /// - `preimages` must contain exactly `N-1` items in the order of
+    ///   the remaining disputants (i.e., disputant indices
+    ///   `0..N` with `missing_idx` removed). Each preimage must hash
+    ///   under HASH160 to the corresponding committed hash.
+    ///
+    /// Witness layout (matches `create_claim_witness`):
+    /// `[sig, preimage_{N-2}, ..., preimage_0, leaf_script, control_block]`
+    /// — sig at the bottom of the stack, preimage of the first
+    /// remaining disputant on top.
+    pub fn create_partial_reveal_witness(
+        &self,
+        missing_idx: usize,
+        winner_signature: &[u8; 64],
+        preimages: &[Vec<u8>],
+    ) -> DepositsResult<Witness> {
+        let n = self.participants.len();
+        if n < PARTIAL_REVEAL_MIN_N {
+            return Err(DepositsError::InvalidState(format!(
+                "Partial-reveal claim leaves only exist for N >= {}; this output has N={}",
+                PARTIAL_REVEAL_MIN_N, n
+            )));
+        }
+        if missing_idx >= n {
+            return Err(DepositsError::InvalidState(format!(
+                "missing_idx {} out of range for N={}",
+                missing_idx, n
+            )));
+        }
+        if preimages.len() != n - 1 {
+            return Err(DepositsError::InvalidState(format!(
+                "Expected {} preimages (N-1) for partial-reveal at missing_idx={}; got {}",
+                n - 1,
+                missing_idx,
+                preimages.len()
+            )));
+        }
+
+        let leaf_script = self
+            .partial_reveal_scripts
+            .get(missing_idx)
+            .ok_or_else(|| {
+                DepositsError::InvalidState(format!(
+                    "Partial-reveal leaf {} not present in this output",
+                    missing_idx
+                ))
+            })?
+            .clone();
+
+        let control_block = self
+            .partial_reveal_control_block(missing_idx)
+            .ok_or_else(|| {
+                DepositsError::InvalidState(format!(
+                    "Partial-reveal control block {} not present in spend_info",
+                    missing_idx
+                ))
+            })?;
+
+        let mut witness = Witness::new();
+        witness.push(&winner_signature[..]);
+        for preimage in preimages.iter().rev() {
+            witness.push(preimage);
+        }
+        witness.push(leaf_script.as_bytes());
+        witness.push(control_block.serialize());
+
+        Ok(witness)
+    }
+
     /// Calculate the winner given revealed preimages.
     ///
     /// Each preimage must be 17 to (16+N) bytes — the contribution

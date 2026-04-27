@@ -156,29 +156,45 @@ Tests:
 - **Retry-depth orchestration counter**: tracking the number of failed lottery rounds for a given dispute and declaring the dispute void after `⌊N/2⌋` rounds. This is dispute-orchestration logic — touches the dispute state machine that's still mid-actor-migration, so it's cleaner to land alongside the Phase 5 CLI work where dispute drivers are being rewritten anyway.
 - **`DisputeEnter` 16+ rejection at the protocol-message-validation layer**: the script-level cap is the enforcement mechanism today. A node-policy check on incoming DisputeEnter would catch the 16th+ attempt earlier and emit a `DisputeFull`-style response, but it requires knowing how many DisputeEnter forks already exist for the same parent — non-trivial bookkeeping that overlaps with Phase 5's `DisputeAcquire` rework.
 
-### Phase 5 — Plumbing (DisputeAcquire rework, CustodyLotteryReveal, CLI)
+### Phase 5 — Plumbing (sub-phased)
 
 **Goal:** the operator-facing path matches the new design.
 
-Touches:
-- `DisputeAcquire` rework: replace `{entropy_block_height, entropy_block_hash, spend_txid}` with `{claim_txid: String, new_reserves_address: String}`. This is a wire-format break; coordinate with anyone consuming the old shape.
-- New `CustodyLotteryReveal` message:
-  ```rust
-  pub struct CustodyLotteryReveal {
-      pub ledger_id: String,
-      pub operator_id: String,
-      pub preimage: Vec<u8>,  // 17..(16+N) bytes
-  }
-  ```
-  Allocate a new Nostr kind (probably 9104 or similar — pick one not in use).
-- CLI: `deposits-node recovery reveal <ledger_id>` — publishes the reveal event using the preimage stored locally during `recovery arm`.
-- CLI: `deposits-node recovery lottery-claim <ledger_id>` — collects all revealed preimages from Nostr, computes the winner index, and (if we're the winner) builds + broadcasts the claim TX.
-- `recovery confiscate_sign` handler in the quorum-watcher path stays mostly unchanged (the lottery output is just a different Taproot script).
-- Update `validate_custody_resolution` in deposits-core to verify `claim_txid` is the lottery output's spend, not entropy-based selection.
+Phase 5 was sub-phased during implementation because the original lump (DisputeAcquire rework + new Nostr message + two new CLIs + retry counter + bond ratio) was too large to land coherently. Order below puts non-breaking pieces first so each is independently testable.
 
-**Test:** end-to-end Tier-3 dispute test on Q=5 cluster: forge → arm → confiscation → reveal → claim → DisputeAcquire. Verify final ledger state has the new operator and the lottery output has been spent to the winner's reserves.
+#### Phase 5a — Partial-reveal witness construction — DONE
 
-**Risk:** moderate. The wire-format break on `DisputeAcquire` invalidates any in-flight disputes during deployment. For mainnet we'd need a coordinated upgrade; for the test cluster it's fine to wipe and re-setup.
+`LotteryOutput::create_partial_reveal_witness(missing_idx, sig, preimages)` and `partial_reveal_control_block(missing_idx)` mirror the existing `create_claim_witness` / `lottery_control_block` for the K=1 partial-reveal leaves. Witness layout matches the primary lottery's: `[sig, preimages reversed, leaf_script, control_block]`.
+
+Tests (4 new in `tests/lottery_script_execution.rs`):
+- `create_claim_witness_unlocks_primary_lottery` — drive the existing helper through the script interpreter; confirms witness layout matches script expectations.
+- `create_partial_reveal_witness_unlocks_correct_leaf` — at N=12 missing-idx 5, the witness unlocks the leaf and dispatch routes to the right revealer.
+- `create_partial_reveal_witness_rejects_invalid_inputs` — out-of-range `missing_idx`, wrong preimage count.
+- `create_partial_reveal_witness_rejected_when_n_too_small` — N=10 has no partial-reveal leaves; helper refuses with a clear error.
+
+#### Phase 5b — `CustodyLotteryReveal` Nostr message — pending
+
+Define the new operation/message type, allocate a Nostr event kind, add TLV codec. Doesn't break anything — additive.
+
+#### Phase 5c — `recovery reveal` + `recovery lottery-claim` CLIs — pending
+
+Two new CLI subcommands. `reveal` publishes the preimage stored locally during `recovery arm`; `lottery-claim` fetches all reveals via Nostr, computes the winner via `calculate_winner`, and (if we're the winner) builds and broadcasts the claim TX using the witness helpers from 5a.
+
+#### Phase 5d — `DisputeAcquire` wire-format rework — pending
+
+Replace `{entropy_block_height, entropy_block_hash, spend_txid}` with `{claim_txid, new_reserves_address}`. Wire-format break; touches ~24 files across protocol/core/node/test crates and the validators (`is_entropy_winner` → claim-TX-spend verification). Sequenced after 5b/5c so the new message types and CLIs are in place before validators move off the entropy path.
+
+#### Phase 5e — Bond-ratio enforcement — pending
+
+The Phase 2 helper `check_bond_ratio_precondition` is in place but unwired. The natural enforcement point depends on a design call: at `DisputeArmed` ingest (conservative against worst-case N=15) vs. at confiscation time (against realized N, but requires fetching each disputant's collateral from their own ledger — significant extra wiring). Defer until 5d lands so we can decide based on the new validation surface.
+
+#### Phase 5f — Retry-depth orchestration counter — pending
+
+Track failed lottery rounds at the dispute layer; declare the dispute void after `⌊N/2⌋` rounds and let the CSV-8064 timeout-recovery leaf become the only remaining spend path. Touches dispute orchestration that's still mid-actor-migration, so it's cleanest to land last.
+
+**Tier-3 integration test target** (after 5b/5c/5d): end-to-end dispute on a Q=5 cluster: forge → arm → confiscate → reveal → claim → DisputeAcquire. Verify final ledger state has the new operator and the lottery output has been spent to the winner's reserves. With 5e/5f added, expand to a Q=11 partial-reveal scenario.
+
+**Risk:** moderate. The 5d wire-format break invalidates any in-flight disputes during deployment. For mainnet we'd need a coordinated upgrade; for the test cluster it's fine to wipe and re-setup.
 
 ## Sequencing within each phase
 
