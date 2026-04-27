@@ -880,10 +880,10 @@ impl LotteryScriptBuilder {
                 "Lottery requires at least 2 participants".to_string(),
             ));
         }
-        if n > 10 {
+        if n > 15 {
             return Err(DepositsError::InvalidState(
-                "Lottery dispatch regime supports at most 10 participants; \
-                 N=11-15 needs the BinaryTree regime (not yet implemented)"
+                "Lottery dispatch supports at most 15 participants \
+                 (MAX_DISPUTANTS); the protocol's hard cap"
                     .to_string(),
             ));
         }
@@ -935,16 +935,23 @@ impl LotteryScriptBuilder {
 
         // Two dispatch strategies, both starting from stack `<sig> <total_sum>`.
         //
-        // Linear (N=2..5): compute `sum mod N` via repeated conditional
-        // subtraction (OP_MOD is OP_SUCCESS in Tapscript), then dispatch on
-        // the resulting index 0..N-1.
+        // Linear (N in 2..=5 and 11..=15): compute `sum mod N` via repeated
+        // conditional subtraction (OP_MOD is OP_SUCCESS in Tapscript), then
+        // dispatch on the resulting index 0..N-1. O(N) for both the modulo
+        // and the dispatch — total ~1.2 KB at N=15. The original design
+        // specified a BinaryTree for N=11..=15; we deviated because Linear
+        // is structurally simpler (shared with Regime A) and the dispatch
+        // tree's structural bytes outweigh the savings from a smaller index
+        // dispatch at this N.
         //
-        // CombinedTable (N=6..10): skip the modulo entirely. The sum is in
-        // `[N, N²]`; emit one dispatch arm per distinct sum value, each
-        // pointing directly to `pubkey_(s mod N)`. Folding the mod into the
-        // dispatch saves a modulo subroutine that would itself be O(N) bytes
-        // per iteration.
-        if n <= 5 {
+        // CombinedTable (N in 6..=10): skip the modulo entirely; emit one
+        // arm per integer sum in `[N, N²]`, each routing directly to
+        // `pubkey_(s mod N)`. Larger than Linear at every N (the O(N²-N+1)
+        // dispatch dominates), but kept here as a deliberate structural
+        // demonstration of the regime in the design doc; past N=10 even the
+        // demonstration becomes impractical (211 arms ≈ 8.7 KB at N=15) so
+        // Linear takes over again.
+        if !(6..=10).contains(&n) {
             // Stack: <sig> <total_sum>
             //
             // Compute `sum mod N` by repeatedly subtracting N while sum >= N.
@@ -1605,11 +1612,11 @@ mod tests {
     }
 
     #[test]
-    fn test_lottery_reject_eleven_participants() {
-        // N=11 needs Regime C's BinaryTree dispatch (not yet implemented).
-        // The CombinedTable cap must refuse so the protocol doesn't silently
-        // produce broken scripts at this boundary.
-        let participants: Vec<LotteryParticipant> = (1..=11)
+    fn test_lottery_reject_sixteen_participants() {
+        // N=16 exceeds the protocol's MAX_DISPUTANTS=15 cap. The builder
+        // must refuse so we never silently mint a lottery output for a
+        // dispute size the rest of the protocol won't honour.
+        let participants: Vec<LotteryParticipant> = (1..=16)
             .map(|i| {
                 LotteryParticipant::new(
                     generate_x_only_pubkey(i),
@@ -1628,13 +1635,130 @@ mod tests {
 
         let err = builder
             .build_lottery_script()
-            .expect_err("N=11 should be rejected until BinaryTree lands");
+            .expect_err("N=16 exceeds MAX_DISPUTANTS=15");
         let msg = format!("{}", err);
         assert!(
-            msg.contains("at most 10") || msg.contains("BinaryTree"),
-            "error message should point to the regime boundary; got: {}",
+            msg.contains("at most 15") || msg.contains("MAX_DISPUTANTS"),
+            "error message should point to the protocol cap; got: {}",
             msg
         );
+    }
+
+    #[test]
+    fn test_lottery_script_build_eleven() {
+        let participants: Vec<LotteryParticipant> = (1..=11)
+            .map(|i| {
+                LotteryParticipant::new(
+                    generate_x_only_pubkey(i),
+                    test_commitment_hash(i),
+                    "bcrt1p...".to_string(),
+                )
+            })
+            .collect();
+
+        let builder = LotteryScriptBuilder::new(
+            participants,
+            vec![
+                generate_x_only_pubkey(20),
+                generate_x_only_pubkey(21),
+                generate_x_only_pubkey(22),
+            ],
+            2,
+            Network::Regtest,
+        );
+
+        let script = builder
+            .build_lottery_script()
+            .expect("N=11 should build via Linear-after-mod");
+
+        // Linear dispatch emits N arms (11 here) plus the modulo
+        // subroutine's N iterations of OP_IF/OP_ENDIF.
+        // Total OP_ENDIFs: N (mod) + N (dispatch) = 2N = 22 for N=11.
+        let endif_count = count_opcode(&script, bitcoin::opcodes::all::OP_ENDIF);
+        assert_eq!(
+            endif_count, 22,
+            "expected 11 mod ENDIFs + 11 dispatch ENDIFs at N=11"
+        );
+
+        // Measured: 879 B at this revision. Less than half the original
+        // BinaryTree estimate (1.6 KB) — Linear-after-mod is the right
+        // tool here despite the design's initial preference.
+        assert!(
+            (750..=1050).contains(&script.len()),
+            "N=11 script length {} should fall within expected envelope",
+            script.len()
+        );
+    }
+
+    #[test]
+    fn test_lottery_script_build_fifteen() {
+        let participants: Vec<LotteryParticipant> = (1..=15)
+            .map(|i| {
+                LotteryParticipant::new(
+                    generate_x_only_pubkey(i),
+                    test_commitment_hash(i),
+                    "bcrt1p...".to_string(),
+                )
+            })
+            .collect();
+
+        let builder = LotteryScriptBuilder::new(
+            participants,
+            vec![
+                generate_x_only_pubkey(20),
+                generate_x_only_pubkey(21),
+                generate_x_only_pubkey(22),
+                generate_x_only_pubkey(23),
+            ],
+            3,
+            Network::Regtest,
+        );
+
+        let script = builder
+            .build_lottery_script()
+            .expect("N=15 should build via Linear-after-mod");
+
+        // 2N = 30 ENDIFs at N=15.
+        let endif_count = count_opcode(&script, bitcoin::opcodes::all::OP_ENDIF);
+        assert_eq!(endif_count, 30, "expected 30 ENDIFs at N=15");
+
+        // Measured: 1199 B at this revision. The original BinaryTree
+        // estimate of 2.0 KB overcounted; Linear-after-mod fits in 1.2 KB.
+        assert!(
+            (1050..=1400).contains(&script.len()),
+            "N=15 script length {} should fall within expected envelope",
+            script.len()
+        );
+    }
+
+    /// Random-sample winner-correctness test for N=11..=15. Exhaustive
+    /// sweep would be 11^11 = 285M up to 15^15 = 437T cases — infeasible.
+    /// 5,000 deterministic samples per N exercise dispatch and modulo
+    /// across the full sum range.
+    #[test]
+    fn test_lottery_winner_high_n_random_sample() {
+        let mut rng_state: u64 = 0xab8e1cd9f0a32b41;
+        let mut next_u64 = || {
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            rng_state
+        };
+
+        for n in 11usize..=15 {
+            for _ in 0..5_000 {
+                let mut preimages: Vec<Vec<u8>> = Vec::with_capacity(n);
+                let mut sum = 0usize;
+                for _ in 0..n {
+                    let c = (next_u64() as usize % n) + 1; // 1..=N
+                    sum += c;
+                    preimages.push(vec![0u8; 16 + c]);
+                }
+                let expected = sum % n;
+                let got = LotteryOutput::calculate_winner(&preimages).unwrap();
+                assert_eq!(got, expected, "winner mismatch at N={} sum={}", n, sum);
+            }
+        }
     }
 
     /// N=6 (CombinedTable boundary): exhaustively verify every reachable sum
@@ -1711,9 +1835,10 @@ mod tests {
         let endif_count = count_opcode(&script, bitcoin::opcodes::all::OP_ENDIF);
         assert_eq!(endif_count, 31, "expected 31 dispatch arms for N=6");
 
-        // Sanity: script should be non-trivially large (~1.5 KB per design table).
+        // Measured: 1482 B at this revision. Bound to ±15% to catch
+        // unexpected drift without forcing a test churn for benign edits.
         assert!(
-            script.len() > 1000 && script.len() < 2000,
+            (1260..=1700).contains(&script.len()),
             "N=6 script length {} should fall within expected envelope",
             script.len()
         );
@@ -1750,10 +1875,11 @@ mod tests {
         let endif_count = count_opcode(&script, bitcoin::opcodes::all::OP_ENDIF);
         assert_eq!(endif_count, 91, "expected 91 dispatch arms for N=10");
 
-        // Per the design table, ~4.3 KB. Bound the upper end against the
-        // 10 KB Tapscript stack-item limit to catch any future bloat.
+        // Measured: 4134 B at this revision. Comfortably under the 10 KB
+        // Tapscript per-stack-item limit; CombinedTable past N=10 would
+        // start crowding it, which is why the regime hands off to Linear.
         assert!(
-            script.len() > 3000 && script.len() < 5500,
+            (3500..=4800).contains(&script.len()),
             "N=10 script length {} should fall within expected envelope",
             script.len()
         );

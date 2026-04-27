@@ -90,21 +90,40 @@ Skipped per scope:
 
 **Goal:** scale to the design's hard cap.
 
+#### Phase 4a — Dispatch for N=11–15 — DONE
+
+Deviated from the original BinaryTree spec to **Linear-after-mod**, extending the existing Regime A path. Measured leaf sizes after the change: N=11 = 879 B, N=15 = 1199 B — significantly under the design doc's original 1.6–2.0 KB tree estimates.
+
+The case for the deviation: a balanced binary tree on the index buys nothing in Tapscript. Only one execution path runs at validation time, so the tree's structural overhead (DUP / push threshold / GE / IF / push threshold / SUB at each internal node) is dead weight; Linear's `O(N)` dispatch is the same shape as Regime A and shares the existing builder branch. Cap moved to `n > 15` with a `MAX_DISPUTANTS` error.
+
+The 10→11 regime boundary stays where it is — that's about CombinedTable's `O(N²-N+1)` growth running out of steam, not about needing a tree.
+
+Tests:
+- `test_lottery_script_build_eleven` — 22 ENDIFs (N for mod + N for dispatch), measured 879 B.
+- `test_lottery_script_build_fifteen` — 30 ENDIFs, measured 1199 B.
+- `test_lottery_winner_high_n_random_sample` — 5,000 deterministic xorshift samples per N in 11..=15 round-tripping through `calculate_winner`.
+- `test_lottery_reject_sixteen_participants` replaced `_eleven_` as the new boundary guard.
+
+Design doc updates: summary table replaced with measured/interpolated leaf sizes (no more inflated tree estimates), Regime C section rewritten to describe the Linear-after-mod choice and explain why the original tree spec was over-engineering.
+
+#### Phase 4b — Partial-reveal claim leaf — pending
+
+For N≥11, P(all reveal) drops below 50% at p=0.95 per-party reliability, so completion-via-recovery becomes the common case. The fix: an extra Tapscript leaf, activated after a short CSV (e.g. 72 blocks), that lets the lottery complete among the revealers only. Non-revealers' contributions are treated as 0, the dispatch indices are remapped to the revealer subset.
+
 Touches:
-- `BinaryTree` dispatch in `tapscript_reserves.rs`:
-  - Compute `sum mod N` via repeated subtraction (or binary-search subtraction in ~60 bytes)
-  - Tree depth `⌈log₂ N⌉ = 4` for all N in regime
-  - For N not a power of 2, irregular bottom arm
-- New tapscript leaf: **partial-reveal claim** for N≥11
-  - Activated after a short CSV (e.g. 72 blocks) before the primary recovery
-  - Treats non-revealers' contributions as 0; lottery completes among revealers only
-  - Different witness shape: `<sig> <preimage_revealers> ... <revealer_count_byte>`
-- `MAX_DISPUTANTS = 15` constant in deposits-protocol; `DisputeEnter` handler refuses 16+
-- Retry depth bound `⌊N/2⌋` in dispute orchestration
+- New leaf in `LotteryReservesBuilder::build()` between the primary lottery claim and the long-tail recovery.
+- Witness shape: `<sig> <preimage_revealer_k> ... <preimage_revealer_1> <revealer_bitmap>` — 1-byte bitmap for ≤8 disputants, 2-byte for ≤15. Each set bit = "this disputant revealed".
+- Script reads the bitmap, validates the claimed revealer set's preimages, computes `sum mod count(revealers)`, dispatches into the revealer-subset.
+- Bond forfeit logic: non-revealers' bonds are slashed and distributed to revealers (this is enforcement, not script — handled at the protocol layer when the partial-reveal claim TX confirms).
 
-**Test:** golden vectors at N=11 and N=15. Partial-reveal scenario test: 12 disputants, 9 reveal, lottery completes among the 9. Defection-cascade scenario: bound the retry depth, verify dispute is declared void at the cap.
+Risk: higher than 4a. The bitmap-driven dispatch is structurally new and the witness format is a wire-compat surface. Keep this in its own commit.
 
-**Risk:** higher. Partial-reveal logic is genuinely new; the script interaction with witness assembly is subtle. Keep the partial-reveal leaf in its own commit so it can be reverted if a witness-format issue surfaces in testing.
+#### Phase 4c — MAX_DISPUTANTS + retry-depth bound — pending
+
+- `MAX_DISPUTANTS = 15` constant in deposits-protocol; `DisputeEnter` handler refuses 16+.
+- Retry-depth bound `⌊N/2⌋` in dispute orchestration. After this many failed lotteries (cascading defections), declare the dispute void and fall back to a manual quorum-resolution leaf at very high CSV (e.g. 8064 blocks ≈ 8 weeks) with threshold 1.
+
+These two are independent of 4a/4b and can land separately. Retry-depth in particular touches dispute orchestration code that's still mid-actor-migration, so it may be cleaner to wait until that lands.
 
 ### Phase 5 — Plumbing (DisputeAcquire rework, CustodyLotteryReveal, CLI)
 

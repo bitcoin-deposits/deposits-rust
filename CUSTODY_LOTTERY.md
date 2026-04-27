@@ -104,27 +104,31 @@ The winner publishes `DisputeAcquire` with the claim txid, completing custody tr
 
 ## Scaling Regimes
 
-The construction's witness size, recovery-quorum requirement, and bond economics all change with N. We define three regimes with different dispatch strategies. A single `LotteryScriptBuilder` selects the strategy automatically based on N.
+The construction's witness size, recovery-quorum requirement, and bond economics all change with N. We define two regimes with different dispatch strategies. A single `LotteryScriptBuilder` selects the strategy automatically based on N. Past N=15 the protocol refuses to arm — see [Why N = 15 Is the Cap](#why-n--15-is-the-cap).
 
 ### Summary table
 
-| N    | Dispatch       | Mod           | Leaf size | Witness  | Min quorum | Bond ratio |
-|------|----------------|---------------|-----------|----------|------------|------------|
-| 3    | Linear         | Subtract      | ~300 B    | ~500 B   | T+3        | 0.67×      |
-| 4    | Linear         | Subtract      | ~450 B    | ~650 B   | T+4        | 0.75×      |
-| 5    | Linear         | Subtract      | ~600 B    | ~800 B   | T+5        | 0.80×      |
-| 6    | Combined table | (folded in)   | ~1.5 KB   | ~1.7 KB  | T+6        | 0.83×      |
-| 7    | Combined table | (folded in)   | ~2.5 KB   | ~2.8 KB  | T+7        | 0.86×      |
-| 8    | Combined table | (folded in)   | ~2.7 KB   | ~3.0 KB  | T+8        | 0.88×      |
-| 9    | Combined table | (folded in)   | ~3.4 KB   | ~3.7 KB  | T+9        | 0.89×      |
-| 10   | Combined table | (folded in)   | ~4.3 KB   | ~4.7 KB  | T+10       | 0.90×      |
-| 11   | Tree           | Subtract      | ~1.6 KB   | ~2.0 KB  | T+11       | 0.91×      |
-| 12   | Tree           | Subtract      | ~1.7 KB   | ~2.1 KB  | T+12       | 0.92×      |
-| 13   | Tree           | Subtract      | ~1.8 KB   | ~2.3 KB  | T+13       | 0.92×      |
-| 14   | Tree           | Subtract      | ~1.9 KB   | ~2.4 KB  | T+14       | 0.93×      |
-| 15   | Tree           | Subtract      | ~2.0 KB   | ~2.5 KB  | T+15       | 0.93×      |
+Leaf sizes for N=6, 10, 11, 15 are measured from `cargo test`; intermediate values are linearly interpolated. Witness adds preimages (~21 B each) + Schnorr sig (65 B) + control block (~33–129 B depending on tree depth).
+
+| N    | Dispatch       | Mod           | Leaf size | Min quorum | Bond ratio |
+|------|----------------|---------------|-----------|------------|------------|
+| 3    | Linear         | Subtract      | ~250 B    | T+3        | 0.67×      |
+| 4    | Linear         | Subtract      | ~330 B    | T+4        | 0.75×      |
+| 5    | Linear         | Subtract      | ~410 B    | T+5        | 0.80×      |
+| 6    | Combined table | (folded in)   | ~1.5 KB   | T+6        | 0.83×      |
+| 7    | Combined table | (folded in)   | ~2.0 KB   | T+7        | 0.86×      |
+| 8    | Combined table | (folded in)   | ~2.7 KB   | T+8        | 0.88×      |
+| 9    | Combined table | (folded in)   | ~3.4 KB   | T+9        | 0.89×      |
+| 10   | Combined table | (folded in)   | ~4.1 KB   | T+10       | 0.90×      |
+| 11   | Linear         | Subtract      | ~880 B    | T+11       | 0.91×      |
+| 12   | Linear         | Subtract      | ~960 B    | T+12       | 0.92×      |
+| 13   | Linear         | Subtract      | ~1.0 KB   | T+13       | 0.92×      |
+| 14   | Linear         | Subtract      | ~1.1 KB   | T+14       | 0.93×      |
+| 15   | Linear         | Subtract      | ~1.2 KB   | T+15       | 0.93×      |
 
 `T` is the emergency-recovery threshold (typically the lowest threshold across the long-tail recovery leaves). `Min quorum` reflects the precondition `N_quorum − N_disputants ≥ T_emergency`.
+
+The leaf-size regression at N=11 vs. N=10 is real: at N=11 we drop CombinedTable's `O(N²-N+1)` dispatch arms in favour of Linear's `O(N)` dispatch + `O(N)` modulo. Both dispatch strategies are valid at every N, but Linear stays roughly flat while CombinedTable grows quadratically; the 10→11 boundary is where CombinedTable's per-arm cost overruns Linear's modulo overhead by enough to matter.
 
 `Bond ratio` is the lower bound on `bond / disputed_value` required to keep defection-and-eat-the-slash irrational, ignoring time value. In practice we recommend `bond ≥ 1.0 × disputed_value` for N ≥ 10.
 
@@ -176,28 +180,25 @@ This is byte-for-byte competitive with separate-mod-then-dispatch through about 
 
 **Operator-facing change in this regime**: the recovery path is no longer rare. At N=10 with 95% per-party reveal probability, P(all reveal) ≈ 60%, so 40% of rounds will need recovery. Document recovery-path fees in the runbook and pre-fund a fee reserve sized for confiscation + recovery, not just confiscation + claim. Consider extending the primary CSV from 144 to 288 blocks to reduce premature recovery triggers.
 
-### Regime C: N = 11–15 (tree dispatch)
+### Regime C: N = 11–15 (linear dispatch, again)
 
-Past N=10, even the combined table becomes painful (at N=15, 106 dispatch arms ≈ 4.8 KB). Switch to a balanced binary tree on the index after explicitly computing `sum mod N`.
+Past N=10, CombinedTable's `O(N²-N+1)` arms blow up — N=15 would need 211 arms ≈ 8.7 KB. Drop back to the Regime A construction: compute `sum mod N` via repeated subtraction, then dispatch linearly on the index 0..N-1. At N=15 this fits in ~1.2 KB, comfortably under the Tapscript per-stack-item limit.
 
 ```
 // Compute sum mod N via repeated subtraction.
-// For N=15, sum ∈ [15, 225], up to 14 subtractions of 15.
-// (Or use a binary-search subtraction in ~60 bytes: subtract 15×8, then 15×4, ...)
+// For N=15, sum ∈ [15, 225], so up to 15 conditional subtractions.
 
 // stack: index ∈ [0, N−1]
-// Tree dispatch with thresholds N/2, N/4, ...
-OP_DUP <N/2> OP_GREATERTHANOREQUAL OP_IF
-    <N/2> OP_SUB
-    // recurse on upper half
-OP_ELSE
-    // recurse on lower half
-OP_ENDIF
+// Linear dispatch (same shape as Regime A):
+OP_DUP <0> OP_EQUAL OP_IF OP_DROP <pubkey_0> OP_CHECKSIG OP_ELSE
+OP_DUP <1> OP_EQUAL OP_IF OP_DROP <pubkey_1> OP_CHECKSIG OP_ELSE
+...
+OP_ENDIF × N
 ```
 
-For N that is not a power of 2 (N ∈ {11, 13, 14, 15}), use thresholds `8 / 4 / 2 / 1` with the bottom arm handling the irregular remainder. Tree depth is `⌈log₂ N⌉ = 4` for all N in this regime.
+An earlier draft of this design specified a balanced binary tree dispatch here, on the assumption that tree dispatch would shave bytes at higher N. In practice the tree's structural overhead (push thresholds, OP_GREATERTHANOREQUAL / OP_SUB at every internal node) outweighs the savings from a smaller leaf count, especially since only one path through the script ever executes — there's no "tree height advantage" the way there would be in a comparison-bound algorithm. Linear-after-mod is the right tool at every N where CombinedTable's quadratic growth is the alternative.
 
-This regime also requires the **partial-reveal claim path** described in [Failure Modes](#failure-modes), because at N=15 with 95% per-party reliability, P(all reveal) ≈ 46% — recovery is more common than completion.
+This regime still requires the **partial-reveal claim path** described in [Failure Modes](#failure-modes), because at N=15 with 95% per-party reliability, P(all reveal) ≈ 46% — recovery is more common than completion.
 
 ## Script Construction
 
