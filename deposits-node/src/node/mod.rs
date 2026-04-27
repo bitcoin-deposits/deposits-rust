@@ -296,13 +296,11 @@ pub struct Node {
     /// processing of non-cosign requests (cosign_update, quorum_join, etc.).
     cosign_semaphore: Arc<tokio::sync::Semaphore>,
 
-    /// Step 8d — apply-edge wakeup for dispute confiscation. The
-    /// per-ledger actor signals this Notify when it observes a
-    /// fork-branch `DisputeArmed`; main_loop's periodic block uses
-    /// `notified()` in `select!` so it wakes immediately rather
-    /// than waiting for the next `periodic_interval` tick. Removes
-    /// the 5-60s "armed → confiscate" lag that periodic-only
-    /// scheduling imposed.
+    /// Apply-edge wakeup for dispute confiscation. A per-ledger
+    /// actor signals this Notify when it observes a fork-branch
+    /// `DisputeArmed`; main_loop's periodic block awaits on it so
+    /// it wakes immediately instead of after the next
+    /// `periodic_interval` tick.
     pub(crate) dispute_wakeup: Arc<tokio::sync::Notify>,
 
     /// Pending Lightning invoices: payment_hash -> (ledger_id, deposit_pubkey, amount_msat)
@@ -341,32 +339,30 @@ pub struct Node {
     cosign_workers:
         Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<crate::nostr::LedgerRequest>>>,
 
-    /// Per-ledger actor handles. Step 2 of the per-ledger-actor migration:
-    /// every loaded ledger gets a tokio task that owns a snapshot of its
-    /// `Ledger`. Actors are idle in this step (run loop is a stub); steps
-    /// 3+ start routing inbound and commit events through them. The
-    /// authoritative `handler.ledgers` map is unchanged.
-    ///
-    /// The shared outbox receiver isn't stored on `Node` — `init.rs`
-    /// spawns a drainer task that takes ownership of it. Step 3 replaces
-    /// the drainer with real fan-in to broadcast / wallet / spawn paths.
+    /// Per-ledger actor handles, keyed by ledger_id. Each actor owns
+    /// the apply path for its ledger via a shared
+    /// `Arc<RwLock<Ledger>>` it co-owns with `handler.ledgers`.
+    /// Inbound updates and operator-driven commits flow into the
+    /// actor's inbox; the actor emits broadcast / cosig requests /
+    /// dispute-pipeline wakeups via the shared outbox.
     pub(crate) ledger_actors:
         Mutex<HashMap<String, ledger_actor::LedgerActorHandle>>,
 
-    /// Outbox sender shared with the actor pool. Held so that ledgers
-    /// created after `Node::new` (via `ledger open`, `import_ledger`, or
-    /// inbound discovery) can lazy-spawn an actor without restarting the
-    /// daemon. The matching receiver is parked in `actor_outbox_rx`
-    /// until `run()` takes it and spawns the drainer.
+    /// Outbox sender shared with every actor in the pool. Held on
+    /// `Node` so ledgers created post-startup (via `ledger open`,
+    /// `import_ledger`, or inbound discovery) can lazy-spawn an
+    /// actor without restarting the daemon. The matching receiver
+    /// is parked in `actor_outbox_rx` until `run()` takes it.
     pub(crate) actor_outbox_tx: tokio::sync::mpsc::UnboundedSender<(
         String,
         ledger_actor::LedgerOutbound,
     )>,
 
-    /// Parked receiver for the actor outbox. `Node::new` no longer
-    /// spawns the outbox drainer itself — `Self` doesn't exist yet, so
-    /// the drainer can't hold an `Arc<Node>` for callbacks. Instead the
-    /// rx is parked here and `main_loop.rs::run` takes it (with
+    /// Parked receiver for the actor outbox. `Node::new` doesn't
+    /// spawn the drainer itself — the drainer needs `Arc<Node>` for
+    /// `request_cosign` / `broadcast_ledger_update` callbacks that
+    /// don't exist until `Self` is constructed. The rx is parked
+    /// here and `main_loop.rs::run` takes it (with
     /// `Arc::clone(self)` in scope) and spawns the drainer there.
     /// Wrapped in `Option` so `take()` consumes it on first run; a
     /// second call to `run()` would find `None` and skip spawning.

@@ -7,39 +7,27 @@
 
 //! Per-ledger actor.
 //!
-//! Each ledger gets a dedicated tokio task that owns its `Ledger`
-//! state, persistence, and state-machine transitions. The coordinator
-//! (the existing `Node`) routes events to the right actor by
-//! `ledger_id` and consumes outbound events for broadcast / wallet /
-//! spawning new actors.
+//! Each ledger gets a dedicated tokio task. `Node` routes events to
+//! the right actor by `ledger_id` and consumes outbound events for
+//! broadcast / cosig / dispute-pipeline wakeups.
 //!
 //! Design discipline:
-//!   - The actor never touches any state outside its own `Ledger`.
-//!   - Inbound is fully idempotent — dedup on `content_hash` so the
-//!     skip-own-ledger guard becomes unnecessary (a self-broadcast
-//!     echoed from the relay is just a duplicate the actor recognizes
-//!     and drops).
-//!   - Outbound is fire-and-forget for everything except cosignature
-//!     collection. Cosig is the one synchronous exception: the actor
-//!     emits `LedgerOutbound::RequestCosig { reply, .. }` and awaits
-//!     the oneshot response before sealing the staged update.
-//!
-//! This file (Step 1 of the migration) defines the types only — the
-//! actor isn't wired into any code path yet. Subsequent steps stand up
-//! the actor pool, route inbound through it, route commits through it,
-//! and finally drop the parallel `DepositsHandler::ledgers` map.
-//! See `MEMORY.md` references for the migration plan.
+//!   - The actor's `ledger` is `Arc<RwLock<Ledger>>` shared with
+//!     `handler.ledgers` — single source of truth, single writer.
+//!   - Inbound is fully idempotent: dedup on `(seq, content_hash)`,
+//!     so a self-broadcast echoed off the relay is a no-op.
+//!   - Outbound is fire-and-forget for `MaybeConfiscate`. `Broadcast`
+//!     is fire-and-forget *unless* a reply oneshot is set.
+//!     `RequestCosig` is the one fully-synchronous outbound path:
+//!     the actor blocks its run loop awaiting majority cosignatures
+//!     before sealing the staged update.
+//!   - Never hold the ledger lock across an `.await`. Take read or
+//!     write briefly, drop, do async work, take again if needed.
 
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use deposits_core::messages::LedgerOperation;
 use deposits_core::types::{CosignEntry, SignedLedgerUpdate};
 use tokio::sync::{mpsc, oneshot};
-
-/// Opaque identifier the coordinator assigns to a cosign request so
-/// the actor can correlate the eventual reply with the request that
-/// triggered it. Today the coordinator's existing `pending_cosign_requests`
-/// uses `String` (Nostr request_id); we keep that shape.
-pub type CosigRequestId = String;
 
 /// Events the coordinator forwards into a ledger actor.
 #[derive(Debug)]
@@ -49,92 +37,44 @@ pub enum LedgerEvent {
     /// it and persists.
     Inbound(Box<SignedLedgerUpdate>),
 
-    /// A peer asked us to cosign their proposed update (we're a quorum
-    /// member of the source ledger). Actor validates against its
-    /// replica and sends a `CosignReply` back via `LedgerOutbound`.
-    Cosign {
-        update: Box<SignedLedgerUpdate>,
-        reply: oneshot::Sender<Option<CosignEntry>>,
-    },
-
-    /// The local operator just committed an update via the legacy
-    /// `Node::commit_operation` path; mirror it onto the actor's
-    /// shadow view and persist to `.actor.log`. This is 8b-shadow:
-    /// the actor isn't authoritative for outbound commits yet, but
-    /// it records every committed update so `actor.log` stays a
-    /// faithful mirror of `handler`'s `<id>.jsonl` for both inbound
-    /// AND outbound updates. A future commit ("true 8b") flips the
-    /// flow so `Node::commit_operation` *requests* the commit via
-    /// this event and the actor drives staging + cosig + broadcast.
-    LocalCommit(Box<SignedLedgerUpdate>),
-
-    /// True 8b — the actor drives a new commit end to end. Replaces
-    /// the legacy `Node::commit_operation` body: actor stages, runs
-    /// the cosig round (if quorum is active or this is a first
-    /// `QuorumBegin`), operator-signs, applies, persists, and
-    /// broadcasts. `Node::commit_operation` becomes a thin shim that
-    /// emits this event and awaits `reply`; on success it mirrors
-    /// the result onto `handler.ledgers` so legacy readers stay
-    /// consistent until 8c migrates them.
+    /// Operator-driven commit. Actor stages, runs the cosig round (if
+    /// quorum is active or this is a first `QuorumBegin`),
+    /// operator-signs, applies, persists, and broadcasts.
+    /// `Node::commit_operation` is a thin shim that emits this event
+    /// and awaits `reply`.
     Commit {
         operation: LedgerOperation,
         block_height: u32,
         block_hash: [u8; 32],
         reply: oneshot::Sender<Result<CommitResult, String>>,
     },
-
-    /// Drained from the run loop on shutdown.
-    Shutdown,
 }
 
-/// Result the actor returns on a successful `Commit`. The drainer-
-/// side `Node::commit_operation` shim mirrors `update` back into
-/// `handler.ledgers` (until 8c removes that map) and returns
-/// `event_id` to the caller.
+/// Result the actor returns on a successful `Commit`.
 #[derive(Debug)]
 pub struct CommitResult {
     pub event_id: String,
     pub update: SignedLedgerUpdate,
 }
 
-/// Specification for an on-chain confiscation transaction the actor
-/// needs the wallet (held by the coordinator) to build and broadcast.
-/// This is the only "ask the wallet to do something" event because
-/// every other on-chain action (reserves rotation, deposit funding) is
-/// driven by the coordinator's own paths, not the per-ledger actor.
-#[derive(Debug)]
-pub struct ConfiscationSpec {
-    pub ledger_id: String,
-    pub last_valid_seq: u64,
-    pub winner_pubkey: PublicKey,
-    // Concrete UTXO + script-path details get added in step 4 when we
-    // actually move dispute resolution into the actor — kept abstract
-    // here so this type doesn't drag in the full lottery scaffolding.
-}
-
-/// Events an actor emits to the coordinator. Fire-and-forget for
-/// everything except `RequestCosig`, which carries a oneshot reply
-/// so the actor can await majority cosignatures before sealing.
+/// Events an actor emits to the coordinator.
 #[derive(Debug)]
 pub enum LedgerOutbound {
     /// Publish a fully-formed `SignedLedgerUpdate` over Nostr. The
     /// optional `reply` is set when the caller needs the resulting
     /// event id (e.g. the actor-driven commit path); fire-and-forget
-    /// when `None` (legacy and disposable broadcasts).
+    /// when `None`.
     Broadcast {
         update: Box<SignedLedgerUpdate>,
         reply: Option<oneshot::Sender<Result<String, String>>>,
     },
-
-    /// Publish a kind:9101 fraud broadcast.
-    BroadcastFraud(Box<deposits_core::fraud::FraudBroadcast>),
 
     /// Coordinator: collect cosignatures from the listed members for
     /// this update. When threshold reached (or timeout), respond via
     /// the oneshot. The actor blocks its run loop on this — it's the
     /// only synchronous outbound path. Reply is `Result` so the actor
     /// can distinguish a real cosig failure (abort the commit) from
-    /// "no quorum needed yet" (proceed with operator-only signature).
+    /// "no quorum needed yet".
     RequestCosig {
         update: Box<SignedLedgerUpdate>,
         members: Vec<PublicKey>,
@@ -142,28 +82,12 @@ pub enum LedgerOutbound {
         reply: oneshot::Sender<Result<Vec<CosignEntry>, String>>,
     },
 
-    /// Coordinator + wallet: build, sign, and broadcast the on-chain
-    /// confiscation transaction described by `spec`.
-    NeedOnchainTx(ConfiscationSpec),
-
-    /// Coordinator: a dispute-resolution event has produced a forked
-    /// ledger; spawn a new actor to own it.
-    SpawnFork {
-        new_ledger_id: String,
-        // Concrete spawn args (initial Ledger state, persistence path)
-        // get added in step 5 when fork creation moves into the actor.
-        // For now this is a marker; the migration introduces the field
-        // shape progressively.
-    },
-
-    /// Step 8d — apply-edge wakeup: the actor just observed a
-    /// fork-branch `DisputeArmed` for `ledger_id`. The coordinator
-    /// should run `auto_confiscate` immediately rather than waiting
-    /// for the next `periodic_interval` tick. The coordinator's
-    /// existing logic is idempotent (skips ledgers without
-    /// `custody_armed_*.marker`, skips ones with pending or already-
-    /// landed confiscation), so firing aggressively on every armed
-    /// observation is safe — extras are no-ops.
+    /// Apply-edge wakeup: the actor just observed a fork-branch
+    /// `DisputeArmed` for `ledger_id`. `Node` runs `auto_confiscate`
+    /// immediately instead of waiting for the next periodic tick.
+    /// Idempotent (skips ledgers without a `custody_armed_*.marker`
+    /// and ones with pending or already-landed confiscation), so
+    /// firing on every armed observation is safe.
     MaybeConfiscate { ledger_id: String },
 }
 
@@ -186,55 +110,35 @@ impl LedgerActorHandle {
 }
 
 /// Shared-shape outbox: each actor sends `(ledger_id, outbound_event)`
-/// into a single coordinator-side receiver. Easier multiplexing than
-/// per-actor channels and matches how the coordinator's main loop
-/// already handles fan-in for Nostr / wallet operations.
+/// into a single coordinator-side receiver.
 pub type SharedOutbox = mpsc::UnboundedSender<(String, LedgerOutbound)>;
 
-/// The actor itself. Step 1 leaves this as the type sketch; subsequent
-/// steps fill in `run()` with the real state-machine driver, move
-/// `Ledger` ownership in, and add persistence.
 pub struct LedgerActor {
-    /// Inbox the actor reads from. Owned here so dropping the actor
-    /// closes the channel naturally on shutdown.
+    /// Inbox the actor reads from.
     pub inbox: mpsc::Receiver<LedgerEvent>,
     /// Shared outbox to the coordinator (tagged with this actor's
     /// `ledger_id` on every send).
     pub outbox: SharedOutbox,
-    /// The shared ledger handle. Phase C/D of the 8b/8c migration
-    /// changes this from an owned `Ledger` to the same
-    /// `Arc<RwLock<Ledger>>` that lives in `handler.ledgers`. Single
-    /// source of truth: the actor's writes (via `commit_staged` in
-    /// `handle_commit`, or `apply` in `apply_inbound`) immediately
-    /// become visible to every reader still going through
-    /// `handler.ledgers`. No separate mirror step needed.
-    ///
-    /// Lock discipline:
-    ///   - Take the write lock only for the apply-state slice.
-    ///   - Never hold any lock across an `.await` (cosig + broadcast
-    ///     in `handle_commit` complete with the lock dropped).
-    ///   - Reads that need a snapshot clone the lock guard contents
-    ///     and drop the guard before returning.
+    /// Shared ledger handle — the same `Arc<RwLock<Ledger>>` that
+    /// lives in `handler.ledgers`. The actor's writes (via
+    /// `commit_staged` in `handle_commit`, or `LedgerState::apply`
+    /// in `apply_inbound`) are immediately visible to every reader.
     pub ledger: std::sync::Arc<std::sync::RwLock<deposits_core::ledger::Ledger>>,
     /// Stable identifier for log lines and outbox tagging.
     pub ledger_id: String,
-    /// Path to the actor's parallel JSONL (Step 5). Each accepted
-    /// `Inbound` update is appended as a `{"type":"Update", ...}` row,
-    /// matching the format `handler.rs` already uses for the
-    /// authoritative file. The actor never writes a State row — its
-    /// JSONL is "updates seen since this process started", so a diff
-    /// against the handler's authoritative file validates that the
-    /// actor's apply path agrees on what's in the chain.
+    /// Parallel `<id>.actor.log` JSONL file. Each accepted update is
+    /// appended as a `{"type":"Update", ...}` row, matching the
+    /// shape of the handler's authoritative `<id>.jsonl`. Used as a
+    /// regression check: a diff between the two files validates
+    /// that the actor's apply path agrees on what's in the chain.
     pub persistence_path: std::path::PathBuf,
-    /// Step 8a: directory holding the fork files. The actor writes
-    /// each observed fork branch to
-    /// `{ledger_id}_{last_valid_seq:06}_{disputer_pk_16}.actor.log`
-    /// in this directory, matching the handler's compound-key
-    /// layout (handler emits `.jsonl` with the same name). The
-    /// actor's job is to observe — it doesn't apply fork branches
-    /// to a sub-state today; that's 8b territory.
+    /// Directory the actor writes fork-branch files into:
+    /// `{ledger_id}_{last_valid_seq:06}_{disputer_pk_16}.actor.log`,
+    /// matching the handler's compound-key layout (handler emits
+    /// `.jsonl` files with the same name). Observation only — the
+    /// actor doesn't apply fork branches to a sub-state.
     pub forks_dir: std::path::PathBuf,
-    /// Step 8a: per-disputer mapping of disputer pubkey →
+    /// Per-disputer mapping of disputer pubkey →
     /// (last_valid_seq, last_observed_seq_on_fork). Built up as
     /// `DisputeEnter` events arrive and consulted when subsequent
     /// fork-branch updates need to be routed to the right file.
@@ -246,14 +150,11 @@ pub struct LedgerActor {
         ForkObservation,
     >,
     /// Operator's signing key, captured at actor spawn from the
-    /// node's wallet. Used by `handle_commit` (true 8b) to sign new
-    /// updates the actor produces. Stable for the daemon's lifetime
-    /// — same key is used by the legacy `Node::commit_operation`
-    /// path, so no risk of key drift between paths.
+    /// node's wallet. Stable for the daemon's lifetime.
     pub operator_secret: SecretKey,
 }
 
-/// Step 8a — per-disputer fork-branch observation state.
+/// Per-disputer fork-branch observation state.
 #[derive(Clone, Debug)]
 pub struct ForkObservation {
     /// Sequence on the *main* chain at which this fork diverges.
@@ -266,64 +167,43 @@ pub struct ForkObservation {
 }
 
 impl LedgerActor {
-    /// Convenience: send to the shared outbox tagged with this
-    /// actor's ledger_id.
-    #[allow(dead_code)] // becomes used in step 3+
-    fn emit(&self, ev: LedgerOutbound) {
-        if let Err(e) = self.outbox.send((self.ledger_id.clone(), ev)) {
-            tracing::warn!(
-                "LedgerActor[{}…] outbox send failed (coordinator gone?): {}",
-                &self.ledger_id[..16.min(self.ledger_id.len())],
-                e
-            );
-        }
-    }
-
-    /// Apply an inbound `SignedLedgerUpdate` to the actor's shadow
-    /// `Ledger`. Step 4 implementation: idempotent dedup on
-    /// `(sequence_number, content_hash)`, then chain-continuity check
-    /// (next slot only — gaps and out-of-order are dropped), then
-    /// `apply_state_changes` and tip advancement. Mirrors what the
-    /// authoritative `handler.ledgers` path does for non-self updates.
+    /// Apply an inbound `SignedLedgerUpdate` to the shared `Ledger`.
+    /// Idempotent dedup on `(sequence_number, content_hash)`, then
+    /// chain-continuity check (next slot only — gaps and out-of-order
+    /// are dropped), then `LedgerState::apply` and tip advancement.
     /// Self-broadcasts echoed back from the relay land here too and
-    /// dedup correctly via content_hash.
+    /// dedup as no-ops.
     ///
-    /// No persistence in step 4 — actor state is in-memory shadow only.
-    /// Step 5 adds persistence and makes the actor authoritative.
+    /// `self.ledger` is shared with `handler.ledgers`, so this is the
+    /// authoritative apply path the rest of the daemon sees. The
+    /// handler's `inbound.rs` apply path may race with us; whichever
+    /// gets the lock first wins, the other's dedup check turns into
+    /// a no-op.
     fn apply_inbound(&mut self, update: deposits_core::types::SignedLedgerUpdate) {
         use deposits_core::messages::LedgerOperation;
         use deposits_core::tlv::TlvDecode;
 
-        // Phase C/D — `self.ledger` is now `Arc<RwLock<Ledger>>`
-        // shared with `handler.ledgers`. Take the write lock for the
-        // whole apply path (no awaits inside this function) so the
-        // checks (parent_pubkey, dedup, chain-continuity) and the
-        // mutation see a consistent view.
+        // Take the write lock for the whole apply path (no awaits
+        // inside this function) so the checks and the mutation see a
+        // consistent view.
         let mut ledger = self.ledger.write().unwrap();
 
         // Operator-key filter: only accept updates whose operator_id
-        // matches our current `parent_pubkey`. Fork-branch updates from
-        // dispute initiators carry the disputer's pubkey as the operator
-        // and would extend a different chain. The handler's
-        // `handle_ledger_update` does the same gate (see
-        // `is_from_operator` check in `inbound.rs`); without this the
-        // actor's shadow drifts as soon as a dispute creates competing
-        // seq-N+1 updates from multiple disputers' forks.
-        // After DisputeAcquire, parent_pubkey is updated to the new
-        // custodian — the filter naturally adapts.
+        // matches our current `parent_pubkey`. Fork-branch updates
+        // from dispute initiators carry the disputer's pubkey as the
+        // operator and would extend a different chain. After
+        // DisputeAcquire, parent_pubkey updates to the new custodian
+        // — the filter adapts naturally.
         if update.operator_id != ledger.state.parent_pubkey {
-            // Fork-branch update — Step 8a routes to a per-disputer
-            // file matching the handler's compound-key layout. Drop
-            // the lock first so the fork helper can take its own.
+            // Drop the lock so the fork helper can take its own.
             drop(ledger);
             self.handle_fork_branch_update(&update);
             return;
         }
 
-        // Dedup on (seq, content_hash). Same content at same seq → no-op.
-        // Different content at same seq → equivocation evidence; log and
-        // refuse to apply (keeps the actor consistent with whichever
-        // arrived first).
+        // Dedup on (seq, content_hash). Same content at same seq →
+        // no-op. Different content at same seq → equivocation
+        // evidence; log and refuse to apply.
         if let Some(existing) = ledger
             .history
             .iter()
@@ -342,11 +222,8 @@ impl LedgerActor {
         }
 
         // Chain-continuity: only apply if this is the exact next slot
-        // AND the previous_hash matches our tip's chain_hash. Gaps and
-        // out-of-order updates are dropped — the authoritative handler
-        // path may have already accepted via event-store catch-up; the
-        // actor's shadow stays slightly behind in that case (will be
-        // reconciled when the actor takes over persistence in step 5).
+        // AND the previous_hash matches our tip's chain_hash. Gaps
+        // and out-of-order updates are dropped.
         let expected_seq = ledger.state.sequence + 1;
         if update.sequence_number != expected_seq {
             tracing::trace!(
@@ -399,12 +276,10 @@ impl LedgerActor {
         // read lock at any time.
         drop(ledger);
 
-        // Append to parallel JSONL (Step 5). Matches handler's
-        // `LedgerLogRow::Update` wire shape — flatten the update with
-        // a `"type":"Update"` key. Failure to persist is logged but
-        // doesn't unwind the in-memory apply: the shadow file is for
-        // sanity-checking, and a missed line is recoverable from the
-        // authoritative handler file in step 6.
+        // Append to the parallel `<id>.actor.log`. Failure to persist
+        // is logged but doesn't unwind the in-memory apply — the
+        // shadow file is for sanity-checking, and a missed line is
+        // recoverable from the authoritative `<id>.jsonl`.
         if let Err(e) = self.append_update_row(&update) {
             tracing::warn!(
                 "LedgerActor[{}…] persist seq {} failed: {}",
@@ -415,25 +290,21 @@ impl LedgerActor {
         }
     }
 
-    /// Append a single `Update` JSONL row to the actor's parallel file.
-    /// Step 8a — observe a fork-branch update (operator_id !=
-    /// parent_pubkey) and persist it to a per-disputer file matching
-    /// the handler's compound-key layout.
+    /// Observe a fork-branch update (operator_id != parent_pubkey)
+    /// and persist it to a per-disputer file matching the handler's
+    /// compound-key layout.
     ///
     /// On `DisputeEnter` (the disputer's first fork-branch update),
     /// register a new `ForkObservation` keyed by the disputer's
     /// pubkey and persist the update under
     /// `{ledger_id}_{last_valid_seq:06}_{disputer_pk_16}.actor.log`.
-    /// Subsequent fork-branch updates from the same disputer are
-    /// routed to the same file as long as their sequence is strictly
+    /// Subsequent fork-branch updates from the same disputer route
+    /// to the same file as long as their sequence is strictly
     /// monotonic on the fork. On `DisputeAcquire` / `DisputeYield`,
     /// the observation is dropped — the fork either takes over the
     /// canonical chain or is tombstoned.
     ///
-    /// This is observation-only: the actor does NOT apply the fork
-    /// branches to a sub-state. That's 8b/8c territory. The files
-    /// produced here let later migration steps (and audit tooling)
-    /// read the actor's view of every fork it saw.
+    /// Observation-only: fork branches do not apply to a sub-state.
     fn handle_fork_branch_update(
         &mut self,
         update: &deposits_core::types::SignedLedgerUpdate,
@@ -584,16 +455,12 @@ impl LedgerActor {
             self.fork_observations.remove(&update.operator_id);
         }
 
-        // Step 8d — apply-edge confiscation trigger. When we observe
-        // a `DisputeArmed` from any disputer (ourselves or a peer),
-        // wake the coordinator so it can re-check whether all
-        // expected disputants are armed and the confiscation is now
-        // ready to initiate. Without this signal, the coordinator
-        // waits up to `periodic_interval` (5s with --fast-poll, else
-        // 60s) before checking — most of the dispute pipeline's
-        // wall-clock latency is here. Idempotent: the coordinator's
-        // logic skips ledgers that don't qualify yet or that already
-        // have a pending/landed confiscation.
+        // Apply-edge confiscation trigger. On any `DisputeArmed`,
+        // wake `Node` to re-check whether all expected disputants
+        // are armed and confiscation is ready to initiate. Without
+        // this signal, `Node` would wait up to `periodic_interval`
+        // (5s/60s) before checking — most of the dispute pipeline's
+        // wall-clock latency was here. Idempotent.
         if matches!(op, LedgerOperation::DisputeArmed { .. }) {
             if let Err(e) = self.outbox.send((
                 self.ledger_id.clone(),
@@ -610,18 +477,9 @@ impl LedgerActor {
         }
     }
 
-    // 8b-shadow's `handle_local_commit_shadow` was removed in Phase
-    // C/D — Phase B made the actor authoritative for commits, and
-    // Phase C/D made `self.ledger` the same `Arc<RwLock<Ledger>>`
-    // that `handler.ledgers` exposes. There's no separate handler
-    // copy to mirror onto, and `Node::commit_operation` no longer
-    // fires `LedgerEvent::LocalCommit`. The variant is kept on the
-    // enum for binary-compat with any in-flight messages but the
-    // run loop just drops it.
-
-    /// Append the main-chain update to `self.persistence_path`. Thin
-    /// wrapper around the free `append_update_to` so the fork path
-    /// (8a) and main path share the same write logic.
+    /// Append a main-chain update to `self.persistence_path`. Thin
+    /// wrapper around `append_update_to` so the fork-branch path and
+    /// the main path share the same write logic.
     fn append_update_row(
         &self,
         update: &deposits_core::types::SignedLedgerUpdate,
@@ -629,20 +487,13 @@ impl LedgerActor {
         append_update_to(&self.persistence_path, update)
     }
 
-    /// True 8b — drive a new commit end to end on this ledger.
+    /// Drive a new commit end-to-end: stage, cosig, sign, apply,
+    /// persist, broadcast.
     ///
-    /// Mirrors what `Node::commit_operation` used to do, but with the
-    /// actor's owned `Ledger` as the authoritative state and the
-    /// outbox as the only path back to the rest of the daemon
-    /// (cosig collection, broadcast). The async work happens inline
-    /// in the run loop because each actor is single-tasked — this
-    /// blocks other events on this ledger but not on others, which
-    /// matches the per-ledger staging-lock semantics the legacy
-    /// path used.
-    ///
-    /// Returns the broadcast event id and the fully-signed update
-    /// (so `Node::commit_operation`'s shim can mirror it onto
-    /// `handler.ledgers` for legacy readers until 8c migrates them).
+    /// The async work happens inline in the run loop because each
+    /// actor is single-tasked — this blocks other events on this
+    /// ledger but not on others. Returns the broadcast event id and
+    /// the fully-signed update.
     async fn handle_commit(
         &mut self,
         operation: LedgerOperation,
@@ -652,10 +503,8 @@ impl LedgerActor {
         use bitcoin::hashes::{sha256, Hash};
         use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
 
-        // 1. Stage on the actor's ledger. validate_operation runs
-        //    inside; mirrors what Node used to do via handler.ledgers.
-        //    Take the read lock for staging only — release before any
-        //    .await to keep readers unblocked during the cosig round.
+        // 1. Stage. Take the read lock briefly and release it before
+        //    any .await so the cosig round doesn't block readers.
         let (mut staged, quorum_active, members) = {
             let ledger = self.ledger.read().unwrap();
             let staged = ledger
@@ -672,11 +521,11 @@ impl LedgerActor {
             (staged, quorum_active, members)
         };
 
-        // 2. Cosign — required when the quorum is active OR when this
-        //    is the very first QuorumBegin (which transitions the
-        //    state machine PreQuorum -> Active and so needs member
-        //    attestation even though the state is still PreQuorum at
-        //    stage time). Same gate as the legacy path.
+        // 2. Cosign — required when the quorum is active OR when
+        //    this is the very first QuorumBegin (which transitions
+        //    the state machine PreQuorum -> Active and so needs
+        //    member attestation even though state is still PreQuorum
+        //    at stage time).
         let is_first_quorum_begin = !quorum_active
             && matches!(&staged.operation, LedgerOperation::QuorumBegin { .. });
         if quorum_active || is_first_quorum_begin {
@@ -710,10 +559,8 @@ impl LedgerActor {
             staged.update.content_hash = staged.update.compute_hash();
         }
 
-        // 3. Operator-sign with the actor's stored secret. The data
-        //    we sign covers content + every cosignature, matching
-        //    what `operator_signing_data()` builds — same shape as
-        //    the legacy path so peers' verifiers don't notice.
+        // 3. Operator-sign. Data covers content + every cosignature
+        //    (see `operator_signing_data`).
         {
             let secp = Secp256k1::new();
             let data = staged.update.operator_signing_data();
@@ -762,10 +609,12 @@ impl LedgerActor {
         if let Err(e) = send_res {
             return Err(format!("Broadcast outbox send failed: {}", e));
         }
+        // Tolerate broadcast failure — the relay echo or a peer's
+        // gap-fill will deliver the update if our publish dropped.
         let event_id = brx
             .await
             .map_err(|_| "Broadcast reply dropped".to_string())?
-            .unwrap_or_default(); // legacy path also tolerates broadcast failure (see operations.rs)
+            .unwrap_or_default();
 
         Ok(CommitResult {
             event_id,
@@ -773,8 +622,9 @@ impl LedgerActor {
         })
     }
 
-    /// Run loop. Step 4 implements `Inbound` to keep an in-memory
-    /// shadow of the ledger; LocalCommit + Cosign are still stubs.
+    /// Run loop — drives `Inbound` and `Commit` events. The actor
+    /// exits when its inbox channel closes (i.e. every sender has
+    /// dropped).
     pub async fn run(mut self) {
         tracing::info!(
             "LedgerActor[{}…] starting",
@@ -784,16 +634,6 @@ impl LedgerActor {
             match event {
                 LedgerEvent::Inbound(update) => {
                     self.apply_inbound(*update);
-                }
-                LedgerEvent::Cosign { reply, .. } => {
-                    // Step 4: still refuse to cosign — handler path is
-                    // authoritative until step 5.
-                    let _ = reply.send(None);
-                }
-                LedgerEvent::LocalCommit(_update) => {
-                    // Dead code post-Phase B: see the comment near
-                    // where `handle_local_commit_shadow` used to live.
-                    // The variant is kept for binary-compat; just drop.
                 }
                 LedgerEvent::Commit {
                     operation,
@@ -806,13 +646,6 @@ impl LedgerActor {
                         .await;
                     let _ = reply.send(res);
                 }
-                LedgerEvent::Shutdown => {
-                    tracing::info!(
-                        "LedgerActor[{}…] shutting down",
-                        &self.ledger_id[..16.min(self.ledger_id.len())]
-                    );
-                    break;
-                }
             }
         }
         tracing::info!(
@@ -823,10 +656,8 @@ impl LedgerActor {
 }
 
 /// Append a `SignedLedgerUpdate` row to the given path, matching the
-/// "newline-then-row" `{"type":"Update", ...}` shape used by the
-/// handler's authoritative ledger files. Used by both the main-chain
-/// `append_update_row` and the fork-branch path in
-/// `handle_fork_branch_update` (Step 8a).
+/// `{"type":"Update", ...}` shape the handler's authoritative ledger
+/// files use. Shared between the main-chain and fork-branch writers.
 fn append_update_to(
     path: &std::path::Path,
     update: &deposits_core::types::SignedLedgerUpdate,

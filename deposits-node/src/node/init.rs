@@ -64,13 +64,11 @@ impl Node {
             }
         }
 
-        // ── Step 2 of the per-ledger-actor migration ──
-        // Spawn one tokio task per loaded ledger. Each actor owns a clone
-        // of the Ledger. Step 2 actors are idle stubs — they don't yet
-        // receive any inbound or commit events. The handler.ledgers map
-        // is still authoritative. This step validates that the actor
-        // pool spins up cleanly (one channel + task per ledger) and that
-        // the shared outbox drainer doesn't leak.
+        // Spawn one actor per loaded ledger. Each actor co-owns the
+        // ledger's `Arc<RwLock<Ledger>>` with `handler.ledgers` so
+        // its commit/apply path is authoritative for every reader.
+        // Lazy-spawn (`Node::ensure_actor_for`) covers ledgers
+        // created after this point.
         let actor_pool_span = tracing::info_span!("actor_pool_spawn").entered();
         let (actor_outbox_tx, actor_outbox_rx) =
             tokio::sync::mpsc::unbounded_channel::<(
@@ -84,19 +82,14 @@ impl Node {
         {
             let ledgers = handler_arc.ledgers.lock().unwrap();
             for (lid, arc) in ledgers.iter() {
-                // Phase C/D — pass the same Arc the handler uses
-                // (cheap refcount bump, not a deep clone). Single
-                // source of truth: the actor's commit/apply paths
-                // and `handler.ledgers` readers see the same
-                // `Ledger` through a shared `RwLock`.
                 let shared_ledger = Arc::clone(arc);
                 let (tx, rx) = tokio::sync::mpsc::channel::<
                     super::ledger_actor::LedgerEvent,
                 >(64);
-                // Note: extension is NOT `.jsonl` — the handler's
-                // ledger-loader globs `*.jsonl` and would treat the
-                // actor's shadow file as another ledger to load
-                // ("missing role" / "missing state" warnings).
+                // Extension is `.actor.log`, not `.jsonl` — the
+                // handler's ledger-loader globs `*.jsonl` and would
+                // otherwise treat this file as another ledger to
+                // load.
                 let ledgers_dir = config.data_dir.join("wallet/ledgers");
                 let persistence_path = ledgers_dir.join(format!("{}.actor.log", lid));
                 let actor = super::ledger_actor::LedgerActor {
@@ -105,18 +98,11 @@ impl Node {
                     ledger: shared_ledger,
                     ledger_id: lid.clone(),
                     persistence_path,
-                    // Step 8a: per-disputer fork files land in the
-                    // same directory the handler uses for its
-                    // authoritative `{compound_key}.jsonl`, with a
-                    // `.actor.log` extension so the handler's
-                    // `*.jsonl` glob doesn't pick them up as ledgers
-                    // to load.
+                    // Per-disputer fork files share the ledgers dir;
+                    // the `.actor.log` extension keeps them out of
+                    // the handler's `*.jsonl` glob.
                     forks_dir: ledgers_dir,
                     fork_observations: std::collections::HashMap::new(),
-                    // 8b/8c phase B: operator's signing key for the
-                    // actor-driven commit path. Same key the legacy
-                    // path uses (wallet.operator_secret), captured
-                    // once at spawn — stable for the daemon's life.
                     operator_secret: wallet.operator_secret(),
                 };
                 tokio::spawn(actor.run());
@@ -127,23 +113,18 @@ impl Node {
             }
         }
         drop(actor_pool_span);
-        // Hand the outbox sender + ledgers_dir to the Node struct so
-        // ledgers created post-startup (via `ledger open`, import, or
-        // inbound discovery) can lazy-spawn an actor on demand.
         let actor_outbox_tx_for_node = actor_outbox_tx;
         let actor_ledgers_dir = config.data_dir.join("wallet/ledgers");
         // Park the outbox receiver on `Self` for `run()` to pick up.
-        // Phase A of the 8b/8c migration: the drainer needs to call
-        // back into Node (`request_cosign`, broadcast, etc.) which
-        // requires `Arc<Node>` — a reference that doesn't exist until
-        // `Ok(Self {})` returns. `main_loop::run` takes `&Arc<Self>`
-        // and spawns the drainer there with the right scope.
+        // The drainer needs `Arc<Node>` for `request_cosign` /
+        // `broadcast_ledger_update` callbacks that don't exist
+        // until `Self` is constructed. `main_loop::run` has
+        // `&Arc<Self>` in scope, so it spawns the drainer there.
         let actor_outbox_rx_parked = Mutex::new(Some(actor_outbox_rx));
-        // Step 8d — Notify shared between the outbox drainer (signal)
-        // and main_loop's periodic block (await). Apply-edge events
-        // like `MaybeConfiscate` set the Notify so the next periodic
-        // task batch fires immediately rather than waiting up to
-        // `periodic_interval` for the timer.
+        // Notify shared between the outbox drainer (signal) and
+        // main_loop's wakeup task (await). `MaybeConfiscate` events
+        // hit `notify_one` so `auto_confiscate` runs immediately
+        // instead of waiting up to `periodic_interval`.
         let dispute_wakeup = Arc::new(tokio::sync::Notify::new());
 
         // Subscribe globally (4 compacted kind filters for all event types).
@@ -332,9 +313,9 @@ impl Node {
         let shared_ledger = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             match ledgers.get(ledger_id) {
-                // Phase C/D — share the handler's Arc directly so
-                // the actor's writes are visible to every reader
-                // still going through `handler.ledgers`.
+                // Share the handler's Arc directly so the actor's
+                // writes are visible to every reader going through
+                // `handler.ledgers`.
                 Some(arc) => Arc::clone(arc),
                 None => return,
             }

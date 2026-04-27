@@ -120,34 +120,18 @@ impl Node {
         lock.lock_owned().await
     }
 
-    /// The single correct way to create a new ledger update as an operator.
-    ///
-    /// 1. Stage: validate + build update (no state changes)
-    /// 2. Cosign: request cosignature from quorum (if active)
-    /// 3. Operator sign: sign the update (including cosign data)
-    /// 4. Persist: write to disk first (crash safety)
-    /// 5. Apply: modify ledger state + push to history
-    /// 6. Broadcast: publish to relays
+    /// The single correct way to create a new ledger update as an
+    /// operator. The per-ledger actor drives the full commit flow
+    /// (stage, cosig, sign, apply, persist, broadcast); this shim
+    /// just acquires the staging lock, snapshots wallet block
+    /// context, dispatches the `Commit` event, awaits the reply,
+    /// and persists `<id>.jsonl` for crash safety.
     #[tracing::instrument(name = "commit_operation", skip(self, operation), fields(ledger = &ledger_id[..16.min(ledger_id.len())]))]
     pub async fn commit_operation(
         &self,
         ledger_id: &str,
         operation: deposits_core::messages::LedgerOperation,
     ) -> Result<String, Error> {
-        // The actor drives the commit end to end (stage, cosig, sign,
-        // apply, persist, broadcast). Phase C/D shares the actor's
-        // ledger Arc with `handler.ledgers`, so the actor's
-        // `commit_staged` is the authoritative write that every
-        // reader sees — no separate mirror step needed. This shim
-        // only:
-        //   1. acquires the per-ledger staging lock (one in-flight
-        //      commit per ledger; the actor's mpsc would also
-        //      serialize, but the lock keeps caller-error
-        //      attribution clean),
-        //   2. snapshots block_height/block_hash from the wallet
-        //      (only Node has wallet access),
-        //   3. dispatches `Commit` and awaits the reply,
-        //   4. persists the new tip to `<id>.jsonl` for crash safety.
         let _lock = self.acquire_staging_lock(ledger_id).await;
 
         let block_height = self.wallet.get_block_height().unwrap_or(0);

@@ -932,14 +932,13 @@ impl Node {
     /// Run the main event loop.
     /// Takes `&Arc<Self>` to enable per-ledger parallel dispatch via `tokio::spawn`.
     pub async fn run(self: &Arc<Self>) -> Result<(), Error> {
-        // Step 8d — apply-edge dispute driver. Runs alongside the
-        // periodic loop: when an actor signals `dispute_wakeup` (after
-        // observing a fork-branch DisputeArmed), this task fires
-        // `auto_confiscate` immediately rather than waiting for the
-        // 5-60s `periodic_interval` tick. The periodic loop still
-        // runs `auto_confiscate` on its schedule as a safety net for
-        // markers we missed at startup or for confiscation retries
-        // after the per-request 120s timeout.
+        // Apply-edge dispute driver. When an actor signals
+        // `dispute_wakeup` (after observing a fork-branch
+        // DisputeArmed), fire `auto_confiscate` immediately instead
+        // of waiting for the next `periodic_interval`. The periodic
+        // loop still runs `auto_confiscate` on schedule as a safety
+        // net for markers missed at startup or retried after the
+        // per-request 120s timeout.
         {
             let node = Arc::clone(self);
             let wakeup = self.dispute_wakeup.clone();
@@ -961,12 +960,11 @@ impl Node {
             });
         }
 
-        // Phase A of true 8b/8c — actor outbox drainer. `Node::new`
-        // parks the rx instead of spawning the drainer because the
+        // Actor outbox drainer. `Node::new` parks the rx because the
         // drainer needs `Arc<Node>` for `request_cosign` /
         // `broadcast_ledger_update` callbacks that don't exist until
-        // `Self` is constructed. We pick up the rx here, with
-        // `Arc::clone(self)` in scope, and route every actor-emitted
+        // `Self` is constructed. Pick it up here with
+        // `Arc::clone(self)` in scope and route every actor-emitted
         // event to its real handler.
         if let Some(rx) = self.actor_outbox_rx.lock().unwrap().take() {
             let node = Arc::clone(self);
@@ -1019,12 +1017,6 @@ impl Node {
                             // Cosig collection talks to peers over
                             // Nostr; spawn so the drainer doesn't
                             // serialize on a multi-second round-trip.
-                            // Reply is Result so the actor can fail
-                            // its commit cleanly if cosig errors out
-                            // (vs. the legacy semantics of always
-                            // returning a Vec, which we kept for
-                            // Phase A's debug-only handler but the
-                            // actor needs error propagation).
                             let node = Arc::clone(&node);
                             let lid = lid.clone();
                             tokio::spawn(async move {
@@ -1042,16 +1034,6 @@ impl Node {
                                 }
                                 let _ = reply.send(result);
                             });
-                        }
-                        other => {
-                            // BroadcastFraud, NeedOnchainTx, SpawnFork
-                            // are emitted from code paths that don't
-                            // exist yet (Phases B+ of the migration).
-                            tracing::debug!(
-                                "actor_outbox[{}…] event {:?} (not yet handled)",
-                                lid_short,
-                                std::mem::discriminant(&other)
-                            );
                         }
                     }
                 }
