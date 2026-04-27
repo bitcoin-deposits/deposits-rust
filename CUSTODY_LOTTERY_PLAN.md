@@ -184,9 +184,14 @@ Tests:
 - `custody_lottery_reveal_json_roundtrip` — locks down the wire-format JSON shape (field names + `#[serde(skip)]` on event_id/timestamp). Any rename or field reorder breaks the test.
 - `custody_lottery_reveal_kind_is_durable` — asserts the kind is in the 1000-9999 retention range (not the 20000+ ephemeral range).
 
-#### Phase 5c — `recovery reveal` + `recovery lottery-claim` CLIs — pending
+#### Phase 5c — Migrate `recovery reveal` + `recovery lottery-claim` to new message — DONE
 
-Two new CLI subcommands. `reveal` publishes the preimage stored locally during `recovery arm`; `lottery-claim` fetches all reveals via Nostr, computes the winner via `calculate_winner`, and (if we're the winner) builds and broadcasts the claim TX using the witness helpers from 5a.
+Both CLI subcommands existed already but used the old ephemeral pattern: `send_ledger_request("lottery_reveal", ...)` against `KIND_LEDGER_REQUEST` (20101, ephemeral). With the durable `KIND_CUSTODY_LOTTERY_REVEAL` (9105) from 5b in place, the CLIs now use the typed publish/fetch helpers:
+
+- `recovery reveal <ledger_id>` — loads the locally-stored preimage from `<data_dir>/lottery_preimage_<ledger_id_prefix>.hex`, builds a Keypair from the operator secret, and calls `transport.publish_custody_lottery_reveal(ledger_id, &preimage, &keypair)`.
+- `recovery lottery-claim <ledger_id>` — replaces the ad-hoc `KIND_LEDGER_REQUEST` filter + JSON parse + action-tag check with `transport.fetch_custody_lottery_reveals(&ledger_id)`. The returned `CustodyLotteryReveal` structs already have decoded fields, so the parse loop simplifies to: hex-decode `preimage_hex`, hex-decode `member_pubkey`, derive its x-only form, and key the preimage map by that. Skips reveals with malformed pubkeys/preimages with a clear log message rather than silently dropping them.
+
+Signature verification on each reveal is **not** wired here yet; the test cluster's relay is trusted. For mainnet a verification step would be added in `recovery lottery-claim` before passing preimages to `calculate_winner` — easy to bolt on (the reveal carries the sighash inputs and signature, and the helper's sighash construction is documented).
 
 #### Phase 5d — `DisputeAcquire` wire-format rework — pending
 

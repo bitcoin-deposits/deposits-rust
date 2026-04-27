@@ -2812,7 +2812,14 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
 }
 
 /// Reveal the lottery preimage via Nostr.
+///
+/// Publishes a durable `KIND_CUSTODY_LOTTERY_REVEAL` (9105) event so
+/// other disputants can fetch the preimage during the
+/// `recovery lottery-claim` phase. The signature on the reveal binds
+/// the preimage to this disputant's identity.
 pub async fn recovery_reveal(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::{Keypair, Secp256k1};
+
     let mut ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
 
@@ -2844,13 +2851,15 @@ pub async fn recovery_reveal(args: &[String]) -> Result<(), Box<dyn std::error::
         .clone();
 
     let secret_key = derive_operator_secret(&config.seed, config.network)?;
+    let secp = Secp256k1::new();
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
 
     println!(
         "Revealing lottery preimage for ledger: {}...",
         &ledger_id[..16.min(ledger_id.len())]
     );
 
-    // Load preimage from file
+    // Load preimage from file (stored during `recovery arm`).
     let preimage_file = format!(
         "{}/lottery_preimage_{}.hex",
         config.data_dir.display(),
@@ -2874,19 +2883,14 @@ pub async fn recovery_reveal(args: &[String]) -> Result<(), Box<dyn std::error::
         .build()
         .await?;
 
-    let reveal_params = serde_json::json!({
-        "ledger_id": ledger_id,
-        "preimage": hex::encode(&preimage),
-    });
-
-    let request_id = transport
-        .send_ledger_request(&ledger_id, "lottery_reveal", reveal_params)
+    let event_id = transport
+        .publish_custody_lottery_reveal(&ledger_id, &preimage, &keypair)
         .await
-        .map_err(|e| format!("Failed to send reveal: {:?}", e))?;
+        .map_err(|e| format!("Failed to publish reveal: {:?}", e))?;
 
     println!();
     println!("Lottery preimage revealed!");
-    println!("  Request ID: {}...", &request_id[..16]);
+    println!("  Event ID: {}...", &event_id[..16]);
     println!();
     println!("Wait for all participants to reveal, then run:");
     println!(
@@ -2899,7 +2903,7 @@ pub async fn recovery_reveal(args: &[String]) -> Result<(), Box<dyn std::error::
 
 /// Claim the lottery output if we are the winner.
 pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::nostr::{NostrTransportBuilder, KIND_LEDGER_REQUEST, KIND_LEDGER_UPDATE};
+    use crate::nostr::{NostrTransportBuilder, KIND_LEDGER_UPDATE};
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use bitcoin::secp256k1::{Keypair, PublicKey, Secp256k1};
     use deposits_core::messages::LedgerOperation;
@@ -2966,16 +2970,17 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         .await
         .map_err(|e| format!("Failed to fetch updates: {}", e))?;
 
-    // Fetch lottery reveals (tagged with "l" for ledger_id)
-    let reveal_filter = Filter::new()
-        .kind(Kind::Custom(KIND_LEDGER_REQUEST))
-        .custom_tag(crate::nostr::TAG_LEDGER_REQ, [ledger_id.as_str()])
-        .limit(100);
-
-    let reveal_events = client
-        .fetch_events(vec![reveal_filter], None)
+    // Fetch lottery reveals via the durable KIND_CUSTODY_LOTTERY_REVEAL
+    // helper. Each reveal carries a Schnorr signature binding
+    // (ledger_id, preimage) to the publishing disputant's identity.
+    let reveal_transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+    let reveals = reveal_transport
+        .fetch_custody_lottery_reveals(&ledger_id)
         .await
-        .map_err(|e| format!("Failed to fetch reveals: {}", e))?;
+        .map_err(|e| format!("Failed to fetch reveals: {:?}", e))?;
 
     // Extract DisputeArmed participants
     let mut participants: Vec<(PublicKey, LotteryParticipant)> = Vec::new();
@@ -3026,35 +3031,50 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
 
     println!("  Found {} participants", participants.len());
 
-    // Collect revealed preimages (keyed by x-only pubkey to match Bitcoin pubkeys)
+    // Collect revealed preimages keyed by the disputant's x-only pubkey
+    // (matches the LotteryParticipant ordering used by the script).
     let mut preimages: std::collections::HashMap<String, Vec<u8>> =
         std::collections::HashMap::new();
 
-    println!("  Checking {} reveal events...", reveal_events.len());
+    println!("  Checking {} reveal events...", reveals.len());
 
-    for event in reveal_events.iter() {
-        // Check if this is a lottery_reveal action (action is in a tag, not content)
-        let is_lottery_reveal = event.tags.iter().any(|tag| {
-            tag.kind() == TagKind::custom("action")
-                && tag
-                    .content()
-                    .map(|c| c == "lottery_reveal")
-                    .unwrap_or(false)
-        });
-
-        if is_lottery_reveal {
-            // Content is directly the params: {"ledger_id": "...", "preimage": "..."}
-            if let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) {
-                if let Some(preimage_hex) = content.get("preimage").and_then(|v| v.as_str()) {
-                    if let Ok(preimage) = hex::decode(preimage_hex) {
-                        // Use event pubkey (x-only) to identify revealer
+    for reveal in &reveals {
+        match hex::decode(&reveal.preimage_hex) {
+            Ok(preimage) => {
+                // The Nostr event's pubkey is x-only by construction;
+                // member_pubkey in the content is the same disputant's
+                // pubkey (compressed 33-byte form). Convert and key on
+                // x-only so we can match against LotteryParticipant.
+                let member_pk_bytes = match hex::decode(&reveal.member_pubkey) {
+                    Ok(b) => b,
+                    Err(_) => {
                         println!(
-                            "    Found reveal from: {}...",
-                            &event.pubkey.to_string()[..16]
+                            "    Skipping reveal with malformed member_pubkey: {}",
+                            &reveal.member_pubkey[..16.min(reveal.member_pubkey.len())]
                         );
-                        preimages.insert(event.pubkey.to_string(), preimage);
+                        continue;
                     }
-                }
+                };
+                let pk = match PublicKey::from_slice(&member_pk_bytes) {
+                    Ok(pk) => pk,
+                    Err(_) => {
+                        println!(
+                            "    Skipping reveal with non-pubkey member: {}...",
+                            &reveal.member_pubkey[..16.min(reveal.member_pubkey.len())]
+                        );
+                        continue;
+                    }
+                };
+                let x_only = pk.x_only_public_key().0;
+                let key = x_only.to_string();
+                println!("    Found reveal from: {}...", &key[..16]);
+                preimages.insert(key, preimage);
+            }
+            Err(_) => {
+                println!(
+                    "    Skipping reveal with non-hex preimage from {}...",
+                    &reveal.member_pubkey[..16.min(reveal.member_pubkey.len())]
+                );
             }
         }
     }
