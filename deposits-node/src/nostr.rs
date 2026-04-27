@@ -4433,11 +4433,7 @@ mod custody_lottery_reveal_tests {
             "KIND_CUSTODY_LOTTERY_REVEAL ({}) must be in the durable range",
             KIND_CUSTODY_LOTTERY_REVEAL
         );
-        // Sits in the dispute-related cluster (9100-9106). Skips 9105
-        // — that slot was previously documented for a DEP-12 Delivery
-        // Escalation Notice that was retired before being implemented;
-        // leaving it vestigial avoids the appearance that this event
-        // repurposed the old slot.
+        // Sits in the dispute-related cluster (9100-9106).
         assert_eq!(KIND_CUSTODY_LOTTERY_REVEAL, 9106);
     }
 }

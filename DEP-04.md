@@ -23,7 +23,7 @@ Wallets connect to both: operator relays for requests, ledger relays for reading
 | 9101 | Fraud Proof | Durable | deposits-node | Fraud proof broadcast (JSON, see DEP-06) |
 | 9103 | Dispute | Durable | deposits-node | Custody dispute notification (JSON) |
 | 9104 | Recovery Agreement | Durable | deposits-node | Quorum member recovery agreement (JSON) |
-| 9106 | Custody Lottery Reveal | Durable | deposits-node | Disputant's preimage reveal during the on-chain lottery (JSON, see DEP-06 §Phase 3). Skips 9105 — that slot was briefly documented for a DEP-12 Delivery Escalation Notice that was retired before being implemented; the gap is left intentionally so this event isn't mistaken for a repurpose. |
+| 9106 | Custody Lottery Reveal | Durable | deposits-node | Disputant's preimage reveal during the on-chain lottery (JSON, see DEP-06 §Phase 3) |
 | 20101 | Request | Ephemeral | deposits-node, wallet | Wallet-to-operator request (JSON) |
 | 20102 | Response | Ephemeral | deposits-node | Operator-to-wallet response (JSON) |
 
