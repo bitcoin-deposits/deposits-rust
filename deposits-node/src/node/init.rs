@@ -121,16 +121,40 @@ impl Node {
         // closes naturally if every actor has shut down (otherwise the
         // drainer would block forever waiting on a sender we hold).
         drop(actor_outbox_tx);
-        // Step 2 outbox drainer: actors don't emit anything yet, but we
-        // start the drain task so step 3 only has to swap the body.
+        // Step 8d — Notify shared between the outbox drainer (signal)
+        // and main_loop's periodic block (await). Apply-edge events
+        // like `MaybeConfiscate` set the Notify so the next periodic
+        // task batch fires immediately rather than waiting up to
+        // `periodic_interval` for the timer.
+        let dispute_wakeup = Arc::new(tokio::sync::Notify::new());
+        let dispute_wakeup_for_drain = dispute_wakeup.clone();
+        // Outbox drainer: classify events and route the apply-edge
+        // signals to their handlers. Cosig collection + broadcast +
+        // fork spawning are still TODOs gated on the construction-
+        // reorg blocking true 8b/8c (they need Arc<Node> access).
         tokio::spawn(async move {
             let mut rx = actor_outbox_rx;
             while let Some((lid, ev)) = rx.recv().await {
-                tracing::debug!(
-                    "actor_outbox: ledger={}… event={:?}",
-                    &lid[..16.min(lid.len())],
-                    std::mem::discriminant(&ev)
-                );
+                let lid_short = &lid[..16.min(lid.len())];
+                match ev {
+                    super::ledger_actor::LedgerOutbound::MaybeConfiscate {
+                        ledger_id,
+                    } => {
+                        tracing::debug!(
+                            "actor_outbox[{}…] MaybeConfiscate for {}… — waking dispute pipeline",
+                            lid_short,
+                            &ledger_id[..16.min(ledger_id.len())]
+                        );
+                        dispute_wakeup_for_drain.notify_one();
+                    }
+                    other => {
+                        tracing::debug!(
+                            "actor_outbox[{}…] event {:?} (not yet handled)",
+                            lid_short,
+                            std::mem::discriminant(&other)
+                        );
+                    }
+                }
             }
             tracing::info!("actor_outbox drainer: all actors gone, exiting");
         });
@@ -161,6 +185,7 @@ impl Node {
             pending_consent_requests: Arc::new(Mutex::new(HashMap::new())),
             staging_locks: Mutex::new(HashMap::new()),
             cosign_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
+            dispute_wakeup,
             pending_invoices: Arc::new(Mutex::new(Self::load_pending_invoices(&config.data_dir))),
             processed_requests: Mutex::new(std::collections::HashSet::new()),
             processed_requests_prev: Mutex::new(std::collections::HashSet::new()),

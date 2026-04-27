@@ -121,6 +121,16 @@ pub enum LedgerOutbound {
         // For now this is a marker; the migration introduces the field
         // shape progressively.
     },
+
+    /// Step 8d — apply-edge wakeup: the actor just observed a
+    /// fork-branch `DisputeArmed` for `ledger_id`. The coordinator
+    /// should run `auto_confiscate` immediately rather than waiting
+    /// for the next `periodic_interval` tick. The coordinator's
+    /// existing logic is idempotent (skips ledgers without
+    /// `custody_armed_*.marker`, skips ones with pending or already-
+    /// landed confiscation), so firing aggressively on every armed
+    /// observation is safe — extras are no-ops.
+    MaybeConfiscate { ledger_id: String },
 }
 
 /// A handle the coordinator keeps to talk to the actor.
@@ -509,6 +519,31 @@ impl LedgerActor {
             LedgerOperation::DisputeAcquire { .. } | LedgerOperation::DisputeYield
         ) {
             self.fork_observations.remove(&update.operator_id);
+        }
+
+        // Step 8d — apply-edge confiscation trigger. When we observe
+        // a `DisputeArmed` from any disputer (ourselves or a peer),
+        // wake the coordinator so it can re-check whether all
+        // expected disputants are armed and the confiscation is now
+        // ready to initiate. Without this signal, the coordinator
+        // waits up to `periodic_interval` (5s with --fast-poll, else
+        // 60s) before checking — most of the dispute pipeline's
+        // wall-clock latency is here. Idempotent: the coordinator's
+        // logic skips ledgers that don't qualify yet or that already
+        // have a pending/landed confiscation.
+        if matches!(op, LedgerOperation::DisputeArmed { .. }) {
+            if let Err(e) = self.outbox.send((
+                self.ledger_id.clone(),
+                LedgerOutbound::MaybeConfiscate {
+                    ledger_id: self.ledger_id.clone(),
+                },
+            )) {
+                tracing::trace!(
+                    "LedgerActor[{}…] MaybeConfiscate outbox send failed: {}",
+                    &self.ledger_id[..16.min(self.ledger_id.len())],
+                    e
+                );
+            }
         }
     }
 

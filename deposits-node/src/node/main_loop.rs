@@ -928,6 +928,35 @@ impl Node {
     /// Run the main event loop.
     /// Takes `&Arc<Self>` to enable per-ledger parallel dispatch via `tokio::spawn`.
     pub async fn run(self: &Arc<Self>) -> Result<(), Error> {
+        // Step 8d — apply-edge dispute driver. Runs alongside the
+        // periodic loop: when an actor signals `dispute_wakeup` (after
+        // observing a fork-branch DisputeArmed), this task fires
+        // `auto_confiscate` immediately rather than waiting for the
+        // 5-60s `periodic_interval` tick. The periodic loop still
+        // runs `auto_confiscate` on its schedule as a safety net for
+        // markers we missed at startup or for confiscation retries
+        // after the per-request 120s timeout.
+        {
+            let node = Arc::clone(self);
+            let wakeup = self.dispute_wakeup.clone();
+            tokio::spawn(async move {
+                loop {
+                    wakeup.notified().await;
+                    tracing::debug!(
+                        "dispute_wakeup signaled — running auto_confiscate immediately"
+                    );
+                    // Hard timeout matches the periodic batch's 10s
+                    // budget so a stuck cosig fetch can't hang the
+                    // event-driven path.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        node.auto_confiscate(),
+                    )
+                    .await;
+                }
+            });
+        }
+
         // Track last ledger reload time
         let mut last_reload = tokio::time::Instant::now();
         let reload_interval = if self.fast_poll {

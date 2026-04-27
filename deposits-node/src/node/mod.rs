@@ -296,6 +296,15 @@ pub struct Node {
     /// processing of non-cosign requests (cosign_update, quorum_join, etc.).
     cosign_semaphore: Arc<tokio::sync::Semaphore>,
 
+    /// Step 8d — apply-edge wakeup for dispute confiscation. The
+    /// per-ledger actor signals this Notify when it observes a
+    /// fork-branch `DisputeArmed`; main_loop's periodic block uses
+    /// `notified()` in `select!` so it wakes immediately rather
+    /// than waiting for the next `periodic_interval` tick. Removes
+    /// the 5-60s "armed → confiscate" lag that periodic-only
+    /// scheduling imposed.
+    pub(crate) dispute_wakeup: Arc<tokio::sync::Notify>,
+
     /// Pending Lightning invoices: payment_hash -> (ledger_id, deposit_pubkey, amount_msat)
     /// Used to credit deposits when payments are received
     pending_invoices: Arc<Mutex<HashMap<[u8; 32], PendingInvoice>>>,
