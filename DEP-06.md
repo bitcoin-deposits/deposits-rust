@@ -98,7 +98,7 @@ After the arm window closes, the recovery quorum (quorum members minus the dispu
 
 #### Phase 3: Reveal (CustodyLotteryReveal)
 
-Once the confiscation transaction confirms, each disputant publishes a `CustodyLotteryReveal` event (Nostr Kind 9105) carrying their preimage. The signature on the reveal binds `(ledger_id, preimage)` to the disputant's identity.
+Once the confiscation transaction confirms, each disputant publishes a `CustodyLotteryReveal` event (Nostr Kind 9106) carrying their preimage. The signature on the reveal binds `(ledger_id, preimage)` to the disputant's identity.
 
 #### Phase 4: Claim and Settlement (DisputeAcquire)
 

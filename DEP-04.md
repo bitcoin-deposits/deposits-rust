@@ -23,7 +23,7 @@ Wallets connect to both: operator relays for requests, ledger relays for reading
 | 9101 | Fraud Proof | Durable | deposits-node | Fraud proof broadcast (JSON, see DEP-06) |
 | 9103 | Dispute | Durable | deposits-node | Custody dispute notification (JSON) |
 | 9104 | Recovery Agreement | Durable | deposits-node | Quorum member recovery agreement (JSON) |
-| 9105 | Custody Lottery Reveal | Durable | deposits-node | Disputant's preimage reveal during the on-chain lottery (JSON, see DEP-06 §Phase 3) |
+| 9106 | Custody Lottery Reveal | Durable | deposits-node | Disputant's preimage reveal during the on-chain lottery (JSON, see DEP-06 §Phase 3). Skips 9105 — that slot was briefly documented for a DEP-12 Delivery Escalation Notice that was retired before being implemented; the gap is left intentionally so this event isn't mistaken for a repurpose. |
 | 20101 | Request | Ephemeral | deposits-node, wallet | Wallet-to-operator request (JSON) |
 | 20102 | Response | Ephemeral | deposits-node | Operator-to-wallet response (JSON) |
 
@@ -68,10 +68,8 @@ Wallets connect to both: operator relays for requests, ledger relays for reading
 | `n` | Kind 39102 | Network name |
 | `p` | Kind 20101 | Courier pubkey (for courier-addressed requests, see DEP-13) |
 | `p` | Kind 9101 | Accused operator pubkey |
-| `d` | Kind 9105 | Deposit ID (hex) |
-| `l` | Kind 9105 | Ledger ID (hex) |
-| `p` | Kind 9105 | Operator pubkey |
-| `action` | Kind 9105 | Request action name |
+| `l` | Kind 9106 | Ledger ID (hex) — disputed ledger this reveal applies to |
+| `member` | Kind 9106 | Revealing disputant's pubkey (hex) |
 | `d` | Kind 30078 | App namespace (`deposits-wallet/state`). Enables NIP-78 replacement. |
 | `p` | Kind 25500 | Verifier pubkey (hex) |
 | `e` | Kind 25501 | Request event ID (for response matching) |
@@ -216,7 +214,7 @@ Wallets need no persistent connections. They can go offline indefinitely and cat
 
 - [DEP-02](DEP-02.md): Ledger update wire format (Kind 9100 content)
 - [DEP-06](DEP-06.md): Fraud proof broadcast format (Kind 9101 content)
-- [DEP-12](DEP-12.md): Certified delivery (Kind 9105 durable escalation)
+- [DEP-12](DEP-12.md): Certified delivery (Kind 20101 wallet → member request, durable record via DeliveryEmbed on Kind 9100)
 
 ## References
 

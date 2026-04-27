@@ -2839,7 +2839,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
 
 /// Reveal the lottery preimage via Nostr.
 ///
-/// Publishes a durable `KIND_CUSTODY_LOTTERY_REVEAL` (9105) event so
+/// Publishes a durable `KIND_CUSTODY_LOTTERY_REVEAL` (9106) event so
 /// other disputants can fetch the preimage during the
 /// `recovery lottery-claim` phase. The signature on the reveal binds
 /// the preimage to this disputant's identity.

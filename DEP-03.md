@@ -73,7 +73,7 @@ When a ledger becomes contested (dispute), quorum members compete for custody vi
 
 1. Each disputing member publishes `DisputeArmed` with a `commitment_hash = HASH160(preimage)` where `preimage` is a 17-to-`(16+N)`-byte random value. The preimage's *length* contributes the entropy: `contribution = LEN(preimage) - 16` lies in `1..=N`.
 2. After the arm window closes, the recovery quorum cosigns a confiscation transaction spending the disputed reserves UTXO into a new Taproot output: the **lottery output**.
-3. Each disputant publishes their preimage as a `CustodyLotteryReveal` event (Nostr Kind 9105).
+3. Each disputant publishes their preimage as a `CustodyLotteryReveal` event (Nostr Kind 9106).
 4. Once all reveals are observed, the script-determined winner = `(sum_of_contributions) mod N` constructs and broadcasts the **claim transaction**, providing all preimages and their signature in the witness.
 5. The winner appends `DisputeAcquire { new_custodian, claim_txid, new_reserves_address }` to their fork. Losers append `DisputeYield`.
 

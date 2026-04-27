@@ -103,7 +103,7 @@ pub const KIND_RECOVERY_AGREE: u16 = 9104;
 /// disputant during the reveal phase after `recovery confiscate` lands the
 /// lottery output on chain. The preimage is the secret committed via the
 /// `commitment_hash` field of an earlier `DisputeArmed`.
-pub const KIND_CUSTODY_LOTTERY_REVEAL: u16 = 9105;
+pub const KIND_CUSTODY_LOTTERY_REVEAL: u16 = 9106;
 
 /// Custom Kind for ledger advertisement (operator terms)
 /// Uses NIP-33 parameterized replaceable events (30000-39999).
@@ -475,7 +475,7 @@ pub struct RecoveryAgreement {
 /// for the same dispute to compute the lottery winner via
 /// `LotteryOutput::calculate_winner`.
 ///
-/// Published as a Nostr event of `KIND_CUSTODY_LOTTERY_REVEAL` (9105).
+/// Published as a Nostr event of `KIND_CUSTODY_LOTTERY_REVEAL` (9106).
 /// The event's pubkey identifies the revealing disputant; the
 /// `member_pubkey` field in the content is included for ergonomic
 /// JSON parsing without needing to cross-reference event metadata.
@@ -4433,7 +4433,11 @@ mod custody_lottery_reveal_tests {
             "KIND_CUSTODY_LOTTERY_REVEAL ({}) must be in the durable range",
             KIND_CUSTODY_LOTTERY_REVEAL
         );
-        // Sits in the dispute-related cluster (9100-9105).
-        assert_eq!(KIND_CUSTODY_LOTTERY_REVEAL, 9105);
+        // Sits in the dispute-related cluster (9100-9106). Skips 9105
+        // — that slot was previously documented for a DEP-12 Delivery
+        // Escalation Notice that was retired before being implemented;
+        // leaving it vestigial avoids the appearance that this event
+        // repurposed the old slot.
+        assert_eq!(KIND_CUSTODY_LOTTERY_REVEAL, 9106);
     }
 }
