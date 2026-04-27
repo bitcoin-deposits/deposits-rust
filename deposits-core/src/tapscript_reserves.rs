@@ -794,9 +794,11 @@ impl LotteryScriptBuilder {
                 "Lottery requires at least 2 participants".to_string(),
             ));
         }
-        if n > 4 {
+        if n > 5 {
             return Err(DepositsError::InvalidState(
-                "Lottery supports at most 4 participants".to_string(),
+                "Lottery linear-dispatch regime supports at most 5 participants; \
+                 use CombinedTable (6-10) or BinaryTree (11-15) regime"
+                    .to_string(),
             ));
         }
 
@@ -892,6 +894,20 @@ impl LotteryScriptBuilder {
                     builder = builder.push_opcode(OP_GREATERTHANOREQUAL);
                     builder = builder.push_opcode(OP_IF);
                     builder = builder.push_int(4);
+                    builder = builder.push_opcode(OP_SUB);
+                    builder = builder.push_opcode(OP_ENDIF);
+                }
+            }
+            5 => {
+                // mod 5 via conditional subtraction.
+                // Sum range for 5 participants: 5..25 (each contribution 1..5).
+                // Max sum 25 needs 25/5 = 5 iterations of "subtract 5 if >= 5".
+                for _ in 0..5 {
+                    builder = builder.push_opcode(OP_DUP);
+                    builder = builder.push_int(5);
+                    builder = builder.push_opcode(OP_GREATERTHANOREQUAL);
+                    builder = builder.push_opcode(OP_IF);
+                    builder = builder.push_int(5);
                     builder = builder.push_opcode(OP_SUB);
                     builder = builder.push_opcode(OP_ENDIF);
                 }
@@ -1091,7 +1107,12 @@ impl LotteryOutput {
 
     /// Calculate the winner given revealed preimages.
     ///
-    /// Each preimage must be 17-20 bytes. Returns the index of the winner.
+    /// Each preimage must be 17 to (16+N) bytes — the contribution
+    /// `LEN(preimage) - 16` is in `1..=N` so that one byte length
+    /// uniformly chosen from `1..=N` produces a uniform `sum mod N`
+    /// (the commit-reveal randomness extraction property only holds
+    /// when each contribution covers a full residue class). Returns
+    /// the winning participant's index.
     pub fn calculate_winner(preimages: &[Vec<u8>]) -> DepositsResult<usize> {
         let n = preimages.len();
         if n < 2 {
@@ -1100,16 +1121,17 @@ impl LotteryOutput {
             ));
         }
 
+        let max_len = 16 + n;
         let mut sum: usize = 0;
         for (i, preimage) in preimages.iter().enumerate() {
             let len = preimage.len();
-            if !(17..=20).contains(&len) {
+            if !(17..=max_len).contains(&len) {
                 return Err(DepositsError::InvalidState(format!(
-                    "Preimage {} has invalid length {} (must be 17-20)",
-                    i, len
+                    "Preimage {} has invalid length {} (must be 17..={})",
+                    i, len, max_len
                 )));
             }
-            sum += len - 16; // Contribution is 1-4
+            sum += len - 16; // contribution in 1..=N
         }
 
         Ok(sum % n)
@@ -1427,5 +1449,112 @@ mod tests {
         );
 
         assert!(builder.build_lottery_script().is_err());
+    }
+
+    #[test]
+    fn test_lottery_winner_five_participants() {
+        // Sweep all 5^5 = 3125 length combinations; verify winner index is
+        // sum_of_contributions mod 5 in every case. Catches off-by-one in
+        // the contribution = LEN - 16 calc and the mod 5 reduction.
+        for a in 1..=5 {
+            for b in 1..=5 {
+                for c in 1..=5 {
+                    for d in 1..=5 {
+                        for e in 1..=5 {
+                            let preimages = vec![
+                                vec![0u8; 16 + a],
+                                vec![0u8; 16 + b],
+                                vec![0u8; 16 + c],
+                                vec![0u8; 16 + d],
+                                vec![0u8; 16 + e],
+                            ];
+                            let winner =
+                                LotteryOutput::calculate_winner(&preimages).unwrap();
+                            let expected = (a + b + c + d + e) % 5;
+                            assert_eq!(
+                                winner, expected,
+                                "lengths={:?}",
+                                (a, b, c, d, e)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_lottery_script_build_five() {
+        // N=5 must build without the "at most 4 participants" error.
+        let participants: Vec<LotteryParticipant> = (1..=5)
+            .map(|i| {
+                LotteryParticipant::new(
+                    generate_x_only_pubkey(i),
+                    test_commitment_hash(i as u8),
+                    "bcrt1p...".to_string(),
+                )
+            })
+            .collect();
+
+        let recovery_voters = vec![
+            generate_x_only_pubkey(20),
+            generate_x_only_pubkey(21),
+            generate_x_only_pubkey(22),
+        ];
+
+        let builder = LotteryScriptBuilder::new(
+            participants,
+            recovery_voters,
+            2,
+            Network::Regtest,
+        );
+
+        let script = builder
+            .build_lottery_script()
+            .expect("N=5 lottery script should build");
+        assert!(!script.is_empty());
+
+        // The N=5 script is meaningfully larger than N=4 (extra hash-
+        // verify block + an extra mod-subtract iteration + an extra
+        // dispatch arm). Lower bound is loose — the script size grows
+        // linearly with N — but catches accidental no-op changes.
+        assert!(
+            script.len() > 200,
+            "N=5 script unexpectedly small: {} bytes",
+            script.len()
+        );
+    }
+
+    #[test]
+    fn test_lottery_reject_six_participants() {
+        // N=6 needs Regime B's combined-table dispatch (not yet
+        // implemented). The linear builder must refuse so the protocol
+        // doesn't silently produce broken scripts at this boundary.
+        let participants: Vec<LotteryParticipant> = (1..=6)
+            .map(|i| {
+                LotteryParticipant::new(
+                    generate_x_only_pubkey(i),
+                    test_commitment_hash(i as u8),
+                    "bcrt1p...".to_string(),
+                )
+            })
+            .collect();
+
+        let builder = LotteryScriptBuilder::new(
+            participants,
+            vec![generate_x_only_pubkey(20), generate_x_only_pubkey(21)],
+            2,
+            Network::Regtest,
+        );
+
+        let err = builder
+            .build_lottery_script()
+            .expect_err("N=6 should be rejected until CombinedTable lands");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("at most 5") || msg.contains("CombinedTable"),
+            "error message should point to the regime boundary; got: {}",
+            msg
+        );
     }
 }
