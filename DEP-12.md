@@ -16,13 +16,21 @@ The wallet publishes a signed request (Kind 20101) to the operator's advertised 
 
 ### Step 2: Quorum Member Delivery
 
-The wallet sends the signed request to one or more quorum members, requesting paid embedding. The member:
+The wallet sends the signed request to one or more quorum members via the standard Kind 20101 request kind defined in DEP-04, addressed to the member's pubkey rather than the operator's. The request body includes:
 
-1. Validates the request signature (proves it came from the deposit's descriptor owner)
-2. Appends a `DeliveryEmbed` (disc 80) to their own ledger with the request hash
-3. Charges the wallet for the embedding (priced per vbyte at the member's discretion)
+- The original signed request payload (whatever the operator was supposed to process)
+- The wallet's payment commitment for the embedding (per-vbyte price the member advertised)
 
-The `DeliveryEmbed` is a co-signed ledger update on the member's chain. At the next co-signature the member provides to the operator's ledger, the member's `member_ledger_hash` will reference a state that includes the embedded request hash. The operator, by co-signing, proves they have seen a state that contains the delivery.
+The member processes the request by:
+
+1. Validating the request signature (proves it came from the deposit's descriptor owner)
+2. Validating the payment commitment (typically a `TransferLock` or off-chain settlement against the wallet's deposit on the member's ledger)
+3. Appending a `DeliveryEmbed` (disc 80) to their own ledger with the request hash
+4. Returning a Kind 20102 response confirming the embed event id and ledger sequence
+
+The `DeliveryEmbed` is a co-signed ledger update on the member's chain — broadcast to relays as a normal Kind 9100 ledger update. At the next co-signature the member provides to the operator's ledger, the member's `member_ledger_hash` will reference a state that includes the embedded request hash. The operator, by co-signing, proves they have seen a state that contains the delivery.
+
+**Implementation status.** `LedgerOperation::DeliveryEmbed` (disc 80) and the operator/member-side `recovery embed-hash` CLI are wired today. The wallet → member request channel via Kind 20101 is the natural extension of the existing wallet → operator request flow but isn't yet plumbed end-to-end in the wallet code.
 
 ### Step 3: Clock Starts
 
@@ -74,7 +82,7 @@ For network health monitors and discovery markets, the embed is the canonical ev
 ## Related DEPs
 
 - [DEP-02](DEP-02.md): Wire format (DeliveryEmbed operation fields, causal ordering via member_ledger_hash)
-- [DEP-04](DEP-04.md): Peer messaging (Kind 20101 requests; DeliveryEmbed rides Kind 9100 ledger updates)
+- [DEP-04](DEP-04.md): Peer messaging (Kind 20101 wallet → operator AND wallet → member requests; DeliveryEmbed rides Kind 9100 as a normal ledger update)
 - [DEP-05](DEP-05.md): Quorum and collateral (service_response_blocks parameter, collateral confiscation)
 - [DEP-06](DEP-06.md): Fraud proofs and recovery (censorship proof construction, dispute initiation)
 - [DEP-08](DEP-08.md): Deposits (descriptor limits enforced at opening)
