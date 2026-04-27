@@ -166,10 +166,14 @@ fn actor_shadow_matches_handler_for_main_chain() {
                 );
                 overlap_seqs += 1;
             }
-            // Updates only-in-actor are tolerated for now — these are
-            // the dispute-fork branches the actor accepts but handler
-            // routes to per-fork files. Step 7 will fix this by
-            // teaching the actor to route forks to fork files itself.
+            // Updates only-in-actor on the main file are tolerated:
+            // step 8a now routes fork-branch updates to per-disputer
+            // `{compound_key}.actor.log` files matching the handler's
+            // layout, so the main `<id>.actor.log` should only carry
+            // operator-key matches. Anything still in main-only here
+            // is either a stale envelope from an earlier session or
+            // the actor's view of an update the handler hasn't yet
+            // persisted (race we don't pin in this test).
         }
 
         eprintln!(

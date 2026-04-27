@@ -92,16 +92,22 @@ impl Node {
                 // ledger-loader globs `*.jsonl` and would treat the
                 // actor's shadow file as another ledger to load
                 // ("missing role" / "missing state" warnings).
-                let persistence_path = config
-                    .data_dir
-                    .join("wallet/ledgers")
-                    .join(format!("{}.actor.log", lid));
+                let ledgers_dir = config.data_dir.join("wallet/ledgers");
+                let persistence_path = ledgers_dir.join(format!("{}.actor.log", lid));
                 let actor = super::ledger_actor::LedgerActor {
                     inbox: rx,
                     outbox: actor_outbox_tx.clone(),
                     ledger: ledger_clone,
                     ledger_id: lid.clone(),
                     persistence_path,
+                    // Step 8a: per-disputer fork files land in the
+                    // same directory the handler uses for its
+                    // authoritative `{compound_key}.jsonl`, with a
+                    // `.actor.log` extension so the handler's
+                    // `*.jsonl` glob doesn't pick them up as ledgers
+                    // to load.
+                    forks_dir: ledgers_dir,
+                    fork_observations: std::collections::HashMap::new(),
                 };
                 tokio::spawn(actor.run());
                 ledger_actors.insert(

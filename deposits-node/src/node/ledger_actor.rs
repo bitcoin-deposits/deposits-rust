@@ -165,6 +165,37 @@ pub struct LedgerActor {
     /// against the handler's authoritative file validates that the
     /// actor's apply path agrees on what's in the chain.
     pub persistence_path: std::path::PathBuf,
+    /// Step 8a: directory holding the fork files. The actor writes
+    /// each observed fork branch to
+    /// `{ledger_id}_{last_valid_seq:06}_{disputer_pk_16}.actor.log`
+    /// in this directory, matching the handler's compound-key
+    /// layout (handler emits `.jsonl` with the same name). The
+    /// actor's job is to observe — it doesn't apply fork branches
+    /// to a sub-state today; that's 8b territory.
+    pub forks_dir: std::path::PathBuf,
+    /// Step 8a: per-disputer mapping of disputer pubkey →
+    /// (last_valid_seq, last_observed_seq_on_fork). Built up as
+    /// `DisputeEnter` events arrive and consulted when subsequent
+    /// fork-branch updates need to be routed to the right file.
+    /// Cleared on `DisputeAcquire` (custody transferred — fork is
+    /// now the canonical chain) or `DisputeYield` (branch
+    /// tombstoned).
+    pub fork_observations: std::collections::HashMap<
+        bitcoin::secp256k1::PublicKey,
+        ForkObservation,
+    >,
+}
+
+/// Step 8a — per-disputer fork-branch observation state.
+#[derive(Clone, Debug)]
+pub struct ForkObservation {
+    /// Sequence on the *main* chain at which this fork diverges.
+    /// Sourced from `DisputeEnter.last_valid_sequence`. Becomes part
+    /// of the compound tracking key.
+    pub last_valid_seq: u64,
+    /// Highest sequence we've observed on this disputer's fork
+    /// branch. Drives idempotent dedup on subsequent appends.
+    pub last_observed_seq: u64,
 }
 
 impl LedgerActor {
@@ -207,26 +238,9 @@ impl LedgerActor {
         // After DisputeAcquire, parent_pubkey is updated to the new
         // custodian — the filter naturally adapts.
         if update.operator_id != self.ledger.state.parent_pubkey {
-            // Fork-branch update at or near our chain tip — info-level
-            // log so the migration's step 8 work (separate fork-file
-            // persistence) has visibility into who's forking when.
-            // Trace-level for clearly-stale updates (seq <= current).
-            if update.sequence_number > self.ledger.state.sequence {
-                tracing::info!(
-                    "LedgerActor[{}…] fork-branch detected: seq {} from {} (parent={})",
-                    &self.ledger_id[..16.min(self.ledger_id.len())],
-                    update.sequence_number,
-                    hex::encode(&update.operator_id.serialize()[..8]),
-                    hex::encode(&self.ledger.state.parent_pubkey.serialize()[..8])
-                );
-            } else {
-                tracing::trace!(
-                    "LedgerActor[{}…] stale non-operator update seq {} from {}",
-                    &self.ledger_id[..16.min(self.ledger_id.len())],
-                    update.sequence_number,
-                    hex::encode(&update.operator_id.serialize()[..8])
-                );
-            }
+            // Fork-branch update — Step 8a routes to a per-disputer
+            // file matching the handler's compound-key layout.
+            self.handle_fork_branch_update(&update);
             return;
         }
 
@@ -322,41 +336,184 @@ impl LedgerActor {
     }
 
     /// Append a single `Update` JSONL row to the actor's parallel file.
-    /// Matches the daemon's `append_updates_to_disk` convention of
-    /// "newline-then-row" so reading back yields a valid sequence even
-    /// after partial writes. The file is created on first append.
+    /// Step 8a — observe a fork-branch update (operator_id !=
+    /// parent_pubkey) and persist it to a per-disputer file matching
+    /// the handler's compound-key layout.
+    ///
+    /// On `DisputeEnter` (the disputer's first fork-branch update),
+    /// register a new `ForkObservation` keyed by the disputer's
+    /// pubkey and persist the update under
+    /// `{ledger_id}_{last_valid_seq:06}_{disputer_pk_16}.actor.log`.
+    /// Subsequent fork-branch updates from the same disputer are
+    /// routed to the same file as long as their sequence is strictly
+    /// monotonic on the fork. On `DisputeAcquire` / `DisputeYield`,
+    /// the observation is dropped — the fork either takes over the
+    /// canonical chain or is tombstoned.
+    ///
+    /// This is observation-only: the actor does NOT apply the fork
+    /// branches to a sub-state. That's 8b/8c territory. The files
+    /// produced here let later migration steps (and audit tooling)
+    /// read the actor's view of every fork it saw.
+    fn handle_fork_branch_update(
+        &mut self,
+        update: &deposits_core::types::SignedLedgerUpdate,
+    ) {
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tlv::TlvDecode;
+
+        let op = match LedgerOperation::tlv_decode(&update.message) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::trace!(
+                    "LedgerActor[{}…] fork update decode failed at seq {}: {}",
+                    &self.ledger_id[..16.min(self.ledger_id.len())],
+                    update.sequence_number,
+                    e
+                );
+                return;
+            }
+        };
+
+        // Pre-fork updates that snuck through (operator_id was the
+        // old operator on a stale broadcast) get logged at trace
+        // and dropped. Only updates ≥ our chain tip are interesting.
+        let is_dispute_enter =
+            matches!(op, LedgerOperation::DisputeEnter { .. });
+        if update.sequence_number <= self.ledger.state.sequence
+            && !is_dispute_enter
+        {
+            tracing::trace!(
+                "LedgerActor[{}…] stale non-operator update seq {} from {}",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                update.sequence_number,
+                hex::encode(&update.operator_id.serialize()[..8])
+            );
+            return;
+        }
+
+        // Resolve which fork file this update belongs to. New
+        // disputers register on `DisputeEnter`; subsequent updates
+        // look up by `operator_id`.
+        let last_valid_seq = match &op {
+            LedgerOperation::DisputeEnter {
+                last_valid_sequence,
+                ..
+            } => {
+                let entry = self
+                    .fork_observations
+                    .entry(update.operator_id)
+                    .or_insert(ForkObservation {
+                        last_valid_seq: *last_valid_sequence,
+                        last_observed_seq: 0,
+                    });
+                // Disputer can re-emit DisputeEnter with the same
+                // last_valid_sequence (idempotent retry). Reject if
+                // they shift the divergence point — that's protocol
+                // confusion and we don't want fork files mutating
+                // their compound key mid-life.
+                if entry.last_valid_seq != *last_valid_sequence {
+                    tracing::warn!(
+                        "LedgerActor[{}…] disputer {} changed last_valid_seq {} → {}",
+                        &self.ledger_id[..16.min(self.ledger_id.len())],
+                        hex::encode(&update.operator_id.serialize()[..8]),
+                        entry.last_valid_seq,
+                        last_valid_sequence
+                    );
+                    return;
+                }
+                tracing::info!(
+                    "LedgerActor[{}…] fork-branch DisputeEnter: disputer={} fork_seq={}",
+                    &self.ledger_id[..16.min(self.ledger_id.len())],
+                    hex::encode(&update.operator_id.serialize()[..8]),
+                    last_valid_sequence
+                );
+                *last_valid_sequence
+            }
+            _ => match self.fork_observations.get(&update.operator_id) {
+                Some(obs) => obs.last_valid_seq,
+                None => {
+                    // Subsequent fork-branch update without a prior
+                    // DisputeEnter we observed. The disputer's
+                    // DisputeEnter may have been published before our
+                    // process started; without it we don't know the
+                    // divergence point so we can't compute the
+                    // compound key. Drop with a log so audit can
+                    // notice.
+                    tracing::trace!(
+                        "LedgerActor[{}…] fork update from unobserved disputer {} (no DisputeEnter on record)",
+                        &self.ledger_id[..16.min(self.ledger_id.len())],
+                        hex::encode(&update.operator_id.serialize()[..8])
+                    );
+                    return;
+                }
+            },
+        };
+
+        // Idempotent dedup on the fork's chain. Anything ≤ what we've
+        // already observed is a duplicate (or out-of-order replay)
+        // and we don't write it twice.
+        if let Some(obs) = self.fork_observations.get(&update.operator_id) {
+            if update.sequence_number <= obs.last_observed_seq
+                && obs.last_observed_seq > 0
+            {
+                tracing::trace!(
+                    "LedgerActor[{}…] dedup fork update from {} at seq {} (last_observed={})",
+                    &self.ledger_id[..16.min(self.ledger_id.len())],
+                    hex::encode(&update.operator_id.serialize()[..8]),
+                    update.sequence_number,
+                    obs.last_observed_seq
+                );
+                return;
+            }
+        }
+
+        // Compound key matches `DepositsHandler::fork_tracking_key`:
+        //   {ledger_id}_{last_valid_seq:06}_{disputer_pk_first_16_hex}
+        let disputer_prefix = hex::encode(update.operator_id.serialize());
+        let compound_key = format!(
+            "{}_{:06}_{}",
+            self.ledger_id,
+            last_valid_seq,
+            &disputer_prefix[..16]
+        );
+        let path = self.forks_dir.join(format!("{}.actor.log", compound_key));
+
+        if let Err(e) = append_update_to(&path, update) {
+            tracing::warn!(
+                "LedgerActor[{}…] persist fork seq {} from {} failed: {}",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                update.sequence_number,
+                hex::encode(&update.operator_id.serialize()[..8]),
+                e
+            );
+            return;
+        }
+
+        // Update the observation's last_observed_seq.
+        if let Some(obs) = self.fork_observations.get_mut(&update.operator_id) {
+            obs.last_observed_seq = obs.last_observed_seq.max(update.sequence_number);
+        }
+
+        // Drop the observation when the fork resolves — DisputeAcquire
+        // means this branch took custody (it'll become the new main
+        // chain via parent_pubkey rotation); DisputeYield tombstones
+        // the branch. Either way, we stop tracking it.
+        if matches!(
+            op,
+            LedgerOperation::DisputeAcquire { .. } | LedgerOperation::DisputeYield
+        ) {
+            self.fork_observations.remove(&update.operator_id);
+        }
+    }
+
+    /// Append the main-chain update to `self.persistence_path`. Thin
+    /// wrapper around the free `append_update_to` so the fork path
+    /// (8a) and main path share the same write logic.
     fn append_update_row(
         &self,
         update: &deposits_core::types::SignedLedgerUpdate,
     ) -> Result<(), std::io::Error> {
-        use std::io::Write;
-
-        if let Some(parent) = self.persistence_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut value = match serde_json::to_value(update) {
-            Ok(v) => v,
-            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
-        };
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert(
-                "type".to_string(),
-                serde_json::Value::String("Update".into()),
-            );
-        }
-        let line = match serde_json::to_string(&value) {
-            Ok(s) => s,
-            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
-        };
-
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&self.persistence_path)?;
-        // Leading newline so a previously-truncated file (e.g. crash
-        // mid-row) doesn't smear into the new row.
-        write!(file, "\n{}", line)?;
-        Ok(())
+        append_update_to(&self.persistence_path, update)
     }
 
     /// Run loop. Step 4 implements `Inbound` to keep an in-memory
@@ -396,4 +553,41 @@ impl LedgerActor {
             &self.ledger_id[..16.min(self.ledger_id.len())]
         );
     }
+}
+
+/// Append a `SignedLedgerUpdate` row to the given path, matching the
+/// "newline-then-row" `{"type":"Update", ...}` shape used by the
+/// handler's authoritative ledger files. Used by both the main-chain
+/// `append_update_row` and the fork-branch path in
+/// `handle_fork_branch_update` (Step 8a).
+fn append_update_to(
+    path: &std::path::Path,
+    update: &deposits_core::types::SignedLedgerUpdate,
+) -> Result<(), std::io::Error> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut value = match serde_json::to_value(update) {
+        Ok(v) => v,
+        Err(e) => return Err(std::io::Error::other(e)),
+    };
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "type".to_string(),
+            serde_json::Value::String("Update".into()),
+        );
+    }
+    let line = match serde_json::to_string(&value) {
+        Ok(s) => s,
+        Err(e) => return Err(std::io::Error::other(e)),
+    };
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
+    write!(file, "\n{}", line)?;
+    Ok(())
 }
