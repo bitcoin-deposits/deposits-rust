@@ -84,7 +84,12 @@ impl Node {
         {
             let ledgers = handler_arc.ledgers.lock().unwrap();
             for (lid, arc) in ledgers.iter() {
-                let ledger_clone = arc.read().unwrap().clone();
+                // Phase C/D — pass the same Arc the handler uses
+                // (cheap refcount bump, not a deep clone). Single
+                // source of truth: the actor's commit/apply paths
+                // and `handler.ledgers` readers see the same
+                // `Ledger` through a shared `RwLock`.
+                let shared_ledger = Arc::clone(arc);
                 let (tx, rx) = tokio::sync::mpsc::channel::<
                     super::ledger_actor::LedgerEvent,
                 >(64);
@@ -97,7 +102,7 @@ impl Node {
                 let actor = super::ledger_actor::LedgerActor {
                     inbox: rx,
                     outbox: actor_outbox_tx.clone(),
-                    ledger: ledger_clone,
+                    ledger: shared_ledger,
                     ledger_id: lid.clone(),
                     persistence_path,
                     // Step 8a: per-disputer fork files land in the
@@ -324,10 +329,13 @@ impl Node {
                 return;
             }
         }
-        let ledger_clone = {
+        let shared_ledger = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             match ledgers.get(ledger_id) {
-                Some(arc) => arc.read().unwrap().clone(),
+                // Phase C/D — share the handler's Arc directly so
+                // the actor's writes are visible to every reader
+                // still going through `handler.ledgers`.
+                Some(arc) => Arc::clone(arc),
                 None => return,
             }
         };
@@ -340,7 +348,7 @@ impl Node {
         let actor = super::ledger_actor::LedgerActor {
             inbox: rx,
             outbox: self.actor_outbox_tx.clone(),
-            ledger: ledger_clone,
+            ledger: shared_ledger,
             ledger_id: ledger_id.to_string(),
             persistence_path,
             forks_dir: self.actor_ledgers_dir.clone(),

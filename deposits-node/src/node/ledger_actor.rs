@@ -201,10 +201,21 @@ pub struct LedgerActor {
     /// Shared outbox to the coordinator (tagged with this actor's
     /// `ledger_id` on every send).
     pub outbox: SharedOutbox,
-    /// The owned ledger. Wrapped so steps 2-3 can move ownership in
-    /// without forcing a full rewrite of every existing access site
-    /// in one PR.
-    pub ledger: deposits_core::ledger::Ledger,
+    /// The shared ledger handle. Phase C/D of the 8b/8c migration
+    /// changes this from an owned `Ledger` to the same
+    /// `Arc<RwLock<Ledger>>` that lives in `handler.ledgers`. Single
+    /// source of truth: the actor's writes (via `commit_staged` in
+    /// `handle_commit`, or `apply` in `apply_inbound`) immediately
+    /// become visible to every reader still going through
+    /// `handler.ledgers`. No separate mirror step needed.
+    ///
+    /// Lock discipline:
+    ///   - Take the write lock only for the apply-state slice.
+    ///   - Never hold any lock across an `.await` (cosig + broadcast
+    ///     in `handle_commit` complete with the lock dropped).
+    ///   - Reads that need a snapshot clone the lock guard contents
+    ///     and drop the guard before returning.
+    pub ledger: std::sync::Arc<std::sync::RwLock<deposits_core::ledger::Ledger>>,
     /// Stable identifier for log lines and outbox tagging.
     pub ledger_id: String,
     /// Path to the actor's parallel JSONL (Step 5). Each accepted
@@ -283,6 +294,13 @@ impl LedgerActor {
         use deposits_core::messages::LedgerOperation;
         use deposits_core::tlv::TlvDecode;
 
+        // Phase C/D — `self.ledger` is now `Arc<RwLock<Ledger>>`
+        // shared with `handler.ledgers`. Take the write lock for the
+        // whole apply path (no awaits inside this function) so the
+        // checks (parent_pubkey, dedup, chain-continuity) and the
+        // mutation see a consistent view.
+        let mut ledger = self.ledger.write().unwrap();
+
         // Operator-key filter: only accept updates whose operator_id
         // matches our current `parent_pubkey`. Fork-branch updates from
         // dispute initiators carry the disputer's pubkey as the operator
@@ -293,9 +311,11 @@ impl LedgerActor {
         // seq-N+1 updates from multiple disputers' forks.
         // After DisputeAcquire, parent_pubkey is updated to the new
         // custodian — the filter naturally adapts.
-        if update.operator_id != self.ledger.state.parent_pubkey {
+        if update.operator_id != ledger.state.parent_pubkey {
             // Fork-branch update — Step 8a routes to a per-disputer
-            // file matching the handler's compound-key layout.
+            // file matching the handler's compound-key layout. Drop
+            // the lock first so the fork helper can take its own.
+            drop(ledger);
             self.handle_fork_branch_update(&update);
             return;
         }
@@ -304,8 +324,7 @@ impl LedgerActor {
         // Different content at same seq → equivocation evidence; log and
         // refuse to apply (keeps the actor consistent with whichever
         // arrived first).
-        if let Some(existing) = self
-            .ledger
+        if let Some(existing) = ledger
             .history
             .iter()
             .find(|u| u.sequence_number == update.sequence_number)
@@ -328,7 +347,7 @@ impl LedgerActor {
         // path may have already accepted via event-store catch-up; the
         // actor's shadow stays slightly behind in that case (will be
         // reconciled when the actor takes over persistence in step 5).
-        let expected_seq = self.ledger.state.sequence + 1;
+        let expected_seq = ledger.state.sequence + 1;
         if update.sequence_number != expected_seq {
             tracing::trace!(
                 "LedgerActor[{}…] dropping seq {} (expected {})",
@@ -338,7 +357,7 @@ impl LedgerActor {
             );
             return;
         }
-        let expected_prev = self.ledger.state.chain_tip_hash;
+        let expected_prev = ledger.state.chain_tip_hash;
         if update.previous_hash != expected_prev {
             tracing::warn!(
                 "LedgerActor[{}…] chain-break at seq {}: previous_hash {} vs tip {}",
@@ -362,7 +381,7 @@ impl LedgerActor {
                 return;
             }
         };
-        if let Err(e) = self.ledger.state.apply(&op) {
+        if let Err(e) = ledger.state.apply(&op) {
             tracing::warn!(
                 "LedgerActor[{}…] apply failed at seq {}: {}",
                 &self.ledger_id[..16.min(self.ledger_id.len())],
@@ -371,9 +390,14 @@ impl LedgerActor {
             );
             return;
         }
-        self.ledger.state.sequence = update.sequence_number;
-        self.ledger.state.chain_tip_hash = update.chain_hash();
-        self.ledger.history.push(update.clone());
+        ledger.state.sequence = update.sequence_number;
+        ledger.state.chain_tip_hash = update.chain_hash();
+        ledger.history.push(update.clone());
+        // Drop the write lock before doing disk I/O: persistence is a
+        // sanity-check side channel, not on the critical path, and
+        // the handler's persist_ledger_to_disk path can take its own
+        // read lock at any time.
+        drop(ledger);
 
         // Append to parallel JSONL (Step 5). Matches handler's
         // `LedgerLogRow::Update` wire shape — flatten the update with
@@ -435,9 +459,8 @@ impl LedgerActor {
         // and dropped. Only updates ≥ our chain tip are interesting.
         let is_dispute_enter =
             matches!(op, LedgerOperation::DisputeEnter { .. });
-        if update.sequence_number <= self.ledger.state.sequence
-            && !is_dispute_enter
-        {
+        let main_chain_seq = self.ledger.read().unwrap().state.sequence;
+        if update.sequence_number <= main_chain_seq && !is_dispute_enter {
             tracing::trace!(
                 "LedgerActor[{}…] stale non-operator update seq {} from {}",
                 &self.ledger_id[..16.min(self.ledger_id.len())],
@@ -587,116 +610,14 @@ impl LedgerActor {
         }
     }
 
-    /// Step 8b (shadow phase) — mirror an already-committed outbound
-    /// update onto the actor's view + persist to `.actor.log`.
-    ///
-    /// Called by the coordinator after `Node::commit_operation`
-    /// successfully finalizes a new update on `handler.ledgers`. The
-    /// actor doesn't drive the commit yet (cosig collection + Nostr
-    /// broadcast still flow through the legacy path); it just records
-    /// the outcome so `.actor.log` stays a faithful mirror of the
-    /// handler's `<id>.jsonl` for both inbound *and* outbound
-    /// updates. A future "true 8b" inverts this: the coordinator
-    /// dispatches via this event and the actor drives the full flow.
-    ///
-    /// The validation is the same as `apply_inbound`'s — operator-key
-    /// match, sequence continuity, dedup on `(seq, content_hash)` —
-    /// because in steady state the broadcast echoes back through
-    /// `apply_inbound` anyway. This shadow path just gets there
-    /// first; the echo is then dedup'd as a no-op.
-    fn handle_local_commit_shadow(
-        &mut self,
-        update: deposits_core::types::SignedLedgerUpdate,
-    ) {
-        use deposits_core::messages::LedgerOperation;
-        use deposits_core::tlv::TlvDecode;
-
-        if update.operator_id != self.ledger.state.parent_pubkey {
-            tracing::warn!(
-                "LedgerActor[{}…] LocalCommit operator_id mismatch: update={} parent={}",
-                &self.ledger_id[..16.min(self.ledger_id.len())],
-                hex::encode(&update.operator_id.serialize()[..8]),
-                hex::encode(&self.ledger.state.parent_pubkey.serialize()[..8])
-            );
-            return;
-        }
-
-        // Idempotent dedup — the relay echo will arrive via
-        // `apply_inbound` and we want a no-op there.
-        if let Some(existing) = self
-            .ledger
-            .history
-            .iter()
-            .find(|u| u.sequence_number == update.sequence_number)
-        {
-            if existing.content_hash != update.content_hash {
-                tracing::warn!(
-                    "LedgerActor[{}…] LocalCommit collision at seq {}: existing {} vs new {}",
-                    &self.ledger_id[..16.min(self.ledger_id.len())],
-                    update.sequence_number,
-                    hex::encode(&existing.content_hash[..8]),
-                    hex::encode(&update.content_hash[..8])
-                );
-            }
-            return;
-        }
-
-        let expected_seq = self.ledger.state.sequence + 1;
-        if update.sequence_number != expected_seq {
-            tracing::warn!(
-                "LedgerActor[{}…] LocalCommit out of order: got seq {}, expected {}",
-                &self.ledger_id[..16.min(self.ledger_id.len())],
-                update.sequence_number,
-                expected_seq
-            );
-            return;
-        }
-        let expected_prev = self.ledger.state.chain_tip_hash;
-        if update.previous_hash != expected_prev {
-            tracing::warn!(
-                "LedgerActor[{}…] LocalCommit chain-break at seq {}: previous_hash {} vs tip {}",
-                &self.ledger_id[..16.min(self.ledger_id.len())],
-                update.sequence_number,
-                hex::encode(&update.previous_hash[..8]),
-                hex::encode(&expected_prev[..8])
-            );
-            return;
-        }
-
-        let op = match LedgerOperation::tlv_decode(&update.message) {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::warn!(
-                    "LedgerActor[{}…] LocalCommit decode failed at seq {}: {}",
-                    &self.ledger_id[..16.min(self.ledger_id.len())],
-                    update.sequence_number,
-                    e
-                );
-                return;
-            }
-        };
-        if let Err(e) = self.ledger.state.apply(&op) {
-            tracing::warn!(
-                "LedgerActor[{}…] LocalCommit apply failed at seq {}: {}",
-                &self.ledger_id[..16.min(self.ledger_id.len())],
-                update.sequence_number,
-                e
-            );
-            return;
-        }
-        self.ledger.state.sequence = update.sequence_number;
-        self.ledger.state.chain_tip_hash = update.chain_hash();
-        self.ledger.history.push(update.clone());
-
-        if let Err(e) = self.append_update_row(&update) {
-            tracing::warn!(
-                "LedgerActor[{}…] LocalCommit persist seq {} failed: {}",
-                &self.ledger_id[..16.min(self.ledger_id.len())],
-                update.sequence_number,
-                e
-            );
-        }
-    }
+    // 8b-shadow's `handle_local_commit_shadow` was removed in Phase
+    // C/D — Phase B made the actor authoritative for commits, and
+    // Phase C/D made `self.ledger` the same `Arc<RwLock<Ledger>>`
+    // that `handler.ledgers` exposes. There's no separate handler
+    // copy to mirror onto, and `Node::commit_operation` no longer
+    // fires `LedgerEvent::LocalCommit`. The variant is kept on the
+    // enum for binary-compat with any in-flight messages but the
+    // run loop just drops it.
 
     /// Append the main-chain update to `self.persistence_path`. Thin
     /// wrapper around the free `append_update_to` so the fork path
@@ -733,28 +654,32 @@ impl LedgerActor {
 
         // 1. Stage on the actor's ledger. validate_operation runs
         //    inside; mirrors what Node used to do via handler.ledgers.
-        let mut staged = self
-            .ledger
-            .stage_operation(operation, block_height, block_hash)
-            .map_err(|e| format!("stage failed: {}", e))?;
+        //    Take the read lock for staging only — release before any
+        //    .await to keep readers unblocked during the cosig round.
+        let (mut staged, quorum_active, members) = {
+            let ledger = self.ledger.read().unwrap();
+            let staged = ledger
+                .stage_operation(operation, block_height, block_hash)
+                .map_err(|e| format!("stage failed: {}", e))?;
+            let quorum_active =
+                ledger.state.quorum_state == deposits_core::QuorumState::Active;
+            let members: Vec<PublicKey> = ledger
+                .state
+                .quorum_members
+                .iter()
+                .map(|m| m.pubkey)
+                .collect();
+            (staged, quorum_active, members)
+        };
 
         // 2. Cosign — required when the quorum is active OR when this
         //    is the very first QuorumBegin (which transitions the
         //    state machine PreQuorum -> Active and so needs member
         //    attestation even though the state is still PreQuorum at
         //    stage time). Same gate as the legacy path.
-        let quorum_active =
-            self.ledger.state.quorum_state == deposits_core::QuorumState::Active;
         let is_first_quorum_begin = !quorum_active
             && matches!(&staged.operation, LedgerOperation::QuorumBegin { .. });
         if quorum_active || is_first_quorum_begin {
-            let members: Vec<PublicKey> = self
-                .ledger
-                .state
-                .quorum_members
-                .iter()
-                .map(|m| m.pubkey)
-                .collect();
             let threshold = members.len() / 2 + 1;
             let (tx, rx) = oneshot::channel::<Result<Vec<CosignEntry>, String>>();
             let send_res = self.outbox.send((
@@ -798,13 +723,18 @@ impl LedgerActor {
             staged.update.operator_signature = secp.sign_schnorr(&msg, &keypair).serialize();
         }
 
-        // 4. Apply on the actor's ledger. After this point the
-        //    actor's view is authoritative; `handler.ledgers`
-        //    becomes the lagging mirror until 8c.
+        // 4. Apply on the shared ledger. Phase C/D — `self.ledger`
+        //    is the same `Arc<RwLock<Ledger>>` `handler.ledgers`
+        //    holds, so `commit_staged` here is the authoritative
+        //    write that every reader sees. Take the write lock
+        //    briefly and drop before any subsequent .await.
         let update_for_return = staged.update.clone();
-        self.ledger
-            .commit_staged(staged)
-            .map_err(|e| format!("commit_staged failed: {}", e))?;
+        {
+            let mut ledger = self.ledger.write().unwrap();
+            ledger
+                .commit_staged(staged)
+                .map_err(|e| format!("commit_staged failed: {}", e))?;
+        }
 
         // 5. Persist to .actor.log so the on-disk shadow stays in
         //    sync with the in-memory tip even if the daemon dies
@@ -860,8 +790,10 @@ impl LedgerActor {
                     // authoritative until step 5.
                     let _ = reply.send(None);
                 }
-                LedgerEvent::LocalCommit(update) => {
-                    self.handle_local_commit_shadow(*update);
+                LedgerEvent::LocalCommit(_update) => {
+                    // Dead code post-Phase B: see the comment near
+                    // where `handle_local_commit_shadow` used to live.
+                    // The variant is kept for binary-compat; just drop.
                 }
                 LedgerEvent::Commit {
                     operation,

@@ -134,21 +134,20 @@ impl Node {
         ledger_id: &str,
         operation: deposits_core::messages::LedgerOperation,
     ) -> Result<String, Error> {
-        use deposits_core::ledger::StagedUpdate;
-
-        // True 8b: the actor drives the commit end to end (stage,
-        // cosig, sign, apply, persist, broadcast). This shim:
-        //   1. acquires the per-ledger staging lock so two concurrent
-        //      commits on the same ledger can't both queue Commit
-        //      events at the actor (the actor would still serialize
-        //      via its mpsc, but that loses caller-error attribution),
+        // The actor drives the commit end to end (stage, cosig, sign,
+        // apply, persist, broadcast). Phase C/D shares the actor's
+        // ledger Arc with `handler.ledgers`, so the actor's
+        // `commit_staged` is the authoritative write that every
+        // reader sees — no separate mirror step needed. This shim
+        // only:
+        //   1. acquires the per-ledger staging lock (one in-flight
+        //      commit per ledger; the actor's mpsc would also
+        //      serialize, but the lock keeps caller-error
+        //      attribution clean),
         //   2. snapshots block_height/block_hash from the wallet
         //      (only Node has wallet access),
-        //   3. dispatches `LedgerEvent::Commit` to the actor and
-        //      awaits the reply,
-        //   4. mirrors the resulting update onto `handler.ledgers`
-        //      so legacy readers stay consistent until 8c migrates
-        //      them to the actor's query API.
+        //   3. dispatches `Commit` and awaits the reply,
+        //   4. persists the new tip to `<id>.jsonl` for crash safety.
         let _lock = self.acquire_staging_lock(ledger_id).await;
 
         let block_height = self.wallet.get_block_height().unwrap_or(0);
@@ -168,7 +167,6 @@ impl Node {
         };
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let operation_for_mirror = operation.clone();
         inbox
             .send(super::ledger_actor::LedgerEvent::Commit {
                 operation,
@@ -184,33 +182,12 @@ impl Node {
             .map_err(|_| Error::Protocol("Actor dropped Commit reply".to_string()))?
             .map_err(Error::Protocol)?;
 
-        // Mirror the actor's commit onto handler.ledgers + jsonl so
-        // every reader still backed by handler sees the new tip.
-        // 8c removes this when readers move to the actor query API.
-        {
-            let arc = {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                ledgers
-                    .get(ledger_id)
-                    .ok_or_else(|| {
-                        Error::Protocol(format!(
-                            "handler.ledgers missing entry for {} after commit",
-                            ledger_id
-                        ))
-                    })?
-                    .clone()
-            };
-            let mut ledger = arc.write().unwrap();
-            let staged = StagedUpdate {
-                operation: operation_for_mirror,
-                update: result.update.clone(),
-            };
-            ledger
-                .commit_staged(staged)
-                .map_err(|e| Error::Protocol(format!("Mirror commit_staged: {}", e)))?;
-        }
+        // Persist the now-applied tip to `<id>.jsonl`. The actor
+        // already appended the same row to `.actor.log`; the
+        // handler-side write is what the rest of the daemon (and
+        // restart-time loaders) read.
         if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-            tracing::warn!("Mirror persist_ledger_to_disk failed: {}", e);
+            tracing::warn!("persist_ledger_to_disk failed after commit: {}", e);
         }
 
         tracing::info!(
