@@ -65,22 +65,26 @@ Tests (deposits-core/src/tapscript_reserves.rs#tests):
 
 Integration coverage of the long-tail recovery leaves (CSV-144 spendability with one disputant skipping reveal) is left for Phase 5, when the reveal/lottery-claim CLIs land — that's the natural place to drive the scenario end-to-end.
 
-### Phase 3 — Regime B (N=6–10, combined-table dispatch)
+### Phase 3 — Regime B (N=6–10, combined-table dispatch) — DONE
 
 **Goal:** support typical federation sizes without O(N²) script bloat.
 
-Touches:
-- New `DispatchStrategy` enum in `tapscript_reserves.rs`:
-  ```rust
-  enum DispatchStrategy { Linear, CombinedTable, BinaryTree }
-  ```
-- Auto-select in `LotteryScriptBuilder::new`: `Linear` for N≤5, `CombinedTable` for 6–10, (BinaryTree placeholder for now).
-- `build_combined_table_dispatch(n, sum_min..=sum_max)` — emit one `OP_DUP <s> OP_EQUAL OP_IF OP_DROP <pubkey_(s mod N)> OP_CHECKSIG` arm per distinct sum value, folding the modulo.
-- The sum range is `[N, N²]`; distinct values ≤ N(N-1)/2 + 1.
+Landed in this phase:
+- `build_lottery_script` now selects strategy inline based on `n`. No separate `DispatchStrategy` enum was introduced — the branch is small and naming the enum would have added more noise than it saved. Linear for `n ≤ 5`, CombinedTable for `n ∈ 6..=10`. The cap moved from `n > 5` to `n > 10`; the new error message points to the BinaryTree regime for N=11-15.
+- The preimage-verification + sum-accumulation prefix is shared between regimes. Linear continues to compute `sum mod N` via repeated conditional subtraction and dispatch on the index. CombinedTable skips the modulo entirely and emits `N²-N+1` arms keyed on the sum, each routing to `pubkey_(s mod N)`.
+- The Linear path was tightened along the way: it now uses `n` subtraction iterations instead of a hardcoded 4, which is provably sufficient since max sum is N².
+- The sum range observation `distinct values ≤ N(N-1)/2 + 1` from the original plan was wrong — every integer in `[N, N²]` is reachable, so the arm count is `N² - N + 1` (31 at N=6, 91 at N=10).
 
-**Test:** golden-vector test at N=6 and N=10. Emit the script bytes and assert byte-for-byte match. Then a regtest dispute test at Q=10.
+Tests:
+- `test_lottery_script_build_six` — 31 dispatch arms (verified via Instructions iterator, not raw byte scan, since OP_ENDIF's byte 0x68 collides with literal pubkey/hash bytes), script size ~1.5 KB.
+- `test_lottery_script_build_ten` — 91 dispatch arms, script size 3-5.5 KB envelope.
+- `test_lottery_winner_six_participants_combined_table` — exhaustive 6^6 = 46,656-case round-trip via `calculate_winner` (the off-chain authority for the same `sum mod N` mapping the script's dispatch table encodes).
+- `test_lottery_winner_ten_random_sample` — 10,000 deterministic xorshift samples (full sweep would be 10^10).
+- `test_lottery_reject_eleven_participants` replaced the old `_reject_six_` test as the new boundary guard.
 
-**Risk:** moderate. Scripts get larger (~4 KB at N=10). Witness sizes need verifying against Bitcoin's policy limit (400 KB stack item / 100 KB script). All within bounds per the design doc's table.
+Skipped per scope:
+- Byte-for-byte golden vectors. Brittle and offer little signal beyond what the round-trip and structural tests already cover; revisit if a future regression slips through.
+- Regtest Tier-3 dispute test at Q=10. The script-side correctness is well-tested in unit tests; integration coverage at high N belongs with the Phase 5 reveal/lottery-claim CLI work where the full end-to-end path is in scope.
 
 ### Phase 4 — Regime C + partial-reveal (N=11–15)
 

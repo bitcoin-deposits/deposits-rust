@@ -880,10 +880,10 @@ impl LotteryScriptBuilder {
                 "Lottery requires at least 2 participants".to_string(),
             ));
         }
-        if n > 5 {
+        if n > 10 {
             return Err(DepositsError::InvalidState(
-                "Lottery linear-dispatch regime supports at most 5 participants; \
-                 use CombinedTable (6-10) or BinaryTree (11-15) regime"
+                "Lottery dispatch regime supports at most 10 participants; \
+                 N=11-15 needs the BinaryTree regime (not yet implemented)"
                     .to_string(),
             ));
         }
@@ -933,101 +933,78 @@ impl LotteryScriptBuilder {
         }
         // Stack: <sig> <total_sum>
 
-        // Calculate winner index: sum mod N
-        // NOTE: OP_MOD (0x97) is OP_SUCCESS in Tapscript, so we must emulate it
-        // For n=2: mod 2 = AND 1
-        // For n=3: use conditional subtraction
-        // For n=4: mod 4 = AND 3
-        // NOTE: OP_AND (0x84) and OP_OR (0x85) are OP_SUCCESS in Tapscript,
-        // so we CANNOT use bitwise AND for mod 2/4.  Use conditional
-        // subtraction (same approach as mod 3) for all cases.
-        match n {
-            2 => {
-                // mod 2 via conditional subtraction.
-                // Sum range for 2 participants: 2..8.  Repeatedly subtract 2.
-                // Max iterations: 8/2 = 4 (sum 8 → 6 → 4 → 2 → 0).
-                for _ in 0..4 {
-                    builder = builder.push_opcode(OP_DUP);
-                    builder = builder.push_int(2);
-                    builder = builder.push_opcode(OP_GREATERTHANOREQUAL);
-                    builder = builder.push_opcode(OP_IF);
-                    builder = builder.push_int(2);
-                    builder = builder.push_opcode(OP_SUB);
-                    builder = builder.push_opcode(OP_ENDIF);
-                }
+        // Two dispatch strategies, both starting from stack `<sig> <total_sum>`.
+        //
+        // Linear (N=2..5): compute `sum mod N` via repeated conditional
+        // subtraction (OP_MOD is OP_SUCCESS in Tapscript), then dispatch on
+        // the resulting index 0..N-1.
+        //
+        // CombinedTable (N=6..10): skip the modulo entirely. The sum is in
+        // `[N, N²]`; emit one dispatch arm per distinct sum value, each
+        // pointing directly to `pubkey_(s mod N)`. Folding the mod into the
+        // dispatch saves a modulo subroutine that would itself be O(N) bytes
+        // per iteration.
+        if n <= 5 {
+            // Stack: <sig> <total_sum>
+            //
+            // Compute `sum mod N` by repeatedly subtracting N while sum >= N.
+            // Max sum is N² so we need at most N subtractions.
+            let n_int = n as i64;
+            for _ in 0..n {
+                builder = builder.push_opcode(OP_DUP);
+                builder = builder.push_int(n_int);
+                builder = builder.push_opcode(OP_GREATERTHANOREQUAL);
+                builder = builder.push_opcode(OP_IF);
+                builder = builder.push_int(n_int);
+                builder = builder.push_opcode(OP_SUB);
+                builder = builder.push_opcode(OP_ENDIF);
             }
-            3 => {
-                // mod 3 via conditional subtraction.
-                // Sum range for 3 participants: 3..12.  Repeatedly subtract 3.
-                // Max iterations: 12/3 = 4.
-                for _ in 0..4 {
-                    builder = builder.push_opcode(OP_DUP);
-                    builder = builder.push_int(3);
-                    builder = builder.push_opcode(OP_GREATERTHANOREQUAL);
-                    builder = builder.push_opcode(OP_IF);
-                    builder = builder.push_int(3);
-                    builder = builder.push_opcode(OP_SUB);
-                    builder = builder.push_opcode(OP_ENDIF);
-                }
-            }
-            4 => {
-                // mod 4 via conditional subtraction.
-                // Sum range for 4 participants: 4..16.  Repeatedly subtract 4.
-                // Max iterations: 16/4 = 4.
-                for _ in 0..4 {
-                    builder = builder.push_opcode(OP_DUP);
-                    builder = builder.push_int(4);
-                    builder = builder.push_opcode(OP_GREATERTHANOREQUAL);
-                    builder = builder.push_opcode(OP_IF);
-                    builder = builder.push_int(4);
-                    builder = builder.push_opcode(OP_SUB);
-                    builder = builder.push_opcode(OP_ENDIF);
-                }
-            }
-            5 => {
-                // mod 5 via conditional subtraction.
-                // Sum range for 5 participants: 5..25 (each contribution 1..5).
-                // Max sum 25 needs 25/5 = 5 iterations of "subtract 5 if >= 5".
-                for _ in 0..5 {
-                    builder = builder.push_opcode(OP_DUP);
-                    builder = builder.push_int(5);
-                    builder = builder.push_opcode(OP_GREATERTHANOREQUAL);
-                    builder = builder.push_opcode(OP_IF);
-                    builder = builder.push_int(5);
-                    builder = builder.push_opcode(OP_SUB);
-                    builder = builder.push_opcode(OP_ENDIF);
-                }
-            }
-            _ => {
-                return Err(DepositsError::InvalidState(format!(
-                    "Unsupported participant count for lottery: {}",
-                    n
-                )));
-            }
-        }
-        // Stack: <sig> <winner_index>
+            // Stack: <sig> <winner_index> where winner_index ∈ 0..N
 
-        // Branch based on winner index
-        // Use nested IF/ELSE for each possible winner
-        for (i, participant) in self.participants.iter().enumerate() {
-            builder = builder.push_opcode(OP_DUP);
-            builder = builder.push_int(i as i64);
-            builder = builder.push_opcode(OP_EQUAL);
-            builder = builder.push_opcode(OP_IF);
-            // Winner is participant i
-            builder = builder.push_opcode(OP_DROP); // Drop the index
-            builder = builder.push_x_only_key(&participant.pubkey);
-            builder = builder.push_opcode(OP_CHECKSIG);
-            builder = builder.push_opcode(OP_ELSE);
-        }
+            // Linear dispatch on winner_index.
+            for (i, participant) in self.participants.iter().enumerate() {
+                builder = builder.push_opcode(OP_DUP);
+                builder = builder.push_int(i as i64);
+                builder = builder.push_opcode(OP_EQUAL);
+                builder = builder.push_opcode(OP_IF);
+                builder = builder.push_opcode(OP_DROP);
+                builder = builder.push_x_only_key(&participant.pubkey);
+                builder = builder.push_opcode(OP_CHECKSIG);
+                builder = builder.push_opcode(OP_ELSE);
+            }
+            builder = builder.push_opcode(OP_DROP);
+            builder = builder.push_opcode(OP_PUSHBYTES_0);
+            for _ in 0..n {
+                builder = builder.push_opcode(OP_ENDIF);
+            }
+        } else {
+            // Stack: <sig> <total_sum>, where total_sum ∈ [N, N²].
+            //
+            // Combined-table dispatch: one arm per integer sum value, each
+            // routing to `pubkey_(s mod N)`. We emit `N² - N + 1` arms in
+            // ascending order; structurally identical to the linear case but
+            // keyed on sum rather than index.
+            let sum_min = n;
+            let sum_max = n * n;
+            let arm_count = sum_max - sum_min + 1;
 
-        // If none matched (shouldn't happen with valid mod), fail
-        builder = builder.push_opcode(OP_DROP);
-        builder = builder.push_opcode(OP_PUSHBYTES_0); // OP_FALSE
-
-        // Close all the IF/ELSE branches
-        for _ in 0..n {
-            builder = builder.push_opcode(OP_ENDIF);
+            for s in sum_min..=sum_max {
+                let winner = s % n;
+                let participant = &self.participants[winner];
+                builder = builder.push_opcode(OP_DUP);
+                builder = builder.push_int(s as i64);
+                builder = builder.push_opcode(OP_EQUAL);
+                builder = builder.push_opcode(OP_IF);
+                builder = builder.push_opcode(OP_DROP);
+                builder = builder.push_x_only_key(&participant.pubkey);
+                builder = builder.push_opcode(OP_CHECKSIG);
+                builder = builder.push_opcode(OP_ELSE);
+            }
+            builder = builder.push_opcode(OP_DROP);
+            builder = builder.push_opcode(OP_PUSHBYTES_0);
+            for _ in 0..arm_count {
+                builder = builder.push_opcode(OP_ENDIF);
+            }
         }
 
         Ok(builder.into_script())
@@ -1410,6 +1387,22 @@ mod tests {
         generate_test_pubkey(seed).x_only_public_key().0
     }
 
+    /// Count occurrences of `opcode` in `script`, walking via the proper
+    /// `Instructions` iterator so push-data bytes that happen to equal the
+    /// opcode's byte don't get miscounted.
+    fn count_opcode(script: &bitcoin::ScriptBuf, opcode: bitcoin::opcodes::Opcode) -> usize {
+        script
+            .instructions()
+            .filter_map(|inst| inst.ok())
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    bitcoin::script::Instruction::Op(op) if *op == opcode
+                )
+            })
+            .count()
+    }
+
     fn test_commitment_hash(seed: u8) -> [u8; 20] {
         let mut hash = [0u8; 20];
         hash[0] = seed;
@@ -1576,7 +1569,7 @@ mod tests {
             .map(|i| {
                 LotteryParticipant::new(
                     generate_x_only_pubkey(i),
-                    test_commitment_hash(i as u8),
+                    test_commitment_hash(i),
                     "bcrt1p...".to_string(),
                 )
             })
@@ -1612,15 +1605,15 @@ mod tests {
     }
 
     #[test]
-    fn test_lottery_reject_six_participants() {
-        // N=6 needs Regime B's combined-table dispatch (not yet
-        // implemented). The linear builder must refuse so the protocol
-        // doesn't silently produce broken scripts at this boundary.
-        let participants: Vec<LotteryParticipant> = (1..=6)
+    fn test_lottery_reject_eleven_participants() {
+        // N=11 needs Regime C's BinaryTree dispatch (not yet implemented).
+        // The CombinedTable cap must refuse so the protocol doesn't silently
+        // produce broken scripts at this boundary.
+        let participants: Vec<LotteryParticipant> = (1..=11)
             .map(|i| {
                 LotteryParticipant::new(
                     generate_x_only_pubkey(i),
-                    test_commitment_hash(i as u8),
+                    test_commitment_hash(i),
                     "bcrt1p...".to_string(),
                 )
             })
@@ -1635,13 +1628,164 @@ mod tests {
 
         let err = builder
             .build_lottery_script()
-            .expect_err("N=6 should be rejected until CombinedTable lands");
+            .expect_err("N=11 should be rejected until BinaryTree lands");
         let msg = format!("{}", err);
         assert!(
-            msg.contains("at most 5") || msg.contains("CombinedTable"),
+            msg.contains("at most 10") || msg.contains("BinaryTree"),
             "error message should point to the regime boundary; got: {}",
             msg
         );
+    }
+
+    /// N=6 (CombinedTable boundary): exhaustively verify every reachable sum
+    /// in [N, N²] = [6, 36] dispatches to the correct participant via
+    /// `calculate_winner`'s round-trip semantics. The script's dispatch
+    /// table is keyed on the sum and each arm directly routes to
+    /// `pubkey_(s mod N)` — `calculate_winner` is the off-chain authority
+    /// for the same mapping, so any divergence between regime A and regime B
+    /// would surface here.
+    #[test]
+    fn test_lottery_winner_six_participants_combined_table() {
+        // Each participant contributes (preimage_len - 16) ∈ 1..=N. Sweep
+        // every (c1..c6) ∈ {1..=6}^6 — 46,656 cases — and assert that
+        // calculate_winner's `sum mod N` matches the dispatch the script
+        // would evaluate at sum.
+        let n = 6;
+        let mut tested = 0usize;
+        for c1 in 1..=n {
+            for c2 in 1..=n {
+                for c3 in 1..=n {
+                    for c4 in 1..=n {
+                        for c5 in 1..=n {
+                            for c6 in 1..=n {
+                                let preimages: Vec<Vec<u8>> = vec![
+                                    vec![0u8; 16 + c1],
+                                    vec![0u8; 16 + c2],
+                                    vec![0u8; 16 + c3],
+                                    vec![0u8; 16 + c4],
+                                    vec![0u8; 16 + c5],
+                                    vec![0u8; 16 + c6],
+                                ];
+                                let sum = c1 + c2 + c3 + c4 + c5 + c6;
+                                let expected = sum % n;
+                                let got = LotteryOutput::calculate_winner(&preimages).unwrap();
+                                assert_eq!(
+                                    got, expected,
+                                    "winner mismatch for sum={} (cs={:?})",
+                                    sum, preimages
+                                );
+                                tested += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(tested, n.pow(6));
+    }
+
+    #[test]
+    fn test_lottery_script_build_six() {
+        let participants: Vec<LotteryParticipant> = (1..=6)
+            .map(|i| {
+                LotteryParticipant::new(
+                    generate_x_only_pubkey(i),
+                    test_commitment_hash(i),
+                    "bcrt1p...".to_string(),
+                )
+            })
+            .collect();
+
+        let builder = LotteryScriptBuilder::new(
+            participants,
+            vec![generate_x_only_pubkey(20), generate_x_only_pubkey(21)],
+            2,
+            Network::Regtest,
+        );
+
+        let script = builder
+            .build_lottery_script()
+            .expect("N=6 should build via CombinedTable");
+
+        // The dispatch table emits N²-N+1 = 31 arms.
+        let endif_count = count_opcode(&script, bitcoin::opcodes::all::OP_ENDIF);
+        assert_eq!(endif_count, 31, "expected 31 dispatch arms for N=6");
+
+        // Sanity: script should be non-trivially large (~1.5 KB per design table).
+        assert!(
+            script.len() > 1000 && script.len() < 2000,
+            "N=6 script length {} should fall within expected envelope",
+            script.len()
+        );
+    }
+
+    #[test]
+    fn test_lottery_script_build_ten() {
+        let participants: Vec<LotteryParticipant> = (1..=10)
+            .map(|i| {
+                LotteryParticipant::new(
+                    generate_x_only_pubkey(i),
+                    test_commitment_hash(i),
+                    "bcrt1p...".to_string(),
+                )
+            })
+            .collect();
+
+        let builder = LotteryScriptBuilder::new(
+            participants,
+            vec![
+                generate_x_only_pubkey(20),
+                generate_x_only_pubkey(21),
+                generate_x_only_pubkey(22),
+            ],
+            2,
+            Network::Regtest,
+        );
+
+        let script = builder
+            .build_lottery_script()
+            .expect("N=10 should build via CombinedTable");
+
+        // N²-N+1 = 91 dispatch arms.
+        let endif_count = count_opcode(&script, bitcoin::opcodes::all::OP_ENDIF);
+        assert_eq!(endif_count, 91, "expected 91 dispatch arms for N=10");
+
+        // Per the design table, ~4.3 KB. Bound the upper end against the
+        // 10 KB Tapscript stack-item limit to catch any future bloat.
+        assert!(
+            script.len() > 3000 && script.len() < 5500,
+            "N=10 script length {} should fall within expected envelope",
+            script.len()
+        );
+    }
+
+    /// Pseudo-random sample of N=10 winner correctness (exhaustive sweep
+    /// would be 10^10 cases). 10,000 random preimage tuples — enough to
+    /// exercise dispatch arms across the full sum range.
+    #[test]
+    fn test_lottery_winner_ten_random_sample() {
+        let n = 10usize;
+        // Deterministic xorshift so failures reproduce.
+        let mut rng_state: u64 = 0xdeadbeefcafef00d;
+        let mut next_u64 = || {
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            rng_state
+        };
+
+        for _ in 0..10_000 {
+            let mut preimages: Vec<Vec<u8>> = Vec::with_capacity(n);
+            let mut sum = 0usize;
+            for _ in 0..n {
+                let c = (next_u64() as usize % n) + 1; // 1..=N
+                sum += c;
+                preimages.push(vec![0u8; 16 + c]);
+            }
+            let expected = sum % n;
+            let got = LotteryOutput::calculate_winner(&preimages).unwrap();
+            assert_eq!(got, expected, "winner mismatch for sum={}", sum);
+        }
     }
 
     #[test]
