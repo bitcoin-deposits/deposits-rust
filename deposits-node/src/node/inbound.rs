@@ -288,6 +288,7 @@ impl Node {
             }
             "offer_status" => self.process_offer_status_request(&request).await,
             "balance_query" => self.process_balance_query_request(&request).await,
+            "delivery_embed" => self.process_delivery_embed_request(&request).await,
             "make_invoice" => self.process_make_invoice_request(&request).await,
             "pay_invoice" => self.process_pay_invoice_request(&request).await,
             "reserves_create" => self.process_reserves_create_request(&request).await,

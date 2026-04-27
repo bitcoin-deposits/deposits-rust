@@ -42,6 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "withdraw" => wallet_cli::payments::withdraw(&args[2..]).await,
         "transfer" => wallet_cli::payments::transfer_lock(&args[2..]).await,
         "transfer_complete" => wallet_cli::payments::transfer_complete(&args[2..]).await,
+        "escalate" => wallet_cli::escalate::escalate(&args[2..]).await,
         "send" => wallet_cli::payments::send(&args[2..]).await,
         "attest" => wallet_cli::attest::attest_subkey(&args[2..]).await,
         "revoke" => wallet_cli::attest::revoke_subkey(&args[2..]).await,

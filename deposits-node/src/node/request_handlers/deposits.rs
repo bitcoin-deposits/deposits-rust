@@ -1108,4 +1108,184 @@ impl Node {
         });
         (true, Some(result.to_string()), None)
     }
+
+    /// Handle a wallet → quorum-member `delivery_embed` request (DEP-12).
+    ///
+    /// The wallet pays a quorum member to anchor an unprocessed
+    /// request's hash on the member's own ledger via `DeliveryEmbed`
+    /// (disc 80). The embed becomes part of the member's ledger
+    /// history and gets broadcast as a normal Kind 9100 update; once
+    /// the operator co-signs a subsequent member ledger update, the
+    /// operator's `member_ledger_hash` causally references the embed,
+    /// proving they've seen the request hash.
+    ///
+    /// Request params (JSON):
+    ///   - `request_hash`: 32-byte hex SHA256 of the original signed
+    ///     request payload the wallet wants embedded
+    ///   - `target_ledger_id`: 32-byte hex of the operator's ledger
+    ///     where the request should have been processed
+    ///   - `target_operator`: 33-byte hex compressed pubkey of the
+    ///     target operator
+    ///
+    /// `request.ledger_id` (the LedgerRequest's outer field) selects
+    /// which of the member's own ledgers receives the embed. The
+    /// member can run multiple ledgers; the wallet picks one.
+    ///
+    /// Pricing/payment is intentionally out of scope here — for now
+    /// the embed is unconditional. A future `payment_commitment`
+    /// param can gate it (e.g., a TransferLock from the wallet's
+    /// deposit on this member's ledger).
+    pub(crate) async fn process_delivery_embed_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        use deposits_core::messages::LedgerOperation;
+
+        let request_hash_hex = match request
+            .params
+            .get("request_hash")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => s,
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing request_hash parameter".to_string()),
+                )
+            }
+        };
+        let request_hash: [u8; 32] = match hex::decode(request_hash_hex) {
+            Ok(b) => match b.try_into() {
+                Ok(arr) => arr,
+                Err(_) => {
+                    return (
+                        false,
+                        None,
+                        Some("request_hash must be 32 bytes (64 hex chars)".to_string()),
+                    )
+                }
+            },
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("Invalid request_hash hex: {}", e)),
+                )
+            }
+        };
+
+        let target_ledger_id_hex = match request
+            .params
+            .get("target_ledger_id")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => s,
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing target_ledger_id parameter".to_string()),
+                )
+            }
+        };
+        let target_ledger_id: [u8; 32] = match hex::decode(target_ledger_id_hex) {
+            Ok(b) => match b.try_into() {
+                Ok(arr) => arr,
+                Err(_) => {
+                    return (
+                        false,
+                        None,
+                        Some(
+                            "target_ledger_id must be 32 bytes (64 hex chars)".to_string(),
+                        ),
+                    )
+                }
+            },
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("Invalid target_ledger_id hex: {}", e)),
+                )
+            }
+        };
+
+        let target_operator_hex = match request
+            .params
+            .get("target_operator")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => s,
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing target_operator parameter".to_string()),
+                )
+            }
+        };
+        let target_operator = match target_operator_hex
+            .parse::<bitcoin::secp256k1::PublicKey>()
+        {
+            Ok(pk) => pk,
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("Invalid target_operator pubkey: {}", e)),
+                )
+            }
+        };
+
+        // Resolve which of our ledgers should receive the embed.
+        let (ledger_id, _ledger) = match self
+            .get_ledger_by_ledger_id(&request.ledger_id)
+            .or_else(|| self.get_ledger_by_reserves_key(&request.ledger_id))
+        {
+            Some(l) => l,
+            None => return (false, None, Some("Ledger not found on this member".to_string())),
+        };
+
+        let operation = LedgerOperation::DeliveryEmbed {
+            request_hash,
+            target_ledger_id,
+            target_operator,
+        };
+
+        match self.commit_operation(&ledger_id, operation).await {
+            Ok(event_id) => {
+                // Look up the new sequence + tip hash so the wallet
+                // can pin causal evidence to a specific point on our
+                // chain. commit_operation has already advanced the
+                // ledger by the time it returns.
+                let (sequence, content_hash) = match self.get_ledger_by_ledger_id(&ledger_id) {
+                    Some((_, l)) => (
+                        l.state.sequence,
+                        hex::encode(l.state.chain_tip_hash),
+                    ),
+                    None => (0, String::new()),
+                };
+                tracing::info!(
+                    "DeliveryEmbed committed: ledger={}... seq={} request_hash={}...",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    sequence,
+                    &request_hash_hex[..16]
+                );
+                let result = serde_json::json!({
+                    "ledger_id": ledger_id,
+                    "event_id": event_id,
+                    "sequence": sequence,
+                    "tip_hash": content_hash,
+                    "request_hash": request_hash_hex,
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Err(e) => (
+                false,
+                None,
+                Some(format!("Failed to commit DeliveryEmbed: {}", e)),
+            ),
+        }
+    }
 }

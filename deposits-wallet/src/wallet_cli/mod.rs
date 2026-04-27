@@ -2,6 +2,7 @@ pub mod attest;
 pub mod batch;
 pub mod deposit;
 pub mod discover;
+pub mod escalate;
 pub mod ledger;
 pub mod payments;
 pub mod regtest;
