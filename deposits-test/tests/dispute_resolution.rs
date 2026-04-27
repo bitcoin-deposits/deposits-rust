@@ -144,9 +144,7 @@ fn dispute_acquire_returns_to_normal() {
 
     let acquire_op = deposits_protocol::LedgerOperation::DisputeAcquire {
         new_custodian: net.op("bob").public_key,
-        entropy_block_height: 850_000,
-        entropy_block_hash: [0xBB; 32],
-        spend_txid: [0xCC; 32],
+        claim_txid: [0xCC; 32],
         new_reserves_address: "bcrt1q_bob_new".to_string(),
     };
     net.op_mut("alice")

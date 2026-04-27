@@ -565,9 +565,7 @@ fn tier3_3_lottery_griefing() {
             .ledger
             .apply_operation(&LedgerOperation::DisputeAcquire {
                 new_custodian: charlie_pk,
-                entropy_block_height: 850_000,
-                entropy_block_hash: [0xEE; 32],
-                spend_txid: [0xCC; 32],
+                claim_txid: [0xCC; 32],
                 new_reserves_address: "bcrt1qcharlie".into(),
             });
 

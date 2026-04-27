@@ -2794,22 +2794,20 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 }
                 LedgerOperation::DisputeAcquire {
                     new_custodian,
-                    entropy_block_height,
-                    spend_txid,
+                    claim_txid,
                     new_reserves_address,
                     ..
                 } => {
                     let pk_bytes = new_custodian.serialize();
-                    let txid_hex = hex::encode(spend_txid);
+                    let txid_hex = hex::encode(claim_txid);
                     (
                         "DisputeAcquire",
                         format!(
-                            "to:{:02x}{:02x}{:02x}{:02x}  entropy_block:{}  txid:{}..  reserves:{}..{}",
+                            "to:{:02x}{:02x}{:02x}{:02x}  claim_txid:{}..  reserves:{}..{}",
                             pk_bytes[0],
                             pk_bytes[1],
                             pk_bytes[2],
                             pk_bytes[3],
-                            entropy_block_height,
                             &txid_hex[..8],
                             &new_reserves_address[..10.min(new_reserves_address.len())],
                             &new_reserves_address[new_reserves_address.len().saturating_sub(6)..]

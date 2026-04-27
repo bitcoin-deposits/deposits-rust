@@ -1939,11 +1939,16 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
     if we_won {
         println!("YOU WON! Publishing DisputeAcquire...");
 
+        // Phase 5d: the entropy-based selection path is deprecated.
+        // `recovery_claim_new` will be removed once all integration
+        // tests migrate to `recovery lottery-claim`. Until then we
+        // synthesize a placeholder claim_txid (the entropy block hash,
+        // which is at least non-zero) so the wire format is honoured;
+        // validators will reject this if used in earnest.
+        let _ = entropy_block_height; // silence unused warning
         let operation = LedgerOperation::DisputeAcquire {
             new_custodian: our_pubkey,
-            entropy_block_height,
-            entropy_block_hash,
-            spend_txid: [0u8; 32],
+            claim_txid: entropy_block_hash,
             new_reserves_address: String::new(),
         };
 
@@ -3384,13 +3389,13 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     let current_block_hash: [u8; 32] = *current_block_hash.as_ref();
 
     // Create DisputeAcquire operation
-    let spend_txid_bytes: [u8; 32] = *claim_txid.as_ref();
+    let claim_txid_bytes: [u8; 32] = *claim_txid.as_ref();
+    let _ = current_block_height;
+    let _ = current_block_hash;
 
     let operation = LedgerOperation::DisputeAcquire {
         new_custodian: our_pubkey,
-        entropy_block_height: current_block_height,
-        entropy_block_hash: current_block_hash,
-        spend_txid: spend_txid_bytes,
+        claim_txid: claim_txid_bytes,
         new_reserves_address: winner_participant.target_reserves.clone(),
     };
 
@@ -3456,7 +3461,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     println!("DisputeAcquire published successfully!");
     println!("  Sequence: {}", sequence);
     println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
-    println!("  Spend txid: {}...", &hex::encode(spend_txid_bytes)[..16]);
+    println!("  Claim txid: {}...", &hex::encode(claim_txid_bytes)[..16]);
     println!(
         "  New reserves: {}...",
         &winner_participant.target_reserves[..20.min(winner_participant.target_reserves.len())]

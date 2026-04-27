@@ -817,9 +817,7 @@ fn invariant_l2_lottery_liveness() {
         .state
         .apply(&LedgerOperation::DisputeAcquire {
             new_custodian: bob_snap.public_key,
-            entropy_block_height: 850_000,
-            entropy_block_hash: [0xBB; 32],
-            spend_txid: [0xCC; 32],
+            claim_txid: [0xCC; 32],
             new_reserves_address: "bcrt1q".into(),
         })
         .is_ok();

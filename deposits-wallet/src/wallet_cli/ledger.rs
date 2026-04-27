@@ -543,7 +543,7 @@ enum CustodyEvent {
     /// New custodian acquired custody
     DisputeAcquired {
         new_custodian: bitcoin::secp256k1::PublicKey,
-        entropy_block: u32,
+        claim_txid: [u8; 32],
         new_reserves_address: String,
     },
 }
@@ -802,7 +802,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 }
                 LedgerOperation::DisputeAcquire {
                     new_custodian,
-                    entropy_block_height,
+                    claim_txid,
                     new_reserves_address,
                     ..
                 } => {
@@ -819,8 +819,8 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                         &hex::encode(new_custodian.serialize())[..16]
                     );
                     println!(
-                        "         |              |   Entropy block: {}",
-                        entropy_block_height
+                        "         |              |   Claim txid: {}...",
+                        &hex::encode(claim_txid)[..16]
                     );
                     println!(
                         "         |              |   New reserves: {}...",
@@ -836,7 +836,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                         block,
                         CustodyEvent::DisputeAcquired {
                             new_custodian,
-                            entropy_block: entropy_block_height,
+                            claim_txid,
                             new_reserves_address,
                         },
                     ));

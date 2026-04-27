@@ -193,9 +193,20 @@ Both CLI subcommands existed already but used the old ephemeral pattern: `send_l
 
 Signature verification on each reveal is **not** wired here yet; the test cluster's relay is trusted. For mainnet a verification step would be added in `recovery lottery-claim` before passing preimages to `calculate_winner` — easy to bolt on (the reveal carries the sighash inputs and signature, and the helper's sighash construction is documented).
 
-#### Phase 5d — `DisputeAcquire` wire-format rework — pending
+#### Phase 5d — `DisputeAcquire` wire-format hard break — DONE
 
-Replace `{entropy_block_height, entropy_block_hash, spend_txid}` with `{claim_txid, new_reserves_address}`. Wire-format break; touches ~24 files across protocol/core/node/test crates and the validators (`is_entropy_winner` → claim-TX-spend verification). Sequenced after 5b/5c so the new message types and CLIs are in place before validators move off the entropy path.
+Pre-release hard break: `DisputeAcquire { new_custodian, entropy_block_height, entropy_block_hash, spend_txid, new_reserves_address }` → `DisputeAcquire { new_custodian, claim_txid, new_reserves_address }`.
+
+Substantive changes:
+- TLV codec: dropped `ENTROPY_BLOCK_HEIGHT (116)` and `ENTROPY_BLOCK_HASH (106)` field IDs; renamed `SPEND_TXID (110)` → `CLAIM_TXID (110)` (same wire ID, different semantic).
+- Validators: `validate_custody_resolution` no longer calls `is_entropy_winner`. The on-chain lottery script enforces winner selection — only the `(sum mod N)`-th candidate per revealed preimages can spend the lottery output. The state machine just verifies (a) `new_custodian` is in the candidate set, (b) `claim_txid` is non-zero. Verifying `claim_txid` actually spends the expected lottery output is a separate component's responsibility (it requires on-chain access).
+- Apply-time validation in `Ledger::validate_operation`: replaced "entropy block must be specified" with "claim_txid must be non-zero".
+- `recovery_claim_new` (the legacy entropy-based CLI path) was kept compiling but synthesizes a placeholder `claim_txid` from the entropy block hash; flagged for cleanup. New code paths use `recovery_lottery_claim` instead.
+- Files touched: 14 — protocol types/codec, core ledger validators, node dispute/recovery/cli/wallet display paths, kaitai schema + ksy validation tests, fuzz_protocol's adversarial cosigner check, and 5 test-construction sites.
+
+The kaitai schema (`deposits_protocol.ksy`) was updated to retire field IDs 106 and 116 with a comment noting they're now legacy, so external tooling that consumes the .ksy gets a clear signal.
+
+**All 224+ tests across the workspace pass after the rework — zero regressions.**
 
 #### Phase 5e — Bond-ratio enforcement — pending
 

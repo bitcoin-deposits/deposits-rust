@@ -738,16 +738,18 @@ impl Node {
         let claim_txid = claim_tx.compute_txid();
         tracing::info!("Claim TX broadcast: {}", claim_txid);
 
-        // Publish DisputeAcquire
+        // Publish DisputeAcquire. The block_height and block_hash on
+        // the SignedLedgerUpdate envelope still need to reflect a
+        // recent on-chain anchor for fraud-proof anchoring; they are
+        // unrelated to the lottery selection (which is enforced by
+        // the on-chain claim TX itself).
         let current_block = self.wallet.get_block_height().unwrap_or(0);
         let current_block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-        let spend_txid_bytes: [u8; 32] = *claim_txid.as_ref();
+        let claim_txid_bytes: [u8; 32] = *claim_txid.as_ref();
 
         let operation = LedgerOperation::DisputeAcquire {
             new_custodian: our_pubkey,
-            entropy_block_height: current_block,
-            entropy_block_hash: current_block_hash,
-            spend_txid: spend_txid_bytes,
+            claim_txid: claim_txid_bytes,
             new_reserves_address: winner_participant.target_reserves.clone(),
         };
 

@@ -311,9 +311,7 @@ fn attack_false_custody_claim() {
     // that's done at the node layer. But the state should update.
     let acquire = LedgerOperation::DisputeAcquire {
         new_custodian: net.op("alice").public_key, // alice claims for herself
-        entropy_block_height: 850_000,
-        entropy_block_hash: [0xBB; 32],
-        spend_txid: [0xCC; 32],
+        claim_txid: [0xCC; 32],
         new_reserves_address: "bcrt1qalice_steals".to_string(),
     };
 

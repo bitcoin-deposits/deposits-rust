@@ -524,41 +524,46 @@ impl Ledger {
     ///
     /// # Arguments
     /// * `operation` - The DisputeAcquire or DisputeYield operation
-    /// * `candidates` - All pubkeys who published DisputeArmed before the entropy block
+    /// * `candidates` - All pubkeys who published DisputeArmed
     ///
-    /// The caller is responsible for:
-    /// 1. Collecting all DisputeArmed updates from Nostr
-    /// 2. Filtering to only those before the entropy block height
-    /// 3. Extracting the parent_pubkey from each branch
+    /// In the on-chain-lottery design, the lottery script enforces
+    /// the winner: only the `(sum mod N)`-th candidate (per revealed
+    /// preimages) can spend the lottery output. The state machine
+    /// trusts that selection and just verifies the new_custodian is
+    /// among the candidates and the claim_txid is non-zero.
+    /// Verification that `claim_txid` actually spends the expected
+    /// lottery output is a separate component's responsibility (it
+    /// requires on-chain access).
     pub fn validate_custody_resolution(
         &self,
         operation: &LedgerOperation,
         candidates: &[PublicKey],
     ) -> DepositsResult<()> {
-        use crate::types::{is_entropy_winner, select_entropy_winner};
-
         match operation {
             LedgerOperation::DisputeAcquire {
                 new_custodian,
-                entropy_block_hash,
+                claim_txid,
                 ..
             } => {
-                // The new_custodian must be the entropy-selected winner
-                if !is_entropy_winner(entropy_block_hash, new_custodian, candidates) {
-                    let actual_winner = select_entropy_winner(entropy_block_hash, candidates);
+                if !candidates.contains(new_custodian) {
                     return Err(DepositsError::ProtocolViolation {
-                        violation_type: "custody_acquire_not_winner".to_string(),
+                        violation_type: "custody_acquire_not_candidate".to_string(),
                         details: format!(
-                            "DisputeAcquire new_custodian {} is not the entropy winner (winner: {:?})",
-                            new_custodian,
-                            actual_winner
+                            "DisputeAcquire new_custodian {} is not in the candidate set",
+                            new_custodian
                         ),
+                    });
+                }
+                if claim_txid == &[0u8; 32] {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "custody_acquire_missing_claim".to_string(),
+                        details: "DisputeAcquire claim_txid must be non-zero".to_string(),
                     });
                 }
             }
             LedgerOperation::DisputeYield => {
-                // DisputeYield doesn't include entropy_block_hash
-                // Use validate_custody_yield() instead with the entropy hash
+                // DisputeYield is unilateral — a candidate self-tombstoning.
+                // No cross-candidate validation needed in the new design.
             }
             _ => {
                 // Not a custody resolution operation
@@ -1302,20 +1307,19 @@ impl Ledger {
                     });
                 }
             }
-            LedgerOperation::DisputeAcquire {
-                entropy_block_height,
-                entropy_block_hash,
-                ..
-            } => {
-                // Basic validation: entropy block must be specified
-                if *entropy_block_height == 0 && *entropy_block_hash == [0u8; 32] {
+            LedgerOperation::DisputeAcquire { claim_txid, .. } => {
+                // Basic well-formedness: claim_txid must be non-zero. The
+                // on-chain lottery script enforces winner selection;
+                // cross-candidate validation lives in
+                // `validate_custody_resolution()` which knows the
+                // observed DisputeArmed set from Nostr.
+                if claim_txid == &[0u8; 32] {
                     return Err(DepositsError::ProtocolViolation {
-                        violation_type: "custody_acquire_no_entropy".to_string(),
-                        details: "DisputeAcquire requires entropy block".to_string(),
+                        violation_type: "custody_acquire_no_claim".to_string(),
+                        details: "DisputeAcquire requires a non-zero claim_txid"
+                            .to_string(),
                     });
                 }
-                // Winner validation is done via validate_custody_resolution()
-                // which requires knowing all candidates (from Nostr observation)
             }
             _ => {
                 // Other operations have simpler or no validation

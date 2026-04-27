@@ -51,11 +51,9 @@ mod ledger_op_tlv {
     // Dispute fields
     pub const REASON: u64 = 100;
     pub const LAST_VALID_SEQUENCE: u64 = 102;
-    pub const ENTROPY_BLOCK_HEIGHT: u64 = 116;
-    pub const ENTROPY_BLOCK_HASH: u64 = 106;
     pub const NEW_CUSTODIAN: u64 = 108;
     pub const ARMED_BLOCK: u64 = 118;
-    pub const SPEND_TXID: u64 = 110;
+    pub const CLAIM_TXID: u64 = 110;
     pub const NEW_RESERVES_ADDRESS: u64 = 120;
     // DisputeArmed lottery fields
     pub const COMMITMENT_HASH: u64 = 112;
@@ -485,16 +483,12 @@ impl TlvEncode for LedgerOperation {
             }
             Self::DisputeAcquire {
                 new_custodian,
-                entropy_block_height,
-                entropy_block_hash,
-                spend_txid,
+                claim_txid,
                 new_reserves_address,
             } => {
                 builder = builder
                     .pubkey_field(NEW_CUSTODIAN, new_custodian)
-                    .u32_field(ENTROPY_BLOCK_HEIGHT, *entropy_block_height)
-                    .bytes_field(ENTROPY_BLOCK_HASH, entropy_block_hash)
-                    .bytes_field(SPEND_TXID, spend_txid)
+                    .bytes_field(CLAIM_TXID, claim_txid)
                     .string_field(NEW_RESERVES_ADDRESS, new_reserves_address);
             }
             Self::DeliveryEmbed {
@@ -692,9 +686,7 @@ impl TlvDecode for LedgerOperation {
             }),
             55 => Ok(Self::DisputeAcquire {
                 new_custodian: reader.read_pubkey(NEW_CUSTODIAN)?,
-                entropy_block_height: reader.read_u32(ENTROPY_BLOCK_HEIGHT)?,
-                entropy_block_hash: reader.read_bytes(ENTROPY_BLOCK_HASH)?,
-                spend_txid: reader.read_bytes(SPEND_TXID)?,
+                claim_txid: reader.read_bytes(CLAIM_TXID)?,
                 new_reserves_address: reader.read_string(NEW_RESERVES_ADDRESS)?,
             }),
             56 => Ok(Self::DisputeYield),

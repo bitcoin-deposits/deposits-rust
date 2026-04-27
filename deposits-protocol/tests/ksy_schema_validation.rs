@@ -210,11 +210,9 @@ const QUORUM_EXPIRY: u64 = 86;
 const GENESIS_BLOCK: u64 = 96;
 const REASON: u64 = 100;
 const LAST_VALID_SEQUENCE: u64 = 102;
-const ENTROPY_BLOCK_HEIGHT: u64 = 116;
-const ENTROPY_BLOCK_HASH: u64 = 106;
 const NEW_CUSTODIAN: u64 = 108;
 const ARMED_BLOCK: u64 = 118;
-const SPEND_TXID: u64 = 110;
+const CLAIM_TXID: u64 = 110;
 const NEW_RESERVES_ADDRESS: u64 = 120;
 const COMMITMENT_HASH: u64 = 112;
 const TARGET_RESERVES: u64 = 122;
@@ -511,9 +509,7 @@ fn schema_custody_acquire() {
         "DisputeAcquire",
         &[
             (NEW_CUSTODIAN, pubkey_bytes()),
-            (ENTROPY_BLOCK_HEIGHT, u32_bytes(400)),
-            (ENTROPY_BLOCK_HASH, hash32()),
-            (SPEND_TXID, hash32()),
+            (CLAIM_TXID, hash32()),
             (NEW_RESERVES_ADDRESS, str_bytes("bcrt1qnew")),
         ],
     );

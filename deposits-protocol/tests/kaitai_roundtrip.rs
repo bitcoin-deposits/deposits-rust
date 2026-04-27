@@ -359,9 +359,7 @@ fn custody_armed() {
 fn custody_acquire() {
     test_roundtrip(&LedgerOperation::DisputeAcquire {
         new_custodian: pk(),
-        entropy_block_height: 400,
-        entropy_block_hash: h32(),
-        spend_txid: h32(),
+        claim_txid: h32(),
         new_reserves_address: "bcrt1qnew".into(),
     });
 }

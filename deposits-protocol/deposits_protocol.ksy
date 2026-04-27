@@ -272,14 +272,14 @@ types:
   # Dispute:
   #   100 = reason (string, DisputeEnter)
   #   102 = last_valid_sequence (u64, DisputeEnter)
-  #   116 = entropy_block_height (u32, DisputeAcquire)
-  #   106 = entropy_block_hash (32 bytes, DisputeAcquire)
   #   108 = new_custodian (33 bytes, DisputeAcquire)
+  #   110 = claim_txid (32 bytes, DisputeAcquire)
   #   118 = armed_block (u32, DisputeArmed)
-  #   110 = spend_txid (32 bytes, DisputeAcquire)
   #   120 = new_reserves_address (string, DisputeAcquire)
   #   112 = commitment_hash (20 bytes HASH160, DisputeArmed)
   #   122 = target_reserves (string, DisputeArmed)
+  # Note: 106 and 116 (entropy_block_hash, entropy_block_height) were
+  # used by the pre-lottery DisputeAcquire shape and are now retired.
 
   fee_structure:
     doc: |

@@ -779,17 +779,18 @@ fn validate_per_op_as_cosigner(
                 true
             }
         }
-        // Custody resolution — entropy-winner checks. Mirrors Ledger::validate_custody_resolution
-        // and Ledger::validate_custody_yield but with the candidate list supplied
-        // by the cosigner (who built it from observed DisputeArmed events).
+        // Custody resolution — in the on-chain-lottery design, the
+        // lottery script enforces selection. Cosigners just verify
+        // the new_custodian is among the armed candidates and the
+        // claim_txid is non-zero. Mirrors Ledger::validate_custody_resolution.
         LedgerOperation::DisputeAcquire {
             new_custodian,
-            entropy_block_hash,
+            claim_txid,
             ..
         } => {
-            use deposits_protocol::types::is_entropy_winner;
             !armed_candidates.is_empty()
-                && is_entropy_winner(entropy_block_hash, new_custodian, armed_candidates)
+                && armed_candidates.contains(new_custodian)
+                && claim_txid != &[0u8; 32]
         }
         LedgerOperation::DisputeYield => {
             // A real cosigner validates DisputeYield against the entropy_block_hash
@@ -914,18 +915,18 @@ impl ProtocolSim {
                 continue;
             }
             if Some(branch.disputer) == winner_idx {
+                let claim_txid = {
+                    let mut t = [0u8; 32];
+                    t[0] = branch.disputer as u8;
+                    t[1] = 0xAC;
+                    t
+                };
                 let acquire_op = LedgerOperation::DisputeAcquire {
                     new_custodian: self.operators[branch.disputer].public_key,
-                    entropy_block_height: entropy_height,
-                    entropy_block_hash,
-                    spend_txid: {
-                        let mut t = [0u8; 32];
-                        t[0] = branch.disputer as u8;
-                        t[1] = 0xAC;
-                        t
-                    },
+                    claim_txid,
                     new_reserves_address: format!("bcrt1q_new_{}", branch.disputer),
                 };
+                let _ = (entropy_height, entropy_block_hash); // unused after lottery rework
                 let replica = self.operators[branch.disputer].replicas[&victim].clone();
                 match apply_with_dispute_gate(&replica, &acquire_op) {
                     Ok(new) => {
@@ -1839,13 +1840,11 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             },
             2 => LedgerOperation::DisputeAcquire {
                 new_custodian: op.public_key,
-                entropy_block_height: sim.block_height,
-                entropy_block_hash: {
-                    let mut h = [0u8; 32];
-                    h[0] = rng.range(256) as u8;
-                    h
+                claim_txid: {
+                    let mut t = [0u8; 32];
+                    t[0] = rng.range(256) as u8;
+                    t
                 },
-                spend_txid: [0xFF; 32],
                 new_reserves_address: format!("bcrt1q_adv_self_{}", proposer),
             },
             _ => LedgerOperation::DisputeYield,
@@ -2387,9 +2386,7 @@ fn adv_majority_quorum_can_take_over_honest_ledger() {
     let attacker_pk = sim.operators[attacker].public_key;
     let acquire = LedgerOperation::DisputeAcquire {
         new_custodian: attacker_pk,
-        entropy_block_height: sim.block_height + 6,
-        entropy_block_hash: [0x22; 32],
-        spend_txid: [0x33; 32],
+        claim_txid: [0x33; 32],
         new_reserves_address: format!("bcrt1q_attacker_{}", attacker),
     };
     assert_eq!(

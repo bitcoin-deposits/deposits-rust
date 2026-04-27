@@ -442,27 +442,32 @@ pub enum LedgerOperation {
         target_reserves: String,
     },
 
-    /// Acquire custody after winning entropy selection.
+    /// Acquire custody after winning the on-chain lottery.
     ///
     /// Effects:
-    /// - Spends the reserves to the new custodian's address
+    /// - Records the on-chain claim TX that proved control of the
+    ///   lottery output
     /// - Transitions ledger back to NORMAL state
     /// - This candidate is now the operator
     ///
     /// Validation:
     /// - Must be in READY state
-    /// - Must be the entropy-selected winner among all READY candidates
+    /// - The lottery script on-chain enforces that only the
+    ///   `(sum mod N)`-th candidate (per revealed preimages) can spend
+    ///   the lottery output. The state machine trusts the Bitcoin
+    ///   layer to enforce that selection and just records the
+    ///   resulting `claim_txid`. A separate component with on-chain
+    ///   access (regtest or wallet sync) is responsible for verifying
+    ///   that `claim_txid` actually spends the expected lottery output.
     DisputeAcquire {
-        /// The new custodian (this candidate's pubkey).
-        /// Validators verify this matches the entropy-selected winner.
+        /// The new custodian (the lottery winner's pubkey).
         new_custodian: PublicKey,
-        /// Block height used for entropy (e.g., initiation_block + 6).
-        entropy_block_height: u32,
-        /// Hash of the entropy block.
-        entropy_block_hash: [u8; 32],
-        /// Transaction ID of the on-chain confiscation spend (proves control).
-        spend_txid: [u8; 32],
-        /// New reserves address (where the confiscated funds now reside).
+        /// Transaction ID of the on-chain claim TX. Witnessed-by spend
+        /// of the Tapscript lottery leaf, proving the script's
+        /// `(sum mod N)`-th-candidate selection.
+        claim_txid: [u8; 32],
+        /// New reserves address (where the lottery output's value now
+        /// resides — the winner's `target_reserves` from `DisputeArmed`).
         new_reserves_address: String,
     },
 
@@ -1279,15 +1284,11 @@ impl BinaryCodec for LedgerOperation {
             }
             Self::DisputeAcquire {
                 new_custodian,
-                entropy_block_height,
-                entropy_block_hash,
-                spend_txid,
+                claim_txid,
                 new_reserves_address,
             } => {
                 write_pubkey(w, new_custodian)?;
-                write_u32(w, *entropy_block_height)?;
-                write_32(w, entropy_block_hash)?;
-                write_32(w, spend_txid)?;
+                write_32(w, claim_txid)?;
                 write_string(w, new_reserves_address)?;
             }
             Self::DeliveryEmbed {
@@ -1612,9 +1613,7 @@ impl BinaryCodec for LedgerOperation {
             // DisputeAcquire (55)
             55 => Ok(Self::DisputeAcquire {
                 new_custodian: read_pubkey(r)?,
-                entropy_block_height: read_u32(r)?,
-                entropy_block_hash: read_32(r)?,
-                spend_txid: read_32(r)?,
+                claim_txid: read_32(r)?,
                 new_reserves_address: read_string(r)?,
             }),
             // DisputeYield (56)
