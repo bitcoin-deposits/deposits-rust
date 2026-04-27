@@ -149,6 +149,43 @@ pub fn read_ledger_history(
     updates
 }
 
+/// Read the `LedgerActor`'s parallel shadow log for a given ledger
+/// (`<data_dir>/wallet/ledgers/<ledger_id>.actor.log`). Same format as
+/// `read_ledger_history` but on the actor's file. Returns an empty
+/// Vec if the file doesn't exist (the actor never saw any qualifying
+/// inbound for that ledger during this process's lifetime).
+pub fn read_actor_log(
+    data_dir: &Path,
+    ledger_id: &str,
+) -> Vec<deposits_protocol::types::SignedLedgerUpdate> {
+    use std::io::{BufRead, BufReader};
+
+    let path = data_dir
+        .join("wallet/ledgers")
+        .join(format!("{}.actor.log", ledger_id));
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let reader = BufReader::new(file);
+    let mut updates = Vec::new();
+    for line in reader.lines() {
+        let line = line.expect("read line");
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut value: serde_json::Value =
+            serde_json::from_str(&line).expect("actor.log line is valid JSON");
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("type");
+        }
+        let update: deposits_protocol::types::SignedLedgerUpdate =
+            serde_json::from_value(value).expect("actor.log row deserializes");
+        updates.push(update);
+    }
+    updates
+}
+
 /// Look up a ledger ID stored under `data_dir/state/<key>` by `setup.sh`.
 pub fn read_setup_state(key: &str) -> String {
     let path = repo_root()
