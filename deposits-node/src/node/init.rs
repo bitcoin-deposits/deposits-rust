@@ -117,10 +117,13 @@ impl Node {
             }
         }
         drop(actor_pool_span);
-        // Drop our local clone of the outbox sender so the channel
-        // closes naturally if every actor has shut down (otherwise the
-        // drainer would block forever waiting on a sender we hold).
-        drop(actor_outbox_tx);
+        // Hand the outbox sender + ledgers_dir to the Node struct so
+        // ledgers created post-startup (via `ledger open`, import, or
+        // inbound discovery) can lazy-spawn an actor on demand. The
+        // drainer task below holds its own clone via the closure
+        // capture, so dropping our local clone here is unnecessary.
+        let actor_outbox_tx_for_node = actor_outbox_tx.clone();
+        let actor_ledgers_dir = config.data_dir.join("wallet/ledgers");
         // Step 8d — Notify shared between the outbox drainer (signal)
         // and main_loop's periodic block (await). Apply-edge events
         // like `MaybeConfiscate` set the Notify so the next periodic
@@ -195,6 +198,8 @@ impl Node {
             ledger_workers: Mutex::new(HashMap::new()),
             cosign_workers: Mutex::new(HashMap::new()),
             ledger_actors: Mutex::new(ledger_actors),
+            actor_outbox_tx: actor_outbox_tx_for_node,
+            actor_ledgers_dir,
             deposit_access_control: std::env::var("DEPOSIT_ACCESS_CONTROL")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
@@ -320,6 +325,52 @@ impl Node {
         ledger.finalize_chain_hash();
 
         Ok(())
+    }
+
+    /// Spawn a `LedgerActor` for `ledger_id` if one doesn't already exist.
+    ///
+    /// At `Node::new` time we spawn one actor per ledger present on disk
+    /// — but ledgers can also appear at runtime (operator opens a new
+    /// ledger via admin, member imports via QuorumJoin, daemon receives
+    /// inbound for an unknown id). Without a corresponding actor, those
+    /// ledgers' inbound + commit events fall on the floor and the
+    /// `<id>.actor.log` shadow file never gets written.
+    ///
+    /// Idempotent: returns immediately if an actor is already registered.
+    pub(crate) fn ensure_actor_for(&self, ledger_id: &str) {
+        {
+            let map = self.ledger_actors.lock().unwrap();
+            if map.contains_key(ledger_id) {
+                return;
+            }
+        }
+        let ledger_clone = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            match ledgers.get(ledger_id) {
+                Some(arc) => arc.read().unwrap().clone(),
+                None => return,
+            }
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel::<
+            super::ledger_actor::LedgerEvent,
+        >(64);
+        let persistence_path = self
+            .actor_ledgers_dir
+            .join(format!("{}.actor.log", ledger_id));
+        let actor = super::ledger_actor::LedgerActor {
+            inbox: rx,
+            outbox: self.actor_outbox_tx.clone(),
+            ledger: ledger_clone,
+            ledger_id: ledger_id.to_string(),
+            persistence_path,
+            forks_dir: self.actor_ledgers_dir.clone(),
+            fork_observations: std::collections::HashMap::new(),
+        };
+        tokio::spawn(actor.run());
+        let mut map = self.ledger_actors.lock().unwrap();
+        map.entry(ledger_id.to_string())
+            .or_insert(super::ledger_actor::LedgerActorHandle { inbox: tx });
+        tracing::debug!("ensure_actor_for: spawned actor for ledger {}", &ledger_id[..16.min(ledger_id.len())]);
     }
 
     /// Validate that the last in-memory update chains correctly from what's on disk.

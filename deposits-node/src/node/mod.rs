@@ -353,6 +353,19 @@ pub struct Node {
     pub(crate) ledger_actors:
         Mutex<HashMap<String, ledger_actor::LedgerActorHandle>>,
 
+    /// Outbox sender shared with the actor pool. Held so that ledgers
+    /// created after `Node::new` (via `ledger open`, `import_ledger`, or
+    /// inbound discovery) can lazy-spawn an actor without restarting the
+    /// daemon. The drainer task in `init.rs` owns the matching receiver.
+    pub(crate) actor_outbox_tx: tokio::sync::mpsc::UnboundedSender<(
+        String,
+        ledger_actor::LedgerOutbound,
+    )>,
+
+    /// Directory the actor pool persists `*.actor.log` files to. Captured
+    /// once at startup so lazy-spawn paths don't need to recompute it.
+    pub(crate) actor_ledgers_dir: std::path::PathBuf,
+
     /// Whether deposit access control is enabled (DEPOSIT_ACCESS_CONTROL=true).
     /// When false, all deposit opens are allowed (denylist still checked).
     deposit_access_control: bool,

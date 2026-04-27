@@ -538,6 +538,12 @@ impl Node {
             tracing::error!("Failed to persist ledger: {}", e);
         }
 
+        // Lazy-spawn an actor for this freshly-created ledger so future
+        // inbound + commit events are mirrored to its `.actor.log`. The
+        // initial actor pool was sized from `handler.ledgers` at
+        // `Node::new` time and won't pick up ledgers opened afterward.
+        self.ensure_actor_for(&ledger_id);
+
         // Create handshake message to send to partner (wire protocol)
         // Note: For BDK self-ledger, this handshake may be sent to self or skipped
         let handshake_msg = deposits_core::messages::HandshakeMsg {
@@ -574,6 +580,10 @@ impl Node {
     ) -> Result<(deposits_core::validation::ValidationReport, Ledger), String> {
         let (report, ledger_arc) = self.handler.import_ledger(export)?;
         let ledger = ledger_arc.read().unwrap().clone();
+        // Lazy-spawn an actor for the imported ledger so subsequent
+        // inbound updates from the operator are mirrored to its shadow
+        // `.actor.log`. (See Node::ensure_actor_for for context.)
+        self.ensure_actor_for(&ledger.ledger_id_hex());
         Ok((report, ledger))
     }
 

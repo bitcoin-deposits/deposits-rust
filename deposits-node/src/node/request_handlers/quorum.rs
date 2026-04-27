@@ -533,6 +533,7 @@ impl Node {
                 "Validated and imported operator ledger {}... before consenting",
                 &operator_ledger_id[..16]
             );
+            self.ensure_actor_for(&operator_ledger_id);
         }
 
         // Sign consent: COLLATERAL_CONSENT || operator_pubkey(33 bytes) || ledger_id(string bytes)

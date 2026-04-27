@@ -417,6 +417,9 @@ impl Node {
                         &ledger_id[..16],
                         filtered.len()
                     );
+                    // Lazy-spawn an actor for this newly-imported ledger
+                    // so its inbound stream gets shadowed to `.actor.log`.
+                    self.ensure_actor_for(&ledger_id);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to import ledger {}: {}", &ledger_id[..16], e);
@@ -754,6 +757,7 @@ impl Node {
                         filtered.len(),
                         filtered.last().map(|u| u.sequence_number).unwrap_or(0)
                     );
+                    self.ensure_actor_for(&ledger_id);
                     Ok(())
                 }
                 Err(e) => {
