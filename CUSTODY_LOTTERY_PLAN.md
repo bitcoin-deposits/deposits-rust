@@ -106,17 +106,36 @@ Tests:
 
 Design doc updates: summary table replaced with measured/interpolated leaf sizes (no more inflated tree estimates), Regime C section rewritten to describe the Linear-after-mod choice and explain why the original tree spec was over-engineering.
 
-#### Phase 4b — Partial-reveal claim leaf — pending
+#### Phase 4b — Partial-reveal claim leaves (K=1) — DONE
 
-For N≥11, P(all reveal) drops below 50% at p=0.95 per-party reliability, so completion-via-recovery becomes the common case. The fix: an extra Tapscript leaf, activated after a short CSV (e.g. 72 blocks), that lets the lottery complete among the revealers only. Non-revealers' contributions are treated as 0, the dispatch indices are remapped to the revealer subset.
+The original design specified a single bitmap-driven leaf with polymorphic dispatch over a variable revealer-subset. Investigation during implementation showed that's infeasible in Tapscript: `OP_AND/OR/XOR/DIV/MOD/LSHIFT/RSHIFT/2DIV/2MUL` are all `OP_SUCCESS` (disabled), making bit-extraction non-trivial; the polymorphic dispatch compounds because every "verify k revealers" branch must be unrolled (no loops) and each revealer's hash check must cascade over all N possible disputant indices, ballooning to ~8.5 KB of verification alone before mod or final dispatch — past the per-stack-item limit and well past anything reasonable.
 
-Touches:
-- New leaf in `LotteryReservesBuilder::build()` between the primary lottery claim and the long-tail recovery.
-- Witness shape: `<sig> <preimage_revealer_k> ... <preimage_revealer_1> <revealer_bitmap>` — 1-byte bitmap for ≤8 disputants, 2-byte for ≤15. Each set bit = "this disputant revealed".
-- Script reads the bitmap, validates the claimed revealer set's preimages, computes `sum mod count(revealers)`, dispatches into the revealer-subset.
-- Bond forfeit logic: non-revealers' bonds are slashed and distributed to revealers (this is enforcement, not script — handled at the protocol layer when the partial-reveal claim TX confirms).
+The Phase 4b implementation chose a feasible alternative: **K=1 multi-leaf coverage**. For N ≥ `PARTIAL_REVEAL_MIN_N` (=11), the Taproot output gains N additional partial-reveal leaves, one per missing-disputant index. Each leaf is a CSV-72-prefixed regular lottery for the (N-1) remaining disputants — the sub-lottery picks its regime by sub-N (CombinedTable for sub-N=10 at the boundary, Linear-after-mod for sub-N in 11..=14).
 
-Risk: higher than 4a. The bitmap-driven dispatch is structurally new and the witness format is a wire-compat surface. Keep this in its own commit.
+Coverage / failure modes:
+- "1 disputant missing" — handled by the appropriate partial-reveal leaf with full lottery randomness preserved among the 14 (or fewer) revealers.
+- "2+ disputants missing" — falls through to the existing CSV-144 quorum recovery long-tail.
+
+At p=0.99 per-party reveal probability, K=1 covers ~99% of failure cases. At p=0.95, it covers ~70%. K=2 (`C(N,2)` additional leaves) is a pure construction-time extension if production data warrants it — no protocol or message changes needed. Tracked in the open-questions checklist.
+
+Construction details:
+- New `PARTIAL_REVEAL_MIN_N = 11` and `PARTIAL_REVEAL_CSV_BLOCKS = 72` constants.
+- New `LotteryScriptBuilder::build_partial_reveal_leaves()` returning `Vec<ScriptBuf>` (empty for N < threshold).
+- `LotteryReservesBuilder::build()` now builds a depth-aware Taproot tree: leaves at `⌈log₂ m⌉` and `⌊log₂ m⌋` depths to handle variable leaf counts. At N=15 the tree has 19 leaves (1 lottery + 15 partial + 3 recovery), Merkle depth 5.
+- New `LotteryOutput::partial_reveal_scripts: Vec<ScriptBuf>` field exposes the leaves for downstream witness construction (Phase 5).
+
+Tests (9 new):
+- `test_partial_reveal_leaves_skipped_below_threshold` — N=10 has empty leaves.
+- `test_partial_reveal_leaf_count_matches_n` — exact count for N=11..=15.
+- `test_partial_reveal_excludes_missing_disputant` — byte-equality reconstruction confirms the j-th leaf excludes participant j.
+- `test_partial_reveal_csv_prefix_present` — every leaf begins with `<72> OP_CSV OP_DROP`.
+- `test_partial_reveal_uses_combined_table_at_n11` — sub-N=10 → 91 ENDIFs (CombinedTable).
+- `test_partial_reveal_uses_linear_at_n15` — sub-N=14 → 28 ENDIFs (Linear-after-mod).
+- `test_partial_reveal_regime_transition_n11_to_n12` — verifies the sub-lottery boundary lands at the right N.
+- `test_lottery_output_taproot_depth_at_n15` — control-block size confirms depth 4 or 5.
+- `test_lottery_output_legacy_shape_at_n5` — N<11 still produces the original 4-leaf depth-2 shape.
+
+Witness construction for partial-reveal claim spends is deferred to Phase 5 plumbing alongside the `recovery reveal` / `recovery lottery-claim` CLIs — the leaves are present in the Taproot tree and the script bytes are exposed via `LotteryOutput::partial_reveal_scripts`, so the spending side just needs the right `create_partial_reveal_witness` helper and CLI dispatch.
 
 #### Phase 4c — MAX_DISPUTANTS + retry-depth bound — pending
 

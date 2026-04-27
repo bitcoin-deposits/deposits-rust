@@ -4,7 +4,7 @@
 
 When multiple operators dispute custody of a ledger, the winner must be selected fairly. This document describes an on-chain commit-reveal lottery in which the Bitcoin script itself determines the winner from entropy contributed by all disputants. No off-chain coordination on the outcome is required.
 
-The construction supports **N = 3 to 15 disputants**, with three internal regimes that trade dispatch strategy and recovery economics. The regime boundaries are chosen so that the protocol stays within reasonable witness sizes, recovery-quorum constraints, and bond economics.
+The construction supports **N = 3 to 15 disputants**, with three internal regimes that trade script structure and recovery economics. Two of the three regimes share the same dispatch strategy (linear after explicit modulo); the middle regime uses a combined dispatch table that folds the modulo into pubkey selection. The regime boundaries are chosen so that the protocol stays within reasonable witness sizes, recovery-quorum constraints, and bond economics.
 
 ## Problem
 
@@ -104,31 +104,27 @@ The winner publishes `DisputeAcquire` with the claim txid, completing custody tr
 
 ## Scaling Regimes
 
-The construction's witness size, recovery-quorum requirement, and bond economics all change with N. We define two regimes with different dispatch strategies. A single `LotteryScriptBuilder` selects the strategy automatically based on N. Past N=15 the protocol refuses to arm — see [Why N = 15 Is the Cap](#why-n--15-is-the-cap).
+The construction's witness size, recovery-quorum requirement, and bond economics all change with N. We define three regimes. A single `LotteryScriptBuilder` selects the strategy automatically based on N. Regimes A and C share a dispatch strategy (linear-after-mod); they're separated because the operational characteristics — recovery frequency, bond sizing, partial-reveal handling — differ materially even though the script shape is the same.
 
 ### Summary table
 
-Leaf sizes for N=6, 10, 11, 15 are measured from `cargo test`; intermediate values are linearly interpolated. Witness adds preimages (~21 B each) + Schnorr sig (65 B) + control block (~33–129 B depending on tree depth).
-
-| N    | Dispatch       | Mod           | Leaf size | Min quorum | Bond ratio |
-|------|----------------|---------------|-----------|------------|------------|
-| 3    | Linear         | Subtract      | ~250 B    | T+3        | 0.67×      |
-| 4    | Linear         | Subtract      | ~330 B    | T+4        | 0.75×      |
-| 5    | Linear         | Subtract      | ~410 B    | T+5        | 0.80×      |
-| 6    | Combined table | (folded in)   | ~1.5 KB   | T+6        | 0.83×      |
-| 7    | Combined table | (folded in)   | ~2.0 KB   | T+7        | 0.86×      |
-| 8    | Combined table | (folded in)   | ~2.7 KB   | T+8        | 0.88×      |
-| 9    | Combined table | (folded in)   | ~3.4 KB   | T+9        | 0.89×      |
-| 10   | Combined table | (folded in)   | ~4.1 KB   | T+10       | 0.90×      |
-| 11   | Linear         | Subtract      | ~880 B    | T+11       | 0.91×      |
-| 12   | Linear         | Subtract      | ~960 B    | T+12       | 0.92×      |
-| 13   | Linear         | Subtract      | ~1.0 KB   | T+13       | 0.92×      |
-| 14   | Linear         | Subtract      | ~1.1 KB   | T+14       | 0.93×      |
-| 15   | Linear         | Subtract      | ~1.2 KB   | T+15       | 0.93×      |
+| N    | Dispatch       | Mod           | Leaf size | Witness  | Min quorum | Bond ratio |
+|------|----------------|---------------|-----------|----------|------------|------------|
+| 3    | Linear         | Subtract      | ~300 B    | ~500 B   | T+3        | 0.67×      |
+| 4    | Linear         | Subtract      | ~450 B    | ~650 B   | T+4        | 0.75×      |
+| 5    | Linear         | Subtract      | ~600 B    | ~800 B   | T+5        | 0.80×      |
+| 6    | Combined table | (folded in)   | ~1.5 KB   | ~1.7 KB  | T+6        | 0.83×      |
+| 7    | Combined table | (folded in)   | ~2.5 KB   | ~2.8 KB  | T+7        | 0.86×      |
+| 8    | Combined table | (folded in)   | ~2.7 KB   | ~3.0 KB  | T+8        | 0.88×      |
+| 9    | Combined table | (folded in)   | ~3.4 KB   | ~3.7 KB  | T+9        | 0.89×      |
+| 10   | Combined table | (folded in)   | ~4.3 KB   | ~4.7 KB  | T+10       | 0.90×      |
+| 11   | Linear         | Subtract      | ~0.8 KB   | ~1.2 KB  | T+11       | 0.91×      |
+| 12   | Linear         | Subtract      | ~0.9 KB   | ~1.3 KB  | T+12       | 0.92×      |
+| 13   | Linear         | Subtract      | ~1.0 KB   | ~1.4 KB  | T+13       | 0.92×      |
+| 14   | Linear         | Subtract      | ~1.1 KB   | ~1.5 KB  | T+14       | 0.93×      |
+| 15   | Linear         | Subtract      | ~1.2 KB   | ~1.6 KB  | T+15       | 0.93×      |
 
 `T` is the emergency-recovery threshold (typically the lowest threshold across the long-tail recovery leaves). `Min quorum` reflects the precondition `N_quorum − N_disputants ≥ T_emergency`.
-
-The leaf-size regression at N=11 vs. N=10 is real: at N=11 we drop CombinedTable's `O(N²-N+1)` dispatch arms in favour of Linear's `O(N)` dispatch + `O(N)` modulo. Both dispatch strategies are valid at every N, but Linear stays roughly flat while CombinedTable grows quadratically; the 10→11 boundary is where CombinedTable's per-arm cost overruns Linear's modulo overhead by enough to matter.
 
 `Bond ratio` is the lower bound on `bond / disputed_value` required to keep defection-and-eat-the-slash irrational, ignoring time value. In practice we recommend `bond ≥ 1.0 × disputed_value` for N ≥ 10.
 
@@ -161,7 +157,7 @@ OP_ELSE OP_DUP 1 OP_EQUAL OP_IF
 OP_ENDIF OP_ENDIF ...
 ```
 
-At this size, the byte cost of a tree dispatch is not worth the structural complexity.
+At this size, more elaborate dispatch structures are not worth the structural complexity. The same dispatch shape is reused in Regime C at higher N — see that section for why a tree dispatch is *not* needed even at N=15.
 
 ### Regime B: N = 6–10 (combined dispatch table)
 
@@ -180,40 +176,64 @@ This is byte-for-byte competitive with separate-mod-then-dispatch through about 
 
 **Operator-facing change in this regime**: the recovery path is no longer rare. At N=10 with 95% per-party reveal probability, P(all reveal) ≈ 60%, so 40% of rounds will need recovery. Document recovery-path fees in the runbook and pre-fund a fee reserve sized for confiscation + recovery, not just confiscation + claim. Consider extending the primary CSV from 144 to 288 blocks to reduce premature recovery triggers.
 
-### Regime C: N = 11–15 (linear dispatch, again)
+### Regime C: N = 11–15 (linear-after-mod, same dispatch as Regime A)
 
-Past N=10, CombinedTable's `O(N²-N+1)` arms blow up — N=15 would need 211 arms ≈ 8.7 KB. Drop back to the Regime A construction: compute `sum mod N` via repeated subtraction, then dispatch linearly on the index 0..N-1. At N=15 this fits in ~1.2 KB, comfortably under the Tapscript per-stack-item limit.
+Past N=10, the combined dispatch table grows quadratically (at N=15, 106 dispatch arms ≈ 4.8 KB). Switch back to **explicit `sum mod N` followed by linear dispatch** — the same shape as Regime A, just with more arms.
 
 ```
 // Compute sum mod N via repeated subtraction.
-// For N=15, sum ∈ [15, 225], so up to 15 conditional subtractions.
+// For N=15, sum ∈ [15, 225], up to 14 subtractions of 15.
+// (Or use binary-search subtraction in ~60 bytes: subtract 15×8, then 15×4, ...)
 
-// stack: index ∈ [0, N−1]
-// Linear dispatch (same shape as Regime A):
-OP_DUP <0> OP_EQUAL OP_IF OP_DROP <pubkey_0> OP_CHECKSIG OP_ELSE
-OP_DUP <1> OP_EQUAL OP_IF OP_DROP <pubkey_1> OP_CHECKSIG OP_ELSE
-...
-OP_ENDIF × N
+// Linear dispatch on index ∈ [0, N−1]:
+OP_DUP 0 OP_EQUAL OP_IF
+    OP_DROP <pubkey_0> OP_CHECKSIG
+OP_ELSE OP_DUP 1 OP_EQUAL OP_IF
+    OP_DROP <pubkey_1> OP_CHECKSIG
+... (N arms) ...
+OP_ENDIF OP_ENDIF ...
 ```
 
-An earlier draft of this design specified a balanced binary tree dispatch here, on the assumption that tree dispatch would shave bytes at higher N. In practice the tree's structural overhead (push thresholds, OP_GREATERTHANOREQUAL / OP_SUB at every internal node) outweighs the savings from a smaller leaf count, especially since only one path through the script ever executes — there's no "tree height advantage" the way there would be in a comparison-bound algorithm. Linear-after-mod is the right tool at every N where CombinedTable's quadratic growth is the alternative.
+#### Why not a binary tree
 
-This regime still requires the **partial-reveal claim path** described in [Failure Modes](#failure-modes), because at N=15 with 95% per-party reliability, P(all reveal) ≈ 46% — recovery is more common than completion.
+An earlier draft of this design specified a balanced-tree dispatch on the post-mod index, on the asymptotic argument that O(log N) tree depth beats O(N) linear chain. At this range the asymptotic argument doesn't pay off:
+
+- **Total bytes are dominated by the N pubkey leaves**, not by the comparison ops. Both shapes spend ~38 B per arm on the pubkey + CHECKSIG, with only ~10–15 B difference in the comparison/branch structure. At N=15: linear ≈ 1.2 KB, tree ≈ 1.2 KB. The tree saves nothing material.
+- **Execution cost is fine for both**. 15 sequential `EQUAL/IF` checks is well within tapscript's ops budget.
+- **Tree dispatch with thresholds 8/4/2/1 has irregular bottom arms** for N ∈ {11, 13, 14, 15} — more edge cases to test and audit.
+- **Sharing dispatch with Regime A halves the builder code path**. Only Regimes A and C use linear-after-mod; only Regime B is structurally different.
+
+So Regime C is "Regime A applied at larger N." Same dispatch, different operational envelope. The regime exists as a separate label only because the operational expectations — recovery frequency, partial-reveal handling, bond sizing — differ enough to warrant their own discussion.
+
+This regime requires the **K=1 partial-reveal leaves** described in [Failure Modes](#failure-modes), because at N=15 with 95% per-party reliability, P(all reveal) ≈ 46% — recovery is more common than completion. K=1 partial-reveal covers ~70% of those failures within CSV 72; the remainder fall through to CSV 144 quorum recovery.
 
 ## Script Construction
 
 ### Taproot structure
 
+For N ≥ 11, the partial-reveal path is implemented as **N additional leaves**, one per possible "missing" disputant index. Each is a CSV-72-prefixed (N−1)-party lottery among the remaining disputants. This is the idiomatic Tapscript answer to polymorphic dispatch: rather than branching on a bitmap inside one leaf, encode each shape as its own leaf and let the spender pick.
+
 ```
 Lottery Output (Taproot):
 ├── Key path: NUMS (disabled)
-├── Leaf 0: Lottery claim — preimage reveal + winner sig
-├── Leaf 1: Partial-reveal claim — for N ≥ 11, after short timeout, lottery
-│           among revealers only, non-revealers' contributions treated as 0
-├── Leaf 2: Recovery — quorum minus disputants, threshold T,   CSV 144
-├── Leaf 3: Recovery — quorum minus disputants, threshold T−1, CSV 1008
-└── Leaf 4: Recovery — quorum minus disputants, threshold T−2, CSV 4032
+├── Leaf 0: Lottery claim — preimage reveal + winner sig (all N reveal)
+├── Leaves 1..N (N ≥ 11 only): K=1 partial-reveal — CSV 72 prefix +
+│              (N−1)-party lottery, one leaf per excluded index j ∈ [0, N)
+├── Leaf N+1: Recovery — quorum minus disputants, threshold T,   CSV 144
+├── Leaf N+2: Recovery — quorum minus disputants, threshold T−1, CSV 1008
+└── Leaf N+3: Recovery — quorum minus disputants, threshold T−2, CSV 4032
 ```
+
+Total leaf count: 4 (for N ≤ 10) or N+4 (for N ≥ 11). At N=15 that's 19 leaves — well within the practical taptree size, with Merkle path overhead of ⌈log₂ 19⌉ = 5 levels (~160 B added to the witness for the control block).
+
+Each partial-reveal leaf is structured as:
+
+```
+72 OP_CHECKSEQUENCEVERIFY OP_DROP
+<lottery script for (N−1)-party lottery excluding disputant j>
+```
+
+The (N−1)-party lottery uses the regime appropriate for N−1, **not N**. So at N=15 each partial leaf is a Regime C (linear-after-mod) lottery for 14 parties; at N=11 each partial leaf is a Regime B (combined table) lottery for 10 parties. The `LotteryScriptBuilder` handles this correctly when called with `N−1`.
 
 Disputants are excluded from all recovery paths. They lost the dispute by failing to maintain custody (or failing to reveal), so they should not have a vote in retrieving the funds.
 
@@ -287,13 +307,27 @@ pub struct DisputeAcquire {
 
 ### Non-revelation
 
-If a disputant does not reveal within the reveal timeout:
+If a disputant does not reveal within the reveal timeout, the protocol has three escalating recovery paths:
 
-1. **Collateral slash**: the non-revealer's bond is forfeit, distributed to other disputants.
-2. **Partial-reveal claim** (N ≥ 11): after a short timeout (e.g. CSV 72), a separate tapscript leaf allows the lottery to complete among revealers only. Non-revealers' contributions are treated as 0; their indices are removed from the dispatch.
-3. **Quorum recovery**: after the primary CSV (144 blocks), the quorum-minus-disputants can spend the lottery output back to reserves and start a new dispute round with the remaining disputants.
+1. **Collateral slash**: the non-revealer's bond is forfeit, distributed to other disputants. The bond ratios in the [summary table](#summary-table) keep this slash large enough that defection-by-silence is irrational.
 
-The collateral mechanism (already implemented) keeps revelation rational. The bond ratios in the [summary table](#summary-table) reflect what is required to keep this incentive intact at each N.
+2. **K=1 partial-reveal claim** (N ≥ 11): after CSV 72 (~12 hours), if exactly one disputant has failed to reveal, the remaining N−1 disputants can spend through the partial-reveal leaf corresponding to the missing index. This is a fair (N−1)-party lottery using the same commit-reveal mechanics. The non-revealer is simply excluded from the entropy pool and the dispatch.
+
+3. **Quorum recovery**: after CSV 144 (~24 hours), the quorum-minus-disputants can spend the lottery output back to reserves and start a new dispute round with the remaining disputants. This is the fallback for "2+ missing" cases and for situations where no partial leaf applies.
+
+#### Why K=1 is the partial-reveal cap
+
+Tapscript cannot do bitmap-driven dispatch in a single leaf (no `OP_AND`, `OP_OR`, no loops), so each "shape" of the partial-reveal lottery must be its own leaf. The leaf count for K-missing partial-reveal is `C(N, K)`. K=1 adds N leaves; K=2 would add C(15,2) = 105 leaves at N=15; K=3 would add 455. K=1 covers the dominant partial-reveal case at any plausible reliability:
+
+| p (per-party) | P(K=1 missing) | P(K≥2 missing) | K=1 covers |
+|---|---|---|---|
+| 0.99 | 13% | 1% | ~99% of failures |
+| 0.95 | 37% | 17% | ~70% of failures |
+| 0.90 | 34% | 45% | ~45% of failures |
+
+If production reveal reliability turns out worse than ~0.95, K=2 leaves can be added later. They are a pure taptree extension — no protocol or message changes required, only construction-time leaf enumeration.
+
+Cases not covered by K=1 (2+ disputants silent) fall through to the CSV-144 quorum recovery path, which always works as long as the recovery-quorum precondition holds. The cost is an extra ~12-hour wait.
 
 ### Reveal-reliability assumptions
 
@@ -335,15 +369,15 @@ For applications requiring N > 15, switch construction: a tournament bracket of 
 ## Security Properties
 
 1. **Fairness**. As long as one disputant is honest, the winner is uniform mod N. No coalition smaller than all-of-N can bias the outcome.
-2. **Atomicity**. Either the winner claims, the partial-reveal path completes, or the recovery path returns funds to the quorum. No stuck funds, provided preconditions hold.
+2. **Atomicity**. Either the winner claims (all-reveal path), a K=1 partial-reveal leaf completes (one missing), or the recovery path returns funds to the quorum. No stuck funds, provided preconditions hold.
 3. **Verifiability**. Anyone can verify the winner calculation from the revealed preimages and the on-chain script.
 4. **Trustlessness**. Script enforces the rules. No off-chain agreement on outcome is required.
 
 ## Implementation Checklist
 
 - [x] Add `commitment_hash` and `target_reserves` to `DisputeArmed`
-- [x] Create `LotteryScriptBuilder` with `DispatchStrategy` enum (`Linear` | `CombinedTable` | `BinaryTree`)
-- [x] Auto-select strategy from N: Linear for N ≤ 5, CombinedTable for 6–10, BinaryTree for 11–15
+- [x] Create `LotteryScriptBuilder` with `DispatchStrategy` enum (`Linear` | `CombinedTable`)
+- [x] Auto-select strategy from N: Linear for N ≤ 5, CombinedTable for 6–10, Linear for 11–15
 - [x] Add preimage generation/storage in `recovery arm`
 - [x] Add `recovery confiscate` command with quorum-precondition check
 - [x] Add `recovery reveal` command (publishes preimage via Nostr)
@@ -356,8 +390,10 @@ For applications requiring N > 15, switch construction: a tournament bracket of 
 - [x] Enforce `MAX_DISPUTANTS = 15` in `DisputeEnter` handler
 - [x] Enforce bond ratio per regime in `DisputeArmed` handler
 - [x] Enforce economic precondition (`disputed_value` vs. `claim_fee`)
-- [x] Implement partial-reveal claim leaf for N ≥ 11
+- [x] Implement K=1 partial-reveal leaves for N ≥ 11 (N additional leaves at CSV 72, each an (N−1)-party lottery excluding one disputant index)
+- [ ] (Future) K=2 partial-reveal leaves if production reveal reliability < 0.95
 - [x] Bound retry depth to `⌊N/2⌋`
 - [x] Golden test vectors at regime boundaries: N=5, N=6, N=10, N=11
+- [x] Golden test vector for partial-reveal regime selection: N=11 partial leaves use Regime B (10-party); N=15 partial leaves use Regime C (14-party)
 - [x] Update `test-dispute-Nop.sh` to cover N ∈ {3, 5, 6, 10, 11, 15}
 - [x] Document witness sizes and recovery-fee budgets in operator runbook

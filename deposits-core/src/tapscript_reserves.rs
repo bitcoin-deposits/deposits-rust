@@ -751,6 +751,17 @@ impl LotteryParticipant {
 /// nobody has a reason to claim, leaving the output stuck.
 pub const MIN_ECONOMIC_FEE_MULTIPLE: u64 = 5;
 
+/// Smallest N at which we add partial-reveal claim leaves to the lottery
+/// Taproot output. Below this, P(all reveal) is high enough that the
+/// CSV-144 quorum recovery path is sufficient as a fallback.
+pub const PARTIAL_REVEAL_MIN_N: usize = 11;
+
+/// CSV block delay before the partial-reveal claim leaves become
+/// spendable. Short enough to give honest revealers a faster path than
+/// the CSV-144 recovery, but long enough that genuine reveals have time
+/// to all land on chain first.
+pub const PARTIAL_REVEAL_CSV_BLOCKS: u32 = 72;
+
 /// Per-regime bond ratio: the lower bound on `bond / disputed_value`
 /// required to keep defection-and-eat-the-slash irrational.
 ///
@@ -1017,6 +1028,61 @@ impl LotteryScriptBuilder {
         Ok(builder.into_script())
     }
 
+    /// Build the partial-reveal claim leaves for a single missing
+    /// disputant (K=1 coverage).
+    ///
+    /// Returns one leaf per disputant index `j` in `0..N`, each prefixed
+    /// with `<PARTIAL_REVEAL_CSV_BLOCKS> OP_CSV OP_DROP` and followed by
+    /// a regular lottery script over the `N-1` revealers excluding `j`.
+    /// Empty `Vec` for `N < PARTIAL_REVEAL_MIN_N`.
+    ///
+    /// This covers the dominant partial-reveal failure mode (one
+    /// disputant fails to reveal) while preserving lottery randomness.
+    /// Cases with two or more non-revealers fall back to the CSV-144
+    /// quorum recovery long-tail. K≥2 coverage is a pure
+    /// construction-time extension if production reliability data
+    /// warrants it; no protocol or message changes needed.
+    ///
+    /// Note that the sub-lottery's regime is determined by `N-1`, not N:
+    /// at N=11 the partial leaves are 10-disputant CombinedTable; at
+    /// N=12..=15 they are 11..=14-disputant Linear-after-mod.
+    pub fn build_partial_reveal_leaves(&self) -> DepositsResult<Vec<ScriptBuf>> {
+        let n = self.participants.len();
+        if n < PARTIAL_REVEAL_MIN_N {
+            return Ok(vec![]);
+        }
+
+        let mut leaves = Vec::with_capacity(n);
+        for missing_idx in 0..n {
+            let revealers: Vec<LotteryParticipant> = self
+                .participants
+                .iter()
+                .enumerate()
+                .filter_map(|(j, p)| if j == missing_idx { None } else { Some(p.clone()) })
+                .collect();
+
+            let sub_builder = LotteryScriptBuilder::new(
+                revealers,
+                self.recovery_voters.clone(),
+                self.recovery_threshold,
+                self.network,
+            );
+            let inner = sub_builder.build_lottery_script()?;
+
+            let prefix = Builder::new()
+                .push_int(PARTIAL_REVEAL_CSV_BLOCKS as i64)
+                .push_opcode(OP_CSV)
+                .push_opcode(OP_DROP)
+                .into_script();
+
+            let mut bytes = prefix.into_bytes();
+            bytes.extend_from_slice(inner.as_bytes());
+            leaves.push(ScriptBuf::from(bytes));
+        }
+
+        Ok(leaves)
+    }
+
     /// Build a recovery script for when revelation stalls.
     ///
     /// After CSV timeout, the quorum (minus disputed operator) can recover funds.
@@ -1069,26 +1135,38 @@ impl LotteryScriptBuilder {
 
     /// Build the complete Taproot lottery output.
     ///
-    /// Structure:
+    /// Leaf order (also the order they appear in the Taproot tree, which
+    /// matters only for control-block determinism — the spender picks any
+    /// leaf):
     /// - Leaf 0: Lottery claim script (preimage reveal + winner sig)
-    /// - Leaf 1: Recovery (CSV 144 blocks, threshold T)
-    /// - Leaf 2: Recovery (CSV 1008 blocks, threshold T-1)
-    /// - Leaf 3: Recovery (CSV 4032 blocks, threshold T-2)
+    /// - Leaves 1..=N (when `N >= PARTIAL_REVEAL_MIN_N`): partial-reveal
+    ///   claim, one per missing disputant index `j`, CSV 72
+    /// - Leaf -3: Recovery (CSV 144,  threshold T)
+    /// - Leaf -2: Recovery (CSV 1008, threshold T-1)
+    /// - Leaf -1: Recovery (CSV 4032, threshold T-2)
+    ///
+    /// Total leaves: 4 for `N < PARTIAL_REVEAL_MIN_N`, `4 + N` otherwise.
+    /// At N=15 that's 19 leaves → Merkle depth `⌈log₂ 19⌉ = 5`.
     pub fn build(&self) -> DepositsResult<LotteryOutput> {
         let secp = Secp256k1::new();
 
         // Build lottery claim script
         let lottery_script = self.build_lottery_script()?;
 
+        // Build partial-reveal claim leaves (empty for N < 11)
+        let partial_reveal_scripts = self.build_partial_reveal_leaves()?;
+
         // Build recovery scripts with degrading thresholds
-        let recovery_scripts = vec![
-            (144, self.recovery_threshold),                           // ~1 day
-            (1008, self.recovery_threshold.saturating_sub(1).max(1)), // ~1 week
-            (4032, self.recovery_threshold.saturating_sub(2).max(1)), // ~4 weeks
+        let recovery_specs = [
+            (144u32, self.recovery_threshold),                           // ~1 day
+            (1008, self.recovery_threshold.saturating_sub(1).max(1)),    // ~1 week
+            (4032, self.recovery_threshold.saturating_sub(2).max(1)),    // ~4 weeks
         ];
 
-        let mut leaves: Vec<ScriptBuf> = vec![lottery_script.clone()];
-        for (csv, threshold) in recovery_scripts {
+        let mut leaves: Vec<ScriptBuf> = Vec::with_capacity(1 + partial_reveal_scripts.len() + 3);
+        leaves.push(lottery_script.clone());
+        leaves.extend(partial_reveal_scripts.iter().cloned());
+        for (csv, threshold) in recovery_specs {
             let builder = LotteryScriptBuilder::new(
                 self.participants.clone(),
                 self.recovery_voters.clone(),
@@ -1107,16 +1185,40 @@ impl LotteryScriptBuilder {
         ])
         .map_err(|_| DepositsError::InvalidState("Invalid NUMS point".to_string()))?;
 
-        // Build Taproot tree with balanced structure
-        let mut builder = TaprootBuilder::new();
+        // Build a Taproot tree with depths that match a balanced layout
+        // for the given leaf count. For `m` leaves where `2^(d-1) < m <=
+        // 2^d`, we put `2*(m - 2^(d-1))` leaves at depth `d` and the
+        // remaining `2^d - m` at depth `d-1`. Power-of-2 m collapses to
+        // all leaves at depth d. The TaprootBuilder fills slots in
+        // call order, so we add the deeper leaves first.
+        let m = leaves.len();
+        let builder = if m == 1 {
+            TaprootBuilder::new().add_leaf(0, leaves[0].clone())
+        } else {
+            let d_max = m.next_power_of_two().trailing_zeros() as u8;
+            let (deep_count, shallow_depth, shallow_count) = if m.is_power_of_two() {
+                (m, d_max, 0usize)
+            } else {
+                let d_min = d_max - 1;
+                let deep = 2 * (m - (1 << d_min));
+                let shallow = (1 << d_max) - m;
+                (deep, d_min, shallow)
+            };
 
-        // Add leaves at appropriate depths for 4 leaves (balanced tree)
-        // Depth 2 for all 4 leaves in a balanced binary tree
-        for script in &leaves {
-            builder = builder.add_leaf(2, script.clone()).map_err(|e| {
-                DepositsError::InvalidState(format!("Failed to add Tapscript leaf: {:?}", e))
-            })?;
+            let mut bldr = TaprootBuilder::new();
+            for s in &leaves[..deep_count] {
+                bldr = bldr.add_leaf(d_max, s.clone()).map_err(|e| {
+                    DepositsError::InvalidState(format!("Failed to add deep leaf: {:?}", e))
+                })?;
+            }
+            for s in &leaves[deep_count..deep_count + shallow_count] {
+                bldr = bldr.add_leaf(shallow_depth, s.clone()).map_err(|e| {
+                    DepositsError::InvalidState(format!("Failed to add shallow leaf: {:?}", e))
+                })?;
+            }
+            Ok(bldr)
         }
+        .map_err(|e| DepositsError::InvalidState(format!("Failed to add leaf: {:?}", e)))?;
 
         let spend_info = builder.finalize(&secp, nums_point).map_err(|e| {
             DepositsError::InvalidState(format!("Failed to finalize Taproot tree: {:?}", e))
@@ -1129,6 +1231,7 @@ impl LotteryScriptBuilder {
             spend_info,
             participants: self.participants.clone(),
             lottery_script,
+            partial_reveal_scripts,
             recovery_voters: self.recovery_voters.clone(),
             recovery_threshold: self.recovery_threshold,
             network: self.network,
@@ -1147,6 +1250,10 @@ pub struct LotteryOutput {
     pub participants: Vec<LotteryParticipant>,
     /// The lottery claim script
     pub lottery_script: ScriptBuf,
+    /// Partial-reveal claim scripts, indexed by the missing disputant.
+    /// Empty for `N < PARTIAL_REVEAL_MIN_N`. `partial_reveal_scripts[j]`
+    /// is the leaf used when disputant `j` failed to reveal.
+    pub partial_reveal_scripts: Vec<ScriptBuf>,
     /// Recovery voters (quorum minus disputed operator)
     pub recovery_voters: Vec<XOnlyPublicKey>,
     /// Recovery threshold
@@ -1728,6 +1835,266 @@ mod tests {
             (1050..=1400).contains(&script.len()),
             "N=15 script length {} should fall within expected envelope",
             script.len()
+        );
+    }
+
+    // ========================================================================
+    // PARTIAL-REVEAL TESTS (Phase 4b)
+    // ========================================================================
+
+    fn make_lottery_builder(n: usize) -> LotteryScriptBuilder {
+        let participants: Vec<LotteryParticipant> = (1..=n as u8)
+            .map(|i| {
+                LotteryParticipant::new(
+                    generate_x_only_pubkey(i),
+                    test_commitment_hash(i),
+                    "bcrt1p...".to_string(),
+                )
+            })
+            .collect();
+        let recovery_voters = vec![
+            generate_x_only_pubkey(50),
+            generate_x_only_pubkey(51),
+            generate_x_only_pubkey(52),
+            generate_x_only_pubkey(53),
+        ];
+        LotteryScriptBuilder::new(participants, recovery_voters, 3, Network::Regtest)
+    }
+
+    #[test]
+    fn test_partial_reveal_leaves_skipped_below_threshold() {
+        // N=10 is below PARTIAL_REVEAL_MIN_N. The output should still
+        // build cleanly with the legacy 4-leaf shape.
+        let builder = make_lottery_builder(10);
+        let leaves = builder
+            .build_partial_reveal_leaves()
+            .expect("partial-reveal builder should not error at N<11");
+        assert!(
+            leaves.is_empty(),
+            "expected no partial-reveal leaves at N=10, got {}",
+            leaves.len()
+        );
+
+        let output = builder.build().expect("N=10 lottery output should build");
+        assert!(
+            output.partial_reveal_scripts.is_empty(),
+            "LotteryOutput should expose empty partial_reveal_scripts at N=10"
+        );
+    }
+
+    #[test]
+    fn test_partial_reveal_leaf_count_matches_n() {
+        // At N=11, expect 11 partial-reveal leaves.
+        // At N=15, expect 15.
+        for n in PARTIAL_REVEAL_MIN_N..=15 {
+            let builder = make_lottery_builder(n);
+            let leaves = builder
+                .build_partial_reveal_leaves()
+                .unwrap_or_else(|e| panic!("partial-reveal failed at N={}: {:?}", n, e));
+            assert_eq!(leaves.len(), n, "expected {} partial leaves at N={}", n, n);
+
+            let output = builder
+                .build()
+                .unwrap_or_else(|e| panic!("output build failed at N={}: {:?}", n, e));
+            assert_eq!(output.partial_reveal_scripts.len(), n);
+        }
+    }
+
+    #[test]
+    fn test_partial_reveal_excludes_missing_disputant() {
+        // Each partial leaf at index j must correspond to a sub-lottery
+        // that excludes participant j. Verify by reconstructing the
+        // expected sub-script for each j and asserting byte equality.
+        let n = 11;
+        let builder = make_lottery_builder(n);
+        let leaves = builder.build_partial_reveal_leaves().unwrap();
+
+        for missing_idx in 0..n {
+            let revealers: Vec<LotteryParticipant> = builder
+                .participants
+                .iter()
+                .enumerate()
+                .filter_map(|(j, p)| (j != missing_idx).then(|| p.clone()))
+                .collect();
+            let sub_builder = LotteryScriptBuilder::new(
+                revealers,
+                builder.recovery_voters.clone(),
+                builder.recovery_threshold,
+                builder.network,
+            );
+            let inner = sub_builder.build_lottery_script().unwrap();
+
+            let prefix = Builder::new()
+                .push_int(PARTIAL_REVEAL_CSV_BLOCKS as i64)
+                .push_opcode(OP_CSV)
+                .push_opcode(OP_DROP)
+                .into_script();
+            let mut expected = prefix.into_bytes();
+            expected.extend_from_slice(inner.as_bytes());
+
+            assert_eq!(
+                leaves[missing_idx].as_bytes(),
+                &expected[..],
+                "partial leaf {} should be CSV-72-prefixed sub-lottery for the 10 remaining disputants",
+                missing_idx
+            );
+        }
+    }
+
+    #[test]
+    fn test_partial_reveal_csv_prefix_present() {
+        // Every partial-reveal leaf must start with `<72> OP_CSV OP_DROP`
+        // — without the CSV the leaf would be spendable immediately,
+        // racing the primary lottery claim.
+        let builder = make_lottery_builder(13);
+        let leaves = builder.build_partial_reveal_leaves().unwrap();
+
+        for (j, leaf) in leaves.iter().enumerate() {
+            let bytes = leaf.as_bytes();
+            // OP_PUSHNUM_8 + OP_PUSHBYTES_1 0x48 (72) — actually 72 fits
+            // in the 1-byte form via OP_PUSHBYTES_1. The Builder uses
+            // push_int which picks the most compact form. 72 is encoded
+            // as `0x01 0x48` (length 1 followed by byte 0x48).
+            assert_eq!(
+                bytes[0], 0x01,
+                "leaf {} should start with OP_PUSHBYTES_1; got 0x{:02x}",
+                j, bytes[0]
+            );
+            assert_eq!(
+                bytes[1], 72,
+                "leaf {} should push 72 (CSV blocks); got {}",
+                j, bytes[1]
+            );
+            assert_eq!(
+                bytes[2], OP_CSV.to_u8(),
+                "leaf {} byte 2 should be OP_CSV (0x{:02x}); got 0x{:02x}",
+                j,
+                OP_CSV.to_u8(),
+                bytes[2]
+            );
+            assert_eq!(
+                bytes[3],
+                bitcoin::opcodes::all::OP_DROP.to_u8(),
+                "leaf {} byte 3 should be OP_DROP",
+                j
+            );
+        }
+    }
+
+    #[test]
+    fn test_partial_reveal_uses_combined_table_at_n11() {
+        // At N=11, partial leaves are 10-disputant sub-lotteries — that
+        // falls in Regime B (CombinedTable). Each leaf should contain
+        // the CombinedTable's 91 ENDIF dispatch arms (10²-10+1 = 91).
+        let builder = make_lottery_builder(11);
+        let leaves = builder.build_partial_reveal_leaves().unwrap();
+
+        for (j, leaf) in leaves.iter().enumerate() {
+            let endif_count = count_opcode(leaf, bitcoin::opcodes::all::OP_ENDIF);
+            assert_eq!(
+                endif_count, 91,
+                "partial leaf {} at N=11 should be CombinedTable (91 arms); got {} ENDIFs",
+                j, endif_count
+            );
+        }
+    }
+
+    #[test]
+    fn test_partial_reveal_uses_linear_at_n15() {
+        // At N=15, partial leaves are 14-disputant sub-lotteries — that
+        // falls in Regime C (Linear-after-mod). Each leaf should have
+        // 2*14 = 28 ENDIFs (mod + dispatch cascades, both length N-1=14).
+        let builder = make_lottery_builder(15);
+        let leaves = builder.build_partial_reveal_leaves().unwrap();
+
+        for (j, leaf) in leaves.iter().enumerate() {
+            let endif_count = count_opcode(leaf, bitcoin::opcodes::all::OP_ENDIF);
+            assert_eq!(
+                endif_count, 28,
+                "partial leaf {} at N=15 should be Linear-after-mod (28 ENDIFs); got {}",
+                j, endif_count
+            );
+        }
+    }
+
+    #[test]
+    fn test_partial_reveal_regime_transition_n11_to_n12() {
+        // The N → N-1 regime transition for partial leaves is at
+        // N=11 (sub-N=10, CombinedTable) → N=12 (sub-N=11, Linear).
+        // Verify by ENDIF count: 91 at N=11, 22 at N=12.
+        let endifs_11 = make_lottery_builder(11)
+            .build_partial_reveal_leaves()
+            .unwrap()
+            .iter()
+            .map(|s| count_opcode(s, bitcoin::opcodes::all::OP_ENDIF))
+            .next()
+            .unwrap();
+        let endifs_12 = make_lottery_builder(12)
+            .build_partial_reveal_leaves()
+            .unwrap()
+            .iter()
+            .map(|s| count_opcode(s, bitcoin::opcodes::all::OP_ENDIF))
+            .next()
+            .unwrap();
+        assert_eq!(endifs_11, 91, "N=11 partial leaves are CombinedTable");
+        assert_eq!(endifs_12, 22, "N=12 partial leaves are Linear-after-mod");
+    }
+
+    #[test]
+    fn test_lottery_output_taproot_depth_at_n15() {
+        // At N=15: 1 lottery + 15 partial + 3 recovery = 19 leaves.
+        // Merkle depth ⌈log₂ 19⌉ = 5. Verify the spend_info exposes a
+        // valid control block for at least the primary lottery leaf and
+        // that its merkle proof is the expected length.
+        let output = make_lottery_builder(15)
+            .build()
+            .expect("N=15 lottery output should build");
+
+        assert_eq!(output.partial_reveal_scripts.len(), 15);
+
+        let cb = output
+            .spend_info
+            .control_block(&(
+                output.lottery_script.clone(),
+                bitcoin::taproot::LeafVersion::TapScript,
+            ))
+            .expect("primary lottery leaf must have a control block");
+
+        // Each merkle-proof step is 32 bytes. Depth 5 → 5 hashes →
+        // 32*5 = 160 bytes of proof. Plus 33 bytes for control-block
+        // header (1 leaf-version+parity byte + 32-byte internal key) =
+        // 193 bytes total. Some leaves may be at depth 4 → 161 bytes;
+        // bound the assertion accordingly.
+        let cb_bytes = cb.serialize();
+        assert!(
+            cb_bytes.len() == 33 + 32 * 4 || cb_bytes.len() == 33 + 32 * 5,
+            "control block size {} should imply depth 4 or 5",
+            cb_bytes.len()
+        );
+    }
+
+    #[test]
+    fn test_lottery_output_legacy_shape_at_n5() {
+        // For N=5 (no partial-reveal) we still expect 4 leaves total:
+        // 1 lottery + 0 partial + 3 recovery. Tree should still finalize.
+        let output = make_lottery_builder(5)
+            .build()
+            .expect("N=5 lottery output should build");
+        assert!(output.partial_reveal_scripts.is_empty());
+
+        let cb = output
+            .spend_info
+            .control_block(&(
+                output.lottery_script.clone(),
+                bitcoin::taproot::LeafVersion::TapScript,
+            ))
+            .expect("primary lottery leaf must have a control block");
+
+        // 4 leaves → depth 2 → 33 + 32*2 = 97 bytes.
+        assert_eq!(
+            cb.serialize().len(),
+            33 + 32 * 2,
+            "N=5 control block should be depth-2"
         );
     }
 
