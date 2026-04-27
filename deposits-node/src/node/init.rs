@@ -88,11 +88,20 @@ impl Node {
                 let (tx, rx) = tokio::sync::mpsc::channel::<
                     super::ledger_actor::LedgerEvent,
                 >(64);
+                // Note: extension is NOT `.jsonl` — the handler's
+                // ledger-loader globs `*.jsonl` and would treat the
+                // actor's shadow file as another ledger to load
+                // ("missing role" / "missing state" warnings).
+                let persistence_path = config
+                    .data_dir
+                    .join("wallet/ledgers")
+                    .join(format!("{}.actor.log", lid));
                 let actor = super::ledger_actor::LedgerActor {
                     inbox: rx,
                     outbox: actor_outbox_tx.clone(),
                     ledger: ledger_clone,
                     ledger_id: lid.clone(),
+                    persistence_path,
                 };
                 tokio::spawn(actor.run());
                 ledger_actors.insert(

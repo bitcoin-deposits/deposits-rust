@@ -157,6 +157,14 @@ pub struct LedgerActor {
     pub ledger: deposits_core::ledger::Ledger,
     /// Stable identifier for log lines and outbox tagging.
     pub ledger_id: String,
+    /// Path to the actor's parallel JSONL (Step 5). Each accepted
+    /// `Inbound` update is appended as a `{"type":"Update", ...}` row,
+    /// matching the format `handler.rs` already uses for the
+    /// authoritative file. The actor never writes a State row — its
+    /// JSONL is "updates seen since this process started", so a diff
+    /// against the handler's authoritative file validates that the
+    /// actor's apply path agrees on what's in the chain.
+    pub persistence_path: std::path::PathBuf,
 }
 
 impl LedgerActor {
@@ -187,6 +195,27 @@ impl LedgerActor {
     fn apply_inbound(&mut self, update: deposits_core::types::SignedLedgerUpdate) {
         use deposits_core::messages::LedgerOperation;
         use deposits_core::tlv::TlvDecode;
+
+        // Operator-key filter: only accept updates whose operator_id
+        // matches our current `parent_pubkey`. Fork-branch updates from
+        // dispute initiators carry the disputer's pubkey as the operator
+        // and would extend a different chain. The handler's
+        // `handle_ledger_update` does the same gate (see
+        // `is_from_operator` check in `inbound.rs`); without this the
+        // actor's shadow drifts as soon as a dispute creates competing
+        // seq-N+1 updates from multiple disputers' forks.
+        // After DisputeAcquire, parent_pubkey is updated to the new
+        // custodian — the filter naturally adapts.
+        if update.operator_id != self.ledger.state.parent_pubkey {
+            tracing::trace!(
+                "LedgerActor[{}…] dropping seq {} from non-operator {} (parent={})",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                update.sequence_number,
+                hex::encode(&update.operator_id.serialize()[..8]),
+                hex::encode(&self.ledger.state.parent_pubkey.serialize()[..8])
+            );
+            return;
+        }
 
         // Dedup on (seq, content_hash). Same content at same seq → no-op.
         // Different content at same seq → equivocation evidence; log and
@@ -261,7 +290,60 @@ impl LedgerActor {
         }
         self.ledger.state.sequence = update.sequence_number;
         self.ledger.state.chain_tip_hash = update.chain_hash();
-        self.ledger.history.push(update);
+        self.ledger.history.push(update.clone());
+
+        // Append to parallel JSONL (Step 5). Matches handler's
+        // `LedgerLogRow::Update` wire shape — flatten the update with
+        // a `"type":"Update"` key. Failure to persist is logged but
+        // doesn't unwind the in-memory apply: the shadow file is for
+        // sanity-checking, and a missed line is recoverable from the
+        // authoritative handler file in step 6.
+        if let Err(e) = self.append_update_row(&update) {
+            tracing::warn!(
+                "LedgerActor[{}…] persist seq {} failed: {}",
+                &self.ledger_id[..16.min(self.ledger_id.len())],
+                update.sequence_number,
+                e
+            );
+        }
+    }
+
+    /// Append a single `Update` JSONL row to the actor's parallel file.
+    /// Matches the daemon's `append_updates_to_disk` convention of
+    /// "newline-then-row" so reading back yields a valid sequence even
+    /// after partial writes. The file is created on first append.
+    fn append_update_row(
+        &self,
+        update: &deposits_core::types::SignedLedgerUpdate,
+    ) -> Result<(), std::io::Error> {
+        use std::io::Write;
+
+        if let Some(parent) = self.persistence_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut value = match serde_json::to_value(update) {
+            Ok(v) => v,
+            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+        };
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "type".to_string(),
+                serde_json::Value::String("Update".into()),
+            );
+        }
+        let line = match serde_json::to_string(&value) {
+            Ok(s) => s,
+            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+        };
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&self.persistence_path)?;
+        // Leading newline so a previously-truncated file (e.g. crash
+        // mid-row) doesn't smear into the new row.
+        write!(file, "\n{}", line)?;
+        Ok(())
     }
 
     /// Run loop. Step 4 implements `Inbound` to keep an in-memory
