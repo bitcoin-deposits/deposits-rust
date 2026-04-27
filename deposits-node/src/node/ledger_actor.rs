@@ -207,13 +207,26 @@ impl LedgerActor {
         // After DisputeAcquire, parent_pubkey is updated to the new
         // custodian — the filter naturally adapts.
         if update.operator_id != self.ledger.state.parent_pubkey {
-            tracing::trace!(
-                "LedgerActor[{}…] dropping seq {} from non-operator {} (parent={})",
-                &self.ledger_id[..16.min(self.ledger_id.len())],
-                update.sequence_number,
-                hex::encode(&update.operator_id.serialize()[..8]),
-                hex::encode(&self.ledger.state.parent_pubkey.serialize()[..8])
-            );
+            // Fork-branch update at or near our chain tip — info-level
+            // log so the migration's step 8 work (separate fork-file
+            // persistence) has visibility into who's forking when.
+            // Trace-level for clearly-stale updates (seq <= current).
+            if update.sequence_number > self.ledger.state.sequence {
+                tracing::info!(
+                    "LedgerActor[{}…] fork-branch detected: seq {} from {} (parent={})",
+                    &self.ledger_id[..16.min(self.ledger_id.len())],
+                    update.sequence_number,
+                    hex::encode(&update.operator_id.serialize()[..8]),
+                    hex::encode(&self.ledger.state.parent_pubkey.serialize()[..8])
+                );
+            } else {
+                tracing::trace!(
+                    "LedgerActor[{}…] stale non-operator update seq {} from {}",
+                    &self.ledger_id[..16.min(self.ledger_id.len())],
+                    update.sequence_number,
+                    hex::encode(&update.operator_id.serialize()[..8])
+                );
+            }
             return;
         }
 
