@@ -13,24 +13,50 @@ RUN apt-get update && apt-get install -y \
 # Create app directory
 WORKDIR /app
 
-COPY deposits-protocol ./deposits-protocol
-COPY deposits-core ./deposits-core
-COPY deposits-node ./deposits-node
 COPY Cargo.toml ./Cargo.toml
 COPY Cargo.lock ./Cargo.lock
 
-# Stub out deposits-tools so workspace resolves (not built)
-COPY deposits-tools/Cargo.toml deposits-tools/Cargo.toml
-RUN mkdir -p deposits-tools/src && echo "" > deposits-tools/src/lib.rs && \
-    mkdir -p deposits-tools/src/bin && \
-    for bin in decode-updates treasury-address \
-               treasury-send standalone_reserves_demo discover replay-ledger; do \
-        echo "fn main() {}" > deposits-tools/src/bin/$bin.rs; \
-    done
+# Crates we actually build (and their in-tree deps).
+COPY deposits-protocol ./deposits-protocol
+COPY deposits-core ./deposits-core
+COPY deposits-node ./deposits-node
+COPY deposits-ringsig ./deposits-ringsig
+COPY deposits-wallet ./deposits-wallet
 
-# Build deposits-node and deposits-wallet with dangerous-testing for test environments
-# WARNING: Do not use this image in production
-RUN cargo build --release -p deposits-node --bin deposits-node --bin deposits-wallet --features dangerous-testing
+# Workspace members we don't build still need their Cargo.toml + a
+# stub source so cargo can resolve the workspace. Each stub
+# replicates the [[bin]] entries from the real Cargo.toml so the
+# workspace's `bin` namespace stays stable.
+COPY deposits-tools/Cargo.toml deposits-tools/Cargo.toml
+RUN mkdir -p deposits-tools/src deposits-tools/src/bin && \
+    echo "" > deposits-tools/src/lib.rs && \
+    for bin in decode-updates treasury-address treasury-send \
+               discover replay-ledger; do \
+        echo "fn main() {}" > deposits-tools/src/bin/$bin.rs; \
+    done && \
+    echo "fn main() {}" > deposits-tools/src/bin/standalone_reserves_demo.rs
+
+COPY deposits-test/Cargo.toml deposits-test/Cargo.toml
+RUN mkdir -p deposits-test/src && echo "" > deposits-test/src/lib.rs
+
+COPY deposits-attestation/Cargo.toml deposits-attestation/Cargo.toml
+RUN mkdir -p deposits-attestation/src deposits-attestation/src/bin && \
+    echo "" > deposits-attestation/src/lib.rs && \
+    echo "fn main() {}" > deposits-attestation/src/bin/deposits-attest.rs
+
+COPY deposits-lnurl/Cargo.toml deposits-lnurl/Cargo.toml
+RUN mkdir -p deposits-lnurl/src deposits-lnurl/src/bin && \
+    echo "" > deposits-lnurl/src/lib.rs && \
+    echo "fn main() {}" > deposits-lnurl/src/bin/deposits-lnurl.rs
+
+# Build deposits-node and deposits-wallet. The two binaries live in
+# different packages, so cargo needs `-p` for each. The
+# `dangerous-testing` feature is a deposits-node-only feature flag
+# enabling testing-only subcommands (forge-stale-cosig, etc.). DO
+# NOT use this image in production.
+RUN cargo build --release \
+    -p deposits-node --bin deposits-node --features deposits-node/dangerous-testing \
+    -p deposits-wallet --bin deposits-wallet
 
 # Runtime image
 FROM debian:bookworm-slim
