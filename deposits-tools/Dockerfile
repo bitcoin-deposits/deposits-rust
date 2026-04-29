@@ -72,6 +72,15 @@ RUN apt-get update && apt-get install -y \
 COPY --from=builder /app/target/release/deposits-node /usr/local/bin/
 COPY --from=builder /app/target/release/deposits-wallet /usr/local/bin/
 
+# Env-resolving entrypoint shared with deposits-node/Dockerfile.
+# Reads NODE_SEED_FILE, ADMIN_NPUB, NETWORK, ELECTRUM_URL, LEDGER_RELAY,
+# EPHEMERAL_RELAYS, NODE_NAME, RELAY_PORT, METRICS_PORT, etc. from
+# the environment and translates them to deposits-node CLI flags.
+# The strfry-availability check inside the entrypoint gracefully
+# no-ops when strfry isn't bundled in the image.
+COPY deposits-tools/docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 # Create data directory
 RUN mkdir -p /data
 
@@ -82,5 +91,8 @@ ENV DATA_DIR=/data
 # Expose no ports by default (nostr uses outbound connections)
 # API port could be added later
 
-ENTRYPOINT ["/usr/local/bin/deposits-node"]
-CMD ["run", "--data-dir", "/data"]
+# `node-cli.sh` invokes commands via `docker exec` (bypassing
+# ENTRYPOINT), so daemon-mode entrypoint here is compatible with both
+# the standalone-daemon use case (compose-driven) and the
+# CLI-via-exec use case.
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]
