@@ -35,7 +35,6 @@ IMAGES=(
     "deposits-test/node:deposits-node/Dockerfile"
     "deposits-test/attestation:deposits-attestation/Dockerfile"
     "deposits-test/lnurl:deposits-lnurl/Dockerfile"
-    "deposits-test/tools:deposits-tools/Dockerfile"
 )
 
 if ! command -v docker >/dev/null 2>&1; then

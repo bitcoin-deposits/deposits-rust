@@ -52,9 +52,19 @@ ENV OPENSSL_STATIC=1 \
     OPENSSL_LIB_DIR=/usr/lib \
     OPENSSL_INCLUDE_DIR=/usr/include
 
+# Build args:
+#   FEATURES — extra cargo features. Pass `dangerous-testing` to enable
+#              the testing-only `forge-stale-cosig`, `fork-update`, etc.
+#              commands. WARNING: never enable this for a mainnet image.
+#                docker build --build-arg FEATURES=dangerous-testing ...
+#
+# The `--features` flag is wired against `deposits-node/...`; passing
+# an empty string is a valid no-op so the default build is feature-free.
+ARG FEATURES=""
 RUN cargo build --release \
     -p deposits-node --bin deposits-node \
-    -p deposits-wallet --bin deposits-wallet
+    -p deposits-wallet --bin deposits-wallet \
+    $(test -n "$FEATURES" && echo "--features deposits-node/$FEATURES")
 
 # Runtime — use the pluja/strfry image as the base so the bundled strfry
 # binary runs natively (it's musl-linked and expects Alpine libs).

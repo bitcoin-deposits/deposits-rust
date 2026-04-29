@@ -72,12 +72,19 @@ jobs:
           cache-from: type=gha,scope=lnurl
           cache-to: type=gha,mode=max,scope=lnurl
 
-      - name: Build deposits-tools (with dangerous-testing)
+      - name: Build deposits-node with dangerous-testing
+        # Same Dockerfile as the production build above, just with the
+        # FEATURES build arg flipped on. Verifies that the testing-
+        # only commands (`forge-stale-cosig`, `fork-update`, etc.)
+        # still compile cleanly. The image isn't consumed elsewhere —
+        # tests build their own binary via cargo.
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: deposits-tools/Dockerfile
+          file: deposits-node/Dockerfile
           push: false
-          tags: deposits-test/tools:ci
-          cache-from: type=gha,scope=tools
-          cache-to: type=gha,mode=max,scope=tools
+          tags: deposits-test/node-dangerous:ci
+          build-args: |
+            FEATURES=dangerous-testing
+          cache-from: type=gha,scope=node-dangerous
+          cache-to: type=gha,mode=max,scope=node-dangerous
