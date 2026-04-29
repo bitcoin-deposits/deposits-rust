@@ -1086,7 +1086,7 @@ impl Node {
             loop_iteration += 1;
 
             // Watchdog: log every 100th iteration so we can see if the loop is running
-            if loop_iteration.is_multiple_of(100) {
+            if loop_iteration % 100 == 0 {
                 tracing::debug!("run loop iteration {}", loop_iteration);
             }
 
