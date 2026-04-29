@@ -184,26 +184,37 @@ impl Node {
         let rotate_txid = self.wallet.broadcast(&rotate_tx)?;
         tracing::info!("Rotation TX broadcast: {}", rotate_txid);
 
-        // Compute total attested collateral from the ledger state
-        let total_collateral = {
+        // Recovery-path rotation: preserve the prior collateral
+        // amount where it exists, defaulting to a 1:1 split on
+        // first activation. See `rotate_reserves_to_quorum` for
+        // the canonical operator-driven path; this one runs from
+        // dispute.rs after winning custody.
+        let total_msats = output_amount.saturating_mul(1000);
+        let collateral_msats = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers
+            let prior = ledgers
                 .get(ledger_id)
                 .map(|arc| arc.read().unwrap().state.total_collateral())
-                .unwrap_or(0)
+                .unwrap_or(0);
+            if prior > 0 {
+                prior.min(total_msats)
+            } else {
+                total_msats / 2
+            }
         };
+        let reserves_msats = total_msats.saturating_sub(collateral_msats);
 
-        // Publish QuorumBegin operation (convert sats to msats at boundary)
+        // Publish QuorumBegin operation. Total UTXO = reserves + collateral.
         let operation = LedgerOperation::QuorumBegin {
             reserves_id: taproot_output.address.to_string(),
             spending_txid: *outpoint.txid.as_ref(),
             new_outpoint_txid: *rotate_txid.as_ref(),
             new_outpoint_vout: 0,
-            amount: output_amount.saturating_mul(1000), // sats to msats
+            amount: reserves_msats,
             quorum_expiry,
             ledger_hash,
             quorum_members: quorum_members.clone(),
-            collateral_amount: total_collateral,
+            collateral_amount: collateral_msats,
         };
 
         let message_bytes = operation.tlv_encode();
@@ -683,9 +694,24 @@ impl Node {
     ///
     /// # Returns
     /// The new Taproot reserves address and txid, or error if rotation fails
+    /// Rotate the reserves UTXO into a quorum-controlled Taproot
+    /// output and commit a `QuorumBegin` operation that activates
+    /// the quorum.
+    ///
+    /// `collateral_bps` is the collateral fraction of the new UTXO,
+    /// in basis points (10000 = 100%):
+    ///   collateral_amount = total_msats * bps / 10000
+    ///   reserves_amount   = total_msats - collateral_amount
+    ///
+    /// Defaults to 5000 (1:1 reserves/collateral) when `None` —
+    /// half the UTXO is the operator's bond, half is deposit
+    /// capacity. The whitepaper's recommended ratio is 6000 bps
+    /// (40/60); operators concerned about coalition-attack
+    /// resistance should pass the higher value explicitly.
     pub async fn rotate_reserves_to_quorum(
         &self,
         ledger_id: &str,
+        collateral_bps: Option<u16>,
     ) -> Result<RotateReservesResult, Error> {
         // --- Phase 1: snapshot membership + ledger state ---
         let ledger_arc = {
@@ -777,16 +803,39 @@ impl Node {
         // which expects internal order, and the other QuorumBegin writer in
         // this file (`*rotate_txid.as_ref()`) uses the same convention.
         let txid_bytes: [u8; 32] = txid.to_byte_array();
+
+        // Compute the reserves/collateral split. Default 5000 bps
+        // (1:1) when not overridden — see this function's doc
+        // comment for rationale.
+        let bps = collateral_bps.unwrap_or(5000);
+        let total_msats = result.amount.saturating_mul(1000);
+        let collateral_msats = (total_msats as u128 * bps as u128 / 10_000) as u64;
+        let reserves_msats = total_msats.saturating_sub(collateral_msats);
+        tracing::info!(
+            "QuorumBegin split: total={} msats, reserves={} msats, collateral={} msats ({}%)",
+            total_msats,
+            reserves_msats,
+            collateral_msats,
+            if total_msats > 0 {
+                (collateral_msats * 100) / total_msats
+            } else {
+                0
+            },
+        );
+
         let operation = LedgerOperation::QuorumBegin {
             reserves_id: result.address.to_string(),
             spending_txid: txid_bytes,
             new_outpoint_txid: txid_bytes,
             new_outpoint_vout: result.outpoint.vout,
-            amount: result.amount.saturating_mul(1000),
+            // QuorumBegin's `amount` is the reserves portion only —
+            // see the state-machine apply in ledger_state.rs.
+            // Total UTXO = amount + collateral_amount.
+            amount: reserves_msats,
             quorum_expiry: result.quorum_expiry,
             ledger_hash,
             quorum_members: quorum_members.clone(),
-            collateral_amount: total_collateral,
+            collateral_amount: collateral_msats,
         };
 
         // commit_operation runs the full stage → cosign → operator-sign →

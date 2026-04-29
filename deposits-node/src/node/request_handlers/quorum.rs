@@ -634,7 +634,21 @@ impl Node {
             tracing::warn!("Wallet sync failed before quorum_begin: {}", e);
         }
 
-        match self.rotate_reserves_to_quorum(&ledger_id).await {
+        // Optional collateral-split override. When set, the rotation
+        // computes `collateral_amount = total_utxo * bps / 10000` and
+        // `reserves_amount = total_utxo - collateral_amount`.
+        // When unset, the existing `state.collateral_amount` is
+        // preserved (zero on first QuorumBegin, last-set on rotations).
+        let collateral_bps = request
+            .params
+            .get("collateral_bps")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u16);
+
+        match self
+            .rotate_reserves_to_quorum(&ledger_id, collateral_bps)
+            .await
+        {
             Ok(result) => {
                 // commit_operation inside rotate_reserves_to_quorum already
                 // broadcasts the cosigned update via Nostr, so no separate
