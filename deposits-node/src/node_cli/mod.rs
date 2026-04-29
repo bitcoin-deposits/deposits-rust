@@ -130,18 +130,12 @@ LEDGER SUBCOMMANDS:
     ledger advertise [reserves_id] [options]
                     Publish a Kind:39100 advertisement for a ledger.
                     Without `reserves_id`, advertises every operator-owned ledger.
-                    Options:
+                    Accepts the full canonical fee/limit flag set
+                    (same names as `ledger open`, see above).
+                    Advertise-only options:
                       --name | --operator-name <S>     Operator display name
                       --description <S>                Free-form service description
                       --advertise-relay <URL>          Relay to publish to (override config)
-                      --annual-fee-bps <N>             Proportional annual custody fee in bps
-                      --annual-fee-fixed-msats <N>     Fixed annual periodic fee in msats
-                      --deposit-fee-bps <N>            One-time fee on incoming deposits
-                      --withdrawal-fee-bps <N>         Fee on on-chain withdrawals
-                      --invoice-fee-bps <N>            Fee on Lightning invoice payments
-                      --fee-period-blocks <N>          Fee collection period in blocks
-                      --max-deposit <N>                Max single deposit (msats)
-                      --min-deposit <N>                Min single deposit (msats)
     ledger republish [ledger_id]
                     Re-broadcast every update on a ledger to relays. Useful for
                     relay catch-up after replacing a relay, or for triggering a
@@ -243,10 +237,13 @@ NOSTR SUBCOMMANDS:
     nostr validate <operator:reserves_id>
                     Fetch and validate a ledger's hash chain directly from Nostr
     nostr request <ledger_id> <action> [params...]
-                    Send a request to a ledger. Actions:
-                      deposit_open <pubkey> [fee_fixed_msats] [fee_bps] [fee_frequency_blocks]
-                      make_offer <pubkey> <max_sats> <min_sats> <blocks_valid>
-                      deposit_withdraw <…>
+                    Send a request to a ledger. Fee flags use the same
+                    canonical names as `ledger open` / `ledger advertise`:
+                    `--annual-fee-bps`, `--annual-fee-fixed-msats`,
+                    `--fee-period-blocks`. Actions:
+                      deposit_open <pubkey> [fee flags...]
+                      make_offer <pubkey> <max_sats> <min_sats> <blocks_valid> [fee flags...]
+                      deposit_withdraw <deposit_secret> <destination_address> <amount_sats>
     nostr watch <ledger_id>
                     Watch for requests and disputes for a ledger
     nostr dispute publish <ledger_id> <reason> <details>
@@ -672,14 +669,26 @@ pub async fn send_daemon_request(
     }
 }
 
-/// Fee schedule arguments parsed from CLI flags
+/// Fee schedule arguments parsed from CLI flags. The same field set
+/// is accepted by `ledger open`, `ledger advertise`, and (in flag
+/// form) by `nostr request deposit_open`.
 #[derive(Default)]
 pub struct FeeScheduleArgs {
+    // Periodic custody fees
     pub annual_fee_bps: Option<u32>,
     pub annualized_fixed_msats: Option<u64>,
     pub fee_period_blocks: Option<u32>,
+    // Per-transfer fees
     pub transfer_fee_fixed: Option<u64>,
     pub transfer_fee_rate_bps: Option<u16>,
+    // Advert-only one-time fees
+    pub deposit_fee_bps: Option<u32>,
+    pub withdrawal_fee_bps: Option<u32>,
+    pub invoice_fee_bps: Option<u32>,
+    // Deposit-size limits
+    pub max_deposit_msats: Option<u64>,
+    pub min_deposit_msats: Option<u64>,
+    // Discovery
     pub advertise_relay: Option<String>,
 }
 
@@ -690,6 +699,59 @@ impl FeeScheduleArgs {
             || self.fee_period_blocks.is_some()
             || self.transfer_fee_fixed.is_some()
             || self.transfer_fee_rate_bps.is_some()
+            || self.deposit_fee_bps.is_some()
+            || self.withdrawal_fee_bps.is_some()
+            || self.invoice_fee_bps.is_some()
+            || self.max_deposit_msats.is_some()
+            || self.min_deposit_msats.is_some()
+    }
+
+    /// Parse one CLI flag into `self`. Returns `Ok(true)` if the
+    /// flag was consumed (and `i` advanced by 1 — caller adds the
+    /// outer i+=1 itself), `Ok(false)` if the flag isn't ours, or
+    /// `Err(msg)` on parse failure.
+    ///
+    /// Centralising the parsing means every CLI surface that
+    /// accepts a fee schedule (`ledger open`, `ledger advertise`,
+    /// `nostr request deposit_open`) sees the same flag set with the
+    /// same names — no surface-specific aliases.
+    pub fn try_consume(
+        &mut self,
+        args: &[String],
+        i: &mut usize,
+    ) -> Result<bool, String> {
+        if *i + 1 >= args.len() {
+            return Ok(false);
+        }
+        macro_rules! parse {
+            ($field:ident) => {{
+                self.$field = Some(
+                    args[*i + 1]
+                        .parse()
+                        .map_err(|_| format!("Invalid {}: {}", args[*i], args[*i + 1]))?,
+                );
+                *i += 1;
+                Ok(true)
+            }};
+        }
+        match args[*i].as_str() {
+            "--annual-fee-bps" => parse!(annual_fee_bps),
+            "--annual-fee-fixed-msats" => parse!(annualized_fixed_msats),
+            "--fee-period-blocks" => parse!(fee_period_blocks),
+            "--transfer-fee-fixed-msats" => parse!(transfer_fee_fixed),
+            "--transfer-fee-rate-bps" => parse!(transfer_fee_rate_bps),
+            "--deposit-fee-bps" => parse!(deposit_fee_bps),
+            "--withdrawal-fee-bps" => parse!(withdrawal_fee_bps),
+            "--invoice-fee-bps" => parse!(invoice_fee_bps),
+            "--max-deposit-msats" => parse!(max_deposit_msats),
+            "--min-deposit-msats" => parse!(min_deposit_msats),
+            "--advertise-relay" => {
+                self.advertise_relay = Some(args[*i + 1].clone());
+                *i += 1;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 }
 
@@ -750,6 +812,21 @@ pub async fn auto_advertise_ledger(
     }
     if let Some(bps) = fee_schedule.transfer_fee_rate_bps {
         ad.transfer_fee_rate_bps = bps;
+    }
+    if let Some(bps) = fee_schedule.deposit_fee_bps {
+        ad.deposit_fee_bps = bps;
+    }
+    if let Some(bps) = fee_schedule.withdrawal_fee_bps {
+        ad.withdrawal_fee_bps = bps;
+    }
+    if let Some(bps) = fee_schedule.invoice_fee_bps {
+        ad.invoice_fee_bps = bps;
+    }
+    if let Some(msats) = fee_schedule.max_deposit_msats {
+        ad.max_deposit_msats = msats;
+    }
+    if let Some(msats) = fee_schedule.min_deposit_msats {
+        ad.min_deposit_msats = msats;
     }
 
     // Access control policy

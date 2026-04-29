@@ -208,25 +208,30 @@ impl Node {
         } else {
             2016
         };
+        // Wire keys mirror the protocol's `FeeStructure` field names
+        // exactly. Hard-broken from the previous `fee_fixed` /
+        // `fee_bps` / `fee_frequency` shape — wallets sending the old
+        // keys will be silently ignored and fall through to the
+        // advertisement's defaults.
         let frequency_blocks = request
             .params
-            .get("fee_frequency")
+            .get("frequency_blocks")
             .and_then(|v| v.as_u64())
             .map(|v| if v > 0 { v as u32 } else { 2016 })
             .unwrap_or(ad_period);
 
-        let fees = if request.params.get("fee_fixed").is_some()
-            || request.params.get("fee_bps").is_some()
+        let fees = if request.params.get("annualized_msats").is_some()
+            || request.params.get("annualized_bps").is_some()
         {
             FeeStructure {
                 annualized_msats: request
                     .params
-                    .get("fee_fixed")
+                    .get("annualized_msats")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0),
                 annualized_bps: request
                     .params
-                    .get("fee_bps")
+                    .get("annualized_bps")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u16,
                 frequency_blocks,
@@ -455,14 +460,16 @@ impl Node {
             2016
         };
 
-        // Extract fee parameters from request if provided, or use advertisement defaults
-        let fees = if request.params.get("fee_fixed").is_some()
-            || request.params.get("fee_bps").is_some()
-            || request.params.get("fee_frequency").is_some()
+        // Extract fee parameters using the canonical `FeeStructure`
+        // field names. See the deposit_open handler above for the
+        // hard-break note.
+        let fees = if request.params.get("annualized_msats").is_some()
+            || request.params.get("annualized_bps").is_some()
+            || request.params.get("frequency_blocks").is_some()
         {
             let frequency_blocks = request
                 .params
-                .get("fee_frequency")
+                .get("frequency_blocks")
                 .and_then(|v| v.as_u64())
                 .map(|v| if v > 0 { v as u32 } else { ad_period })
                 .unwrap_or(ad_period);
@@ -470,12 +477,12 @@ impl Node {
             FeeStructure {
                 annualized_msats: request
                     .params
-                    .get("fee_fixed")
+                    .get("annualized_msats")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0),
                 annualized_bps: request
                     .params
-                    .get("fee_bps")
+                    .get("annualized_bps")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u16,
                 frequency_blocks,

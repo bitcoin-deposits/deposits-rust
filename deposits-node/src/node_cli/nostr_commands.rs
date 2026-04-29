@@ -2054,12 +2054,21 @@ pub async fn nostr_export(args: &[String]) -> Result<(), Box<dyn std::error::Err
 pub async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut ledger_id: Option<String> = None;
     let mut action: Option<String> = None;
+    let mut fee_args = super::FeeScheduleArgs::default();
     let mut params: Vec<String> = Vec::new();
     let mut config_args = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
         if args[i].starts_with("--") {
+            // Fee-schedule flags are action-specific (used by
+            // `deposit_open` and `make_offer`); pull them out before
+            // they reach `parse_config`. The remaining `--` flags
+            // are config (--seed, --network, --relay, …).
+            if fee_args.try_consume(args, &mut i)? {
+                i += 1;
+                continue;
+            }
             config_args.push(args[i].clone());
             if i + 1 < args.len() && !args[i + 1].starts_with("--") {
                 config_args.push(args[i + 1].clone());
@@ -2088,78 +2097,70 @@ pub async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
     let secret_key = derive_operator_secret(&config.seed, config.network)?;
 
-    // Build params JSON based on action
+    // Fee-schedule flags were parsed in the outer loop. Build the
+    // request JSON here using the canonical `FeeStructure` field
+    // names (`annualized_msats`, `annualized_bps`, `frequency_blocks`)
+    // — hard break from the old positional `[fee_fixed] [fee_bps]
+    // [fee_frequency]` form.
+    let positionals = &params;
     let params_json = match action.as_str() {
         "deposit_open" => {
-            // params: deposit_pubkey [fee_fixed] [fee_bps] [fee_frequency]
-            if params.is_empty() {
-                return Err("deposit_open requires: <deposit_pubkey>".into());
+            if positionals.is_empty() {
+                return Err(
+                    "deposit_open requires: <deposit_pubkey> \
+                     [--annual-fee-bps N] [--annual-fee-fixed-msats N] [--fee-period-blocks N]"
+                        .into(),
+                );
             }
             let mut obj = serde_json::Map::new();
             obj.insert(
                 "deposit_pubkey".to_string(),
-                serde_json::Value::String(params[0].clone()),
+                serde_json::Value::String(positionals[0].clone()),
             );
-            if params.len() > 1 {
-                obj.insert(
-                    "fee_fixed".to_string(),
-                    serde_json::json!(params[1].parse::<u64>().unwrap_or(0)),
-                );
+            if let Some(v) = fee_args.annualized_fixed_msats {
+                obj.insert("annualized_msats".to_string(), serde_json::json!(v));
             }
-            if params.len() > 2 {
-                obj.insert(
-                    "fee_bps".to_string(),
-                    serde_json::json!(params[2].parse::<u64>().unwrap_or(0)),
-                );
+            if let Some(v) = fee_args.annual_fee_bps {
+                obj.insert("annualized_bps".to_string(), serde_json::json!(v));
             }
-            if params.len() > 3 {
-                obj.insert(
-                    "fee_frequency".to_string(),
-                    serde_json::json!(params[3].parse::<u32>().unwrap_or(144)),
-                );
+            if let Some(v) = fee_args.fee_period_blocks {
+                obj.insert("frequency_blocks".to_string(), serde_json::json!(v));
             }
             serde_json::Value::Object(obj)
         }
         "make_offer" => {
-            // params: deposit_pubkey max_sats min_sats blocks_valid [fee_bps] [fee_fixed] [fee_frequency]
-            if params.len() < 4 {
-                return Err("make_offer requires: <deposit_pubkey> <max_sats> <min_sats> <blocks_valid> [fee_bps] [fee_fixed] [fee_frequency]".into());
+            if positionals.len() < 4 {
+                return Err(
+                    "make_offer requires: <deposit_pubkey> <max_sats> <min_sats> <blocks_valid> \
+                     [--annual-fee-bps N] [--annual-fee-fixed-msats N] [--fee-period-blocks N]"
+                        .into(),
+                );
             }
             let mut obj = serde_json::Map::new();
             obj.insert(
                 "deposit_pubkey".to_string(),
-                serde_json::Value::String(params[0].clone()),
+                serde_json::Value::String(positionals[0].clone()),
             );
             obj.insert(
                 "max_sats".to_string(),
-                serde_json::json!(params[1].parse::<u64>().unwrap_or(0)),
+                serde_json::json!(positionals[1].parse::<u64>().unwrap_or(0)),
             );
             obj.insert(
                 "min_sats".to_string(),
-                serde_json::json!(params[2].parse::<u64>().unwrap_or(0)),
+                serde_json::json!(positionals[2].parse::<u64>().unwrap_or(0)),
             );
             obj.insert(
                 "blocks_valid".to_string(),
-                serde_json::json!(params[3].parse::<u32>().unwrap_or(144)),
+                serde_json::json!(positionals[3].parse::<u32>().unwrap_or(144)),
             );
-            // Optional fee params
-            if params.len() > 4 {
-                obj.insert(
-                    "fee_bps".to_string(),
-                    serde_json::json!(params[4].parse::<u64>().unwrap_or(0)),
-                );
+            if let Some(v) = fee_args.annual_fee_bps {
+                obj.insert("annualized_bps".to_string(), serde_json::json!(v));
             }
-            if params.len() > 5 {
-                obj.insert(
-                    "fee_fixed".to_string(),
-                    serde_json::json!(params[5].parse::<u64>().unwrap_or(0)),
-                );
+            if let Some(v) = fee_args.annualized_fixed_msats {
+                obj.insert("annualized_msats".to_string(), serde_json::json!(v));
             }
-            if params.len() > 6 {
-                obj.insert(
-                    "fee_frequency".to_string(),
-                    serde_json::json!(params[6].parse::<u32>().unwrap_or(2016)),
-                );
+            if let Some(v) = fee_args.fee_period_blocks {
+                obj.insert("frequency_blocks".to_string(), serde_json::json!(v));
             }
             serde_json::Value::Object(obj)
         }

@@ -38,88 +38,27 @@ pub async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::E
 
 /// Open a new ledger backed by our reserves UTXO
 async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse fee schedule flags
     let mut config_args = Vec::new();
-
-    // Fee schedule (advertised minimums)
-    let mut annual_fee_bps: Option<u32> = None;
-    let mut annualized_fixed_msats: Option<u64> = None;
-    let mut fee_period_blocks: Option<u32> = None;
-    let mut transfer_fee_fixed: Option<u64> = None;
-    let mut transfer_fee_rate_bps: Option<u16> = None;
-    let mut advertise_relay: Option<String> = None;
+    let mut fee_schedule = FeeScheduleArgs::default();
 
     let mut i = 0;
     while i < args.len() {
         if args[i].starts_with("--") {
-            match args[i].as_str() {
-                "--annual-fee-bps" if i + 1 < args.len() => {
-                    annual_fee_bps = Some(
-                        args[i + 1]
-                            .parse()
-                            .map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?,
-                    );
-                    i += 1;
-                }
-                "--annual-fee-fixed-msats" if i + 1 < args.len() => {
-                    annualized_fixed_msats = Some(
-                        args[i + 1]
-                            .parse()
-                            .map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?,
-                    );
-                    i += 1;
-                }
-                "--fee-period-blocks" | "--fee-period" if i + 1 < args.len() => {
-                    fee_period_blocks = Some(
-                        args[i + 1]
-                            .parse()
-                            .map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?,
-                    );
-                    i += 1;
-                }
-                "--transfer-fee-fixed-msats" | "--transfer-fee-fixed" if i + 1 < args.len() => {
-                    transfer_fee_fixed = Some(
-                        args[i + 1]
-                            .parse()
-                            .map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?,
-                    );
-                    i += 1;
-                }
-                "--transfer-fee-rate-bps" if i + 1 < args.len() => {
-                    transfer_fee_rate_bps = Some(
-                        args[i + 1]
-                            .parse()
-                            .map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?,
-                    );
-                    i += 1;
-                }
-                "--advertise-relay" if i + 1 < args.len() => {
-                    advertise_relay = Some(args[i + 1].clone());
-                    i += 1;
-                }
-                _ => {
-                    // Config argument - pass through
-                    config_args.push(args[i].clone());
-                    if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                        config_args.push(args[i + 1].clone());
-                        i += 1;
-                    }
-                }
+            // First try the canonical fee/limit flag set; fall through
+            // to general config args otherwise.
+            if fee_schedule.try_consume(args, &mut i)? {
+                i += 1;
+                continue;
             }
-        } else {
-            // Skip unknown positional arguments (enforcement_block was removed)
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
         }
+        // Positional arguments are ignored (enforcement_block was removed).
         i += 1;
     }
-
-    let fee_schedule = FeeScheduleArgs {
-        annual_fee_bps,
-        annualized_fixed_msats,
-        fee_period_blocks,
-        transfer_fee_fixed,
-        transfer_fee_rate_bps,
-        advertise_relay,
-    };
 
     let config = parse_config(&config_args)?;
     let seed = config.seed;
@@ -176,6 +115,21 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 bps,
                 bps as f64 / 100.0
             );
+        }
+        if let Some(bps) = fee_schedule.deposit_fee_bps {
+            println!("    Deposit fee: {} bps", bps);
+        }
+        if let Some(bps) = fee_schedule.withdrawal_fee_bps {
+            println!("    Withdrawal fee: {} bps", bps);
+        }
+        if let Some(bps) = fee_schedule.invoice_fee_bps {
+            println!("    Invoice fee: {} bps", bps);
+        }
+        if let Some(msats) = fee_schedule.max_deposit_msats {
+            println!("    Max deposit: {} msats", msats);
+        }
+        if let Some(msats) = fee_schedule.min_deposit_msats {
+            println!("    Min deposit: {} msats", msats);
         }
     }
 
@@ -883,100 +837,88 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut reserves_id: Option<String> = None;
     let mut operator_name: Option<String> = None;
     let mut description: Option<String> = None;
-    let mut annual_fee_bps: u32 = 0;
-    let mut deposit_fee_bps: u32 = 0;
-    let mut withdrawal_fee_bps: u32 = 0;
-    let mut invoice_fee_bps: u32 = 0;
-    let mut annualized_fixed_msats: u64 = 0;
-    let mut fee_period_blocks: u32 = 2016; // default ~2 weeks
-    let mut max_deposit_msats: u64 = u64::MAX;
-    let mut min_deposit_msats: u64 = 0;
-    let mut advertise_relay_url: Option<String> = None;
+    let mut fee_schedule = FeeScheduleArgs::default();
     let mut config_args = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
+        // Hard-rejected legacy flag names: surface a clear rename
+        // pointer instead of either silently accepting wrong-units
+        // numbers or routing through to config_args (which would
+        // produce an opaque "Unknown config arg" later).
         match args[i].as_str() {
-            "--name" | "--operator-name" if i + 1 < args.len() => {
-                operator_name = Some(args[i + 1].clone());
-                i += 1;
-            }
-            "--description" if i + 1 < args.len() => {
-                description = Some(args[i + 1].clone());
-                i += 1;
-            }
-            "--advertise-relay" if i + 1 < args.len() => {
-                advertise_relay_url = Some(args[i + 1].clone());
-                i += 1;
-            }
-            "--annual-fee" | "--annual-fee-bps" if i + 1 < args.len() => {
-                annual_fee_bps = args[i + 1].parse().map_err(|e| {
-                    format!("Invalid {} value '{}': {}", args[i], args[i + 1], e)
-                })?;
-                i += 1;
-            }
-            "--annual-fee-fixed-msats" if i + 1 < args.len() => {
-                annualized_fixed_msats = args[i + 1].parse().map_err(|e| {
-                    format!(
-                        "Invalid --annual-fee-fixed-msats value '{}': {}",
-                        args[i + 1],
-                        e
-                    )
-                })?;
-                i += 1;
-            }
-            "--deposit-fee" | "--deposit-fee-bps" if i + 1 < args.len() => {
-                deposit_fee_bps = args[i + 1].parse()?;
-                i += 1;
-            }
-            "--withdrawal-fee" | "--withdrawal-fee-bps" if i + 1 < args.len() => {
-                withdrawal_fee_bps = args[i + 1].parse()?;
-                i += 1;
-            }
-            "--invoice-fee" | "--invoice-fee-bps" if i + 1 < args.len() => {
-                invoice_fee_bps = args[i + 1].parse()?;
-                i += 1;
-            }
-            // `--min-fee` was the previous name for the operator's
-            // annualized fixed periodic fee. Rejected with a hint
-            // so the rename is discoverable instead of silently
-            // accepting wrong-units numbers.
             "--min-fee" => {
-                return Err(format!(
-                    "--min-fee was renamed to --annual-fee-fixed-msats (semantics: \
-                     annualized msats, no longer per-period sats)"
-                )
-                .into());
+                return Err("--min-fee was renamed to --annual-fee-fixed-msats \
+                            (annualized msats, no longer per-period sats)"
+                    .into());
             }
-            "--fee-period-blocks" | "--fee-period" if i + 1 < args.len() => {
-                fee_period_blocks = args[i + 1].parse().map_err(|e| {
-                    format!("Invalid --fee-period-blocks value '{}': {}", args[i + 1], e)
-                })?;
+            "--annual-fee" => {
+                return Err("--annual-fee was renamed to --annual-fee-bps".into());
+            }
+            "--deposit-fee" => {
+                return Err("--deposit-fee was renamed to --deposit-fee-bps".into());
+            }
+            "--withdrawal-fee" => {
+                return Err("--withdrawal-fee was renamed to --withdrawal-fee-bps".into());
+            }
+            "--invoice-fee" => {
+                return Err("--invoice-fee was renamed to --invoice-fee-bps".into());
+            }
+            "--fee-period" => {
+                return Err("--fee-period was renamed to --fee-period-blocks".into());
+            }
+            "--max-deposit" => {
+                return Err("--max-deposit was renamed to --max-deposit-msats".into());
+            }
+            "--min-deposit" => {
+                return Err("--min-deposit was renamed to --min-deposit-msats".into());
+            }
+            _ => {}
+        }
+
+        if args[i].starts_with("--") {
+            // Try the canonical fee/limit flag set first.
+            if fee_schedule.try_consume(args, &mut i)? {
                 i += 1;
+                continue;
             }
-            "--max-deposit" if i + 1 < args.len() => {
-                max_deposit_msats = args[i + 1].parse()?;
-                i += 1;
-            }
-            "--min-deposit" if i + 1 < args.len() => {
-                min_deposit_msats = args[i + 1].parse()?;
-                i += 1;
-            }
-            s if s.starts_with("--") => {
-                config_args.push(args[i].clone());
-                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                    config_args.push(args[i + 1].clone());
+            match args[i].as_str() {
+                "--name" | "--operator-name" if i + 1 < args.len() => {
+                    operator_name = Some(args[i + 1].clone());
                     i += 1;
                 }
-            }
-            _ => {
-                if reserves_id.is_none() {
-                    reserves_id = Some(args[i].clone());
+                "--description" if i + 1 < args.len() => {
+                    description = Some(args[i + 1].clone());
+                    i += 1;
+                }
+                _ => {
+                    // Unrecognised flag — pass through as a possible
+                    // config arg (handles --seed, --network, --relay,
+                    // etc.).
+                    config_args.push(args[i].clone());
+                    if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                        config_args.push(args[i + 1].clone());
+                        i += 1;
+                    }
                 }
             }
+        } else if reserves_id.is_none() {
+            reserves_id = Some(args[i].clone());
         }
         i += 1;
     }
+
+    // Field defaults match the previous behaviour: `fee_period_blocks`
+    // defaults to 2016 (~2 weeks); other fields default to 0 / u64::MAX.
+    let annual_fee_bps = fee_schedule.annual_fee_bps.unwrap_or(0);
+    let annualized_fixed_msats = fee_schedule.annualized_fixed_msats.unwrap_or(0);
+    let fee_period_blocks = fee_schedule.fee_period_blocks.unwrap_or(2016);
+    let deposit_fee_bps = fee_schedule.deposit_fee_bps.unwrap_or(0);
+    let withdrawal_fee_bps = fee_schedule.withdrawal_fee_bps.unwrap_or(0);
+    let invoice_fee_bps = fee_schedule.invoice_fee_bps.unwrap_or(0);
+    let max_deposit_msats = fee_schedule.max_deposit_msats.unwrap_or(u64::MAX);
+    let min_deposit_msats = fee_schedule.min_deposit_msats.unwrap_or(0);
+    let advertise_relay_url = fee_schedule.advertise_relay.clone();
 
     let config = parse_config(&config_args)?;
     let node = Node::new(config.clone()).await?;
