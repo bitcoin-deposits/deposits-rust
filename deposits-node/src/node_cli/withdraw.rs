@@ -110,15 +110,7 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let config = parse_config(&config_args)?;
     let mut node = Node::new(config).await?;
 
-    // Resolve reserves_id to ledger_id
-    let ledger_id =
-        if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-            reserves_id_arg.clone()
-        } else {
-            node.get_ledger_with_id(reserves_id_arg)
-                .map(|(lid, _)| lid)
-                .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
-        };
+    let ledger_id = super::resolve_to_ledger_id(&node, reserves_id_arg)?;
 
     // Sync wallet
     node.sync_wallet()?;
@@ -242,15 +234,7 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let config = parse_config(&config_args)?;
     let mut node = Node::new(config).await?;
 
-    // Resolve reserves_id to ledger_id
-    let ledger_id =
-        if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-            reserves_id_arg.clone()
-        } else {
-            node.get_ledger_with_id(reserves_id_arg)
-                .map(|(lid, _)| lid)
-                .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
-        };
+    let ledger_id = super::resolve_to_ledger_id(&node, reserves_id_arg)?;
 
     // Sync wallet
     node.sync_wallet()?;
@@ -345,15 +329,7 @@ async fn withdraw_complete(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let config = parse_config(&config_args)?;
     let mut node = Node::new(config).await?;
 
-    // Resolve reserves_id to ledger_id
-    let ledger_id =
-        if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-            reserves_id_arg.clone()
-        } else {
-            node.get_ledger_with_id(reserves_id_arg)
-                .map(|(lid, _)| lid)
-                .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
-        };
+    let ledger_id = super::resolve_to_ledger_id(&node, reserves_id_arg)?;
 
     // Sync wallet
     node.sync_wallet()?;

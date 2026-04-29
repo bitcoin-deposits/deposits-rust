@@ -61,15 +61,7 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     // Load state from disk to resolve ledger_id
     let node = Node::new(config.clone()).await?;
     let ledger_id = match reserves_id {
-        Some(id) => {
-            if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) {
-                id
-            } else {
-                node.get_ledger_with_id(&id)
-                    .map(|(lid, _)| lid)
-                    .ok_or_else(|| format!("Ledger not found for: {}", id))?
-            }
-        }
+        Some(id) => super::resolve_to_ledger_id(&node, &id)?,
         None => match node.get_primary_ledger() {
             Some((lid, _)) => lid,
             None => return Err("No ledger found. Open a ledger first with 'ledger open'.".into()),
@@ -179,7 +171,7 @@ async fn quorum_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Invalid quorum member pubkey: {}", e))?;
 
     // Validate ledger ID format (should be 64 hex chars)
-    if member_ledger_id.len() != 64 || !member_ledger_id.chars().all(|c| c.is_ascii_hexdigit()) {
+    if !super::is_ledger_id(&member_ledger_id) {
         return Err("Member ledger ID must be a 64-character hex string".into());
     }
 
@@ -187,14 +179,7 @@ async fn quorum_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     // Load state from disk to resolve ledger_id
     let node = Node::new(config.clone()).await?;
-    let ledger_id = if reserves_id.len() == 64 && reserves_id.chars().all(|c| c.is_ascii_hexdigit())
-    {
-        reserves_id.clone()
-    } else {
-        node.get_ledger_with_id(&reserves_id)
-            .map(|(lid, _)| lid)
-            .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id))?
-    };
+    let ledger_id = super::resolve_to_ledger_id(&node, &reserves_id)?;
     drop(node);
 
     println!("Adding quorum member (requesting consent from member)...");
@@ -342,26 +327,20 @@ async fn quorum_join_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
     // Load state from disk to resolve our ledger_id
     let node = Node::new(config.clone()).await?;
-    let our_ledger_id = if our_id.len() == 64 && our_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        our_id.clone()
-    } else {
-        node.get_ledger_with_id(&our_id)
-            .map(|(lid, _)| lid)
-            .ok_or_else(|| format!("Ledger not found for reserves: {}", our_id))?
-    };
+    let our_ledger_id = super::resolve_to_ledger_id(&node, &our_id)?;
     drop(node);
 
-    // Target must be a ledger_id hash (64 hex chars)
-    let target_ledger_id =
-        if target_id.len() == 64 && target_id.chars().all(|c| c.is_ascii_hexdigit()) {
-            target_id.clone()
-        } else {
-            return Err(format!(
-                "Target ledger ID must be a 64-char hex hash, got: {}",
-                target_id
-            )
-            .into());
-        };
+    // Target must be a ledger_id hash (64 hex chars) — we cannot
+    // resolve a foreign reserves address without already knowing
+    // the ledger.
+    if !super::is_ledger_id(&target_id) {
+        return Err(format!(
+            "Target ledger ID must be a 64-char hex hash, got: {}",
+            target_id
+        )
+        .into());
+    }
+    let target_ledger_id = target_id.clone();
 
     println!("Recording quorum join via daemon...");
     println!("  Our ledger:       {}...", &our_ledger_id[..16]);

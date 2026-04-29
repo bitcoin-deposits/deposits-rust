@@ -184,14 +184,14 @@ DEPOSIT SUBCOMMANDS:
                     for diagnostics.
 
 WITHDRAW SUBCOMMANDS:
-    withdraw request <partner_id> <deposit_secret> <address> <amount_sats> <fee_sats>
+    withdraw request <ledger_id> <deposit_secret> <address> <amount_sats> <fee_sats>
                     Common path. Holds the deposit secret locally, generates
                     a nonce, signs the request, and locks in one step.
-    withdraw lock <partner_id> <deposit_pubkey> <address> <amount_sats> <fee_sats> <nonce> <signature>
+    withdraw lock <ledger_id> <deposit_pubkey> <address> <amount_sats> <fee_sats> <nonce> <signature>
                     Operator-side primitive. Use when the wallet has signed
                     the request out of band (e.g. via a separate signing
                     device) and the operator just needs to commit the lock.
-    withdraw complete <partner_id> <withdrawal_id>
+    withdraw complete <ledger_id> <withdrawal_id>
                     Complete a withdrawal by broadcasting the transaction
     withdraw cancel <withdrawal_id>
                     Cancel a pending withdrawal (only before broadcast)
@@ -368,7 +368,13 @@ DANGER SUBCOMMANDS (testing only - DO NOT USE IN PRODUCTION):
     );
 
     println!(
-        r#"OPTIONS (most subcommands accept these):
+        r#"IDENTIFIER NOTE:
+    Wherever a subcommand takes <ledger_id> or <reserves_id> as a
+    positional, both forms are accepted: a 64-char hex ledger_id
+    *or* a bech32 reserves address (`bcrt1q…`/`bc1q…`/`tb1q…`).
+    The CLI dispatches based on shape — no flags needed.
+
+OPTIONS (most subcommands accept these):
     --seed <hex>       Seed for wallet/identity (64 hex chars)
     --network <net>    Bitcoin network: mainnet, testnet, signet, regtest (default: signet)
     --esplora <url>    Esplora server URL (default: https://mempool.space/signet/api)
@@ -753,6 +759,29 @@ impl FeeScheduleArgs {
             _ => Ok(false),
         }
     }
+}
+
+/// True if `s` looks like a 64-char hex ledger_id (no bech32 prefix,
+/// no leading 0x). Used by every CLI surface that accepts either a
+/// ledger_id OR a reserves address as its identifier — `s` matching
+/// this is treated as a ledger_id directly; otherwise the caller
+/// goes through `node.get_ledger_with_id(s)` to resolve a reserves
+/// address.
+pub fn is_ledger_id(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Resolve a CLI identifier (ledger_id OR reserves address) to a
+/// ledger_id. Pass-through when `s` is already a ledger_id; lookup
+/// via `node.get_ledger_with_id` otherwise. Single helper so the
+/// 12-place inline copies of this disambiguation don't drift apart.
+pub fn resolve_to_ledger_id(node: &Node, s: &str) -> Result<String, String> {
+    if is_ledger_id(s) {
+        return Ok(s.to_string());
+    }
+    node.get_ledger_with_id(s)
+        .map(|(lid, _)| lid)
+        .ok_or_else(|| format!("Ledger not found for identifier: {}", s))
 }
 
 /// Helper to auto-advertise a ledger for wallet discovery

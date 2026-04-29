@@ -488,16 +488,7 @@ async fn deposit_ls(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     let config = parse_config(&config_args)?;
     let node = Node::new(config).await?;
-
-    // Resolve reserves_id to ledger_id
-    let ledger_id =
-        if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-            reserves_id_arg.clone()
-        } else {
-            node.get_ledger_with_id(&reserves_id_arg)
-                .map(|(lid, _)| lid)
-                .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
-        };
+    let ledger_id = super::resolve_to_ledger_id(&node, &reserves_id_arg)?;
 
     let deposits = node.list_deposits(&ledger_id);
 
@@ -575,16 +566,16 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     let config = parse_config(&config_args)?;
 
-    // Resolve reserves_id to ledger_id
-    let ledger_id =
-        if reserves_id_arg.len() == 64 && reserves_id_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-            reserves_id_arg.clone()
-        } else {
-            let node = Node::new(config.clone()).await?;
-            node.get_ledger_with_id(reserves_id_arg)
-                .map(|(lid, _)| lid)
-                .ok_or_else(|| format!("Ledger not found for reserves: {}", reserves_id_arg))?
-        };
+    // Resolve identifier without spinning up a `Node` if it's
+    // already a ledger_id — `Node::new` is the expensive path
+    // (loads ledgers from disk, opens BDK wallet) and we don't
+    // need it just to credit by hex id.
+    let ledger_id = if super::is_ledger_id(reserves_id_arg) {
+        reserves_id_arg.clone()
+    } else {
+        let node = Node::new(config.clone()).await?;
+        super::resolve_to_ledger_id(&node, reserves_id_arg)?
+    };
 
     println!("Crediting deposit via daemon...");
     println!("  Ledger ID: {}", ledger_id);
