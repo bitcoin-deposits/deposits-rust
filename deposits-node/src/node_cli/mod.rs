@@ -101,11 +101,7 @@ QUORUM SUBCOMMANDS:
     quorum begin [reserves_id] [--collateral-ratio <F>]
                     Activate quorum-based Taproot spending (rotates reserves into multisig).
                     --collateral-ratio is a float in [0, 1] giving the
-                    collateral portion of the on-chain UTXO. Examples:
-                      0.0   entire UTXO is reserves, no slashable bond
-                      0.5   default — 1:1 split (50% reserves, 50% collateral)
-                      0.6   whitepaper recommendation (40% reserves, 60% collateral)
-                      1.0   entire UTXO is collateral (no deposit capacity)
+                    collateral portion of the on-chain UTXO (default 0.5).
     quorum request <pubkey>
                     Send quorum membership request
     quorum list     List all quorum relationships
