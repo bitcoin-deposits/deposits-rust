@@ -184,25 +184,31 @@ impl Node {
         let rotate_txid = self.wallet.broadcast(&rotate_tx)?;
         tracing::info!("Rotation TX broadcast: {}", rotate_txid);
 
-        // Recovery-path rotation: preserve the prior collateral
-        // amount where it exists, defaulting to a 1:1 split on
-        // first activation. See `rotate_reserves_to_quorum` for
-        // the canonical operator-driven path; this one runs from
-        // dispute.rs after winning custody.
+        // Recovery-path rotation: preserve the reserves/collateral
+        // ratio from current state (same as the operator-driven
+        // path in `rotate_reserves_to_quorum`). The split was set
+        // at `ledger open` and carries forward.
         let total_msats = output_amount.saturating_mul(1000);
-        let collateral_msats = {
+        let (reserves_msats, collateral_msats) = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            let prior = ledgers
-                .get(ledger_id)
-                .map(|arc| arc.read().unwrap().state.total_collateral())
-                .unwrap_or(0);
-            if prior > 0 {
-                prior.min(total_msats)
+            let l_opt = ledgers.get(ledger_id);
+            if let Some(arc) = l_opt {
+                let l = arc.read().unwrap();
+                let prev_total = l
+                    .state
+                    .reserves_amount
+                    .saturating_add(l.state.collateral_amount);
+                if prev_total > 0 {
+                    let collateral = (l.state.collateral_amount as u128 * total_msats as u128
+                        / prev_total as u128) as u64;
+                    (total_msats.saturating_sub(collateral), collateral)
+                } else {
+                    (total_msats, 0)
+                }
             } else {
-                total_msats / 2
+                (total_msats, 0)
             }
         };
-        let reserves_msats = total_msats.saturating_sub(collateral_msats);
 
         // Publish QuorumBegin operation. Total UTXO = reserves + collateral.
         let operation = LedgerOperation::QuorumBegin {
@@ -474,7 +480,11 @@ impl Node {
     /// For BDK, the ledger is identified by the reserves UTXO address (stored in
     /// reserves_id). The reserves_id field uses our own pubkey since there is
     /// no separate partner node.
-    pub fn open_ledger(&self) -> Result<Ledger, Error> {
+    /// `collateral_bps` is the collateral fraction of the on-chain
+    /// UTXO, in basis points. Stored on the LedgerOpen so every
+    /// later rotation can preserve the chosen split. Defaults to
+    /// 5000 (1:1) when `None`.
+    pub fn open_ledger(&self, collateral_bps: Option<u16>) -> Result<Ledger, Error> {
         // Find an unused reserves output (not already backing a ledger)
         let all_reserves = self.wallet.get_reserves();
         if all_reserves.is_empty() {
@@ -526,14 +536,18 @@ impl Node {
         // For BDK, use the reserves address as the reserves_id (identifies the reserves UTXO)
         let reserves_id = reserves_address;
 
-        // Get or create the ledger - this automatically adds LedgerOpen (with reserves_amount)
-        // if it's a new ledger for our own operator
-        // Convert reserves_balance from sats to msats at the on-chain boundary
-        let reserves_balance_msats = reserves_balance.saturating_mul(1000);
+        // Get or create the ledger — this automatically adds
+        // LedgerOpen with the reserves/collateral split derived from
+        // `collateral_bps`. Convert sats → msats at the on-chain
+        // boundary.
+        let total_msats = reserves_balance.saturating_mul(1000);
+        let bps = collateral_bps.unwrap_or(5000);
+        let collateral_msats = (total_msats as u128 * bps as u128 / 10_000) as u64;
+        let reserves_msats = total_msats.saturating_sub(collateral_msats);
         let ledger_arc = self.handler.get_or_create_ledger_with_outpoint(
             self.node_id,
             reserves_id.clone(),
-            Some(reserves_balance_msats),
+            Some((reserves_msats, collateral_msats)),
             None,
         );
 
@@ -698,20 +712,14 @@ impl Node {
     /// output and commit a `QuorumBegin` operation that activates
     /// the quorum.
     ///
-    /// `collateral_bps` is the collateral fraction of the new UTXO,
-    /// in basis points (10000 = 100%):
-    ///   collateral_amount = total_msats * bps / 10000
-    ///   reserves_amount   = total_msats - collateral_amount
-    ///
-    /// Defaults to 5000 (1:1 reserves/collateral) when `None` —
-    /// half the UTXO is the operator's bond, half is deposit
-    /// capacity. The whitepaper's recommended ratio is 6000 bps
-    /// (40/60); operators concerned about coalition-attack
-    /// resistance should pass the higher value explicitly.
+    /// The reserves/collateral split is preserved from the current
+    /// ledger state (set at `ledger open` time, then carried
+    /// forward by every rotation). An operator who chose 60%
+    /// collateral at `ledger open` keeps 60% on every rotation —
+    /// no per-rotation knob.
     pub async fn rotate_reserves_to_quorum(
         &self,
         ledger_id: &str,
-        collateral_bps: Option<u16>,
     ) -> Result<RotateReservesResult, Error> {
         // --- Phase 1: snapshot membership + ledger state ---
         let ledger_arc = {
@@ -804,13 +812,33 @@ impl Node {
         // this file (`*rotate_txid.as_ref()`) uses the same convention.
         let txid_bytes: [u8; 32] = txid.to_byte_array();
 
-        // Compute the reserves/collateral split. Default 5000 bps
-        // (1:1) when not overridden — see this function's doc
-        // comment for rationale.
-        let bps = collateral_bps.unwrap_or(5000);
+        // Preserve the reserves/collateral ratio from current state.
+        // The split was chosen at `ledger open` and propagates
+        // forward through every rotation.
         let total_msats = result.amount.saturating_mul(1000);
-        let collateral_msats = (total_msats as u128 * bps as u128 / 10_000) as u64;
-        let reserves_msats = total_msats.saturating_sub(collateral_msats);
+        let (reserves_msats, collateral_msats) = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let l = ledgers
+                .get(ledger_id)
+                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
+                .read()
+                .unwrap();
+            let prev_total = l
+                .state
+                .reserves_amount
+                .saturating_add(l.state.collateral_amount);
+            if prev_total > 0 {
+                let collateral =
+                    (l.state.collateral_amount as u128 * total_msats as u128 / prev_total as u128)
+                        as u64;
+                (total_msats.saturating_sub(collateral), collateral)
+            } else {
+                // Defensive: no prior amounts to anchor a ratio.
+                // Treat the whole UTXO as reserves; the operator
+                // can re-open with a non-default split.
+                (total_msats, 0)
+            }
+        };
         tracing::info!(
             "QuorumBegin split: total={} msats, reserves={} msats, collateral={} msats ({}%)",
             total_msats,

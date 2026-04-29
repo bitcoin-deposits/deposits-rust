@@ -40,20 +40,38 @@ pub async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::E
 async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut config_args = Vec::new();
     let mut fee_schedule = FeeScheduleArgs::default();
+    let mut collateral_bps: Option<u32> = None;
 
     let mut i = 0;
     while i < args.len() {
         if args[i].starts_with("--") {
-            // First try the canonical fee/limit flag set; fall through
-            // to general config args otherwise.
-            if fee_schedule.try_consume(args, &mut i)? {
-                i += 1;
-                continue;
-            }
-            config_args.push(args[i].clone());
-            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                config_args.push(args[i + 1].clone());
-                i += 1;
+            match args[i].as_str() {
+                "--collateral-ratio" if i + 1 < args.len() => {
+                    let raw = &args[i + 1];
+                    let ratio: f64 = raw.parse().map_err(|_| {
+                        format!("Invalid --collateral-ratio value: {} (expected float in [0, 1])", raw)
+                    })?;
+                    if !ratio.is_finite() || ratio < 0.0 || ratio > 1.0 {
+                        return Err(format!(
+                            "--collateral-ratio {} must be in [0.0, 1.0]",
+                            raw
+                        )
+                        .into());
+                    }
+                    collateral_bps = Some((ratio * 10_000.0).round() as u32);
+                    i += 1;
+                }
+                _ => {
+                    if fee_schedule.try_consume(args, &mut i)? {
+                        i += 1;
+                        continue;
+                    }
+                    config_args.push(args[i].clone());
+                    if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                        config_args.push(args[i + 1].clone());
+                        i += 1;
+                    }
+                }
             }
         }
         // Positional arguments are ignored (enforcement_block was removed).
@@ -67,9 +85,24 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let operator_name = config.operator_name.clone();
 
     println!("Opening ledger backed by reserves UTXO (via daemon)...");
+    if let Some(bps) = collateral_bps {
+        println!(
+            "  Collateral ratio: {:.4} ({}% of UTXO held as bond)",
+            bps as f64 / 10_000.0,
+            bps as f64 / 100.0
+        );
+    }
 
-    let result = super::send_admin_daemon_request(&config, "ledger_open", serde_json::json!({}))
-        .await?;
+    let mut params = serde_json::Map::new();
+    if let Some(bps) = collateral_bps {
+        params.insert("collateral_bps".to_string(), serde_json::json!(bps));
+    }
+    let result = super::send_admin_daemon_request(
+        &config,
+        "ledger_open",
+        serde_json::Value::Object(params),
+    )
+    .await?;
     let ledger_id = result
         .get("ledger_id")
         .and_then(|v| v.as_str())

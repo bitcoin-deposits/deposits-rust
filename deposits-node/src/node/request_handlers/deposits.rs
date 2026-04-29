@@ -1093,7 +1093,16 @@ impl Node {
             return (false, None, Some(format!("wallet sync failed: {}", e)));
         }
 
-        let ledger = match self.open_ledger() {
+        // Optional collateral ratio. Stored on the LedgerOpen so
+        // every later rotation (`quorum begin`, recovery rotation)
+        // can preserve the operator's chosen split.
+        let collateral_bps = request
+            .params
+            .get("collateral_bps")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u16);
+
+        let ledger = match self.open_ledger(collateral_bps) {
             Ok(l) => l,
             Err(e) => return (false, None, Some(format!("open_ledger: {}", e))),
         };

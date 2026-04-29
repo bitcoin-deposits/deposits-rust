@@ -98,16 +98,15 @@ QUORUM SUBCOMMANDS:
                     Remove a quorum member (records QuorumRemoveMember)
     quorum join <our_ledger_id> <target_operator> <target_ledger_id> <expires_block>
                     Record that you joined another operator's quorum (records QuorumJoin)
-    quorum begin [reserves_id] [--collateral-ratio <F>]
+    quorum begin [reserves_id]
                     Activate quorum-based Taproot spending (rotates reserves into multisig).
-                    --collateral-ratio is a float in [0, 1] giving the
-                    collateral portion of the on-chain UTXO (default 0.5).
+                    The reserves/collateral split is preserved from `ledger open`.
     quorum request <pubkey>
                     Send quorum membership request
     quorum list     List all quorum relationships
 
 LEDGER SUBCOMMANDS:
-    ledger open [fee options]
+    ledger open [fee options] [--collateral-ratio <F>]
                     Open a ledger backed by your reserves UTXO. Sets the
                     operator's *charged* fee schedule (not quorum-side
                     minimums — those live on `quorum add`):
@@ -116,6 +115,9 @@ LEDGER SUBCOMMANDS:
                       --fee-period-blocks <N>          Fee collection period in blocks (default: 2016)
                       --transfer-fee-fixed-msats <N>   Fixed per-transfer fee in msats
                       --transfer-fee-rate-bps <N>      Proportional per-transfer fee in basis points
+                      --collateral-ratio <F>           Float in [0, 1] giving the collateral portion
+                                                       of the on-chain UTXO (default 0.5). Carried
+                                                       forward through every rotation.
     ledger list     List all ledgers
     ledger history [reserves_id]
                     Show hash chain history for a ledger (default: primary ledger)

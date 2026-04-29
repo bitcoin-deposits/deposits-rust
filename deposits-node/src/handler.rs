@@ -846,11 +846,17 @@ impl DepositsHandler {
     ///
     /// If `outpoint` is Some, include it in the ledger_id computation so multiple
     /// reserves with the same address produce distinct ledger IDs.
+    /// `split_msats` is `Some((reserves_msats, collateral_msats))`
+    /// when the caller wants to override the LedgerOpen split. When
+    /// `None`, the entire wallet reserves balance becomes
+    /// `reserves_amount` and `collateral_amount = 0` (the legacy
+    /// behaviour for partner-side ledger imports where no quorum
+    /// will be activated).
     pub fn get_or_create_ledger_with_outpoint(
         &self,
         operator: PublicKey,
         reserves_address: String,
-        specific_reserves_balance: Option<u64>,
+        split_msats: Option<(u64, u64)>,
         outpoint: Option<String>,
     ) -> Arc<RwLock<Ledger>> {
         use deposits_core::types::LedgerState;
@@ -893,13 +899,17 @@ impl DepositsHandler {
 
         // If we created a new ledger for ourselves, add initial operations
         if is_new && operator == self.our_node_id {
-            // Get reserves balance in msats — use specific amount if provided (already msats),
-            // else convert total wallet balance from sats to msats
-            let reserves_balance = specific_reserves_balance.unwrap_or_else(|| {
-                self.wallet
+            // Resolve the LedgerOpen split. Caller-provided value
+            // takes precedence; otherwise treat the whole wallet
+            // reserves balance as `reserves_amount` with zero
+            // collateral (legacy partner-side-import shape).
+            let (reserves_msats, collateral_msats) = split_msats.unwrap_or_else(|| {
+                let total = self
+                    .wallet
                     .get_reserves_balance()
                     .unwrap_or(0)
-                    .saturating_mul(1000)
+                    .saturating_mul(1000);
+                (total, 0)
             });
 
             // Add LedgerOpen operation
@@ -909,8 +919,8 @@ impl DepositsHandler {
                     operator_id: operator,
                     reserves_id: reserves_address.clone(),
                     genesis_block,
-                    reserves_amount: reserves_balance,
-                    collateral_amount: 0,
+                    reserves_amount: reserves_msats,
+                    collateral_amount: collateral_msats,
                 };
                 if let Err(e) = ledger_guard.append_operation(operation) {
                     tracing::error!("Failed to append LedgerOpen: {:?}", e);
