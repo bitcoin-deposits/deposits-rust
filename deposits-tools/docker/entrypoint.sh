@@ -10,12 +10,19 @@ set -e
 # and forms a Q=5 quorum with the fastest ones.
 #
 # Required:
-#   <admin_npub>                     - passed as first positional arg, OR env ADMIN_NPUB.
-#                                      Must have a published Kind 0 profile.
-#                                      Accepts npub1... bech32 or 64-char hex.
 #   NETWORK                          - bitcoin, testnet, signet, regtest
 #   ELECTRUM_URL                     - esplora/electrs URL
-#   LEDGER_RELAY                     - durable relay (used for ads, DM, discovery)
+#   LEDGER_RELAY                     - durable relay (used for ads, discovery)
+#
+# Required only on the bootstrap-init path (no NODE_SEED_FILE):
+#   <admin_npub>                     - first positional arg, OR env ADMIN_NPUB.
+#                                      Must have a published Kind 0 profile.
+#                                      Accepts npub1... bech32 or 64-char hex.
+#                                      Used to DM the generated mnemonic.
+#                                      Optional when NODE_SEED_FILE is set —
+#                                      a self-administered node (operator
+#                                      drives admin via their own seed) does
+#                                      not need a separate admin identity.
 #
 # Seed handling:
 #   NODE_SEED_FILE                   - path to a pre-mounted operator seed.
@@ -112,13 +119,17 @@ for f in deposit_allowlist.txt deposit_denylist.txt deposit_domain_allowlist.txt
     fi
 done
 
-# --- Resolve admin npub ---
-ADMIN_NPUB="${1:-$ADMIN_NPUB}"
-if [ -z "$ADMIN_NPUB" ]; then
-    echo "ERROR: admin npub required — pass as first arg or set ADMIN_NPUB env"
-    echo "usage: docker run ... <admin_npub>"
-    exit 1
-fi
+# --- Resolve admin npub (optional) ---
+# `admin.npub` authorises a *separate* identity to drive admin-class
+# gift-wrapped requests. Self-authored admin requests (signer ==
+# operator) are always authorised regardless, so a node administered
+# by its own operator key (e.g. via node-cli.sh against the same
+# seed) doesn't need this set.
+#
+# `bootstrap init` does need it though — to DM the admin the
+# generated mnemonic. So we only hard-fail on missing ADMIN_NPUB
+# below if we end up taking the generate-seed path.
+ADMIN_NPUB="${1:-${ADMIN_NPUB:-}}"
 
 # --- Validate required env ---
 if [ -z "$NETWORK" ]; then
@@ -183,19 +194,31 @@ BOOT_RELAY=$(echo "$LEDGER_RELAY" | cut -d',' -f1)
 NODE_SEED_FILE="${NODE_SEED_FILE:-/secrets/seed}"
 if [ -f "$NODE_SEED_FILE" ] && [ ! -f "$DATA_DIR/seed.hex" ]; then
     # Pre-mounted seed path. Skip the DM-mnemonic flow entirely — the
-    # admin already has the seed out of band (HSM, backup, etc.).
+    # operator already has the seed out of band (HSM, backup, etc.).
     echo ""
     echo "Phase 1: importing pre-mounted seed from $NODE_SEED_FILE"
     cp "$NODE_SEED_FILE" "$DATA_DIR/seed.hex"
     chmod 600 "$DATA_DIR/seed.hex"
-    # Persist admin.npub so admin-class request authorisation works at
-    # daemon startup. The daemon's `Node::load_admin_pubkey` accepts
-    # both npub1… bech32 and 64-char hex.
-    printf '%s\n' "$ADMIN_NPUB" > "$DATA_DIR/admin.npub"
+    # Only write admin.npub when an external admin identity was
+    # explicitly provided. The daemon's auth check unconditionally
+    # accepts requests signed by the operator's own key, so leaving
+    # admin.npub absent is the correct shape for a self-administered
+    # node (which is the common case).
+    if [ -n "$ADMIN_NPUB" ]; then
+        printf '%s\n' "$ADMIN_NPUB" > "$DATA_DIR/admin.npub"
+    fi
 elif [ ! -f "$DATA_DIR/seed.hex" ]; then
     # First-boot fresh-seed path. `bootstrap init` generates a seed,
     # writes seed.hex + admin.npub, and DMs the admin the mnemonic
-    # over Nostr. Requires a relay so the DM can land.
+    # over Nostr. Requires both a relay and an admin npub so the DM
+    # can land somewhere meaningful.
+    if [ -z "$ADMIN_NPUB" ]; then
+        echo "ERROR: bootstrap init needs ADMIN_NPUB (or first positional arg)" >&2
+        echo "       to DM the generated mnemonic. Either provide one, or" >&2
+        echo "       mount a pre-existing seed at \$NODE_SEED_FILE" >&2
+        echo "       (default /secrets/seed) to skip bootstrap init." >&2
+        exit 1
+    fi
     echo ""
     echo "Phase 1: generating operator key + DMing admin..."
     deposits-node bootstrap init "$ADMIN_NPUB" \

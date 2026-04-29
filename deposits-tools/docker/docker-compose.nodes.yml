@@ -48,7 +48,13 @@ services:
       ELECTRUM_URL: ${ELECTRUM_URL:-http://electrs:3000}
       LEDGER_RELAY: ${LEDGER_RELAY:-wss://relay.ynniv.com}
       EPHEMERAL_RELAYS: ${EPHEMERAL_RELAYS:-}
-      ADMIN_NPUB: ${ADMIN_NPUB:?ADMIN_NPUB env required}
+      # Optional. Only needed when the operator wants a *separate* admin
+      # identity (e.g. a custodial service driving admin operations on
+      # the operator's behalf). Leave unset for self-administered nodes
+      # — admin requests signed with the operator's own seed are always
+      # authorised. Required if NODE_SEED_FILE is unset (the bootstrap
+      # init path needs an npub to DM the generated mnemonic to).
+      ADMIN_NPUB: ${ADMIN_NPUB:-}
       NODE_NAME: ${NODE_NAME:-operator}
       RELAY_PORT: "7777"
       METRICS_PORT: "9100"
