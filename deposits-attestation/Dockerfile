@@ -2,7 +2,7 @@
 # Build from the workspace root:
 #   docker build -f deposits-attestation/Dockerfile -t deposits-attestation .
 
-FROM rust:1.85-bookworm AS builder
+FROM rust:bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \

@@ -1,7 +1,7 @@
 # Dockerfile for deposits-node nodes
 # Builds the deposits-node CLI and runs it
 
-FROM rust:1.85-bookworm AS builder
+FROM rust:bookworm AS builder
 
 # Install dependencies
 RUN apt-get update && apt-get install -y \

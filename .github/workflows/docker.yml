@@ -1,0 +1,83 @@
+name: Docker
+
+# Runs every Dockerfile in the main service set through `docker build`
+# to catch the class of bug where a Dockerfile drifts out of sync with
+# the workspace (missing COPY/stub for a new crate, wrong cargo
+# invocation, etc.). Slow — only runs on PRs and pushes to main, not
+# on every commit.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Dockerfile"
+      - "**/Dockerfile.*"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deposits-tools/bin/test-docker-builds.sh"
+      - ".github/workflows/docker.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/Dockerfile"
+      - "**/Dockerfile.*"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deposits-tools/bin/test-docker-builds.sh"
+      - ".github/workflows/docker.yml"
+
+jobs:
+  build:
+    name: Build images
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # buildx + the gha cache backend cuts cold-build time from
+      # ~25-30 min to a few minutes on warm cache. Each Dockerfile
+      # gets its own cache scope so an unrelated Dockerfile change
+      # doesn't blow away another image's cache.
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build deposits-node
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deposits-node/Dockerfile
+          push: false
+          tags: deposits-test/node:ci
+          cache-from: type=gha,scope=node
+          cache-to: type=gha,mode=max,scope=node
+
+      - name: Build deposits-attestation
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deposits-attestation/Dockerfile
+          push: false
+          tags: deposits-test/attestation:ci
+          cache-from: type=gha,scope=attestation
+          cache-to: type=gha,mode=max,scope=attestation
+
+      - name: Build deposits-lnurl
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deposits-lnurl/Dockerfile
+          push: false
+          tags: deposits-test/lnurl:ci
+          cache-from: type=gha,scope=lnurl
+          cache-to: type=gha,mode=max,scope=lnurl
+
+      - name: Build deposits-tools (with dangerous-testing)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deposits-tools/Dockerfile
+          push: false
+          tags: deposits-test/tools:ci
+          cache-from: type=gha,scope=tools
+          cache-to: type=gha,mode=max,scope=tools
