@@ -532,7 +532,7 @@ impl Faucet {
 #[derive(Debug, Clone)]
 struct LedgerFees {
     annual_fee_bps: u64,
-    /// Annualized fixed fee (min_fee_sats_per_period * periods_per_year)
+    /// Annualized fixed fee in msats (`FeeStructure::annualized_msats`).
     annualized_fixed: u64,
     fee_period_blocks: u64,
 }
@@ -607,28 +607,26 @@ async fn fetch_advertisements(
             }
         }
 
-        // Extract fee minimums from advertisement
-        // fee_fixed in the request is annualized_msats, so we must convert:
-        //   annualized = min_fee_sats_per_period * (52560 / fee_period_blocks)
+        // Extract fee minimums from advertisement. The advert's
+        // `annualized_fixed_msats` maps directly onto the protocol's
+        // `FeeStructure.annualized_msats` — no conversion.
         let annual_fee_bps = ad
             .get("annual_fee_bps")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let min_fee_sats = ad.get("min_fee_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+        let annualized_fixed_msats = ad
+            .get("annualized_fixed_msats")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let fee_period_blocks = ad
             .get("fee_period_blocks")
             .and_then(|v| v.as_u64())
             .unwrap_or(2016);
-        let periods_per_year = if fee_period_blocks > 0 {
-            52560 / fee_period_blocks
-        } else {
-            26
-        };
         ledger_fees_map.insert(
             ledger_id.clone(),
             LedgerFees {
                 annual_fee_bps,
-                annualized_fixed: min_fee_sats.saturating_mul(periods_per_year),
+                annualized_fixed: annualized_fixed_msats,
                 fee_period_blocks,
             },
         );

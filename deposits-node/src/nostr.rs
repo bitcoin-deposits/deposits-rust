@@ -553,9 +553,17 @@ pub struct LedgerAdvertisement {
     /// Fee per Lightning invoice payment (e.g., 5 = 0.05%)
     pub invoice_fee_bps: u32,
 
-    /// Minimum fee per transaction in sats (floor)
+    /// Annualized fixed periodic fee in msats. Combines with
+    /// `annual_fee_bps` to form the protocol-level `FeeStructure`
+    /// (`annualized_msats` half). The actual quorum-join floors
+    /// live on `quorum add` (`--min-fee-bps`, `--min-fee-fixed`),
+    /// not here — this field is the operator's *charged* fixed fee.
+    ///
+    /// Hard-broken from the old `min_fee_sats` field (per-period
+    /// sats with implicit ×periods/year ×1000 conversion). Old
+    /// JSON ads will deserialize with this field defaulted to 0.
     #[serde(default)]
-    pub min_fee_sats: u64,
+    pub annualized_fixed_msats: u64,
 
     /// Fee collection period in blocks
     #[serde(default)]
@@ -829,10 +837,10 @@ impl LedgerAdvertisement {
             operator_name: None,
             description: None,
             annual_fee_bps: 0,
+            annualized_fixed_msats: 0,
             deposit_fee_bps: 0,
             withdrawal_fee_bps: 0,
             invoice_fee_bps: 0,
-            min_fee_sats: 0,
             fee_period_blocks: 0,
             transfer_fee_fixed_msats: 0,
             transfer_fee_rate_bps: 0,
@@ -852,37 +860,26 @@ impl LedgerAdvertisement {
     }
 
     /// Convert advertisement fees to FeeStructure for new deposits.
-    ///
-    /// Uses the advertisement's annual_fee_bps, min_fee_sats, and fee_period_blocks.
-    /// If fee_period_blocks is 0, returns a FeeStructure with frequency_blocks=0
-    /// (caller should handle this case or provide a fallback).
+    /// Both halves of the result map directly: `annualized_fixed_msats`
+    /// → `annualized_msats`, `annual_fee_bps` → `annualized_bps`.
+    /// If `fee_period_blocks` is 0, the resulting FeeStructure has
+    /// `frequency_blocks=0` and the caller should treat it as unset.
     pub fn to_fee_structure(&self) -> deposits_core::types::FeeStructure {
-        const BLOCKS_PER_YEAR: u64 = 52560;
-        let frequency = self.fee_period_blocks;
-        let periods_per_year = if frequency > 0 {
-            BLOCKS_PER_YEAR / frequency as u64
-        } else {
-            0
-        };
         deposits_core::types::FeeStructure {
-            annualized_msats: self
-                .min_fee_sats
-                .saturating_mul(periods_per_year)
-                .saturating_mul(1000),
+            annualized_msats: self.annualized_fixed_msats,
             annualized_bps: self.annual_fee_bps as u16,
-            frequency_blocks: frequency,
+            frequency_blocks: self.fee_period_blocks,
         }
     }
 
-    /// Get minimum acceptable fee parameters for deposit validation.
-    ///
-    /// Returns (min_annual_bps, min_fixed_per_period_msats) where:
-    /// - min_annual_bps: minimum annual fee in basis points
-    /// - min_fixed_per_period_msats: minimum fixed fee per collection period in msats
+    /// Operator-charged fee shape, returned for member-side fee-floor
+    /// validation: `(annual_bps, annualized_fixed_msats)`. The actual
+    /// quorum-join floors a member declares live on `quorum add`, not
+    /// here; this is the operator's *charged* terms.
     pub fn minimum_fees(&self) -> (u16, u64) {
         (
             self.annual_fee_bps as u16,
-            self.min_fee_sats.saturating_mul(1000),
+            self.annualized_fixed_msats,
         )
     }
 }

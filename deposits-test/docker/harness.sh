@@ -112,7 +112,7 @@ for o in s['operators']:
         # Open ledgers
         for op in $OPERATORS; do
             run_node_cmd "$op" ledger open \
-                --annual-fee-bps 50 --min-fee-sats 100 --fee-period-blocks 2016 \
+                --annual-fee-bps 50 --annual-fee-fixed-msats 2600000 --fee-period-blocks 2016 \
                 2>/dev/null || true
         done
         sleep 2

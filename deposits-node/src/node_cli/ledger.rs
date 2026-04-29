@@ -43,7 +43,7 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
     // Fee schedule (advertised minimums)
     let mut annual_fee_bps: Option<u32> = None;
-    let mut min_fee_sats: Option<u64> = None;
+    let mut annualized_fixed_msats: Option<u64> = None;
     let mut fee_period_blocks: Option<u32> = None;
     let mut transfer_fee_fixed: Option<u64> = None;
     let mut transfer_fee_rate_bps: Option<u16> = None;
@@ -61,8 +61,8 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                     );
                     i += 1;
                 }
-                "--min-fee-sats" if i + 1 < args.len() => {
-                    min_fee_sats = Some(
+                "--annual-fee-fixed-msats" if i + 1 < args.len() => {
+                    annualized_fixed_msats = Some(
                         args[i + 1]
                             .parse()
                             .map_err(|_| format!("Invalid {}: {}", args[i], args[i + 1]))?,
@@ -114,7 +114,7 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
     let fee_schedule = FeeScheduleArgs {
         annual_fee_bps,
-        min_fee_sats,
+        annualized_fixed_msats,
         fee_period_blocks,
         transfer_fee_fixed,
         transfer_fee_rate_bps,
@@ -161,8 +161,8 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 bps as f64 / 100.0
             );
         }
-        if let Some(sats) = fee_schedule.min_fee_sats {
-            println!("    Minimum fee per period: {} sats", sats);
+        if let Some(msats) = fee_schedule.annualized_fixed_msats {
+            println!("    Annual fixed custody fee: {} msats", msats);
         }
         if let Some(blocks) = fee_schedule.fee_period_blocks {
             println!("    Fee collection period: {} blocks", blocks);
@@ -887,7 +887,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let mut deposit_fee_bps: u32 = 0;
     let mut withdrawal_fee_bps: u32 = 0;
     let mut invoice_fee_bps: u32 = 0;
-    let mut min_fee_sats: u64 = 0;
+    let mut annualized_fixed_msats: u64 = 0;
     let mut fee_period_blocks: u32 = 2016; // default ~2 weeks
     let mut max_deposit_msats: u64 = u64::MAX;
     let mut min_deposit_msats: u64 = 0;
@@ -909,29 +909,44 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 advertise_relay_url = Some(args[i + 1].clone());
                 i += 1;
             }
-            "--annual-fee" if i + 1 < args.len() => {
-                annual_fee_bps = args[i + 1]
-                    .parse()
-                    .map_err(|e| format!("Invalid --annual-fee value '{}': {}", args[i + 1], e))?;
+            "--annual-fee" | "--annual-fee-bps" if i + 1 < args.len() => {
+                annual_fee_bps = args[i + 1].parse().map_err(|e| {
+                    format!("Invalid {} value '{}': {}", args[i], args[i + 1], e)
+                })?;
                 i += 1;
             }
-            "--deposit-fee" if i + 1 < args.len() => {
+            "--annual-fee-fixed-msats" if i + 1 < args.len() => {
+                annualized_fixed_msats = args[i + 1].parse().map_err(|e| {
+                    format!(
+                        "Invalid --annual-fee-fixed-msats value '{}': {}",
+                        args[i + 1],
+                        e
+                    )
+                })?;
+                i += 1;
+            }
+            "--deposit-fee" | "--deposit-fee-bps" if i + 1 < args.len() => {
                 deposit_fee_bps = args[i + 1].parse()?;
                 i += 1;
             }
-            "--withdrawal-fee" if i + 1 < args.len() => {
+            "--withdrawal-fee" | "--withdrawal-fee-bps" if i + 1 < args.len() => {
                 withdrawal_fee_bps = args[i + 1].parse()?;
                 i += 1;
             }
-            "--invoice-fee" if i + 1 < args.len() => {
+            "--invoice-fee" | "--invoice-fee-bps" if i + 1 < args.len() => {
                 invoice_fee_bps = args[i + 1].parse()?;
                 i += 1;
             }
-            "--min-fee" if i + 1 < args.len() => {
-                min_fee_sats = args[i + 1]
-                    .parse()
-                    .map_err(|e| format!("Invalid --min-fee value '{}': {}", args[i + 1], e))?;
-                i += 1;
+            // `--min-fee` was the previous name for the operator's
+            // annualized fixed periodic fee. Rejected with a hint
+            // so the rename is discoverable instead of silently
+            // accepting wrong-units numbers.
+            "--min-fee" => {
+                return Err(format!(
+                    "--min-fee was renamed to --annual-fee-fixed-msats (semantics: \
+                     annualized msats, no longer per-period sats)"
+                )
+                .into());
             }
             "--fee-period-blocks" | "--fee-period" if i + 1 < args.len() => {
                 fee_period_blocks = args[i + 1].parse().map_err(|e| {
@@ -1022,7 +1037,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         ad.deposit_fee_bps = deposit_fee_bps;
         ad.withdrawal_fee_bps = withdrawal_fee_bps;
         ad.invoice_fee_bps = invoice_fee_bps;
-        ad.min_fee_sats = min_fee_sats;
+        ad.annualized_fixed_msats = annualized_fixed_msats;
         ad.fee_period_blocks = fee_period_blocks;
         ad.max_deposit_msats = max_deposit_msats;
         ad.min_deposit_msats = min_deposit_msats;
@@ -1046,13 +1061,12 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         println!("  Ledger ID: {}...", &ledger_id[..16]);
         println!("  Reserves: {} msats", ad.reserves_amount_msats);
         println!("  Collateral: {} msats", ad.collateral_amount_msats);
-        let periods_per_year = 52560u64 / ad.fee_period_blocks.max(1) as u64;
-        let annualized_msats = ad.min_fee_sats.saturating_mul(periods_per_year);
         let annual_pct = ad.annual_fee_bps as f64 / 100.0;
-        let fee_str = match (ad.annual_fee_bps > 0, annualized_msats > 0) {
-            (true, true) => format!("{}% and {} sats per year", annual_pct, annualized_msats),
+        let annualized_fixed = ad.annualized_fixed_msats;
+        let fee_str = match (ad.annual_fee_bps > 0, annualized_fixed > 0) {
+            (true, true) => format!("{}% and {} msats per year", annual_pct, annualized_fixed),
             (true, false) => format!("{}% per year", annual_pct),
-            (false, true) => format!("{} sats per year", annualized_msats),
+            (false, true) => format!("{} msats per year", annualized_fixed),
             (false, false) => "None".to_string(),
         };
         println!(
@@ -1198,8 +1212,8 @@ pub async fn ledger_discover(args: &[String]) -> Result<(), Box<dyn std::error::
         println!("    Deposit: {}bps", ad.deposit_fee_bps);
         println!("    Withdrawal: {}bps", ad.withdrawal_fee_bps);
         println!("    Invoice: {}bps", ad.invoice_fee_bps);
-        if ad.min_fee_sats > 0 {
-            println!("    Min fee: {} sats", ad.min_fee_sats);
+        if ad.annualized_fixed_msats > 0 {
+            println!("    Annual fixed: {} msats", ad.annualized_fixed_msats);
         }
         println!("  Limits:");
         if ad.max_deposit_msats < u64::MAX {

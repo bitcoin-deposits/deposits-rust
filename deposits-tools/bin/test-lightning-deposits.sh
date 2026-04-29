@@ -218,9 +218,9 @@ advertise_with_fees() {
         # Note: arguments must be separate for proper parsing
         # --fee-period 10 for fast testing (10 blocks instead of 2016)
         local ad_output=$(run_node_cmd "$op" ledger advertise "$reserves_id" \
-            --annual-fee "100" \
-            --min-fee "1000" \
-            --fee-period "10" 2>&1)
+            --annual-fee-bps "100" \
+            --annual-fee-fixed-msats "5256000000" \
+            --fee-period-blocks "10" 2>&1)
 
         if echo "$ad_output" | grep -q "Advertisement published\|published"; then
             # Verify the fees were set correctly

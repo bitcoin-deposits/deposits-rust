@@ -110,14 +110,12 @@ pub async fn discover(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
         // Fee summary
         let annual_pct = ad.annual_fee_bps as f64 / 100.0;
-        // Annualize the fixed fee using actual fee period
-        let periods_per_year = 52560u64 / ad.fee_period_blocks.max(1) as u64;
-        let annualized_msats = ad.min_fee_sats.saturating_mul(periods_per_year);
+        let annualized_fixed = ad.annualized_fixed_msats;
 
-        let fee_str = match (ad.annual_fee_bps > 0, annualized_msats > 0) {
-            (true, true) => format!("{}% and {} sats per year", annual_pct, annualized_msats),
+        let fee_str = match (ad.annual_fee_bps > 0, annualized_fixed > 0) {
+            (true, true) => format!("{}% and {} msats per year", annual_pct, annualized_fixed),
             (true, false) => format!("{}% per year", annual_pct),
-            (false, true) => format!("{} sats per year", annualized_msats),
+            (false, true) => format!("{} msats per year", annualized_fixed),
             (false, false) => "None".to_string(),
         };
 
@@ -346,8 +344,8 @@ pub async fn ledger_info(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         ad.invoice_fee_bps,
         ad.invoice_fee_bps as f64 / 100.0
     );
-    if ad.min_fee_sats > 0 {
-        println!("Minimum Fee: {} sats", ad.min_fee_sats);
+    if ad.annualized_fixed_msats > 0 {
+        println!("Annual fixed fee: {} msats", ad.annualized_fixed_msats);
     }
     println!();
     println!("Deposit Limits");

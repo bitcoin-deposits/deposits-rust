@@ -62,7 +62,7 @@ fn advertisement_new_defaults_fees_to_zero() {
     assert_eq!(ad.deposit_fee_bps, 0);
     assert_eq!(ad.withdrawal_fee_bps, 0);
     assert_eq!(ad.invoice_fee_bps, 0);
-    assert_eq!(ad.min_fee_sats, 0);
+    assert_eq!(ad.annualized_fixed_msats, 0);
     assert_eq!(ad.fee_period_blocks, 0);
     assert_eq!(ad.transfer_fee_fixed_msats, 0);
     assert_eq!(ad.transfer_fee_rate_bps, 0);
@@ -122,21 +122,20 @@ fn to_fee_structure_computes_periods_per_year() {
         String::new(),
         "regtest".to_string(),
     );
-    // 52560 blocks/year, period = 4380 blocks -> 12 periods/year
+    // After the rename, both halves of FeeStructure pass through
+    // directly — no per-period × periods-per-year × 1000 conversion.
     ad.fee_period_blocks = 4380;
-    ad.min_fee_sats = 100; // 100 sats per period
-    ad.annual_fee_bps = 50; // 0.5% annual
+    ad.annualized_fixed_msats = 1_200_000;
+    ad.annual_fee_bps = 50;
 
     let fs = ad.to_fee_structure();
     assert_eq!(fs.frequency_blocks, 4380);
     assert_eq!(fs.annualized_bps, 50);
-    // periods_per_year = 52560 / 4380 = 12
-    // annualized_msats = 100 * 12 * 1000 = 1_200_000
     assert_eq!(fs.annualized_msats, 1_200_000);
 }
 
 #[test]
-fn to_fee_structure_single_block_period() {
+fn to_fee_structure_passes_through_unchanged() {
     let mut ad = LedgerAdvertisement::new(
         String::new(),
         String::new(),
@@ -144,16 +143,15 @@ fn to_fee_structure_single_block_period() {
         "regtest".to_string(),
     );
     ad.fee_period_blocks = 1;
-    ad.min_fee_sats = 1;
+    ad.annualized_fixed_msats = 52_560_000;
 
     let fs = ad.to_fee_structure();
-    // periods_per_year = 52560 / 1 = 52560
-    // annualized_msats = 1 * 52560 * 1000 = 52_560_000
     assert_eq!(fs.annualized_msats, 52_560_000);
+    assert_eq!(fs.frequency_blocks, 1);
 }
 
 #[test]
-fn to_fee_structure_large_fee_saturates() {
+fn to_fee_structure_max_value_unchanged() {
     let mut ad = LedgerAdvertisement::new(
         String::new(),
         String::new(),
@@ -161,29 +159,28 @@ fn to_fee_structure_large_fee_saturates() {
         "regtest".to_string(),
     );
     ad.fee_period_blocks = 1;
-    ad.min_fee_sats = u64::MAX; // Will overflow without saturation
+    ad.annualized_fixed_msats = u64::MAX;
 
     let fs = ad.to_fee_structure();
-    // Should saturate to u64::MAX instead of wrapping
     assert_eq!(fs.annualized_msats, u64::MAX);
 }
 
 #[test]
-fn to_fee_structure_period_larger_than_year() {
+fn to_fee_structure_long_period_keeps_value() {
     let mut ad = LedgerAdvertisement::new(
         String::new(),
         String::new(),
         String::new(),
         "regtest".to_string(),
     );
-    // Period is 100000 blocks (> 52560 blocks/year)
+    // Period > blocks/year is a valid configuration (annual fee
+    // collected on a multi-year cadence). The pass-through means
+    // the annualized msats stay as set rather than truncating to 0.
     ad.fee_period_blocks = 100_000;
-    ad.min_fee_sats = 500;
+    ad.annualized_fixed_msats = 500;
 
     let fs = ad.to_fee_structure();
-    // periods_per_year = 52560 / 100000 = 0 (integer division)
-    // annualized_msats = 500 * 0 * 1000 = 0
-    assert_eq!(fs.annualized_msats, 0);
+    assert_eq!(fs.annualized_msats, 500);
     assert_eq!(fs.frequency_blocks, 100_000);
 }
 
@@ -192,7 +189,7 @@ fn to_fee_structure_period_larger_than_year() {
 // ============================================================================
 
 #[test]
-fn minimum_fees_converts_sats_to_msats() {
+fn minimum_fees_passes_through_msats() {
     let mut ad = LedgerAdvertisement::new(
         String::new(),
         String::new(),
@@ -200,11 +197,11 @@ fn minimum_fees_converts_sats_to_msats() {
         "regtest".to_string(),
     );
     ad.annual_fee_bps = 100; // 1%
-    ad.min_fee_sats = 10; // 10 sats
+    ad.annualized_fixed_msats = 10_000;
 
     let (bps, fixed_msats) = ad.minimum_fees();
     assert_eq!(bps, 100);
-    assert_eq!(fixed_msats, 10_000); // 10 sats * 1000
+    assert_eq!(fixed_msats, 10_000);
 }
 
 #[test]
@@ -222,17 +219,17 @@ fn minimum_fees_zero_values() {
 }
 
 #[test]
-fn minimum_fees_large_sats_saturates() {
+fn minimum_fees_max_msats_unchanged() {
     let mut ad = LedgerAdvertisement::new(
         String::new(),
         String::new(),
         String::new(),
         "regtest".to_string(),
     );
-    ad.min_fee_sats = u64::MAX;
+    ad.annualized_fixed_msats = u64::MAX;
 
     let (_, fixed_msats) = ad.minimum_fees();
-    assert_eq!(fixed_msats, u64::MAX); // saturating_mul
+    assert_eq!(fixed_msats, u64::MAX);
 }
 
 #[test]
@@ -264,7 +261,7 @@ fn advertisement_json_round_trip() {
     );
     ad.annual_fee_bps = 50;
     ad.deposit_fee_bps = 10;
-    ad.min_fee_sats = 100;
+    ad.annualized_fixed_msats = 100;
     ad.fee_period_blocks = 4380;
     ad.max_deposit_msats = 1_000_000_000;
     ad.min_deposit_msats = 1_000;
@@ -277,7 +274,7 @@ fn advertisement_json_round_trip() {
     assert_eq!(parsed.operator_pubkey, ad.operator_pubkey);
     assert_eq!(parsed.annual_fee_bps, 50);
     assert_eq!(parsed.deposit_fee_bps, 10);
-    assert_eq!(parsed.min_fee_sats, 100);
+    assert_eq!(parsed.annualized_fixed_msats, 100);
     assert_eq!(parsed.fee_period_blocks, 4380);
     assert_eq!(parsed.max_deposit_msats, 1_000_000_000);
     assert_eq!(parsed.min_deposit_msats, 1_000);
@@ -306,7 +303,7 @@ fn advertisement_json_missing_optional_fields() {
     assert!(parsed.operator_name.is_none());
     assert!(parsed.description.is_none());
     assert_eq!(parsed.fee_period_blocks, 0); // serde(default)
-    assert_eq!(parsed.min_fee_sats, 0); // serde(default)
+    assert_eq!(parsed.annualized_fixed_msats, 0); // serde(default)
     assert_eq!(parsed.transfer_fee_fixed_msats, 0);
     assert_eq!(parsed.transfer_fee_rate_bps, 0);
 }
@@ -817,11 +814,11 @@ fn to_fee_structure_with_max_u32_period() {
         "regtest".to_string(),
     );
     ad.fee_period_blocks = u32::MAX;
-    ad.min_fee_sats = 1000;
+    ad.annualized_fixed_msats = 1000;
 
     let fs = ad.to_fee_structure();
-    // 52560 / u32::MAX = 0
-    assert_eq!(fs.annualized_msats, 0);
+    // Both halves pass through unchanged regardless of period.
+    assert_eq!(fs.annualized_msats, 1000);
     assert_eq!(fs.frequency_blocks, u32::MAX);
 }
 

@@ -43,9 +43,9 @@ The top-level dispatch is in `deposits-node/src/bin/deposits-node.rs`. Each subc
 
 **`reserves <create|list>`** — `create [amount_sats]` produces a reserves UTXO (default 100 000 000 sats / 1 BTC) by sending to a freshly-derived reserves address. `list` enumerates known reserves. Both go through the running daemon via gift-wrapped admin requests.
 
-**`ledger <open|list|history|validate|export|advertise>`** — `open` creates a new ledger backed by a reserves UTXO. Fee-schedule flags set advertised minimums:
-- `--annual-fee-bps <N>` — annual custody fee in basis points
-- `--min-fee-sats <N>` — minimum fee per period
+**`ledger <open|list|history|validate|export|import|advertise|republish|discover|health>`** — `open` creates a new ledger backed by a reserves UTXO. Fee-schedule flags set the operator's *charged* fee schedule (the actual quorum-side floors live on `quorum add`):
+- `--annual-fee-bps <N>` — proportional annual custody fee in basis points
+- `--annual-fee-fixed-msats <N>` — fixed annual periodic fee in msats
 - `--fee-period-blocks <N>` — period length (default 2016)
 - `--transfer-fee-fixed-msats <N>` — fixed per-transfer fee
 - `--transfer-fee-rate-bps <N>` — proportional per-transfer fee

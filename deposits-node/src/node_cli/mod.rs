@@ -66,13 +66,19 @@ COMMANDS:
     derive-deposit-key
                     Derive wallet deposit secret key from seed (for collateral lock)
     reserves        Manage reserves UTXOs (create, list)
-    quorum          Manage quorum (add, join, begin, request, list)
-    ledger          Manage ledgers (open, list)
+    quorum          Manage quorum (add, remove, join, begin, request, list)
+    ledger          Manage ledgers (open, list, history, validate, export,
+                    import, advertise, republish, discover, health)
     collateral      Manage collateral pledges
-    deposit         Manage deposit offers for on-chain funding
+    deposit         Manage deposit offers and credits
     withdraw        Manage on-chain withdrawals
-    lightning (ln)  Lightning invoice payment operations (lock, fail, fulfill)
-    nostr           Nostr relay operations (updates, broadcast)
+    lightning (ln)  Lightning operations (LDK sidecar + ledger lock/fail/fulfill)
+    nostr           Nostr relay operations (export, import, validate, request,
+                    watch, dispute)
+    recovery        Recovery and dispute pipeline (start, agree, claim, …)
+    health          Cluster health checks (ping, chains, relays)
+    bootstrap       Helper bring-up flows (init, reserves, quorum)
+    admin           Admin daemon-side operations (buffer)
     help            Show this help message
 
 RESERVES SUBCOMMANDS:
@@ -93,10 +99,11 @@ QUORUM SUBCOMMANDS:
 
 LEDGER SUBCOMMANDS:
     ledger open [fee options]
-                    Open a ledger backed by your reserves UTXO.
-                    Fee options set advertised minimums for deposit negotiation:
-                      --annual-fee-bps <N>             Annual custody fee in basis points
-                      --min-fee-sats <N>               Minimum fee per period in sats
+                    Open a ledger backed by your reserves UTXO. Sets the
+                    operator's *charged* fee schedule (not quorum-side
+                    minimums — those live on `quorum add`):
+                      --annual-fee-bps <N>             Proportional annual custody fee in basis points
+                      --annual-fee-fixed-msats <N>     Fixed annual periodic fee in msats
                       --fee-period-blocks <N>          Fee collection period in blocks (default: 2016)
                       --transfer-fee-fixed-msats <N>   Fixed per-transfer fee in msats
                       --transfer-fee-rate-bps <N>      Proportional per-transfer fee in basis points
@@ -164,17 +171,19 @@ LIGHTNING SUBCOMMANDS (alias: ln):
                     Complete a Lightning payment with the preimage
 
 NOSTR SUBCOMMANDS:
-    nostr list      List all ledgers available on the Nostr relay
     nostr export [operator:reserves_id]
                     Broadcast ledger updates to Nostr relay (all local ledgers if no ID given)
     nostr import [operator:reserves_id]
                     Fetch ledger updates from Nostr relay (all ledgers if no ID given)
+    nostr updates [ledger_id]
+                    Stream ledger update events from the relay
     nostr validate <operator:reserves_id>
                     Fetch and validate a ledger's hash chain directly from Nostr
     nostr request <ledger_id> <action> [params...]
                     Send a request to a ledger. Actions:
-                      deposit_open <pubkey> [fee_fixed] [fee_bps] [fee_frequency]
+                      deposit_open <pubkey> [fee_fixed_msats] [fee_bps] [fee_frequency_blocks]
                       make_offer <pubkey> <max_sats> <min_sats> <blocks_valid>
+                      deposit_withdraw <…>
     nostr watch <ledger_id>
                     Watch for requests and disputes for a ledger
     nostr dispute publish <ledger_id> <reason> <details>
@@ -231,10 +240,12 @@ EXAMPLES:
     {} info
 
     # Create reserves (1 BTC default)
-    {} reserves 100000000 --network regtest
+    {} reserves create 100000000 --network regtest
 
-    # Open a ledger with bootstrap phase (enforcement at block 1000)
-    {} ledger open 1000 --network regtest
+    # Open a ledger backed by your reserves UTXO
+    {} ledger open --network regtest \
+        --annual-fee-bps 50 --annual-fee-fixed-msats 1000000 \
+        --fee-period-blocks 2016
 
 "#,
         program, program, program, program, program
@@ -503,7 +514,7 @@ pub async fn send_daemon_request(
 #[derive(Default)]
 pub struct FeeScheduleArgs {
     pub annual_fee_bps: Option<u32>,
-    pub min_fee_sats: Option<u64>,
+    pub annualized_fixed_msats: Option<u64>,
     pub fee_period_blocks: Option<u32>,
     pub transfer_fee_fixed: Option<u64>,
     pub transfer_fee_rate_bps: Option<u16>,
@@ -513,7 +524,7 @@ pub struct FeeScheduleArgs {
 impl FeeScheduleArgs {
     pub fn has_any(&self) -> bool {
         self.annual_fee_bps.is_some()
-            || self.min_fee_sats.is_some()
+            || self.annualized_fixed_msats.is_some()
             || self.fee_period_blocks.is_some()
             || self.transfer_fee_fixed.is_some()
             || self.transfer_fee_rate_bps.is_some()
@@ -566,8 +577,8 @@ pub async fn auto_advertise_ledger(
     if let Some(bps) = fee_schedule.annual_fee_bps {
         ad.annual_fee_bps = bps;
     }
-    if let Some(sats) = fee_schedule.min_fee_sats {
-        ad.min_fee_sats = sats;
+    if let Some(msats) = fee_schedule.annualized_fixed_msats {
+        ad.annualized_fixed_msats = msats;
     }
     if let Some(blocks) = fee_schedule.fee_period_blocks {
         ad.fee_period_blocks = blocks;
