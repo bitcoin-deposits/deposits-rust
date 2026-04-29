@@ -12,9 +12,26 @@ set -e
 # Required:
 #   <admin_npub>                     - passed as first positional arg, OR env ADMIN_NPUB.
 #                                      Must have a published Kind 0 profile.
+#                                      Accepts npub1... bech32 or 64-char hex.
 #   NETWORK                          - bitcoin, testnet, signet, regtest
 #   ELECTRUM_URL                     - esplora/electrs URL
 #   LEDGER_RELAY                     - durable relay (used for ads, DM, discovery)
+#
+# Seed handling:
+#   NODE_SEED_FILE                   - path to a pre-mounted operator seed.
+#                                      Default /secrets/seed. When this file
+#                                      exists, the entrypoint copies it to
+#                                      $DATA_DIR/seed.hex on first boot and
+#                                      skips the bootstrap-init "generate
+#                                      seed + DM admin mnemonic" flow. Used
+#                                      in production where the operator
+#                                      already has a seed (HSM-backed,
+#                                      restored from backup, etc.). When
+#                                      NODE_SEED_FILE doesn't exist, the
+#                                      entrypoint falls back to
+#                                      `bootstrap init` which generates a
+#                                      fresh seed and DMs the admin the
+#                                      mnemonic over Nostr.
 #
 # Optional:
 #   EPHEMERAL_RELAYS                 - comma-separated additional relay URLs
@@ -151,11 +168,34 @@ for r in $(echo "$LEDGER_RELAY" | tr ',' ' '); do
     fi
 done
 
+if [ -z "$RELAYS" ]; then
+    echo "ERROR: no relays resolved. Set LEDGER_RELAY (and optionally" >&2
+    echo "       EPHEMERAL_RELAYS) — without at least one relay the daemon" >&2
+    echo "       can't subscribe to incoming events and admin requests" >&2
+    echo "       silently time out." >&2
+    exit 1
+fi
+
 # Bootstrap-phase relay (single value, used by init/reserves/quorum commands).
 BOOT_RELAY=$(echo "$LEDGER_RELAY" | cut -d',' -f1)
 
 # --- Phase 1: seed + DM admin (pre-daemon, creates seed.hex + admin.npub) ---
-if [ ! -f "$DATA_DIR/seed.hex" ]; then
+NODE_SEED_FILE="${NODE_SEED_FILE:-/secrets/seed}"
+if [ -f "$NODE_SEED_FILE" ] && [ ! -f "$DATA_DIR/seed.hex" ]; then
+    # Pre-mounted seed path. Skip the DM-mnemonic flow entirely — the
+    # admin already has the seed out of band (HSM, backup, etc.).
+    echo ""
+    echo "Phase 1: importing pre-mounted seed from $NODE_SEED_FILE"
+    cp "$NODE_SEED_FILE" "$DATA_DIR/seed.hex"
+    chmod 600 "$DATA_DIR/seed.hex"
+    # Persist admin.npub so admin-class request authorisation works at
+    # daemon startup. The daemon's `Node::load_admin_pubkey` accepts
+    # both npub1… bech32 and 64-char hex.
+    printf '%s\n' "$ADMIN_NPUB" > "$DATA_DIR/admin.npub"
+elif [ ! -f "$DATA_DIR/seed.hex" ]; then
+    # First-boot fresh-seed path. `bootstrap init` generates a seed,
+    # writes seed.hex + admin.npub, and DMs the admin the mnemonic
+    # over Nostr. Requires a relay so the DM can land.
     echo ""
     echo "Phase 1: generating operator key + DMing admin..."
     deposits-node bootstrap init "$ADMIN_NPUB" \
@@ -164,7 +204,14 @@ if [ ! -f "$DATA_DIR/seed.hex" ]; then
         --esplora "$ELECTRUM_URL" \
         --relay "$BOOT_RELAY"
 fi
-NODE_SEED=$(cat "$DATA_DIR/seed.hex")
+NODE_SEED=$(cat "$DATA_DIR/seed.hex" 2>/dev/null || true)
+if [ -z "$NODE_SEED" ]; then
+    echo "ERROR: $DATA_DIR/seed.hex is empty or missing after Phase 1." >&2
+    echo "       NODE_SEED_FILE=$NODE_SEED_FILE (exists: $([ -f "$NODE_SEED_FILE" ] && echo yes || echo no))." >&2
+    echo "       If using a pre-mounted seed, mount it at \$NODE_SEED_FILE." >&2
+    echo "       If using bootstrap init, ensure ADMIN_NPUB and LEDGER_RELAY are reachable." >&2
+    exit 1
+fi
 
 # --- Start deposits-node daemon (runs through phases 2 + 3 via admin DMs) ---
 echo ""

@@ -1,20 +1,26 @@
 # Deposits node overlay — run N operators with shared messaging relay
 #
 # Usage:
-#   # Generate for your operators:
+#   # Generate seeds at the canonical host path that `node-cli.sh` reads:
 #   for name in alice bob charlie; do
 #     mkdir -p /mnt/bitcoind/deposits/$name
 #     openssl rand -hex 32 > /mnt/bitcoind/deposits/$name/seed
 #   done
 #
-#   # Start:
+#   # Bring the cluster up:
 #   docker compose -f docker-compose.yml -f docker/docker-compose.nodes.yml up -d
 #
 # Each operator:
-#   - Runs deposits-node + bundled strfry relay in one container
-#   - Connects to shared LEDGER_RELAY (durable) for advertisements + ledger updates
-#   - Connects to other operators' local relays for messaging
-#   - No collateral deposits needed — collateral is part of the UTXO
+#   - Runs deposits-node + bundled strfry relay in one container.
+#   - Mounts its host seed file (`/mnt/bitcoind/deposits/<name>/seed`)
+#     read-only into the container at `/secrets/seed`. The entrypoint's
+#     Phase 1 imports it into `/data/node/seed.hex` on first boot.
+#     `node-cli.sh` reads the same host path — both halves agree on
+#     identity.
+#   - Connects to shared LEDGER_RELAY (durable) for advertisements +
+#     ledger updates, and to other operators' local relays for
+#     messaging.
+#   - No collateral deposits needed — collateral is part of the UTXO.
 #
 # After starting, use deposits-node CLI or setup.sh to:
 #   1. Fund wallets (send BTC to each operator's address)
@@ -23,22 +29,26 @@
 #   4. Form quorums (quorum add / quorum begin)
 
 services:
-  # Example: single operator node
+  # Example: single operator node named after the env-resolved $NODE_NAME.
   # Duplicate this block for each operator, changing:
   #   - service name, container_name, NODE_NAME
-  #   - seed volume path
+  #   - seed volume path (must match $NODE_NAME)
   #   - port mappings
-  #   - EPHEMERAL_RELAYS (list other operators)
+  #   - EPHEMERAL_RELAYS (list other operators on the same host network)
   operator:
     image: deposits-node:latest
-    container_name: operator
+    container_name: ${NODE_NAME:-operator}
     restart: unless-stopped
     environment:
+      # Pre-mounted seed import. The entrypoint copies this into
+      # /data/node/seed.hex on first boot and skips the
+      # generate-seed-and-DM-admin Phase 1.
       NODE_SEED_FILE: /secrets/seed
       NETWORK: ${NETWORK:-bitcoin}
       ELECTRUM_URL: ${ELECTRUM_URL:-http://electrs:3000}
       LEDGER_RELAY: ${LEDGER_RELAY:-wss://relay.ynniv.com}
       EPHEMERAL_RELAYS: ${EPHEMERAL_RELAYS:-}
+      ADMIN_NPUB: ${ADMIN_NPUB:?ADMIN_NPUB env required}
       NODE_NAME: ${NODE_NAME:-operator}
       RELAY_PORT: "7777"
       METRICS_PORT: "9100"
@@ -48,7 +58,11 @@ services:
       - "7801:7777"   # strfry relay
       - "9101:9100"   # prometheus metrics
     volumes:
-      - ./seed:/secrets/seed:ro
+      # Host path matches what `node-cli.sh` reads
+      # (DEPOSITS_SEED_DIR/<name>/seed, default /mnt/bitcoind/deposits).
+      # Override with DEPOSITS_SEED_DIR + NODE_NAME if your layout
+      # differs.
+      - ${DEPOSITS_SEED_DIR:-/mnt/bitcoind/deposits}/${NODE_NAME:-operator}/seed:/secrets/seed:ro
       - operator-data:/data
     networks:
       - bitcoin-network
