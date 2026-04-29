@@ -712,14 +712,17 @@ impl Node {
     /// output and commit a `QuorumBegin` operation that activates
     /// the quorum.
     ///
-    /// The reserves/collateral split is preserved from the current
-    /// ledger state (set at `ledger open` time, then carried
-    /// forward by every rotation). An operator who chose 60%
-    /// collateral at `ledger open` keeps 60% on every rotation —
-    /// no per-rotation knob.
+    /// `collateral_bps`:
+    ///   - `Some(b)`: explicit override, used as-is (and carried
+    ///     forward as the new "current ratio" for subsequent
+    ///     rotations).
+    ///   - `None`: preserve the ratio from current state. The
+    ///     split was set at `ledger open` and propagates through
+    ///     every rotation absent an explicit override.
     pub async fn rotate_reserves_to_quorum(
         &self,
         ledger_id: &str,
+        collateral_bps: Option<u16>,
     ) -> Result<RotateReservesResult, Error> {
         // --- Phase 1: snapshot membership + ledger state ---
         let ledger_arc = {
@@ -812,11 +815,15 @@ impl Node {
         // this file (`*rotate_txid.as_ref()`) uses the same convention.
         let txid_bytes: [u8; 32] = txid.to_byte_array();
 
-        // Preserve the reserves/collateral ratio from current state.
-        // The split was chosen at `ledger open` and propagates
-        // forward through every rotation.
+        // Resolve the reserves/collateral split. Explicit override
+        // wins; otherwise preserve the ratio from current state
+        // (set at `ledger open`, carried forward through every
+        // rotation).
         let total_msats = result.amount.saturating_mul(1000);
-        let (reserves_msats, collateral_msats) = {
+        let (reserves_msats, collateral_msats) = if let Some(bps) = collateral_bps {
+            let collateral = (total_msats as u128 * bps as u128 / 10_000) as u64;
+            (total_msats.saturating_sub(collateral), collateral)
+        } else {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let l = ledgers
                 .get(ledger_id)
@@ -835,7 +842,7 @@ impl Node {
             } else {
                 // Defensive: no prior amounts to anchor a ratio.
                 // Treat the whole UTXO as reserves; the operator
-                // can re-open with a non-default split.
+                // can pass --collateral-ratio to fix.
                 (total_msats, 0)
             }
         };

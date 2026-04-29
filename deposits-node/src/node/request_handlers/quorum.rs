@@ -634,10 +634,20 @@ impl Node {
             tracing::warn!("Wallet sync failed before quorum_begin: {}", e);
         }
 
-        // The reserves/collateral split is fixed at `ledger open` and
-        // preserved through every rotation — no per-rotation
-        // override.
-        match self.rotate_reserves_to_quorum(&ledger_id).await {
+        // Optional collateral-ratio override. When set, the new
+        // QuorumBegin uses this ratio (and it carries forward as
+        // the new "current ratio" for subsequent rotations). When
+        // unset, the ratio from state is preserved.
+        let collateral_bps = request
+            .params
+            .get("collateral_bps")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u16);
+
+        match self
+            .rotate_reserves_to_quorum(&ledger_id, collateral_bps)
+            .await
+        {
             Ok(result) => {
                 // commit_operation inside rotate_reserves_to_quorum already
                 // broadcasts the cosigned update via Nostr, so no separate

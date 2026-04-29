@@ -39,16 +39,36 @@ pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::E
 /// Activate quorum-based Taproot spending (rotates reserves into quorum multisig)
 async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut reserves_id: Option<String> = None;
+    let mut collateral_bps: Option<u32> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
         if args[i].starts_with("--") {
-            // Config argument — pass through
-            config_args.push(args[i].clone());
-            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                config_args.push(args[i + 1].clone());
-                i += 1;
+            match args[i].as_str() {
+                "--collateral-ratio" if i + 1 < args.len() => {
+                    let raw = &args[i + 1];
+                    let ratio: f64 = raw.parse().map_err(|_| {
+                        format!("Invalid --collateral-ratio value: {} (expected float in [0, 1])", raw)
+                    })?;
+                    if !ratio.is_finite() || ratio < 0.0 || ratio > 1.0 {
+                        return Err(format!(
+                            "--collateral-ratio {} must be in [0.0, 1.0]",
+                            raw
+                        )
+                        .into());
+                    }
+                    collateral_bps = Some((ratio * 10_000.0).round() as u32);
+                    i += 1;
+                }
+                _ => {
+                    // Config argument — pass through
+                    config_args.push(args[i].clone());
+                    if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                        config_args.push(args[i + 1].clone());
+                        i += 1;
+                    }
+                }
             }
         } else if reserves_id.is_none() {
             reserves_id = Some(args[i].clone());
@@ -71,12 +91,23 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     println!("Activating quorum via daemon...");
     println!("  Ledger: {}...", &ledger_id[..16]);
+    if let Some(bps) = collateral_bps {
+        println!(
+            "  Collateral ratio: {:.4} ({}% of UTXO held as bond) — override",
+            bps as f64 / 10_000.0,
+            bps as f64 / 100.0
+        );
+    }
 
+    let mut params = serde_json::Map::new();
+    if let Some(bps) = collateral_bps {
+        params.insert("collateral_bps".to_string(), serde_json::json!(bps));
+    }
     let result = send_daemon_request(
         &config,
         &ledger_id,
         "quorum_begin",
-        serde_json::json!({}),
+        serde_json::Value::Object(params),
     )
     .await?;
 

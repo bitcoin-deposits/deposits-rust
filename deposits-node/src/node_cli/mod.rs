@@ -98,9 +98,10 @@ QUORUM SUBCOMMANDS:
                     Remove a quorum member (records QuorumRemoveMember)
     quorum join <our_ledger_id> <target_operator> <target_ledger_id> <expires_block>
                     Record that you joined another operator's quorum (records QuorumJoin)
-    quorum begin [reserves_id]
+    quorum begin [reserves_id] [--collateral-ratio <F>]
                     Activate quorum-based Taproot spending (rotates reserves into multisig).
-                    The reserves/collateral split is preserved from `ledger open`.
+                    Without --collateral-ratio, preserves the split from `ledger open`.
+                    With it, overrides the split for this rotation onward.
     quorum request <pubkey>
                     Send quorum membership request
     quorum list     List all quorum relationships
