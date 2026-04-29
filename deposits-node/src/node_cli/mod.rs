@@ -158,11 +158,12 @@ COLLATERAL SUBCOMMANDS:
 DEPOSIT SUBCOMMANDS:
     deposit offer <reserves_id> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid>
                     Create a signed deposit offer for on-chain funding
-    deposit list    List all deposit offers
     deposit open <reserves_id> <deposit_pubkey>
                     Open a new deposit in a ledger
-    deposit ls <reserves_id>
+    deposit list <reserves_id>
                     List all deposits in a ledger
+    deposit list-offers
+                    List pending deposit offers (formerly `deposit list`)
     deposit address <ledger_id> <deposit_pubkey> [--domain <domain>]
                     Print a deposit's funding address (bech32 deposit-id form,
                     suitable for `<bech32>@<domain>` Lightning-address style URIs)

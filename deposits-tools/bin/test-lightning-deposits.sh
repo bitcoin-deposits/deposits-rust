@@ -582,7 +582,7 @@ show_final_state() {
         local reserves_id=$(get_value "reserves_id_$op")
         local op_short="$op"
 
-        local deposits=$(run_node_cmd "$op" deposit ls "$reserves_id" 2>&1)
+        local deposits=$(run_node_cmd "$op" deposit list "$reserves_id" 2>&1)
         local balance=$(echo "$deposits" | grep "Balance:" | head -1 | awk '{print $2}')
 
         log_info "  $op_short: $balance msat"
@@ -601,7 +601,7 @@ test_fee_collection() {
 
     # Get initial balances for alice's deposit
     local alice_reserves=$(get_value "reserves_id_alice")
-    local alice_deposit_before=$(run_node_cmd alice deposit ls "$alice_reserves" 2>&1 | grep "Balance:" | head -1 | awk '{print $2}')
+    local alice_deposit_before=$(run_node_cmd alice deposit list "$alice_reserves" 2>&1 | grep "Balance:" | head -1 | awk '{print $2}')
     log_info "Alice deposit balance before: $alice_deposit_before msat"
 
     # Mine enough blocks to trigger fee collection (fee period is 10 blocks)
@@ -613,7 +613,7 @@ test_fee_collection() {
     run_node_cmd alice deposit collect-fees 2>&1
 
     # Check if balance decreased (fees were collected)
-    local alice_deposit_after=$(run_node_cmd alice deposit ls "$alice_reserves" 2>&1 | grep "Balance:" | head -1 | awk '{print $2}')
+    local alice_deposit_after=$(run_node_cmd alice deposit list "$alice_reserves" 2>&1 | grep "Balance:" | head -1 | awk '{print $2}')
     log_info "Alice deposit balance after: $alice_deposit_after msat"
 
     if [ -n "$alice_deposit_before" ] && [ -n "$alice_deposit_after" ]; then

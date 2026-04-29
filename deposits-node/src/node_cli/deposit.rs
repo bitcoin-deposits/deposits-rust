@@ -13,15 +13,27 @@ use std::str::FromStr;
 /// Handle deposit subcommands
 pub async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-node deposit <offer|list|open|ls|credit|check|complete|verify-custodian|collect-fees> [args...]");
+        eprintln!("Usage: deposits-node deposit <offer|open|list|list-offers|address|invoice|pending|credit|check|complete|verify-custodian|collect-fees> [args...]");
         return Ok(());
     }
 
     match args[0].as_str() {
         "offer" => deposit_offer(&args[1..]).await,
-        "list" => deposit_list(&args[1..]).await,
+        // `list` lists deposits in a ledger (the intuitive default).
+        // `list-offers` lists pending deposit offers — formerly the
+        // unprefixed `list` name; renamed because two visually
+        // identical commands (`list` vs `ls`) with materially
+        // different scopes was a confusing rough edge.
+        "list" => deposit_ls(&args[1..]).await,
+        "list-offers" => deposit_list(&args[1..]).await,
         "open" => deposit_open(&args[1..]).await,
-        "ls" => deposit_ls(&args[1..]).await,
+        "ls" => {
+            eprintln!(
+                "`deposit ls` was renamed to `deposit list` (and the old \
+                 `deposit list` is now `deposit list-offers`)."
+            );
+            Ok(())
+        }
         "address" => deposit_address(&args[1..]),
         "invoice" => deposit_invoice(&args[1..]).await,
         "pending" => deposit_pending(&args[1..]).await,
@@ -32,7 +44,7 @@ pub async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::
         "collect-fees" => deposit_collect_fees(&args[1..]).await,
         cmd => {
             eprintln!("Unknown deposit subcommand: {}", cmd);
-            eprintln!("Usage: deposits-node deposit <offer|list|open|ls|credit|check|complete|verify-custodian|collect-fees> [args...]");
+            eprintln!("Usage: deposits-node deposit <offer|open|list|list-offers|address|invoice|pending|credit|check|complete|verify-custodian|collect-fees> [args...]");
             Ok(())
         }
     }
