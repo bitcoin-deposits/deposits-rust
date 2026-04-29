@@ -88,7 +88,14 @@ RESERVES SUBCOMMANDS:
 
 QUORUM SUBCOMMANDS:
     quorum add <ledger_id> <member_pubkey> <member_ledger_id>
-                    Add a quorum member to your ledger (requests consent, records QuorumAddMember)
+                    Add a quorum member (requests consent, records QuorumAddMember).
+                    Member-side fee floors:
+                      --min-fee-bps <N>           Floor on annual_fee_bps the member accepts
+                      --min-fee-fixed <N>         Floor on the fixed fee component
+                      --max-fee-period <N>        Cap on fee_period_blocks
+                      --membership-until <N>      Block height the membership expires
+    quorum remove <ledger_id> <member_pubkey>
+                    Remove a quorum member (records QuorumRemoveMember)
     quorum join <our_ledger_id> <target_operator> <target_ledger_id> <expires_block>
                     Record that you joined another operator's quorum (records QuorumJoin)
     quorum begin [reserves_id]
@@ -113,8 +120,33 @@ LEDGER SUBCOMMANDS:
     ledger validate [reserves_id]
                     Validate a ledger's conformance to the Bitcoin Deposits Protocol.
                     Checks hash chain integrity, sequence continuity, and business rules.
+    ledger health [ledger_id]
+                    Report ledger health: reserves, quorum membership, co-sign
+                    readiness, and conformance state.
     ledger export [reserves_id] [--json|--binary]
                     Export a ledger for external validation or backup
+    ledger import <file_path>
+                    Import a ledger from an export file (JSON or binary)
+    ledger advertise [reserves_id] [options]
+                    Publish a Kind:39100 advertisement for a ledger.
+                    Without `reserves_id`, advertises every operator-owned ledger.
+                    Options:
+                      --name | --operator-name <S>     Operator display name
+                      --description <S>                Free-form service description
+                      --advertise-relay <URL>          Relay to publish to (override config)
+                      --annual-fee-bps <N>             Proportional annual custody fee in bps
+                      --annual-fee-fixed-msats <N>     Fixed annual periodic fee in msats
+                      --deposit-fee-bps <N>            One-time fee on incoming deposits
+                      --withdrawal-fee-bps <N>         Fee on on-chain withdrawals
+                      --invoice-fee-bps <N>            Fee on Lightning invoice payments
+                      --fee-period-blocks <N>          Fee collection period in blocks
+                      --max-deposit <N>                Max single deposit (msats)
+                      --min-deposit <N>                Min single deposit (msats)
+    ledger republish [ledger_id]
+                    Re-broadcast every update on a ledger to relays. Useful for
+                    relay catch-up after replacing a relay, or for triggering a
+                    full resync from sequence 0.
+    ledger discover Discover ledgers advertising on Nostr (Kind:39100)
 
 COLLATERAL SUBCOMMANDS:
     collateral lock <ledger_id> <amount_msats> <lock_blocks>
@@ -131,18 +163,39 @@ DEPOSIT SUBCOMMANDS:
                     Open a new deposit in a ledger
     deposit ls <reserves_id>
                     List all deposits in a ledger
+    deposit address <ledger_id> <deposit_pubkey> [--domain <domain>]
+                    Print a deposit's funding address (bech32 deposit-id form,
+                    suitable for `<bech32>@<domain>` Lightning-address style URIs)
+    deposit invoice <ledger_id> <deposit_pubkey> <amount_sats> [description]
+                    Create a BOLT-11 invoice that credits the deposit when paid
+                    (operator-side; cosigned member attestation included)
     deposit credit <reserves_id> <deposit_pubkey> <amount_msats> <invoice_id>
-                    Manually credit a deposit
+                    Low-level credit primitive. Bypasses the offer-confirmation
+                    machinery — useful only when the operator already has
+                    out-of-band proof of funding. Normal flow uses `complete`.
     deposit check <offer_id>
                     Check if a deposit offer has been funded
     deposit complete <offer_id> <txid> <amount_sats>
-                    Complete a funded deposit offer and credit the deposit
+                    Common path. Once an on-chain funding TX has confirmed,
+                    cite its txid + amount to mark the offer fulfilled and
+                    credit the deposit. Validates against the offer terms.
+    deposit pending Show pending invoices and unfunded offers
+    deposit verify-custodian <ledger_id>
+                    Cross-check the current custodian by querying quorum
+                    members and comparing their views of the latest update
+    deposit collect-fees
+                    Manually trigger periodic fee collection on operator-owned
+                    ledgers. Normally runs in the background; this command is
+                    for diagnostics.
 
 WITHDRAW SUBCOMMANDS:
     withdraw request <partner_id> <deposit_secret> <address> <amount_sats> <fee_sats>
-                    Request withdrawal (generates nonce, signs, and locks in one step)
+                    Common path. Holds the deposit secret locally, generates
+                    a nonce, signs the request, and locks in one step.
     withdraw lock <partner_id> <deposit_pubkey> <address> <amount_sats> <fee_sats> <nonce> <signature>
-                    Lock funds for withdrawal (operator-side, requires pre-signed request)
+                    Operator-side primitive. Use when the wallet has signed
+                    the request out of band (e.g. via a separate signing
+                    device) and the operator just needs to commit the lock.
     withdraw complete <partner_id> <withdrawal_id>
                     Complete a withdrawal by broadcasting the transaction
     withdraw cancel <withdrawal_id>
@@ -169,8 +222,17 @@ LIGHTNING SUBCOMMANDS (alias: ln):
                     Fail/cancel a pending Lightning payment and unlock funds
     lightning fulfill <reserves_id> <deposit_pubkey> <amount_msats> <payment_id> <preimage> <signature>
                     Complete a Lightning payment with the preimage
+    lightning locks List open `InvoiceLock` operations across all ledgers
+    lightning send <reserves_id> <deposit_pubkey> <amount_msats> <bolt11>
+                    Combined helper: locks deposit funds, pays the BOLT-11 via
+                    LDK, fulfills the lock with the preimage. Convenience for
+                    operator scripts; equivalent to `lightning lock` +
+                    `lightning pay` + `lightning fulfill`.
 
 NOSTR SUBCOMMANDS:
+    nostr events [--color | --color-by-pk]
+                    Show every deposits-protocol event currently on the relay
+                    (raw decoded). Useful for debugging.
     nostr export [operator:reserves_id]
                     Broadcast ledger updates to Nostr relay (all local ledgers if no ID given)
     nostr import [operator:reserves_id]
@@ -192,16 +254,97 @@ NOSTR SUBCOMMANDS:
                     Listen for disputes (all ledgers or specific)
 
 RECOVERY SUBCOMMANDS:
+  Dispute pipeline (the canonical flow):
+    recovery dispute <ledger_id> [--reason <text>]
+                    Open a custody dispute by publishing a `DisputeEnter`
+                    operation on a forked branch
+    recovery rebuild <ledger_id> <quorum-add|status> [args...]
+                    Rebuild the dispute branch's quorum.
+                      quorum-add <member_pubkey> <member_ledger_id>
+                      status
+    recovery arm <ledger_id>
+                    Pre-commit for the lottery: publish `DisputeArmed`
+    recovery reveal <ledger_id>
+                    Publish the lottery preimage (Kind:9106) once enough
+                    co-disputants have armed
+    recovery claim <ledger_id>
+                    After the entropy block, publish `DisputeAcquire`
+                    (winner) or `DisputeYield` (loser)
+    recovery confiscate <ledger_id>
+                    Build + broadcast the confiscation transaction that
+                    spends the operator's reserves UTXO into the lottery
+                    output
+    recovery lottery-claim <ledger_id>
+                    Spend the lottery output if we are the winner
+    recovery rotate-to-quorum <ledger_id>
+                    Rotate lottery winnings to a new quorum-controlled
+                    Taproot address
+    recovery continue <ledger_id>
+                    Continue ledger operation after winning custody
+    recovery spend <ledger_id>
+                    Alias for `lottery-claim` — final on-chain step
+
+  Higher-level helpers (bundle several of the above):
     recovery start <ledger_id> [--reason <text>]
-                    Start recovery - validates ledger and publishes dispute
+                    Validate a ledger from the relay and publish a dispute
+                    if non-conforming. Convenience wrapper around `dispute`.
     recovery agree <ledger_id>
-                    Agree to recovery - independently validate and sign
+                    Independently validate the ledger and publish agreement
+                    if a violation is confirmed
+    recovery prepare <ledger_id>
+                    Prepare as a candidate for custody acquisition
+    recovery release <ledger_id>
+                    Publish `DisputeYield` to close a candidate branch
+                    that won't be selected
+    recovery complete <ledger_id> [--new-custodian <pubkey>]
+                    Complete recovery once the quorum agrees on a winner
     recovery status <ledger_id>
                     Show current recovery status
-    recovery claim <ledger_id>
-                    Execute a claim if eligible
-    recovery complete <ledger_id> [--new-custodian <pubkey>]
-                    Complete recovery once quorum agrees
+
+  Low-level helpers (rarely needed directly):
+    recovery embed-hash <reserves_id> <hash_hex>
+                    Embed an arbitrary 32-byte hash into the operator's
+                    chain via `DeliveryEmbed`. Used by fraud-proof
+                    construction and certified delivery.
+    recovery publish-fraud-broadcast <broadcast.json|->
+                    Publish a Kind:9101 fraud broadcast from a JSON file
+                    (or stdin via `-`). The broadcast must contain a
+                    valid causal chain.
+
+HEALTH SUBCOMMANDS:
+    health ping     Measure co-sign latency to each quorum member of every
+                    operator-owned ledger. Useful for SLA monitoring.
+    health chains   Report chain-validity status for every ledger this
+                    daemon tracks (operator-owned + joined as member)
+    health relays   Query the running daemon for live relay-connection
+                    health and subscription state
+
+BOOTSTRAP SUBCOMMANDS:
+    bootstrap init <admin_npub>
+                    Generate a fresh seed, DM the admin pubkey the seed
+                    mnemonic plus a one-shot funding address, and persist
+                    seed.hex + funding_address files in --data-dir.
+                    First step of unattended bring-up.
+    bootstrap reserves
+                    After the funding address has confirmed, create a
+                    reserves UTXO and open a ledger over the live daemon's
+                    admin channel.
+    bootstrap quorum [--quorum-size <N>]
+                    Drive quorum-add + collateral-consent against the
+                    admin's selected member set. Default Q is built-in.
+
+ADMIN SUBCOMMANDS:
+    admin buffer open [--amount-sats <N>] [--ledger <id>] [--index <N>]
+                    Open a buffer deposit on the operator's own ledger and
+                    optionally fill it with the given amount. Buffers are
+                    the operator's own deposits used for self-paid invoices
+                    and for absorbing rounding errors during fee collection.
+    admin buffer fill <index> <amount_sats>
+                    Fill a previously-opened buffer with additional sats
+    admin buffer drain <index>
+                    Drain a buffer back to the operator's wallet
+    admin buffer list
+                    List all operator-owned buffer deposits
 "#,
         program
     );
@@ -213,21 +356,39 @@ DANGER SUBCOMMANDS (testing only - DO NOT USE IN PRODUCTION):
     danger publish-invalid <reserves_id> <violation_type>
                     Publish an invalid ledger update to test recovery.
                     Violation types:
-                      invalid-hash     - Wrong previous_hash linkage
-                      skip-sequence    - Skip ahead in sequence numbers
-                      double-spend     - Spend more than available balance
-                      replay           - Replay an old sequence number
+                      invalid-hash     Wrong `previous_hash` linkage
+                      skip-sequence    Skip ahead in sequence numbers
+                      replay           Replay an old sequence number
+    danger forge-stale-cosig <reserves_id> <stale_member_hash_hex> <block_height>
+                    Forge a `StaleCosignature` proof candidate by signing an
+                    update with a deliberately-stale member-ledger-hash.
+    danger fork-update <reserves_id> [--cosigner-seed <hex>]+
+                    Build a fork-branch update signed by the listed
+                    cosigner-seed identities, useful for exercising the
+                    actor's fork-detection path.
 "#
     );
 
     println!(
-        r#"OPTIONS:
+        r#"OPTIONS (most subcommands accept these):
     --seed <hex>       Seed for wallet/identity (64 hex chars)
     --network <net>    Bitcoin network: mainnet, testnet, signet, regtest (default: signet)
     --esplora <url>    Esplora server URL (default: https://mempool.space/signet/api)
     --relay <url>      Nostr relay URL (can be specified multiple times)
+    --slow-relay <url> Durable Nostr relay used only for `fetch_events`
+                       gap-fill (can be specified multiple times)
     --data-dir <path>  Data directory (default: ~/.deposits-node)
-    --metrics-port <port>  Port for Prometheus metrics endpoint (run command only)
+    --name <name>      Operator display name; appears in logs and adverts
+    --skip-nostr-verify
+                       Skip event-signature verification on inbound events
+                       (test/dev only; never enable in production)
+
+`run`-only options:
+    --metrics-port <port>
+                       Port for the Prometheus metrics endpoint
+    --fast-poll        Tighten periodic-task intervals (2s ledger reload,
+                       5s periodic, 30s wallet sync) for test/dev clusters.
+                       Production runs leave this off.
 
 EXAMPLES:
     # Run a node on signet
