@@ -220,27 +220,32 @@ mod tests {
 
         let hash_before = ledger.state.chain_tip_hash;
 
-        // Add a quorum member — hash should change
-        let update = ledger
-            .apply_operation(&LedgerOperation::QuorumAddMember {
-                quorum_member: member_key,
-                quorum_member_signature: [0xAA; 64],
-                member_ledger_id: "member_collateral_ledger".to_string(),
-                min_fee_bps: None,
-                min_fee_fixed: None,
-                max_fee_period: None,
-                membership_until: None,
-                dispute_response_blocks: None,
-                dispute_arm_blocks: None,
-                service_response_blocks: None,
-                max_transfer_timeout_blocks: None,
-                max_descriptor_bytes: None,
-                compensation_bps: None,
-                compensation_deposit_id: None,
-                compensation_frequency_blocks: None,
-            })
-            .unwrap();
-        let hash_after_add = update.content_hash;
+        // Add three quorum members — hash should change. Q=3 minimum is
+        // required by the policy gate; each member must have a
+        // QuorumAddMember consent before they appear in QuorumBegin.
+        let mut hash_after_add = hash_before;
+        for member in &[member_key, member2_key, member3_key] {
+            let update = ledger
+                .apply_operation(&LedgerOperation::QuorumAddMember {
+                    quorum_member: *member,
+                    quorum_member_signature: [0xAA; 64],
+                    member_ledger_id: "member_collateral_ledger".to_string(),
+                    min_fee_bps: None,
+                    min_fee_fixed: None,
+                    max_fee_period: None,
+                    membership_until: None,
+                    dispute_response_blocks: None,
+                    dispute_arm_blocks: None,
+                    service_response_blocks: None,
+                    max_transfer_timeout_blocks: None,
+                    max_descriptor_bytes: None,
+                    compensation_bps: None,
+                    compensation_deposit_id: None,
+                    compensation_frequency_blocks: None,
+                })
+                .unwrap();
+            hash_after_add = update.content_hash;
+        }
         assert_ne!(
             hash_before, hash_after_add,
             "Hash should change after QuorumAddMember"

@@ -1234,7 +1234,12 @@ impl Ledger {
         // until production reliability data justifies lifting it. Q must
         // also be one of {3, 5, 7} — odd-only so thresholds have a clean
         // majority, Q≥3 for redundancy. Operator is *not* counted in Q.
-        if let LedgerOperation::QuorumBegin { quorum_members, .. } = operation {
+        if let LedgerOperation::QuorumBegin {
+            quorum_members,
+            quorum_expiry,
+            ..
+        } = operation
+        {
             let q = quorum_members.len();
             if !crate::constants::VALID_QUORUM_SIZES.contains(&q) {
                 return Err(DepositsError::ProtocolViolation {
@@ -1251,6 +1256,59 @@ impl Ledger {
                         crate::constants::MAX_DISPUTANTS
                     ),
                 });
+            }
+
+            // Each declared member must have an existing QuorumAddMember
+            // consent in next_quorum_members. The operator can only rotate
+            // to members who have explicitly consented; QuorumBegin is not
+            // a unilateral "anyone I name is now a cosigner" lever.
+            //
+            // Operator can shorten the set (drop members) by omission, or
+            // formally remove via QuorumRemoveMember. Adding a new member
+            // without prior consent is rejected here.
+            let staged: std::collections::HashMap<_, _> = self
+                .state
+                .next_quorum_members
+                .iter()
+                .map(|m| (m.pubkey, m))
+                .collect();
+            for declared in quorum_members {
+                if !staged.contains_key(declared) {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "quorum_member_unstaged".to_string(),
+                        details: format!(
+                            "QuorumBegin declares member {} who has no \
+                             corresponding QuorumAddMember consent in \
+                             next_quorum_members. Operator must record consent \
+                             before including a member in a rotation.",
+                            declared
+                        ),
+                    });
+                }
+            }
+
+            // The operator can shorten the expiry (e.g., to align rotations
+            // with a calendar quarter) but cannot extend any member's
+            // committed `membership_until`. The natural ceiling is the MIN
+            // of the declared members' commitments — the most-impatient
+            // member sets the deadline, since the on-chain script tree can
+            // only encode one timelock.
+            let min_committed: Option<u32> = quorum_members
+                .iter()
+                .filter_map(|pk| staged.get(pk).and_then(|m| m.membership_until))
+                .min();
+            if let Some(ceiling) = min_committed {
+                if *quorum_expiry > ceiling {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "quorum_expiry_exceeds_commitment".to_string(),
+                        details: format!(
+                            "QuorumBegin quorum_expiry={} exceeds the most-impatient \
+                             declared member's membership_until={}. The operator can \
+                             shorten the expiry but cannot extend a member's commitment.",
+                            quorum_expiry, ceiling
+                        ),
+                    });
+                }
             }
         }
 

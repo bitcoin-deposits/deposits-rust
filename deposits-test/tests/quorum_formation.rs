@@ -60,11 +60,11 @@ fn quorum_begin_promotes_members() {
     assert_eq!(net.op("alice").ledger.state.next_quorum_members.len(), 2);
     assert!(net.op("alice").ledger.state.quorum_members.is_empty());
 
-    // Begin quorum
+    // Begin quorum (scaffold pads to Q=3 minimum with 1 synthetic member).
     net.op_mut("alice").begin_quorum(1_000_000);
 
     assert!(net.op("alice").ledger.state.next_quorum_members.is_empty());
-    assert_eq!(net.op("alice").ledger.state.quorum_members.len(), 2);
+    assert_eq!(net.op("alice").ledger.state.quorum_members.len(), 3);
     assert_eq!(
         net.op("alice").ledger.state.quorum_state,
         QuorumState::Active
@@ -105,9 +105,10 @@ fn full_quorum_setup_three_operators() {
 
     net.op_mut("alice").begin_quorum(1_000_000);
 
-    // Verify full quorum state
+    // Verify full quorum state. Scaffold pads to Q=3 minimum with one
+    // synthetic member when only 2 real members are added.
     let state = &net.op("alice").ledger.state;
     assert_eq!(state.quorum_state, QuorumState::Active);
-    assert_eq!(state.quorum_members.len(), 2);
+    assert_eq!(state.quorum_members.len(), 3);
     assert!(state.has_sufficient_reserves());
 }

@@ -219,14 +219,24 @@ impl LedgerState {
                 amount,
                 collateral_amount,
                 quorum_expiry,
+                quorum_members,
                 ..
             } => {
                 next.reserves_key = reserves_id.clone();
                 next.reserves_amount = *amount;
                 next.collateral_amount = *collateral_amount;
                 next.quorum_expiry = Some(*quorum_expiry);
-                // Promote pending quorum members to active
-                next.quorum_members = std::mem::take(&mut next.next_quorum_members);
+                // Promote the subset of staged members that the operation
+                // declared (validated upstream to be ⊆ next_quorum_members).
+                // Members in next_quorum_members that the operation
+                // *omitted* are dropped — they never enter the active set.
+                let declared: std::collections::HashSet<_> =
+                    quorum_members.iter().copied().collect();
+                let staged = std::mem::take(&mut next.next_quorum_members);
+                next.quorum_members = staged
+                    .into_iter()
+                    .filter(|m| declared.contains(&m.pubkey))
+                    .collect();
                 next.quorum_state = QuorumState::Active;
             }
             LedgerOperation::DepositOpen {

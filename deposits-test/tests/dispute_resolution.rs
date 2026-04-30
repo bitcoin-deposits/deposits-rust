@@ -52,7 +52,8 @@ fn dispute_enter_changes_state() {
         net.op("alice").ledger.state.dispute_state,
         DisputeState::Disputed
     );
-    assert_eq!(net.op("alice").ledger.state.quorum_at_fork.len(), 2);
+    // Q=3 minimum: bob + charlie + 1 synthetic pad from begin_quorum.
+    assert_eq!(net.op("alice").ledger.state.quorum_at_fork.len(), 3);
 }
 
 #[test]
