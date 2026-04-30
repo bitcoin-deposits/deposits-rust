@@ -1026,12 +1026,28 @@ impl Wallet {
     ///
     /// # Returns
     /// A `TaprootReservesCreateResult` with the rotation transaction
-    pub fn rotate_reserves_to_taproot(
+    /// Build (but do NOT broadcast or persist) a rotation tx from a legacy
+    /// P2WSH reserves UTXO to a fresh Taproot quorum vault.
+    ///
+    /// Returns the unsigned (well, operator-signed) tx + the future
+    /// [`TaprootReservesInfo`] that should be tracked once the rotation is
+    /// confirmed *and* the QuorumBegin ledger op has committed. The legacy
+    /// reserves outpoint that will be retired is also returned so the
+    /// caller can pair it with the new info in [`commit_rotation_to_taproot`].
+    ///
+    /// This function does **no** state mutation — the wallet's two reserves
+    /// maps are unchanged on return. Only after the broadcast confirms and
+    /// the ledger-side QuorumBegin commits should the caller invoke
+    /// `commit_rotation_to_taproot` to atomically retire the legacy entry
+    /// and start tracking the new taproot UTXO. If anything fails between
+    /// build and commit, the legacy entry stays intact and a retry can
+    /// simply rebuild from the same source UTXO.
+    pub fn build_rotation_to_taproot(
         &self,
         quorum_members: Vec<PublicKey>,
         member_expiries: Vec<u32>,
         ledger_hash: [u8; 32],
-    ) -> Result<TaprootReservesCreateResult, Error> {
+    ) -> Result<(TaprootReservesCreateResult, OutPoint, TaprootReservesInfo), Error> {
         use bitcoin::ecdsa::Signature as EcdsaSignature;
         use bitcoin::sighash::{EcdsaSighashType, SighashCache};
         use bitcoin::Witness;
@@ -1146,27 +1162,16 @@ impl Wallet {
             confirmed: false,
         };
 
-        // Update tracking: remove old reserves, add new
-        {
-            let mut old_reserves = self.reserves.write().unwrap();
-            old_reserves.remove(&reserves_info.outpoint);
-        }
-        {
-            let mut new_reserves = self.taproot_reserves.write().unwrap();
-            new_reserves.insert(new_outpoint, new_info);
-        }
-
-        // Persist
-        self.save_reserves_to_disk()?;
-
+        // No state mutation here — the caller drives broadcast, confs,
+        // and ledger commit before invoking commit_rotation_to_taproot.
         tracing::info!(
-            "Rotating reserves from {} to Taproot {} with {} quorum members",
+            "Built rotation from {} to Taproot {} with {} quorum members (not yet broadcast)",
             reserves_info.outpoint,
             new_outpoint,
             quorum_members.len()
         );
 
-        Ok(TaprootReservesCreateResult {
+        let result = TaprootReservesCreateResult {
             outpoint: new_outpoint,
             address: taproot_output.address.clone(),
             amount: output_amount,
@@ -1174,7 +1179,36 @@ impl Wallet {
             taproot_output,
             quorum_expiry: first_expiry,
             ledger_hash,
-        })
+        };
+        Ok((result, reserves_info.outpoint, new_info))
+    }
+
+    /// Atomically retire the legacy reserves entry and start tracking the
+    /// new Taproot UTXO. Persists immediately. Call only after the rotation
+    /// tx has confirmed AND the QuorumBegin ledger op has committed.
+    pub fn commit_rotation_to_taproot(
+        &self,
+        legacy_outpoint: OutPoint,
+        new_info: TaprootReservesInfo,
+    ) -> Result<(), Error> {
+        let new_outpoint = new_info.outpoint;
+        let member_count = new_info.quorum_members.len();
+        {
+            let mut old_reserves = self.reserves.write().unwrap();
+            old_reserves.remove(&legacy_outpoint);
+        }
+        {
+            let mut new_reserves = self.taproot_reserves.write().unwrap();
+            new_reserves.insert(new_outpoint, new_info);
+        }
+        self.save_reserves_to_disk()?;
+        tracing::info!(
+            "Committed rotation: retired legacy {} → tracking Taproot {} (Q={})",
+            legacy_outpoint,
+            new_outpoint,
+            member_count
+        );
+        Ok(())
     }
 
     /// Broadcast a transaction

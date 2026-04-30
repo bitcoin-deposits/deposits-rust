@@ -773,8 +773,15 @@ impl Node {
             ));
         }
 
-        // --- Phase 2: construct + broadcast rotation tx ---
-        let result = self.wallet.rotate_reserves_to_taproot(
+        // --- Phase 2: build the rotation tx (no wallet state mutation yet) ---
+        //
+        // build_rotation_to_taproot returns the operator-signed tx plus the
+        // legacy outpoint that will be retired and the new TaprootReservesInfo
+        // that will be tracked. We commit those mutations only after the
+        // rotation is confirmed *and* the QuorumBegin op has applied. If
+        // anything between here and that commit fails, the legacy reserves
+        // entry stays intact and a retry just rebuilds.
+        let (result, legacy_outpoint, pending_taproot) = self.wallet.build_rotation_to_taproot(
             quorum_members.clone(),
             quorum_expiries.clone(),
             ledger_hash,
@@ -879,6 +886,17 @@ impl Node {
         // next_quorum_members and embeds their signatures into the update,
         // producing a result that peers' validators will accept.
         self.commit_operation(ledger_id, operation).await?;
+
+        // --- Phase 5: the ledger op has committed → mutate wallet state ---
+        // Only now do we retire the legacy reserves entry and start tracking
+        // the new taproot UTXO. If a crash had occurred between the broadcast
+        // (above) and this commit, the legacy entry would still be in the
+        // wallet's reserves map and a retry would attempt to rebuild — at
+        // which point the broadcast would fail because the input is already
+        // spent on-chain, exposing the half-rotated state to the operator
+        // rather than silently losing track of funds.
+        self.wallet
+            .commit_rotation_to_taproot(legacy_outpoint, pending_taproot)?;
 
         tracing::info!(
             "Committed QuorumBegin operation to ledger: txid={}, quorum={} members",
