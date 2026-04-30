@@ -70,7 +70,7 @@ Module map:
 | `fraud.rs` | `FraudProof`, `FraudBroadcast`, `FraudEvidence`, `ProofEmbedding`, `CausalLink`. The shapes a fraud proof takes on the wire |
 | `wire_messages.rs` | The on-wire envelopes for cosign requests, consent requests, etc. |
 | `signature_utils.rs` | Helpers for hashing-to-signing-data and signature verification |
-| `constants.rs` | Protocol constants: `MAX_QUORUM_SIZE_POLICY = 8`, `MAX_DISPUTANTS = 15`, etc. |
+| `constants.rs` | Protocol constants: `MAX_QUORUM_SIZE_POLICY = 7`, `VALID_QUORUM_SIZES = {3, 5, 7}`, `MAX_DISPUTANTS = 15`, etc. |
 | `error.rs` | `DepositsError`, `DepositsResult` |
 
 The single most important type in this crate is `LedgerOperation` (in `messages/types.rs`). Every variant corresponds to a class of state-machine transition — `LedgerOpen`, `DepositOpen`, `InvoiceCredit`, `InvoiceLock`, `InvoiceFulfill`, `TransferLock`, `TransferComplete`, `FeeChange`, `QuorumBegin`, `DisputeEnter`, `DisputeArmed`, `DisputeAcquire`, and so on. If you want to know what operations the protocol supports, read this enum.

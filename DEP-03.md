@@ -104,7 +104,7 @@ For recovery leaves: standard tapscript multisig — `K` of `N` signature slots 
 
 ### Pre-release policy cap
 
-The script supports up to N=15 disputants. The current policy in this release is `MAX_QUORUM_SIZE_POLICY = 8` (operator + cosigners), enforced at `QuorumBegin` validation — so disputes can have at most 7 disputants. Lifting this cap is a one-line constant change with no script or wire-format implications. See `CUSTODY_LOTTERY.md` for full design rationale.
+The script supports up to N=15 disputants. The current policy in this release is `VALID_QUORUM_SIZES = {3, 5, 7}` with `MAX_QUORUM_SIZE_POLICY = 7`, enforced at `QuorumBegin` validation. `Q` is the cosigner count and excludes the operator; disputants equal `Q` exactly (every cosigner can dispute, the operator is barred from disputing their own ledger). Lifting the cap or extending the allowed set is a one-line constant change with no script or wire-format implications. See `CUSTODY_LOTTERY.md` for full design rationale.
 
 ### Respectful Custody
 

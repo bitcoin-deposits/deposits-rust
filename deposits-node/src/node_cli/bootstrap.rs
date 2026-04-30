@@ -15,9 +15,9 @@
 //!
 //! 3. `bootstrap quorum` — discovers peer operators from ledger
 //!    advertisements, pings each to measure round-trip latency, then issues
-//!    `QuorumAddMember` for the top `quorum_size - 1` peers and finally
-//!    `QuorumBegin`. Must run AFTER the daemon is started (it delegates to
-//!    the daemon over Nostr).
+//!    `QuorumAddMember` for the top `quorum_size` peers (Q = cosigner count;
+//!    operator is not counted) and finally `QuorumBegin`. Must run AFTER the
+//!    daemon is started (it delegates to the daemon over Nostr).
 
 use super::{derive_operator_secret, parse_config, send_daemon_request};
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
@@ -27,7 +27,7 @@ use crate::{Node, NodeConfig};
 use nostr_sdk::prelude::*;
 use std::time::Duration;
 
-const DEFAULT_QUORUM_SIZE: usize = 5;
+const DEFAULT_QUORUM_SIZE: usize = 3;
 
 pub async fn bootstrap_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
@@ -147,7 +147,7 @@ async fn bootstrap_init(args: &[String]) -> Result<(), Box<dyn std::error::Error
          \n\
          Send any amount to the funding address. The first on-chain payment \
          becomes the reserves UTXO, and the container will form a Q={} quorum \
-         with the fastest peers it can find.",
+         (Q cosigners + operator) with the fastest peers it can find.",
         mnemonic,
         config.network,
         node_pubkey,
@@ -335,6 +335,15 @@ async fn bootstrap_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Err
         match args[i].as_str() {
             "--quorum-size" if i + 1 < args.len() => {
                 quorum_size = args[i + 1].parse()?;
+                if !deposits_core::VALID_QUORUM_SIZES.contains(&quorum_size) {
+                    return Err(format!(
+                        "--quorum-size {} is not in the allowed set {:?} \
+                         (Q is the cosigner count; operator is not counted)",
+                        quorum_size,
+                        deposits_core::VALID_QUORUM_SIZES,
+                    )
+                    .into());
+                }
                 i += 1;
             }
             _ => {
@@ -389,7 +398,10 @@ async fn bootstrap_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // responsive for the common "peer booted a minute ago" case.
     const RETRY_SLEEP_SECS: u64 = 300; // 5 min
 
-    let need = quorum_size - 1;
+    // Q is the cosigner count and excludes the operator. Each peer we
+    // need to recruit becomes one cosigner, so `need == quorum_size`
+    // exactly (no off-by-one for "the operator slot").
+    let need = quorum_size;
     let mut round = 0;
     loop {
         round += 1;

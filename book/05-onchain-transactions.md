@@ -78,7 +78,7 @@ Once `QuorumBegin` is committed, the ledger is "active" — the quorum is the on
 
 ## Reserves rotation
 
-Quorums are not permanent. Each member's `QuorumAddMember` carries a `membership_until` block height; the quorum's overall expiry is the *minimum* of those, because the script tree can only encode one timelock and the most-impatient member sets the deadline. Before that block arrives, the operator must roll the UTXO into a new one with a fresh `QuorumBegin`. Membership churn — a member leaving, a new member joining, a `MAX_QUORUM_SIZE_POLICY = 8` reshuffle — also forces a rotation, since it changes the script tree.
+Quorums are not permanent. Each member's `QuorumAddMember` carries a `membership_until` block height; the quorum's overall expiry is the *minimum* of those, because the script tree can only encode one timelock and the most-impatient member sets the deadline. Before that block arrives, the operator must roll the UTXO into a new one with a fresh `QuorumBegin`. Membership churn — a member leaving, a new member joining, a `Q ∈ {3, 5, 7}` reshuffle — also forces a rotation, since it changes the script tree.
 
 A rotation transaction is shaped like this:
 

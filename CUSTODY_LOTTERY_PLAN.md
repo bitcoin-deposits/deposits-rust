@@ -213,9 +213,9 @@ The kaitai schema (`deposits_protocol.ksy`) was updated to retire field IDs 106 
 We initially planned to enforce a per-disputant bond ratio (`bond_locked` field on `DisputeArmed`, validator runs `check_bond_ratio_precondition` against the worst-case `(N-1)/N` at MAX_DISPUTANTS=15). After implementing it through the integration tests, the user reconsidered: simpler to cap quorum size for the pre-release period and avoid the wire-format addition entirely. Smaller quorums also keep the worst-case bond ratio modest (≤ 6/7 ≈ 86% at Q=8 total), which is the same goal the bond gate was chasing.
 
 Landed:
-- `MAX_QUORUM_SIZE_POLICY = 8` constant in `deposits-protocol/src/constants.rs`. Total quorum size = operator + cosigners. Disputants are quorum members excluding the original operator (the operator is structurally barred by `validate_update_signer` from arming on their own ledger), so `Q = 8` → max 7 disputants.
-- `Ledger::validate_operation` rejects `QuorumBegin` whose `quorum_members.len() + 1 > MAX_QUORUM_SIZE_POLICY` with `quorum_size_policy_exceeded`.
-- `recovery_confiscate` re-checks `participants.len() <= MAX_QUORUM_SIZE_POLICY - 1` as defence-in-depth (the QuorumBegin gate catches it earlier in the lifecycle, but a pre-policy ledger reaching confiscate time would still be rejected).
+- `MAX_QUORUM_SIZE_POLICY = 7` and `VALID_QUORUM_SIZES = {3, 5, 7}` constants in `deposits-protocol/src/constants.rs`. `Q` is the cosigner count; the operator is *not* counted in `Q`. Disputants equal `Q` exactly (every cosigner can dispute, the operator is barred by `validate_update_signer` from arming on their own ledger).
+- `Ledger::validate_operation` rejects `QuorumBegin` whose `quorum_members.len()` is not in `VALID_QUORUM_SIZES` with `quorum_size_invalid`.
+- `recovery_confiscate` re-checks `participants.len() <= MAX_QUORUM_SIZE_POLICY` as defence-in-depth (the QuorumBegin gate catches it earlier in the lifecycle, but a pre-policy ledger reaching confiscate time would still be rejected).
 - The bond-ratio helper (`check_bond_ratio_precondition`) stays in `tapscript_reserves` as a pure utility for any future enforcement work — it just isn't wired into the validation path.
 - `scaling.rs`'s `for n in [4, 8, 12]` loops shrunk to `[4, 6, 8]` to stay under the cap.
 

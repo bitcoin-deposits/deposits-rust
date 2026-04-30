@@ -230,14 +230,40 @@ impl Operator {
     }
 
     /// Begin quorum (promotes pending members to active).
+    ///
+    /// Pads the cosigner list with synthetic deterministic keys up to
+    /// `MIN_VALID_Q = 3` if the test set up fewer real members. Tests
+    /// that exercise specific cosigner-set behavior (e.g.,
+    /// adversarial consent paths) should add three real members
+    /// explicitly via `add_quorum_member`.
     pub fn begin_quorum(&mut self, new_reserves_amount: u64) {
-        let members: Vec<PublicKey> = self
+        use bitcoin::secp256k1::{Secp256k1, SecretKey};
+        const MIN_VALID_Q: usize = 3;
+        let real: Vec<PublicKey> = self
             .ledger
             .state
             .next_quorum_members
             .iter()
             .map(|m| m.pubkey)
             .collect();
+        let mut members = real.clone();
+        if members.len() < MIN_VALID_Q {
+            // Generate deterministic synthetic keys with high seeds so
+            // they don't collide with real test operators (which tend to
+            // use low byte values).
+            let secp = Secp256k1::new();
+            let mut filler: u8 = 0xF0;
+            while members.len() < MIN_VALID_Q {
+                let mut bytes = [0u8; 32];
+                bytes[31] = filler;
+                let sk = SecretKey::from_slice(&bytes).unwrap();
+                let pk = PublicKey::from_secret_key(&secp, &sk);
+                if !members.contains(&pk) {
+                    members.push(pk);
+                }
+                filler = filler.wrapping_add(1);
+            }
+        }
         let op = LedgerOperation::QuorumBegin {
             reserves_id: format!("{}_rotated", self.ledger.state.reserves_key),
             spending_txid: [0x11; 32],

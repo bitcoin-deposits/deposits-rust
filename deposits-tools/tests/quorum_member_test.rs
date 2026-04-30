@@ -214,6 +214,8 @@ mod tests {
     fn test_quorum_member_messages_update_hash_chain() {
         let operator_key = generate_test_pubkey(1);
         let member_key = generate_test_pubkey(2);
+        let member2_key = generate_test_pubkey(3);
+        let member3_key = generate_test_pubkey(4);
         let mut ledger = Ledger::new_as_operator(operator_key, "bcrt1qtest".to_string(), 0);
 
         let hash_before = ledger.state.chain_tip_hash;
@@ -254,7 +256,7 @@ mod tests {
                 amount: 100_000_000,
                 quorum_expiry: 1_000_000,
                 ledger_hash: [0x33; 32],
-                quorum_members: vec![member_key],
+                quorum_members: vec![member_key, member2_key, member3_key],
                 collateral_amount: 50_000,
             })
             .unwrap();

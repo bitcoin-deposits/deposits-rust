@@ -123,7 +123,7 @@ This is the disputant's commitment to the on-chain lottery. Three fields:
 
 `DisputeArmed` advances the fork's `DisputeState` from `Disputed` to `Armed`. From here only `DisputeAcquire` (winner) or `DisputeYield` (loser) is valid.
 
-Each disputant arms independently. The lottery fires once *all* expected disputants have armed (or the arm window closes). Expected disputants = quorum members minus operator. For Q=3 with Alice operator, that's {Bob, Carol}.
+Each disputant arms independently. The lottery fires once *all* expected disputants have armed (or the arm window closes). Expected disputants = `Q` exactly (every cosigner; the operator was never in `Q`). For Q=3 with Alice operator and {Bob, Carol, Dave} as cosigners, all three are expected to arm.
 
 `auto_arm_for_dispute` in `dispute.rs` handles `DisputeEnter` and `DisputeArmed` together: by the time a disputant has finished forking and entering, they arm with a freshly-generated 32-byte preimage. Stages 3 and 4 are usually sub-second after detection.
 
@@ -253,7 +253,7 @@ A few hard limits:
 
 - **`MAX_DISPUTANTS = 15`** (`deposits-protocol/src/constants.rs:52`). The script construction tops out at 15. Past that, witness sizes, recovery-quorum requirements, and bond economics no longer hold. The 16th disputant receives a `DisputeFull` rejection.
 
-- **`MAX_QUORUM_SIZE_POLICY = 8`** (`deposits-protocol/src/constants.rs:72`). The current operational policy caps total quorum size at 8 (operator + 7 cosigners), so at most 7 disputants per dispute. This is well below the script's 15-disputant cap; lifting it is a one-line constant change with no script or wire-format implications. Smaller quorums are simpler to coordinate; 8 is enough for the one-honest-member assumption to be useful without the recovery cascade dominating operations.
+- **`MAX_QUORUM_SIZE_POLICY = 7`** with `VALID_QUORUM_SIZES = {3, 5, 7}` (`deposits-protocol/src/constants.rs:72`). The current operational policy restricts `Q` (cosigner count, operator not included) to odd values 3-7 inclusive. Disputants equal `Q` exactly — every cosigner can dispute, the operator is barred from disputing their own ledger. This is well below the script's 15-disputant cap; lifting it is a one-line constant change with no script or wire-format implications. Smaller quorums are simpler to coordinate; 7 is enough for the one-honest-member assumption to be useful without the recovery cascade dominating operations.
 
 - **Retry depth bound** of `⌊N/2⌋` per `CUSTODY_LOTTERY.md`. Prevents an adversary controlling 2+ operators from stalling indefinitely by alternating defections across rounds. At N=7 disputants that's 3 retries; past that the lottery is declared void and falls back to manual quorum resolution.
 
@@ -339,7 +339,7 @@ The example takes about 90 seconds in the regtest integration test, dominated by
 - Honest recovery is no-fault (collateral returns); proven fraud is punitive (collateral forfeited). Multi-ledger slashing replays the same proof against the operator's other ledgers, multiplying the cost of misbehavior.
 - Inactive-quorum proofs slash members who failed to act. The protocol does not allow passive agreement — declining to escalate a fraud is itself slashable.
 - The implementation event-drives the confiscate path via a `dispute_wakeup` Notify, dropping the armed-to-confiscate latency from 5–60s to milliseconds. The periodic loop still runs as a safety net.
-- Hard caps: `MAX_DISPUTANTS = 15` (script limit), `MAX_QUORUM_SIZE_POLICY = 8` (current operational cap → ≤7 disputants per dispute), retry depth `⌊N/2⌋`, recovery-quorum precondition `N_quorum − N_disputants ≥ T_emergency`.
+- Hard caps: `MAX_DISPUTANTS = 15` (script limit), `MAX_QUORUM_SIZE_POLICY = 7` with `VALID_QUORUM_SIZES = {3, 5, 7}` (current operational policy → ≤7 disputants per dispute), retry depth `⌊N/2⌋`, recovery-quorum precondition `N_quorum − N_disputants ≥ T_emergency`.
 
 ## Where this leads
 

@@ -119,7 +119,7 @@ If exactly one disputant fails to reveal within the timeout, the remaining N-1 c
 
 #### Pre-release policy cap
 
-The script supports up to N=15 disputants, but the operational policy in this release is `MAX_QUORUM_SIZE_POLICY = 8` total quorum members → at most 7 disputants per dispute (the operator is barred from disputing their own ledger by `validate_update_signer`). `Ledger::validate_operation` rejects `QuorumBegin` whose total exceeds the policy cap. Lifting it later is a one-line constant change with no script or wire-format implications.
+The script supports up to N=15 disputants, but the operational policy in this release is `VALID_QUORUM_SIZES = {3, 5, 7}` with `MAX_QUORUM_SIZE_POLICY = 7` (`Q` is the cosigner count and excludes the operator) → at most 7 disputants per dispute. The operator is barred from disputing their own ledger by `validate_update_signer` and was never counted in `Q`, so disputants equal `Q` exactly. `Ledger::validate_operation` rejects `QuorumBegin` whose `Q` falls outside the allowed set. Lifting the cap or extending the set is a one-line constant change with no script or wire-format implications.
 
 #### Respectful vs Punitive
 

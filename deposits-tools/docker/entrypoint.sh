@@ -7,7 +7,8 @@ set -e
 # On first boot generates its own operator key, DMs the admin npub the
 # BIP39 mnemonic + funding address (NIP-17 gift-wrapped), waits for the
 # first on-chain payment to become reserves, then discovers peer operators
-# and forms a Q=5 quorum with the fastest ones.
+# and forms a Q=3 quorum with the fastest ones (Q is the cosigner count;
+# operator is not counted).
 #
 # Required:
 #   NETWORK                          - bitcoin, testnet, signet, regtest
@@ -45,7 +46,8 @@ set -e
 #   RELAY_PORT                       - local relay port (default: 7777)
 #   METRICS_PORT                     - prometheus metrics port (default: 9100)
 #   NODE_NAME                        - operator name for advertisements
-#   QUORUM_SIZE                      - default 5
+#   QUORUM_SIZE                      - default 3 (cosigner count; operator
+#                                      not counted). Must be one of {3, 5, 7}.
 #   COURIER_RESERVES_SATS            - open a buffer deposit of this many
 #                                      sats on the operator's own ledger
 #                                      after quorum, publish a Swap
@@ -105,7 +107,7 @@ DATA_DIR="/data/node"
 RELAY_DIR="/data/relay"
 RELAY_PORT="${RELAY_PORT:-7777}"
 METRICS_PORT="${METRICS_PORT:-9100}"
-QUORUM_SIZE="${QUORUM_SIZE:-5}"
+QUORUM_SIZE="${QUORUM_SIZE:-3}"
 
 mkdir -p "$DATA_DIR" "$RELAY_DIR"
 

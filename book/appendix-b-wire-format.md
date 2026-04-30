@@ -408,7 +408,7 @@ These are the policy and protocol numbers that wire-format implementers need to 
 | `DEPOSITS_PROTOCOL_VERSION` | `1` | Wire-format version field. Bump on incompatible TLV layout changes |
 | `PROTOCOL_VERSION` (messages) | `2` | Peer-message envelope version. Currently `v2` (consolidated messages) |
 | `MIN_PROTOCOL_VERSION` | `1` | Lowest version a v2 peer will speak to |
-| `MAX_QUORUM_SIZE_POLICY` | `8` | Pre-release operational cap on `operator + cosigners`. Disputants in any one lottery: `Q − 1 = 7` (operator is barred from disputing own ledger) |
+| `MAX_QUORUM_SIZE_POLICY` | `7` | Pre-release operational cap on `Q`, the cosigner count (operator not counted). Combined with `VALID_QUORUM_SIZES = {3, 5, 7}` (odd-only, ≥3). Disputants in any one lottery: `Q` exactly (operator is barred from disputing own ledger and was never in `Q`) |
 | `MAX_DISPUTANTS` | `15` | Hard protocol cap on lottery participants. Builders and `recovery_confiscate` refuse larger sets |
 | `TIMEOUT_RECOVERY_CSV_BLOCKS` | `8064` | CSV delay (~8 weeks) on the lottery script's last-resort timeout-recovery leaf |
 | `MIN_RESERVES_OUTPUT_SATS` | `660` | Floor on a reserves output (above P2WSH dust) |

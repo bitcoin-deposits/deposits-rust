@@ -51,25 +51,33 @@ pub const DEPOSITS_PROTOCOL_VERSION: u16 = 1;
 /// proceed if it observes more DisputeArmed events than this cap.
 pub const MAX_DISPUTANTS: usize = 15;
 
-/// Pre-release policy cap on the total quorum size (operator + cosigners).
+/// Pre-release policy cap on the cosigner count `Q`.
+///
+/// `Q` counts cosigners only — the operator is *not* included. So `Q=3`
+/// means 1 operator + 3 cosigners (4 keys total in the on-chain quorum
+/// vault). Disputants equal `Q` exactly: every cosigner can dispute,
+/// the operator is structurally barred from disputing their own ledger
+/// by `validate_update_signer`.
 ///
 /// Distinct from `MAX_DISPUTANTS`: that's the protocol/script's hard
 /// cap on what's *technically* supported (15). This constant is the
 /// *operational* cap — until production reliability data justifies
-/// going higher, we refuse to begin a quorum with more than 8 members
-/// total.
+/// going higher, we refuse `Q > 7`.
 ///
-/// Disputants in the lottery are quorum members *excluding* the
-/// original operator (the operator is the one being disputed and is
-/// structurally barred from arming on their own ledger by
-/// `validate_update_signer`). So `Q = 8` total → at most 7 disputants
-/// in any single lottery. Bond ratio worst case is 6/7 ≈ 86%;
-/// partial-reveal failure cases at p=0.99 per-party reveal stay below
-/// 1%.
+/// Valid `Q` is restricted to the odd values `{3, 5, 7}` — odd-only so
+/// thresholds have a clean majority, `Q≥3` so there's meaningful
+/// redundancy, `Q≤7` per the cap.
 ///
-/// Lifting this cap is a one-line constant change with no script or
-/// wire-format implications — the lottery already supports up to N=15.
-pub const MAX_QUORUM_SIZE_POLICY: usize = 8;
+/// Bond ratio worst case at `Q=7` is 6/7 ≈ 86%; partial-reveal failure
+/// cases at p=0.99 per-party reveal stay below 1%. Lifting the cap is
+/// a one-line constant change with no script or wire-format
+/// implications — the lottery already supports up to `N=15`.
+pub const MAX_QUORUM_SIZE_POLICY: usize = 7;
+
+/// Valid cosigner counts. `Q` must be one of these — odd-only so
+/// thresholds have a clean majority, `Q≥3` for redundancy, `Q≤7` per
+/// `MAX_QUORUM_SIZE_POLICY`.
+pub const VALID_QUORUM_SIZES: [usize; 3] = [3, 5, 7];
 
 /// CSV block delay for the very-final timeout-recovery leaf.
 ///

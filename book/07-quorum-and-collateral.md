@@ -44,29 +44,31 @@ The 40/60 ratio isn't enforced by the protocol — operators can set any reserve
 
 The split is *baked into the script tree's accounting*, not into the script tree itself. The Taproot output the quorum controls doesn't know whether 4 BTC of its 10 BTC is "reserves" and 6 BTC is "collateral" — it's just 10 BTC of P2TR. The split lives in the ledger state. What this means is: a slashing event confiscates the entire UTXO (10 BTC); the new operator inherits the deposit obligations against the reserves portion (4 BTC owed to depositors); the remaining 6 BTC is the new operator's compensation for taking over. That residual is the collateral, and it's the operator's real loss. See [Chapter 5](05-onchain-transactions.md) for the script-path mechanics.
 
-## Why quorums are capped at Q ≤ 8
+## Why quorums are restricted to Q ∈ {3, 5, 7}
+
+`Q` counts cosigners only — the operator is not included in `Q`. So `Q=3` means 1 operator + 3 cosigners (4 keys total in the on-chain quorum vault).
 
 Two numbers govern quorum size:
 
 - `MAX_DISPUTANTS = 15` — the on-chain script's hard cap. The dispute lottery (see [Chapter 13](13-custody-lottery.md)) tags each member with a 4-byte pubkey prefix in the partial-reveal protocol; the script size grows superlinearly past 15 disputants and the bond ratio approaches 100% of disputed value. This is a wire-format constant.
-- `MAX_QUORUM_SIZE_POLICY = 8` — the *policy* cap on total quorum size (operator + cosigners). This is what the reference implementation actually enforces today.
+- `MAX_QUORUM_SIZE_POLICY = 7` — the *policy* cap on `Q`. Combined with odd-only and ≥3, valid `Q` values are restricted to `VALID_QUORUM_SIZES = {3, 5, 7}` (odd-only so thresholds have a clean majority, ≥3 for meaningful redundancy).
 
-The policy cap lives in `deposits-protocol/src/constants.rs` and is checked in `Ledger::validate_operation` at `deposits-core/src/ledger.rs:1239`:
+The policy lives in `deposits-protocol/src/constants.rs` and is enforced in `Ledger::validate_operation`:
 
 ```rust
 if let LedgerOperation::QuorumBegin { quorum_members, .. } = operation {
-    let total_quorum = quorum_members.len() + 1; // operator + cosigners
-    if total_quorum > MAX_QUORUM_SIZE_POLICY {
+    let q = quorum_members.len(); // cosigner count, operator not counted
+    if !VALID_QUORUM_SIZES.contains(&q) {
         return Err(DepositsError::ProtocolViolation { ... });
     }
 }
 ```
 
-The reasoning behind capping below the on-chain limit is operational caution. The lottery script supports up to N=15 disputants, but until the network has production reliability data — how often partial-reveal failures actually occur, how cosigners behave under load, what bond-ratio range is comfortable — running smaller quorums keeps the worst-case dispute cheap. With Q=8, the lottery has at most 7 disputants (operator excluded; see below); the worst-case bond ratio is 6/7 ≈ 86%, and partial-reveal failure cases at p=0.99 per-party reveal stay below 1%.
+The reasoning behind capping below the on-chain limit is operational caution. The lottery script supports up to N=15 disputants, but until the network has production reliability data — how often partial-reveal failures actually occur, how cosigners behave under load, what bond-ratio range is comfortable — running smaller quorums keeps the worst-case dispute cheap. With Q=7 (the largest allowed), the lottery has 7 disputants; the worst-case bond ratio is 6/7 ≈ 86%, and partial-reveal failure cases at p=0.99 per-party reveal stay below 1%.
 
-Lifting the cap is one constant change. The protocol fuzzer and the test suite still exercise high-Q lottery scripts at Q=11 and Q=15 to keep the script-side machinery honest, so the day the cap is raised the validation has already been done.
+Lifting the cap is one constant change. The protocol fuzzer and the test suite still exercise high-Q lottery scripts at N=11 and N=15 to keep the script-side machinery honest, so the day the cap is raised the validation has already been done.
 
-**Disputants = Q − 1.** When a fraud proof fires against an operator, the *operator* is the party being disputed and is structurally barred from arming on their own ledger (their signature wouldn't make sense; they're the one being slashed). This is enforced by `validate_update_signer`. So a Q=8 quorum produces at most 7 disputants in the lottery — the cosigners. The operator is on the receiving end, not the racing end.
+**Disputants = Q.** When a fraud proof fires against an operator, the *operator* is the party being disputed and is structurally barred from arming on their own ledger (their signature wouldn't make sense; they're the one being slashed). This is enforced by `validate_update_signer`. The operator was never counted in `Q`, so disputants equal `Q` exactly — every cosigner is a potential disputant.
 
 ## Fee-schedule policy: members protect themselves from bad inheritance
 

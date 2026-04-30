@@ -327,8 +327,8 @@ Terms used throughout the book, grouped alphabetically. Chapter references point
 **`MAX_DISPUTANTS = 15`**
 : The on-chain script's hard cap on disputant count. Set by witness sizes and bond economics. See [Chapter 7: Quorum and Collateral](07-quorum-and-collateral.md).
 
-**`MAX_QUORUM_SIZE_POLICY = 8`**
-: The current policy cap on total quorum size (operator + cosigners). One-line constant change to lift; below the script's 15-disputant capacity.
+**`MAX_QUORUM_SIZE_POLICY = 7`** (with `VALID_QUORUM_SIZES = {3, 5, 7}`)
+: The current policy cap on `Q`, the cosigner count. The operator is *not* counted in `Q`. Restricted to odd values 3-7 inclusive. One-line constant change to lift or extend the allowed set; below the script's 15-disputant capacity.
 
 **`max_transfer_timeout_blocks`**
 : The quorum-negotiated upper bound on `TransferLock` timeouts. Default 1008 blocks (~1 week).
@@ -435,7 +435,7 @@ Terms used throughout the book, grouped alphabetically. Chapter references point
 ## Q
 
 **Q (quorum size)**
-: The total quorum size, including the operator. `Q ≤ MAX_QUORUM_SIZE_POLICY = 8`. Disputants per dispute = Q − 1.
+: The number of cosigners. The operator is *not* counted in `Q`. Valid `Q ∈ VALID_QUORUM_SIZES = {3, 5, 7}` (odd-only, ≥3 for redundancy, ≤`MAX_QUORUM_SIZE_POLICY = 7`). Disputants per dispute = `Q` exactly (every cosigner can dispute; the operator is barred from disputing their own ledger and was never in `Q`).
 
 **Quorum**
 : The set of operators who co-sign a particular ledger's updates. Each ledger has its own; membership is asymmetric (A's quorum can include B, but B's quorum need not include A). See [Chapter 7: Quorum and Collateral](07-quorum-and-collateral.md).
