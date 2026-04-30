@@ -517,7 +517,12 @@ impl LedgerState {
                 }
             }
             LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
-                next.quorum_members.retain(|m| m.pubkey != *quorum_member);
+                // Unstage only. The active set (`quorum_members`) reflects
+                // the on-chain UTXO's signers; mutating it without an
+                // accompanying rotation tx would silently break custody —
+                // the on-chain script still requires those keys to spend.
+                // Membership in the *active* set leaves only via QuorumBegin
+                // (rotation re-declares membership) or QuorumLeave.
                 next.next_quorum_members
                     .retain(|m| m.pubkey != *quorum_member);
             }
