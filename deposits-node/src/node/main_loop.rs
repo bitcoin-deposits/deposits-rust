@@ -1499,6 +1499,12 @@ impl Node {
                                                 &stale_id[..16.min(stale_id.len())],
                                             );
                                             }
+                                            // Local tip == relay tip. Drop from the stale set;
+                                            // the inbound path (inbound.rs) will re-mark it
+                                            // stale if a future event arrives with a sequence
+                                            // gap. Without this, every joined ledger gets
+                                            // re-fetched every RELAY_FETCH_COOLDOWN forever.
+                                            continue;
                                         }
                                         Ok(Err(e)) => {
                                             let err_str = format!("{}", e);
@@ -1541,7 +1547,13 @@ impl Node {
                                 }
                             }
 
-                            // Still behind — re-queue for next cycle
+                            // Re-queue for next cycle. Reaches here when:
+                            //   - relay fetch was deferred (cooldown active or another
+                            //     ledger took this cycle's single fetch slot)
+                            //   - relay fetch failed with a non-chain-break error
+                            // The "fetch succeeded but at-tip" and "fetch succeeded with
+                            // new events" cases continue earlier; chain breaks and
+                            // cosign-pending defers handle their own re-queue / drop.
                             self.stale_joined_ledgers
                                 .lock()
                                 .unwrap()
