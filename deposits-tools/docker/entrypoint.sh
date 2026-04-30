@@ -154,7 +154,11 @@ if command -v strfry >/dev/null 2>&1 && [ -f /etc/strfry.conf.tmpl ]; then
     sed "s|__RELAY_DIR__|${RELAY_DIR}|g; s|__RELAY_PORT__|${RELAY_PORT}|g" \
         /etc/strfry.conf.tmpl > /tmp/strfry.conf
     echo "Starting local relay on port $RELAY_PORT..."
-    strfry --config=/tmp/strfry.conf relay &
+    # Filter strfry's per-event Writer/cron INFO chatter (every Insert/Delete,
+    # every ephemeral-cleanup pass). Hardcoded LI() in strfry, not gated by
+    # any of its config knobs. WARN/ERR + startup INFO still pass through.
+    strfry --config=/tmp/strfry.conf relay 2>&1 \
+        | awk '!/\[(Writer|cron) +\]INFO\|/' &
     sleep 1
     LOCAL_RELAY="ws://127.0.0.1:${RELAY_PORT}"
 fi
