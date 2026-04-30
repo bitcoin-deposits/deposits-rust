@@ -11,22 +11,26 @@ use crate::Node;
 
 /// Handle reserves subcommands
 pub async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    if args.is_empty() {
-        // Default behavior: create reserves (backwards compatible)
-        return reserves_create(&[]).await;
+    if args.is_empty() || args[0].starts_with("--") {
+        eprintln!(
+            "Usage: deposits-node reserves <create|list|spend> [args...]\n\
+             \n\
+             Subcommands:\n\
+               create [amount_sats]   Create a new reserves UTXO (defaults to wallet balance - 1000)\n\
+               list                   List existing reserves UTXOs\n\
+               spend                  Spend a reserves UTXO back to the operator wallet"
+        );
+        return Ok(());
     }
 
     match args[0].as_str() {
         "create" => reserves_create(&args[1..]).await,
         "list" => reserves_list(&args[1..]).await,
         "spend" => reserves_spend(&args[1..]).await,
-        arg if !arg.starts_with("--") && arg.parse::<u64>().is_ok() => {
-            // Legacy: direct amount argument (backwards compatible)
-            reserves_create(args).await
-        }
-        _ => {
-            // Could be config args for create (backwards compatible)
-            reserves_create(args).await
+        cmd => {
+            eprintln!("Unknown reserves subcommand: {}", cmd);
+            eprintln!("Run `deposits-node reserves` for usage.");
+            Ok(())
         }
     }
 }
