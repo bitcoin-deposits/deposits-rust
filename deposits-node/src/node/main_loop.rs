@@ -1101,7 +1101,7 @@ impl Node {
             // Periodic tasks (every 5s fast / 60s normal)
             if last_periodic.elapsed() >= periodic_interval {
                 let periodic_start = std::time::Instant::now();
-                tracing::info!("[CANARY] entering periodic section (v2-timeout-all)");
+                tracing::debug!("[CANARY] entering periodic section (v2-timeout-all)");
                 // Lightweight block height sync (2 HTTP requests)
                 if let Err(e) = self.sync_block_height() {
                     tracing::warn!("Block height sync failed: {}", e);
@@ -1250,7 +1250,7 @@ impl Node {
 
             // Discover new/updated ledger files and refresh quorum membership cache
             if last_reload.elapsed() >= reload_interval {
-                tracing::info!("[CANARY] entering reload section (v2-timeout-all)");
+                tracing::debug!("[CANARY] entering reload section (v2-timeout-all)");
                 // Pre-check: skip entire reload if ledgers lock is contended
                 // (orphaned JoinSet tasks may still hold it after abort_all+drain timeout).
                 if self.handler.ledgers.try_lock().is_err() {
@@ -1379,7 +1379,7 @@ impl Node {
                             // Try event store first (free, in-memory)
                             let caught_up = self.catch_up_ledger_from_event_store(stale_id);
                             if caught_up > 0 {
-                                tracing::info!(
+                                tracing::debug!(
                                     "Background gap-fill: ledger {}... +{} events from event store",
                                     &stale_id[..16.min(stale_id.len())],
                                     caught_up,
@@ -1428,7 +1428,7 @@ impl Node {
                                         continue;
                                     }
 
-                                    tracing::info!(
+                                    tracing::debug!(
                                     "Background gap-fill: fetching ledger {}... from relay (local_seq={})",
                                     &stale_id[..16.min(stale_id.len())], local_seq,
                                 );
@@ -1458,7 +1458,7 @@ impl Node {
                                                     .map(|arc| arc.read().unwrap().next_sequence())
                                                     .unwrap_or(0)
                                             };
-                                            tracing::info!(
+                                            tracing::debug!(
                                             "Background gap-fill: relay fetch succeeded for {}... (seq {} -> {})",
                                             &stale_id[..16.min(stale_id.len())], local_seq, new_seq,
                                         );

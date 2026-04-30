@@ -1151,7 +1151,7 @@ impl NostrTransport {
             .collect();
         let count = new_set.len();
         *self.interested_ledgers.write().unwrap() = new_set;
-        tracing::info!("Interested ledgers set: {} ledgers", count);
+        tracing::debug!("Interested ledgers set: {} ledgers", count);
     }
 
     /// Subscribe with compacted global filters (3 kind-based filters instead of per-ledger).
@@ -3838,7 +3838,7 @@ impl NostrTransport {
                     if let Some(lid) = &ledger_id {
                         if !interested.contains(lid) {
                             if kind_num == KIND_LEDGER_REQUEST {
-                                tracing::warn!("Dropping kind {} request for ledger {} (not in interested set: {:?})",
+                                tracing::debug!("Dropping kind {} request for ledger {} (not in interested set: {:?})",
                                     kind_num, lid, interested.iter().collect::<Vec<_>>());
                             }
                             return false; // Not our ledger — drop
