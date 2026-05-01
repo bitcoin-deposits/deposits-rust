@@ -58,6 +58,29 @@ pub enum FraudProofType {
     DisputeDereliction,
     /// The operator signed a ledger update that violates protocol rules.
     NonConformingUpdate,
+    /// The operator failed to rotate the quorum before `quorum_expiry`.
+    /// The only respectful fraud-proof type — confiscation tx is
+    /// bifurcated (obligations to lottery, change to operator), and
+    /// the proof does NOT propagate cross-ledger. Evidence is just an
+    /// anchor block hash whose height in the verifier's chain exceeds
+    /// the ledger's recorded `quorum_expiry`.
+    QuorumExpired,
+}
+
+impl FraudProofType {
+    /// Whether this fraud proof is *respectful* (operator wasn't
+    /// provably dishonest, just failed to maintain the schedule) or
+    /// *punitive* (provably misbehaved).
+    ///
+    /// Drives:
+    /// - the confiscation tx shape (respectful = bifurcated, change to
+    ///   operator's pubkey; punitive = full UTXO confiscated and split
+    ///   among the Q cosigners).
+    /// - cross-ledger propagation (punitive proofs cascade to the
+    ///   operator's *other* quorums; respectful do not).
+    pub fn is_respectful(&self) -> bool {
+        matches!(self, Self::QuorumExpired)
+    }
 }
 
 /// Evidence specific to each proof type.
@@ -159,6 +182,24 @@ pub enum FraudEvidence {
         update_b64: String,
         /// What rule was violated.
         violation: String,
+    },
+
+    /// Operator failed to rotate before `quorum_expiry`. The verifier
+    /// confirms `anchor_block_hash` is in its own chain, looks up its
+    /// height, and checks the height exceeds the ledger's recorded
+    /// `quorum_expiry` (also carried here for binding + redundancy).
+    /// Block heights are never trusted from the proof — only the hash's
+    /// presence in the verifier's chain.
+    QuorumExpired {
+        /// Anchor block whose chain-height proves the deadline has
+        /// passed. Verifier looks this up via the BlockOracle.
+        #[serde(with = "crate::types::serde_32")]
+        anchor_block_hash: [u8; 32],
+        /// The expired quorum's `quorum_expiry`, as recorded on the
+        /// ledger's most recent `QuorumBegin`. Carried in the evidence
+        /// for explicit binding — verifier reads it from ledger state
+        /// and checks it matches before consulting the chain.
+        quorum_expiry: u32,
     },
 }
 
@@ -577,6 +618,86 @@ pub fn verify_inactive_quorum_member(
     Ok(())
 }
 
+/// Verify a `QuorumExpired` claim.
+///
+/// The accusation: the operator failed to rotate before the recorded
+/// `quorum_expiry`. Cosigners refuse to cosign past the deadline (see
+/// `Ledger::validate_for_cosign`), so a missed rotation is fatal to
+/// the current quorum and the lottery — bifurcated, returning
+/// collateral to the operator — is the recovery.
+///
+/// Checks:
+///   1. `anchor_block_hash` is in the verifier's confirmed chain. The
+///      verifier reads its height directly from the oracle; no height
+///      claimed by the proof creator is ever trusted.
+///   2. `anchor_height > evidence.quorum_expiry`. The anchor block must
+///      be strictly after the deadline — exactly at the deadline is
+///      still cosignable per the cosigner-edge rule.
+///   3. `evidence.quorum_expiry` matches the ledger's recorded
+///      `quorum_expiry`. The verifier reads the ledger state and
+///      confirms the binding — without this, a forged proof could cite
+///      an arbitrary expiry block to fabricate an "expired" claim.
+pub fn verify_quorum_expired(
+    proof: &FraudProof,
+    accused_history: &[crate::types::SignedLedgerUpdate],
+    block_oracle: &dyn BlockOracle,
+) -> Result<(), String> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::TlvDecode;
+
+    let FraudEvidence::QuorumExpired {
+        anchor_block_hash,
+        quorum_expiry: claimed_expiry,
+    } = &proof.evidence
+    else {
+        return Err("verify_quorum_expired: wrong evidence type".into());
+    };
+
+    // (1) anchor block confirmed.
+    let anchor_height = block_oracle.confirms(anchor_block_hash).ok_or_else(|| {
+        format!(
+            "anchor_block_hash {} not in verifier's confirmed chain",
+            hex::encode(&anchor_block_hash[..8])
+        )
+    })?;
+
+    // (2) anchor strictly after the claimed deadline.
+    if anchor_height <= *claimed_expiry {
+        return Err(format!(
+            "anchor block at height {} is not past quorum_expiry {} \
+             (expiry block itself is still cosignable; need anchor > expiry)",
+            anchor_height, claimed_expiry
+        ));
+    }
+
+    // (3) claimed_expiry matches the ledger's most recent QuorumBegin.
+    // Walk the accused's history and find the most recent QuorumBegin's
+    // declared `quorum_expiry`. The fraud proof is bound to that exact
+    // value — it can't fabricate an arbitrary one.
+    let mut last_begin_expiry: Option<u32> = None;
+    for u in accused_history.iter() {
+        if let Ok(LedgerOperation::QuorumBegin { quorum_expiry, .. }) =
+            LedgerOperation::tlv_decode(&u.message)
+        {
+            last_begin_expiry = Some(quorum_expiry);
+        }
+    }
+    let actual_expiry = last_begin_expiry.ok_or_else(|| {
+        "accused ledger has no QuorumBegin — quorum was never active, \
+         can't be 'expired'"
+            .to_string()
+    })?;
+    if *claimed_expiry != actual_expiry {
+        return Err(format!(
+            "claimed quorum_expiry {} doesn't match the ledger's most \
+             recent QuorumBegin's quorum_expiry {}",
+            claimed_expiry, actual_expiry
+        ));
+    }
+
+    Ok(())
+}
+
 /// Verify an `UncreditedOnchainPayment` claim.
 ///
 /// The accusation: a cosigned offer was issued, a Bitcoin tx funded the
@@ -956,6 +1077,15 @@ pub fn verify_fraud_broadcast(
             // Receiver-side validator dispatch is a separate piece of
             // work tracked alongside the conformance test surface.
         }
+        FraudProofType::QuorumExpired => {
+            let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
+                format!(
+                    "accused ledger {} not available",
+                    &proof.ledger_id[..16.min(proof.ledger_id.len())]
+                )
+            })?;
+            verify_quorum_expired(proof, &accused_history, block_oracle)?;
+        }
     }
 
     Ok(())
@@ -1031,6 +1161,7 @@ impl FraudProofType {
             Self::StaleCosignature => 3,
             Self::DisputeDereliction => 4,
             Self::NonConformingUpdate => 5,
+            Self::QuorumExpired => 6,
         }
     }
 }
@@ -1099,6 +1230,13 @@ impl FraudEvidence {
                 out.extend_from_slice(&sequence.to_le_bytes());
                 out.extend_from_slice(update_b64.as_bytes());
                 out.extend_from_slice(violation.as_bytes());
+            }
+            Self::QuorumExpired {
+                anchor_block_hash,
+                quorum_expiry,
+            } => {
+                out.extend_from_slice(anchor_block_hash);
+                out.extend_from_slice(&quorum_expiry.to_le_bytes());
             }
         }
         out

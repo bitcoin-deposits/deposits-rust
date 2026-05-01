@@ -96,6 +96,18 @@ fn make_nonconforming_proof() -> FraudProof {
     }
 }
 
+fn make_quorum_expired_proof() -> FraudProof {
+    FraudProof {
+        proof_type: FraudProofType::QuorumExpired,
+        accused: make_accused(),
+        ledger_id: make_ledger_id(),
+        evidence: FraudEvidence::QuorumExpired {
+            anchor_block_hash: [0xCC; 32],
+            quorum_expiry: 800_000,
+        },
+    }
+}
+
 // =========================================================================
 // Hash determinism and uniqueness
 // =========================================================================
@@ -120,6 +132,7 @@ fn each_proof_type_has_distinct_hash() {
         make_stale_cosign_proof().proof_hash(),
         make_inactive_proof().proof_hash(),
         make_nonconforming_proof().proof_hash(),
+        make_quorum_expired_proof().proof_hash(),
     ];
     // All pairwise distinct
     for i in 0..hashes.len() {
@@ -2530,4 +2543,173 @@ fn chain_hash_is_sha256_of_content_hash_and_operator_sig() {
     let expected: [u8; 32] = hasher.finalize().into();
 
     assert_eq!(update.chain_hash(), expected);
+}
+
+#[cfg(test)]
+mod quorum_expired_verifier {
+    use super::*;
+    use deposits_protocol::fraud::verify_quorum_expired;
+    use deposits_protocol::messages::LedgerOperation;
+    use deposits_protocol::tlv::TlvEncode;
+    use deposits_protocol::types::SignedLedgerUpdate;
+    use std::collections::HashMap;
+
+    struct MockOracle(HashMap<[u8; 32], u32>);
+    impl BlockOracle for MockOracle {
+        fn confirms(&self, h: &[u8; 32]) -> Option<u32> {
+            self.0.get(h).copied()
+        }
+    }
+
+    /// Build a minimal SignedLedgerUpdate carrying a QuorumBegin at the
+    /// given expiry. Other fields are zeroed since the verifier only
+    /// reads the message bytes.
+    fn quorum_begin_update(seq: u64, quorum_expiry: u32) -> SignedLedgerUpdate {
+        let op = LedgerOperation::QuorumBegin {
+            reserves_id: "rid".into(),
+            spending_txid: [0; 32],
+            new_outpoint_txid: [0x11; 32],
+            new_outpoint_vout: 0,
+            amount: 1_000_000,
+            quorum_expiry,
+            ledger_hash: [0; 32],
+            quorum_members: vec![],
+            collateral_amount: 50_000,
+        };
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
+        let operator_id = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk);
+        SignedLedgerUpdate {
+            message: op.tlv_encode(),
+            message_type: 0,
+            operator_id,
+            ledger_id: [0xAA; 32],
+            sequence_number: seq,
+            previous_hash: [0; 32],
+            content_hash: [0; 32],
+            block_height: 0,
+            block_hash: [0; 32],
+            cosign_signature: [0; 64],
+            operator_signature: [0; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: vec![],
+        }
+    }
+
+    fn make_proof(anchor: [u8; 32], claimed_expiry: u32) -> FraudProof {
+        FraudProof {
+            proof_type: FraudProofType::QuorumExpired,
+            accused: "02".to_string() + &"ab".repeat(32),
+            ledger_id: hex::encode([0xAA; 32]),
+            evidence: FraudEvidence::QuorumExpired {
+                anchor_block_hash: anchor,
+                quorum_expiry: claimed_expiry,
+            },
+        }
+    }
+
+    #[test]
+    fn accepts_genuine_expiry() {
+        // QuorumBegin recorded expiry=500; anchor confirmed at height 600.
+        let history = vec![quorum_begin_update(1, 500)];
+        let anchor = [0xCC; 32];
+        let mut oracle_map = HashMap::new();
+        oracle_map.insert(anchor, 600);
+        let oracle = MockOracle(oracle_map);
+        verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap();
+    }
+
+    #[test]
+    fn rejects_anchor_at_expiry_block() {
+        // Anchor at the expiry block itself is NOT past — that block is
+        // still cosignable per the cosigner-edge rule. Need anchor > expiry.
+        let history = vec![quorum_begin_update(1, 500)];
+        let anchor = [0xCC; 32];
+        let mut oracle_map = HashMap::new();
+        oracle_map.insert(anchor, 500);
+        let oracle = MockOracle(oracle_map);
+        let err =
+            verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap_err();
+        assert!(
+            err.contains("not past quorum_expiry"),
+            "expected expiry guard error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_anchor_before_expiry() {
+        let history = vec![quorum_begin_update(1, 500)];
+        let anchor = [0xCC; 32];
+        let mut oracle_map = HashMap::new();
+        oracle_map.insert(anchor, 400);
+        let oracle = MockOracle(oracle_map);
+        let err =
+            verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap_err();
+        assert!(err.contains("not past quorum_expiry"));
+    }
+
+    #[test]
+    fn rejects_unknown_anchor() {
+        let history = vec![quorum_begin_update(1, 500)];
+        let anchor = [0xCC; 32];
+        let oracle = MockOracle(HashMap::new()); // empty
+        let err =
+            verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap_err();
+        assert!(err.contains("not in verifier's confirmed chain"));
+    }
+
+    #[test]
+    fn rejects_mismatched_expiry() {
+        // Ledger recorded expiry=500; proof claims expiry=400. The
+        // verifier reads the actual expiry from history and refuses
+        // the binding — without this, a forged proof could fabricate
+        // any expiry.
+        let history = vec![quorum_begin_update(1, 500)];
+        let anchor = [0xCC; 32];
+        let mut oracle_map = HashMap::new();
+        oracle_map.insert(anchor, 600);
+        let oracle = MockOracle(oracle_map);
+        let err =
+            verify_quorum_expired(&make_proof(anchor, 400), &history, &oracle).unwrap_err();
+        assert!(
+            err.contains("doesn't match the ledger's most"),
+            "expected mismatch error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_no_quorum_begin_in_history() {
+        // Ledger never had a QuorumBegin (PreQuorum forever). Can't be
+        // "expired."
+        let history = vec![];
+        let anchor = [0xCC; 32];
+        let mut oracle_map = HashMap::new();
+        oracle_map.insert(anchor, 600);
+        let oracle = MockOracle(oracle_map);
+        let err =
+            verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap_err();
+        assert!(err.contains("no QuorumBegin"));
+    }
+
+    #[test]
+    fn uses_most_recent_quorum_begin() {
+        // Two QuorumBegins: re-rotation case. The verifier should bind
+        // to the most recent one (current quorum), not the earliest.
+        let history = vec![
+            quorum_begin_update(1, 200), // old, already expired
+            quorum_begin_update(2, 500), // current
+        ];
+        let anchor = [0xCC; 32];
+        let mut oracle_map = HashMap::new();
+        oracle_map.insert(anchor, 600);
+        let oracle = MockOracle(oracle_map);
+        verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap();
+        // And the old expiry is rejected (matches a stale QuorumBegin):
+        let err =
+            verify_quorum_expired(&make_proof(anchor, 200), &history, &oracle).unwrap_err();
+        assert!(err.contains("doesn't match the ledger's most"));
+    }
 }
