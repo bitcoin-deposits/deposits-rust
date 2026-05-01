@@ -19,7 +19,7 @@
 #
 # Environment:
 #   DEPOSITS_NETWORK       - bitcoin/testnet/regtest (default: bitcoin)
-#   DEPOSITS_LEDGER_RELAY  - relay for advertisements + requests (default: wss://relay.ynniv.com)
+#   DEPOSITS_LEDGER_RELAY  - relay for advertisements + requests (default: wss://relay.bitcoindeposits.net)
 #   DEPOSITS_RELAYS        - comma-separated operator relays
 
 set -e
@@ -85,7 +85,7 @@ PYEOF
 
 WALLET_DIR=""
 NETWORK="${DEPOSITS_NETWORK:-bitcoin}"
-LEDGER_RELAY="${DEPOSITS_LEDGER_RELAY:-wss://relay.ynniv.com}"
+LEDGER_RELAY="${DEPOSITS_LEDGER_RELAY:-wss://relay.bitcoindeposits.net}"
 EXTRA_RELAYS="${DEPOSITS_RELAYS:-}"
 
 # Parse global flags

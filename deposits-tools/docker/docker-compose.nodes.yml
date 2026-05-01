@@ -46,7 +46,7 @@ services:
       NODE_SEED_FILE: /secrets/seed
       NETWORK: ${NETWORK:-bitcoin}
       ELECTRUM_URL: ${ELECTRUM_URL:-http://electrs:3000}
-      LEDGER_RELAY: ${LEDGER_RELAY:-wss://relay.ynniv.com}
+      LEDGER_RELAY: ${LEDGER_RELAY:-wss://relay.bitcoindeposits.net}
       EPHEMERAL_RELAYS: ${EPHEMERAL_RELAYS:-}
       # Optional. Only needed when the operator wants a *separate* admin
       # identity (e.g. a custodial service driving admin operations on

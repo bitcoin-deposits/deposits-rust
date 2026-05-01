@@ -14,7 +14,7 @@
 # Environment:
 #   DEPOSITS_SEED_DIR    - path to seed files (default: /mnt/bitcoind/deposits)
 #   DEPOSITS_NETWORK     - bitcoin/testnet/regtest (default: bitcoin)
-#   DEPOSITS_LEDGER_RELAY - relay URL (default: wss://relay.ynniv.com)
+#   DEPOSITS_LEDGER_RELAY - relay URL (default: wss://relay.bitcoindeposits.net)
 
 set -e
 

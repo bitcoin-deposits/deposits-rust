@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./discover.sh                         # Uses default relay
-#   ./discover.sh wss://relay.ynniv.com   # Specify relay
+#   ./discover.sh wss://relay.bitcoindeposits.net   # Specify relay
 #   ./discover.sh --node alice            # Use a node's connection
 
 set -e
@@ -15,7 +15,7 @@ if [ "$1" = "--node" ] && [ -n "$2" ]; then
     exec "$SCRIPT_DIR/node-cli.sh" "$2" ledger discover
 fi
 
-RELAY="${1:-${DEPOSITS_LEDGER_RELAY:-wss://relay.ynniv.com}}"
+RELAY="${1:-${DEPOSITS_LEDGER_RELAY:-wss://relay.bitcoindeposits.net}}"
 
 # Query relay for kind 39100 (ledger advertisements)
 python3 -c "

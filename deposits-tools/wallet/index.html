@@ -1010,7 +1010,7 @@ let state = {
   backupVerified: false,
   network: 'bitcoin',
   relays: [],  // populated from setup page or advertisement relay_url
-  ledgerRelay: '',  // durable relay — set on setup page (e.g. wss://relay.ynniv.com)
+  ledgerRelay: '',  // durable relay — set on setup page (e.g. wss://relay.bitcoindeposits.net)
   deposits: [],
   keyIndex: 0,
 };
@@ -5829,7 +5829,7 @@ function parseRelays(input) {
 function getSetupConfig() {
   return {
     relayInput: document.getElementById('setup-relay').value || '',
-    ledgerRelay: document.getElementById('setup-ledger-relay').value || 'wss://relay.ynniv.com',
+    ledgerRelay: document.getElementById('setup-ledger-relay').value || 'wss://relay.bitcoindeposits.net',
     network: document.getElementById('setup-network').value,
     saveKeychain: document.getElementById('setup-save-keychain').checked,
   };
@@ -5897,7 +5897,7 @@ window.importWallet = async function() {
 
   const network = document.getElementById('setup-network').value;
   const relayInput = document.getElementById('setup-relay').value || '';
-  const ledgerRelay = document.getElementById('setup-ledger-relay').value || 'wss://relay.ynniv.com';
+  const ledgerRelay = document.getElementById('setup-ledger-relay').value || 'wss://relay.bitcoindeposits.net';
 
   if (isValidMnemonic(input)) {
     // BIP-39 mnemonic

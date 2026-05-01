@@ -31,7 +31,7 @@ fi
 # Collect the user's command + subcommands + args, then append config flags.
 # deposits-node expects: <command> [subcommand] [--flag value ...] [--seed ...]
 # We pass everything through and let deposits-node parse it.
-LEDGER_RELAY="${DEPOSITS_LEDGER_RELAY:-wss://relay.ynniv.com}"
+LEDGER_RELAY="${DEPOSITS_LEDGER_RELAY:-wss://relay.bitcoindeposits.net}"
 ALL_NODES="${DEPOSITS_NODES:-alice bob charlie diana}"
 
 # Build relay list: local relay + all other nodes' relays (for cross-node requests)
