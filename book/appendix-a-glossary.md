@@ -430,7 +430,7 @@ Terms used throughout the book, grouped alphabetically. Chapter references point
 : The chain hash of the prior update in the chain. Each new update names this; the very first update sets it to `[0; 32]`.
 
 **Punitive recovery**
-: A recovery mode where the operator is provably dishonest. The full UTXO (reserves + collateral) goes to the lottery output; the winner inherits the deposit obligations and keeps the collateral. Contrast respectful recovery. See [Chapter 12: Recovery Pipeline](12-recovery-pipeline.md).
+: A recovery mode triggered by a fraud proof of provable misbehaviour (uncredited payment, backdated cosignature, non-conforming update, dereliction of duty). The confiscation tx splits the full UTXO: `obligations` reserves to the lottery output; the remainder (excess reserves + operator's collateral) is split equally among the `Q` cosigners. The winner inherits deposit obligations and provides *replacement* collateral when claiming the lottery output — operating a ledger is a service, not a windfall. Punitive proofs propagate cross-ledger. Contrast respectful recovery. See [Chapter 12: Recovery Pipeline](12-recovery-pipeline.md).
 
 ## Q
 
@@ -494,7 +494,7 @@ Terms used throughout the book, grouped alphabetically. Chapter references point
 : The single Bitcoin Taproot output anchoring a ledger. Holds reserves + collateral. Internal key is NUMS; spend paths are tiered script leaves.
 
 **Respectful recovery**
-: A recovery mode where the operator is unavailable but no fraud is proven. Reserves go to the lottery; collateral returns to the operator. Contrast punitive recovery.
+: A recovery mode triggered by a `QuorumExpired` fraud proof — the operator failed to rotate before `quorum_expiry`. The confiscation tx is bifurcated: `obligations` reserves to the lottery output; the remainder (excess reserves + full collateral) returns to the operator's pubkey. Respectful proofs do **not** propagate cross-ledger. Contrast punitive recovery.
 
 **Ring signature**
 : A signature scheme proving membership in a known set without revealing which member. The protocol uses bLSAG; see [Chapter 18: Anonymous WoT Ring Signatures](18-ring-signatures.md).

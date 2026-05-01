@@ -85,7 +85,7 @@ Both live in the same Taproot output, controlled by the same quorum via tiered s
 
 ### Slashing
 
-When the operator is proven non-conforming (see DEP-06), the quorum confiscates the entire UTXO. The collateral portion is the operator's real loss — deposits are owed back to depositors, but the collateral is forfeited. The lottery winner (see DEP-03) takes over the ledger, inherits obligations, and retains the collateral as compensation for assuming custody.
+When the operator is proven non-conforming (see DEP-06), the quorum confiscates the entire UTXO. The collateral portion is the operator's real loss — deposits are owed back to depositors. The lottery winner (see DEP-03) takes over the ledger and inherits obligations; the slashed value (excess reserves + the operator's full collateral) is split equally among the `Q` cosigners, and the winner provides *replacement* collateral on lottery claim. Operating a ledger is a service commitment, not a windfall — the winner's economics post-takeover are roughly neutral, and the slashing reward is shared evenly so every cosigner is uniformly incentivized to dispute.
 
 If the operator misbehaves as a **quorum member** on another operator's ledger (e.g., co-signs a non-conforming update), proof of this misbehavior can be presented to the misbehaving member's own quorum, triggering slashing on their own ledger.
 

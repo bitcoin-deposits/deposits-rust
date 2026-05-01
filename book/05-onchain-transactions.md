@@ -112,9 +112,15 @@ The mechanics happen in two transactions:
 INPUT:                                       OUTPUTS:
   current reserves UTXO                      [0] lottery output (P2TR, new tapscript tree)
   witness: Tier 0 — majority quorum sig          encodes commitment_hash + target_reserves
-                                                 for each disputant
-                                             [1] (optional) change to operator pubkey
-                                                 (only for "respectful custody" cases)
+                                                 for each disputant; carries `obligations`
+                                                 worth of reserves
+                                             [1..] change distribution:
+                                                 - respectful (QuorumExpired): single
+                                                   output, (excess + full collateral) →
+                                                   operator's pubkey
+                                                 - punitive (any other fraud-proof type):
+                                                   Q outputs, (excess + collateral)/Q each
+                                                   → each cosigner's pubkey
 ```
 
 This transaction is built and cosigned by the *recovery quorum* — quorum members minus disputants minus the disputed operator. The operator is excluded from cosigning because they are the party being confiscated. Disputants are excluded because they are competing for custody and shouldn't have authority over how the lottery output gets shaped.
