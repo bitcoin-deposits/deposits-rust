@@ -84,6 +84,27 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let relays = config.relays.clone();
     let operator_name = config.operator_name.clone();
 
+    // Persist any fee/limit flags into operator_policy.json so subsequent
+    // `ledger advertise` runs (and `process_deposit_open_request` enforcement)
+    // see them. Pre-fix, these flags only got printed by ledger_open and were
+    // silently lost — operators thought they'd set fees but the advertised
+    // ones came out as zeros.
+    {
+        use crate::operator_policy::OperatorPolicy;
+        let mut policy = OperatorPolicy::load(&config.data_dir)
+            .map_err(|e| format!("Failed to load operator_policy.json: {}", e))?
+            .unwrap_or_default();
+        if policy.overlay_fee_args(&fee_schedule) {
+            policy
+                .save(&config.data_dir)
+                .map_err(|e| format!("Failed to save operator_policy.json: {}", e))?;
+            println!(
+                "Saved fee/limit policy to {}",
+                OperatorPolicy::path(&config.data_dir).display()
+            );
+        }
+    }
+
     println!("Opening ledger backed by reserves UTXO (via daemon)...");
     if let Some(bps) = collateral_bps {
         println!(
@@ -950,44 +971,10 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
     //      so re-running `ledger advertise` without flags keeps the
     //      previous values rather than silently zeroing them.
     use crate::operator_policy::OperatorPolicy;
-    let any_cli_flags = fee_schedule.has_any();
     let mut policy = OperatorPolicy::load(&config.data_dir)
         .map_err(|e| format!("Failed to load operator_policy.json: {}", e))?
         .unwrap_or_default();
-    if let Some(v) = fee_schedule.annual_fee_bps {
-        policy.annual_fee_bps = Some(v);
-    }
-    if let Some(v) = fee_schedule.annualized_fixed_msats {
-        policy.annualized_fixed_msats = Some(v);
-    }
-    if let Some(v) = fee_schedule.fee_period_blocks {
-        policy.fee_period_blocks = Some(v);
-    }
-    if let Some(v) = fee_schedule.deposit_fee_bps {
-        policy.deposit_fee_bps = Some(v);
-    }
-    if let Some(v) = fee_schedule.withdrawal_fee_bps {
-        policy.withdrawal_fee_bps = Some(v);
-    }
-    if let Some(v) = fee_schedule.invoice_fee_bps {
-        policy.invoice_fee_bps = Some(v);
-    }
-    if let Some(v) = fee_schedule.transfer_fee_fixed {
-        policy.transfer_fee_fixed_msats = Some(v);
-    }
-    if let Some(v) = fee_schedule.transfer_fee_rate_bps {
-        policy.transfer_fee_rate_bps = Some(v);
-    }
-    if let Some(v) = fee_schedule.max_deposit_msats {
-        policy.max_deposit_msats = Some(v);
-    }
-    if let Some(v) = fee_schedule.min_deposit_msats {
-        policy.min_deposit_msats = Some(v);
-    }
-    if let Some(v) = fee_schedule.advertise_relay.clone() {
-        policy.advertise_relay = Some(v);
-    }
-    if any_cli_flags {
+    if policy.overlay_fee_args(&fee_schedule) {
         policy
             .save(&config.data_dir)
             .map_err(|e| format!("Failed to save operator_policy.json: {}", e))?;

@@ -111,6 +111,63 @@ impl OperatorPolicy {
         std::fs::write(&path, pretty)
     }
 
+    /// Overlay fee-schedule CLI args onto the policy. Fields that the user
+    /// didn't set on the command line stay at their existing value (or
+    /// remain `None` if they were never set). Returns `true` if at least
+    /// one CLI flag was applied — caller uses that to decide whether to
+    /// persist the updated policy back to disk.
+    pub fn overlay_fee_args(
+        &mut self,
+        args: &crate::node_cli::FeeScheduleArgs,
+    ) -> bool {
+        let mut touched = false;
+        if let Some(v) = args.annual_fee_bps {
+            self.annual_fee_bps = Some(v);
+            touched = true;
+        }
+        if let Some(v) = args.annualized_fixed_msats {
+            self.annualized_fixed_msats = Some(v);
+            touched = true;
+        }
+        if let Some(v) = args.fee_period_blocks {
+            self.fee_period_blocks = Some(v);
+            touched = true;
+        }
+        if let Some(v) = args.deposit_fee_bps {
+            self.deposit_fee_bps = Some(v);
+            touched = true;
+        }
+        if let Some(v) = args.withdrawal_fee_bps {
+            self.withdrawal_fee_bps = Some(v);
+            touched = true;
+        }
+        if let Some(v) = args.invoice_fee_bps {
+            self.invoice_fee_bps = Some(v);
+            touched = true;
+        }
+        if let Some(v) = args.transfer_fee_fixed {
+            self.transfer_fee_fixed_msats = Some(v);
+            touched = true;
+        }
+        if let Some(v) = args.transfer_fee_rate_bps {
+            self.transfer_fee_rate_bps = Some(v);
+            touched = true;
+        }
+        if let Some(v) = args.max_deposit_msats {
+            self.max_deposit_msats = Some(v);
+            touched = true;
+        }
+        if let Some(v) = args.min_deposit_msats {
+            self.min_deposit_msats = Some(v);
+            touched = true;
+        }
+        if let Some(v) = args.advertise_relay.clone() {
+            self.advertise_relay = Some(v);
+            touched = true;
+        }
+        touched
+    }
+
     /// Operator's minimum fees for `validate_fee_minimum`. Falls back to
     /// `(0, 0)` when the field isn't set — `(0, 0)` means "no floor", the
     /// same semantics as the previous relay-fetched-zero-on-missing ad.
