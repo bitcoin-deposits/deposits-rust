@@ -887,6 +887,30 @@ impl Node {
             return;
         }
 
+        // Cross-ledger propagation policy. The whitepaper describes
+        // proof-of-non-conformance on one of an operator's ledgers being
+        // presentable to the operator's *other* quorums to trigger
+        // slashing there too. This propagation is the protocol's
+        // mechanism for ensuring multi-ledger operators can't insulate
+        // one ledger from misbehaviour on another.
+        //
+        // The policy is classification-gated:
+        //   - Punitive proofs (everything except QuorumExpired): MAY
+        //     propagate. Operators today do this manually via
+        //     `recovery publish-fraud-broadcast` against the operator's
+        //     other ledger IDs. Future automation will dispatch on
+        //     `proof_type.is_respectful() == false`.
+        //   - Respectful proofs (QuorumExpired): MUST NOT propagate.
+        //     The operator's bond on this ledger is preserved (returned
+        //     via the bifurcated confiscation tx); the deadline-miss
+        //     fault is local to this ledger only and should not affect
+        //     the operator's other quorums.
+        //
+        // No automated propagation runs in this handler today, so the
+        // gate is forward-looking. When automation lands, it'll check
+        // `proof.proof_type.is_respectful()` here and skip the cascade
+        // for the respectful case.
+
         // 5. Determine last valid sequence from the proof
         let last_valid_seq = match &broadcast.proof.evidence {
             deposits_core::fraud::FraudEvidence::UncreditedOnchain { proof_sequence, .. } => {
@@ -898,9 +922,21 @@ impl Node {
             deposits_core::fraud::FraudEvidence::NonConforming { sequence, .. } => {
                 sequence.saturating_sub(1)
             }
+            deposits_core::fraud::FraudEvidence::QuorumExpired { .. } => {
+                // QuorumExpired is respectful: the operator's chain is
+                // valid up to its current tip — they just stopped
+                // rotating before the deadline. All recorded updates
+                // remain conforming; the fork point is "right now."
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(ledger_id)
+                    .map(|arc| arc.read().unwrap().next_sequence().saturating_sub(1))
+                    .unwrap_or(0)
+            }
             _ => {
-                // For stale cosign and inactive quorum, use the embedding sequence
-                // as a reference point (the fraud happened before this)
+                // For stale cosign and dispute dereliction, use the
+                // embedding sequence as a reference point (the fraud
+                // happened before this).
                 let ledgers = self.handler.ledgers.lock().unwrap();
                 ledgers
                     .get(ledger_id)
