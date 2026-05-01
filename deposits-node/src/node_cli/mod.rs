@@ -513,19 +513,41 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
         i += 1;
     }
 
-    // Generate random seed if not provided
-    let seed = seed.unwrap_or_else(|| {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let mut s = [0u8; 32];
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        s[0..16].copy_from_slice(&now.to_le_bytes());
-        // In production, use proper random source
-        tracing::warn!("Using timestamp-based seed. In production, provide --seed");
-        s
-    });
+    // Generate random seed if not provided. On mainnet this is a hard
+    // error — generating an operator key without explicit input means
+    // we'd lose track of any funds the operator controls (no way to
+    // recover the seed from CLI output alone, since BDK reuses the
+    // same seed across daemon restarts via $DATA_DIR/seed.hex which
+    // wasn't written here). Force the operator to be deliberate.
+    let seed = match seed {
+        Some(s) => s,
+        None => {
+            if network == Network::Bitcoin {
+                return Err(
+                    "--seed is required on mainnet (--network bitcoin). \
+                     Generate an operator seed via `bootstrap init` or supply \
+                     one explicitly. Implicit timestamp/random seeds are \
+                     refused because there's no recovery path if the seed \
+                     isn't captured."
+                        .to_string(),
+                );
+            }
+            // Non-mainnet networks: real OS entropy. The previous behavior
+            // mixed 16 bytes of timestamp with 16 zero bytes — terrible
+            // entropy even for testnet. Replaced with OsRng.
+            use bitcoin::secp256k1::rand::rngs::OsRng;
+            use bitcoin::secp256k1::rand::RngCore;
+            let mut s = [0u8; 32];
+            OsRng.fill_bytes(&mut s);
+            tracing::warn!(
+                "No --seed supplied on {:?}: generated random seed {}. \
+                 Save this if you want to reuse the same operator identity.",
+                network,
+                hex::encode(s)
+            );
+            s
+        }
+    };
 
     // Create data directory
     std::fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create data dir: {}", e))?;
