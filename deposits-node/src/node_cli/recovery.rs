@@ -234,28 +234,63 @@ pub async fn recovery_reconstruct_taproot(
         return Ok(());
     }
 
-    // Resolve ledger_id: explicit arg or single .jsonl in ledgers/.
+    // Resolve ledger_id: explicit arg, or auto-detect the unique ledger
+    // where this node holds the Operator role (partner replicas of peer
+    // ledgers also live in this dir but aren't candidates — only our own
+    // legacy reserves UTXO would have been rotated).
     let ledger_id = match ledger_id_arg {
         Some(id) => id,
         None => {
-            let entries: Vec<_> = std::fs::read_dir(&ledgers_dir)?
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().map_or(false, |x| x == "jsonl"))
-                .collect();
-            if entries.len() != 1 {
-                return Err(format!(
-                    "Found {} ledgers in {}; specify which one as a positional arg",
-                    entries.len(),
-                    ledgers_dir.display()
-                )
-                .into());
+            let mut operator_ledgers: Vec<String> = Vec::new();
+            for e in std::fs::read_dir(&ledgers_dir)?.filter_map(|e| e.ok()) {
+                if e.path().extension().map_or(true, |x| x != "jsonl") {
+                    continue;
+                }
+                let raw = match std::fs::read_to_string(e.path()) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                // Role line is the first record; check it cheaply.
+                let is_operator = raw.lines().next().map_or(false, |l| {
+                    serde_json::from_str::<serde_json::Value>(l)
+                        .ok()
+                        .and_then(|v| {
+                            (v.get("type")?.as_str()? == "Role"
+                                && v.get("role")?.as_str()? == "Operator")
+                                .then_some(())
+                        })
+                        .is_some()
+                });
+                if is_operator {
+                    operator_ledgers.push(
+                        e.path()
+                            .file_stem()
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
             }
-            entries[0]
-                .path()
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
+            match operator_ledgers.len() {
+                0 => {
+                    return Err(format!(
+                        "No ledger with Operator role found in {}. \
+                         Has `ledger open` ever succeeded on this node?",
+                        ledgers_dir.display()
+                    )
+                    .into());
+                }
+                1 => operator_ledgers.into_iter().next().unwrap(),
+                n => {
+                    return Err(format!(
+                        "Found {} operator-role ledgers in {}; specify one as \
+                         a positional arg.",
+                        n,
+                        ledgers_dir.display()
+                    )
+                    .into());
+                }
+            }
         }
     };
 
