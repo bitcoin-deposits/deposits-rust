@@ -20,9 +20,10 @@ COPY deposits-core/Cargo.toml     ./deposits-core/Cargo.toml
 COPY deposits-node/Cargo.toml     ./deposits-node/Cargo.toml
 COPY deposits-wallet/Cargo.toml   ./deposits-wallet/Cargo.toml
 COPY deposits-attestation/Cargo.toml ./deposits-attestation/Cargo.toml
+COPY deposits-ringsig/Cargo.toml  ./deposits-ringsig/Cargo.toml
 COPY deposits-tools/Cargo.toml    ./deposits-tools/Cargo.toml
 COPY deposits-test/Cargo.toml     ./deposits-test/Cargo.toml
-RUN for c in deposits-protocol deposits-core deposits-node deposits-wallet deposits-attestation deposits-tools deposits-test; do \
+RUN for c in deposits-protocol deposits-core deposits-node deposits-wallet deposits-attestation deposits-ringsig deposits-tools deposits-test; do \
         mkdir -p "$c/src" && echo "" > "$c/src/lib.rs"; \
     done
 
