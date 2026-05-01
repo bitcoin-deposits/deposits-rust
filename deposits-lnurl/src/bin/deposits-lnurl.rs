@@ -55,6 +55,10 @@ struct AppState {
     /// Used to gift-wrap requests so the relay never sees ledger_id /
     /// deposit_pubkey / amount in cleartext.
     operator_keys: Mutex<HashMap<String, PublicKey>>,
+    /// Cache of short-prefix → full-64-hex ledger IDs. The host subdomain
+    /// is often a truncated bech32 (DNS-friendly); we resolve to the full
+    /// ID by scanning Kind 39100 ads once and remembering the answer.
+    ledger_resolutions: Mutex<HashMap<String, String>>,
 }
 
 #[derive(Serialize)]
@@ -175,13 +179,18 @@ fn lnurl_err(msg: &str) -> (StatusCode, Json<LnurlError>) {
     )
 }
 
-/// Extract ledger ID (full hex) from the Host header subdomain.
+/// Extract a hex ledger identifier — full or prefix — from the Host
+/// header subdomain.
 ///
-/// Host `2qp9n7kzjmqyw...pay.example.com` with base_domain `pay.example.com`
-/// → subdomain decoded from bech32 data → full 64-char hex ledger ID.
+/// Host `<sub>.<base_domain>` → returns hex. Three cases:
+///   1. `<sub>` is exactly 52 valid bech32-data chars → full 64-char hex
+///   2. `<sub>` is exactly 64 hex chars → returned verbatim (lowercased)
+///   3. `<sub>` is bech32-charset of any length → decoded to a hex prefix
+///      (caller must call `resolve_full_ledger_id` to look up the full ID
+///      via Kind 39100 ads — useful when DNS labels need to stay short)
+///   4. otherwise → None
 ///
-/// Also accepts raw hex subdomains for backwards compatibility.
-/// Falls back to LNURL_DEFAULT_LEDGER if no subdomain.
+/// Falls back to LNURL_DEFAULT_LEDGER (full 64-hex) if no subdomain.
 fn extract_ledger_from_host(host: &str, base_domain: &str) -> Option<String> {
     // Strip port if present
     let host_no_port = host.split(':').next().unwrap_or(host);
@@ -191,21 +200,103 @@ fn extract_ledger_from_host(host: &str, base_domain: &str) -> Option<String> {
         let prefix = &host_no_port[..host_no_port.len() - base_no_port.len()];
         let prefix = prefix.trim_end_matches('.');
         if !prefix.is_empty() {
-            // Try bech32-data decode first
+            // 1. Full bech32 (52 chars → 32 bytes → 64 hex)
             if let Some(hex_id) = subdomain_to_ledger(prefix) {
                 return Some(hex_id);
             }
-            // Fall back to raw hex
+            // 2. Raw 64-char hex
             if prefix.len() == 64 && prefix.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Some(prefix.to_string());
+                return Some(prefix.to_lowercase());
             }
-            // Treat as truncated hex prefix
-            return Some(prefix.to_string());
+            // 3. Short bech32 → hex prefix (length-agnostic decode).
+            //    Length-agnostic decode of the bech32 data charset gives
+            //    floor(N*5/8) bytes; caller resolves the prefix to a full
+            //    ledger ID by ad lookup.
+            if prefix
+                .chars()
+                .all(|c| BECH32_CHARSET.contains(&(c as u8)))
+            {
+                let bytes = bech32_data_to_bytes(prefix)?;
+                if !bytes.is_empty() {
+                    return Some(hex::encode(bytes));
+                }
+            }
+            // 4. Raw hex prefix (length < 64). Same downstream path:
+            //    caller resolves via ad lookup.
+            if prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Some(prefix.to_lowercase());
+            }
+            return None;
         }
     }
 
     // Fallback: check env var for single-ledger deployments
     std::env::var("LNURL_DEFAULT_LEDGER").ok()
+}
+
+/// Resolve a hex ledger ID (full 64-char OR shorter prefix) to the full
+/// 64-char ID by scanning Kind 39100 advertisements. Caches per-prefix
+/// to avoid re-scanning. Errors if the prefix matches zero or multiple ads.
+async fn resolve_full_ledger_id(state: &AppState, hex_or_prefix: &str) -> Option<String> {
+    if hex_or_prefix.len() == 64 {
+        return Some(hex_or_prefix.to_string());
+    }
+    if let Some(full) = state
+        .ledger_resolutions
+        .lock()
+        .await
+        .get(hex_or_prefix)
+        .cloned()
+    {
+        return Some(full);
+    }
+    // Tag filters don't support prefix matching; pull recent 39100 events
+    // and filter client-side. Replaceable per ledger so volume is bounded
+    // by the operator population on this relay set.
+    let filter = Filter::new().kind(Kind::Custom(39100)).limit(1000);
+    let events = state
+        .client
+        .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+        .await
+        .ok()?;
+    let needle = hex_or_prefix.to_lowercase();
+    let mut matches: Vec<String> = Vec::new();
+    for ev in events.iter() {
+        let ad: serde_json::Value = match serde_json::from_str(&ev.content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let id = ad
+            .get("ledger_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_lowercase());
+        if let Some(id) = id {
+            if id.starts_with(&needle) && !matches.contains(&id) {
+                matches.push(id);
+            }
+        }
+    }
+    if matches.len() == 1 {
+        let full = matches.into_iter().next().unwrap();
+        state
+            .ledger_resolutions
+            .lock()
+            .await
+            .insert(hex_or_prefix.to_string(), full.clone());
+        log::info!(
+            "Resolved ledger prefix {}… → {}",
+            &hex_or_prefix[..hex_or_prefix.len().min(16)],
+            &full[..16]
+        );
+        Some(full)
+    } else {
+        log::warn!(
+            "Ledger prefix {}… resolved to {} ads (need exactly 1)",
+            &hex_or_prefix[..hex_or_prefix.len().min(16)],
+            matches.len()
+        );
+        None
+    }
 }
 
 /// GET /.well-known/lnurlp/<deposit_pubkey>
@@ -216,11 +307,19 @@ async fn lnurlp_metadata(
     Host(host): Host,
     Path(deposit_pubkey): Path<String>,
 ) -> Result<Json<LnurlPayResponse>, (StatusCode, Json<LnurlError>)> {
-    let ledger_hex = extract_ledger_from_host(&host, &state.domain)
+    let hex_or_prefix = extract_ledger_from_host(&host, &state.domain)
         .ok_or_else(|| lnurl_err("Could not determine ledger from host. Use <ledger>.<domain> or set LNURL_DEFAULT_LEDGER."))?;
+    // Resolve here so we fail fast at metadata time if the ledger is
+    // unknown — better than producing a callback URL that'll just time
+    // out when the wallet hits it.
+    resolve_full_ledger_id(&state, &hex_or_prefix)
+        .await
+        .ok_or_else(|| lnurl_err("Ledger not found. The subdomain doesn't match any operator's advertisement."))?;
 
-    let subdomain = ledger_to_subdomain(&ledger_hex).unwrap_or(ledger_hex.clone());
-    let addr_domain = format!("{}.{}", subdomain, state.domain);
+    // Echo back the host the user came in on — keeps the address that
+    // wallets display consistent with whatever short/canonical subdomain
+    // the operator's DNS is set up to serve.
+    let addr_domain = host.clone();
     let metadata = format!(
         "[[\"text/plain\",\"Pay to deposit {}\"],[\"text/identifier\",\"{}@{}\"]]",
         &deposit_pubkey[..16.min(deposit_pubkey.len())],
@@ -352,8 +451,11 @@ async fn lnurlp_callback(
     Path(deposit_pubkey): Path<String>,
     Query(params): Query<CallbackParams>,
 ) -> Result<Json<CallbackResponse>, (StatusCode, Json<LnurlError>)> {
-    let ledger_id = extract_ledger_from_host(&host, &state.domain)
+    let hex_or_prefix = extract_ledger_from_host(&host, &state.domain)
         .ok_or_else(|| lnurl_err("Could not determine ledger from host"))?;
+    let ledger_id = resolve_full_ledger_id(&state, &hex_or_prefix)
+        .await
+        .ok_or_else(|| lnurl_err("Ledger not found for subdomain"))?;
 
     if params.amount < state.min_msats || params.amount > state.max_msats {
         return Err(lnurl_err(&format!(
@@ -599,6 +701,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_msats: max_sats * 1000,
         pending: Mutex::new(HashMap::new()),
         operator_keys: Mutex::new(HashMap::new()),
+        ledger_resolutions: Mutex::new(HashMap::new()),
     });
 
     // Spawn response listener

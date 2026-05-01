@@ -47,9 +47,14 @@ impl LnurlServer {
     /// `extract_ledger_from_host` — no `LNURL_DEFAULT_LEDGER` fallback,
     /// exercising the same path production clients use.
     fn spawn(port: u16, domain: &str) -> Self {
+        // Both relays — make_invoice flows on messaging (20101/20102),
+        // Kind 39100 advertisements (used for short-subdomain prefix
+        // resolution + operator pubkey discovery) live on the durable
+        // ledgers relay.
+        let relays = format!("{},{}", relay_messaging(), relay_ledgers());
         let child = Command::new(lnurl_bin())
             .env("LNURL_NSEC", "4c4e55524c746573740000000000000000000000000000000000000000000001")
-            .env("LNURL_RELAYS", relay_messaging())
+            .env("LNURL_RELAYS", relays)
             .env("LNURL_DOMAIN", domain)
             .env("LNURL_LISTEN", format!("127.0.0.1:{}", port))
             .env("RUST_LOG", "warn")
@@ -214,4 +219,128 @@ fn lnurl_pay_flow_metadata_and_invoice() {
         &invoice[..invoice.len().min(20)]
     );
     assert!(invoice.len() > 100, "invoice looks truncated: {}", invoice);
+}
+
+const BECH32_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+/// Encode bytes as bech32 data characters (no HRP, no checksum). Mirrors
+/// the encoder in `deposits-lnurl/src/bin/deposits-lnurl.rs`. 32 bytes
+/// produces 52 chars; truncating to N chars produces a prefix that the
+/// gateway resolves back to the full ledger ID via Kind 39100 ad lookup.
+fn bech32_data_encode(bytes: &[u8]) -> String {
+    let mut out = Vec::new();
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in bytes {
+        acc = (acc << 8) | b as u32;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(BECH32_CHARSET[((acc >> bits) & 0x1f) as usize]);
+        }
+    }
+    if bits > 0 {
+        out.push(BECH32_CHARSET[((acc << (5 - bits)) & 0x1f) as usize]);
+    }
+    String::from_utf8(out).unwrap()
+}
+
+/// Short-subdomain path: hit the gateway with a 12-char bech32 prefix
+/// instead of the full 52-char canonical subdomain. The gateway must
+/// scan Kind 39100 ads, find the unique ledger whose ID starts with our
+/// decoded hex prefix, and proceed normally. This is the path operator
+/// deployments take when their TLS / DNS setup wants short labels.
+#[test]
+#[ignore]
+fn lnurl_short_subdomain_resolves_via_ad() {
+    if !cluster_available() {
+        eprintln!("skipping: cluster not running — start with ./bin/setup.sh");
+        return;
+    }
+    if !lnurl_bin().is_file() {
+        eprintln!(
+            "skipping: deposits-lnurl binary missing — run `cargo build --release -p deposits-lnurl`"
+        );
+        return;
+    }
+    if !lightning_available() {
+        eprintln!("skipping: `lightning` container not running");
+        return;
+    }
+
+    let ledger = discover_op0_ledger();
+    let (_wdir, deposit_pubkey) = open_fresh_deposit(&ledger);
+
+    let port = free_port();
+    // Realistic-shape base domain so the short subdomain is the *only*
+    // hint the gateway has about which ledger this is.
+    let domain = format!("ledger.test.local:{}", port);
+    let lnurl = LnurlServer::spawn(port, &domain);
+
+    // Build the short subdomain: 12 bech32 chars covering 60 bits =
+    // first 7.5 bytes (15 hex) of the ledger ID. With ~30 ledgers in
+    // the standard cluster the ambiguity probability is negligible.
+    let ledger_bytes = hex::decode(&ledger).expect("ledger hex");
+    let full_subdomain = bech32_data_encode(&ledger_bytes);
+    assert_eq!(full_subdomain.len(), 52);
+    let short_subdomain = &full_subdomain[..12];
+    let short_host = format!("{}.{}", short_subdomain, lnurl.domain);
+    eprintln!(
+        "[setup]  ledger={}…  short_subdomain={}",
+        &ledger[..16],
+        short_subdomain
+    );
+
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .unwrap();
+
+    // ── Metadata via short subdomain ──
+    let resp = http
+        .get(format!("{}/.well-known/lnurlp/{}", lnurl.base_url(), deposit_pubkey))
+        .header("Host", &short_host)
+        .send()
+        .expect("metadata GET");
+    assert!(
+        resp.status().is_success(),
+        "metadata via short subdomain returned {}",
+        resp.status()
+    );
+    let meta: serde_json::Value = resp.json().expect("metadata not JSON");
+    let callback = meta["callback"].as_str().expect("callback field");
+    // Metadata should echo the short host back so the wallet hits a
+    // subdomain length that the operator's wildcard cert / DNS supports.
+    assert!(
+        callback.contains(short_subdomain),
+        "callback URL should preserve the short subdomain we came in on: {}",
+        callback
+    );
+
+    // ── Callback (make_invoice) via short subdomain ──
+    let amount_msats: u64 = 1_000_000;
+    let resp = http
+        .get(format!(
+            "{}/lnurl/callback/{}?amount={}",
+            lnurl.base_url(),
+            deposit_pubkey,
+            amount_msats
+        ))
+        .header("Host", &short_host)
+        .send()
+        .expect("callback GET");
+    assert!(
+        resp.status().is_success(),
+        "callback via short subdomain returned {} — \
+         body: {}",
+        resp.status(),
+        resp.text().unwrap_or_default()
+    );
+    let body: serde_json::Value = resp.json().expect("callback not JSON");
+    let invoice = body["pr"].as_str().expect("missing `pr`");
+    assert!(
+        invoice.starts_with("lnbcrt"),
+        "expected lnbcrt invoice, got: {}",
+        &invoice[..invoice.len().min(20)]
+    );
 }
