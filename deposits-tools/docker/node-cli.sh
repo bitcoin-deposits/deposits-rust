@@ -32,7 +32,18 @@ fi
 # deposits-node expects: <command> [subcommand] [--flag value ...] [--seed ...]
 # We pass everything through and let deposits-node parse it.
 LEDGER_RELAY="${DEPOSITS_LEDGER_RELAY:-wss://relay.bitcoindeposits.net}"
-ALL_NODES="${DEPOSITS_NODES:-alice bob charlie diana}"
+
+# Auto-detect node list from $SEED_DIR (each subdirectory containing a `seed`
+# file is a node). DEPOSITS_NODES env var overrides; the hardcoded fallback
+# is the historical 4-op cluster names if neither is available.
+detect_nodes() {
+    [ -d "$SEED_DIR" ] || return 0
+    for d in "$SEED_DIR"/*/; do
+        [ -f "$d/seed" ] && basename "$d"
+    done | sort | tr '\n' ' ' | sed 's/ $//'
+}
+ALL_NODES="${DEPOSITS_NODES:-$(detect_nodes)}"
+ALL_NODES="${ALL_NODES:-alice bob charlie diana}"
 
 # Build relay list: local relay + all other nodes' relays (for cross-node requests)
 RELAY_ARGS="--relay ws://127.0.0.1:7777"

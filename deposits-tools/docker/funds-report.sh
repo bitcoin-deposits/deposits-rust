@@ -16,7 +16,18 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$SCRIPT_DIR/node-cli.sh"
 
-ALL_NODES="${DEPOSITS_NODES:-alice bob charlie diana}"
+# Auto-detect node list from $SEED_DIR (each subdirectory containing a `seed`
+# file is a node). DEPOSITS_NODES env var overrides; the hardcoded fallback
+# is the historical 4-op cluster names if neither is available.
+SEED_DIR="${DEPOSITS_SEED_DIR:-/mnt/bitcoind/deposits}"
+detect_nodes() {
+    [ -d "$SEED_DIR" ] || return 0
+    for d in "$SEED_DIR"/*/; do
+        [ -f "$d/seed" ] && basename "$d"
+    done | sort | tr '\n' ' ' | sed 's/ $//'
+}
+ALL_NODES="${DEPOSITS_NODES:-$(detect_nodes)}"
+ALL_NODES="${ALL_NODES:-alice bob charlie diana}"
 JSON_MODE=false
 SUMMARY_MODE=false
 NODES=()
