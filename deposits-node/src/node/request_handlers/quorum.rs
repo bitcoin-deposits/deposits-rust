@@ -644,8 +644,16 @@ impl Node {
             .and_then(|v| v.as_u64())
             .map(|v| v as u16);
 
+        // Optional amount_sats — used only by the genesis path (no
+        // legacy reserves UTXO). Ignored when rotating an existing
+        // reserves UTXO; that path uses the existing UTXO's amount.
+        let amount_sats = request
+            .params
+            .get("amount_sats")
+            .and_then(|v| v.as_u64());
+
         match self
-            .rotate_reserves_to_quorum(&ledger_id, collateral_bps)
+            .rotate_reserves_to_quorum(&ledger_id, collateral_bps, amount_sats)
             .await
         {
             Ok(result) => {

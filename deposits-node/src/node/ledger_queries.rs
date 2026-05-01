@@ -485,15 +485,22 @@ impl Node {
     /// later rotation can preserve the chosen split. Defaults to
     /// 5000 (1:1) when `None`.
     pub fn open_ledger(&self, collateral_bps: Option<u16>) -> Result<Ledger, Error> {
-        // Find an unused reserves output (not already backing a ledger)
+        // Two-mode dispatch:
+        //   - Legacy mode: a `reserves_create` ran first and produced a P2WSH
+        //     reserves UTXO. LedgerOpen carries the UTXO's address as
+        //     `reserves_id` and the actual reserves/collateral split.
+        //   - Genesis mode: no legacy reserves UTXO exists. LedgerOpen is a
+        //     pure declaration with `reserves_amount = 0`,
+        //     `collateral_amount = 0`, and a synthetic `reserves_id`.
+        //     The first QuorumBegin will populate the actual amounts when
+        //     it spends operator wallet UTXOs into the Q=N taproot vault.
+        //
+        // The genesis path drops the intermediate `reserves_create` tx
+        // entirely — wallet funding lands once, then `quorum begin` is
+        // the single on-chain action that creates the quorum-controlled
+        // vault directly.
         let all_reserves = self.wallet.get_reserves();
-        if all_reserves.is_empty() {
-            return Err(Error::NoReserves);
-        }
 
-        // Addresses of reserves already backing ledgers.
-        // Each reserves has a unique P2WSH address (ensured by timeout_height offset
-        // in create_reserves_output), so address-based matching is correct.
         let used_addresses: std::collections::HashSet<String> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
@@ -502,48 +509,71 @@ impl Node {
                 .collect()
         };
 
-        let unused = all_reserves
-            .iter()
-            .find(|r| {
-                let addr =
-                    bitcoin::Address::p2wsh(&r.redeem_script, self.wallet.network()).to_string();
-                !used_addresses.contains(&addr)
-            })
-            .ok_or_else(|| {
-                Error::Protocol(format!(
-                    "All {} reserves are already backing ledgers ({} used addresses)",
-                    all_reserves.len(),
-                    used_addresses.len()
-                ))
-            })?;
-
-        let reserves_balance = unused.amount;
-        let reserves_outpoint = Some(unused.outpoint);
-        let reserves_address =
-            bitcoin::Address::p2wsh(&unused.redeem_script, self.wallet.network()).to_string();
-
-        if reserves_balance == 0 {
-            return Err(Error::NoReserves);
-        }
-
-        // Get funding txid and vout from reserves outpoint
-        let (funding_txid, funding_vout) = if let Some(outpoint) = reserves_outpoint {
-            (outpoint.txid.to_byte_array(), outpoint.vout as u16)
+        let (reserves_id, reserves_msats, collateral_msats) = if all_reserves.is_empty() {
+            // Genesis mode. Pure declaration; no on-chain commitment yet.
+            // The synthetic reserves_id is derived from the operator pubkey
+            // so distinct genesis ledgers from the same operator (rare but
+            // possible) get distinct synthetic ids.
+            let synth = format!(
+                "genesis:{}",
+                hex::encode(&self.node_id.serialize()[..16])
+            );
+            // If an existing genesis-mode ledger uses the same synth id,
+            // disambiguate with the next available counter.
+            let mut chosen = synth.clone();
+            let mut counter: u32 = 0;
+            while used_addresses.contains(&chosen) {
+                counter += 1;
+                chosen = format!("{}.{}", synth, counter);
+            }
+            tracing::info!(
+                "open_ledger: genesis mode (no legacy reserves UTXO), reserves_id={}",
+                chosen
+            );
+            (chosen, 0u64, 0u64)
         } else {
-            ([0u8; 32], 0u16)
+            // Legacy mode — find an unused P2WSH reserves UTXO.
+            let unused = all_reserves
+                .iter()
+                .find(|r| {
+                    let addr = bitcoin::Address::p2wsh(&r.redeem_script, self.wallet.network())
+                        .to_string();
+                    !used_addresses.contains(&addr)
+                })
+                .ok_or_else(|| {
+                    Error::Protocol(format!(
+                        "All {} reserves are already backing ledgers ({} used addresses)",
+                        all_reserves.len(),
+                        used_addresses.len()
+                    ))
+                })?;
+
+            let reserves_balance = unused.amount;
+            if reserves_balance == 0 {
+                return Err(Error::NoReserves);
+            }
+            let reserves_address =
+                bitcoin::Address::p2wsh(&unused.redeem_script, self.wallet.network()).to_string();
+            let total_msats = reserves_balance.saturating_mul(1000);
+            let bps = collateral_bps.unwrap_or(5000);
+            let collateral = (total_msats as u128 * bps as u128 / 10_000) as u64;
+            let reserves = total_msats.saturating_sub(collateral);
+            (reserves_address, reserves, collateral)
         };
 
-        // For BDK, use the reserves address as the reserves_id (identifies the reserves UTXO)
-        let reserves_id = reserves_address;
+        // Funding outpoint: only meaningful in legacy mode. Genesis carries
+        // zero — the QuorumBegin tx will declare the real outpoint.
+        let (funding_txid, funding_vout) = (|| -> ([u8; 32], u16) {
+            for r in self.wallet.get_reserves() {
+                let addr =
+                    bitcoin::Address::p2wsh(&r.redeem_script, self.wallet.network()).to_string();
+                if addr == reserves_id {
+                    return (r.outpoint.txid.to_byte_array(), r.outpoint.vout as u16);
+                }
+            }
+            ([0u8; 32], 0u16)
+        })();
 
-        // Get or create the ledger — this automatically adds
-        // LedgerOpen with the reserves/collateral split derived from
-        // `collateral_bps`. Convert sats → msats at the on-chain
-        // boundary.
-        let total_msats = reserves_balance.saturating_mul(1000);
-        let bps = collateral_bps.unwrap_or(5000);
-        let collateral_msats = (total_msats as u128 * bps as u128 / 10_000) as u64;
-        let reserves_msats = total_msats.saturating_sub(collateral_msats);
         let ledger_arc = self.handler.get_or_create_ledger_with_outpoint(
             self.node_id,
             reserves_id.clone(),
@@ -723,6 +753,7 @@ impl Node {
         &self,
         ledger_id: &str,
         collateral_bps: Option<u16>,
+        amount_sats: Option<u64>,
     ) -> Result<RotateReservesResult, Error> {
         // --- Phase 1: snapshot membership + ledger state ---
         let ledger_arc = {
@@ -773,7 +804,8 @@ impl Node {
             ));
         }
 
-        use crate::wallet::TaprootReservesCreateResult;
+        use crate::wallet::{TaprootReservesCreateResult, TaprootReservesInfo};
+        use bitcoin::OutPoint;
         use deposits_core::QuorumState;
 
         // --- Phase 2: build the rotation tx (no wallet state mutation yet) ---
@@ -805,8 +837,26 @@ impl Node {
             }
         };
 
-        let (result, legacy_outpoint, pending_taproot) = if let Some(existing) = pending_resume
-        {
+        // Detect the genesis case: ledger is PreQuorum, no legacy reserves,
+        // no taproot reserves yet → spend wallet UTXOs directly into a
+        // fresh Q=N taproot vault (no intermediate P2WSH UTXO).
+        let is_genesis = {
+            let pre_quorum =
+                ledger_arc.read().unwrap().state.quorum_state == QuorumState::PreQuorum;
+            pre_quorum
+                && self.wallet.get_reserves().is_empty()
+                && self.wallet.get_taproot_reserves().is_empty()
+        };
+
+        // `legacy_outpoint` is `Option<OutPoint>`: `Some` for the migration
+        // path (legacy P2WSH → taproot, retire the legacy entry), `None`
+        // for the genesis path (no legacy entry to retire) and the resume
+        // path (legacy entry already gone from a prior attempt).
+        let (result, legacy_outpoint, pending_taproot): (
+            TaprootReservesCreateResult,
+            Option<OutPoint>,
+            TaprootReservesInfo,
+        ) = if let Some(existing) = pending_resume {
             tracing::info!(
                 "Detected half-finished QuorumBegin: reusing taproot UTXO {}:{} ({}sat) — \
                  skipping build+broadcast, jumping to confirmation+cosign",
@@ -814,12 +864,9 @@ impl Node {
                 existing.outpoint.vout,
                 existing.amount
             );
-            // Synthesize the result+pending pair from the saved entry. The
-            // legacy_outpoint here is a sentinel: there's nothing left to
-            // retire (the wallet already removed it during the original
-            // failed attempt), so commit_rotation_to_taproot is effectively
-            // a no-op below. We pass the entry's own outpoint as a harmless
-            // placeholder.
+            // Synthesize the result+pending pair from the saved entry.
+            // No legacy entry to retire — the wallet already removed it
+            // during the original failed attempt.
             let synth_result = TaprootReservesCreateResult {
                 outpoint: existing.outpoint,
                 address: existing.taproot_output.address.clone(),
@@ -834,15 +881,56 @@ impl Node {
                 quorum_expiry: existing.quorum_expiry,
                 ledger_hash: existing.ledger_hash,
             };
-            (synth_result, existing.outpoint, existing)
+            (synth_result, None, existing)
+        } else if is_genesis {
+            // Genesis path: spend wallet UTXOs directly into a fresh Q=N
+            // taproot vault. amount_sats defaults to wallet balance minus
+            // a small fee buffer when not explicitly specified.
+            let chosen_amount = match amount_sats {
+                Some(a) => a,
+                None => {
+                    let bal = self.wallet.get_reserves_balance().unwrap_or(0);
+                    if bal <= 1000 {
+                        return Err(Error::Wallet(format!(
+                            "Genesis QuorumBegin: insufficient wallet balance: {} sats \
+                             (need > 1000 sats to leave a fee buffer)",
+                            bal
+                        )));
+                    }
+                    bal.saturating_sub(1000)
+                }
+            };
+            tracing::info!(
+                "QuorumBegin genesis path: spending {} sats from wallet UTXOs into Q={} taproot vault",
+                chosen_amount,
+                quorum_members.len()
+            );
+            // Use a generous fee rate (5 sat/vB) — the operator usually
+            // wants this to confirm promptly. Could be made configurable
+            // via params if needed.
+            let (result, pending) = self.wallet.build_genesis_rotation_tx(
+                quorum_members.clone(),
+                quorum_expiries.clone(),
+                ledger_hash,
+                chosen_amount,
+                5.0,
+            )?;
+            let txid = self.wallet.broadcast(&result.tx)?;
+            tracing::info!(
+                "Broadcast genesis rotation: txid={}, address={}, {} members, first expiry at block {}",
+                txid,
+                result.address,
+                quorum_members.len(),
+                result.quorum_expiry
+            );
+            (result, None, pending)
         } else {
-            // build_rotation_to_taproot returns the operator-signed tx plus
-            // the legacy outpoint that will be retired and the new
-            // TaprootReservesInfo that will be tracked. We commit those
-            // mutations only after the rotation is confirmed *and* the
-            // QuorumBegin op has applied. If anything between here and that
-            // commit fails, the legacy reserves entry stays intact and a
-            // retry just rebuilds.
+            // Migration path: rotate an existing legacy P2WSH reserves
+            // UTXO to a fresh Q=N taproot vault. build_rotation_to_taproot
+            // returns the operator-signed tx plus the legacy outpoint that
+            // will be retired and the new TaprootReservesInfo to track.
+            // We commit those mutations only after the rotation is
+            // confirmed *and* the QuorumBegin op has applied.
             let (result, legacy, pending) = self.wallet.build_rotation_to_taproot(
                 quorum_members.clone(),
                 quorum_expiries.clone(),
@@ -856,7 +944,7 @@ impl Node {
                 quorum_members.len(),
                 result.quorum_expiry
             );
-            (result, legacy, pending)
+            (result, Some(legacy), pending)
         };
 
         let txid = result.outpoint.txid;
@@ -960,8 +1048,16 @@ impl Node {
         // which point the broadcast would fail because the input is already
         // spent on-chain, exposing the half-rotated state to the operator
         // rather than silently losing track of funds.
-        self.wallet
-            .commit_rotation_to_taproot(legacy_outpoint, pending_taproot)?;
+        // Migration path retires a legacy outpoint; genesis path has none
+        // to retire (no legacy entry was ever inserted). Resume path also
+        // has none — the legacy entry was removed during the original
+        // (failed) attempt before our deferred-mutation fix landed.
+        match legacy_outpoint {
+            Some(legacy) => self
+                .wallet
+                .commit_rotation_to_taproot(legacy, pending_taproot)?,
+            None => self.wallet.commit_genesis_rotation(pending_taproot)?,
+        }
 
         tracing::info!(
             "Committed QuorumBegin operation to ledger: txid={}, quorum={} members",

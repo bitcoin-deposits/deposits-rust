@@ -40,6 +40,7 @@ pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::E
 async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut reserves_id: Option<String> = None;
     let mut collateral_bps: Option<u32> = None;
+    let mut amount_sats: Option<u64> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -59,6 +60,14 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                         .into());
                     }
                     collateral_bps = Some((ratio * 10_000.0).round() as u32);
+                    i += 1;
+                }
+                "--amount-sats" if i + 1 < args.len() => {
+                    let raw = &args[i + 1];
+                    let v: u64 = raw.parse().map_err(|_| {
+                        format!("Invalid --amount-sats value: {} (expected positive integer)", raw)
+                    })?;
+                    amount_sats = Some(v);
                     i += 1;
                 }
                 _ => {
@@ -102,6 +111,9 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let mut params = serde_json::Map::new();
     if let Some(bps) = collateral_bps {
         params.insert("collateral_bps".to_string(), serde_json::json!(bps));
+    }
+    if let Some(amt) = amount_sats {
+        params.insert("amount_sats".to_string(), serde_json::json!(amt));
     }
     let result = send_daemon_request(
         &config,
