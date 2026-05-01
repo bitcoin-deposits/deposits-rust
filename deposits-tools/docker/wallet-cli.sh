@@ -12,6 +12,7 @@
 #   pubkey [--index N]        Show deposit pubkey at key index
 #   open <ledger_id>          Open a deposit on a ledger
 #   deposit-id <ledger_id>    Show deposit ID for our key on a ledger
+#   lnurl                     Print the lightning address for each tracked deposit
 #
 # The wallet directory contains:
 #   seed          - 32-byte hex secret
@@ -577,9 +578,40 @@ print(f"  Total: ₿ {total_sats:,.3f}")
 PYEOF
     ;;
 
+lnurl)
+    DOMAIN="${DEPOSITS_LNURL_DOMAIN:-ledger.bitcoindeposits.net}"
+    if [ ! -f "$WALLET_DIR/deposits.json" ]; then
+        echo "No deposits. Use 'open' first."
+        exit 0
+    fi
+
+    python3 - "$WALLET_DIR" "$DOMAIN" << 'PYEOF'
+import json, sys
+wallet_dir, domain = sys.argv[1], sys.argv[2]
+CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+def bytes_to_bech32_data(b):
+    out, acc, bits = [], 0, 0
+    for x in b:
+        acc = (acc << 8) | x
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            out.append(CHARSET[(acc >> bits) & 0x1f])
+    if bits > 0:
+        out.append(CHARSET[(acc << (5 - bits)) & 0x1f])
+    return "".join(out)
+
+deps = json.load(open(wallet_dir + '/deposits.json'))
+for i, d in enumerate(deps):
+    sub = bytes_to_bech32_data(bytes.fromhex(d['ledger_id']))
+    print(f"  [{i}] {d['pubkey']}@{sub}.{domain}")
+PYEOF
+    ;;
+
 *)
     echo "Unknown command: $COMMAND"
-    echo "Commands: init, pubkey, open, invoice, fund, balance"
+    echo "Commands: init, pubkey, open, invoice, fund, balance, lnurl"
     exit 1
     ;;
 
