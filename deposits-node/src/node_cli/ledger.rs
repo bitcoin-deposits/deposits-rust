@@ -941,19 +941,74 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         i += 1;
     }
 
-    // Field defaults match the previous behaviour: `fee_period_blocks`
-    // defaults to 2016 (~2 weeks); other fields default to 0 / u64::MAX.
-    let annual_fee_bps = fee_schedule.annual_fee_bps.unwrap_or(0);
-    let annualized_fixed_msats = fee_schedule.annualized_fixed_msats.unwrap_or(0);
-    let fee_period_blocks = fee_schedule.fee_period_blocks.unwrap_or(2016);
-    let deposit_fee_bps = fee_schedule.deposit_fee_bps.unwrap_or(0);
-    let withdrawal_fee_bps = fee_schedule.withdrawal_fee_bps.unwrap_or(0);
-    let invoice_fee_bps = fee_schedule.invoice_fee_bps.unwrap_or(0);
-    let max_deposit_msats = fee_schedule.max_deposit_msats.unwrap_or(u64::MAX);
-    let min_deposit_msats = fee_schedule.min_deposit_msats.unwrap_or(0);
-    let advertise_relay_url = fee_schedule.advertise_relay.clone();
-
     let config = parse_config(&config_args)?;
+
+    // Layered fee/policy resolution:
+    //   1. Load existing operator_policy.json (or empty if absent).
+    //   2. Apply CLI overrides on top of it.
+    //   3. If any CLI flag was set, persist the merged policy back —
+    //      so re-running `ledger advertise` without flags keeps the
+    //      previous values rather than silently zeroing them.
+    use crate::operator_policy::OperatorPolicy;
+    let any_cli_flags = fee_schedule.has_any();
+    let mut policy = OperatorPolicy::load(&config.data_dir)
+        .map_err(|e| format!("Failed to load operator_policy.json: {}", e))?
+        .unwrap_or_default();
+    if let Some(v) = fee_schedule.annual_fee_bps {
+        policy.annual_fee_bps = Some(v);
+    }
+    if let Some(v) = fee_schedule.annualized_fixed_msats {
+        policy.annualized_fixed_msats = Some(v);
+    }
+    if let Some(v) = fee_schedule.fee_period_blocks {
+        policy.fee_period_blocks = Some(v);
+    }
+    if let Some(v) = fee_schedule.deposit_fee_bps {
+        policy.deposit_fee_bps = Some(v);
+    }
+    if let Some(v) = fee_schedule.withdrawal_fee_bps {
+        policy.withdrawal_fee_bps = Some(v);
+    }
+    if let Some(v) = fee_schedule.invoice_fee_bps {
+        policy.invoice_fee_bps = Some(v);
+    }
+    if let Some(v) = fee_schedule.transfer_fee_fixed {
+        policy.transfer_fee_fixed_msats = Some(v);
+    }
+    if let Some(v) = fee_schedule.transfer_fee_rate_bps {
+        policy.transfer_fee_rate_bps = Some(v);
+    }
+    if let Some(v) = fee_schedule.max_deposit_msats {
+        policy.max_deposit_msats = Some(v);
+    }
+    if let Some(v) = fee_schedule.min_deposit_msats {
+        policy.min_deposit_msats = Some(v);
+    }
+    if let Some(v) = fee_schedule.advertise_relay.clone() {
+        policy.advertise_relay = Some(v);
+    }
+    if any_cli_flags {
+        policy
+            .save(&config.data_dir)
+            .map_err(|e| format!("Failed to save operator_policy.json: {}", e))?;
+        println!(
+            "Saved policy update to {}",
+            OperatorPolicy::path(&config.data_dir).display()
+        );
+    }
+
+    // Materialize concrete values from the merged policy. `fee_period_blocks`
+    // defaults to 2016 (~2 weeks); other fields default to 0 / u64::MAX.
+    let annual_fee_bps = policy.annual_fee_bps.unwrap_or(0);
+    let annualized_fixed_msats = policy.annualized_fixed_msats.unwrap_or(0);
+    let fee_period_blocks = policy.fee_period_blocks.unwrap_or(2016);
+    let deposit_fee_bps = policy.deposit_fee_bps.unwrap_or(0);
+    let withdrawal_fee_bps = policy.withdrawal_fee_bps.unwrap_or(0);
+    let invoice_fee_bps = policy.invoice_fee_bps.unwrap_or(0);
+    let max_deposit_msats = policy.max_deposit_msats.unwrap_or(u64::MAX);
+    let min_deposit_msats = policy.min_deposit_msats.unwrap_or(0);
+    let advertise_relay_url = policy.advertise_relay.clone();
+
     let node = Node::new(config.clone()).await?;
 
     // If no reserves_id given, advertise all operator ledgers
@@ -1031,6 +1086,19 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
             .last()
             .map(|u| u.block_height)
             .unwrap_or_else(|| node.wallet.get_block_height().unwrap_or(0));
+
+        // Quorum state lets wallets distinguish provisional ledgers (PreQuorum,
+        // no on-chain commitment yet, no enforcement) from active ones.
+        // The membership list (operator NOT included) lets wallets see
+        // exactly who's backing this operator, since quorum membership
+        // is public chain state.
+        ad.quorum_state = format!("{:?}", ledger.state.quorum_state);
+        ad.quorum_members = ledger
+            .state
+            .quorum_members
+            .iter()
+            .map(|m| m.pubkey.to_string())
+            .collect();
 
         println!("Publishing ledger advertisement...");
         println!("  Ledger ID: {}...", &ledger_id[..16]);

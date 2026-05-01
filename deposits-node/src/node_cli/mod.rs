@@ -994,10 +994,23 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
                     .last()
                     .map(|u| u.block_height)
                     .unwrap_or(wallet_tip);
-                (l.reserves_amount(), l.state.collateral_amount, last_block)
+                let q_state = format!("{:?}", l.state.quorum_state);
+                let q_members: Vec<String> = l
+                    .state
+                    .quorum_members
+                    .iter()
+                    .map(|m| m.pubkey.to_string())
+                    .collect();
+                (
+                    l.reserves_amount(),
+                    l.state.collateral_amount,
+                    last_block,
+                    q_state,
+                    q_members,
+                )
             })
         };
-        let Some((reserves, collateral, last_block)) = refreshed else {
+        let Some((reserves, collateral, last_block, q_state, q_members)) = refreshed else {
             continue;
         };
 
@@ -1006,6 +1019,8 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
         // obligations/headroom intentionally omitted — see comment at the
         // populate site in auto_advertise_ledger.
         ad.current_block = last_block;
+        ad.quorum_state = q_state;
+        ad.quorum_members = q_members;
 
         match node.nostr.publish_ledger_advertisement(&ad).await {
             Ok(_) => {

@@ -167,40 +167,79 @@ impl Node {
             Err(e) => return (false, None, Some(format!("Invalid deposit_pubkey: {}", e))),
         };
 
-        // Fetch the advertisement to get fee minimums
-        let advertisement = match self
-            .nostr
-            .fetch_ledger_advertisement(&request.ledger_id)
-            .await
-        {
-            Ok(Some(ad)) => ad,
-            Ok(None) => {
+        // Resolve fee minimums. The local operator_policy.json is
+        // authoritative when present (set deliberately by `ledger advertise`).
+        // Fall back to the relay-published advertisement only if the operator
+        // hasn't written a policy yet — this is the fresh-bootstrap window
+        // before the operator has set deliberate fees. After they have,
+        // forgetting CLI flags on a re-advertise no longer silently zeros
+        // the enforcement floor.
+        let policy =
+            crate::operator_policy::OperatorPolicy::load(&self.data_dir).unwrap_or(None);
+
+        let (min_annual_bps, min_fixed_per_period, advertisement) = match policy {
+            Some(p) => {
+                let (bps, fixed) = p.minimum_fees();
+                tracing::debug!(
+                    "deposit_open: applying operator_policy.json minimums (bps={}, fixed_per_period={})",
+                    bps,
+                    fixed
+                );
+                // Synthesize an advertisement-shaped struct from the policy
+                // so the existing fall-through code (defaulted FeeStructure
+                // for wallets that don't propose explicit fees) keeps working.
+                let mut ad = crate::nostr::LedgerAdvertisement::new(
+                    request.ledger_id.clone(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                );
+                ad.annual_fee_bps = p.annual_fee_bps.unwrap_or(0);
+                ad.annualized_fixed_msats = p.annualized_fixed_msats.unwrap_or(0);
+                ad.fee_period_blocks = p.fee_period_blocks.unwrap_or(2016);
+                (bps, fixed, ad)
+            }
+            None => {
                 tracing::warn!(
-                    "No advertisement found for ledger {}, using zero fee minimums",
+                    "deposit_open: operator_policy.json absent for ledger {} — \
+                     falling back to relay advertisement for fee floors",
                     &request.ledger_id[..16]
                 );
-                crate::nostr::LedgerAdvertisement::new(
-                    request.ledger_id.clone(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                )
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to fetch advertisement: {}, using zero fee minimums",
-                    e
-                );
-                crate::nostr::LedgerAdvertisement::new(
-                    request.ledger_id.clone(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                )
+                let advertisement = match self
+                    .nostr
+                    .fetch_ledger_advertisement(&request.ledger_id)
+                    .await
+                {
+                    Ok(Some(ad)) => ad,
+                    Ok(None) => {
+                        tracing::warn!(
+                            "No advertisement found for ledger {}, using zero fee minimums",
+                            &request.ledger_id[..16]
+                        );
+                        crate::nostr::LedgerAdvertisement::new(
+                            request.ledger_id.clone(),
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                        )
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to fetch advertisement: {}, using zero fee minimums",
+                            e
+                        );
+                        crate::nostr::LedgerAdvertisement::new(
+                            request.ledger_id.clone(),
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                        )
+                    }
+                };
+                let (bps, fixed) = advertisement.minimum_fees();
+                (bps, fixed, advertisement)
             }
         };
-
-        let (min_annual_bps, min_fixed_per_period) = advertisement.minimum_fees();
 
         // Extract fee parameters from request OR use advertisement defaults
         let ad_period = if advertisement.fee_period_blocks > 0 {

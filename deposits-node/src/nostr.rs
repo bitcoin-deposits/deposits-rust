@@ -629,6 +629,22 @@ pub struct LedgerAdvertisement {
     #[serde(default)]
     pub current_block: u32,
 
+    /// Current quorum state. `"PreQuorum"` for ledgers that have a
+    /// `LedgerOpen` but no `QuorumBegin` yet (provisional, no on-chain
+    /// commitment yet — wallets should ignore these). `"Active"` once
+    /// the genesis QuorumBegin lands. `"Expired"` if the active quorum
+    /// passed its expiry without a re-rotation.
+    #[serde(default)]
+    pub quorum_state: String,
+
+    /// Active quorum cosigners (operator NOT included). Hex-encoded
+    /// 33-byte compressed secp256k1 pubkeys. Empty when
+    /// `quorum_state == PreQuorum`. `Q == quorum_members.len()`.
+    /// Wallets use this to verify which operators back this ledger
+    /// — quorum membership is public chain state, not a secret.
+    #[serde(default)]
+    pub quorum_members: Vec<String>,
+
     /// Version of the advertisement format
     #[serde(default = "default_version")]
     pub version: u8,
@@ -853,6 +869,8 @@ impl LedgerAdvertisement {
             allowed_domains: Vec::new(),
             network,
             current_block: 0,
+            quorum_state: String::new(),
+            quorum_members: Vec::new(),
             version: 1,
             event_id: String::new(),
             timestamp: 0,
