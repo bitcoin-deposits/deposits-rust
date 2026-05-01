@@ -75,6 +75,14 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         eprintln!("  reveal <ledger_id>                     Reveal lottery preimage via Nostr");
         eprintln!("  lottery-claim <ledger_id>              Claim lottery output if winner");
         eprintln!();
+        eprintln!("Stranded-state recovery:");
+        eprintln!("  reconstruct-taproot [<ledger_id>] [--quorum-expiry <block>]");
+        eprintln!("                                         Rebuild taproot_reserves.json from on-chain");
+        eprintln!("                                         state when a previous quorum_begin rotated");
+        eprintln!("                                         the legacy P2WSH UTXO but failed to persist");
+        eprintln!("                                         the new entry locally. Run with the daemon");
+        eprintln!("                                         stopped (or behind manual_override.marker).");
+        eprintln!();
         eprintln!("Recovery flow (entropy-based):");
         eprintln!("  1. dispute - Detect violation, publish DisputeEnter (quorum disbanded)");
         eprintln!("  2. rebuild - Add new quorum members, collect attestations");
@@ -100,6 +108,7 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
     match args[0].as_str() {
         "embed-hash" => recovery_embed_hash(&args[1..]).await,
         "publish-fraud-broadcast" => recovery_publish_fraud_broadcast(&args[1..]).await,
+        "reconstruct-taproot" => recovery_reconstruct_taproot(&args[1..]).await,
         // New dispute protocol commands
         "dispute" => recovery_dispute(&args[1..]).await,
         "rebuild" => recovery_rebuild(&args[1..]).await,
@@ -126,6 +135,313 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
             Ok(())
         }
     }
+}
+
+/// Reconstruct `taproot_reserves.json` from on-chain state when a previous
+/// `quorum begin` rotated the legacy P2WSH UTXO into a taproot vault but
+/// failed to persist the new entry locally — typically a daemon crash
+/// between broadcast and the (pre-fix) wallet state mutation.
+///
+/// The funds aren't lost; they're sitting in a Q=N taproot vault. This
+/// command re-derives the local view from the chain so `quorum begin`
+/// can hit the resume path and complete the bootstrap.
+///
+/// Operates entirely on files + Esplora HTTP — does NOT instantiate a
+/// `Node` (which would lock the wallet against a running daemon). The
+/// operator should drop a `manual_override.marker` and stop the daemon
+/// before running this, then restart and retry `quorum begin`.
+pub async fn recovery_reconstruct_taproot(
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use serde::{Deserialize, Serialize};
+
+    let mut ledger_id_arg: Option<String> = None;
+    let mut quorum_expiry_arg: Option<u32> = None;
+    let mut config_args = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--quorum-expiry" if i + 1 < args.len() => {
+                quorum_expiry_arg = Some(args[i + 1].parse().map_err(|_| {
+                    format!("Invalid --quorum-expiry: {}", args[i + 1])
+                })?);
+                i += 1;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id_arg.is_none() {
+                    ledger_id_arg = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&config_args)?;
+    let wallet_dir = config.data_dir.join("wallet");
+    let reserves_path = wallet_dir.join("reserves.json");
+    let taproot_path = wallet_dir.join("taproot_reserves.json");
+    let ledgers_dir = wallet_dir.join("ledgers");
+
+    if !reserves_path.exists() {
+        return Err(format!(
+            "{} does not exist — nothing to reconstruct",
+            reserves_path.display()
+        )
+        .into());
+    }
+
+    // Wallet's serde shapes — kept private in wallet.rs, redefined here.
+    // Drift between the two is caught at daemon load time when it parses
+    // the file we write.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct LegacyEntry {
+        outpoint_txid: String,
+        outpoint_vout: u32,
+        amount: u64,
+        operator: String,
+        partners: Vec<String>,
+        threshold: usize,
+        timeout_height: u32,
+        redeem_script_hex: String,
+        confirmed: bool,
+    }
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TaprootEntry {
+        outpoint_txid: String,
+        outpoint_vout: u32,
+        amount: u64,
+        operator: String,
+        quorum_members: Vec<String>,
+        quorum_expiry: u32,
+        ledger_hash: String,
+        address: String,
+        confirmed: bool,
+    }
+
+    let legacy: Vec<LegacyEntry> = {
+        let raw = std::fs::read_to_string(&reserves_path)?;
+        serde_json::from_str(&raw)?
+    };
+    if legacy.is_empty() {
+        eprintln!("reserves.json is empty — nothing to reconstruct");
+        return Ok(());
+    }
+
+    // Resolve ledger_id: explicit arg or single .jsonl in ledgers/.
+    let ledger_id = match ledger_id_arg {
+        Some(id) => id,
+        None => {
+            let entries: Vec<_> = std::fs::read_dir(&ledgers_dir)?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map_or(false, |x| x == "jsonl"))
+                .collect();
+            if entries.len() != 1 {
+                return Err(format!(
+                    "Found {} ledgers in {}; specify which one as a positional arg",
+                    entries.len(),
+                    ledgers_dir.display()
+                )
+                .into());
+            }
+            entries[0]
+                .path()
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+
+    // Read the ledger's latest State line.
+    let ledger_jsonl = ledgers_dir.join(format!("{}.jsonl", ledger_id));
+    let raw = std::fs::read_to_string(&ledger_jsonl)?;
+    let mut latest_state: Option<serde_json::Value> = None;
+    for line in raw.lines() {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").and_then(|x| x.as_str()) == Some("State") {
+            latest_state = Some(v);
+        }
+    }
+    let state = latest_state.ok_or_else(|| {
+        format!(
+            "no State line found in {} — ledger file is malformed",
+            ledger_jsonl.display()
+        )
+    })?;
+
+    let operator_key_bytes: Vec<u8> = serde_json::from_value(state["operator_key"].clone())?;
+    let operator_hex = hex::encode(&operator_key_bytes);
+    let chain_tip_bytes: Vec<u8> = serde_json::from_value(state["chain_tip_hash"].clone())?;
+    let ledger_hash_hex = hex::encode(&chain_tip_bytes);
+    let next_quorum_members: Vec<serde_json::Value> =
+        serde_json::from_value(state["next_quorum_members"].clone()).unwrap_or_default();
+    let active_quorum_members: Vec<serde_json::Value> =
+        serde_json::from_value(state["quorum_members"].clone()).unwrap_or_default();
+    let members_source = if !next_quorum_members.is_empty() {
+        next_quorum_members
+    } else {
+        active_quorum_members
+    };
+    let member_pks: Vec<String> = members_source
+        .iter()
+        .filter_map(|m| {
+            let pk: Option<Vec<u8>> = m.get("pubkey").and_then(|v| serde_json::from_value(v.clone()).ok());
+            pk.map(|b| hex::encode(b))
+        })
+        .collect();
+    if member_pks.is_empty() {
+        return Err(format!(
+            "ledger {} has no quorum members (next_quorum_members and quorum_members both empty)",
+            ledger_id
+        )
+        .into());
+    }
+
+    // Inspect each legacy entry against the chain.
+    let http = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let esplora = config.electrum_url.trim_end_matches('/').to_string();
+    let mut new_taproot_entries: Vec<TaprootEntry> = Vec::new();
+    let mut keep_legacy: Vec<LegacyEntry> = Vec::new();
+
+    for entry in legacy {
+        let outspend_url =
+            format!("{}/tx/{}/outspend/{}", esplora, entry.outpoint_txid, entry.outpoint_vout);
+        let outspend: serde_json::Value = match http.get(&outspend_url).send() {
+            Ok(r) if r.status().is_success() => r.json()?,
+            Ok(r) => {
+                eprintln!(
+                    "  outspend lookup failed ({}): {}",
+                    r.status(),
+                    outspend_url
+                );
+                keep_legacy.push(entry);
+                continue;
+            }
+            Err(e) => {
+                eprintln!("  outspend HTTP error: {}", e);
+                keep_legacy.push(entry);
+                continue;
+            }
+        };
+        if !outspend.get("spent").and_then(|v| v.as_bool()).unwrap_or(false) {
+            println!(
+                "  {}:{} not spent on-chain — leaving in reserves.json",
+                entry.outpoint_txid, entry.outpoint_vout
+            );
+            keep_legacy.push(entry);
+            continue;
+        }
+        let spending_txid = outspend["txid"]
+            .as_str()
+            .ok_or("outspend missing txid")?
+            .to_string();
+        let confirm_block =
+            outspend["status"]["block_height"].as_u64().unwrap_or(0) as u32;
+
+        // Fetch the spending tx to find the P2TR output.
+        let tx_url = format!("{}/tx/{}", esplora, spending_txid);
+        let tx: serde_json::Value = http.get(&tx_url).send()?.json()?;
+        let outputs = tx["vout"]
+            .as_array()
+            .ok_or("spending tx has no vout array")?;
+        let (out_idx, out) = outputs
+            .iter()
+            .enumerate()
+            .find(|(_, o)| o["scriptpubkey_type"].as_str() == Some("v1_p2tr"))
+            .ok_or("spending tx has no P2TR output (not a rotation pattern)")?;
+
+        let address = out["scriptpubkey_address"]
+            .as_str()
+            .ok_or("output missing address")?
+            .to_string();
+        let amount = out["value"].as_u64().ok_or("output missing value")?;
+
+        // Default expiry: rotate_reserves_to_quorum used current_block + 1000;
+        // current_block was approximately confirm_block - 3 (typical mempool age).
+        let derived_expiry = confirm_block.saturating_sub(3) + 1000;
+        let quorum_expiry = quorum_expiry_arg.unwrap_or(derived_expiry);
+
+        let new_entry = TaprootEntry {
+            outpoint_txid: spending_txid.clone(),
+            outpoint_vout: out_idx as u32,
+            amount,
+            operator: operator_hex.clone(),
+            quorum_members: member_pks.clone(),
+            quorum_expiry,
+            ledger_hash: ledger_hash_hex.clone(),
+            address: address.clone(),
+            confirmed: true,
+        };
+
+        println!(
+            "  {}:{} spent by {} → reconstructing as taproot {}:{}",
+            entry.outpoint_txid, entry.outpoint_vout, &spending_txid[..16], &spending_txid[..16], out_idx
+        );
+        println!("    address:   {}", address);
+        println!("    amount:    {} sats", amount);
+        println!("    Q members: {}", member_pks.len());
+        println!("    expiry:    {} (derived from confirm block {})", quorum_expiry, confirm_block);
+        println!("    ledger:    {}...", &ledger_hash_hex[..16]);
+
+        new_taproot_entries.push(new_entry);
+    }
+
+    if new_taproot_entries.is_empty() {
+        eprintln!("nothing to reconstruct: all legacy entries are still unspent on-chain");
+        return Ok(());
+    }
+
+    // Merge with existing taproot entries (don't overwrite).
+    let mut existing_taproot: Vec<TaprootEntry> = if taproot_path.exists() {
+        let raw = std::fs::read_to_string(&taproot_path)?;
+        if raw.trim().is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(&raw)?
+        }
+    } else {
+        Vec::new()
+    };
+    existing_taproot.extend(new_taproot_entries.iter().cloned());
+
+    std::fs::write(&taproot_path, serde_json::to_string_pretty(&existing_taproot)?)?;
+    std::fs::write(&reserves_path, serde_json::to_string_pretty(&keep_legacy)?)?;
+
+    println!();
+    println!(
+        "Wrote {} reconstructed taproot entries to {}.",
+        new_taproot_entries.len(),
+        taproot_path.display()
+    );
+    println!(
+        "Updated {} ({} legacy entries remaining).",
+        reserves_path.display(),
+        keep_legacy.len()
+    );
+    println!();
+    println!("Next steps:");
+    println!("  1. Restart the daemon so it reloads wallet state from disk");
+    println!("  2. Run `quorum begin` — it will hit the resume path and complete the bootstrap");
+    println!();
+    println!(
+        "If the cosign step rejects the reconstructed entry, the derived expiry ({}) may be \
+         wrong. Re-run with --quorum-expiry <correct-block> to override.",
+        new_taproot_entries[0].quorum_expiry
+    );
+
+    Ok(())
 }
 
 /// Start a recovery process for a non-conforming ledger
