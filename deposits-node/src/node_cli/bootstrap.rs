@@ -392,11 +392,41 @@ async fn bootstrap_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Err
         return Ok(());
     }
 
+    // Honor an operator-set manual-override marker. Drop a file named
+    // `manual_override.marker` in the data dir (ad hoc, no daemon
+    // interaction needed) to disable the auto-bootstrap loop while you
+    // intervene by hand. Without this, an unattended bootstrap retry
+    // can race with manual `quorum begin` invocations and produce
+    // "input already spent" loops on stranded state.
+    let override_marker = config.data_dir.join("manual_override.marker");
+    if override_marker.exists() {
+        eprintln!(
+            "bootstrap quorum: manual override marker present at {} — skipping auto-bootstrap. \
+             Remove the file to re-enable.",
+            override_marker.display()
+        );
+        return Ok(());
+    }
+
     // Sleep between rounds when something transient fails. Long enough to
     // not hammer the relay, short enough to converge within minutes when
     // peers do come up. Block time (~10 min) would be cheaper but less
     // responsive for the common "peer booted a minute ago" case.
     const RETRY_SLEEP_SECS: u64 = 300; // 5 min
+
+    // Errors that won't resolve by retrying. When we see one of these,
+    // bail the auto-bootstrap loop entirely — the operator must
+    // intervene by hand. Returning Err propagates to the caller (often
+    // entrypoint.sh), which logs and stops looping. Without this, the
+    // process busy-loops forever on a stranded state.
+    fn is_permanent_error(msg: &str) -> bool {
+        msg.contains("bad-txns-inputs-missingorspent")
+            || msg.contains("No existing reserves to rotate")
+            || msg.contains("quorum_member_unstaged")
+            || msg.contains("quorum_size_invalid")
+            || msg.contains("quorum_expiry_exceeds_commitment")
+            || msg.contains("Ledger not found")
+    }
 
     // Q is the cosigner count and excludes the operator. Each peer we
     // need to recruit becomes one cosigner, so `need == quorum_size`
@@ -465,7 +495,16 @@ async fn bootstrap_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Err
             match send_daemon_request(&config, &ledger_id, "quorum_add", params).await {
                 Ok(_) => println!("    added"),
                 Err(e) => {
-                    println!("    FAILED: {}", e);
+                    let msg = e.to_string();
+                    println!("    FAILED: {}", msg);
+                    if is_permanent_error(&msg) {
+                        return Err(format!(
+                            "bootstrap quorum: permanent error during quorum_add: {}. \
+                             Manual intervention required; not retrying.",
+                            msg
+                        )
+                        .into());
+                    }
                     add_ok = false;
                     break;
                 }
@@ -490,9 +529,20 @@ async fn bootstrap_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 break;
             }
             Err(e) => {
+                let msg = e.to_string();
+                if is_permanent_error(&msg) {
+                    return Err(format!(
+                        "bootstrap quorum: permanent error during quorum_begin: {}. \
+                         Manual intervention required; not retrying. Drop a \
+                         `manual_override.marker` file in the data dir to disable \
+                         this auto-bootstrap on subsequent restarts.",
+                        msg
+                    )
+                    .into());
+                }
                 println!(
                     "    FAILED: {} — sleeping {}s and retrying",
-                    e, RETRY_SLEEP_SECS
+                    msg, RETRY_SLEEP_SECS
                 );
                 tokio::time::sleep(Duration::from_secs(RETRY_SLEEP_SECS)).await;
                 continue;

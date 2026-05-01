@@ -98,6 +98,12 @@ set -e
 #   funding_address                  - address shown in the DM (stable across restarts)
 #   reserves_ready.marker            - set after phase 2 completes
 #   quorum_active.marker             - set after phase 3 completes
+#   manual_override.marker           - operator drops this file to disable the
+#                                      auto bootstrap-quorum loop. Useful when
+#                                      stranded state (e.g., half-rotated reserves)
+#                                      requires hand intervention; without it the
+#                                      retry loop races with manual `quorum begin`
+#                                      invocations. Remove the file to re-enable.
 #
 # Volumes:
 #   /data                            - persistent node data + relay DB
