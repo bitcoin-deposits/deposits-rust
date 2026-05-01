@@ -502,7 +502,34 @@ impl Node {
                     // Validate against local ledger state
                     if let Some(ref arc) = operator_ledger_arc {
                         let ledger = arc.read().unwrap();
-                        // Try applying the operation to a clone to check validity
+                        // Cosigner-edge policy + expiry check. Refuses to
+                        // sign anything past `quorum_expiry`, including a
+                        // fresh `QuorumBegin`. Operators must rotate before
+                        // the deadline; missing it forces them onto the
+                        // Tier-1 (operator-alone after expiry) recovery
+                        // path. We use the wallet's view of the chain tip
+                        // — fresh enough since the wallet syncs every
+                        // periodic_interval.
+                        let current_block_height =
+                            self.wallet.get_block_height().unwrap_or(0);
+                        if let Err(e) = ledger
+                            .validate_for_cosign(&operation, current_block_height)
+                        {
+                            tracing::warn!(
+                                "Cosign validation FAILED (policy/expiry): seq={} op={} error={}",
+                                sequence_number,
+                                Self::format_op_short(&operation),
+                                e
+                            );
+                            return (
+                                false,
+                                None,
+                                Some(format!("Cosign refused: {}", e)),
+                            );
+                        }
+                        // State-machine apply test: ensures the operation
+                        // applies cleanly to the current state (separate
+                        // from validate_for_cosign's policy checks).
                         match ledger.state.apply(&operation) {
                             Ok(_) => {
                                 tracing::debug!(

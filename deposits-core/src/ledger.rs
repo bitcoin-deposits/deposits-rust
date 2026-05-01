@@ -1539,6 +1539,52 @@ impl Ledger {
             history: updates,
         }
     }
+
+    /// Cosigner-edge validation: combines stateless `validate_operation`
+    /// with the post-expiry refusal rule.
+    ///
+    /// Once a quorum's `quorum_expiry` block has passed, cosigners refuse
+    /// to sign *any* operation, including a fresh `QuorumBegin`. Operators
+    /// must rotate before the deadline; missing it forces them onto the
+    /// Tier-1 (operator-alone after expiry) recovery path. There is no
+    /// "rotate at the last second" exemption — the deadline is the
+    /// deadline, and that's what makes it a meaningful obligation.
+    ///
+    /// Pre-quorum (no `quorum_expiry` set) and operations on a still-active
+    /// quorum (`current_block <= quorum_expiry`) pass through.
+    ///
+    /// Callers: cosign request handlers, before they sign anything. NOT
+    /// the operator's own apply path — operators can still apply ops
+    /// post-expiry (e.g. via Tier-1 recovery) but won't get cosignatures
+    /// for them.
+    pub fn validate_for_cosign(
+        &self,
+        operation: &LedgerOperation,
+        current_block_height: u32,
+    ) -> DepositsResult<()> {
+        self.validate_operation(operation)?;
+
+        if let Some(expiry) = self.state.quorum_expiry {
+            if current_block_height > expiry
+                && self.state.quorum_state == deposits_protocol::QuorumState::Active
+            {
+                return Err(DepositsError::ProtocolViolation {
+                    violation_type: "post_expiry_cosign_refused".to_string(),
+                    details: format!(
+                        "Quorum expired at block {}; current {}. \
+                         Cosigners refuse to sign past expiry — the operator \
+                         missed their rotation window. Recovery path is Tier-1 \
+                         (operator-alone after expiry) followed by a fresh \
+                         genesis bootstrap, not another QuorumBegin against \
+                         this expired quorum.",
+                        expiry, current_block_height
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -2531,6 +2577,102 @@ mod tests {
             DepositsError::ProtocolViolation {
                 violation_type, ..
             } => assert_eq!(violation_type, "quorum_size_invalid"),
+            other => panic!("expected ProtocolViolation, got {:?}", other),
+        }
+    }
+
+    /// `validate_for_cosign` refuses ops past `quorum_expiry`.
+    ///
+    /// Verifies all four boundary cases:
+    ///  - Active quorum + before expiry → accept
+    ///  - Active quorum + at expiry → accept (boundary is inclusive of expiry)
+    ///  - Active quorum + past expiry → refuse with `post_expiry_cosign_refused`
+    ///  - PreQuorum (no expiry set) + any block height → accept
+    #[test]
+    fn validate_for_cosign_refuses_post_expiry() {
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+        use deposits_protocol::types::QuorumMember;
+        use deposits_protocol::QuorumState;
+
+        fn pk(seed: u8) -> PublicKey {
+            let secp = Secp256k1::new();
+            let mut bytes = [0u8; 32];
+            bytes[31] = seed;
+            let sk = SecretKey::from_slice(&bytes).unwrap();
+            PublicKey::from_secret_key(&secp, &sk)
+        }
+
+        let operator = pk(1);
+        let mut ledger = Ledger::new(
+            operator,
+            "rid".to_string(),
+            LedgerRole::Operator,
+            Vec::new(),
+            100,
+        );
+        ledger.state.parent_pubkey = operator;
+        ledger.state.reserves_amount = 1_000_000;
+
+        // LedgerClose is the simplest op (no fields), used here as a probe
+        // to check the expiry gate fires regardless of op shape.
+        let op = LedgerOperation::LedgerClose;
+
+        // PreQuorum: no expiry set, all block heights pass.
+        ledger.state.quorum_state = QuorumState::PreQuorum;
+        ledger.state.quorum_expiry = None;
+        assert!(ledger.validate_for_cosign(&op, 1_000_000).is_ok());
+
+        // Activate the quorum at expiry block 500.
+        ledger.state.quorum_state = QuorumState::Active;
+        ledger.state.quorum_expiry = Some(500);
+        ledger.state.quorum_members = vec![
+            QuorumMember {
+                pubkey: pk(2),
+                ledger_id: "m1".into(),
+                min_fee_bps: None,
+                min_fee_fixed: None,
+                max_fee_period: None,
+                membership_until: Some(500),
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
+                compensation_bps: None,
+                compensation_deposit_id: None,
+                compensation_frequency_blocks: None,
+            },
+        ];
+
+        // Before expiry → accept.
+        assert!(
+            ledger.validate_for_cosign(&op, 499).is_ok(),
+            "block 499 with expiry 500 should pass"
+        );
+        // At expiry → accept (the expiry block itself is the last cosignable block).
+        assert!(
+            ledger.validate_for_cosign(&op, 500).is_ok(),
+            "block 500 with expiry 500 should pass (boundary inclusive)"
+        );
+        // Past expiry → refuse with `post_expiry_cosign_refused`.
+        let err = ledger
+            .validate_for_cosign(&op, 501)
+            .expect_err("block 501 with expiry 500 must refuse");
+        match err {
+            DepositsError::ProtocolViolation {
+                violation_type, ..
+            } => assert_eq!(violation_type, "post_expiry_cosign_refused"),
+            other => panic!("expected ProtocolViolation, got {:?}", other),
+        }
+
+        // Way past expiry → still refuse.
+        let err = ledger
+            .validate_for_cosign(&op, 1_000_000)
+            .expect_err("far-past expiry must refuse");
+        match err {
+            DepositsError::ProtocolViolation {
+                violation_type, ..
+            } => assert_eq!(violation_type, "post_expiry_cosign_refused"),
             other => panic!("expected ProtocolViolation, got {:?}", other),
         }
     }
