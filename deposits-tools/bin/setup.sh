@@ -155,7 +155,11 @@ start_node() {
     local data_dir="$DATA_ROOT/$name"
     local metrics_port=$((9100 + idx))
     mkdir -p "$data_dir"
-    RUST_LOG=warn "$DEPOSITS_NODE" run \
+    RUST_LOG=warn LDK_CLI="$LDK_CLI" LDK_REAL_CLI="$LDK_REAL_CLI" \
+        LDK_HOST="$LDK_HOST" LDK_PORT="$LDK_PORT" \
+        LDK_API_KEY="$LDK_API_KEY" LDK_TLS_CERT="$LDK_TLS_CERT" \
+        LDK_SELF_PAY_DIR="$LDK_SELF_PAY_DIR" \
+        "$DEPOSITS_NODE" run \
         --seed "$seed" --name "$name" \
         --network regtest --data-dir "$data_dir" \
         --esplora "$ELECTRS_URL" \
@@ -241,6 +245,33 @@ echo ""
 # 60s with "admin request timeout".
 
 log_info "=== Phase 1b: Start Daemons ==="
+
+# LDK wiring (optional). When the `lightning` container is up, refresh
+# the TLS cert from inside it (ldk-server regenerates self-signed certs
+# on every container start) and export LDK_* so each operator's
+# `make_invoice` / `pay_invoice` handler can talk to it. Without this,
+# operators fall through to "ldk-server-cli not in PATH" and any
+# Lightning-touching test fails. Mirrors `_common.sh:start_node`'s
+# block but lives here because setup.sh has its own start_node copy.
+LDK_CLI=""; LDK_REAL_CLI=""; LDK_HOST=""; LDK_PORT=""
+LDK_API_KEY=""; LDK_TLS_CERT=""; LDK_SELF_PAY_DIR=""
+if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^lightning$'; then
+    mkdir -p "$TOOLS_DIR/certs"
+    if docker cp lightning:/ldk/tls.crt "$TOOLS_DIR/certs/lightning.crt" 2>/dev/null; then
+        log_ok "Refreshed LDK TLS cert from lightning container"
+    fi
+    LDK_CLI="$TOOLS_DIR/bin/ldk-cli-wrapper.sh"
+    LDK_REAL_CLI="${LDK_SERVER_CLI:-$HOME/ldk-server/target/release/ldk-server-cli}"
+    [ -x "$LDK_REAL_CLI" ] || log_warn "ldk-server-cli not found at $LDK_REAL_CLI"
+    LDK_HOST="localhost"
+    LDK_PORT="3111"
+    LDK_API_KEY=$(docker exec lightning sh -c "cat /ldk/regtest/api_key | od -A n -t x1 | tr -d ' \n'" 2>/dev/null || echo "")
+    LDK_TLS_CERT="$TOOLS_DIR/certs/lightning.crt"
+    LDK_SELF_PAY_DIR="$DATA_ROOT/self-pay"
+    mkdir -p "$LDK_SELF_PAY_DIR"
+fi
+export LDK_CLI LDK_REAL_CLI LDK_HOST LDK_PORT LDK_API_KEY LDK_TLS_CERT LDK_SELF_PAY_DIR
+
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     start_node "$i"
 done
