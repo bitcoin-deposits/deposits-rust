@@ -2668,11 +2668,32 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     use nostr_sdk::prelude::*;
 
     let mut ledger_id: Option<String> = None;
+    let mut respectful = false;
+    let mut obligations_sats: Option<u64> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--respectful" => {
+                // Marks this confiscation as a respectful dispute
+                // (currently only QuorumExpired). Bifurcates the
+                // confiscation tx: `obligations_sats` of reserves go
+                // to the lottery winner; the change (excess reserves +
+                // full collateral) returns to the operator's pubkey.
+                // Without this flag, the punitive single-output
+                // behavior is used (full UTXO to lottery; the corrected
+                // Q-split punitive shape lands in a follow-up commit).
+                respectful = true;
+            }
+            "--obligations-sats" if i + 1 < args.len() => {
+                obligations_sats = Some(
+                    args[i + 1]
+                        .parse()
+                        .map_err(|_| format!("Invalid --obligations-sats: {}", args[i + 1]))?,
+                );
+                i += 1;
+            }
             s if s.starts_with("--") => {
                 config_args.push(args[i].clone());
                 if i + 1 < args.len() && !args[i + 1].starts_with("--") {
@@ -2687,6 +2708,17 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
             }
         }
         i += 1;
+    }
+
+    if respectful && obligations_sats.is_none() {
+        return Err(
+            "--respectful requires --obligations-sats <N>: the lottery output \
+             carries obligations-worth of reserves, the change (remainder) \
+             returns to the operator's pubkey. The auto-arm path computes \
+             this from the fork-ledger's deposit balances; manual operators \
+             pass it explicitly."
+                .into(),
+        );
     }
 
     let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
@@ -2919,7 +2951,61 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     // output and it stays stuck.
     check_economic_precondition(reserves_amount, fee).map_err(|e| format!("{}", e))?;
 
-    let output_amount = reserves_amount.saturating_sub(fee);
+    let spendable = reserves_amount.saturating_sub(fee);
+
+    // Build outputs based on dispute classification.
+    //
+    // Respectful (QuorumExpired): bifurcated. The lottery output carries
+    // exactly `obligations` worth of reserves — the new operator inherits
+    // those obligations against that backing. The change (excess reserves
+    // + full collateral) returns to the original operator's pubkey via
+    // P2TR. The operator keeps their bond; the deposits get a new
+    // custodian. Respectful proofs do NOT propagate cross-ledger.
+    //
+    // Punitive (everything else): single output to lottery, full UTXO
+    // confiscated. This is the LEGACY shape — the new spec calls for
+    // `obligations` to lottery + Q-output split for the remainder, but
+    // that's a follow-up commit. The current single-output behavior
+    // matches today's deployed code; lottery winner gets everything.
+    let outputs: Vec<TxOut> = if respectful {
+        let obligations = obligations_sats.expect("checked above");
+        if obligations > spendable {
+            return Err(format!(
+                "Respectful confiscation: obligations {} sats exceed spendable \
+                 {} sats (reserves {} - fee {}). The dispute can't proceed — \
+                 the operator's reserves can't cover declared obligations.",
+                obligations, spendable, reserves_amount, fee
+            )
+            .into());
+        }
+        let change_to_operator = spendable - obligations;
+        let secp_local = Secp256k1::new();
+        let operator_xonly = original_operator.x_only_public_key().0;
+        let operator_addr =
+            bitcoin::Address::p2tr(&secp_local, operator_xonly, None, config.network);
+        println!(
+            "  Respectful split: lottery={} sats (obligations), \
+             change={} sats → operator's pubkey ({})",
+            obligations, change_to_operator, operator_addr
+        );
+        vec![
+            TxOut {
+                value: Amount::from_sat(obligations),
+                script_pubkey: lottery_output.script_pubkey(),
+            },
+            TxOut {
+                value: Amount::from_sat(change_to_operator),
+                script_pubkey: operator_addr.script_pubkey(),
+            },
+        ]
+    } else {
+        // Punitive (legacy single-output shape — full UTXO to lottery).
+        // The corrected Q-output split lands in a follow-up commit.
+        vec![TxOut {
+            value: Amount::from_sat(spendable),
+            script_pubkey: lottery_output.script_pubkey(),
+        }]
+    };
 
     let confiscation_tx = Transaction {
         version: bitcoin::transaction::Version::TWO,
@@ -2930,10 +3016,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
             sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
             witness: Witness::default(),
         }],
-        output: vec![TxOut {
-            value: Amount::from_sat(output_amount),
-            script_pubkey: lottery_output.script_pubkey(),
-        }],
+        output: outputs,
     };
 
     // Build the Taproot reserves structure for signing
