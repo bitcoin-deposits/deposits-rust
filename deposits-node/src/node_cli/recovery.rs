@@ -2710,12 +2710,15 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         i += 1;
     }
 
-    if respectful && obligations_sats.is_none() {
+    if obligations_sats.is_none() {
         return Err(
-            "--respectful requires --obligations-sats <N>: the lottery output \
-             carries obligations-worth of reserves, the change (remainder) \
-             returns to the operator's pubkey. The auto-arm path computes \
-             this from the fork-ledger's deposit balances; manual operators \
+            "--obligations-sats <N> is required. The lottery output \
+             carries `obligations` worth of reserves (the new operator \
+             inherits those obligations against that backing); the \
+             remainder is split per the dispute classification — \
+             back to operator (respectful) or among Q cosigners \
+             (punitive). The auto-arm path computes obligations from \
+             the fork-ledger's deposit balances; manual operators \
              pass it explicitly."
                 .into(),
         );
@@ -2962,31 +2965,38 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     // P2TR. The operator keeps their bond; the deposits get a new
     // custodian. Respectful proofs do NOT propagate cross-ledger.
     //
-    // Punitive (everything else): single output to lottery, full UTXO
-    // confiscated. This is the LEGACY shape — the new spec calls for
-    // `obligations` to lottery + Q-output split for the remainder, but
-    // that's a follow-up commit. The current single-output behavior
-    // matches today's deployed code; lottery winner gets everything.
+    // Punitive (everything else): obligations to lottery, the remainder
+    // (excess reserves + full collateral) split equally among the Q
+    // cosigners. The lottery winner does NOT retain the confiscated
+    // collateral as a windfall — they receive their per-cosigner share
+    // alongside everyone else, evenly aligning incentives across the
+    // quorum. The winner provides replacement collateral when claiming
+    // the lottery output (separate concern, not modeled here).
+    //
+    // Dust handling: integer division of the remainder by Q drops a
+    // residue (≤ Q-1 sats). It silently increases the actual fee paid
+    // to miners — small enough to ignore.
+    let obligations = obligations_sats.expect("checked above");
+    if obligations > spendable {
+        return Err(format!(
+            "Confiscation: obligations {} sats exceed spendable {} sats \
+             (reserves {} - fee {}). The dispute can't proceed — the \
+             operator's reserves can't cover declared obligations.",
+            obligations, spendable, reserves_amount, fee
+        )
+        .into());
+    }
+    let remainder = spendable - obligations;
+    let secp_local = Secp256k1::new();
+
     let outputs: Vec<TxOut> = if respectful {
-        let obligations = obligations_sats.expect("checked above");
-        if obligations > spendable {
-            return Err(format!(
-                "Respectful confiscation: obligations {} sats exceed spendable \
-                 {} sats (reserves {} - fee {}). The dispute can't proceed — \
-                 the operator's reserves can't cover declared obligations.",
-                obligations, spendable, reserves_amount, fee
-            )
-            .into());
-        }
-        let change_to_operator = spendable - obligations;
-        let secp_local = Secp256k1::new();
         let operator_xonly = original_operator.x_only_public_key().0;
         let operator_addr =
             bitcoin::Address::p2tr(&secp_local, operator_xonly, None, config.network);
         println!(
             "  Respectful split: lottery={} sats (obligations), \
              change={} sats → operator's pubkey ({})",
-            obligations, change_to_operator, operator_addr
+            obligations, remainder, operator_addr
         );
         vec![
             TxOut {
@@ -2994,17 +3004,43 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
                 script_pubkey: lottery_output.script_pubkey(),
             },
             TxOut {
-                value: Amount::from_sat(change_to_operator),
+                value: Amount::from_sat(remainder),
                 script_pubkey: operator_addr.script_pubkey(),
             },
         ]
     } else {
-        // Punitive (legacy single-output shape — full UTXO to lottery).
-        // The corrected Q-output split lands in a follow-up commit.
-        vec![TxOut {
-            value: Amount::from_sat(spendable),
+        // Punitive: obligations to lottery + Q equal slices to cosigners.
+        // Cosigner ordering is by xonly pubkey (matches the recovery
+        // voter ordering convention used elsewhere) so the tx is
+        // deterministic and reproducible by every quorum member.
+        let q = quorum_members.len() as u64;
+        if q == 0 {
+            return Err("Punitive confiscation: zero quorum members — \
+                       nowhere to send the slashed value."
+                .into());
+        }
+        let per_cosigner = remainder / q;
+        let dust = remainder - (per_cosigner * q);
+        let mut cosigners_sorted: Vec<PublicKey> = quorum_members.clone();
+        cosigners_sorted.sort_by_key(|pk| pk.x_only_public_key().0.serialize());
+        println!(
+            "  Punitive split: lottery={} sats (obligations), \
+             {} sats × {} cosigners ({} sats dust → fee)",
+            obligations, per_cosigner, q, dust
+        );
+        let mut outs = vec![TxOut {
+            value: Amount::from_sat(obligations),
             script_pubkey: lottery_output.script_pubkey(),
-        }]
+        }];
+        for pk in &cosigners_sorted {
+            let xonly = pk.x_only_public_key().0;
+            let addr = bitcoin::Address::p2tr(&secp_local, xonly, None, config.network);
+            outs.push(TxOut {
+                value: Amount::from_sat(per_cosigner),
+                script_pubkey: addr.script_pubkey(),
+            });
+        }
+        outs
     };
 
     let confiscation_tx = Transaction {
