@@ -33,7 +33,7 @@ pub enum FraudProofType {
     UncreditedOnchainPayment,
     UncreditedLightningPayment,
     StaleCosignature,
-    InactiveQuorumMember,
+    DisputeDereliction,
     NonConformingUpdate,  // placeholder
 }
 ```
@@ -87,11 +87,11 @@ Evidence (`FraudEvidence::UncreditedOnchain`):
 
 Notably, this proof is **autonomous**: a wallet has every piece of evidence it needs from the offer it received, the on-chain transaction it sent, and the operator's own subsequent updates (which the wallet can fetch from the relay). No interactive cooperation with the payer is required.
 
-### InactiveQuorumMember
+### DisputeDereliction
 
 The accusation: a member of the disputed ledger's quorum was online during the response window after a fraud proof became knowable, but did not act on it. They are sanctioned for their inaction by losing their *own* ledger's collateral. Their accused-ledger here is their collateral ledger, not the original disputed one.
 
-Evidence (`FraudEvidence::InactiveQuorum`):
+Evidence (`FraudEvidence::DisputeDereliction`):
 
 - `original_fraud_hash`: the proof hash they ignored.
 - `original_fraud_block_hash`: a block hash anchoring when the original fraud became knowable. Verifier confirms this hash is in its own confirmed chain.

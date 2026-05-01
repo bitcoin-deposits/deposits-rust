@@ -359,7 +359,7 @@ Source: `deposits-protocol/src/fraud.rs:32–820`. See [Chapter 11](11-fraud-pro
 | 0 | `UncreditedOnchainPayment` | Operator saw enough confirmations via a signed update but never credited the deposit |
 | 1 | `UncreditedLightningPayment` | Operator cosigned an invoice and the preimage is observable, but no `InvoiceCredit` followed |
 | 2 | `StaleCosignature` | A cosignature declares a `member_ledger_hash` that the member's chain had already advanced past |
-| 3 | `InactiveQuorumMember` | A member was active (extended their own ledger) within the response window but didn't dispute observed fraud |
+| 3 | `DisputeDereliction` | A member was active (extended their own ledger) within the response window but didn't dispute observed fraud |
 | 4 | `NonConformingUpdate` | Operator signed a ledger update that violates protocol rules (placeholder verifier as of writing) |
 
 ### `FraudEvidence` per-type fields
@@ -371,7 +371,7 @@ Verifier semantics: each variant produces canonical bytes via a stable serializa
 | `UncreditedOnchain` | `offer_id`, `funding_address`, `accused_operator_pubkey`, `deadline_block`, `cosigner_pubkey`, `cosigner_ledger_hash`, `cosign_signature`, `txid`, `vout`, `amount_sats`, `confirmed_at_block_hash` (32 bytes), `required_confirmations`, `proof_sequence` |
 | `UncreditedLightning` | `invoice` (BOLT11), `payment_hash`, `deposit_id`, `amount_msat`, `cosigner_pubkey`, `cosigner_ledger_hash`, `cosign_signature`, `preimage`, `proof_sequence` |
 | `StaleCosign` | `stale_update_sequence`, `stale_update_hash`, `declared_member_hash`, `member_later_sequence`, `member_later_hash`, `member_ledger_id` |
-| `InactiveQuorum` | `original_fraud_hash`, `original_fraud_block_hash` (32 bytes), `required_response_blocks`, `member_ledger_id`, `member_active_sequence`, `member_pubkey` |
+| `DisputeDereliction` | `original_fraud_hash`, `original_fraud_block_hash` (32 bytes), `required_response_blocks`, `member_ledger_id`, `member_active_sequence`, `member_pubkey` |
 | `NonConforming` | `sequence`, `update_b64` (base64 TLV of the offending `SignedLedgerUpdate`), `violation` (free-form description) |
 
 Hex string lengths in evidence: pubkeys are 66 chars (compressed, 33 bytes), x-only and Nostr-style pubkeys are 64 chars (32 bytes), txids and ledger hashes are 64 chars, ledger IDs are 64 chars. Block hashes embedded in evidence are 32-byte raw arrays serialized via the `serde_32` helper as a hex string.

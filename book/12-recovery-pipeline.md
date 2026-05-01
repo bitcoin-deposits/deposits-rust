@@ -239,7 +239,7 @@ What is *not* automatic: pending Lightning channel settlements may need explicit
 
 ## Inactive-quorum slashing
 
-The protocol also has a slashing path for a member who fails to act. If a member was demonstrably active during the dispute window — they appended updates to their *own* ledger after the fraud occurred, proving they were online — but did not initiate a dispute against the accused, they can be the target of an `InactiveQuorum` fraud proof.
+The protocol also has a slashing path for a member who fails to act. If a member was demonstrably active during the dispute window — they appended updates to their *own* ledger after the fraud occurred, proving they were online — but did not initiate a dispute against the accused, they can be the target of an `DisputeDereliction` fraud proof.
 
 The verifier (`deposits-protocol/src/fraud.rs:507::verify_inactive_quorum_member`) evaluates the member's own ledger history for activity in the window after the original fraud and the absence of a dispute event. If accepted, the member's *own* ledger is slashable.
 

@@ -1,4 +1,4 @@
-//! Integration test: a verified `InactiveQuorumMember` fraud proof
+//! Integration test: a verified `DisputeDereliction` fraud proof
 //! drives the dispute pipeline end-to-end.
 //!
 //! In this proof type, the accused is a quorum member who *was online*
@@ -92,10 +92,10 @@ fn fraud_proof_inactive_quorum_triggers_confiscation() {
         buf
     };
     let proof = FraudProof {
-        proof_type: FraudProofType::InactiveQuorumMember,
+        proof_type: FraudProofType::DisputeDereliction,
         accused: hex::encode(member_pubkey.serialize()),
         ledger_id: accused_ledger.clone(),
-        evidence: FraudEvidence::InactiveQuorum {
+        evidence: FraudEvidence::DisputeDereliction {
             original_fraud_hash: hex::encode(original_fraud_hash),
             original_fraud_block_hash,
             required_response_blocks: 1,

@@ -357,7 +357,7 @@ If any of these fail in a way regtest didn't catch, file a memory note in `~/.cl
 ## Things to know that regtest hides
 
 - **Mempool full / fee spike:** during a real fee event, confiscation TXs may sit unconfirmed for hours. Today's `initiate_confiscations` doesn't bump fees on its own — that's a known gap.
-- **Reorgs:** mainnet has small reorgs (1–2 blocks) regularly. The protocol's block-anchor verification (used by `UncreditedOnchainPayment` and `InactiveQuorum` fraud proofs) requires the anchor block to be in the verifier's chain — a reorg can briefly invalidate a fraud proof. Quorum members should re-attempt verification after the new tip stabilizes.
+- **Reorgs:** mainnet has small reorgs (1–2 blocks) regularly. The protocol's block-anchor verification (used by `UncreditedOnchainPayment` and `DisputeDereliction` fraud proofs) requires the anchor block to be in the verifier's chain — a reorg can briefly invalidate a fraud proof. Quorum members should re-attempt verification after the new tip stabilizes.
 - **NTP:** Nostr events have timestamps that relays validate within ±15 minutes (`rejectEventsNewerThanSeconds`). All operator and relay hosts must run an NTP client; clock drift silently breaks event ingest.
 - **Public-relay abuse:** the ledgers relay accepts events from anyone. Strfry's default config doesn't rate-limit; for a public-facing deployment, add `dropEventsByPubkey` filtering or a write-side proxy that gates on operator pubkeys.
 

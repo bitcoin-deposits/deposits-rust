@@ -97,7 +97,7 @@ This is the same reasoning that made the `danger fork-update` test's expectation
 
 ## Why this isn't (yet) `FraudProofType::Equivocation`
 
-A reader who consulted [Chapter 11](11-fraud-proofs.md) and the FraudProofType enum (`deposits-protocol/src/fraud.rs:46`) will notice equivocation is not on the list. The five types currently enumerated are `UncreditedOnchainPayment`, `UncreditedLightningPayment`, `StaleCosignature`, `InactiveQuorumMember`, and `NonConformingUpdate`. There is no `Equivocation` variant.
+A reader who consulted [Chapter 11](11-fraud-proofs.md) and the FraudProofType enum (`deposits-protocol/src/fraud.rs:46`) will notice equivocation is not on the list. The five types currently enumerated are `UncreditedOnchainPayment`, `UncreditedLightningPayment`, `StaleCosignature`, `DisputeDereliction`, and `NonConformingUpdate`. There is no `Equivocation` variant.
 
 This is a deliberate state of partial coverage. The current implementation:
 

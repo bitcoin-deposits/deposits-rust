@@ -55,7 +55,7 @@ pub enum FraudProofType {
     StaleCosignature,
     /// A quorum member was active (their ledger has updates) but didn't
     /// initiate a dispute within the required block window.
-    InactiveQuorumMember,
+    DisputeDereliction,
     /// The operator signed a ledger update that violates protocol rules.
     NonConformingUpdate,
 }
@@ -132,7 +132,7 @@ pub enum FraudEvidence {
     },
 
     /// Quorum member was active but didn't act on fraud.
-    InactiveQuorum {
+    DisputeDereliction {
         /// Hash of the original fraud proof that was ignored.
         original_fraud_hash: String,
         /// Block hash anchoring when the original fraud proof became
@@ -485,7 +485,7 @@ pub fn verify_uncredited_lightning(
     Ok(())
 }
 
-/// Verify an `InactiveQuorumMember` claim.
+/// Verify an `DisputeDereliction` claim.
 ///
 /// The accusation: member was online (their ledger has updates) past
 /// the required response window after a fraud proof was knowable, but
@@ -511,7 +511,7 @@ pub fn verify_inactive_quorum_member(
 ) -> Result<(), String> {
     use std::str::FromStr;
 
-    let FraudEvidence::InactiveQuorum {
+    let FraudEvidence::DisputeDereliction {
         original_fraud_hash: _,
         original_fraud_block_hash,
         required_response_blocks,
@@ -927,12 +927,12 @@ pub fn verify_fraud_broadcast(
             })?;
             verify_uncredited_lightning(proof, &accused_history)?;
         }
-        FraudProofType::InactiveQuorumMember => {
-            let FraudEvidence::InactiveQuorum {
+        FraudProofType::DisputeDereliction => {
+            let FraudEvidence::DisputeDereliction {
                 member_ledger_id, ..
             } = &proof.evidence
             else {
-                return Err("InactiveQuorumMember: wrong evidence type".into());
+                return Err("DisputeDereliction: wrong evidence type".into());
             };
             let member_history = ledgers.ledger_history(member_ledger_id).ok_or_else(|| {
                 format!(
@@ -1029,7 +1029,7 @@ impl FraudProofType {
             Self::UncreditedOnchainPayment => 1,
             Self::UncreditedLightningPayment => 2,
             Self::StaleCosignature => 3,
-            Self::InactiveQuorumMember => 4,
+            Self::DisputeDereliction => 4,
             Self::NonConformingUpdate => 5,
         }
     }
@@ -1078,7 +1078,7 @@ impl FraudEvidence {
                 out.extend_from_slice(declared_member_hash.as_bytes());
                 out.extend_from_slice(member_later_hash.as_bytes());
             }
-            Self::InactiveQuorum {
+            Self::DisputeDereliction {
                 original_fraud_hash,
                 original_fraud_block_hash,
                 member_ledger_id,

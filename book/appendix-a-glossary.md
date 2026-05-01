@@ -174,7 +174,7 @@ Terms used throughout the book, grouped alphabetically. Chapter references point
 : The operation that opens a custody dispute on a fork. The one operation that may be signed by a key other than the current `parent_pubkey` — specifically, by any pubkey that was a quorum member at the fork point.
 
 **`dispute_response_blocks`**
-: The negotiated window after evidence becomes knowable, within which a quorum member must dispute or themselves become liable for an `InactiveQuorum` proof. Default 144 blocks (~1 day).
+: The negotiated window after evidence becomes knowable, within which a quorum member must dispute or themselves become liable for an `DisputeDereliction` proof. Default 144 blocks (~1 day).
 
 **`DisputeState`**
 : The per-ledger dispute state-machine variable. Values: `Normal`, `Disputed`, `Armed`, `Tombstoned`. Per fork-branch.
@@ -235,7 +235,7 @@ Terms used throughout the book, grouped alphabetically. Chapter references point
 : The on-the-wire shape of a fraud proof: the proof, an embedding, and a causal chain. Published as Nostr `Kind:9101`.
 
 **`FraudProofType`**
-: The enum of fraud-proof variants: `UncreditedOnchainPayment`, `UncreditedLightningPayment`, `StaleCosignature`, `InactiveQuorumMember`, `NonConformingUpdate` (placeholder).
+: The enum of fraud-proof variants: `UncreditedOnchainPayment`, `UncreditedLightningPayment`, `StaleCosignature`, `DisputeDereliction`, `NonConformingUpdate` (placeholder).
 
 ## G
 
@@ -264,7 +264,7 @@ Terms used throughout the book, grouped alphabetically. Chapter references point
 **Idempotency**
 : The protocol property that a re-broadcast of the same update is a no-op. The `(sequence_number, content_hash)` dedup in the actor's apply path enforces this.
 
-**`InactiveQuorumMember`**
+**`DisputeDereliction`**
 : A fraud-proof variant slashing a member who was online during the response window after a fraud proof but did not act. Their *own* ledger's collateral is at stake. See [Chapter 11: Fraud Proofs](11-fraud-proofs.md).
 
 **`InvoiceCredit`**

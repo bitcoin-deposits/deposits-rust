@@ -69,10 +69,10 @@ fn make_stale_cosign_proof() -> FraudProof {
 
 fn make_inactive_proof() -> FraudProof {
     FraudProof {
-        proof_type: FraudProofType::InactiveQuorumMember,
+        proof_type: FraudProofType::DisputeDereliction,
         accused: make_accused(),
         ledger_id: make_ledger_id(),
-        evidence: FraudEvidence::InactiveQuorum {
+        evidence: FraudEvidence::DisputeDereliction {
             original_fraud_hash: "66".repeat(32),
             original_fraud_block_hash: [0xAA; 32],
             member_ledger_id: hex::encode([0xBB; 32]),
@@ -204,7 +204,7 @@ fn discriminants_are_unique() {
         FraudProofType::UncreditedOnchainPayment,
         FraudProofType::UncreditedLightningPayment,
         FraudProofType::StaleCosignature,
-        FraudProofType::InactiveQuorumMember,
+        FraudProofType::DisputeDereliction,
         FraudProofType::NonConformingUpdate,
     ];
     let discs: Vec<u8> = types.iter().map(|t| t.discriminant()).collect();
@@ -990,7 +990,7 @@ mod dispatch {
         );
     }
 
-    // ---------------- InactiveQuorumMember -----------------
+    // ---------------- DisputeDereliction -----------------
 
     fn inactive_quorum_scenario(
         elapsed: u32,
@@ -1016,10 +1016,10 @@ mod dispatch {
         member_active_update.block_hash = member_block;
 
         let proof_template = FraudProof {
-            proof_type: FraudProofType::InactiveQuorumMember,
+            proof_type: FraudProofType::DisputeDereliction,
             accused: hex::encode(pk_from_seed(0xAB).serialize()),
             ledger_id: hex::encode(accused_ledger),
-            evidence: FraudEvidence::InactiveQuorum {
+            evidence: FraudEvidence::DisputeDereliction {
                 original_fraud_hash: "66".repeat(32),
                 original_fraud_block_hash: original_block,
                 required_response_blocks: required,
@@ -1809,10 +1809,10 @@ mod inactive_quorum_member {
         let history = vec![member_update_at(200, member_block_hash, signer)];
 
         let proof = FraudProof {
-            proof_type: FraudProofType::InactiveQuorumMember,
+            proof_type: FraudProofType::DisputeDereliction,
             accused: "02".to_string() + &"ab".repeat(32),
             ledger_id: hex::encode([0xAA; 32]),
-            evidence: FraudEvidence::InactiveQuorum {
+            evidence: FraudEvidence::DisputeDereliction {
                 original_fraud_hash: "66".repeat(32),
                 original_fraud_block_hash,
                 required_response_blocks: required_blocks,
@@ -1848,7 +1848,7 @@ mod inactive_quorum_member {
     fn rejects_unconfirmed_original_fraud_block() {
         // Oracle returns None for the original-fraud block hash.
         let (mut proof, history, _) = fixture(200, 144, member_pk());
-        if let FraudEvidence::InactiveQuorum {
+        if let FraudEvidence::DisputeDereliction {
             original_fraud_block_hash,
             ..
         } = &mut proof.evidence
@@ -1875,10 +1875,10 @@ mod inactive_quorum_member {
 
         let history = vec![member_update_at(200, [0xCC; 32], member_pk())];
         let proof = FraudProof {
-            proof_type: FraudProofType::InactiveQuorumMember,
+            proof_type: FraudProofType::DisputeDereliction,
             accused: "02".to_string() + &"ab".repeat(32),
             ledger_id: hex::encode([0xAA; 32]),
-            evidence: FraudEvidence::InactiveQuorum {
+            evidence: FraudEvidence::DisputeDereliction {
                 original_fraud_hash: "66".repeat(32),
                 original_fraud_block_hash,
                 required_response_blocks: 144,
