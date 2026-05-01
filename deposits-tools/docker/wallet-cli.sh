@@ -170,18 +170,99 @@ open)
         exit 1
     fi
 
+    # Build relay list
+    ALL_RELAYS="$LEDGER_RELAY"
+    if [ -n "$EXTRA_RELAYS" ]; then
+        ALL_RELAYS="$ALL_RELAYS,$EXTRA_RELAYS"
+    fi
+
+    # Canonicalize LEDGER_ID. Accept:
+    #   - full 64-hex (passes through)
+    #   - hex prefix (any length < 64)
+    #   - bech32-data prefix (length-agnostic, decodes to a hex prefix)
+    # Any prefix gets resolved against Kind 39100 ads on the relay set
+    # so deposits.json always stores the full ledger_id.
+    RESOLVED=$(python3 - "$LEDGER_ID" "$ALL_RELAYS" 2>&1 << 'PYEOF'
+import sys, json
+try:
+    import websocket
+except ImportError:
+    print("ERROR: pip install websocket-client", file=sys.stderr)
+    sys.exit(1)
+
+raw, relays_str = sys.argv[1], sys.argv[2]
+HEX = set("0123456789abcdef")
+CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+# Pass through canonical form unchanged.
+if len(raw) == 64 and all(c in HEX for c in raw.lower()):
+    print(raw.lower())
+    sys.exit(0)
+
+# Compute the hex prefix to search for. Prefer bech32 decode (matches
+# what deposits-lnurl does for short subdomains); fall back to raw hex.
+needle = None
+if all(c in CHARSET for c in raw):
+    acc, bits, out = 0, 0, []
+    for c in raw:
+        acc = (acc << 5) | CHARSET.index(c)
+        bits += 5
+        if bits >= 8:
+            bits -= 8
+            out.append((acc >> bits) & 0xff)
+    if out:
+        needle = bytes(out).hex()
+if needle is None and all(c in HEX for c in raw.lower()):
+    needle = raw.lower()
+if needle is None:
+    print(f"ERROR: '{raw}' is neither hex nor bech32-data — can't resolve.", file=sys.stderr)
+    sys.exit(1)
+
+matches = set()
+for relay_url in [r.strip() for r in relays_str.split(',') if r.strip()]:
+    try:
+        ws = websocket.create_connection(relay_url, timeout=5)
+        ws.send(json.dumps(['REQ', 'lr1', {'kinds': [39100], 'limit': 1000}]))
+        ws.settimeout(5)
+        while True:
+            msg = json.loads(ws.recv())
+            if msg[0] == 'EVENT':
+                try:
+                    lid = json.loads(msg[2]['content']).get('ledger_id', '').lower()
+                    if lid.startswith(needle):
+                        matches.add(lid)
+                except Exception:
+                    pass
+            elif msg[0] == 'EOSE':
+                break
+        ws.close()
+    except Exception as e:
+        print(f"  resolve via {relay_url} failed: {e}", file=sys.stderr)
+
+if not matches:
+    print(f"ERROR: no Kind 39100 advertisement matches prefix '{needle}'.", file=sys.stderr)
+    sys.exit(1)
+if len(matches) > 1:
+    print(f"ERROR: prefix '{needle}' is ambiguous — matches {len(matches)} ledgers.", file=sys.stderr)
+    sys.exit(1)
+print(next(iter(matches)))
+PYEOF
+)
+    if [ $? -ne 0 ] || [ -z "$RESOLVED" ] || ! echo "$RESOLVED" | grep -qE '^[0-9a-f]{64}$'; then
+        echo "$RESOLVED" >&2
+        exit 1
+    fi
+    if [ "$RESOLVED" != "$LEDGER_ID" ]; then
+        echo "Resolved ledger prefix '${LEDGER_ID}' → ${RESOLVED:0:16}…"
+    fi
+    LEDGER_ID="$RESOLVED"
+
     echo "Opening deposit..."
     echo "  Ledger: ${LEDGER_ID:0:16}..."
     echo "  Pubkey: $PUBKEY"
     echo "  Index:  $INDEX"
     echo "  Relay:  $LEDGER_RELAY"
     echo ""
-
-    # Build relay list
-    ALL_RELAYS="$LEDGER_RELAY"
-    if [ -n "$EXTRA_RELAYS" ]; then
-        ALL_RELAYS="$ALL_RELAYS,$EXTRA_RELAYS"
-    fi
 
     # Send deposit_open request via Nostr (pure Python, no Docker needed)
     python3 -c "
