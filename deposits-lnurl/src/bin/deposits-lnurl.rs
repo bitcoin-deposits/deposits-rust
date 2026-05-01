@@ -51,6 +51,10 @@ struct AppState {
     max_msats: u64,
     /// Pending make_invoice requests: request_event_id → oneshot sender
     pending: Mutex<HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>,
+    /// Cache of discovered operator pubkeys per ledger (from Kind 39100 ads).
+    /// Used to gift-wrap requests so the relay never sees ledger_id /
+    /// deposit_pubkey / amount in cleartext.
+    operator_keys: Mutex<HashMap<String, PublicKey>>,
 }
 
 #[derive(Serialize)]
@@ -234,6 +238,111 @@ async fn lnurlp_metadata(
     }))
 }
 
+/// Discover the operator's nostr pubkey for a ledger by querying its
+/// Kind 39100 advertisement. Cached per-ledger; misses fall back to plaintext.
+///
+/// The ad is signed by the operator's nostr key, so `event.pubkey` is the
+/// authoritative operator identity (the `o` tag is informational and equal
+/// in practice but not signature-bound).
+async fn discover_operator(state: &AppState, ledger_id: &str) -> Option<PublicKey> {
+    if let Some(pk) = state.operator_keys.lock().await.get(ledger_id).copied() {
+        return Some(pk);
+    }
+    let filter = Filter::new()
+        .kind(Kind::Custom(39100))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::L), [ledger_id])
+        .limit(1);
+    let events = state
+        .client
+        .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+        .await
+        .ok()?;
+    let event = events.into_iter().max_by_key(|e| e.created_at)?;
+    let pk = event.pubkey;
+    state
+        .operator_keys
+        .lock()
+        .await
+        .insert(ledger_id.to_string(), pk);
+    Some(pk)
+}
+
+/// Build a NIP-59-shaped gift-wrap (rumor → seal → wrap) for a Kind 20101
+/// request, mirroring `send_admin_request` in deposits-node/src/nostr.rs.
+///
+/// Uses NIP-04 (not NIP-44) and Kind 20101 for the outer wrap so the daemon's
+/// `process_ledger_request` accepts it via its existing unwrap path.
+fn gift_wrap_request(
+    sender: &Keys,
+    recipient: &PublicKey,
+    ledger_id: &str,
+    action: &str,
+    content: &str,
+) -> Result<Event, String> {
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Rumor: unsigned 20101 event.
+    let rumor_json = serde_json::json!({
+        "kind": 20101,
+        "content": content,
+        "tags": [["l", ledger_id], ["action", action]],
+        "pubkey": sender.public_key().to_hex(),
+        "created_at": created_at,
+    })
+    .to_string();
+
+    // Seal: NIP-04-encrypted rumor, kind 13, signed by us.
+    let seal_content = nip04::encrypt(sender.secret_key(), recipient, &rumor_json)
+        .map_err(|e| format!("seal encrypt failed: {}", e))?;
+    let seal_event = EventBuilder::new(Kind::Custom(13), &seal_content)
+        .sign_with_keys(sender)
+        .map_err(|e| format!("seal sign failed: {}", e))?;
+    let seal_json = serde_json::json!({
+        "id": seal_event.id.to_hex(),
+        "pubkey": seal_event.pubkey.to_hex(),
+        "created_at": seal_event.created_at.as_u64(),
+        "kind": 13,
+        "content": seal_event.content,
+        "sig": seal_event.sig.to_string(),
+    })
+    .to_string();
+
+    // Wrap: outer kind 20101, NIP-04-encrypted to recipient, signed by a
+    // throwaway key so relays can't link wraps to a long-lived identity.
+    let throwaway = Keys::generate();
+    let wrap_content = nip04::encrypt(throwaway.secret_key(), recipient, &seal_json)
+        .map_err(|e| format!("wrap encrypt failed: {}", e))?;
+    EventBuilder::new(Kind::Custom(20101), &wrap_content)
+        .tag(Tag::public_key(*recipient))
+        .tag(Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+            [ledger_id],
+        ))
+        .tag(Tag::custom(TagKind::custom("action"), [action]))
+        .sign_with_keys(&throwaway)
+        .map_err(|e| format!("wrap sign failed: {}", e))
+}
+
+/// Try to gift-unwrap a kind-20102 response addressed to us.
+/// Returns the inner response JSON on success, or None if the event isn't
+/// a wrap or decryption fails.
+fn gift_unwrap_response(recipient: &Keys, event: &Event) -> Option<serde_json::Value> {
+    // Outer: encrypted by throwaway sender to us.
+    let seal_json = nip04::decrypt(recipient.secret_key(), &event.pubkey, &event.content).ok()?;
+    let seal: serde_json::Value = serde_json::from_str(&seal_json).ok()?;
+    // Seal: encrypted by real operator key to us.
+    let seal_pubkey_hex = seal.get("pubkey")?.as_str()?;
+    let seal_pubkey = PublicKey::from_hex(seal_pubkey_hex).ok()?;
+    let seal_content = seal.get("content")?.as_str()?;
+    let rumor_json = nip04::decrypt(recipient.secret_key(), &seal_pubkey, seal_content).ok()?;
+    let rumor: serde_json::Value = serde_json::from_str(&rumor_json).ok()?;
+    let inner_content = rumor.get("content")?.as_str()?;
+    serde_json::from_str(inner_content).ok()
+}
+
 /// GET /lnurl/callback/<deposit_pubkey>?amount=<msats>
 ///
 /// Creates an invoice via the operator's deposits-node. Ledger from Host subdomain.
@@ -263,18 +372,36 @@ async fn lnurlp_callback(
         "description": description,
     });
 
-    let tags = vec![
-        Tag::custom(
-            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
-            [ledger_id.as_str()],
-        ),
-        Tag::custom(TagKind::custom("action"), ["make_invoice"]),
-    ];
-
-    let event = EventBuilder::new(Kind::Custom(20101), content.to_string())
-        .tags(tags)
-        .sign_with_keys(&state.keys)
-        .map_err(|e| lnurl_err(&format!("Failed to sign event: {}", e)))?;
+    // Try to gift-wrap to the operator. Falls back to plaintext if the ad
+    // hasn't propagated yet (matches the web wallet's pre-discovery behavior).
+    let operator_pk = discover_operator(&state, &ledger_id).await;
+    let (event, wrapped) = match operator_pk {
+        Some(recipient) => {
+            let wrap = gift_wrap_request(
+                &state.keys,
+                &recipient,
+                &ledger_id,
+                "make_invoice",
+                &content.to_string(),
+            )
+            .map_err(|e| lnurl_err(&format!("Gift-wrap failed: {}", e)))?;
+            (wrap, true)
+        }
+        None => {
+            let tags = vec![
+                Tag::custom(
+                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                    [ledger_id.as_str()],
+                ),
+                Tag::custom(TagKind::custom("action"), ["make_invoice"]),
+            ];
+            let plain = EventBuilder::new(Kind::Custom(20101), content.to_string())
+                .tags(tags)
+                .sign_with_keys(&state.keys)
+                .map_err(|e| lnurl_err(&format!("Failed to sign event: {}", e)))?;
+            (plain, false)
+        }
+    };
 
     let event_id = event.id.to_hex();
 
@@ -289,11 +416,12 @@ async fn lnurlp_callback(
     }
 
     log::info!(
-        "Sent make_invoice: deposit={}-{}, amount={} sats, event={}...",
+        "Sent make_invoice: deposit={}-{}, amount={} sats, event={}... wrapped={}",
         &ledger_id[..16.min(ledger_id.len())],
         &deposit_pubkey[..16.min(deposit_pubkey.len())],
         amount_sats,
-        &event_id[..16]
+        &event_id[..16],
+        wrapped,
     );
 
     // Wait for response with timeout
@@ -359,8 +487,13 @@ async fn listen_for_responses(state: Arc<AppState>) {
                     if let Some(req_id) = request_id {
                         let mut pending = state.pending.lock().await;
                         if let Some(tx) = pending.remove(&req_id) {
-                            match serde_json::from_str::<serde_json::Value>(&event.content) {
-                                Ok(response) => {
+                            // Operator mirrors our wrap state — plaintext
+                            // request → plaintext response, wrapped → wrapped.
+                            let parsed = serde_json::from_str::<serde_json::Value>(&event.content)
+                                .ok()
+                                .or_else(|| gift_unwrap_response(&state.keys, &event));
+                            match parsed {
+                                Some(response) => {
                                     let success = response
                                         .get("success")
                                         .and_then(|v| v.as_bool())
@@ -375,8 +508,10 @@ async fn listen_for_responses(state: Arc<AppState>) {
                                         let _ = tx.send(response);
                                     }
                                 }
-                                Err(e) => {
-                                    log::warn!("Failed to parse response: {}", e);
+                                None => {
+                                    log::warn!(
+                                        "Failed to parse response (plaintext + unwrap both failed)"
+                                    );
                                 }
                             }
                         }
@@ -463,6 +598,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         min_msats: min_sats * 1000,
         max_msats: max_sats * 1000,
         pending: Mutex::new(HashMap::new()),
+        operator_keys: Mutex::new(HashMap::new()),
     });
 
     // Spawn response listener

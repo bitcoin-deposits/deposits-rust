@@ -13,8 +13,9 @@ path = "src/bin/deposits-lnurl.rs"
 # Web server
 axum = "0.7"
 
-# Nostr transport
-nostr-sdk = "0.37"
+# Nostr transport. nip04 is required for the NIP-59-shaped gift-wrap envelope
+# the operator daemon uses (see deposits-node/src/nostr.rs send_admin_request).
+nostr-sdk = { version = "0.37", features = ["nip04"] }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
