@@ -773,28 +773,93 @@ impl Node {
             ));
         }
 
+        use crate::wallet::TaprootReservesCreateResult;
+        use deposits_core::QuorumState;
+
         // --- Phase 2: build the rotation tx (no wallet state mutation yet) ---
         //
-        // build_rotation_to_taproot returns the operator-signed tx plus the
-        // legacy outpoint that will be retired and the new TaprootReservesInfo
-        // that will be tracked. We commit those mutations only after the
-        // rotation is confirmed *and* the QuorumBegin op has applied. If
-        // anything between here and that commit fails, the legacy reserves
-        // entry stays intact and a retry just rebuilds.
-        let (result, legacy_outpoint, pending_taproot) = self.wallet.build_rotation_to_taproot(
-            quorum_members.clone(),
-            quorum_expiries.clone(),
-            ledger_hash,
-        )?;
-        let txid = self.wallet.broadcast(&result.tx)?;
+        // First, detect a resume case: a previous QuorumBegin attempt may
+        // have built and broadcast the rotation tx, recorded the new
+        // TaprootReservesInfo in the wallet, but timed out before the
+        // QuorumBegin ledger op committed. In that state the legacy reserves
+        // entry is gone, the wallet's taproot_reserves has the new outpoint,
+        // and the ledger is still in PreQuorum. Building a fresh rotation
+        // here would fail ("No existing reserves to rotate"). Instead, reuse
+        // the existing entry and jump straight to the cosign+commit phase.
+        //
+        // Detection: wallet has any taproot_reserves entry AND ledger is
+        // PreQuorum. The entry's quorum_members must match the staged set
+        // — if they don't, the operator added/removed members after the
+        // failed attempt, which we can't reconcile here (would need to
+        // RBF the rotation tx with a fresh script tree).
+        let pending_resume = {
+            let pre_quorum =
+                ledger_arc.read().unwrap().state.quorum_state == QuorumState::PreQuorum;
+            if pre_quorum {
+                self.wallet
+                    .get_taproot_reserves()
+                    .into_iter()
+                    .find(|t| t.quorum_members == quorum_members)
+            } else {
+                None
+            }
+        };
 
-        tracing::info!(
-            "Rotated reserves to Taproot quorum-based output: txid={}, address={}, {} members, first expiry at block {}",
-            txid,
-            result.address,
-            quorum_members.len(),
-            result.quorum_expiry
-        );
+        let (result, legacy_outpoint, pending_taproot) = if let Some(existing) = pending_resume
+        {
+            tracing::info!(
+                "Detected half-finished QuorumBegin: reusing taproot UTXO {}:{} ({}sat) — \
+                 skipping build+broadcast, jumping to confirmation+cosign",
+                existing.outpoint.txid,
+                existing.outpoint.vout,
+                existing.amount
+            );
+            // Synthesize the result+pending pair from the saved entry. The
+            // legacy_outpoint here is a sentinel: there's nothing left to
+            // retire (the wallet already removed it during the original
+            // failed attempt), so commit_rotation_to_taproot is effectively
+            // a no-op below. We pass the entry's own outpoint as a harmless
+            // placeholder.
+            let synth_result = TaprootReservesCreateResult {
+                outpoint: existing.outpoint,
+                address: existing.taproot_output.address.clone(),
+                amount: existing.amount,
+                tx: bitcoin::Transaction {
+                    version: bitcoin::transaction::Version::TWO,
+                    lock_time: bitcoin::absolute::LockTime::ZERO,
+                    input: vec![],
+                    output: vec![],
+                },
+                taproot_output: existing.taproot_output.clone(),
+                quorum_expiry: existing.quorum_expiry,
+                ledger_hash: existing.ledger_hash,
+            };
+            (synth_result, existing.outpoint, existing)
+        } else {
+            // build_rotation_to_taproot returns the operator-signed tx plus
+            // the legacy outpoint that will be retired and the new
+            // TaprootReservesInfo that will be tracked. We commit those
+            // mutations only after the rotation is confirmed *and* the
+            // QuorumBegin op has applied. If anything between here and that
+            // commit fails, the legacy reserves entry stays intact and a
+            // retry just rebuilds.
+            let (result, legacy, pending) = self.wallet.build_rotation_to_taproot(
+                quorum_members.clone(),
+                quorum_expiries.clone(),
+                ledger_hash,
+            )?;
+            let txid = self.wallet.broadcast(&result.tx)?;
+            tracing::info!(
+                "Rotated reserves to Taproot quorum-based output: txid={}, address={}, {} members, first expiry at block {}",
+                txid,
+                result.address,
+                quorum_members.len(),
+                result.quorum_expiry
+            );
+            (result, legacy, pending)
+        };
+
+        let txid = result.outpoint.txid;
 
         // --- Phase 3: wait for the UTXO to reach the cosigner's required depth ---
         //
