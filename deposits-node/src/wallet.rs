@@ -1211,6 +1211,147 @@ impl Wallet {
         Ok(())
     }
 
+    /// Build (but do NOT broadcast or persist) a *genesis* rotation tx that
+    /// spends operator wallet UTXOs directly into a fresh Taproot Q=N quorum
+    /// vault. This is the new-model entry path: no legacy P2WSH reserves
+    /// UTXO is involved.
+    ///
+    /// Differs from [`build_rotation_to_taproot`]:
+    /// - Inputs come from BDK-managed wallet UTXOs (HD-derived addresses),
+    ///   selected and signed by BDK; the operator's secret key signs each
+    ///   input via the standard wallet path.
+    /// - There's no legacy reserves outpoint to return for retirement.
+    ///
+    /// Returns the operator-signed tx + the future TaprootReservesInfo to
+    /// track once both the rotation confirms and the QuorumBegin ledger op
+    /// commits. Caller drives broadcast → confs → cosign+commit, then
+    /// invokes [`commit_genesis_rotation`].
+    pub fn build_genesis_rotation_tx(
+        &self,
+        quorum_members: Vec<PublicKey>,
+        member_expiries: Vec<u32>,
+        ledger_hash: [u8; 32],
+        amount_sats: u64,
+        fee_rate_sat_per_vb: f32,
+    ) -> Result<(TaprootReservesCreateResult, TaprootReservesInfo), Error> {
+        if quorum_members.len() != member_expiries.len() {
+            return Err(Error::Wallet(
+                "Quorum members and expiries must have same length".to_string(),
+            ));
+        }
+
+        let first_expiry = *member_expiries.iter().min().unwrap_or(&0);
+
+        // Build the Taproot output (operator + cosigners, all configured tiers).
+        let voter_set = VoterSet::new(self.operator_pubkey, quorum_members.clone());
+        let config = if quorum_members.is_empty() {
+            ThresholdConfig::custom(vec![ThresholdTier::new(
+                1,
+                true,
+                0,
+                "Operator only (no quorum)",
+            )])
+        } else {
+            ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
+        };
+        let builder = TapscriptReservesBuilder::new(voter_set, config, self.network, ledger_hash);
+        let taproot_output = builder
+            .build()
+            .map_err(|e| Error::Wallet(format!("Failed to build Taproot reserves: {:?}", e)))?;
+        let new_script_pubkey = taproot_output.script_pubkey();
+
+        // BDK selects + signs wallet UTXOs to fund the rotation. The
+        // change output (if any) returns to the operator's wallet — only
+        // `amount_sats` lands in the taproot vault. This is the genesis
+        // case: no rotation FROM an existing reserves UTXO, just a fresh
+        // funding tx with a quorum-controlled output.
+        let mut wallet = self.inner.lock().unwrap();
+        let mut psbt = {
+            let mut tx_builder = wallet.build_tx();
+            tx_builder
+                .add_recipient(new_script_pubkey.clone(), Amount::from_sat(amount_sats))
+                .fee_rate(FeeRate::from_sat_per_vb_unchecked(
+                    fee_rate_sat_per_vb.max(1.0) as u64,
+                ));
+            tx_builder
+                .finish()
+                .map_err(|e| Error::Wallet(format!("Failed to build genesis rotation tx: {}", e)))?
+        };
+        wallet
+            .sign(&mut psbt, SignOptions::default())
+            .map_err(|e| Error::Wallet(format!("Failed to sign genesis rotation tx: {}", e)))?;
+        let tx = psbt
+            .extract_tx()
+            .map_err(|e| Error::Wallet(format!("Failed to extract tx: {}", e)))?;
+        drop(wallet);
+
+        // Find the taproot output's vout (BDK may place change first).
+        let vout = tx
+            .output
+            .iter()
+            .position(|o| o.script_pubkey == new_script_pubkey)
+            .ok_or_else(|| {
+                Error::Wallet("Taproot reserves output not found in genesis tx".to_string())
+            })? as u32;
+
+        let new_outpoint = OutPoint {
+            txid: tx.compute_txid(),
+            vout,
+        };
+        let new_info = TaprootReservesInfo {
+            outpoint: new_outpoint,
+            amount: amount_sats,
+            operator: self.operator_pubkey,
+            quorum_members: quorum_members.clone(),
+            quorum_expiry: first_expiry,
+            ledger_hash,
+            taproot_output: taproot_output.clone(),
+            confirmed: false,
+        };
+
+        tracing::info!(
+            "Built genesis rotation: wallet UTXOs → Taproot {} ({}sat, Q={}, expiry block {})",
+            new_outpoint,
+            amount_sats,
+            quorum_members.len(),
+            first_expiry
+        );
+
+        let result = TaprootReservesCreateResult {
+            outpoint: new_outpoint,
+            address: taproot_output.address.clone(),
+            amount: amount_sats,
+            tx,
+            taproot_output,
+            quorum_expiry: first_expiry,
+            ledger_hash,
+        };
+        Ok((result, new_info))
+    }
+
+    /// Atomically start tracking a genesis Taproot rotation. No legacy
+    /// reserves entry to retire (this is the genesis case). Persists
+    /// immediately. Call only after the rotation tx has confirmed AND the
+    /// QuorumBegin ledger op has committed.
+    pub fn commit_genesis_rotation(
+        &self,
+        new_info: TaprootReservesInfo,
+    ) -> Result<(), Error> {
+        let new_outpoint = new_info.outpoint;
+        let member_count = new_info.quorum_members.len();
+        {
+            let mut new_reserves = self.taproot_reserves.write().unwrap();
+            new_reserves.insert(new_outpoint, new_info);
+        }
+        self.save_reserves_to_disk()?;
+        tracing::info!(
+            "Committed genesis rotation: tracking Taproot {} (Q={})",
+            new_outpoint,
+            member_count
+        );
+        Ok(())
+    }
+
     /// Broadcast a transaction
     pub fn broadcast(&self, tx: &Transaction) -> Result<Txid, Error> {
         let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
