@@ -891,14 +891,19 @@ impl LedgerAdvertisement {
     }
 
     /// Operator-charged fee shape, returned for member-side fee-floor
-    /// validation: `(annual_bps, annualized_fixed_msats)`. The actual
-    /// quorum-join floors a member declares live on `quorum add`, not
-    /// here; this is the operator's *charged* terms.
+    /// validation: `(annual_bps, fixed_per_period_msats)`.
+    ///
+    /// The fixed half is converted from annualized to per-period (matches
+    /// `OperatorPolicy::minimum_fees`). `validate_fee_minimum` compares
+    /// proposed per-period against this value, so returning the raw
+    /// annualized number would inflate the floor by the periods-per-year
+    /// factor (~26 for the default 2016-block period).
     pub fn minimum_fees(&self) -> (u16, u64) {
-        (
-            self.annual_fee_bps as u16,
-            self.annualized_fixed_msats,
-        )
+        const BLOCKS_PER_YEAR: u64 = 52560;
+        let period = (self.fee_period_blocks as u64).max(1);
+        let periods_per_year = (BLOCKS_PER_YEAR / period).max(1);
+        let fixed_per_period = self.annualized_fixed_msats / periods_per_year;
+        (self.annual_fee_bps as u16, fixed_per_period)
     }
 }
 
@@ -4450,5 +4455,34 @@ mod custody_lottery_reveal_tests {
         );
         // Sits in the dispute-related cluster (9100-9106).
         assert_eq!(KIND_CUSTODY_LOTTERY_REVEAL, 9106);
+    }
+}
+
+#[cfg(test)]
+mod ledger_advertisement_tests {
+    use super::*;
+
+    #[test]
+    fn minimum_fees_converts_annualized_to_per_period() {
+        // The advertisement stores `annualized_fixed_msats` as msats/year,
+        // but `validate_fee_minimum` compares against per-period — so this
+        // accessor MUST do the division. Returning the raw annualized
+        // number inflates the floor by the periods-per-year factor.
+        // Regression-locks the wallet-deposit-open path for operators
+        // who haven't written an `operator_policy.json` yet.
+        let mut ad = LedgerAdvertisement::new(
+            "0".repeat(64),
+            "0".repeat(66),
+            String::new(),
+            "regtest".into(),
+        );
+        ad.annual_fee_bps = 50;
+        ad.annualized_fixed_msats = 2_500_000;   // 2500 sats/year
+        ad.fee_period_blocks = 2016;             // ≈ 2 weeks → 26 periods/year
+
+        let (bps, fixed_per_period) = ad.minimum_fees();
+        assert_eq!(bps, 50);
+        // 52560 / 2016 = 26 periods/year; 2_500_000 / 26 = 96_153 msats/period
+        assert_eq!(fixed_per_period, 96_153);
     }
 }
