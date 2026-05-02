@@ -250,23 +250,42 @@ fi
 
 # --- LDK wiring (optional) ---
 #
-# Lit up when the operator container has the lightning sidecar's
-# volumes mounted:
-#   /ldk-cli  → ldk-server-cli binary (shared volume populated by the
-#               lightning container's entrypoint)
-#   /ldk      → ldk-server data dir, read-only. We need:
-#                 /ldk/tls.crt           — self-signed TLS cert (regen
-#                                          on every lightning restart)
-#                 /ldk/$NETWORK/api_key  — bearer token, raw bytes
+# Lit up when the operator container has the lightning sidecar's data
+# dir mounted at `/ldk` (read-only is fine). Two layouts supported:
+#
+#   single-mount (production): everything under /ldk —
+#     /ldk/ldk-server-cli          binary
+#     /ldk/ldk-cli-wrapper.sh      (optional — overrides the bundled
+#                                  /app/ldk-cli-wrapper.sh when present,
+#                                  so deployments can iterate without
+#                                  rebuilding the operator image)
+#     /ldk/tls.crt                 self-signed TLS cert
+#     /ldk/$NETWORK/api_key        bearer token, raw bytes
+#
+#   split-mount (regtest compose): binary at /ldk-cli, data at /ldk —
+#     /ldk-cli/ldk-server-cli
+#     /ldk/tls.crt
+#     /ldk/$NETWORK/api_key
 #
 # Without these mounts the operator has no LDK access — make_invoice /
 # pay_invoice fail with "ldk-server-cli: No such file or directory" or
-# unauthenticated requests. With them, point the deposit-node at the
-# bundled wrapper (gives self-pay support across multiple operators
-# sharing one LDK node) and export everything the wrapper needs.
-if [ -x /ldk-cli/ldk-server-cli ] && [ -d "/ldk/$NETWORK" ]; then
-    export LDK_CLI=/app/ldk-cli-wrapper.sh
-    export LDK_REAL_CLI=/ldk-cli/ldk-server-cli
+# unauthenticated requests. With them, point at the wrapper (gives
+# self-pay support when multiple operators share one LDK node) and
+# export everything the wrapper needs.
+if [ -x /ldk/ldk-server-cli ]; then
+    LDK_REAL_CLI_PATH=/ldk/ldk-server-cli
+elif [ -x /ldk-cli/ldk-server-cli ]; then
+    LDK_REAL_CLI_PATH=/ldk-cli/ldk-server-cli
+else
+    LDK_REAL_CLI_PATH=""
+fi
+if [ -n "$LDK_REAL_CLI_PATH" ] && [ -d "/ldk/$NETWORK" ]; then
+    if [ -x /ldk/ldk-cli-wrapper.sh ]; then
+        export LDK_CLI=/ldk/ldk-cli-wrapper.sh
+    else
+        export LDK_CLI=/app/ldk-cli-wrapper.sh
+    fi
+    export LDK_REAL_CLI="$LDK_REAL_CLI_PATH"
     export LDK_HOST="${LDK_HOST:-lightning}"
     export LDK_PORT="${LDK_PORT:-3000}"
     export LDK_TLS_CERT="${LDK_TLS_CERT:-/ldk/tls.crt}"
@@ -276,7 +295,7 @@ if [ -x /ldk-cli/ldk-server-cli ] && [ -d "/ldk/$NETWORK" ]; then
         # api_key is raw 32 bytes; the CLI takes it hex-encoded.
         export LDK_API_KEY=$(od -A n -t x1 -v "/ldk/$NETWORK/api_key" | tr -d ' \n')
     fi
-    echo "  LDK:          $LDK_HOST:$LDK_PORT (cli=$LDK_CLI)"
+    echo "  LDK:          $LDK_HOST:$LDK_PORT (cli=$LDK_CLI, real=$LDK_REAL_CLI)"
 fi
 
 # --- Start deposits-node daemon (runs through phases 2 + 3 via admin DMs) ---
