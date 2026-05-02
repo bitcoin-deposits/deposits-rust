@@ -82,6 +82,18 @@ RUN ln -s /app/strfry /usr/local/bin/strfry
 COPY deposits-tools/docker/entrypoint.sh /entrypoint.sh
 COPY deposits-tools/docker/strfry.conf.tmpl /etc/strfry.conf.tmpl
 
+# LDK CLI wrapper — translates the deposit-node's named-flag style to
+# the real ldk-server-cli's positional args and adds self-pay support
+# when multiple operators share one LDK node. Activated by mounting the
+# `lightning` container's volumes — see docker-compose.nodes.yml.
+COPY deposits-tools/bin/ldk-cli-wrapper.sh /app/ldk-cli-wrapper.sh
+RUN chmod +x /app/ldk-cli-wrapper.sh
+
+# python3 + bash for the wrapper's BOLT11 parsing + flock + jsonl
+# bookkeeping. The strfry base is alpine so we add them here rather
+# than relying on the host.
+RUN apk add --no-cache bash python3
+
 RUN mkdir -p /data /config
 
 EXPOSE 7777 9100

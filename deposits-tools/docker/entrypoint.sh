@@ -248,6 +248,37 @@ if [ -z "$NODE_SEED" ]; then
     exit 1
 fi
 
+# --- LDK wiring (optional) ---
+#
+# Lit up when the operator container has the lightning sidecar's
+# volumes mounted:
+#   /ldk-cli  → ldk-server-cli binary (shared volume populated by the
+#               lightning container's entrypoint)
+#   /ldk      → ldk-server data dir, read-only. We need:
+#                 /ldk/tls.crt           — self-signed TLS cert (regen
+#                                          on every lightning restart)
+#                 /ldk/$NETWORK/api_key  — bearer token, raw bytes
+#
+# Without these mounts the operator has no LDK access — make_invoice /
+# pay_invoice fail with "ldk-server-cli: No such file or directory" or
+# unauthenticated requests. With them, point the deposit-node at the
+# bundled wrapper (gives self-pay support across multiple operators
+# sharing one LDK node) and export everything the wrapper needs.
+if [ -x /ldk-cli/ldk-server-cli ] && [ -d "/ldk/$NETWORK" ]; then
+    export LDK_CLI=/app/ldk-cli-wrapper.sh
+    export LDK_REAL_CLI=/ldk-cli/ldk-server-cli
+    export LDK_HOST="${LDK_HOST:-lightning}"
+    export LDK_PORT="${LDK_PORT:-3000}"
+    export LDK_TLS_CERT="${LDK_TLS_CERT:-/ldk/tls.crt}"
+    export LDK_SELF_PAY_DIR="${LDK_SELF_PAY_DIR:-/data/self-pay}"
+    mkdir -p "$LDK_SELF_PAY_DIR"
+    if [ -r "/ldk/$NETWORK/api_key" ]; then
+        # api_key is raw 32 bytes; the CLI takes it hex-encoded.
+        export LDK_API_KEY=$(od -A n -t x1 -v "/ldk/$NETWORK/api_key" | tr -d ' \n')
+    fi
+    echo "  LDK:          $LDK_HOST:$LDK_PORT (cli=$LDK_CLI)"
+fi
+
 # --- Start deposits-node daemon (runs through phases 2 + 3 via admin DMs) ---
 echo ""
 echo "Starting deposits-node daemon..."

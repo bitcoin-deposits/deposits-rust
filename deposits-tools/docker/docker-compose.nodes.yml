@@ -70,6 +70,17 @@ services:
       # differs.
       - ${DEPOSITS_SEED_DIR:-/mnt/bitcoind/deposits}/${NODE_NAME:-operator}/seed:/secrets/seed:ro
       - operator-data:/data
+      # LDK — mount these from where the `lightning` sidecar writes its
+      # CLI binary and data dir. The entrypoint detects them and
+      # auto-exports LDK_CLI / LDK_REAL_CLI / LDK_API_KEY / LDK_TLS_CERT.
+      # Drop both mounts on operators that don't need Lightning.
+      #   $LDK_CLI_HOST_DIR   — path containing `ldk-server-cli`. The
+      #                          lightning sidecar usually `cp`s the
+      #                          binary into a shared dir at startup.
+      #   $LDK_DATA_HOST_DIR  — ldk-server's data dir, must contain
+      #                          `tls.crt` and `<network>/api_key`.
+      - ${LDK_CLI_HOST_DIR:-/mnt/bitcoind/ldk-cli}:/ldk-cli:ro
+      - ${LDK_DATA_HOST_DIR:-/mnt/bitcoind/ldk}:/ldk:ro
     networks:
       - bitcoin-network
 
