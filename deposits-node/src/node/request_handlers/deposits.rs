@@ -292,6 +292,7 @@ impl Node {
             &fees,
             min_annual_bps,
             min_fixed_per_period,
+            ad_period,
         ) {
             return (false, None, Some(format!("Fee validation failed: {}", e)));
         }
@@ -536,6 +537,7 @@ impl Node {
             &fees,
             min_annual_bps,
             min_fixed_per_period,
+            ad_period,
         ) {
             return (false, None, Some(format!("Fee validation failed: {}", e)));
         }

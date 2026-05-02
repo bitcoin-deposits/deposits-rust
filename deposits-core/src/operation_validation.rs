@@ -228,19 +228,35 @@ pub fn validate_payment_fail(amount: u64) -> ValidationResult {
 // Fee Validations
 // ============================================================================
 
-/// Validate that a proposed fee structure meets operator minimums.
+/// Validate that a proposed fee structure meets operator terms.
 ///
-/// This is used when a wallet proposes fees during deposit opening. The operator
-/// can enforce minimum fees to ensure deposits are profitable enough to service.
+/// Used when a wallet proposes fees during deposit opening. The operator
+/// dictates the assessment period; the wallet may only choose annual rates.
 ///
 /// Checks:
+/// - `frequency_blocks` exactly equals the operator's period.
+///   Without this, a wallet can propose `frequency_blocks > 1 year`
+///   (no fees ever collected within a deposit lifetime), or
+///   `frequency_blocks ≤ 1` (every block emits a fee-collect update,
+///   bloating the ledger). Both bypass economic enforcement that the
+///   per-period comparison alone can't catch.
 /// - Proposed annual bps >= operator's minimum annual bps
 /// - Proposed fixed fee per period >= operator's minimum fixed fee per period
 pub fn validate_fee_minimum(
     proposed: &FeeStructure,
     min_annual_bps: u16,
     min_fixed_per_period: u64,
+    expected_period_blocks: u32,
 ) -> ValidationResult {
+    // The period is operator-dictated. Wallets that disagree must take
+    // their business elsewhere — not silently re-shape the contract.
+    if proposed.frequency_blocks != expected_period_blocks {
+        return Err(format!(
+            "Proposed fee period {} blocks doesn't match operator period {} blocks",
+            proposed.frequency_blocks, expected_period_blocks
+        ));
+    }
+
     // Check annual bps meets minimum
     if proposed.annualized_bps < min_annual_bps {
         return Err(format!(
@@ -249,14 +265,12 @@ pub fn validate_fee_minimum(
         ));
     }
 
-    // Calculate the proposed fixed fee per period from annualized fixed
+    // Calculate the proposed fixed fee per period from annualized fixed.
+    // Period is now guaranteed equal to expected_period_blocks > 0, so
+    // the divide-by-zero case is impossible.
     const BLOCKS_PER_YEAR: u64 = 52560;
-    let periods_per_year = BLOCKS_PER_YEAR / proposed.frequency_blocks.max(1) as u64;
-    let proposed_fixed_per_period = if periods_per_year > 0 {
-        proposed.annualized_msats / periods_per_year
-    } else {
-        0
-    };
+    let periods_per_year = (BLOCKS_PER_YEAR / proposed.frequency_blocks.max(1) as u64).max(1);
+    let proposed_fixed_per_period = proposed.annualized_msats / periods_per_year;
 
     // Check fixed fee meets minimum per period (both in msats)
     if proposed_fixed_per_period < min_fixed_per_period {
@@ -1493,5 +1507,64 @@ mod tests {
 
         let result = validate_transfer_timeout(&ledger, &transfer_id, 900_000);
         assert!(result.is_ok());
+    }
+
+    // ─── validate_fee_minimum ──────────────────────────────────────────
+
+    fn fee(annualized_msats: u64, bps: u16, period: u32) -> FeeStructure {
+        FeeStructure { annualized_msats, annualized_bps: bps, frequency_blocks: period }
+    }
+
+    #[test]
+    fn fee_minimum_accepts_matching_period_above_floor() {
+        // Operator: 50 bps + 2_500_000 msats/year, period=2016 blocks.
+        // 52560/2016 = 26 periods/year → min_per_period = 96_153 msats.
+        let result = validate_fee_minimum(&fee(2_500_000, 50, 2016), 50, 96_153, 2016);
+        assert!(result.is_ok(), "{:?}", result);
+    }
+
+    #[test]
+    fn fee_minimum_rejects_too_long_period() {
+        // Period > 1 year would make periods_per_year=0 in the divisor
+        // and (without the period check) zero-out the per-period floor.
+        // Has to be rejected even when annualized_msats matches the
+        // operator's expectation.
+        let result = validate_fee_minimum(&fee(2_500_000, 50, 100_000), 50, 96_153, 2016);
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("period") && err.contains("doesn't match"),
+            "want period mismatch, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn fee_minimum_rejects_too_short_period() {
+        // period=1 → fees assessable every block → ledger growth attack.
+        // Reject regardless of whether the per-period number happens to
+        // pass the floor.
+        let result = validate_fee_minimum(&fee(u64::MAX, 50, 1), 50, 96_153, 2016);
+        assert!(result.unwrap_err().contains("doesn't match"));
+    }
+
+    #[test]
+    fn fee_minimum_rejects_zero_period() {
+        // Same idea — zero would divide-by-zero in the per-period math
+        // before this commit; now caught by the period check.
+        let result = validate_fee_minimum(&fee(2_500_000, 50, 0), 50, 96_153, 2016);
+        assert!(result.unwrap_err().contains("doesn't match"));
+    }
+
+    #[test]
+    fn fee_minimum_rejects_below_bps_floor() {
+        let result = validate_fee_minimum(&fee(2_500_000, 10, 2016), 50, 96_153, 2016);
+        assert!(result.unwrap_err().contains("annual fee"));
+    }
+
+    #[test]
+    fn fee_minimum_rejects_below_fixed_floor() {
+        // annualized 100_000 msats / 26 = 3_846 — below floor.
+        let result = validate_fee_minimum(&fee(100_000, 50, 2016), 50, 96_153, 2016);
+        assert!(result.unwrap_err().contains("fixed fee"));
     }
 }
