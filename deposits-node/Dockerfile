@@ -75,7 +75,18 @@ FROM docker.io/pluja/strfry:latest
 # glibc-built (matches the lightning sidecar's runtime). Without it the
 # binary fails to load on this Alpine/musl base with "Error relocating:
 # __res_init: symbol not found" and similar glibc-only symbols.
-RUN apk add --no-cache ca-certificates libgcc gcompat
+#
+# gcompat 1.1.0 (Alpine 3.18) ships only libgcompat.so.0 + libresolv.so.2
+# and doesn't create the `libc.so.6`/`libm.so.6` aliases that loaders
+# look up by name. Without them ldd shows `libc.so.6 => ld-linux.so.2`
+# (the stub loader) and __res_init / gnu_get_libc_version don't
+# resolve. gcompat ≥1.1.1 creates these symlinks itself; until the
+# strfry base updates, do it here.
+RUN apk add --no-cache ca-certificates libgcc gcompat && \
+    ln -sf /lib/libgcompat.so.0 /lib/libc.so.6 && \
+    ln -sf /lib/libgcompat.so.0 /lib/libm.so.6 && \
+    ln -sf /lib/libgcompat.so.0 /usr/lib/libc.so.6 && \
+    ln -sf /lib/libgcompat.so.0 /usr/lib/libm.so.6
 
 COPY --from=builder /build/target/release/deposits-node /usr/local/bin/
 COPY --from=builder /build/target/release/deposits-wallet /usr/local/bin/
