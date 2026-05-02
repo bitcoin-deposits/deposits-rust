@@ -155,11 +155,27 @@ pubkey)
 
 open)
     LEDGER_ID="$1"
-    INDEX="${2:-0}"
+    INDEX="$2"
 
     if [ -z "$LEDGER_ID" ]; then
         echo "Usage: $0 --wallet <dir> open <ledger_id> [key_index]"
         exit 1
+    fi
+
+    # Auto-pick the next free key_index when the user didn't supply one,
+    # so repeated `open` calls each produce a fresh deposit_pubkey rather
+    # than colliding with a prior deposit at index 0. Honors an explicit
+    # arg verbatim — pass `0` to deliberately reuse the first index.
+    if [ -z "$INDEX" ]; then
+        if [ -f "$WALLET_DIR/deposits.json" ]; then
+            INDEX=$(python3 -c "
+import json
+deps = json.load(open('$WALLET_DIR/deposits.json'))
+print(max((d.get('key_index', 0) for d in deps), default=-1) + 1)
+")
+        else
+            INDEX=0
+        fi
     fi
 
     SEED=$(cat "$SEED_FILE")
