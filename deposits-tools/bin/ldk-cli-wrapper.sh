@@ -36,9 +36,21 @@ conn_args() {
     echo "$args"
 }
 
-# Run the real CLI with connection args + given command args
+# Run the real CLI with connection args + given command args.
+#
+# LD_PRELOAD: when gcompat ships libresolv.so.2 as a separate file (the
+# 1.1.0 layout — Alpine 3.18), the glibc-built ldk-server-cli's NEEDED
+# list doesn't reference libresolv, so the loader never opens it and
+# `__res_init` fails to resolve. Preload libresolv.so.2 here so the
+# symbol is available — only for the CLI invocation, not for the
+# (musl) deposit-node process that called us.
 real_cli() {
-    $REAL_CLI $(conn_args) "$@"
+    if [ -f /lib/libresolv.so.2 ]; then
+        LD_PRELOAD="/lib/libresolv.so.2${LD_PRELOAD:+:$LD_PRELOAD}" \
+            $REAL_CLI $(conn_args) "$@"
+    else
+        $REAL_CLI $(conn_args) "$@"
+    fi
 }
 
 # Atomic append to invoices file (uses flock for concurrent operators)
