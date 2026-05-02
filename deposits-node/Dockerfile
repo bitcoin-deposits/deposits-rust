@@ -66,6 +66,17 @@ RUN cargo build --release \
     -p deposits-wallet --bin deposits-wallet \
     $(test -n "$FEATURES" && echo "--features deposits-node/$FEATURES")
 
+# Stub for glibc's `__res_init`. gcompat 1.1.0 (Alpine 3.18, what
+# pluja/strfry:latest pins to) references the symbol as UND but doesn't
+# define it, so glibc binaries we pull in (ldk-server-cli) fail to
+# relocate. The function returns 0 on success and is a no-op for our
+# call paths — DNS resolution actually goes through musl's
+# getaddrinfo, which doesn't read glibc's resolver state. Drop this
+# stub when the strfry base moves to gcompat ≥1.1.1.
+RUN echo 'int __res_init(void) { return 0; }' > /tmp/res_init_stub.c && \
+    gcc -shared -fPIC -Wl,-soname,libres_init_stub.so \
+        -o /tmp/libres_init_stub.so /tmp/res_init_stub.c
+
 # Runtime — use the pluja/strfry image as the base so the bundled strfry
 # binary runs natively (it's musl-linked and expects Alpine libs).
 # deposits-node is now also musl, so no cross-libc weirdness.
@@ -90,6 +101,7 @@ RUN apk add --no-cache ca-certificates libgcc gcompat && \
 
 COPY --from=builder /build/target/release/deposits-node /usr/local/bin/
 COPY --from=builder /build/target/release/deposits-wallet /usr/local/bin/
+COPY --from=builder /tmp/libres_init_stub.so /lib/libres_init_stub.so
 
 # strfry ships at /app/strfry — expose it on PATH for the entrypoint.
 RUN ln -s /app/strfry /usr/local/bin/strfry

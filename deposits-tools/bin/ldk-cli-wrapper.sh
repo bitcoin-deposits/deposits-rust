@@ -38,15 +38,18 @@ conn_args() {
 
 # Run the real CLI with connection args + given command args.
 #
-# LD_PRELOAD: when gcompat ships libresolv.so.2 as a separate file (the
-# 1.1.0 layout — Alpine 3.18), the glibc-built ldk-server-cli's NEEDED
-# list doesn't reference libresolv, so the loader never opens it and
-# `__res_init` fails to resolve. Preload libresolv.so.2 here so the
-# symbol is available — only for the CLI invocation, not for the
-# (musl) deposit-node process that called us.
+# LD_PRELOAD: gcompat 1.1.0 (Alpine 3.18, the version pluja/strfry:latest
+# pins to) references `__res_init` as UND in libgcompat.so.0 but doesn't
+# define it, and ships an empty libresolv.so.2 stub. Glibc binaries that
+# need `__res_init` (e.g. ldk-server-cli) fail to relocate without a
+# definition. The Dockerfile builds a tiny stub that defines
+# `__res_init` to return 0 — safe because DNS resolution actually goes
+# through musl's getaddrinfo, which doesn't read glibc resolver state.
+# Preload the stub only for the CLI invocation, not for the (musl)
+# deposit-node process that called us.
 real_cli() {
-    if [ -f /lib/libresolv.so.2 ]; then
-        LD_PRELOAD="/lib/libresolv.so.2${LD_PRELOAD:+:$LD_PRELOAD}" \
+    if [ -f /lib/libres_init_stub.so ]; then
+        LD_PRELOAD="/lib/libres_init_stub.so${LD_PRELOAD:+:$LD_PRELOAD}" \
             $REAL_CLI $(conn_args) "$@"
     else
         $REAL_CLI $(conn_args) "$@"
