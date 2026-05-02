@@ -253,12 +253,12 @@ PYEOF
         exit 1
     fi
     if [ "$RESOLVED" != "$LEDGER_ID" ]; then
-        echo "Resolved ledger prefix '${LEDGER_ID}' → ${RESOLVED:0:16}…"
+        echo "Resolved ledger prefix '${LEDGER_ID}' → ${RESOLVED}"
     fi
     LEDGER_ID="$RESOLVED"
 
     echo "Opening deposit..."
-    echo "  Ledger: ${LEDGER_ID:0:16}..."
+    echo "  Ledger: ${LEDGER_ID}"
     echo "  Pubkey: $PUBKEY"
     echo "  Index:  $INDEX"
     echo "  Relay:  $LEDGER_RELAY"
