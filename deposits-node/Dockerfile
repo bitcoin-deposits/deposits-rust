@@ -71,7 +71,11 @@ RUN cargo build --release \
 # deposits-node is now also musl, so no cross-libc weirdness.
 FROM docker.io/pluja/strfry:latest
 
-RUN apk add --no-cache ca-certificates libgcc
+# gcompat: glibc-compat shim for /ldk/ldk-server-cli, which is shipped
+# glibc-built (matches the lightning sidecar's runtime). Without it the
+# binary fails to load on this Alpine/musl base with "Error relocating:
+# __res_init: symbol not found" and similar glibc-only symbols.
+RUN apk add --no-cache ca-certificates libgcc gcompat
 
 COPY --from=builder /build/target/release/deposits-node /usr/local/bin/
 COPY --from=builder /build/target/release/deposits-wallet /usr/local/bin/
