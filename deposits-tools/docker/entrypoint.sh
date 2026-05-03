@@ -280,11 +280,14 @@ else
     LDK_REAL_CLI_PATH=""
 fi
 if [ -n "$LDK_REAL_CLI_PATH" ] && [ -d "/ldk/$NETWORK" ]; then
-    if [ -x /ldk/ldk-cli-wrapper.sh ]; then
-        export LDK_CLI=/ldk/ldk-cli-wrapper.sh
-    else
-        export LDK_CLI=/app/ldk-cli-wrapper.sh
-    fi
+    # Default to the bundled wrapper. The host-side
+    # /ldk/ldk-cli-wrapper.sh is intentionally NOT auto-preferred —
+    # the wrapper is versioned with this image, and silently using a
+    # stale host copy hides updates (e.g. it would miss the
+    # LDK_LD_PRELOAD env added in 80281b7). Override by setting
+    # LDK_CLI explicitly in compose env if you really do want a
+    # local-iteration override.
+    export LDK_CLI="${LDK_CLI:-/app/ldk-cli-wrapper.sh}"
     export LDK_REAL_CLI="$LDK_REAL_CLI_PATH"
     export LDK_HOST="${LDK_HOST:-lightning}"
     export LDK_PORT="${LDK_PORT:-3000}"
