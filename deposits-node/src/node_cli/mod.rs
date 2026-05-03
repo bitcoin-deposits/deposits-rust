@@ -882,6 +882,7 @@ pub async fn auto_advertise_ledger(
     ad.relay_url = fee_schedule.advertise_relay.clone();
     ad.reserves_amount_msats = ledger.reserves_amount();
     ad.collateral_amount_msats = ledger.state.collateral_amount;
+    ad.max_deposit_balance_msats = node.max_deposit_balance_msats();
 
     // Apply fee schedule from CLI flags
     if let Some(bps) = fee_schedule.annual_fee_bps {

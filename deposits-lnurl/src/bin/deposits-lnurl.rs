@@ -51,10 +51,11 @@ struct AppState {
     max_msats: u64,
     /// Pending make_invoice requests: request_event_id → oneshot sender
     pending: Mutex<HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>,
-    /// Cache of discovered operator pubkeys per ledger (from Kind 39100 ads).
-    /// Used to gift-wrap requests so the relay never sees ledger_id /
-    /// deposit_pubkey / amount in cleartext.
-    operator_keys: Mutex<HashMap<String, PublicKey>>,
+    /// Cache of discovered ledger metadata (from Kind 39100 ads).
+    /// Used to gift-wrap requests (operator_pubkey) and to clamp
+    /// `maxSendable` on the LNURL metadata response
+    /// (max_deposit_balance_msats).
+    ledger_info: Mutex<HashMap<String, LedgerInfo>>,
     /// NIP-57 zap-request lifecycle: payment_hash (hex) → recorded
     /// pending zap. When the matching `InvoiceCredit` is observed on
     /// the operator's ledger, we publish a Kind 9735 receipt
@@ -62,6 +63,17 @@ struct AppState {
     /// the credit still happens, but the depositor doesn't get a zap
     /// receipt for that one.
     pending_zaps: Mutex<HashMap<String, PendingZap>>,
+}
+
+/// What we learned about a ledger from its Kind 39100 advertisement.
+/// Cached per ledger_id so we don't re-query relays on every callback.
+#[derive(Clone)]
+struct LedgerInfo {
+    /// Operator's nostr pubkey — recipient of gift-wrapped requests.
+    operator_pubkey: PublicKey,
+    /// Per-deposit balance cap (msats). 0 = unlimited.
+    /// Reflected into LNURL `maxSendable`.
+    max_deposit_balance_msats: u64,
 }
 
 /// Recorded NIP-57 zap request awaiting payment confirmation.
@@ -266,8 +278,20 @@ async fn lnurlp_metadata(
     Host(host): Host,
     Path(deposit_pubkey): Path<String>,
 ) -> Result<Json<LnurlPayResponse>, (StatusCode, Json<LnurlError>)> {
-    let _ledger_hex = extract_ledger_from_host(&host, &state.domain)
+    let ledger_hex = extract_ledger_from_host(&host, &state.domain)
         .ok_or_else(|| lnurl_err("Could not determine ledger from host. Subdomain must be the full 52-char bech32 (or 64-char hex) ledger ID."))?;
+
+    // Discovery here also primes the cache for the eventual callback.
+    // If the operator advertises a per-deposit balance cap, clamp
+    // `maxSendable` against it — surfaces the cap before a depositor
+    // builds an invoice that'd be rejected past it.
+    let info = discover_ledger_info(&state, &ledger_hex).await;
+    let max_sendable = match info.as_ref() {
+        Some(i) if i.max_deposit_balance_msats > 0 => {
+            state.max_msats.min(i.max_deposit_balance_msats)
+        }
+        _ => state.max_msats,
+    };
 
     // Echo back the host the user came in on so the address wallets
     // display matches whatever DNS shape the operator's serving.
@@ -283,7 +307,7 @@ async fn lnurlp_metadata(
         tag: "payRequest",
         callback: format!("https://{}/lnurl/callback/{}", addr_domain, deposit_pubkey),
         min_sendable: state.min_msats,
-        max_sendable: state.max_msats,
+        max_sendable,
         metadata,
         comment_allowed: 0,
         allows_nostr: true,
@@ -291,15 +315,15 @@ async fn lnurlp_metadata(
     }))
 }
 
-/// Discover the operator's nostr pubkey for a ledger by querying its
-/// Kind 39100 advertisement. Cached per-ledger; misses fall back to plaintext.
+/// Discover ledger metadata (operator pubkey + per-deposit balance cap)
+/// from the operator's Kind 39100 advertisement. Cached per ledger.
 ///
 /// The ad is signed by the operator's nostr key, so `event.pubkey` is the
-/// authoritative operator identity (the `o` tag is informational and equal
-/// in practice but not signature-bound).
-async fn discover_operator(state: &AppState, ledger_id: &str) -> Option<PublicKey> {
-    if let Some(pk) = state.operator_keys.lock().await.get(ledger_id).copied() {
-        return Some(pk);
+/// authoritative operator identity. The per-deposit balance cap rides on
+/// the ad's JSON content (`max_deposit_balance_msats`); 0 means unlimited.
+async fn discover_ledger_info(state: &AppState, ledger_id: &str) -> Option<LedgerInfo> {
+    if let Some(info) = state.ledger_info.lock().await.get(ledger_id).cloned() {
+        return Some(info);
     }
     let filter = Filter::new()
         .kind(Kind::Custom(39100))
@@ -311,13 +335,23 @@ async fn discover_operator(state: &AppState, ledger_id: &str) -> Option<PublicKe
         .await
         .ok()?;
     let event = events.into_iter().max_by_key(|e| e.created_at)?;
-    let pk = event.pubkey;
+    // The ad's JSON body carries field-level limits; the operator pubkey
+    // is the event signer. Fields default to 0 if the operator's on an
+    // older version that doesn't publish them.
+    let ad: serde_json::Value = serde_json::from_str(&event.content).ok()?;
+    let info = LedgerInfo {
+        operator_pubkey: event.pubkey,
+        max_deposit_balance_msats: ad
+            .get("max_deposit_balance_msats")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+    };
     state
-        .operator_keys
+        .ledger_info
         .lock()
         .await
-        .insert(ledger_id.to_string(), pk);
-    Some(pk)
+        .insert(ledger_id.to_string(), info.clone());
+    Some(info)
 }
 
 /// Build a NIP-59-shaped gift-wrap (rumor → seal → wrap) for a Kind 20101
@@ -452,7 +486,9 @@ async fn lnurlp_callback(
 
     // Try to gift-wrap to the operator. Falls back to plaintext if the ad
     // hasn't propagated yet (matches the web wallet's pre-discovery behavior).
-    let operator_pk = discover_operator(&state, &ledger_id).await;
+    let operator_pk = discover_ledger_info(&state, &ledger_id)
+        .await
+        .map(|i| i.operator_pubkey);
     let (event, wrapped) = match operator_pk {
         Some(recipient) => {
             let wrap = gift_wrap_request(
@@ -898,7 +934,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         min_msats: min_sats * 1000,
         max_msats: max_sats * 1000,
         pending: Mutex::new(HashMap::new()),
-        operator_keys: Mutex::new(HashMap::new()),
+        ledger_info: Mutex::new(HashMap::new()),
         pending_zaps: Mutex::new(HashMap::new()),
     });
 

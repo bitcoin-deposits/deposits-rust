@@ -584,6 +584,16 @@ pub struct LedgerAdvertisement {
     /// Minimum deposit size in msats
     pub min_deposit_msats: u64,
 
+    /// Per-deposit balance cap (msats). 0 = unlimited. Operator-side
+    /// enforcement of `MAX_DEPOSIT_BALANCE_MSATS`; surfaced here so
+    /// wallets and lnurl gateways can clamp `maxSendable` (or refuse a
+    /// credit that'd push the balance past the cap) before paying. The
+    /// gateway in particular reflects this into the LNURL metadata
+    /// response so a depositor sees the cap before constructing an
+    /// invoice that'd be rejected.
+    #[serde(default)]
+    pub max_deposit_balance_msats: u64,
+
     // === Trust Info ===
     //
     // NOTE: historically carried `total_obligations_msats` and
@@ -862,6 +872,7 @@ impl LedgerAdvertisement {
             transfer_fee_rate_bps: 0,
             max_deposit_msats: u64::MAX,
             min_deposit_msats: 0,
+            max_deposit_balance_msats: 0,
             reserves_amount_msats: 0,
             collateral_amount_msats: 0,
             relay_url: None,

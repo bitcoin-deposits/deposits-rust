@@ -1058,6 +1058,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
         ad.fee_period_blocks = fee_period_blocks;
         ad.max_deposit_msats = max_deposit_msats;
         ad.min_deposit_msats = min_deposit_msats;
+        ad.max_deposit_balance_msats = node.max_deposit_balance_msats();
         ad.reserves_amount_msats = ledger.reserves_amount();
         ad.collateral_amount_msats = ledger.state.collateral_amount;
 

@@ -244,6 +244,15 @@ impl Node {
         self.wallet.sync()
     }
 
+    /// Per-deposit balance cap (msats). 0 = unlimited. Sourced from
+    /// MAX_DEPOSIT_BALANCE_MSATS env at startup. Surfaced on the
+    /// ledger advertisement so wallets / lnurl gateways can reflect
+    /// it as `maxSendable` instead of letting depositors hit the cap
+    /// only after paying.
+    pub fn max_deposit_balance_msats(&self) -> u64 {
+        self.max_deposit_balance_msats
+    }
+
     /// Lightweight sync: just block height + hash (cheap)
     pub fn sync_block_height(&self) -> Result<(), Error> {
         self.wallet.sync_block_height()
