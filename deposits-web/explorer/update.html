@@ -266,6 +266,7 @@
 
 <script type="module">
 import { OP_NAMES, FIELD_NAMES } from './tlv-catalog.js';
+import { schnorr } from './vendor/noble-curves-secp256k1.js';
 
 // ── helpers ─────────────────────────────────────────────────────
 
@@ -423,10 +424,29 @@ async function verifyEventId(event) {
   return { ok: computed === event.id, computed };
 }
 
+// ── BIP-340 Schnorr signature verification (Nostr event sig) ──────
+//
+// `sig = schnorr(event_id_bytes, x-only_pubkey)`. The Nostr event's
+// `pubkey` field is already x-only hex.
+function hexToBytesU8(s) {
+  const out = new Uint8Array(s.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+function verifyEventSig(event) {
+  try {
+    const sig = hexToBytesU8(event.sig);
+    const msg = hexToBytesU8(event.id);
+    const pk  = hexToBytesU8(event.pubkey);
+    return schnorr.verify(sig, msg, pk);
+  } catch {
+    return false;
+  }
+}
+
 // ── render ────────────────────────────────────────────────────────
 
-function renderEventCard(event, idCheck) {
-  const sigOk = idCheck.ok;  // we can verify the id matches; full Schnorr sig verify needs secp lib
+function renderEventCard(event, idCheck, sigOk) {
   const tagsHtml = event.tags.length === 0
     ? '<div class="muted">(none)</div>'
     : `<table class="tags">${event.tags.map(t => `
@@ -434,6 +454,12 @@ function renderEventCard(event, idCheck) {
           <td class="k">${escapeHtml(t[0])}</td>
           <td class="v">${escapeHtml(t.slice(1).join(' '))}</td>
         </tr>`).join('')}</table>`;
+  const idBadge = idCheck.ok
+    ? '<span class="check ok">id valid</span>'
+    : '<span class="check bad">id mismatch (computed ' + escapeHtml(idCheck.computed) + ')</span>';
+  const sigBadge = sigOk
+    ? '<span class="check ok">BIP-340 sig valid</span>'
+    : '<span class="check bad">BIP-340 sig invalid</span>';
   return `
     <div class="card">
       <h3>nostr event</h3>
@@ -441,8 +467,8 @@ function renderEventCard(event, idCheck) {
         <dt>kind</dt><dd>${event.kind} <span class="ann">(${event.kind === 9100 ? 'KIND_LEDGER_UPDATE' : event.kind === 39100 ? 'KIND_LEDGER_ADVERTISE' : 'other'})</span></dd>
         <dt>created at</dt><dd>${new Date(event.created_at * 1000).toISOString().replace('T', ' ').slice(0, 19)} UTC <span class="ann">(${event.created_at})</span></dd>
         <dt>pubkey</dt><dd class="mono">${escapeHtml(event.pubkey)}</dd>
-        <dt>signature</dt><dd class="mono">${escapeHtml(event.sig)}</dd>
-        <dt>id</dt><dd class="mono">${escapeHtml(event.id)} <span class="ann">${sigOk ? '<span class="check ok">id valid</span>' : '<span class="check bad">id mismatch (computed ' + escapeHtml(idCheck.computed) + ')</span>'}</span></dd>
+        <dt>signature</dt><dd class="mono">${escapeHtml(event.sig)} <span class="ann">${sigBadge}</span></dd>
+        <dt>id</dt><dd class="mono">${escapeHtml(event.id)} <span class="ann">${idBadge}</span></dd>
         <dt>tags</dt><dd>${tagsHtml}</dd>
         <dt>content</dt><dd class="muted">${event.content.length} chars (base64 — decoded below)</dd>
       </dl>
@@ -608,11 +634,12 @@ async function main() {
     <span>${new Date(event.created_at * 1000).toISOString().replace('T', ' ').slice(0, 19)} UTC</span>
   `;
 
-  // Verify Nostr event id
+  // Verify Nostr event id + Schnorr signature
   const idCheck = await verifyEventId(event);
+  const sigOk = verifyEventSig(event);
 
   let html = '';
-  html += renderEventCard(event, idCheck);
+  html += renderEventCard(event, idCheck, sigOk);
 
   // Decode the base64 TLV body
   let rawTlv = null;

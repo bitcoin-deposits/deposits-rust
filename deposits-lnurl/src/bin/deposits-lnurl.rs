@@ -335,6 +335,21 @@ async fn tlv_catalog_js() -> ([(axum::http::HeaderName, &'static str); 1], &'sta
     )
 }
 
+/// GET /vendor/noble-curves-secp256k1.js
+///
+/// Vendored from the wallet's vendor tree — used by the per-update
+/// page to BIP-340-verify the Nostr event signature. ~70KB minified;
+/// browser caches across page loads.
+async fn noble_curves_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        NOBLE_CURVES_JS,
+    )
+}
+
 const EXPLORER_LEDGER_HTML: &str =
     include_str!("../../../deposits-web/explorer/ledger.html");
 const EXPLORER_OVERVIEW_HTML: &str =
@@ -343,6 +358,8 @@ const EXPLORER_UPDATE_HTML: &str =
     include_str!("../../../deposits-web/explorer/update.html");
 const TLV_CATALOG_JS: &str =
     include_str!("../../../deposits-web/wallet/tlv-catalog.js");
+const NOBLE_CURVES_JS: &str =
+    include_str!("../../../deposits-web/wallet/vendor/noble-curves-secp256k1.js");
 
 /// GET /.well-known/lnurlp/<deposit_pubkey>
 ///
@@ -1030,6 +1047,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/explorer", get(explorer_overview))
         .route("/update", get(explorer_update))
         .route("/tlv-catalog.js", get(tlv_catalog_js))
+        .route("/vendor/noble-curves-secp256k1.js", get(noble_curves_js))
         .with_state(state);
 
     log::info!("Listening on {}", listen);
