@@ -295,7 +295,14 @@ if [ -n "$LDK_REAL_CLI_PATH" ] && [ -d "/ldk/$NETWORK" ]; then
         # api_key is raw 32 bytes; the CLI takes it hex-encoded.
         export LDK_API_KEY=$(od -A n -t x1 -v "/ldk/$NETWORK/api_key" | tr -d ' \n')
     fi
-    echo "  LDK:          $LDK_HOST:$LDK_PORT (cli=$LDK_CLI, real=$LDK_REAL_CLI)"
+    # gcompat 1.1.0 (pluja/strfry's Alpine 3.18) doesn't define
+    # __res_init; the Dockerfile builds a stub at this path. Telling
+    # the wrapper explicitly via LDK_LD_PRELOAD is more debuggable
+    # than the wrapper guessing based on the file's existence.
+    if [ -f /lib/libres_init_stub.so ]; then
+        export LDK_LD_PRELOAD=/lib/libres_init_stub.so
+    fi
+    echo "  LDK:          $LDK_HOST:$LDK_PORT (cli=$LDK_CLI, real=$LDK_REAL_CLI${LDK_LD_PRELOAD:+, preload=$LDK_LD_PRELOAD})"
 fi
 
 # --- Start deposits-node daemon (runs through phases 2 + 3 via admin DMs) ---

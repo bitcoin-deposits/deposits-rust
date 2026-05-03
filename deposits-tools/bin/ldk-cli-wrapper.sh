@@ -38,18 +38,16 @@ conn_args() {
 
 # Run the real CLI with connection args + given command args.
 #
-# LD_PRELOAD: gcompat 1.1.0 (Alpine 3.18, the version pluja/strfry:latest
-# pins to) references `__res_init` as UND in libgcompat.so.0 but doesn't
-# define it, and ships an empty libresolv.so.2 stub. Glibc binaries that
-# need `__res_init` (e.g. ldk-server-cli) fail to relocate without a
-# definition. The Dockerfile builds a tiny stub that defines
-# `__res_init` to return 0 — safe because DNS resolution actually goes
-# through musl's getaddrinfo, which doesn't read glibc resolver state.
-# Preload the stub only for the CLI invocation, not for the (musl)
-# deposit-node process that called us.
+# LDK_LD_PRELOAD: a colon-separated list of .so paths to LD_PRELOAD
+# only for the CLI invocation (not for the calling process, which is
+# the musl-built deposit-node). Set by the operator entrypoint when
+# the gcompat-1.1.0 `__res_init` stub at /lib/libres_init_stub.so is
+# present. Manually-invoked test calls must set this themselves;
+# otherwise the wrapper runs the binary unmodified and a glibc
+# binary needing `__res_init` will fail to relocate on Alpine 3.18.
 real_cli() {
-    if [ -f /lib/libres_init_stub.so ]; then
-        LD_PRELOAD="/lib/libres_init_stub.so${LD_PRELOAD:+:$LD_PRELOAD}" \
+    if [ -n "$LDK_LD_PRELOAD" ]; then
+        LD_PRELOAD="${LDK_LD_PRELOAD}${LD_PRELOAD:+:$LD_PRELOAD}" \
             $REAL_CLI $(conn_args) "$@"
     else
         $REAL_CLI $(conn_args) "$@"
