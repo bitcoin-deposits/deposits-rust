@@ -1370,6 +1370,20 @@ impl NostrTransport {
                     [hex::encode(dep_id)],
                 ));
             }
+
+            // Payment-hash tag for InvoiceCredit. Lets clients (e.g. the
+            // LNURL gateway publishing NIP-57 zap receipts, third-party
+            // monitoring) match a credit back to the originating BOLT11
+            // without TLV-decoding the body.
+            if let deposits_core::messages::LedgerOperation::InvoiceCredit {
+                payment_hash, ..
+            } = &op
+            {
+                builder = builder.tag(Tag::custom(
+                    TagKind::custom("payment_hash"),
+                    [hex::encode(payment_hash)],
+                ));
+            }
         }
 
         let event = builder

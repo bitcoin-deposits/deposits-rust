@@ -609,8 +609,47 @@ async fn lnurlp_callback(
 // Nostr response listener
 // ============================================================================
 
+/// Publish a NIP-57 Kind 9735 zap receipt for a pending zap whose
+/// matching `InvoiceCredit` we just observed. Best-effort — failures
+/// are logged but don't block the credit.
+async fn publish_zap_receipt(state: &AppState, zap: PendingZap) {
+    let mut tags: Vec<Tag> = vec![
+        Tag::custom(TagKind::custom("bolt11"), [zap.bolt11.as_str()]),
+        Tag::custom(TagKind::custom("description"), [zap.request_json.as_str()]),
+    ];
+    if !zap.recipient_pubkey.is_empty() {
+        tags.push(Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P)),
+            [zap.recipient_pubkey.as_str()],
+        ));
+    }
+    if let Some(ref ev) = zap.event_id {
+        tags.push(Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)),
+            [ev.as_str()],
+        ));
+    }
+    let event = match EventBuilder::new(Kind::Custom(9735), "")
+        .tags(tags)
+        .sign_with_keys(&state.keys)
+    {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("Zap-receipt sign failed: {}", e);
+            return;
+        }
+    };
+    match state.client.send_event(event).await {
+        Ok(_) => log::info!(
+            "Published zap receipt for recipient={}…",
+            &zap.recipient_pubkey[..16.min(zap.recipient_pubkey.len())]
+        ),
+        Err(e) => log::warn!("Zap-receipt send failed: {}", e),
+    }
+}
+
 async fn listen_for_responses(state: Arc<AppState>) {
-    log::info!("Listening for kind 20102 responses...");
+    log::info!("Listening for kind 20102 responses + 9100 InvoiceCredit ledger updates...");
 
     loop {
         let notifications = state.client.notifications();
@@ -619,52 +658,11 @@ async fn listen_for_responses(state: Arc<AppState>) {
         loop {
             match rx.recv().await {
                 Ok(RelayPoolNotification::Event { event, .. }) => {
-                    if event.kind.as_u16() != 20102 {
-                        continue;
-                    }
-
-                    // Find the request ID from the 'e' tag
-                    let request_id = event.tags.iter().find_map(|tag| {
-                        if tag.kind()
-                            == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E))
-                        {
-                            tag.content().map(|s| s.to_string())
-                        } else {
-                            None
-                        }
-                    });
-
-                    if let Some(req_id) = request_id {
-                        let mut pending = state.pending.lock().await;
-                        if let Some(tx) = pending.remove(&req_id) {
-                            // Operator mirrors our wrap state — plaintext
-                            // request → plaintext response, wrapped → wrapped.
-                            let parsed = serde_json::from_str::<serde_json::Value>(&event.content)
-                                .ok()
-                                .or_else(|| gift_unwrap_response(&state.keys, &event));
-                            match parsed {
-                                Some(response) => {
-                                    let success = response
-                                        .get("success")
-                                        .and_then(|v| v.as_bool())
-                                        .unwrap_or(false);
-                                    if success {
-                                        if let Some(result) = response.get("result") {
-                                            let _ = tx.send(result.clone());
-                                        } else {
-                                            let _ = tx.send(response);
-                                        }
-                                    } else {
-                                        let _ = tx.send(response);
-                                    }
-                                }
-                                None => {
-                                    log::warn!(
-                                        "Failed to parse response (plaintext + unwrap both failed)"
-                                    );
-                                }
-                            }
-                        }
+                    let kind = event.kind.as_u16();
+                    if kind == 20102 {
+                        handle_response_event(&state, &event).await;
+                    } else if kind == 9100 {
+                        handle_ledger_update_event(&state, &event).await;
                     }
                 }
                 Ok(_) => {} // other notification types
@@ -677,6 +675,69 @@ async fn listen_for_responses(state: Arc<AppState>) {
 
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
+}
+
+async fn handle_response_event(state: &AppState, event: &Event) {
+    // Find the request ID from the 'e' tag
+    let request_id = event.tags.iter().find_map(|tag| {
+        if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)) {
+            tag.content().map(|s| s.to_string())
+        } else {
+            None
+        }
+    });
+
+    let Some(req_id) = request_id else { return };
+    let mut pending = state.pending.lock().await;
+    let Some(tx) = pending.remove(&req_id) else {
+        return;
+    };
+    // Operator mirrors our wrap state — plaintext request → plaintext
+    // response, wrapped → wrapped.
+    let parsed = serde_json::from_str::<serde_json::Value>(&event.content)
+        .ok()
+        .or_else(|| gift_unwrap_response(&state.keys, event));
+    match parsed {
+        Some(response) => {
+            let success = response
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if success {
+                if let Some(result) = response.get("result") {
+                    let _ = tx.send(result.clone());
+                } else {
+                    let _ = tx.send(response);
+                }
+            } else {
+                let _ = tx.send(response);
+            }
+        }
+        None => {
+            log::warn!("Failed to parse response (plaintext + unwrap both failed)");
+        }
+    }
+}
+
+async fn handle_ledger_update_event(state: &AppState, event: &Event) {
+    // Look for the operator-emitted `payment_hash` tag (set on
+    // InvoiceCredit ops — see deposits-node/src/nostr.rs:1373). Match
+    // it against pending_zaps; on hit, publish the Kind 9735 receipt.
+    let payment_hash = event.tags.iter().find_map(|tag| {
+        if tag.kind() == TagKind::custom("payment_hash") {
+            tag.content().map(|s| s.to_string())
+        } else {
+            None
+        }
+    });
+    let Some(ph) = payment_hash else { return };
+    let zap = state.pending_zaps.lock().await.remove(&ph);
+    let Some(zap) = zap else { return };
+    log::info!(
+        "InvoiceCredit observed for tracked zap (payment_hash={}…), publishing receipt",
+        &ph[..16.min(ph.len())]
+    );
+    publish_zap_receipt(state, zap).await;
 }
 
 // ============================================================================
@@ -737,9 +798,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect_with_timeout(std::time::Duration::from_secs(10))
         .await;
 
-    // Subscribe to responses
+    // Subscribe to:
+    //   - 20102: make_invoice responses from operators
+    //   - 9100:  durable ledger updates — we watch for InvoiceCredit
+    //            payment_hash tags so we can publish NIP-57 zap receipts
+    //            when a recorded pending zap's invoice gets credited.
     let response_filter = Filter::new().kind(Kind::Custom(20102));
-    client.subscribe(vec![response_filter], None).await?;
+    let credit_filter = Filter::new().kind(Kind::Custom(9100));
+    client
+        .subscribe(vec![response_filter, credit_filter], None)
+        .await?;
 
     let state = Arc::new(AppState {
         keys,
