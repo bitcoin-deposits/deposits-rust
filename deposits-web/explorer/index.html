@@ -107,6 +107,17 @@
 //
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
+// Read a param from either the fragment (`#k=v&k2=v2`) or the query
+// string (`?k=v&k2=v2`). Fragment wins when both are set — fragments
+// don't get sent to the server or recorded in HTTP logs/referrers, so
+// they're the more private choice for dev URLs that pin a remote relay
+// and ledger ID. Both syntaxes accept `&`-separated key/value pairs.
+function getParam(name) {
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  if (hashParams.has(name)) return hashParams.get(name);
+  return new URLSearchParams(window.location.search).get(name);
+}
+
 function bech32DataToBytes(s) {
   let acc = 0, bits = 0;
   const out = [];
@@ -125,14 +136,13 @@ function hex(buf) {
 }
 
 function resolveLedgerFromUrl() {
-  const params = new URLSearchParams(window.location.search);
-  const override = params.get('ledger');
+  const override = getParam('ledger');
   if (override) {
     const v = override.toLowerCase();
     if (v.length === 64 && /^[0-9a-f]+$/.test(v)) return v;
     const decoded = bech32DataToBytes(v);
     if (decoded && decoded.length === 32) return hex(decoded);
-    throw new Error(`?ledger=${override} is neither 64-hex nor 52-char bech32-data`);
+    throw new Error(`ledger=${override} is neither 64-hex nor 52-char bech32-data`);
   }
   // Subdomain: take the leftmost label of window.location.hostname.
   const host = window.location.hostname;
@@ -144,12 +154,13 @@ function resolveLedgerFromUrl() {
   }
   throw new Error(
     `Cannot determine ledger ID from "${host}". Use the canonical ` +
-    `<bech32-or-hex>.ledger.bitcoindeposits.net subdomain or pass ?ledger=<id>.`
+    `<bech32-or-hex>.ledger.bitcoindeposits.net subdomain or pass ` +
+    `#ledger=<id> (or ?ledger=<id>).`
   );
 }
 
 const RELAY_URL =
-  new URLSearchParams(window.location.search).get('relay')
+  getParam('relay')
   || document.querySelector('meta[name=relay]')?.content
   || 'wss://relay.bitcoindeposits.net';
 
