@@ -118,6 +118,18 @@ impl Node {
             .and_then(|v| v.as_str())
             .unwrap_or("Deposit credit");
 
+        // NIP-57 zaps: when the LNURL gateway provides description_hash
+        // (sha256 of the urlencoded zap-request JSON), the invoice must
+        // commit to it via the BOLT11 `h` field instead of `d`.
+        // Otherwise the wallet's zap detection — which compares the
+        // invoice's description_hash against sha256(its zap request) —
+        // won't recognize the invoice as honoring the zap.
+        let description_hash = request
+            .params
+            .get("description_hash")
+            .and_then(|v| v.as_str())
+            .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()));
+
         let amount_msat = amount_sats * 1000;
 
         // Check collateral obligation limits before creating the invoice
@@ -135,7 +147,12 @@ impl Node {
         // Create invoice via LdkCli (same as `deposits-node lightning invoice`)
         let cli = LdkCli::from_env();
 
-        match cli.create_invoice(amount_msat, description) {
+        let invoice_result = if let Some(dh) = description_hash {
+            cli.create_invoice_with_desc_hash(amount_msat, dh)
+        } else {
+            cli.create_invoice(amount_msat, description)
+        };
+        match invoice_result {
             Ok(invoice_str) => {
                 // Parse the invoice to get the payment hash
                 let payment_hash = match Bolt11Invoice::from_str(&invoice_str) {
@@ -181,6 +198,48 @@ impl Node {
                     amount_sats,
                     hex::encode(&payment_hash[..8])
                 );
+
+                // Operator-side attestation. Reuses the cosign canonical
+                // message (`invoice_cosign_signing_message`) so the
+                // existing fraud-proof verifier can validate either
+                // signature; the operator's "ledger_hash" portion is
+                // their own ledger's tip content_hash.
+                //
+                // Without this, only the cosigner had skin in the game
+                // for an uncredited-payment fraud proof — adding the
+                // operator's signature lets a depositor present
+                // dual-attestation evidence and burn the operator's
+                // collateral too.
+                let (operator_ledger_hash_hex, operator_signature_hex) = {
+                    use bitcoin::secp256k1::{Keypair, Message};
+                    let operator_ledger_hash = {
+                        let ledgers = self.handler.ledgers.lock().unwrap();
+                        ledgers
+                            .get(&request.ledger_id)
+                            .and_then(|arc| {
+                                arc.read()
+                                    .unwrap()
+                                    .history
+                                    .last()
+                                    .map(|u| u.content_hash)
+                            })
+                            .unwrap_or([0u8; 32])
+                    };
+                    let msg_hash = deposits_core::signature_utils::invoice_cosign_signing_message(
+                        &request.ledger_id,
+                        &payment_hash,
+                        &deposit_id,
+                        amount_msat,
+                        &operator_ledger_hash,
+                    );
+                    let secp = &self.secp;
+                    let secret = self.wallet.operator_secret();
+                    let keypair = Keypair::from_secret_key(secp, &secret);
+                    let msg = Message::from_digest(msg_hash);
+                    let sig = secp.sign_schnorr(&msg, &keypair);
+                    (hex::encode(operator_ledger_hash), hex::encode(sig.serialize()))
+                };
+                let operator_pubkey_hex = self.node_id_hex.clone();
 
                 // Request co-signature from quorum member (if post-rotation)
                 let requires_cosign = self.is_quorum_active(&request.ledger_id);
@@ -251,6 +310,9 @@ impl Node {
                                 "cosigner_pubkey": r.get("cosigner_pubkey").and_then(|v| v.as_str()).unwrap_or(""),
                                 "cosigner_ledger_hash": r.get("cosigner_ledger_hash").and_then(|v| v.as_str()).unwrap_or(""),
                                 "cosign_signature": r.get("cosign_signature").and_then(|v| v.as_str()).unwrap_or(""),
+                                "operator_pubkey": operator_pubkey_hex,
+                                "operator_ledger_hash": operator_ledger_hash_hex,
+                                "operator_signature": operator_signature_hex,
                             });
                             (true, Some(result.to_string()), None)
                         }
@@ -270,6 +332,9 @@ impl Node {
                         "deposit_pubkey": deposit_pubkey_hex,
                         "deposit_id": hex::encode(deposit_id),
                         "payment_hash": hex::encode(payment_hash),
+                        "operator_pubkey": operator_pubkey_hex,
+                        "operator_ledger_hash": operator_ledger_hash_hex,
+                        "operator_signature": operator_signature_hex,
                     });
                     (true, Some(result.to_string()), None)
                 }

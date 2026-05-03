@@ -147,6 +147,38 @@ impl LdkCli {
         Ok(response.invoice)
     }
 
+    /// Create a BOLT11 invoice committing to a 32-byte description hash
+    /// instead of a plaintext description. Required by NIP-57 zaps —
+    /// the wallet sha256s the zap-request JSON and expects the invoice's
+    /// `h` field to match exactly so the payment can be tied back to the
+    /// zap request.
+    pub fn create_invoice_with_desc_hash(
+        &self,
+        amount_msat: u64,
+        desc_hash_hex: &str,
+    ) -> Result<String, Error> {
+        tracing::info!(
+            "Creating invoice via ldk-server-cli: {} msat (desc_hash={})",
+            amount_msat,
+            &desc_hash_hex[..16.min(desc_hash_hex.len())]
+        );
+        let amount_str = format!("{}msat", amount_msat);
+        let output = self.run_command(&[
+            "bolt11-receive",
+            &amount_str,
+            "--description-hash",
+            desc_hash_hex,
+        ])?;
+
+        let response: Bolt11ReceiveResponse = serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!(
+                "Failed to parse invoice response: {} (output: {})",
+                e, output
+            ))
+        })?;
+        Ok(response.invoice)
+    }
+
     /// Create a variable amount BOLT11 invoice
     pub fn create_invoice_any_amount(&self, description: &str) -> Result<String, Error> {
         tracing::info!("Creating any-amount invoice via ldk-server-cli");
