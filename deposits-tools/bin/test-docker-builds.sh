@@ -9,7 +9,7 @@
 #   - deposits-tools/Dockerfile.ldk-node    requires the ldk-server
 #                                           submodule outside the
 #                                           workspace
-#   - deposits-tools/wallet/Dockerfile      static-site nginx, no
+#   - deposits-web/wallet/Dockerfile        static-site nginx, no
 #                                           Rust build
 #
 # Usage:

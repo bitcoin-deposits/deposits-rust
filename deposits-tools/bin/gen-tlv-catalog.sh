@@ -10,7 +10,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KSY="$SCRIPT_DIR/../../deposits-protocol/deposits_protocol.ksy"
-OUTPUT="$SCRIPT_DIR/../wallet/tlv-catalog.js"
+OUTPUT="$SCRIPT_DIR/../../deposits-web/wallet/tlv-catalog.js"
 
 if [ ! -f "$KSY" ]; then
     echo "Error: $KSY not found" >&2

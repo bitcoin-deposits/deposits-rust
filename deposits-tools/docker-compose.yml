@@ -252,8 +252,8 @@ services:
     ports:
       - "8888:80"
     volumes:
-      - ./wallet:/usr/share/nginx/html:ro
-      - ./wallet/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../deposits-web/wallet:/usr/share/nginx/html:ro
+      - ../deposits-web/wallet/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     networks:
       - regtest
 
