@@ -272,19 +272,49 @@ fn extract_ledger_from_host(host: &str, base_domain: &str) -> Option<String> {
 
 /// GET /
 ///
-/// Per-ledger explorer page. Single static HTML; the page's JS reads
-/// `window.location.hostname` to determine which ledger is being
-/// inspected, mirroring `extract_ledger_from_host` so the same
-/// canonical subdomain works for both LNURL and explorer.
-async fn explorer_index() -> Html<&'static str> {
-    Html(EXPLORER_HTML)
+/// Hostname-aware index. Routes:
+///   - `explorer.<basedomain>` → overview page (operators + ledgers)
+///   - `<bech32_or_hex>.<basedomain>` → per-ledger detail page
+///   - anything else (including localhost dev URLs) → overview by
+///     default; user can navigate to `/ledger` for the per-ledger
+///     view with an explicit `#ledger=<id>` override.
+async fn root_index(
+    State(state): State<Arc<AppState>>,
+    Host(host): Host,
+) -> Html<&'static str> {
+    let host_no_port = host.split(':').next().unwrap_or(&host);
+    if host_no_port.starts_with("explorer.") {
+        return Html(EXPLORER_OVERVIEW_HTML);
+    }
+    if extract_ledger_from_host(&host, &state.domain).is_some() {
+        return Html(EXPLORER_LEDGER_HTML);
+    }
+    Html(EXPLORER_OVERVIEW_HTML)
+}
+
+/// GET /ledger
+///
+/// Always serves the per-ledger detail page regardless of Host.
+/// Useful for dev URLs that want to inspect a specific ledger
+/// without spinning up the canonical subdomain — pass
+/// `#ledger=<hex>&relay=<url>` in the URL.
+async fn explorer_ledger() -> Html<&'static str> {
+    Html(EXPLORER_LEDGER_HTML)
+}
+
+/// GET /explorer
+///
+/// Always serves the operators-and-ledgers overview regardless of
+/// Host. Symmetric with `/ledger` for dev URLs.
+async fn explorer_overview() -> Html<&'static str> {
+    Html(EXPLORER_OVERVIEW_HTML)
 }
 
 /// GET /tlv-catalog.js
 ///
 /// Auto-generated from `deposits-protocol/deposits_protocol.ksy` by
-/// `bin/gen-tlv-catalog.sh` and lives next to the wallet. The
-/// explorer imports `OP_NAMES` / `FIELD_NAMES` from it to render
+/// `bin/gen-tlv-catalog.sh` and lives next to the wallet. Both
+/// explorer pages import `OP_NAMES` / `FIELD_NAMES` from it to render
 /// operation names instead of raw discriminant numbers.
 async fn tlv_catalog_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
     (
@@ -296,8 +326,10 @@ async fn tlv_catalog_js() -> ([(axum::http::HeaderName, &'static str); 1], &'sta
     )
 }
 
-const EXPLORER_HTML: &str =
-    include_str!("../../../deposits-web/explorer/index.html");
+const EXPLORER_LEDGER_HTML: &str =
+    include_str!("../../../deposits-web/explorer/ledger.html");
+const EXPLORER_OVERVIEW_HTML: &str =
+    include_str!("../../../deposits-web/explorer/explorer.html");
 const TLV_CATALOG_JS: &str =
     include_str!("../../../deposits-web/wallet/tlv-catalog.js");
 
@@ -979,13 +1011,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/.well-known/lnurlp/:deposit_id", get(lnurlp_metadata))
         .route("/lnurl/callback/:deposit_id", get(lnurlp_callback))
-        // Per-ledger explorer page served at the same hostname as the
-        // LNURL endpoints. The page reads its ledger ID from the
-        // `Host` header subdomain, so visiting
-        // `https://<bech32_ledger_id>.<base_domain>/` gives a view of
-        // that specific ledger. Bundled into the binary at build time
-        // via `include_str!`; rebuild to update.
-        .route("/", get(explorer_index))
+        // Explorer pages — Host-aware default plus explicit paths for
+        // dev. Bundled into the binary at build time via `include_str!`;
+        // rebuild to update. See the handler docs for routing rules.
+        .route("/", get(root_index))
+        .route("/ledger", get(explorer_ledger))
+        .route("/explorer", get(explorer_overview))
         .route("/tlv-catalog.js", get(tlv_catalog_js))
         .with_state(state);
 
