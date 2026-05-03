@@ -500,11 +500,17 @@ function renderUpdateFields(records, hashOk) {
           ${records.map(r => {
             const interp = interpretValue(r);
             const name = SIGNED_UPDATE_NAMES[r.type] || FIELD_NAMES[r.type] || `tag_${r.type}`;
+            // Tag 8 (`message`) gets fully decoded in its own section
+            // below; link the hex to that anchor instead of dumping the
+            // whole blob inline.
+            const valueCell = r.type === 8
+              ? `<a href="#message" style="color:var(--accent);">${escapeHtml(interp.hex)}</a><span class="interp">${escapeHtml(interp.ann)} — see <a href="#message" style="color:var(--accent);">decoded below</a></span>`
+              : `${escapeHtml(interp.hex)}<span class="interp">${escapeHtml(interp.ann)}</span>`;
             return `<tr>
               <td class="tag-id">${r.type}</td>
               <td class="name">${escapeHtml(name)}</td>
               <td class="len">${r.value.length}</td>
-              <td class="value">${escapeHtml(interp.hex)}<span class="interp">${escapeHtml(interp.ann)}</span></td>
+              <td class="value">${valueCell}</td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -522,8 +528,8 @@ function renderInnerOp(opBytes) {
     opCat = opCategory(opName);
   }
   return `
-    <div class="card">
-      <h3>inner operation · <span class="op ${opCat}">${escapeHtml(opName)}</span> <span class="ann" style="font-family:var(--sans);font-size:0.78rem;color:var(--fg-muted);margin-left:0.4rem;">discriminant ${opDisc}</span></h3>
+    <div class="card" id="message">
+      <h3>message · <span class="op ${opCat}">${escapeHtml(opName)}</span> <span class="ann" style="font-family:var(--sans);font-size:0.78rem;color:var(--fg-muted);margin-left:0.4rem;">discriminant ${opDisc}</span></h3>
       <table class="tlv">
         <thead><tr><th>tag</th><th>name</th><th>len</th><th>value</th></tr></thead>
         <tbody>
