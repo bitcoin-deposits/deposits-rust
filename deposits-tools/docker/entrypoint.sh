@@ -239,14 +239,14 @@ elif [ ! -f "$DATA_DIR/seed.hex" ]; then
         --esplora "$ELECTRUM_URL" \
         --relay "$BOOT_RELAY"
 fi
-NODE_SEED=$(cat "$DATA_DIR/seed.hex" 2>/dev/null || true)
-if [ -z "$NODE_SEED" ]; then
+if [ ! -s "$DATA_DIR/seed.hex" ]; then
     echo "ERROR: $DATA_DIR/seed.hex is empty or missing after Phase 1." >&2
     echo "       NODE_SEED_FILE=$NODE_SEED_FILE (exists: $([ -f "$NODE_SEED_FILE" ] && echo yes || echo no))." >&2
     echo "       If using a pre-mounted seed, mount it at \$NODE_SEED_FILE." >&2
     echo "       If using bootstrap init, ensure ADMIN_NPUB and LEDGER_RELAY are reachable." >&2
     exit 1
 fi
+SEED_PATH="$DATA_DIR/seed.hex"
 
 # --- LDK wiring (optional) ---
 #
@@ -311,7 +311,7 @@ NAME_FLAG=""
 [ -n "$NODE_NAME" ] && NAME_FLAG="--name $NODE_NAME"
 
 deposits-node run \
-    --seed "$NODE_SEED" \
+    --seed-file "$SEED_PATH" \
     --network "$NETWORK" \
     --electrum "$ELECTRUM_URL" \
     $RELAYS \
@@ -324,12 +324,33 @@ DAEMON_PID=$!
 # sending admin requests through it.
 sleep 5
 
-# --- Phase 2: wait for funding + create reserves + open ledger (via daemon) ---
-if [ ! -f "$DATA_DIR/reserves_ready.marker" ]; then
+# --- Bootstrap (Phases 2 + 3) — opt-in via $BOOTSTRAP ---
+#
+# Default: SKIP. Repeated container restarts on an already-funded
+# already-quorum'd node should NOT re-trigger bootstrap; that path
+# spams the relay with `quorum_add` retries that time out as
+# "Consent request timed out after 5s" until peers happen to answer.
+#
+# Set BOOTSTRAP=1 (or true / yes) on first launch to run:
+#   - Phase 2: wait for funding → create reserves → open ledger
+#   - Phase 3: discover peers → form quorum (skip with SKIP_QUORUM=1)
+#
+# Marker files (`reserves_ready.marker`, `quorum_active.marker`) still
+# short-circuit the inner steps when present, so leaving BOOTSTRAP=1
+# permanent is safe once both have landed — but cleaner to unset it
+# and only flip back on for re-bootstrap operations.
+case "${BOOTSTRAP:-}" in
+    ""|"0"|"false"|"False"|"FALSE"|"no"|"No"|"NO")
+        run_bootstrap=0 ;;
+    *)
+        run_bootstrap=1 ;;
+esac
+
+if [ "$run_bootstrap" = "1" ] && [ ! -f "$DATA_DIR/reserves_ready.marker" ]; then
     echo ""
     echo "Phase 2: waiting for funding + opening ledger..."
     deposits-node bootstrap reserves \
-        --seed "$NODE_SEED" \
+        --seed-file "$SEED_PATH" \
         --data-dir "$DATA_DIR" \
         --network "$NETWORK" \
         --esplora "$ELECTRUM_URL" \
@@ -337,34 +358,34 @@ if [ ! -f "$DATA_DIR/reserves_ready.marker" ]; then
     touch "$DATA_DIR/reserves_ready.marker"
 fi
 
-# --- Phase 3: discover peers + form quorum (via daemon) ---
-#
-# Skipped entirely when SKIP_QUORUM is set (anything but unset/0/false) —
-# used to bring up the first nodes in a fresh network. Otherwise bootstrap
-# quorum retries every ~5 min indefinitely until enough peers are online
-# and all join steps succeed; the container is effectively blocked in
-# Phase 3 until then.
+# Phase 3 control flow:
+#   BOOTSTRAP=0 (default) → skip entirely
+#   BOOTSTRAP=1 + SKIP_QUORUM=1 → reserves only, no quorum
+#   BOOTSTRAP=1 + marker present → already done, skip
+#   BOOTSTRAP=1, no marker → form quorum
 case "${SKIP_QUORUM:-}" in
     ""|"0"|"false"|"False"|"FALSE")
-        skip_quorum=0
-        ;;
+        skip_quorum=0 ;;
     *)
-        skip_quorum=1
-        ;;
+        skip_quorum=1 ;;
 esac
 
-if [ "$skip_quorum" = "1" ]; then
+if [ "$run_bootstrap" != "1" ]; then
+    echo ""
+    echo "Bootstrap: BOOTSTRAP env unset/false — skipping Phases 2 + 3."
+    echo "           Set BOOTSTRAP=1 on first launch to provision a fresh node."
+elif [ "$skip_quorum" = "1" ]; then
     echo ""
     echo "Phase 3: SKIP_QUORUM set — running solo, no quorum formation"
     echo "         form a quorum later with:"
     echo "         docker exec <container> deposits-node bootstrap quorum \\"
-    echo "             --seed <seed> --data-dir $DATA_DIR --network $NETWORK \\"
+    echo "             --seed-file $SEED_PATH --data-dir $DATA_DIR --network $NETWORK \\"
     echo "             --esplora $ELECTRUM_URL --relay $BOOT_RELAY --quorum-size $QUORUM_SIZE"
 elif [ ! -f "$DATA_DIR/quorum_active.marker" ]; then
     echo ""
     echo "Phase 3: discovering peers + forming quorum (Q=$QUORUM_SIZE)..."
     if deposits-node bootstrap quorum \
-        --seed "$NODE_SEED" \
+        --seed-file "$SEED_PATH" \
         --data-dir "$DATA_DIR" \
         --network "$NETWORK" \
         --esplora "$ELECTRUM_URL" \
@@ -403,7 +424,7 @@ elif [ -n "$COURIER_RESERVES_SATS" ]; then
     # enough that a dedicated --json flag isn't worth the churn.
     BUFFER_OUT=$(deposits-node admin buffer open \
         --amount-sats "$COURIER_RESERVES_SATS" \
-        --seed "$NODE_SEED" \
+        --seed-file "$SEED_PATH" \
         --data-dir "$DATA_DIR" \
         --network "$NETWORK" \
         --esplora "$ELECTRUM_URL" \
@@ -425,7 +446,8 @@ elif [ -n "$COURIER_RESERVES_SATS" ]; then
         # reason about the buffer as a named deposit.
         WALLET_DIR="$DATA_DIR/courier-wallet"
         mkdir -p "$WALLET_DIR"
-        echo "$NODE_SEED" > "$WALLET_DIR/seed.hex"
+        cp "$SEED_PATH" "$WALLET_DIR/seed.hex"
+        chmod 600 "$WALLET_DIR/seed.hex"
         cat > "$WALLET_DIR/deposits.json" <<EOF
 [
   {

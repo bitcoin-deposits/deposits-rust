@@ -380,7 +380,11 @@ DANGER SUBCOMMANDS (testing only - DO NOT USE IN PRODUCTION):
     The CLI dispatches based on shape — no flags needed.
 
 OPTIONS (most subcommands accept these):
-    --seed <hex>       Seed for wallet/identity (64 hex chars)
+    --seed <hex>       Seed for wallet/identity (64 hex chars).
+                       Visible in `ps`/`/proc` — prefer --seed-file.
+    --seed-file <path> Read the seed from a file (64-char hex). Use
+                       this instead of --seed in production / under
+                       Docker so the seed doesn't leak via `ps`.
     --network <net>    Bitcoin network: mainnet, testnet, signet, regtest (default: signet)
     --esplora <url>    Esplora server URL (default: https://mempool.space/signet/api)
     --relay <url>      Nostr relay URL (can be specified multiple times)
@@ -455,6 +459,32 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
                     return Err("Seed must be 64 hex characters".to_string());
                 }
                 let bytes = hex::decode(hex).map_err(|e| format!("Invalid hex: {}", e))?;
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                seed = Some(arr);
+            }
+            "--seed-file" => {
+                // Read the seed from a file instead of taking it on the
+                // command line. Avoids leaking the seed via `ps` / /proc.
+                // File must contain a 64-char hex string (whitespace
+                // tolerated).
+                i += 1;
+                if i >= args.len() {
+                    return Err("--seed-file requires a path".to_string());
+                }
+                let path = &args[i];
+                let raw = std::fs::read_to_string(path)
+                    .map_err(|e| format!("Failed to read --seed-file {}: {}", path, e))?;
+                let hex = raw.trim();
+                if hex.len() != 64 {
+                    return Err(format!(
+                        "Seed in {} must be 64 hex characters, got {}",
+                        path,
+                        hex.len()
+                    ));
+                }
+                let bytes = hex::decode(hex)
+                    .map_err(|e| format!("Invalid hex in --seed-file {}: {}", path, e))?;
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&bytes);
                 seed = Some(arr);
