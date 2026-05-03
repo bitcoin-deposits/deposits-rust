@@ -29,7 +29,7 @@
 use axum::{
     extract::{Host, Path, Query, State},
     http::StatusCode,
-    response::Json,
+    response::{Html, Json},
     routing::get,
     Router,
 };
@@ -269,6 +269,19 @@ fn extract_ledger_from_host(host: &str, base_domain: &str) -> Option<String> {
     // Fallback: check env var for single-ledger deployments
     std::env::var("LNURL_DEFAULT_LEDGER").ok()
 }
+
+/// GET /
+///
+/// Per-ledger explorer page. Single static HTML; the page's JS reads
+/// `window.location.hostname` to determine which ledger is being
+/// inspected, mirroring `extract_ledger_from_host` so the same
+/// canonical subdomain works for both LNURL and explorer.
+async fn explorer_index() -> Html<&'static str> {
+    Html(EXPLORER_HTML)
+}
+
+const EXPLORER_HTML: &str =
+    include_str!("../../../deposits-web/explorer/index.html");
 
 /// GET /.well-known/lnurlp/<deposit_pubkey>
 ///
@@ -948,6 +961,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/.well-known/lnurlp/:deposit_id", get(lnurlp_metadata))
         .route("/lnurl/callback/:deposit_id", get(lnurlp_callback))
+        // Per-ledger explorer page served at the same hostname as the
+        // LNURL endpoints. The page reads its ledger ID from the
+        // `Host` header subdomain, so visiting
+        // `https://<bech32_ledger_id>.<base_domain>/` gives a view of
+        // that specific ledger. Bundled into the binary at build time
+        // via `include_str!`; rebuild to update.
+        .route("/", get(explorer_index))
         .with_state(state);
 
     log::info!("Listening on {}", listen);

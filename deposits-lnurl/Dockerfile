@@ -13,6 +13,12 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY deposits-lnurl ./deposits-lnurl
 
+# Per-ledger explorer page baked into the binary at compile time via
+# `include_str!`. Lives outside the crate so the wallet can share the
+# same vendor / TLV-catalog tree later, but the build needs it present
+# at the path the source references.
+COPY deposits-web ./deposits-web
+
 # Stub out other workspace members so the workspace manifest resolves
 # without pulling their source trees.
 COPY deposits-protocol/Cargo.toml ./deposits-protocol/Cargo.toml
