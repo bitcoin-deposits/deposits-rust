@@ -55,6 +55,29 @@ struct AppState {
     /// Used to gift-wrap requests so the relay never sees ledger_id /
     /// deposit_pubkey / amount in cleartext.
     operator_keys: Mutex<HashMap<String, PublicKey>>,
+    /// NIP-57 zap-request lifecycle: payment_hash (hex) → recorded
+    /// pending zap. When the matching `InvoiceCredit` is observed on
+    /// the operator's ledger, we publish a Kind 9735 receipt
+    /// referencing the original zap request. Lost on gateway restart —
+    /// the credit still happens, but the depositor doesn't get a zap
+    /// receipt for that one.
+    pending_zaps: Mutex<HashMap<String, PendingZap>>,
+}
+
+/// Recorded NIP-57 zap request awaiting payment confirmation.
+struct PendingZap {
+    /// Original zap-request event JSON (Kind 9734) as the wallet sent
+    /// it. Embedded verbatim into the eventual receipt as the
+    /// `description` tag value, per NIP-57.
+    request_json: String,
+    /// BOLT11 invoice we returned to the wallet. Goes into the receipt's
+    /// `bolt11` tag.
+    bolt11: String,
+    /// `p` tag from the zap request — the recipient (deposit owner) the
+    /// zap is addressed to.
+    recipient_pubkey: String,
+    /// `e` tag from the zap request, if any — the event being zapped.
+    event_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -68,18 +91,36 @@ struct LnurlPayResponse {
     metadata: String,
     #[serde(rename = "commentAllowed")]
     comment_allowed: u16,
+    /// NIP-57: signals to wallets that the callback accepts a `nostr=`
+    /// param carrying a zap-request event.
+    #[serde(rename = "allowsNostr")]
+    allows_nostr: bool,
+    /// NIP-57: hex pubkey wallets should expect to author the eventual
+    /// Kind 9735 zap receipt. Must equal `state.keys.public_key()`.
+    #[serde(rename = "nostrPubkey")]
+    nostr_pubkey: String,
 }
 
 #[derive(Deserialize)]
 struct CallbackParams {
     amount: u64, // msats
     comment: Option<String>,
+    /// NIP-57 zap-request event, urlencoded JSON. When present the
+    /// invoice's description_hash commits to sha256 of this raw value
+    /// and we record a pending zap for receipt publishing later.
+    nostr: Option<String>,
 }
 
 #[derive(Serialize)]
 struct CallbackResponse {
     pr: String, // BOLT11 invoice
     routes: Vec<()>,
+    /// Operator + cosigner attestation artifacts forwarded from the
+    /// operator's `make_invoice` response. A depositor who pays the
+    /// invoice and never sees the credit can use these to file a
+    /// fraud proof and burn the operator's collateral.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attestations: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -241,6 +282,8 @@ async fn lnurlp_metadata(
         max_sendable: state.max_msats,
         metadata,
         comment_allowed: 0,
+        allows_nostr: true,
+        nostr_pubkey: state.keys.public_key().to_hex(),
     }))
 }
 
@@ -369,14 +412,39 @@ async fn lnurlp_callback(
     }
 
     let amount_sats = params.amount / 1000;
+
+    // NIP-57 zap: parse the `nostr=` param if present and compute its
+    // sha256 — that's the description_hash the wallet will check the
+    // invoice's `h` field against. We also stash the parsed event so a
+    // successful invoice lets us record a pending zap for receipt
+    // publishing later.
+    let zap_request = match params.nostr.as_ref() {
+        Some(raw) => {
+            let parsed: serde_json::Value = serde_json::from_str(raw)
+                .map_err(|e| lnurl_err(&format!("invalid `nostr=` JSON: {}", e)))?;
+            if parsed.get("kind").and_then(|v| v.as_u64()) != Some(9734) {
+                return Err(lnurl_err("`nostr=` event must be Kind 9734 (zap request)"));
+            }
+            Some((raw.clone(), parsed))
+        }
+        None => None,
+    };
+    let description_hash_hex: Option<String> = zap_request.as_ref().map(|(raw, _)| {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(raw.as_bytes()))
+    });
     let description = params.comment.as_deref().unwrap_or("LNURL deposit");
 
-    // Build make_invoice request
-    let content = serde_json::json!({
+    // Build make_invoice request — operator picks `h` field over `d`
+    // when description_hash is set.
+    let mut content = serde_json::json!({
         "deposit_pubkey": deposit_pubkey,
         "amount_sats": amount_sats,
         "description": description,
     });
+    if let Some(ref dh) = description_hash_hex {
+        content["description_hash"] = serde_json::Value::String(dh.clone());
+    }
 
     // Try to gift-wrap to the operator. Falls back to plaintext if the ad
     // hasn't propagated yet (matches the web wallet's pre-discovery behavior).
@@ -454,10 +522,86 @@ async fn lnurlp_callback(
                 .unwrap_or("No invoice in response");
             lnurl_err(error)
         })?;
+    let payment_hash_hex = response
+        .get("payment_hash")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Record the pending zap so the receipt publisher can find it when
+    // the matching `InvoiceCredit` lands on the operator's ledger.
+    if let (Some((raw, parsed)), Some(payment_hash)) = (zap_request, payment_hash_hex.as_ref()) {
+        let recipient_pubkey = parsed
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .and_then(|tags| {
+                tags.iter().find_map(|t| {
+                    let arr = t.as_array()?;
+                    if arr.first()?.as_str()? == "p" {
+                        arr.get(1)?.as_str().map(String::from)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_default();
+        let event_id = parsed
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .and_then(|tags| {
+                tags.iter().find_map(|t| {
+                    let arr = t.as_array()?;
+                    if arr.first()?.as_str()? == "e" {
+                        arr.get(1)?.as_str().map(String::from)
+                    } else {
+                        None
+                    }
+                })
+            });
+        state.pending_zaps.lock().await.insert(
+            payment_hash.clone(),
+            PendingZap {
+                request_json: raw,
+                bolt11: invoice.to_string(),
+                recipient_pubkey,
+                event_id,
+            },
+        );
+        log::info!(
+            "Recorded pending zap for payment_hash={}…",
+            &payment_hash[..16.min(payment_hash.len())]
+        );
+    }
+
+    // Forward operator + cosigner artifacts to the LNURL caller. Lets
+    // a depositor who paid an invoice they never got credit for file
+    // a fraud proof against the operator's collateral.
+    let attestations = {
+        let mut out = serde_json::Map::new();
+        for k in [
+            "deposit_id",
+            "payment_hash",
+            "operator_pubkey",
+            "operator_ledger_hash",
+            "operator_signature",
+            "cosigner_pubkey",
+            "cosigner_ledger_hash",
+            "cosign_signature",
+        ] {
+            if let Some(v) = response.get(k) {
+                out.insert(k.to_string(), v.clone());
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(out))
+        }
+    };
 
     Ok(Json(CallbackResponse {
         pr: invoice.to_string(),
         routes: vec![],
+        attestations,
     }))
 }
 
@@ -605,6 +749,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_msats: max_sats * 1000,
         pending: Mutex::new(HashMap::new()),
         operator_keys: Mutex::new(HashMap::new()),
+        pending_zaps: Mutex::new(HashMap::new()),
     });
 
     // Spawn response listener
