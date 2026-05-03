@@ -13,6 +13,8 @@
 #   open <ledger_id>          Open a deposit on a ledger
 #   deposit-id <ledger_id>    Show deposit ID for our key on a ledger
 #   lnurl                     Print the lightning address for each tracked deposit
+#   pay-lnurl <addr> <sats>   Pay a lightning address from a tracked deposit
+#   zap <addr> <sats>         Like pay-lnurl, but with a NIP-57 zap request
 #
 # The wallet directory contains:
 #   seed          - 32-byte hex secret
@@ -706,9 +708,267 @@ for i, d in enumerate(deps):
 PYEOF
     ;;
 
+pay-lnurl|zap)
+    LN_ADDRESS="$1"
+    AMOUNT_SATS="$2"
+    DEPOSIT_INDEX="0"
+    COMMENT=""
+    ZAP_MESSAGE=""
+    NOTE_ID=""
+    [ "$COMMAND" = "zap" ] && IS_ZAP=1 || IS_ZAP=0
+    shift 2 2>/dev/null || true
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --from|-f) DEPOSIT_INDEX="$2"; shift 2 ;;
+            --comment|-c) COMMENT="$2"; shift 2 ;;
+            --message|-m) ZAP_MESSAGE="$2"; shift 2 ;;
+            --note|-n) NOTE_ID="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    if [ -z "$LN_ADDRESS" ] || [ -z "$AMOUNT_SATS" ]; then
+        echo "Usage: $0 --wallet <dir> $COMMAND <ln-address-or-lnurl> <amount_sats> [--from N] [--message TEXT] [--note EVENT_ID]" >&2
+        exit 1
+    fi
+
+    # Resolve the deposit we're paying from
+    DEPOSIT_INFO=$(python3 - "$WALLET_DIR" "$DEPOSIT_INDEX" << 'PYEOF'
+import json, sys
+wallet_dir, idx_str = sys.argv[1], sys.argv[2]
+try:
+    deps = json.load(open(wallet_dir + '/deposits.json'))
+except FileNotFoundError:
+    print("ERROR: no deposits.json — open a deposit first", file=sys.stderr); sys.exit(1)
+idx = int(idx_str)
+if idx >= len(deps):
+    print(f"ERROR: deposit index {idx} out of range (have {len(deps)})", file=sys.stderr); sys.exit(1)
+d = deps[idx]
+print(f"{d['ledger_id']} {d['pubkey']} {d.get('key_index', 0)} {d.get('relay', '')}")
+PYEOF
+)
+    if [ $? -ne 0 ] || echo "$DEPOSIT_INFO" | grep -q '^ERROR'; then
+        echo "$DEPOSIT_INFO" >&2; exit 1
+    fi
+    LEDGER_ID=$(echo "$DEPOSIT_INFO" | awk '{print $1}')
+    DEPOSIT_PUBKEY=$(echo "$DEPOSIT_INFO" | awk '{print $2}')
+    KEY_INDEX=$(echo "$DEPOSIT_INFO" | awk '{print $3}')
+    STORED_RELAY=$(echo "$DEPOSIT_INFO" | awk '{print $4}')
+    [ -n "$STORED_RELAY" ] && LEDGER_RELAY="$STORED_RELAY"
+    ALL_RELAYS="$LEDGER_RELAY"
+    [ -n "$EXTRA_RELAYS" ] && ALL_RELAYS="$ALL_RELAYS,$EXTRA_RELAYS"
+
+    SEED=$(cat "$SEED_FILE")
+
+    echo "${COMMAND^} → ${LN_ADDRESS}  ${AMOUNT_SATS} sats  from deposit[${DEPOSIT_INDEX}]"
+
+    python3 - "$LN_ADDRESS" "$AMOUNT_SATS" "$DEPOSIT_PUBKEY" "$KEY_INDEX" \
+            "$LEDGER_ID" "$ALL_RELAYS" "$SEED" "$IS_ZAP" "$ZAP_MESSAGE" \
+            "$NOTE_ID" "$COMMENT" << 'PYEOF'
+import json, hashlib, hmac, struct, time, sys, urllib.request, urllib.parse, os, re
+
+try:
+    from secp256k1 import PrivateKey
+    import websocket
+except ImportError:
+    print("ERROR: pip install secp256k1 websocket-client", file=sys.stderr); sys.exit(1)
+
+ln_addr, amount_sats, deposit_pubkey, key_index_str, ledger_id, relays_str, \
+    seed_hex, is_zap_str, zap_message, note_id, comment = sys.argv[1:12]
+amount_sats = int(amount_sats)
+amount_msat = amount_sats * 1000
+key_index = int(key_index_str)
+is_zap = is_zap_str == "1"
+
+# ── 1. Resolve LN address / LNURL → metadata URL ──────────────────────
+def resolve_endpoint(addr):
+    if addr.startswith("lnurl") or addr.startswith("LNURL"):
+        # bech32-encoded URL — decode
+        CHARSET='qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+        a = addr.lower()
+        pos = a.rfind('1')
+        data = a[pos+1:-6]
+        vals = [CHARSET.find(c) for c in data]
+        bits, acc, out = 0, 0, []
+        for v in vals:
+            acc = (acc << 5) | v; bits += 5
+            while bits >= 8:
+                bits -= 8; out.append((acc >> bits) & 0xff)
+        return bytes(out).decode('ascii', errors='replace')
+    if '@' in addr:
+        user, domain = addr.split('@', 1)
+        return f"https://{domain}/.well-known/lnurlp/{user}"
+    return addr  # raw URL
+
+endpoint = resolve_endpoint(ln_addr)
+print(f"  endpoint:    {endpoint}")
+try:
+    with urllib.request.urlopen(endpoint, timeout=10) as r:
+        metadata = json.loads(r.read())
+except Exception as e:
+    print(f"ERROR: failed to fetch LNURL metadata: {e}", file=sys.stderr); sys.exit(1)
+
+if metadata.get('tag') != 'payRequest':
+    print(f"ERROR: not a payRequest endpoint: {metadata}", file=sys.stderr); sys.exit(1)
+callback = metadata['callback']
+min_send = metadata.get('minSendable', 0)
+max_send = metadata.get('maxSendable', 1 << 60)
+if amount_msat < min_send or amount_msat > max_send:
+    print(f"ERROR: {amount_msat} msat outside {min_send}-{max_send}", file=sys.stderr); sys.exit(1)
+
+# ── 2. Build callback URL (with `nostr=` for zaps) ────────────────────
+qs = {'amount': str(amount_msat)}
+if comment:
+    qs['comment'] = comment
+if is_zap:
+    if not metadata.get('allowsNostr'):
+        print(f"WARN: endpoint doesn't advertise allowsNostr — zap may be ignored")
+    # Ephemeral sender key. Wallet's deposit_pubkey IS public anyway, but
+    # signing zaps with it ties depositor identity to deposit, which most
+    # users don't want.
+    sender_sk = PrivateKey(os.urandom(32))
+    sender_xonly = sender_sk.pubkey.serialize()[1:].hex()
+    tags = [['p', deposit_pubkey], ['amount', str(amount_msat)]]
+    # NIP-57 needs a `relays` tag — relays where the gateway should publish
+    # the receipt. Use whatever the wallet's already talking to, filtered
+    # to FQDNs (gateways drop docker-internal hostnames anyway).
+    fqdn_relays = [r for r in relays_str.split(',') if r and ('.' in r.split('://',1)[-1].split(':',1)[0])]
+    if fqdn_relays:
+        tags.append(['relays'] + fqdn_relays)
+    if note_id:
+        tags.append(['e', note_id])
+    created_at = int(time.time())
+    serial = json.dumps([0, sender_xonly, created_at, 9734, tags, zap_message], separators=(',',':'))
+    eid = hashlib.sha256(serial.encode()).digest()
+    sig = sender_sk.schnorr_sign(eid, bip340tag=None, raw=True)
+    zap_req = {
+        'id': eid.hex(), 'pubkey': sender_xonly, 'created_at': created_at,
+        'kind': 9734, 'tags': tags, 'content': zap_message, 'sig': sig.hex(),
+    }
+    qs['nostr'] = json.dumps(zap_req, separators=(',',':'))
+
+cb_url = callback + ('&' if '?' in callback else '?') + urllib.parse.urlencode(qs)
+try:
+    with urllib.request.urlopen(cb_url, timeout=15) as r:
+        cb_resp = json.loads(r.read())
+except Exception as e:
+    print(f"ERROR: callback failed: {e}", file=sys.stderr); sys.exit(1)
+if cb_resp.get('status') == 'ERROR':
+    print(f"ERROR: callback returned {cb_resp.get('reason')}", file=sys.stderr); sys.exit(1)
+invoice = cb_resp.get('pr')
+if not invoice:
+    print(f"ERROR: callback returned no `pr` field: {cb_resp}", file=sys.stderr); sys.exit(1)
+print(f"  invoice:     {invoice[:40]}…")
+if cb_resp.get('attestations'):
+    print(f"  attestations: {len(cb_resp['attestations'])} fields (save these!)")
+
+# ── 3. Parse BOLT11 to extract payment_hash + amount ──────────────────
+inv = invoice.lower()
+m = re.match(r'^ln(bcrt|bc|tb|sb)(\d+)([munp]?)1', inv)
+if m:
+    num, mult = int(m.group(2)), m.group(3)
+    multipliers = {'m': 100_000_000, 'u': 100_000, 'n': 100, 'p': 0.1}
+    inv_amount_msat = int(num * multipliers.get(mult, 100_000_000_000))
+else:
+    inv_amount_msat = amount_msat
+
+CHARSET='qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+pos = inv.rfind('1')
+data = inv[pos+1:-6]
+vals = [CHARSET.find(c) for c in data]
+idx = 7  # skip timestamp (7 5-bit groups)
+payment_hash = None
+while idx < len(vals) - 2:
+    tag = vals[idx]; idx += 1
+    dlen = vals[idx]*32 + vals[idx+1]; idx += 2
+    if tag == 1 and dlen == 52:  # `p` = payment_hash
+        bits, acc, out = 0, 0, []
+        for v in vals[idx:idx+dlen]:
+            acc = (acc << 5) | v; bits += 5
+            while bits >= 8:
+                bits -= 8; out.append((acc >> bits) & 0xff)
+        payment_hash = bytes(out[:32])
+        break
+    idx += dlen
+if payment_hash is None:
+    print("ERROR: couldn't extract payment_hash from invoice", file=sys.stderr); sys.exit(1)
+
+# ── 4. Sign INVOICE message with the deposit's secret key ─────────────
+seed_bytes = bytes.fromhex(seed_hex)
+I = hmac.new(b'Bitcoin seed', seed_bytes, hashlib.sha512).digest()
+key, chain = I[:32], I[32:]
+N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+def ckd(k, c, idx):
+    if idx >= 0x80000000:
+        data = b'\x00' + k + struct.pack('>I', idx)
+    else:
+        data = PrivateKey(k).pubkey.serialize() + struct.pack('>I', idx)
+    h = hmac.new(c, data, hashlib.sha512).digest()
+    return ((int.from_bytes(h[:32],'big') + int.from_bytes(k,'big')) % N).to_bytes(32,'big'), h[32:]
+for i in [84+0x80000000, 0x80000000, 0x80000000, 0, key_index]:
+    key, chain = ckd(key, chain, i)
+deposit_sk = PrivateKey(key)
+descriptor = f"pk({deposit_pubkey})"
+deposit_id = hashlib.sha256(descriptor.encode()).digest()[:16]
+sig_msg = f"INVOICE:{deposit_id.hex()}:{payment_hash.hex()}:{inv_amount_msat}".encode()
+msg_hash = hashlib.sha256(sig_msg).digest()
+sig = deposit_sk.schnorr_sign(msg_hash, bip340tag=None, raw=True)
+
+# ── 5. pay_invoice via Nostr 20101 ────────────────────────────────────
+# Sign as the deposit_pubkey so the operator's pay_invoice handler sees
+# the same key that signed the invoice_lock_signing_message.
+content = json.dumps({
+    'deposit_pubkey': deposit_pubkey,
+    'invoice': invoice,
+    'payment_hash': payment_hash.hex(),
+    'amount_msats': inv_amount_msat,
+    'signature': sig.hex(),
+})
+created_at = int(time.time())
+tags = [['l', ledger_id], ['action', 'pay_invoice']]
+serial = json.dumps([0, deposit_sk.pubkey.serialize()[1:].hex(), created_at, 20101, tags, content], separators=(',',':'))
+eid = hashlib.sha256(serial.encode()).digest()
+sig_event = deposit_sk.schnorr_sign(eid, bip340tag=None, raw=True)
+event = {
+    'id': eid.hex(),
+    'pubkey': deposit_sk.pubkey.serialize()[1:].hex(),
+    'created_at': created_at, 'kind': 20101, 'tags': tags,
+    'content': content, 'sig': sig_event.hex(),
+}
+
+for relay_url in [r.strip() for r in relays_str.split(',') if r.strip()]:
+    try:
+        ws = websocket.create_connection(relay_url, timeout=5)
+        ws.send(json.dumps(['REQ', 'p1', {'kinds': [20102], '#e': [event['id']], 'since': created_at - 5}]))
+        ws.send(json.dumps(['EVENT', event]))
+        ws.settimeout(120)
+        while True:
+            msg = json.loads(ws.recv())
+            if msg[0] == 'EVENT' and msg[2].get('kind') == 20102:
+                resp = json.loads(msg[2]['content'])
+                if resp.get('success'):
+                    print("Payment sent.")
+                    if resp.get('result'):
+                        pre = resp['result'].get('preimage', '')
+                        if pre: print(f"  preimage: {pre}")
+                    sys.exit(0)
+                else:
+                    print(f"ERROR: {resp.get('error', 'unknown')}", file=sys.stderr)
+                    sys.exit(1)
+            elif msg[0] == 'EOSE':
+                continue
+    except websocket.WebSocketTimeoutException:
+        print(f"  timeout on {relay_url}", file=sys.stderr)
+    except Exception as e:
+        print(f"  failed on {relay_url}: {e}", file=sys.stderr)
+print("ERROR: no response from any relay", file=sys.stderr)
+sys.exit(1)
+PYEOF
+    ;;
+
 *)
     echo "Unknown command: $COMMAND"
-    echo "Commands: init, pubkey, open, invoice, fund, balance, lnurl"
+    echo "Commands: init, pubkey, open, invoice, fund, balance, lnurl, pay-lnurl, zap"
     exit 1
     ;;
 
