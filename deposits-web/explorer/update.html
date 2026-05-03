@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Update · Deposits Explorer</title>
+  <style>
+    :root {
+      --bg:        #11131f;
+      --bg-elev:   #181c2c;
+      --bg-card:   #1d2237;
+      --bg-card-h: #232943;
+      --border:    #2a304a;
+      --border-strong: #3a4263;
+      --fg:        #e7e9f0;
+      --fg-strong: #ffffff;
+      --fg-muted:  #8d96b3;
+      --fg-dim:    #5b6386;
+      --accent:    #f7931a;
+      --green:     #4cae5a;
+      --red:       #d9534f;
+      --yellow:    #f0ad4e;
+      --blue:      #5b8def;
+      --purple:    #b58cf0;
+      --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { background: var(--bg); }
+    body { margin: 0; color: var(--fg); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+    a { color: inherit; text-decoration: none; }
+    a:hover { color: var(--accent); }
+
+    .topnav {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.85rem 1.25rem;
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 10;
+    }
+    .brand { display: flex; align-items: baseline; gap: 0.45rem; font-weight: 600; font-size: 1.05rem; }
+    .brand .logo { color: var(--accent); font-size: 1.25rem; line-height: 1; }
+    .brand .name { color: var(--fg-strong); }
+    .brand .sub { color: var(--fg-muted); font-weight: 400; font-size: 0.85rem; }
+    .nav-links { display: flex; gap: 1rem; font-size: 0.9rem; color: var(--fg-muted); }
+    .nav-links a.active { color: var(--accent); }
+
+    main { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+
+    h1.section-title {
+      font-size: 0.78rem; font-weight: 600;
+      color: var(--fg-muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+      margin: 1.5rem 0 0.85rem;
+    }
+    h1.section-title:first-child { margin-top: 0; }
+
+    /* hero */
+    .hero {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1.1rem 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .hero .lbl {
+      color: var(--fg-muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.25rem;
+    }
+    .hero .id {
+      font: 0.95rem var(--mono);
+      color: var(--accent);
+      word-break: break-all;
+      letter-spacing: -0.01em;
+    }
+    .hero .meta {
+      display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;
+      margin-top: 0.55rem;
+      color: var(--fg-muted);
+      font-size: 0.85rem;
+    }
+
+    /* generic card */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.95rem 1.1rem;
+      margin-bottom: 1rem;
+    }
+    .card h3 {
+      font-size: 0.72rem; font-weight: 600;
+      color: var(--fg-muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+      margin: 0 0 0.7rem;
+    }
+
+    /* key/value rows */
+    .kv {
+      display: grid;
+      grid-template-columns: 8.5rem 1fr;
+      gap: 0.4rem 1rem;
+      font-size: 0.85rem;
+      align-items: baseline;
+    }
+    .kv dt {
+      color: var(--fg-muted);
+      text-transform: uppercase;
+      font-size: 0.7rem;
+      letter-spacing: 0.06em;
+      padding-top: 0.1rem;
+    }
+    .kv dd {
+      margin: 0;
+      color: var(--fg);
+      font-variant-numeric: tabular-nums;
+      word-break: break-all;
+    }
+    .kv dd.mono { font-family: var(--mono); font-size: 0.82rem; color: var(--fg-strong); }
+    .kv dd.muted { color: var(--fg-muted); }
+    .kv dd .ann {
+      display: inline-block;
+      color: var(--fg-dim);
+      font-family: var(--sans);
+      font-size: 0.78rem;
+      margin-left: 0.6rem;
+    }
+
+    /* tag list */
+    table.tags { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    .tags td { padding: 0.3rem 0.6rem 0.3rem 0; vertical-align: top; }
+    .tags td.k {
+      color: var(--accent);
+      font: 0.78rem var(--mono);
+      width: 5rem;
+    }
+    .tags td.v {
+      font-family: var(--mono); color: var(--fg);
+      word-break: break-all;
+    }
+
+    /* TLV field rows */
+    table.tlv { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    .tlv th, .tlv td {
+      text-align: left;
+      padding: 0.45rem 0.6rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    .tlv tr:last-child td { border-bottom: none; }
+    .tlv th {
+      color: var(--fg-muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.68rem;
+      letter-spacing: 0.06em;
+    }
+    .tlv td.tag-id { color: var(--fg-dim); font-family: var(--mono); width: 3.5rem; font-variant-numeric: tabular-nums; }
+    .tlv td.name   { color: var(--fg); font-weight: 600; width: 12rem; }
+    .tlv td.len    { color: var(--fg-muted); width: 4rem; font-variant-numeric: tabular-nums; }
+    .tlv td.value  { color: var(--fg-strong); font-family: var(--mono); word-break: break-all; }
+    .tlv td.value .interp {
+      display: block;
+      margin-top: 0.2rem;
+      color: var(--fg-muted);
+      font-family: var(--sans);
+      font-size: 0.78rem;
+    }
+
+    /* hex dump */
+    pre.hexdump {
+      margin: 0;
+      padding: 0.85rem 1rem;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font: 0.78rem/1.45 var(--mono);
+      color: var(--fg);
+      overflow-x: auto;
+      white-space: pre;
+    }
+    pre.hexdump .off { color: var(--fg-dim); }
+    pre.hexdump .ascii { color: var(--fg-muted); }
+    .hex-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 0.5rem;
+      font-size: 0.82rem;
+      color: var(--fg-muted);
+    }
+    .hex-meta b { color: var(--fg); }
+
+    /* op pill (re-used) */
+    .op {
+      display: inline-block;
+      padding: 0.1rem 0.5rem;
+      border-radius: 3px;
+      font: 600 0.75rem var(--mono);
+      letter-spacing: -0.01em;
+      vertical-align: middle;
+    }
+    .op.credit    { background: rgba(76, 174, 90, 0.15); color: var(--green); }
+    .op.lock      { background: rgba(240, 173, 78, 0.15); color: var(--yellow); }
+    .op.deposit   { background: rgba(91, 141, 239, 0.15); color: var(--blue); }
+    .op.quorum    { background: rgba(181, 140, 240, 0.15); color: var(--purple); }
+    .op.dispute   { background: rgba(217, 83, 79, 0.18); color: var(--red); }
+    .op.transfer  { background: rgba(91, 141, 239, 0.15); color: var(--blue); }
+    .op.unknown   { background: var(--border); color: var(--fg-muted); }
+
+    /* check pills */
+    .check { display: inline-block; padding: 0.05rem 0.4rem; border-radius: 3px; font-size: 0.7rem; font-weight: 600; }
+    .check.ok  { background: rgba(76, 174, 90, 0.18); color: var(--green); }
+    .check.bad { background: rgba(217, 83, 79, 0.18); color: var(--red); }
+
+    .empty {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1.25rem;
+      color: var(--fg-muted);
+    }
+    .empty.err { color: var(--red); border-color: rgba(217, 83, 79, 0.4); }
+    .loading { color: var(--fg-muted); padding: 0.5rem 0; }
+
+    footer {
+      margin-top: 2.5rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      color: var(--fg-dim);
+      font-size: 0.78rem;
+      text-align: center;
+    }
+    footer .mono { font-family: var(--mono); color: var(--fg-muted); }
+  </style>
+</head>
+<body>
+  <nav class="topnav">
+    <div class="brand">
+      <span class="logo">⟁</span>
+      <span class="name">deposits</span>
+      <span class="sub">explorer</span>
+    </div>
+    <div class="nav-links">
+      <a href="/explorer">overview</a>
+      <a href="/ledger">ledger</a>
+    </div>
+  </nav>
+
+  <main>
+    <div class="hero">
+      <div class="lbl">ledger update · nostr event</div>
+      <div class="id" id="event-id">…</div>
+      <div class="meta" id="hero-meta"></div>
+    </div>
+
+    <div id="body"><div class="loading">querying relay…</div></div>
+
+    <footer>
+      data via nostr relay <span class="mono" id="relay-url"></span>
+    </footer>
+  </main>
+
+<script type="module">
+import { OP_NAMES, FIELD_NAMES } from './tlv-catalog.js';
+
+// ── helpers ─────────────────────────────────────────────────────
+
+function getParam(name) {
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  if (hashParams.has(name)) return hashParams.get(name);
+  return new URLSearchParams(window.location.search).get(name);
+}
+
+const RELAY_URL =
+  getParam('relay')
+  || document.querySelector('meta[name=relay]')?.content
+  || 'wss://relay.bitcoindeposits.net';
+document.getElementById('relay-url').textContent = RELAY_URL;
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+
+function bytesToHex(buf) {
+  return [...buf].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function b64ToBytes(s) {
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+}
+
+async function sha256(buf) {
+  const h = await crypto.subtle.digest('SHA-256', buf);
+  return new Uint8Array(h);
+}
+
+function utf8(s) { return new TextEncoder().encode(s); }
+
+function nostrFetch(relayUrl, filter, { timeoutMs = 8000 } = {}) {
+  return new Promise((resolve) => {
+    const events = [];
+    let ws;
+    try { ws = new WebSocket(relayUrl); }
+    catch { resolve([]); return; }
+    const subId = 'q' + Math.random().toString(36).slice(2, 8);
+    const finish = () => { try { ws.close(); } catch {} clearTimeout(timer); resolve(events); };
+    const timer = setTimeout(finish, timeoutMs);
+    ws.onopen = () => ws.send(JSON.stringify(['REQ', subId, filter]));
+    ws.onmessage = (msg) => {
+      try {
+        const d = JSON.parse(msg.data);
+        if (d[0] === 'EVENT' && d[1] === subId) events.push(d[2]);
+        else if (d[0] === 'EOSE' && d[1] === subId) finish();
+      } catch {}
+    };
+    ws.onerror = finish;
+    ws.onclose = finish;
+  });
+}
+
+// ── Bitcoin VarInt (Compact Size) ──────────────────────────────────
+function readVarint(buf, off) {
+  const b = buf[off];
+  if (b < 0xfd) return [b, off + 1];
+  if (b === 0xfd) return [(buf[off+1] << 8) | buf[off+2], off + 3];
+  if (b === 0xfe) return [(buf[off+1] << 24) | (buf[off+2] << 16) | (buf[off+3] << 8) | buf[off+4], off + 5];
+  let val = 0; for (let i = 0; i < 8; i++) val = val * 256 + buf[off + 1 + i];
+  return [val, off + 9];
+}
+
+// ── TLV parser (matches deposits-protocol's wire encoding) ─────────
+function parseTlv(buf) {
+  const records = [];
+  let off = 0;
+  while (off < buf.length) {
+    const startOff = off;
+    const [type_, o1] = readVarint(buf, off);
+    const [len, o2] = readVarint(buf, o1);
+    const value = buf.slice(o2, o2 + len);
+    records.push({ type: type_, value, off: startOff, headerLen: o2 - startOff });
+    off = o2 + len;
+  }
+  return records;
+}
+
+// ── interpret a TLV value ──────────────────────────────────────────
+//
+// Multiple shapes are plausible for a given byte string (a 32-byte
+// blob could be a hash or a pubkey or just bytes). We pick by length
+// and tag context but always show the raw hex too.
+function interpretValue(rec) {
+  const { value, type } = rec;
+  const len = value.length;
+  const hex = bytesToHex(value);
+
+  // Single-byte discriminant — common for op-type fields
+  if (len === 1) return { hex, ann: `u8 = ${value[0]}` };
+  if (len === 2) return { hex, ann: `u16 = ${(value[0] << 8) | value[1]}` };
+  if (len === 4) {
+    const u32 = ((value[0] << 24) | (value[1] << 16) | (value[2] << 8) | value[3]) >>> 0;
+    return { hex, ann: `u32 = ${u32}` };
+  }
+  if (len === 8) {
+    let u64 = 0n;
+    for (let i = 0; i < 8; i++) u64 = (u64 << 8n) | BigInt(value[i]);
+    return { hex, ann: `u64 = ${u64.toString()}` };
+  }
+  if (len === 16) return { hex, ann: '16 bytes (deposit_id?)' };
+  if (len === 32) return { hex, ann: '32 bytes (hash / xonly pubkey?)' };
+  if (len === 33) return { hex, ann: '33 bytes (compressed pubkey?)' };
+  if (len === 64) return { hex, ann: '64 bytes (signature?)' };
+
+  // ASCII-ish? Show as text too.
+  if (value.every(b => b >= 0x20 && b < 0x7f)) {
+    try { return { hex, ann: `string (${len}B) = ${JSON.stringify(new TextDecoder().decode(value))}` }; }
+    catch { return { hex, ann: `${len} bytes` }; }
+  }
+  return { hex, ann: `${len} bytes` };
+}
+
+// ── pretty hex dump ────────────────────────────────────────────────
+function hexDump(buf) {
+  const lines = [];
+  for (let off = 0; off < buf.length; off += 16) {
+    const slice = buf.slice(off, off + 16);
+    const hex = [...slice].map(b => b.toString(16).padStart(2, '0')).join(' ');
+    const padded = hex.padEnd(16 * 3 - 1, ' ');
+    const ascii = [...slice].map(b => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : '·').join('');
+    const offHex = off.toString(16).padStart(6, '0');
+    lines.push(
+      `<span class="off">${offHex}</span>  ${escapeHtml(padded)}  <span class="ascii">${escapeHtml(ascii)}</span>`
+    );
+  }
+  return lines.join('\n');
+}
+
+// ── op-name category for color coding ──────────────────────────────
+function opCategory(name) {
+  if (!name) return 'unknown';
+  if (name.startsWith('Dispute')) return 'dispute';
+  if (name.startsWith('Quorum') || name.startsWith('Ledger')) return 'quorum';
+  if (name.startsWith('Transfer')) return 'transfer';
+  if (name.startsWith('Deposit') || name === 'FeeChange' || name === 'FeeCollect') return 'deposit';
+  if (name.endsWith('Credit') || name === 'InvoiceFulfill' || name === 'OnchainFulfill') return 'credit';
+  if (name.endsWith('Lock') || name.endsWith('Fail')) return 'lock';
+  return 'unknown';
+}
+
+// ── Nostr event-id verification (NIP-01 canonical hash) ───────────
+//
+// id = sha256(JSON.stringify([0, pubkey, created_at, kind, tags, content]))
+// using the canonical separator-free encoding.
+async function verifyEventId(event) {
+  const canonical = JSON.stringify([
+    0, event.pubkey, event.created_at, event.kind, event.tags, event.content
+  ]);
+  const computed = bytesToHex(await sha256(utf8(canonical)));
+  return { ok: computed === event.id, computed };
+}
+
+// ── render ────────────────────────────────────────────────────────
+
+function renderEventCard(event, idCheck) {
+  const sigOk = idCheck.ok;  // we can verify the id matches; full Schnorr sig verify needs secp lib
+  const tagsHtml = event.tags.length === 0
+    ? '<div class="muted">(none)</div>'
+    : `<table class="tags">${event.tags.map(t => `
+        <tr>
+          <td class="k">${escapeHtml(t[0])}</td>
+          <td class="v">${escapeHtml(t.slice(1).join(' '))}</td>
+        </tr>`).join('')}</table>`;
+  return `
+    <div class="card">
+      <h3>nostr event</h3>
+      <dl class="kv">
+        <dt>kind</dt><dd>${event.kind} <span class="ann">(${event.kind === 9100 ? 'KIND_LEDGER_UPDATE' : event.kind === 39100 ? 'KIND_LEDGER_ADVERTISE' : 'other'})</span></dd>
+        <dt>created at</dt><dd>${new Date(event.created_at * 1000).toISOString().replace('T', ' ').slice(0, 19)} UTC <span class="ann">(${event.created_at})</span></dd>
+        <dt>pubkey</dt><dd class="mono">${escapeHtml(event.pubkey)}</dd>
+        <dt>signature</dt><dd class="mono">${escapeHtml(event.sig)}</dd>
+        <dt>id</dt><dd class="mono">${escapeHtml(event.id)} <span class="ann">${sigOk ? '<span class="check ok">id valid</span>' : '<span class="check bad">id mismatch (computed ' + escapeHtml(idCheck.computed) + ')</span>'}</span></dd>
+        <dt>tags</dt><dd>${tagsHtml}</dd>
+        <dt>content</dt><dd class="muted">${event.content.length} chars (base64 — decoded below)</dd>
+      </dl>
+    </div>`;
+}
+
+function renderUpdateFields(records, hashOk) {
+  // Map deposits-protocol's outer SignedLedgerUpdate tags to friendly names.
+  const SIGNED_UPDATE_NAMES = {
+    0: 'operator_id',
+    2: 'ledger_id',
+    4: 'sequence_number',
+    6: 'previous_hash',
+    8: 'message',
+    10: 'block_height',
+    12: 'block_hash',
+    14: 'cosign_signature',  // legacy single
+    16: 'member_ledger_hash', // legacy single
+    18: 'cosignature',        // legacy alt
+    20: 'operator_signature',
+    22: 'cosignatures',       // multi-cosig (length-prefixed entries)
+  };
+  return `
+    <div class="card">
+      <h3>signed ledger update <span class="ann" style="font-family:var(--sans);font-size:0.78rem;color:var(--fg-muted);">${hashOk.ok ? '<span class="check ok">content_hash valid</span>' : '<span class="check bad">content_hash mismatch</span>'}</span></h3>
+      <table class="tlv">
+        <thead><tr><th>tag</th><th>name</th><th>len</th><th>value</th></tr></thead>
+        <tbody>
+          ${records.map(r => {
+            const interp = interpretValue(r);
+            const name = SIGNED_UPDATE_NAMES[r.type] || FIELD_NAMES[r.type] || `tag_${r.type}`;
+            return `<tr>
+              <td class="tag-id">${r.type}</td>
+              <td class="name">${escapeHtml(name)}</td>
+              <td class="len">${r.value.length}</td>
+              <td class="value">${escapeHtml(interp.hex)}<span class="interp">${escapeHtml(interp.ann)}</span></td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function renderInnerOp(opBytes) {
+  if (!opBytes) return '';
+  const inner = parseTlv(opBytes);
+  let opName = '?', opDisc = 0, opCat = 'unknown';
+  if (inner.length > 0 && inner[0].type === 0 && inner[0].value.length === 1) {
+    opDisc = inner[0].value[0];
+    opName = OP_NAMES[opDisc] || `Unknown(${opDisc})`;
+    opCat = opCategory(opName);
+  }
+  return `
+    <div class="card">
+      <h3>inner operation · <span class="op ${opCat}">${escapeHtml(opName)}</span> <span class="ann" style="font-family:var(--sans);font-size:0.78rem;color:var(--fg-muted);margin-left:0.4rem;">discriminant ${opDisc}</span></h3>
+      <table class="tlv">
+        <thead><tr><th>tag</th><th>name</th><th>len</th><th>value</th></tr></thead>
+        <tbody>
+          ${inner.map(r => {
+            const interp = interpretValue(r);
+            const name = FIELD_NAMES[r.type] || `field_${r.type}`;
+            return `<tr>
+              <td class="tag-id">${r.type}</td>
+              <td class="name">${escapeHtml(name)}</td>
+              <td class="len">${r.value.length}</td>
+              <td class="value">${escapeHtml(interp.hex)}<span class="interp">${escapeHtml(interp.ann)}</span></td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function renderHexDump(label, buf) {
+  return `
+    <div class="card">
+      <h3>${escapeHtml(label)}</h3>
+      <div class="hex-meta">
+        <span><b>${buf.length}</b> bytes · <b>0x${buf.length.toString(16)}</b> hex</span>
+        <span>sha256: <span style="font-family:var(--mono);color:var(--fg);" id="hex-sha-${label.replace(/\s+/g, '-')}">…</span></span>
+      </div>
+      <pre class="hexdump">${hexDump(buf)}</pre>
+    </div>`;
+}
+
+// ── Compute the SignedLedgerUpdate's content_hash the same way the ──
+// ── operator does (sequence_number || previous_hash || message      ──
+// ── [ || cosignature triples ]).                                    ──
+async function computeContentHash(records) {
+  const get = (t) => records.find(r => r.type === t)?.value;
+
+  const seqRaw = get(4);
+  if (!seqRaw) return null;
+  // seq is stored as 8 bytes; the wallet treats the buffer as a u64
+  // little-endian here. Match that.
+  const seqBytes = new Uint8Array(8);
+  for (let i = 0; i < Math.min(8, seqRaw.length); i++) seqBytes[i] = seqRaw[i];
+
+  const prevHash = get(6) || new Uint8Array(32);
+  const msg = get(8) || new Uint8Array(0);
+
+  const parts = [seqBytes, prevHash, msg];
+
+  const cosigsRaw = get(22);
+  if (cosigsRaw && cosigsRaw.length >= 131) {
+    let cOff = 0;
+    while (cOff + 2 <= cosigsRaw.length) {
+      const entryLen = (cosigsRaw[cOff] << 8) | cosigsRaw[cOff + 1];
+      cOff += 2;
+      if (cOff + entryLen > cosigsRaw.length || entryLen < 129) break;
+      const sig = cosigsRaw.slice(cOff + 33, cOff + 97);
+      const mh = cosigsRaw.slice(cOff + 97, cOff + 129);
+      parts.push(mh); parts.push(sig);
+      cOff += entryLen;
+    }
+  } else {
+    const memberHash = get(16);
+    const cosignSig = get(18) || new Uint8Array(64);
+    if (memberHash) parts.push(memberHash);
+    if (cosignSig.some(b => b !== 0)) parts.push(cosignSig);
+  }
+
+  const total = parts.reduce((s, p) => s + p.length, 0);
+  const all = new Uint8Array(total);
+  let o = 0;
+  for (const p of parts) { all.set(p, o); o += p.length; }
+  return await sha256(all);
+}
+
+// ── main ──────────────────────────────────────────────────────────
+
+async function main() {
+  const eventId = getParam('event');
+  if (!eventId || eventId.length !== 64 || !/^[0-9a-f]+$/i.test(eventId)) {
+    document.getElementById('event-id').textContent = '— missing/invalid event id';
+    document.getElementById('body').innerHTML = `<div class="empty err">Pass <code>#event=&lt;64-hex-event-id&gt;</code> in the URL to inspect a specific update.</div>`;
+    return;
+  }
+  document.getElementById('event-id').textContent = eventId;
+
+  const events = await nostrFetch(RELAY_URL, { ids: [eventId.toLowerCase()], limit: 1 });
+  if (!events.length) {
+    document.getElementById('body').innerHTML = `<div class="empty err">Event ${escapeHtml(eventId)} not found on
+      <span style="font-family:var(--mono)">${escapeHtml(RELAY_URL)}</span>.</div>`;
+    return;
+  }
+  const event = events[0];
+
+  // Hero meta
+  const ledgerTagD = event.tags.find(t => t[0] === 'd')?.[1];
+  const seqTag = event.tags.find(t => t[0] === 'n')?.[1];
+  const opTag = event.tags.find(t => t[0] === 't')?.[1];
+  const opNameStr = opTag ? (OP_NAMES[Number(opTag)] || `op(${opTag})`) : '';
+  const opCat = opCategory(opNameStr);
+  const ledgerLink = ledgerTagD
+    ? `/ledger#ledger=${ledgerTagD}&relay=${encodeURIComponent(RELAY_URL)}`
+    : null;
+  document.getElementById('hero-meta').innerHTML = `
+    <span class="op ${opCat}">${escapeHtml(opNameStr || `kind ${event.kind}`)}</span>
+    ${seqTag ? `<span style="color:var(--fg-dim)">·</span> <span>seq <b style="color:var(--fg)">${escapeHtml(seqTag)}</b></span>` : ''}
+    ${ledgerLink ? `<span style="color:var(--fg-dim)">·</span> <a href="${escapeHtml(ledgerLink)}">ledger ${escapeHtml(ledgerTagD)}…</a>` : ''}
+    <span style="color:var(--fg-dim)">·</span>
+    <span>${new Date(event.created_at * 1000).toISOString().replace('T', ' ').slice(0, 19)} UTC</span>
+  `;
+
+  // Verify Nostr event id
+  const idCheck = await verifyEventId(event);
+
+  let html = '';
+  html += renderEventCard(event, idCheck);
+
+  // Decode the base64 TLV body
+  let rawTlv = null;
+  try { rawTlv = b64ToBytes(event.content); }
+  catch (e) {
+    html += `<div class="empty err">Failed to base64-decode event content: ${escapeHtml(e.message)}</div>`;
+    document.getElementById('body').innerHTML = html;
+    return;
+  }
+
+  let outerRecords = [];
+  try { outerRecords = parseTlv(rawTlv); }
+  catch (e) {
+    html += `<div class="empty err">Failed to TLV-parse event content: ${escapeHtml(e.message)}</div>`;
+    document.getElementById('body').innerHTML = html;
+    return;
+  }
+
+  // content_hash check (only meaningful for kind 9100)
+  let hashOk = { ok: false };
+  if (event.kind === 9100) {
+    const computed = await computeContentHash(outerRecords);
+    if (computed) {
+      // The on-wire content_hash isn't usually present in the TLV (it's
+      // wire-derived). Compare against what's tagged in the operator's
+      // emit if any; otherwise we just surface the computed value.
+      const provided = outerRecords.find(r => r.type === 24)?.value; // some shapes carry it under tag 24
+      hashOk = { ok: provided ? bytesToHex(computed) === bytesToHex(provided) : true, computed: bytesToHex(computed) };
+    }
+  }
+
+  html += renderUpdateFields(outerRecords, hashOk);
+
+  // Inner operation
+  const msgBytes = outerRecords.find(r => r.type === 8)?.value;
+  if (msgBytes) html += renderInnerOp(msgBytes);
+
+  html += renderHexDump('raw TLV body (base64-decoded)', rawTlv);
+  html += `<div class="card"><h3>raw event content (base64)</h3>
+    <pre class="hexdump" style="white-space:pre-wrap;word-break:break-all;">${escapeHtml(event.content)}</pre>
+  </div>`;
+
+  document.getElementById('body').innerHTML = html;
+
+  // Fill in hex-dump sha256 line
+  const sha = bytesToHex(await sha256(rawTlv));
+  const target = document.getElementById('hex-sha-raw-TLV-body-(base64-decoded)');
+  if (target) target.textContent = sha;
+}
+
+main();
+</script>
+</body>
+</html>

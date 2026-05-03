@@ -158,6 +158,9 @@
       border-bottom: 1px solid var(--border);
     }
     .activity tr:last-child td { border-bottom: none; }
+    .activity tbody tr { cursor: pointer; }
+    .activity tbody tr:hover { background: var(--bg-card-h); }
+    .activity tbody tr:hover td.muted { color: var(--fg); }
     .activity th {
       color: var(--fg-muted);
       font-weight: 600;
@@ -473,7 +476,8 @@ function renderActivity(events) {
             const cat = opCategory(name);
             const dep = tagValue(e, 'i');
             const ph = tagValue(e, 'payment_hash');
-            return `<tr>
+            const href = `/update#event=${e.id}&relay=${encodeURIComponent(RELAY_URL)}`;
+            return `<tr onclick="window.location='${escapeHtml(href)}'">
               <td class="num muted">${escapeHtml(seq)}</td>
               <td><span class="op ${cat}">${escapeHtml(name)}</span></td>
               <td class="mono">${dep ? escapeHtml(fmt.short(dep, 16)) : '—'}</td>

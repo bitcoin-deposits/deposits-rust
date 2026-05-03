@@ -310,6 +310,15 @@ async fn explorer_overview() -> Html<&'static str> {
     Html(EXPLORER_OVERVIEW_HTML)
 }
 
+/// GET /update
+///
+/// Single-event detail view — full Nostr event, decoded
+/// SignedLedgerUpdate fields, inner operation TLV, and hex dump.
+/// Reads `#event=<64-hex-event-id>` from the URL.
+async fn explorer_update() -> Html<&'static str> {
+    Html(EXPLORER_UPDATE_HTML)
+}
+
 /// GET /tlv-catalog.js
 ///
 /// Auto-generated from `deposits-protocol/deposits_protocol.ksy` by
@@ -330,6 +339,8 @@ const EXPLORER_LEDGER_HTML: &str =
     include_str!("../../../deposits-web/explorer/ledger.html");
 const EXPLORER_OVERVIEW_HTML: &str =
     include_str!("../../../deposits-web/explorer/explorer.html");
+const EXPLORER_UPDATE_HTML: &str =
+    include_str!("../../../deposits-web/explorer/update.html");
 const TLV_CATALOG_JS: &str =
     include_str!("../../../deposits-web/wallet/tlv-catalog.js");
 
@@ -1017,6 +1028,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(root_index))
         .route("/ledger", get(explorer_ledger))
         .route("/explorer", get(explorer_overview))
+        .route("/update", get(explorer_update))
         .route("/tlv-catalog.js", get(tlv_catalog_js))
         .with_state(state);
 
