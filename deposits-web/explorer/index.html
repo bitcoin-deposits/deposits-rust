@@ -93,7 +93,9 @@
     </div>
   </div>
 
-<script>
+<script type="module">
+import { OP_NAMES } from './tlv-catalog.js';
+
 //
 // 1. Resolve the ledger ID from the hostname.
 //
@@ -292,11 +294,9 @@ function tagValue(event, name) {
 }
 
 function opName(disc) {
-  // OP_NAMES populated by tlv-catalog.js if present.
-  if (typeof window.OP_NAMES === 'object' && window.OP_NAMES[disc]) {
-    return window.OP_NAMES[disc];
-  }
-  return disc;
+  // tlv-catalog.js's OP_NAMES is keyed by integer; tag values come in
+  // as strings (`"30"`).
+  return OP_NAMES[Number(disc)] || `op(${disc})`;
 }
 
 function escapeHtml(s) {
@@ -319,10 +319,11 @@ async function main() {
   document.getElementById('ledger-id').textContent = ledgerId;
   document.getElementById('hint').textContent = '';
 
-  // Ad: most-recent Kind 39100 with `#l` matching this ledger.
-  // Updates: most-recent Kind 9100 with `#d` matching the 16-char prefix
-  // operators tag with (see deposits-node/src/nostr.rs:1350 area).
-  const adFilter = { kinds: [39100], '#l': [ledgerId], limit: 1 };
+  // Both kinds use `#d` for the ledger-tag, but with different
+  // shapes — see deposits-node/src/nostr.rs `TAG_LEDGER_ID = d`:
+  //   - Kind 39100 ad: `d = <full 64-hex>` (replaceable, one per ledger)
+  //   - Kind 9100 update: `d = <16-hex prefix>` (`ledger_tag()` truncates)
+  const adFilter = { kinds: [39100], '#d': [ledgerId], limit: 1 };
   const updateFilter = { kinds: [9100], '#d': [ledgerId.slice(0, 16)], limit: 30 };
 
   const [adEvents, updateEvents] = await Promise.all([

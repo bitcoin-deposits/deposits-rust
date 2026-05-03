@@ -280,8 +280,26 @@ async fn explorer_index() -> Html<&'static str> {
     Html(EXPLORER_HTML)
 }
 
+/// GET /tlv-catalog.js
+///
+/// Auto-generated from `deposits-protocol/deposits_protocol.ksy` by
+/// `bin/gen-tlv-catalog.sh` and lives next to the wallet. The
+/// explorer imports `OP_NAMES` / `FIELD_NAMES` from it to render
+/// operation names instead of raw discriminant numbers.
+async fn tlv_catalog_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        TLV_CATALOG_JS,
+    )
+}
+
 const EXPLORER_HTML: &str =
     include_str!("../../../deposits-web/explorer/index.html");
+const TLV_CATALOG_JS: &str =
+    include_str!("../../../deposits-web/wallet/tlv-catalog.js");
 
 /// GET /.well-known/lnurlp/<deposit_pubkey>
 ///
@@ -968,6 +986,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // that specific ledger. Bundled into the binary at build time
         // via `include_str!`; rebuild to update.
         .route("/", get(explorer_index))
+        .route("/tlv-catalog.js", get(tlv_catalog_js))
         .with_state(state);
 
     log::info!("Listening on {}", listen);
