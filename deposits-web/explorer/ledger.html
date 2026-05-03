@@ -3,117 +3,262 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Deposit Ledger Explorer</title>
+  <title>Ledger · Deposits Explorer</title>
   <style>
     :root {
-      --fg: #d8dee9;
-      --fg-muted: #8c95a3;
-      --bg: #1a1d23;
-      --panel: #232830;
-      --border: #2c323b;
-      --accent: #88c0d0;
-      --warn: #d08770;
-      --ok: #a3be8c;
-      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --bg:        #11131f;
+      --bg-elev:   #181c2c;
+      --bg-card:   #1d2237;
+      --bg-card-h: #232943;
+      --border:    #2a304a;
+      --border-strong: #3a4263;
+      --fg:        #e7e9f0;
+      --fg-strong: #ffffff;
+      --fg-muted:  #8d96b3;
+      --fg-dim:    #5b6386;
+      --accent:    #f7931a;
+      --green:     #4cae5a;
+      --red:       #d9534f;
+      --yellow:    #f0ad4e;
+      --blue:      #5b8def;
+      --purple:    #b58cf0;
+      --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
     }
     * { box-sizing: border-box; }
+    html, body { background: var(--bg); }
     body {
-      margin: 0; padding: 0 1rem 4rem 1rem;
-      background: var(--bg); color: var(--fg);
-      font: 14px/1.5 system-ui, sans-serif;
+      margin: 0;
+      color: var(--fg);
+      font: 14px/1.5 var(--sans);
+      -webkit-font-smoothing: antialiased;
     }
-    .wrap { max-width: 980px; margin: 0 auto; }
-    h1 { font-size: 1.1rem; font-weight: 600; margin: 1.5rem 0 0.25rem; color: var(--fg-muted); }
-    h1 small { color: var(--fg-muted); font-size: 0.85rem; font-weight: normal; }
-    .ledger-id {
-      font-family: var(--mono); font-size: 0.85rem;
-      word-break: break-all;
-      color: var(--accent);
+    a { color: inherit; text-decoration: none; }
+    a:hover { color: var(--accent); }
+
+    .topnav {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.85rem 1.25rem;
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 10;
     }
-    section {
-      background: var(--panel);
+    .brand { display: flex; align-items: baseline; gap: 0.45rem; font-weight: 600; font-size: 1.05rem; }
+    .brand .logo { color: var(--accent); font-size: 1.25rem; line-height: 1; }
+    .brand .name { color: var(--fg-strong); }
+    .brand .sub { color: var(--fg-muted); font-weight: 400; font-size: 0.85rem; }
+    .nav-links { display: flex; gap: 1rem; font-size: 0.9rem; color: var(--fg-muted); }
+    .nav-links a.active { color: var(--accent); }
+
+    main { max-width: 1200px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+    h1.section-title {
+      font-size: 0.78rem; font-weight: 600;
+      color: var(--fg-muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+      margin: 1.5rem 0 0.85rem;
+    }
+    h1.section-title:first-child { margin-top: 0; }
+
+    .hero {
+      background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: 6px;
-      padding: 0.75rem 1rem;
-      margin: 0.75rem 0;
+      padding: 1.1rem 1.25rem;
+      margin-bottom: 1rem;
     }
-    section h2 {
-      font-size: 0.95rem;
-      font-weight: 600;
-      margin: 0 0 0.5rem;
+    .hero .lbl {
       color: var(--fg-muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.25rem;
+    }
+    .hero .lid {
+      font: 0.95rem var(--mono);
+      color: var(--accent);
+      word-break: break-all;
+      letter-spacing: -0.01em;
+    }
+    .hero .meta {
+      display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;
+      margin-top: 0.55rem;
+      color: var(--fg-muted);
+      font-size: 0.85rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.95rem 1.1rem;
+    }
+    .card h3 {
+      font-size: 0.72rem; font-weight: 600;
+      color: var(--fg-muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+      margin: 0 0 0.6rem;
+    }
+    .card .big {
+      font: 600 1.4rem/1 var(--sans);
+      color: var(--fg-strong);
+      letter-spacing: -0.01em;
+      font-variant-numeric: tabular-nums;
+      margin-bottom: 0.25rem;
+    }
+    .card .big.accent { color: var(--accent); }
+    .card .big-sub {
+      font-size: 0.78rem;
+      color: var(--fg-muted);
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 0.4rem 1rem;
+      font-size: 0.85rem;
+    }
+    .kv dt { color: var(--fg-muted); }
+    .kv dd {
+      margin: 0;
+      color: var(--fg);
+      font-variant-numeric: tabular-nums;
+      word-break: break-all;
+    }
+    .kv dd.mono { font-family: var(--mono); font-size: 0.82rem; color: var(--fg-strong); }
+
+    .quorum-list { display: flex; flex-direction: column; gap: 0.4rem; }
+    .quorum-item {
+      display: flex; align-items: center; gap: 0.6rem;
+      font: 0.82rem var(--mono);
+      color: var(--fg);
+    }
+    .quorum-num {
+      flex: 0 0 1.5rem;
+      color: var(--fg-dim);
+      font-family: var(--sans);
+      font-size: 0.75rem;
+    }
+    .quorum-pk { word-break: break-all; }
+
+    .activity-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    table.activity { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    .activity th, .activity td {
+      text-align: left;
+      padding: 0.6rem 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .activity tr:last-child td { border-bottom: none; }
+    .activity th {
+      color: var(--fg-muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.7rem;
+      letter-spacing: 0.06em;
+      background: var(--bg-elev);
+    }
+    .activity td.mono { font-family: var(--mono); font-size: 0.8rem; }
+    .activity td.muted { color: var(--fg-muted); }
+    .activity td.num   { font-variant-numeric: tabular-nums; }
+
+    .op {
+      display: inline-block;
+      padding: 0.1rem 0.5rem;
+      border-radius: 3px;
+      font: 600 0.72rem var(--mono);
+      letter-spacing: -0.01em;
+    }
+    .op.credit    { background: rgba(76, 174, 90, 0.15); color: var(--green); }
+    .op.lock      { background: rgba(240, 173, 78, 0.15); color: var(--yellow); }
+    .op.deposit   { background: rgba(91, 141, 239, 0.15); color: var(--blue); }
+    .op.quorum    { background: rgba(181, 140, 240, 0.15); color: var(--purple); }
+    .op.dispute   { background: rgba(217, 83, 79, 0.18); color: var(--red); }
+    .op.transfer  { background: rgba(91, 141, 239, 0.15); color: var(--blue); }
+    .op.unknown   { background: var(--border); color: var(--fg-muted); }
+
+    .badge {
+      display: inline-block;
+      padding: 0.05rem 0.45rem;
+      border-radius: 3px;
+      font-size: 0.7rem;
+      font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.04em;
+      vertical-align: 1px;
     }
-    .kv { display: grid; grid-template-columns: 11rem 1fr; gap: 0.25rem 1rem; font-size: 0.9rem; }
-    .kv dt { color: var(--fg-muted); }
-    .kv dd { margin: 0; font-family: var(--mono); word-break: break-all; }
-    .pubkey, .hash { font-family: var(--mono); font-size: 0.82rem; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-    th, td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); }
-    th { color: var(--fg-muted); font-weight: 600; text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.04em; }
-    td.mono { font-family: var(--mono); font-size: 0.8rem; }
-    .muted { color: var(--fg-muted); }
-    .pill {
-      display: inline-block; padding: 0.05rem 0.4rem; border-radius: 3px;
-      font-size: 0.72rem; background: var(--border); color: var(--fg);
+    .badge.active   { background: rgba(76, 174, 90, 0.18); color: var(--green); }
+    .badge.pre      { background: rgba(141, 150, 179, 0.15); color: var(--fg-muted); }
+    .badge.expired  { background: rgba(217, 83, 79, 0.18); color: var(--red); }
+    .badge.gated    { background: rgba(240, 173, 78, 0.18); color: var(--yellow); }
+    .badge.q        { background: rgba(91, 141, 239, 0.18); color: var(--blue); }
+
+    .empty {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1.25rem;
+      color: var(--fg-muted);
     }
-    .pill.active { background: var(--ok); color: var(--bg); }
-    .pill.expired { background: var(--warn); color: var(--bg); }
-    .pill.dispute { background: var(--warn); color: var(--bg); }
-    .err { color: var(--warn); padding: 0.5rem 0; }
-    .loading { color: var(--fg-muted); font-style: italic; }
-    .footer { text-align: center; color: var(--fg-muted); font-size: 0.8rem; margin-top: 2rem; }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
+    .empty.err { color: var(--red); border-color: rgba(217, 83, 79, 0.4); }
+    .loading { color: var(--fg-muted); padding: 0.5rem 0; }
+
+    footer {
+      margin-top: 2.5rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      color: var(--fg-dim);
+      font-size: 0.78rem;
+      text-align: center;
+    }
+    footer .mono { font-family: var(--mono); color: var(--fg-muted); }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>deposits ledger <small id="hint">(loading…)</small></h1>
-    <div class="ledger-id" id="ledger-id"></div>
-
-    <section id="overview">
-      <h2>overview</h2>
-      <div id="overview-body" class="loading">querying relay…</div>
-    </section>
-
-    <section id="quorum">
-      <h2>quorum</h2>
-      <div id="quorum-body" class="loading">…</div>
-    </section>
-
-    <section id="activity">
-      <h2>recent activity</h2>
-      <div id="activity-body" class="loading">…</div>
-    </section>
-
-    <div class="footer">
-      generated locally · data via nostr relay <span class="mono" id="relay-url"></span>
+  <nav class="topnav">
+    <div class="brand">
+      <span class="logo">⟁</span>
+      <span class="name">deposits</span>
+      <span class="sub">explorer</span>
     </div>
-  </div>
+    <div class="nav-links">
+      <a href="/explorer">overview</a>
+      <a href="/ledger" class="active">ledger</a>
+    </div>
+  </nav>
+
+  <main>
+    <div class="hero">
+      <div class="lbl">ledger</div>
+      <div class="lid" id="ledger-id">…</div>
+      <div class="meta" id="hero-meta"></div>
+    </div>
+
+    <div id="overview-body">
+      <div class="loading">querying relay…</div>
+    </div>
+
+    <h1 class="section-title">recent activity</h1>
+    <div id="activity-body" class="loading">…</div>
+
+    <footer>
+      data via nostr relay <span class="mono" id="relay-url"></span>
+    </footer>
+  </main>
 
 <script type="module">
 import { OP_NAMES } from './tlv-catalog.js';
 
-//
-// 1. Resolve the ledger ID from the hostname.
-//
-// Subdomain shapes accepted:
-//   - 52-char bech32-data → 32-byte ledger_id
-//   - 64-char hex → ledger_id verbatim
-//   - anything else → error UI
-//
-// `?ledger=<hex|bech32>` query-param override is also accepted, useful
-// when serving the page from a non-subdomain dev URL.
-//
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
-// Read a param from either the fragment (`#k=v&k2=v2`) or the query
-// string (`?k=v&k2=v2`). Fragment wins when both are set — fragments
-// don't get sent to the server or recorded in HTTP logs/referrers, so
-// they're the more private choice for dev URLs that pin a remote relay
-// and ledger ID. Both syntaxes accept `&`-separated key/value pairs.
 function getParam(name) {
   const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
   if (hashParams.has(name)) return hashParams.get(name);
@@ -126,8 +271,7 @@ function bech32DataToBytes(s) {
   for (const ch of s.toLowerCase()) {
     const v = BECH32_CHARSET.indexOf(ch);
     if (v < 0) return null;
-    acc = (acc << 5) | v;
-    bits += 5;
+    acc = (acc << 5) | v; bits += 5;
     if (bits >= 8) { bits -= 8; out.push((acc >> bits) & 0xff); }
   }
   return new Uint8Array(out);
@@ -146,7 +290,6 @@ function resolveLedgerFromUrl() {
     if (decoded && decoded.length === 32) return hex(decoded);
     throw new Error(`ledger=${override} is neither 64-hex nor 52-char bech32-data`);
   }
-  // Subdomain: take the leftmost label of window.location.hostname.
   const host = window.location.hostname;
   const sub = host.split('.')[0];
   if (sub.length === 64 && /^[0-9a-f]+$/.test(sub)) return sub.toLowerCase();
@@ -157,7 +300,7 @@ function resolveLedgerFromUrl() {
   throw new Error(
     `Cannot determine ledger ID from "${host}". Use the canonical ` +
     `<bech32-or-hex>.ledger.bitcoindeposits.net subdomain or pass ` +
-    `#ledger=<id> (or ?ledger=<id>).`
+    `#ledger=<id>.`
   );
 }
 
@@ -168,27 +311,21 @@ const RELAY_URL =
 
 document.getElementById('relay-url').textContent = RELAY_URL;
 
-//
-// 2. Tiny Nostr REQ helper. Opens a websocket, sends one filter,
-//    accumulates EVENTs, resolves on EOSE or timeout.
-//
 function nostrFetch(relayUrl, filter, { timeoutMs = 8000 } = {}) {
   return new Promise((resolve) => {
     const events = [];
-    const ws = new WebSocket(relayUrl);
+    let ws;
+    try { ws = new WebSocket(relayUrl); }
+    catch { resolve([]); return; }
     const subId = 'q' + Math.random().toString(36).slice(2, 8);
-    const finish = () => {
-      try { ws.close(); } catch {}
-      clearTimeout(timer);
-      resolve(events);
-    };
+    const finish = () => { try { ws.close(); } catch {} clearTimeout(timer); resolve(events); };
     const timer = setTimeout(finish, timeoutMs);
     ws.onopen = () => ws.send(JSON.stringify(['REQ', subId, filter]));
     ws.onmessage = (msg) => {
       try {
-        const data = JSON.parse(msg.data);
-        if (data[0] === 'EVENT' && data[1] === subId) events.push(data[2]);
-        else if (data[0] === 'EOSE' && data[1] === subId) finish();
+        const d = JSON.parse(msg.data);
+        if (d[0] === 'EVENT' && d[1] === subId) events.push(d[2]);
+        else if (d[0] === 'EOSE' && d[1] === subId) finish();
       } catch {}
     };
     ws.onerror = finish;
@@ -196,16 +333,16 @@ function nostrFetch(relayUrl, filter, { timeoutMs = 8000 } = {}) {
   });
 }
 
-//
-// 3. Render helpers.
-//
 const fmt = {
   short: (s, n = 16) => s ? s.slice(0, n) + (s.length > n ? '…' : '') : '',
   msats: (n) => {
     if (n == null) return '—';
     const sats = n / 1000;
-    if (sats >= 100_000_000) return `₿ ${(sats / 100_000_000).toLocaleString(undefined, { maximumFractionDigits: 8 })}`;
-    return `${sats.toLocaleString()} sat`;
+    if (sats >= 100_000_000) {
+      return `₿ ${(sats / 100_000_000).toLocaleString(undefined, { maximumFractionDigits: 4 })}`;
+    }
+    if (sats >= 1_000) return `${sats.toLocaleString()} sat`;
+    return `${sats} sat`;
   },
   bps: (b) => b == null ? '—' : `${(b / 100).toFixed(2)}%`,
   ts: (t) => {
@@ -215,114 +352,152 @@ const fmt = {
   },
 };
 
-function renderOverview(ledgerId, ad) {
-  const el = document.getElementById('overview-body');
-  if (!ad) {
-    el.innerHTML = `<div class="err">No advertisement found for this ledger on ${RELAY_URL}.</div>
-       <div class="muted">If the operator publishes ads on a different relay, append <code>?relay=wss://your-relay</code> to the URL.</div>`;
-    return;
-  }
-  const stateBadge = (() => {
-    const s = ad.quorum_state || '';
-    const cls = s === 'Active' ? 'active' : (s === 'Expired' ? 'expired' : '');
-    return `<span class="pill ${cls}">${s || 'unknown'}</span>`;
-  })();
-  el.innerHTML = `
-    <dl class="kv">
-      <dt>operator</dt>
-      <dd>${ad.operator_name ? `<b>${escapeHtml(ad.operator_name)}</b> · ` : ''}<span class="pubkey">${ad.operator_pubkey}</span></dd>
-      <dt>network</dt><dd>${ad.network || '—'}</dd>
-      <dt>quorum state</dt><dd>${stateBadge}</dd>
-      <dt>reserves</dt><dd>${fmt.msats(ad.reserves_amount_msats)}</dd>
-      <dt>collateral</dt><dd>${fmt.msats(ad.collateral_amount_msats)}</dd>
-      <dt>annual fee</dt><dd>${fmt.bps(ad.annual_fee_bps)} + ${fmt.msats(ad.annualized_fixed_msats)}/year fixed (period: ${ad.fee_period_blocks} blocks)</dd>
-      <dt>per-deposit cap</dt><dd>${ad.max_deposit_balance_msats ? fmt.msats(ad.max_deposit_balance_msats) : 'unlimited'}</dd>
-      <dt>deposit limits</dt><dd>min ${fmt.msats(ad.min_deposit_msats)} · max ${fmt.msats(ad.max_deposit_msats)}</dd>
-      ${ad.access_control ? `<dt>access</dt><dd><span class="pill expired">gated</span> ${ad.allowed_domains?.length ? `domains: ${ad.allowed_domains.join(', ')}` : ''}</dd>` : ''}
-    </dl>
-  `;
-}
-
-function renderQuorum(ad) {
-  const el = document.getElementById('quorum-body');
-  const members = ad?.quorum_members || [];
-  if (!members.length) {
-    el.innerHTML = `<div class="muted">No quorum members listed (legacy ad or pre-QuorumBegin).</div>`;
-    return;
-  }
-  el.innerHTML = `
-    <table>
-      <thead><tr><th>#</th><th>pubkey</th></tr></thead>
-      <tbody>
-        ${members.map((m, i) => `<tr><td>${i + 1}</td><td class="mono">${m}</td></tr>`).join('')}
-      </tbody>
-    </table>`;
-}
-
-function renderActivity(events) {
-  const el = document.getElementById('activity-body');
-  if (!events.length) {
-    el.innerHTML = `<div class="muted">No ledger updates fetched. Either this ledger has no activity or the relay didn't surface its history.</div>`;
-    return;
-  }
-  // Sort newest first.
-  events.sort((a, b) => b.created_at - a.created_at);
-  el.innerHTML = `
-    <table>
-      <thead><tr><th>seq</th><th>op</th><th>deposit</th><th>payment</th><th>when</th></tr></thead>
-      <tbody>
-        ${events.map(e => {
-          const seq = tagValue(e, 'n') || '?';
-          const op = tagValue(e, 't') || '?';
-          const dep = tagValue(e, 'i');
-          const ph = tagValue(e, 'payment_hash');
-          return `<tr>
-            <td>${seq}</td>
-            <td><b>${escapeHtml(opName(op))}</b></td>
-            <td class="mono">${dep ? fmt.short(dep, 16) : '—'}</td>
-            <td class="mono">${ph ? fmt.short(ph, 16) : '—'}</td>
-            <td class="muted">${fmt.ts(e.created_at)}</td>
-          </tr>`;
-        }).join('')}
-      </tbody>
-    </table>`;
-}
-
-function tagValue(event, name) {
-  const t = event.tags?.find(t => t[0] === name);
-  return t ? t[1] : null;
-}
-
-function opName(disc) {
-  // tlv-catalog.js's OP_NAMES is keyed by integer; tag values come in
-  // as strings (`"30"`).
-  return OP_NAMES[Number(disc)] || `op(${disc})`;
-}
-
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 }
 
-//
-// 4. Main: fetch ad + recent updates, render.
-//
+function quorumBadge(state) {
+  const cls = state === 'Active' ? 'active'
+    : state === 'PreQuorum' ? 'pre'
+    : state === 'Expired' ? 'expired' : '';
+  return `<span class="badge ${cls}">${escapeHtml(state || 'unknown')}</span>`;
+}
+
+// Color-code op types by category. OP_NAMES is the source of truth
+// for op name → discriminant; this just maps the name to a CSS class.
+function opCategory(name) {
+  if (!name) return 'unknown';
+  if (name.startsWith('Dispute')) return 'dispute';
+  if (name.startsWith('Quorum') || name.startsWith('Ledger')) return 'quorum';
+  if (name.startsWith('Transfer')) return 'transfer';
+  if (name.startsWith('Deposit') || name === 'FeeChange' || name === 'FeeCollect') return 'deposit';
+  if (name.endsWith('Credit') || name === 'InvoiceFulfill' || name === 'OnchainFulfill') return 'credit';
+  if (name.endsWith('Lock') || name.endsWith('Fail')) return 'lock';
+  return 'unknown';
+}
+
+function opName(disc) { return OP_NAMES[Number(disc)] || `op(${disc})`; }
+function tagValue(event, name) { const t = event.tags?.find(t => t[0] === name); return t ? t[1] : null; }
+
+function renderOverview(ad) {
+  const el = document.getElementById('overview-body');
+  if (!ad) {
+    el.innerHTML = `<div class="empty err">No advertisement found for this ledger on
+      <span style="font-family:var(--mono)">${escapeHtml(RELAY_URL)}</span>.<br>
+      If the operator publishes ads on a different relay, append <code>#relay=wss://your-relay</code>.</div>`;
+    document.getElementById('hero-meta').innerHTML = '';
+    return;
+  }
+
+  document.getElementById('hero-meta').innerHTML = `
+    ${quorumBadge(ad.quorum_state)}
+    ${ad.quorum_members?.length ? `<span class="badge q">Q=${ad.quorum_members.length}</span>` : ''}
+    ${ad.access_control ? `<span class="badge gated">gated</span>` : ''}
+    <span style="color:var(--fg-dim)">·</span>
+    <span>${escapeHtml(ad.network || '')}</span>
+    ${ad.operator_name ? `<span style="color:var(--fg-dim)">·</span> <span>operator <b style="color:var(--fg)">${escapeHtml(ad.operator_name)}</b></span>` : ''}
+  `;
+
+  el.innerHTML = `
+    <div class="grid">
+      <div class="card">
+        <h3>reserves</h3>
+        <div class="big accent">${escapeHtml(fmt.msats(ad.reserves_amount_msats))}</div>
+        <div class="big-sub">backing depositor balances</div>
+      </div>
+      <div class="card">
+        <h3>collateral</h3>
+        <div class="big">${escapeHtml(fmt.msats(ad.collateral_amount_msats))}</div>
+        <div class="big-sub">forfeit on proven non-conformance</div>
+      </div>
+      <div class="card">
+        <h3>annual fees</h3>
+        <div class="big">${escapeHtml(fmt.bps(ad.annual_fee_bps))} <span style="font-size:0.85rem;color:var(--fg-muted);">+ ${escapeHtml(fmt.msats(ad.annualized_fixed_msats))}</span></div>
+        <div class="big-sub">period: ${ad.fee_period_blocks} blocks</div>
+      </div>
+      <div class="card">
+        <h3>per-deposit cap</h3>
+        <div class="big">${ad.max_deposit_balance_msats ? escapeHtml(fmt.msats(ad.max_deposit_balance_msats)) : 'unlimited'}</div>
+        <div class="big-sub">${ad.max_deposit_balance_msats ? 'maximum balance per deposit' : 'no per-deposit cap'}</div>
+      </div>
+      <div class="card">
+        <h3>operator</h3>
+        <dl class="kv">
+          <dt>name</dt><dd>${escapeHtml(ad.operator_name || '—')}</dd>
+          <dt>pubkey</dt><dd class="mono">${escapeHtml(ad.operator_pubkey || '—')}</dd>
+          <dt>reserves addr</dt><dd class="mono">${escapeHtml(fmt.short(ad.reserves_address || '—', 32))}</dd>
+        </dl>
+      </div>
+      <div class="card">
+        <h3>quorum (${ad.quorum_members?.length || 0})</h3>
+        ${ad.quorum_members?.length ? `
+          <div class="quorum-list">
+            ${ad.quorum_members.map((m, i) => `
+              <div class="quorum-item">
+                <span class="quorum-num">${i + 1}.</span>
+                <span class="quorum-pk">${escapeHtml(m)}</span>
+              </div>
+            `).join('')}
+          </div>
+        ` : `<div class="big-sub">no members listed (legacy ad or pre-QuorumBegin)</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function renderActivity(events) {
+  const el = document.getElementById('activity-body');
+  if (!events.length) {
+    el.innerHTML = `<div class="empty">No ledger updates fetched. Either no activity or relay didn't surface this ledger's history.</div>`;
+    return;
+  }
+  events.sort((a, b) => b.created_at - a.created_at);
+  el.innerHTML = `
+    <div class="activity-card">
+      <table class="activity">
+        <thead>
+          <tr>
+            <th>seq</th>
+            <th>op</th>
+            <th>deposit</th>
+            <th>payment hash</th>
+            <th>when</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${events.map(e => {
+            const seq = tagValue(e, 'n') || '?';
+            const opDisc = tagValue(e, 't') || '';
+            const name = opName(opDisc);
+            const cat = opCategory(name);
+            const dep = tagValue(e, 'i');
+            const ph = tagValue(e, 'payment_hash');
+            return `<tr>
+              <td class="num muted">${escapeHtml(seq)}</td>
+              <td><span class="op ${cat}">${escapeHtml(name)}</span></td>
+              <td class="mono">${dep ? escapeHtml(fmt.short(dep, 16)) : '—'}</td>
+              <td class="mono">${ph ? escapeHtml(fmt.short(ph, 16)) : '—'}</td>
+              <td class="muted">${escapeHtml(fmt.ts(e.created_at))}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
 async function main() {
   let ledgerId;
   try { ledgerId = resolveLedgerFromUrl(); }
   catch (e) {
-    document.getElementById('hint').textContent = '— error';
+    document.getElementById('ledger-id').textContent = '— error';
     document.getElementById('overview-body').innerHTML =
-      `<div class="err">${escapeHtml(e.message)}</div>`;
+      `<div class="empty err">${escapeHtml(e.message)}</div>`;
+    document.getElementById('activity-body').innerHTML = '';
     return;
   }
   document.getElementById('ledger-id').textContent = ledgerId;
-  document.getElementById('hint').textContent = '';
 
-  // Both kinds use `#d` for the ledger-tag, but with different
-  // shapes — see deposits-node/src/nostr.rs `TAG_LEDGER_ID = d`:
-  //   - Kind 39100 ad: `d = <full 64-hex>` (replaceable, one per ledger)
-  //   - Kind 9100 update: `d = <16-hex prefix>` (`ledger_tag()` truncates)
   const adFilter = { kinds: [39100], '#d': [ledgerId], limit: 1 };
   const updateFilter = { kinds: [9100], '#d': [ledgerId.slice(0, 16)], limit: 30 };
 
@@ -333,12 +508,10 @@ async function main() {
 
   let ad = null;
   if (adEvents.length) {
-    // Pick the most recent.
     adEvents.sort((a, b) => b.created_at - a.created_at);
-    try { ad = JSON.parse(adEvents[0].content); } catch { ad = null; }
+    try { ad = JSON.parse(adEvents[0].content); } catch {}
   }
-  renderOverview(ledgerId, ad);
-  renderQuorum(ad);
+  renderOverview(ad);
   renderActivity(updateEvents);
 }
 

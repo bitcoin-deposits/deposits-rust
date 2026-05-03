@@ -6,89 +6,244 @@
   <title>Deposits Explorer</title>
   <style>
     :root {
-      --fg: #d8dee9;
-      --fg-muted: #8c95a3;
-      --bg: #1a1d23;
-      --panel: #232830;
-      --border: #2c323b;
-      --accent: #88c0d0;
-      --warn: #d08770;
-      --ok: #a3be8c;
-      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --bg:        #11131f;
+      --bg-elev:   #181c2c;
+      --bg-card:   #1d2237;
+      --bg-card-h: #232943;
+      --border:    #2a304a;
+      --border-strong: #3a4263;
+      --fg:        #e7e9f0;
+      --fg-strong: #ffffff;
+      --fg-muted:  #8d96b3;
+      --fg-dim:    #5b6386;
+      --accent:    #f7931a;
+      --green:     #4cae5a;
+      --red:       #d9534f;
+      --yellow:    #f0ad4e;
+      --blue:      #5b8def;
+      --purple:    #b58cf0;
+      --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
     }
     * { box-sizing: border-box; }
+    html, body { background: var(--bg); }
     body {
-      margin: 0; padding: 0 1rem 4rem 1rem;
-      background: var(--bg); color: var(--fg);
-      font: 14px/1.5 system-ui, sans-serif;
+      margin: 0;
+      color: var(--fg);
+      font: 14px/1.5 var(--sans);
+      -webkit-font-smoothing: antialiased;
     }
-    .wrap { max-width: 980px; margin: 0 auto; }
-    h1 {
-      font-size: 1.1rem; font-weight: 600;
-      margin: 1.5rem 0 0.25rem;
+    a { color: inherit; text-decoration: none; }
+    a:hover { color: var(--accent); }
+
+    /* ── nav ─────────────────────────────────────────────────────── */
+    .topnav {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.85rem 1.25rem;
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 10;
+    }
+    .brand {
+      display: flex; align-items: baseline; gap: 0.45rem;
+      font-weight: 600; font-size: 1.05rem;
+    }
+    .brand .logo {
+      color: var(--accent); font-size: 1.25rem; line-height: 1;
+    }
+    .brand .name { color: var(--fg-strong); }
+    .brand .sub { color: var(--fg-muted); font-weight: 400; font-size: 0.85rem; }
+    .nav-links { display: flex; gap: 1rem; font-size: 0.9rem; color: var(--fg-muted); }
+    .nav-links a.active { color: var(--accent); }
+
+    /* ── stats strip ─────────────────────────────────────────────── */
+    .stats-strip {
+      display: grid; grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .stat {
+      background: var(--bg-elev);
+      padding: 1.1rem 1.25rem 0.95rem;
+    }
+    .stat-value {
+      font: 600 1.65rem/1 var(--sans);
+      color: var(--fg-strong);
+      letter-spacing: -0.01em;
+      font-variant-numeric: tabular-nums;
+    }
+    .stat-value.accent { color: var(--accent); }
+    .stat-label {
+      margin-top: 0.3rem;
       color: var(--fg-muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
     }
-    h1 small { color: var(--fg-muted); font-size: 0.85rem; font-weight: normal; }
-    .stats { display: flex; gap: 1.5rem; margin: 0.5rem 0 1rem; color: var(--fg-muted); font-size: 0.85rem; }
-    .stats b { color: var(--fg); font-weight: 600; }
+    @media (max-width: 720px) {
+      .stats-strip { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    /* ── main ────────────────────────────────────────────────────── */
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 1.5rem 1.25rem 4rem;
+    }
+    h1.section-title {
+      font-size: 0.78rem; font-weight: 600;
+      color: var(--fg-muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+      margin: 0 0 0.85rem;
+    }
+
+    /* ── operator card ───────────────────────────────────────────── */
     .operator {
-      background: var(--panel);
+      background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: 6px;
-      padding: 0.75rem 1rem;
-      margin: 0.75rem 0;
+      margin-bottom: 1rem;
+      overflow: hidden;
     }
-    .operator h2 {
-      font-size: 0.95rem;
-      font-weight: 600;
-      margin: 0 0 0.5rem;
-      display: flex;
-      align-items: baseline;
-      gap: 0.6rem;
+    .operator-header {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 1rem;
+      padding: 0.85rem 1.1rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-elev);
     }
-    .operator h2 .name { color: var(--fg); }
-    .operator h2 .pubkey {
+    .operator-name {
+      font-size: 1rem; font-weight: 600;
+      color: var(--fg-strong);
+      margin: 0;
+      display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap;
+    }
+    .operator-name .pubkey {
+      color: var(--fg-dim);
+      font: 400 0.78rem var(--mono);
+    }
+    .operator-summary {
       color: var(--fg-muted);
-      font-family: var(--mono);
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }
+    .operator-summary b {
+      color: var(--fg-strong);
+      font-weight: 600;
+    }
+    .ledger-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1px;
+      background: var(--border);
+    }
+    .ledger-tile {
+      background: var(--bg-card);
+      padding: 0.85rem 1rem;
+      transition: background 0.1s;
+      display: block;
+    }
+    .ledger-tile:hover { background: var(--bg-card-h); color: inherit; }
+    .ledger-tile .lid {
+      font: 0.82rem var(--mono);
+      color: var(--accent);
+      word-break: break-all;
+      margin-bottom: 0.45rem;
+    }
+    .ledger-tile .row {
+      display: flex; justify-content: space-between; align-items: baseline;
+      gap: 0.5rem;
+      font-size: 0.82rem;
+      color: var(--fg-muted);
+      font-variant-numeric: tabular-nums;
+      margin-top: 0.2rem;
+    }
+    .ledger-tile .row b {
+      color: var(--fg);
+      font-weight: 500;
+    }
+
+    /* ── badges ──────────────────────────────────────────────────── */
+    .badge {
+      display: inline-block;
+      padding: 0.05rem 0.45rem;
+      border-radius: 3px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      vertical-align: 1px;
+    }
+    .badge.active   { background: rgba(76, 174, 90, 0.18); color: var(--green); }
+    .badge.pre      { background: rgba(141, 150, 179, 0.15); color: var(--fg-muted); }
+    .badge.expired  { background: rgba(217, 83, 79, 0.18); color: var(--red); }
+    .badge.dispute  { background: rgba(217, 83, 79, 0.18); color: var(--red); }
+    .badge.q        { background: rgba(91, 141, 239, 0.18); color: var(--blue); }
+    .badge.gated    { background: rgba(240, 173, 78, 0.18); color: var(--yellow); }
+
+    /* ── status / errors ─────────────────────────────────────────── */
+    .empty {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1.25rem;
+      color: var(--fg-muted);
+    }
+    .empty.err { color: var(--red); border-color: rgba(217, 83, 79, 0.4); }
+    .loading { color: var(--fg-muted); padding: 0.5rem 0; }
+
+    /* ── footer ──────────────────────────────────────────────────── */
+    footer {
+      margin-top: 2.5rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      color: var(--fg-dim);
       font-size: 0.78rem;
-      font-weight: normal;
+      text-align: center;
     }
-    .operator table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-    .operator th, .operator td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); }
-    .operator th { color: var(--fg-muted); font-weight: 600; text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.04em; }
-    .operator tr:last-child td { border-bottom: 0; }
-    .operator td.mono { font-family: var(--mono); font-size: 0.8rem; }
-    .pill {
-      display: inline-block; padding: 0.05rem 0.4rem; border-radius: 3px;
-      font-size: 0.7rem; background: var(--border); color: var(--fg);
-    }
-    .pill.active { background: var(--ok); color: var(--bg); }
-    .pill.expired { background: var(--warn); color: var(--bg); }
-    .pill.pre { background: var(--border); color: var(--fg-muted); }
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .err { color: var(--warn); padding: 0.5rem 0; }
-    .loading { color: var(--fg-muted); font-style: italic; }
-    .footer { text-align: center; color: var(--fg-muted); font-size: 0.8rem; margin-top: 2rem; }
-    .footer .mono { font-family: var(--mono); }
+    footer .mono { font-family: var(--mono); color: var(--fg-muted); }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>deposits explorer <small id="hint">(loading…)</small></h1>
-    <div class="stats">
-      <span><b id="op-count">0</b> operators</span>
-      <span><b id="ledger-count">0</b> ledgers</span>
-      <span><b id="active-count">0</b> active quorums</span>
-      <span><b id="reserves-total">—</b> total reserves</span>
+  <nav class="topnav">
+    <div class="brand">
+      <span class="logo">⟁</span>
+      <span class="name">deposits</span>
+      <span class="sub">explorer</span>
     </div>
+    <div class="nav-links">
+      <a href="/explorer" class="active">overview</a>
+      <a href="/ledger">ledger</a>
+    </div>
+  </nav>
 
-    <div id="operators"></div>
-
-    <div class="footer">
-      data via nostr relay <span class="mono" id="relay-url"></span>
+  <div class="stats-strip">
+    <div class="stat">
+      <div class="stat-value" id="op-count">—</div>
+      <div class="stat-label">operators</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value" id="ledger-count">—</div>
+      <div class="stat-label">ledgers</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value" id="active-count">—</div>
+      <div class="stat-label">active quorums</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value accent" id="reserves-total">—</div>
+      <div class="stat-label">total reserves</div>
     </div>
   </div>
+
+  <main>
+    <h1 class="section-title">operators</h1>
+    <div id="operators"><div class="loading">querying relay…</div></div>
+    <footer>
+      data via nostr relay <span class="mono" id="relay-url"></span>
+    </footer>
+  </main>
 
 <script type="module">
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
@@ -100,15 +255,10 @@ function getParam(name) {
 }
 
 function bytesToBech32(bytes) {
-  let acc = 0, bits = 0;
-  let out = '';
+  let acc = 0, bits = 0, out = '';
   for (const b of bytes) {
-    acc = (acc << 8) | b;
-    bits += 8;
-    while (bits >= 5) {
-      bits -= 5;
-      out += BECH32_CHARSET[(acc >> bits) & 0x1f];
-    }
+    acc = (acc << 8) | b; bits += 8;
+    while (bits >= 5) { bits -= 5; out += BECH32_CHARSET[(acc >> bits) & 0x1f]; }
   }
   if (bits > 0) out += BECH32_CHARSET[(acc << (5 - bits)) & 0x1f];
   return out;
@@ -116,9 +266,7 @@ function bytesToBech32(bytes) {
 
 function hexToBytes(s) {
   const out = new Uint8Array(s.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
-  }
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
   return out;
 }
 
@@ -129,54 +277,35 @@ const RELAY_URL =
 
 document.getElementById('relay-url').textContent = RELAY_URL;
 
-//
-// Determine where ledger links should point.
-//
-// In prod the explorer lives at `explorer.<basedomain>` (e.g.
-// `explorer.bitcoindeposits.net`) and per-ledger views live at
-// `<bech32>.ledger.<basedomain>`. We detect prod mode by an
-// `explorer.` hostname prefix and link absolutely; otherwise (dev,
-// or any non-prod hosting) we fall back to a relative URL on the
-// same gateway: `/ledger#ledger=<hex>&relay=<url>`.
-//
+// In prod the explorer lives at `explorer.<basedomain>` and per-ledger
+// views at `<bech32>.ledger.<basedomain>`. Detect that and link
+// accordingly. Otherwise (dev) link to `/ledger#ledger=…&relay=…`.
 function ledgerLink(ledgerIdHex) {
   const host = window.location.hostname;
-  const ledgerSubdomain = bytesToBech32(hexToBytes(ledgerIdHex));
+  const sub = bytesToBech32(hexToBytes(ledgerIdHex));
   if (host.startsWith('explorer.')) {
-    const baseDomain = host.replace(/^explorer\./, 'ledger.');
-    return `https://${ledgerSubdomain}.${baseDomain}/`;
+    const base = host.replace(/^explorer\./, 'ledger.');
+    return `https://${sub}.${base}/`;
   }
-  // Dev / unknown hosting: pin the relay so we keep looking at the
-  // same data the explorer found this ledger on.
-  const params = new URLSearchParams();
-  params.set('ledger', ledgerIdHex);
-  params.set('relay', RELAY_URL);
+  const params = new URLSearchParams({ ledger: ledgerIdHex, relay: RELAY_URL });
   return `/ledger#${params.toString()}`;
 }
 
-//
-// Tiny Nostr REQ helper. Same shape as ledger.html — accumulates
-// EVENTs until EOSE or timeout.
-//
 function nostrFetch(relayUrl, filter, { timeoutMs = 8000 } = {}) {
   return new Promise((resolve) => {
     const events = [];
     let ws;
     try { ws = new WebSocket(relayUrl); }
-    catch (e) { resolve([]); return; }
+    catch { resolve([]); return; }
     const subId = 'q' + Math.random().toString(36).slice(2, 8);
-    const finish = () => {
-      try { ws.close(); } catch {}
-      clearTimeout(timer);
-      resolve(events);
-    };
+    const finish = () => { try { ws.close(); } catch {} clearTimeout(timer); resolve(events); };
     const timer = setTimeout(finish, timeoutMs);
     ws.onopen = () => ws.send(JSON.stringify(['REQ', subId, filter]));
     ws.onmessage = (msg) => {
       try {
-        const data = JSON.parse(msg.data);
-        if (data[0] === 'EVENT' && data[1] === subId) events.push(data[2]);
-        else if (data[0] === 'EOSE' && data[1] === subId) finish();
+        const d = JSON.parse(msg.data);
+        if (d[0] === 'EVENT' && d[1] === subId) events.push(d[2]);
+        else if (d[0] === 'EOSE' && d[1] === subId) finish();
       } catch {}
     };
     ws.onerror = finish;
@@ -189,8 +318,11 @@ const fmt = {
   msats: (n) => {
     if (n == null) return '—';
     const sats = n / 1000;
-    if (sats >= 100_000_000) return `₿ ${(sats / 100_000_000).toLocaleString(undefined, { maximumFractionDigits: 8 })}`;
-    return `${sats.toLocaleString()} sat`;
+    if (sats >= 100_000_000) {
+      return `₿ ${(sats / 100_000_000).toLocaleString(undefined, { maximumFractionDigits: 4 })}`;
+    }
+    if (sats >= 1_000) return `${sats.toLocaleString()} sat`;
+    return `${sats} sat`;
   },
   bps: (b) => b == null ? '—' : `${(b / 100).toFixed(2)}%`,
 };
@@ -200,103 +332,99 @@ function escapeHtml(s) {
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 }
 
-function quorumPill(state) {
+function quorumBadge(state) {
   const cls = state === 'Active' ? 'active'
-    : state === 'Expired' ? 'expired'
     : state === 'PreQuorum' ? 'pre'
-    : '';
-  return `<span class="pill ${cls}">${escapeHtml(state || 'unknown')}</span>`;
+    : state === 'Expired' ? 'expired' : '';
+  return `<span class="badge ${cls}">${escapeHtml(state || 'unknown')}</span>`;
 }
 
-//
-// Main: fetch all 39100 ads on the relay, group by operator, render.
-//
-// Kind 39100 is replaceable per (pubkey, d-tag) — the operator's
-// daemon publishes one event per ledger and the relay keeps the
-// latest. So a `kinds=[39100]` filter without further constraints
-// returns one event per ledger, capped by `limit` for safety.
-//
 async function main() {
+  // Kind 39100 is replaceable per (pubkey, d-tag); a wide-open query
+  // returns one event per ledger up to the limit.
   const events = await nostrFetch(RELAY_URL, { kinds: [39100], limit: 500 });
 
   const ads = [];
   for (const e of events) {
     try {
       const ad = JSON.parse(e.content);
-      ad.event_id = e.id;
-      ad.timestamp = e.created_at;
       ad.signer_pubkey = e.pubkey;
       ads.push(ad);
     } catch {}
   }
 
-  // Group by operator. Prefer `operator_pubkey` field; fall back to the
-  // event signer (which always equals it in practice).
   const byOp = new Map();
   for (const ad of ads) {
-    const key = ad.operator_pubkey || ad.signer_pubkey;
-    if (!byOp.has(key)) byOp.set(key, { name: ad.operator_name || null, ledgers: [] });
-    const op = byOp.get(key);
+    const k = ad.operator_pubkey || ad.signer_pubkey;
+    if (!byOp.has(k)) byOp.set(k, { name: ad.operator_name || null, ledgers: [] });
+    const op = byOp.get(k);
     if (!op.name && ad.operator_name) op.name = ad.operator_name;
     op.ledgers.push(ad);
   }
 
-  // Stable order: operators by name (or pubkey), ledgers by ledger_id.
   const operators = [...byOp.entries()]
-    .sort(([ka, va], [kb, vb]) =>
-      (va.name || ka).localeCompare(vb.name || kb));
+    .sort(([ka, va], [kb, vb]) => (va.name || ka).localeCompare(vb.name || kb));
   for (const [, op] of operators) {
     op.ledgers.sort((a, b) => a.ledger_id.localeCompare(b.ledger_id));
   }
 
-  let totalReservesMsat = 0;
-  let totalActive = 0;
+  let totalReservesMsat = 0, totalActive = 0;
   for (const ad of ads) {
     totalReservesMsat += Number(ad.reserves_amount_msats || 0);
     if (ad.quorum_state === 'Active') totalActive += 1;
   }
 
-  document.getElementById('op-count').textContent = operators.length;
-  document.getElementById('ledger-count').textContent = ads.length;
+  document.getElementById('op-count').textContent = operators.length || '0';
+  document.getElementById('ledger-count').textContent = ads.length || '0';
   document.getElementById('active-count').textContent = totalActive;
   document.getElementById('reserves-total').textContent = fmt.msats(totalReservesMsat);
-  document.getElementById('hint').textContent = '';
 
   const root = document.getElementById('operators');
   if (!operators.length) {
-    root.innerHTML = `<div class="err">No advertisements on ${escapeHtml(RELAY_URL)}.
+    root.innerHTML = `<div class="empty err">No advertisements on
+      <span style="font-family:var(--mono)">${escapeHtml(RELAY_URL)}</span>.
       Append <code>#relay=wss://your-relay</code> to point at a different one.</div>`;
     return;
   }
 
-  root.innerHTML = operators.map(([pubkey, op]) => `
-    <div class="operator">
-      <h2>
-        <span class="name">${escapeHtml(op.name || '(unnamed operator)')}</span>
-        <span class="pubkey">${escapeHtml(pubkey)}</span>
-      </h2>
-      <table>
-        <thead><tr>
-          <th>ledger</th>
-          <th>quorum</th>
-          <th>reserves</th>
-          <th>collateral</th>
-          <th>fees / year</th>
-        </tr></thead>
-        <tbody>
+  root.innerHTML = operators.map(([pubkey, op]) => {
+    const opReserves = op.ledgers.reduce((s, a) => s + Number(a.reserves_amount_msats || 0), 0);
+    return `
+      <article class="operator">
+        <header class="operator-header">
+          <h2 class="operator-name">
+            <span>${escapeHtml(op.name || '(unnamed operator)')}</span>
+            <span class="pubkey">${escapeHtml(pubkey)}</span>
+          </h2>
+          <div class="operator-summary">
+            <b>${op.ledgers.length}</b> ledger${op.ledgers.length === 1 ? '' : 's'}
+            · <b>${escapeHtml(fmt.msats(opReserves))}</b> reserves
+          </div>
+        </header>
+        <div class="ledger-grid">
           ${op.ledgers.map(ad => `
-            <tr>
-              <td><a href="${escapeHtml(ledgerLink(ad.ledger_id))}">${escapeHtml(fmt.short(ad.ledger_id, 24))}</a></td>
-              <td>${quorumPill(ad.quorum_state)} ${ad.quorum_members?.length ? `<span class="pill">${ad.quorum_members.length}</span>` : ''}</td>
-              <td>${fmt.msats(ad.reserves_amount_msats)}</td>
-              <td>${fmt.msats(ad.collateral_amount_msats)}</td>
-              <td>${fmt.bps(ad.annual_fee_bps)} + ${fmt.msats(ad.annualized_fixed_msats)}</td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    </div>
-  `).join('');
+            <a class="ledger-tile" href="${escapeHtml(ledgerLink(ad.ledger_id))}">
+              <div class="lid">${escapeHtml(fmt.short(ad.ledger_id, 32))}</div>
+              <div class="row">
+                <span>${quorumBadge(ad.quorum_state)} ${
+                  ad.quorum_members?.length ? `<span class="badge q">Q=${ad.quorum_members.length}</span>` : ''
+                } ${ad.access_control ? '<span class="badge gated">gated</span>' : ''}</span>
+                <span class="muted">${escapeHtml(ad.network || '')}</span>
+              </div>
+              <div class="row">
+                <span><b>${escapeHtml(fmt.msats(ad.reserves_amount_msats))}</b> reserves</span>
+                <span><b>${escapeHtml(fmt.msats(ad.collateral_amount_msats))}</b> collateral</span>
+              </div>
+              <div class="row">
+                <span>${escapeHtml(fmt.bps(ad.annual_fee_bps))} + ${escapeHtml(fmt.msats(ad.annualized_fixed_msats))}/yr</span>
+                <span>${ad.max_deposit_balance_msats
+                  ? `cap ${escapeHtml(fmt.msats(ad.max_deposit_balance_msats))}`
+                  : 'no cap'}</span>
+              </div>
+            </a>`).join('')}
+        </div>
+      </article>`;
+  }).join('');
 }
 
 main();
