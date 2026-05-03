@@ -78,6 +78,10 @@ struct PendingZap {
     recipient_pubkey: String,
     /// `e` tag from the zap request, if any — the event being zapped.
     event_id: Option<String>,
+    /// Relays from the zap request's `relays` tag, filtered to FQDN
+    /// `wss://` / `ws://` URLs. The receipt is published here per
+    /// NIP-57; non-FQDN entries (docker hostnames etc.) are dropped.
+    request_relays: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -557,6 +561,31 @@ async fn lnurlp_callback(
                     }
                 })
             });
+        let request_relays: Vec<String> = parsed
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|tags| {
+                tags.iter()
+                    .filter_map(|t| {
+                        let arr = t.as_array()?;
+                        if arr.first()?.as_str()? == "relays" {
+                            // The relays tag's first value is "relays"; the
+                            // remaining entries are the URLs themselves.
+                            Some(
+                                arr.iter()
+                                    .skip(1)
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .filter(|u| is_publishable_relay(u))
+                                    .collect::<Vec<_>>(),
+                            )
+                        } else {
+                            None
+                        }
+                    })
+                    .flatten()
+                    .collect()
+            })
+            .unwrap_or_default();
         state.pending_zaps.lock().await.insert(
             payment_hash.clone(),
             PendingZap {
@@ -564,6 +593,7 @@ async fn lnurlp_callback(
                 bolt11: invoice.to_string(),
                 recipient_pubkey,
                 event_id,
+                request_relays,
             },
         );
         log::info!(
@@ -609,9 +639,36 @@ async fn lnurlp_callback(
 // Nostr response listener
 // ============================================================================
 
+/// True for relay URLs that are reachable from outside the operator's
+/// docker network — i.e. have a real hostname with a dot in it. Drops
+/// docker-internal names like `ws://external-relay:7777` which would
+/// be useless in a zap-receipt-publication target.
+fn is_publishable_relay(url: &str) -> bool {
+    let scheme_ok = url.starts_with("ws://") || url.starts_with("wss://");
+    if !scheme_ok {
+        return false;
+    }
+    let after_scheme = url
+        .strip_prefix("wss://")
+        .or_else(|| url.strip_prefix("ws://"))
+        .unwrap_or("");
+    // Take the host part (everything before `:` or `/`).
+    let host = after_scheme
+        .split(|c: char| c == ':' || c == '/')
+        .next()
+        .unwrap_or("");
+    // Require a dot — single-label hostnames are docker-internal or
+    // bare hostnames that won't resolve for outside callers.
+    host.contains('.') && !host.is_empty()
+}
+
 /// Publish a NIP-57 Kind 9735 zap receipt for a pending zap whose
-/// matching `InvoiceCredit` we just observed. Best-effort — failures
-/// are logged but don't block the credit.
+/// matching `InvoiceCredit` we just observed.
+///
+/// Per NIP-57 the receipt should land on the relays the zap request
+/// asked for (`relays` tag). We also publish to the gateway's own
+/// configured relays so other watchers see it. Best-effort — failures
+/// at either layer are logged but don't block the credit.
 async fn publish_zap_receipt(state: &AppState, zap: PendingZap) {
     let mut tags: Vec<Tag> = vec![
         Tag::custom(TagKind::custom("bolt11"), [zap.bolt11.as_str()]),
@@ -639,12 +696,37 @@ async fn publish_zap_receipt(state: &AppState, zap: PendingZap) {
             return;
         }
     };
-    match state.client.send_event(event).await {
-        Ok(_) => log::info!(
-            "Published zap receipt for recipient={}…",
+
+    // Layer 1: gateway's own relays.
+    if let Err(e) = state.client.send_event(event.clone()).await {
+        log::warn!("Zap-receipt local send failed: {}", e);
+    }
+
+    // Layer 2: the relays the wallet asked us to publish to. Short-lived
+    // Client so the long-lived gateway client doesn't accumulate
+    // arbitrary relays from every passing zap request.
+    if !zap.request_relays.is_empty() {
+        let secondary = Client::builder().signer(state.keys.clone()).build();
+        for url in &zap.request_relays {
+            let _ = secondary.add_relay(url).await;
+        }
+        secondary
+            .connect_with_timeout(std::time::Duration::from_secs(3))
+            .await;
+        match secondary.send_event(event).await {
+            Ok(_) => log::info!(
+                "Published zap receipt for recipient={}… to {} request relays",
+                &zap.recipient_pubkey[..16.min(zap.recipient_pubkey.len())],
+                zap.request_relays.len()
+            ),
+            Err(e) => log::warn!("Zap-receipt request-relay send failed: {}", e),
+        }
+        // Drop secondary; nostr-sdk closes connections on drop.
+    } else {
+        log::info!(
+            "Published zap receipt for recipient={}… (no request relays — gateway's only)",
             &zap.recipient_pubkey[..16.min(zap.recipient_pubkey.len())]
-        ),
-        Err(e) => log::warn!("Zap-receipt send failed: {}", e),
+        );
     }
 }
 
