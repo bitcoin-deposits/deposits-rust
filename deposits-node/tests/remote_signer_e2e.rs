@@ -11,7 +11,7 @@ use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{Message, Secp256k1};
 use deposits_node::remote_signer::RemoteSigner;
 use deposits_signer::data::{DataDir, TransportKey};
-use deposits_signer_api::{LocalSigner, SigPurpose, SignContext, Signer};
+use deposits_signer_api::{LocalSigner, SigPurpose, SignContext, Signer, SignerError};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -182,6 +182,47 @@ fn remote_signer_ecdsa_matches_local_signer() {
         sig_local.serialize_compact(),
         sig_remote.serialize_compact()
     );
+}
+
+#[test]
+fn remote_signer_anti_equivocation_refuses_seq_regression() {
+    // Sign at seq=10, then try seq=10 again — RemoteSigner should surface
+    // a PolicyRefused error from the signer.
+    let operator_seed = [0x66u8; 32];
+    let node_transport = TransportKey::random();
+    let (proc, signer_transport_pubkey) = spawn_signer(operator_seed, node_transport.public);
+    let remote = RemoteSigner::connect(
+        &proc.socket,
+        node_transport.secret,
+        signer_transport_pubkey,
+    )
+    .unwrap();
+
+    let ledger_id = [0xDD; 32];
+    let digest_a = [0x01u8; 32];
+    let digest_b = [0x02u8; 32];
+
+    // First sign goes through.
+    let _sig = remote
+        .bip340_sign(&SignContext::operator_update(ledger_id, 10), &digest_a)
+        .expect("first sign at seq=10 must succeed");
+
+    // Same seq, different digest → still a regression because we already
+    // committed seq=10. The policy refuses regardless of digest content.
+    let err = remote
+        .bip340_sign(&SignContext::operator_update(ledger_id, 10), &digest_b)
+        .expect_err("repeat sign at seq=10 must be refused");
+    match err {
+        SignerError::PolicyRefused(msg) => {
+            assert!(msg.contains("seq regression"), "unexpected message: {}", msg);
+        }
+        other => panic!("expected PolicyRefused, got {:?}", other),
+    }
+
+    // seq=11 now works — state is intact past the refusal.
+    let _sig = remote
+        .bip340_sign(&SignContext::operator_update(ledger_id, 11), &digest_b)
+        .expect("seq=11 must succeed after refusal");
 }
 
 #[test]

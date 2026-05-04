@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use deposits_signer::data::{DataDir, DataError};
+use deposits_signer::policy::SeqPolicy;
 use deposits_signer::server::{serve_connection, ServerCtx};
 
 const USAGE: &str = r#"deposits-signer — out-of-process signer for deposits-node
@@ -250,10 +251,15 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         tracing::warn!("allowlist is empty — no daemon will be permitted to connect");
     }
 
+    let policy = std::sync::Arc::new(
+        SeqPolicy::load(dd.policy_path()).map_err(|e| format!("load policy: {}", e))?,
+    );
+
     let ctx = std::sync::Arc::new(ServerCtx::from_local(
         transport.secret,
         allowlist,
         operator_secret,
+        policy,
     ));
 
     // Async runtime for the listener + per-conn tasks.

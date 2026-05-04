@@ -21,6 +21,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::framing::{read_frame, write_frame, FrameError};
+use crate::policy::SeqPolicy;
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -40,6 +41,12 @@ pub struct ServerCtx {
     pub allowlist: Vec<PublicKey>,
     /// Carries out the actual signs once the handshake completes.
     pub signer: Arc<dyn Signer>,
+    /// Anti-equivocation policy: refuses operator/cosigner sigs that would
+    /// regress or repeat a `(ledger_id, role) → max_seq`. Shared across all
+    /// connections (a hot-spare daemon racing on the same key would have
+    /// both nodes hit the same instance — only one of their `seq` values
+    /// gets through).
+    pub policy: Arc<SeqPolicy>,
 }
 
 impl ServerCtx {
@@ -47,6 +54,7 @@ impl ServerCtx {
         transport_secret: bitcoin::secp256k1::SecretKey,
         allowlist: Vec<PublicKey>,
         operator_secret: bitcoin::secp256k1::SecretKey,
+        policy: Arc<SeqPolicy>,
     ) -> Self {
         let secp = Secp256k1::new();
         let transport = Keypair::from_secret_key(&secp, &transport_secret);
@@ -55,6 +63,7 @@ impl ServerCtx {
             transport,
             allowlist,
             signer,
+            policy,
         }
     }
 }
@@ -117,12 +126,31 @@ where
             }
             Err(e) => return Err(ServerError::Frame(e)),
         };
-        let response = handle_request(&*ctx.signer, req);
+        let response = handle_request(&*ctx.signer, &ctx.policy, req);
         write_frame(stream, &response).await?;
     }
 }
 
-fn handle_request(signer: &dyn Signer, req: SignRequest) -> SignResponse {
+fn handle_request(
+    signer: &dyn Signer,
+    policy: &SeqPolicy,
+    req: SignRequest,
+) -> SignResponse {
+    // Anti-equivocation gate. Only BIP-340 ops with a ledger-bound role
+    // run through the policy; ECDSA sighashes and ECDH have no SeqContext,
+    // PubkeyQuery is read-only.
+    if matches!(&req.op, SignOp::Bip340 { .. }) {
+        if let Err(e) = policy.check_and_record(&req.ctx.role) {
+            return SignResponse {
+                id: req.id,
+                result: SignResult::Error {
+                    kind: SignErrorKind::PolicyRefused,
+                    message: e.to_string(),
+                },
+            };
+        }
+    }
+
     let result = match req.op {
         SignOp::Bip340 { digest } => match signer.bip340_sign(&req.ctx, &digest) {
             Ok(sig) => SignResult::Bip340Sig { sig },
@@ -159,8 +187,12 @@ fn signer_error_to_result(e: SignerError) -> SignResult {
 /// Used by the integration test in `deposits-signer-api`-aware crates to
 /// drive a server side directly without standing up a Unix socket.
 #[doc(hidden)]
-pub fn _handle_request_for_test(signer: &dyn Signer, req: SignRequest) -> SignResponse {
-    handle_request(signer, req)
+pub fn _handle_request_for_test(
+    signer: &dyn Signer,
+    policy: &SeqPolicy,
+    req: SignRequest,
+) -> SignResponse {
+    handle_request(signer, policy, req)
 }
 
 /// Re-export of [`SignContext`] so the integration test (in `deposits-signer-api`'s

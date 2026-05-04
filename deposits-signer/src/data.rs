@@ -56,6 +56,9 @@ impl DataDir {
     pub fn allowlist_path(&self) -> PathBuf {
         self.root.join("allowlist")
     }
+    pub fn policy_path(&self) -> PathBuf {
+        self.root.join("anti_equivocation.json")
+    }
 
     /// True if the data dir already has a transport keypair. We use this
     /// as the init/not-init signal — `seed` is optional (the operator may
