@@ -182,6 +182,8 @@ types:
   #
   # Ledger:
   #   6   = quorum_members (N*33 concatenated compressed pubkeys, QuorumBegin)
+  #         Pair with field 276 (quorum_member_ledger_ids, optional) for
+  #         the per-member ledger_id pairing.
   #   56  = operator_id (33 bytes, LedgerOpen)
   #   58  = reserves_id (string, LedgerOpen/QuorumBegin/QuorumJoin)
   #   62  = reserves_amount (u64, msats, LedgerOpen/QuorumBegin)
@@ -268,6 +270,15 @@ types:
   #   88  = collateral_amount_msats (u64, msats, collateral portion of UTXO)
   #   90  = spending_txid (32 bytes)
   #   92  = new_outpoint_vout (u32)
+  #   276 = quorum_member_ledger_ids (parallel array to quorum_members:
+  #         each entry is `u8 len || ledger_id_bytes`. Ledger IDs are
+  #         64-char hex (so `len` is always 64 today, but the encoding
+  #         is varlen for forward compat). Index i in this list is the
+  #         ledger_id for quorum_members[i]. Optional — older
+  #         QuorumBegin events omit it; decoders MUST treat the
+  #         per-member ledger_id as empty in that case and may fall
+  #         back to deriving the mapping from prior QuorumAddMember
+  #         operations on the same ledger.
   #
   # Dispute:
   #   100 = reason (string, DisputeEnter)

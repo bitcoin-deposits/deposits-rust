@@ -179,7 +179,8 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 90 | spending_txid | 32 | QuorumBegin |
 | 92 | new_outpoint_vout | 4 | QuorumBegin |
 | 96 | genesis_block | 4 | LedgerOpen |
-| 6 | quorum_members | N*33 | QuorumBegin |
+| 6 | quorum_members | N*33 | QuorumBegin (concatenated 33-byte compressed pubkeys) |
+| 276 | quorum_member_ledger_ids | variable | QuorumBegin (optional; parallel to type 6, each entry `u8 len ‖ ledger_id_bytes`) |
 
 #### Deposits
 
