@@ -1,0 +1,24 @@
+[package]
+name = "deposits-signer"
+version = "0.1.0"
+edition = "2021"
+description = "Bitcoin Deposits — out-of-process signer daemon"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+deposits-signer-api = { path = "../deposits-signer-api" }
+
+bitcoin = { version = "0.32", features = ["serde"] }
+secp256k1 = { version = "0.29", features = ["serde", "rand", "rand-std"] }
+
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "io-util", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints]
+workspace = true
