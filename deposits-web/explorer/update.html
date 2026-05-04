@@ -580,20 +580,45 @@ function decodeQuorumBeginMembers(opBytes) {
   return out;
 }
 
-// Stage-C derivation: for ledgers whose QuorumBegin predates the
-// member_ledger_id wire change, fetch the most-recent QuorumBegin on
-// this ledger and try to read it. If absent or empty, we'd want to
-// also walk QuorumAddMember ops — left as a follow-up; today the map
-// is empty in that case and the cosignatures section just doesn't
-// show a "ledger" column.
+// Decode a QuorumAddMember op: returns [pubkey_hex, ledger_id] or null.
+// Used as the fallback derivation path when the ledger's QuorumBegin
+// predates QUORUM_MEMBER_LEDGER_IDS (tag 276) and so doesn't carry the
+// pairing inline. Each QuorumAddMember TLV holds:
+//   tag 0   = discriminant (must be 43)
+//   tag 44  = quorum_member (33-byte compressed pubkey)
+//   tag 114 = member_ledger_id (string)
+function decodeQuorumAddMember(opBytes) {
+  let inner;
+  try { inner = parseTlv(opBytes); } catch { return null; }
+  const disc = inner.find(r => r.type === 0);
+  if (!disc || disc.value.length !== 1 || disc.value[0] !== 43) return null;
+  const pkRec = inner.find(r => r.type === 44);
+  const lidRec = inner.find(r => r.type === 114);
+  if (!pkRec || pkRec.value.length !== 33 || !lidRec) return null;
+  let lid;
+  try { lid = new TextDecoder('utf-8', { fatal: false }).decode(lidRec.value); }
+  catch { return null; }
+  return [bytesToHex(pkRec.value), lid];
+}
+
+// Stage-C derivation: build pubkey → member_ledger_id map for the
+// cosigners of this ledger.
+//
+// Two-tier lookup, freshest data wins:
+//   1. Most-recent QuorumBegin's QUORUM_MEMBER_LEDGER_IDS (the new
+//      wire field, populated since 11bc5c0). If a non-empty map
+//      comes back here, we're done.
+//   2. Walk QuorumAddMember ops on this ledger (op-type tag t=43)
+//      and zip pubkey with member_ledger_id.
+//
+// Older ledgers whose QuorumBegin lacks the new field still get a
+// useful answer this way — QuorumAddMember has always carried
+// member_ledger_id, the rotation summary just dropped it.
 async function fetchCosignerLedgerMap(ledgerPrefix) {
-  // Filter on op-type tag (TAG_OP_TYPE = "t", QuorumBegin = 12).
-  // The operator emits both (deposits-node/src/nostr.rs publish path).
-  const events = await nostrFetch(RELAY_URL, {
+  // Tier 1: QuorumBegin (op-type tag t=12).
+  let events = await nostrFetch(RELAY_URL, {
     kinds: [9100], '#d': [ledgerPrefix], '#t': ['12'], limit: 5,
   });
-  if (!events.length) return new Map();
-  // Most recent first
   events.sort((a, b) => b.created_at - a.created_at);
   for (const ev of events) {
     let raw, outer, msg;
@@ -604,9 +629,29 @@ async function fetchCosignerLedgerMap(ledgerPrefix) {
     } catch { continue; }
     if (!msg) continue;
     const map = decodeQuorumBeginMembers(msg);
-    if (map.size > 0) return map;
+    if (map.size > 0 && [...map.values()].some(v => v)) return map;
   }
-  return new Map();
+
+  // Tier 2: QuorumAddMember ops (op-type tag t=43).
+  const adds = await nostrFetch(RELAY_URL, {
+    kinds: [9100], '#d': [ledgerPrefix], '#t': ['43'], limit: 100,
+  });
+  // Newest-last so a later add overrides an earlier one (covers the
+  // re-add edge case). Sort ascending by created_at.
+  adds.sort((a, b) => a.created_at - b.created_at);
+  const map = new Map();
+  for (const ev of adds) {
+    let raw, outer, msg;
+    try {
+      raw = b64ToBytes(ev.content);
+      outer = parseTlv(raw);
+      msg = outer.find(r => r.type === 8)?.value;
+    } catch { continue; }
+    if (!msg) continue;
+    const pair = decodeQuorumAddMember(msg);
+    if (pair) map.set(pair[0], pair[1]);
+  }
+  return map;
 }
 
 // Parse the multi-cosig (tag 22) blob: each entry is a 2-byte
@@ -673,7 +718,7 @@ function renderCosignatures(records, cosignerLedgers) {
         const lid = pkHex ? cosignerLedgers?.get(pkHex) : null;
         const lidLink = lid
           ? `<a href="/ledger#ledger=${encodeURIComponent(lid)}&relay=${encodeURIComponent(RELAY_URL)}" style="color:var(--accent);font-family:var(--mono);">${escapeHtml(lid)}</a>`
-          : '<span class="muted">(unknown — older QuorumBegin lacks ledger pairing)</span>';
+          : '<span class="muted">(no QuorumBegin or QuorumAddMember on this relay binds this pubkey to a ledger)</span>';
         return `
         <div style="margin: ${i === 0 ? '0' : '0.85rem 0 0'}; padding: ${i === 0 ? '0' : '0.85rem 0 0'}; ${i === 0 ? '' : 'border-top: 1px solid var(--border);'}">
           <dl class="kv" style="grid-template-columns: 9rem 1fr;">
