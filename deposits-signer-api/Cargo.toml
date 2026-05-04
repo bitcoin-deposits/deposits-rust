@@ -1,0 +1,18 @@
+[package]
+name = "deposits-signer-api"
+version = "0.1.0"
+edition = "2021"
+description = "Bitcoin Deposits — Signer trait, role/purpose taxonomy, and LocalSigner reference impl"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+bitcoin = { version = "0.32", features = ["serde"] }
+secp256k1 = { version = "0.29", features = ["serde", "rand", "rand-std"] }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+
+[dev-dependencies]
+serde_json = "1.0"
+
+[lints]
+workspace = true
