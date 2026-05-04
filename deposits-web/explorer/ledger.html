@@ -118,24 +118,22 @@
     }
 
     /* Decorative barberpole filler for the dead grid cells trailing
-       the overview cards. Bitcoin-orange-tinted diagonal stripes on
-       the same dark base as the card row. Spans 2 grid cells so it
-       occupies the typical 4-col / 2-row layout's empty bottom-right;
-       gracefully shrinks at narrower widths. */
+       the overview cards. Two shades of the existing blue palette —
+       neutral so it reads as "intentionally blank" rather than
+       drawing attention. Spans 2 cells in the typical 4-col layout's
+       empty bottom-right; collapses on narrow viewports. */
     .barberpole {
       grid-column: span 2;
       min-height: 120px;
       border: 1px solid var(--border);
       border-radius: 6px;
-      background:
-        repeating-linear-gradient(
-          -45deg,
-          rgba(247, 147, 26, 0.06) 0,
-          rgba(247, 147, 26, 0.06) 14px,
-          transparent 14px,
-          transparent 28px
-        ),
-        var(--bg-card);
+      background: repeating-linear-gradient(
+        -45deg,
+        var(--bg-card) 0,
+        var(--bg-card) 14px,
+        var(--bg-elev) 14px,
+        var(--bg-elev) 28px
+      );
     }
     @media (max-width: 700px) {
       .barberpole { grid-column: span 1; min-height: 60px; }

@@ -500,12 +500,18 @@ function renderUpdateFields(records, hashOk) {
           ${records.map(r => {
             const interp = interpretValue(r);
             const name = SIGNED_UPDATE_NAMES[r.type] || FIELD_NAMES[r.type] || `tag_${r.type}`;
-            // Tag 8 (`message`) gets fully decoded in its own section
-            // below; link the hex to that anchor instead of dumping the
-            // whole blob inline.
-            const valueCell = r.type === 8
-              ? `<a href="#message" style="color:var(--accent);">${escapeHtml(interp.hex)}</a><span class="interp">${escapeHtml(interp.ann)} — see <a href="#message" style="color:var(--accent);">decoded below</a></span>`
-              : `${escapeHtml(interp.hex)}<span class="interp">${escapeHtml(interp.ann)}</span>`;
+            // Tags with their own breakdown sections get a small
+            // accent-colored link in the interp line; the hex itself
+            // stays plain so the value column is uniform across rows.
+            //   tag 8  → message (op + fields)
+            //   tag 22 → cosignatures (per-entry pk/sig/member_hash)
+            let interpExtra = '';
+            if (r.type === 8) {
+              interpExtra = ' — see <a href="#message" style="color:var(--accent);">decoded below</a>';
+            } else if (r.type === 22) {
+              interpExtra = ' — see <a href="#cosignatures" style="color:var(--accent);">per-cosigner breakdown below</a>';
+            }
+            const valueCell = `${escapeHtml(interp.hex)}<span class="interp">${escapeHtml(interp.ann)}${interpExtra}</span>`;
             return `<tr>
               <td class="tag-id">${r.type}</td>
               <td class="name">${escapeHtml(name)}</td>
@@ -515,6 +521,82 @@ function renderUpdateFields(records, hashOk) {
           }).join('')}
         </tbody>
       </table>
+    </div>`;
+}
+
+// Parse the multi-cosig (tag 22) blob: each entry is a 2-byte
+// big-endian length prefix followed by `pk(33) || sig(64) || mh(32)`
+// = 129 bytes. Mirrors the wallet's decoder (deposits-web/wallet/index.html).
+function parseCosignatures(buf) {
+  const entries = [];
+  let off = 0;
+  while (off + 2 <= buf.length) {
+    const entryLen = (buf[off] << 8) | buf[off + 1];
+    off += 2;
+    if (entryLen < 129 || off + entryLen > buf.length) break;
+    entries.push({
+      pubkey: buf.slice(off, off + 33),
+      signature: buf.slice(off + 33, off + 97),
+      member_ledger_hash: buf.slice(off + 97, off + 129),
+      // Anything past 129 bytes — currently unused but parse gracefully.
+      extra: entryLen > 129 ? buf.slice(off + 129, off + entryLen) : null,
+    });
+    off += entryLen;
+  }
+  return { entries, leftover: buf.length - off };
+}
+
+function renderCosignatures(records) {
+  // Multi-cosig (tag 22) is the modern shape. The legacy single-cosig
+  // path (tags 16/18) was always a 1-of-N at most; show it under the
+  // same card if present.
+  const multi = records.find(r => r.type === 22)?.value;
+  const legacyMh = records.find(r => r.type === 16)?.value;
+  const legacySig = records.find(r => r.type === 18)?.value
+    || records.find(r => r.type === 14)?.value;
+
+  if (!multi && !legacyMh && !legacySig) return '';
+
+  let entries = [];
+  let leftover = 0;
+  if (multi) {
+    const parsed = parseCosignatures(multi);
+    entries = parsed.entries;
+    leftover = parsed.leftover;
+  } else if (legacyMh || legacySig) {
+    // Synthesize a single legacy entry for display. No pk available
+    // in the legacy shape — show the cosigner_pubkey as "?" and let
+    // the user know it's the single-cosig fallback.
+    entries.push({
+      pubkey: null,
+      signature: legacySig || new Uint8Array(64),
+      member_ledger_hash: legacyMh || new Uint8Array(32),
+      extra: null,
+      legacy: true,
+    });
+  }
+
+  const note = multi
+    ? `${entries.length} cosigner${entries.length === 1 ? '' : 's'} · multi-cosig (tag 22)`
+    : `legacy single-cosig (tags 16/18) — pubkey not on the wire`;
+
+  return `
+    <div class="card" id="cosignatures">
+      <h3>cosignatures <span class="ann" style="font-family:var(--sans);font-size:0.78rem;color:var(--fg-muted);margin-left:0.4rem;">${escapeHtml(note)}</span></h3>
+      ${entries.map((e, i) => `
+        <div style="margin: ${i === 0 ? '0' : '0.85rem 0 0'}; padding: ${i === 0 ? '0' : '0.85rem 0 0'}; ${i === 0 ? '' : 'border-top: 1px solid var(--border);'}">
+          <dl class="kv" style="grid-template-columns: 9rem 1fr;">
+            <dt>cosigner</dt>
+            <dd class="mono">${e.pubkey ? escapeHtml(bytesToHex(e.pubkey)) : '<span class="muted">(legacy — not encoded)</span>'}</dd>
+            <dt>signature</dt>
+            <dd class="mono">${escapeHtml(bytesToHex(e.signature))}</dd>
+            <dt>member ledger hash</dt>
+            <dd class="mono">${escapeHtml(bytesToHex(e.member_ledger_hash))}</dd>
+            ${e.extra ? `<dt>trailing bytes</dt><dd class="mono">${escapeHtml(bytesToHex(e.extra))} <span class="muted">(${e.extra.length} bytes — newer fields the explorer doesn't know about yet)</span></dd>` : ''}
+          </dl>
+        </div>
+      `).join('')}
+      ${leftover > 0 ? `<div class="ann" style="margin-top:0.85rem;color:var(--red);font-family:var(--sans);font-size:0.78rem;">${leftover} byte(s) of trailing junk in the cosignatures blob — parse may be incomplete.</div>` : ''}
     </div>`;
 }
 
@@ -678,6 +760,11 @@ async function main() {
   }
 
   html += renderUpdateFields(outerRecords, hashOk);
+
+  // Per-cosigner breakdown of the cosignatures field (tag 22) or
+  // legacy single-cosig fallback (tags 16/18). Skipped silently if
+  // neither is present.
+  html += renderCosignatures(outerRecords);
 
   // Inner operation
   const msgBytes = outerRecords.find(r => r.type === 8)?.value;
