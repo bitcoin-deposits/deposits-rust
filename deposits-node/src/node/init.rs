@@ -17,12 +17,26 @@ impl Node {
         let secret_key = wallet.operator_secret();
         let node_id = PublicKey::from_secret_key(&secp, &secret_key);
 
+        // Derive the *Nostr identity* secret at the sibling path
+        // m/85'/0'/0'/0/0 (same scheme `deposits-signer` uses for
+        // `IssueNostrSecret`). The Nostr layer holds this key locally for
+        // event signing + NIP-04 ECDH; the operator/protocol key stays out
+        // of nostr.rs so a daemon compromise doesn't leak the slashable
+        // identity. Today the seed is still in-process (LocalSigner path);
+        // a real-world RemoteSigner deployment would call
+        // `signer.issue_nostr_secret()` instead.
+        let (_op_check, nostr_secret) = deposits_signer::data::derive_keys_from_seed(
+            &config.seed,
+            config.network,
+        )
+        .map_err(|e| Error::Wallet(format!("derive nostr secret: {}", e)))?;
+
         // Store relay URL for later use
         let relay_url = config.relays.first().cloned().unwrap_or_default();
 
         // Create nostr transport (fast relays for subs/publish, slow relays for gap-fill)
         let nostr = NostrTransport::new_with_slow(
-            secret_key,
+            nostr_secret,
             config.relays,
             config.slow_relays,
             config.skip_nostr_verify,

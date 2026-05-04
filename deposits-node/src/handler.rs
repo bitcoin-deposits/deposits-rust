@@ -76,15 +76,10 @@ pub struct DepositsHandler {
     /// Our node's public key (derived from Nostr keypair)
     our_node_id: PublicKey,
 
-    /// Our secret key for signing.
-    ///
-    /// Transitional: kept alongside `signer` while phase-3 migrates inline
-    /// signing call sites to go through the Signer trait. New code should
-    /// use `self.signer` instead. Once all daemon-internal signs flow
-    /// through the trait, this field is removed.
-    secret_key: SecretKey,
-
     /// Signer abstraction. `LocalSigner` today; `RemoteSigner` in v1.
+    /// All operator-protocol signing flows through this — the daemon does
+    /// not retain the operator secret as a separate field. See
+    /// `PLAN-remote-signer.md`.
     pub(crate) signer: Arc<dyn Signer>,
 
     /// Shared secp256k1 context
@@ -192,7 +187,6 @@ impl DepositsHandler {
 
         let handler = Self {
             our_node_id,
-            secret_key,
             signer,
             secp,
             ledgers: Mutex::new(ledgers),
@@ -1601,7 +1595,12 @@ impl HandlerContext for DepositsHandler {
     }
 
     fn our_secret_key(&self) -> Option<SecretKey> {
-        Some(self.secret_key)
+        // The daemon no longer retains the operator secret directly — all
+        // signing flows through `self.signer`. The `HandlerContext` trait
+        // method's default-impl callers (sign_message / sign_schnorr) will
+        // see `None` and bail out; in deposits-rust those defaults are not
+        // wired into any active daemon path.
+        None
     }
 
     fn current_block_height(&self) -> u32 {
