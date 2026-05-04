@@ -45,15 +45,6 @@ impl LocalSigner {
             .expect("secp256k1 keygen produced a valid secret");
         Self::new(secret)
     }
-
-    /// Transitional escape hatch — the daemon's `Nostr` layer wraps a
-    /// `nostr_sdk::Keys::new(secret_key)` which signs internally. Until phase-3
-    /// migrates that to manual event construction via the `Signer` trait, the
-    /// daemon needs the raw secret. RemoteSigner will not have this method;
-    /// removing the last caller is a phase-3 prerequisite.
-    pub fn secret_key(&self) -> &SecretKey {
-        &self.secret
-    }
 }
 
 impl Signer for LocalSigner {
