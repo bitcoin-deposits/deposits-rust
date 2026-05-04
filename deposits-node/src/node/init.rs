@@ -103,7 +103,7 @@ impl Node {
                     // the handler's `*.jsonl` glob.
                     forks_dir: ledgers_dir,
                     fork_observations: std::collections::HashMap::new(),
-                    operator_secret: wallet.operator_secret(),
+                    signer: handler_arc.signer.clone(),
                 };
                 tokio::spawn(actor.run());
                 ledger_actors.insert(
@@ -352,7 +352,7 @@ impl Node {
             persistence_path,
             forks_dir: self.actor_ledgers_dir.clone(),
             fork_observations: std::collections::HashMap::new(),
-            operator_secret: self.wallet.operator_secret(),
+            signer: self.handler.signer.clone(),
         };
         tokio::spawn(actor.run());
         let mut map = self.ledger_actors.lock().unwrap();

@@ -24,7 +24,7 @@
 //!   - Never hold the ledger lock across an `.await`. Take read or
 //!     write briefly, drop, do async work, take again if needed.
 
-use bitcoin::secp256k1::{PublicKey, SecretKey};
+use bitcoin::secp256k1::PublicKey;
 use deposits_core::messages::LedgerOperation;
 use deposits_core::types::{CosignEntry, SignedLedgerUpdate};
 use tokio::sync::{mpsc, oneshot};
@@ -149,9 +149,11 @@ pub struct LedgerActor {
         bitcoin::secp256k1::PublicKey,
         ForkObservation,
     >,
-    /// Operator's signing key, captured at actor spawn from the
-    /// node's wallet. Stable for the daemon's lifetime.
-    pub operator_secret: SecretKey,
+    /// Operator-side signer, shared with the handler. The actor calls
+    /// `bip340_sign` here to produce the operator signature on each
+    /// committed update; the underlying secret never lives on the
+    /// actor's stack.
+    pub signer: std::sync::Arc<dyn deposits_signer_api::Signer>,
 }
 
 /// Per-disputer fork-branch observation state.
@@ -501,7 +503,6 @@ impl LedgerActor {
         block_hash: [u8; 32],
     ) -> Result<CommitResult, String> {
         use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
 
         // 1. Stage. Take the read lock briefly and release it before
         //    any .await so the cosig round doesn't block readers.
@@ -560,14 +561,21 @@ impl LedgerActor {
         }
 
         // 3. Operator-sign. Data covers content + every cosignature
-        //    (see `operator_signing_data`).
+        //    (see `operator_signing_data`). Routed through the Signer
+        //    so RemoteSigner / anti-equivocation policy can intercept.
         {
-            let secp = Secp256k1::new();
+            use deposits_signer_api::SignContext;
             let data = staged.update.operator_signing_data();
             let hash = sha256::Hash::hash(&data);
-            let msg = Message::from_digest(*hash.as_byte_array());
-            let keypair = Keypair::from_secret_key(&secp, &self.operator_secret);
-            staged.update.operator_signature = secp.sign_schnorr(&msg, &keypair).serialize();
+            let ledger_id_bytes = self.ledger.read().unwrap().ledger_id();
+            let ctx = SignContext::operator_update(
+                ledger_id_bytes,
+                staged.update.sequence_number,
+            );
+            staged.update.operator_signature = self
+                .signer
+                .bip340_sign(&ctx, hash.as_byte_array())
+                .map_err(|e| format!("operator sign failed: {}", e))?;
         }
 
         // 4. Apply on the shared ledger. Phase C/D — `self.ledger`

@@ -19,6 +19,7 @@ use deposits_core::message_validation::{HandlerContext, ValidationContext};
 use deposits_core::messages::DepositsMessage;
 use deposits_core::types::{LedgerState, SignedLedgerUpdate};
 use deposits_core::validation::{LedgerConformanceValidator, LedgerExport, ValidationReport};
+use deposits_signer_api::{SignContext, Signer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -75,8 +76,16 @@ pub struct DepositsHandler {
     /// Our node's public key (derived from Nostr keypair)
     our_node_id: PublicKey,
 
-    /// Our secret key for signing
+    /// Our secret key for signing.
+    ///
+    /// Transitional: kept alongside `signer` while phase-3 migrates inline
+    /// signing call sites to go through the Signer trait. New code should
+    /// use `self.signer` instead. Once all daemon-internal signs flow
+    /// through the trait, this field is removed.
     secret_key: SecretKey,
+
+    /// Signer abstraction. `LocalSigner` today; `RemoteSigner` in v1.
+    pub(crate) signer: Arc<dyn Signer>,
 
     /// Shared secp256k1 context
     pub secp: bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::All>,
@@ -130,8 +139,10 @@ impl DepositsHandler {
         enable_metrics_emitter: bool,
     ) -> (Self, mpsc::UnboundedReceiver<OutboundMessage>) {
         use bitcoin::secp256k1::Secp256k1;
+        use deposits_signer_api::LocalSigner;
         let secp = Secp256k1::new();
         let our_node_id = PublicKey::from_secret_key(&secp, &secret_key);
+        let signer: Arc<dyn Signer> = Arc::new(LocalSigner::new(secret_key));
 
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
 
@@ -182,6 +193,7 @@ impl DepositsHandler {
         let handler = Self {
             our_node_id,
             secret_key,
+            signer,
             secp,
             ledgers: Mutex::new(ledgers),
             events: Mutex::new(Vec::new()),
@@ -1348,8 +1360,8 @@ impl DepositsHandler {
     /// Sign the last update in a ledger with our operator key
     fn sign_ledger_update(&self, ledger: &mut Ledger) {
         use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::Message;
 
+        let ledger_id = ledger.ledger_id();
         if let Some(update) = ledger.history.last_mut() {
             // Compute signature over update content
             let mut sig_input = Vec::new();
@@ -1359,12 +1371,13 @@ impl DepositsHandler {
             sig_input.extend_from_slice(&update.message);
 
             let hash = sha256::Hash::hash(&sig_input);
-            let secp = &self.secp;
-            let msg = Message::from_digest(*hash.as_byte_array());
-            let keypair = bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.secret_key);
-            let sig = secp.sign_schnorr(&msg, &keypair);
+            let ctx = SignContext::operator_update(ledger_id, update.sequence_number);
+            let sig = self
+                .signer
+                .bip340_sign(&ctx, hash.as_byte_array())
+                .expect("LocalSigner cannot fail; RemoteSigner errors propagate when wired");
 
-            update.operator_signature = sig.serialize();
+            update.operator_signature = sig;
             tracing::debug!("Signed update seq={}", update.sequence_number);
         }
 
