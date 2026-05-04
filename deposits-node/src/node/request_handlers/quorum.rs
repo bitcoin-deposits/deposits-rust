@@ -271,7 +271,7 @@ impl Node {
         // Sign consent: COLLATERAL_CONSENT || operator_pubkey(33 bytes) || ledger_id(string bytes)
         let _signature = {
             use bitcoin::hashes::{sha256, Hash};
-            use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+            use deposits_signer_api::{SigPurpose, SignContext};
 
             let mut sign_content = Vec::new();
             sign_content.extend_from_slice(b"COLLATERAL_CONSENT");
@@ -279,11 +279,19 @@ impl Node {
             sign_content.extend_from_slice(target_ledger_id.as_bytes());
 
             let hash = sha256::Hash::hash(&sign_content);
-            let secp_msg = Message::from_digest(hash.to_byte_array());
-            let secp = Secp256k1::new();
-            let keypair = Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
-            let sig = secp.sign_schnorr_no_aux_rand(&secp_msg, &keypair);
-            sig.serialize()
+            match self.handler.signer.bip340_sign(
+                &SignContext::no_ledger(SigPurpose::Bip340Untagged),
+                hash.as_byte_array(),
+            ) {
+                Ok(sig) => sig,
+                Err(e) => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("collateral consent sign: {}", e)),
+                    )
+                }
+            }
         };
 
         match self
@@ -544,14 +552,22 @@ impl Node {
 
         let signature = {
             use bitcoin::hashes::{sha256, Hash};
-            use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+            use deposits_signer_api::{SigPurpose, SignContext};
 
             let hash = sha256::Hash::hash(&sign_content);
-            let secp_msg = Message::from_digest(hash.to_byte_array());
-            let secp = Secp256k1::new();
-            let keypair = Keypair::from_secret_key(&secp, &self.wallet.operator_secret());
-            let sig = secp.sign_schnorr_no_aux_rand(&secp_msg, &keypair);
-            sig.serialize()
+            match self.handler.signer.bip340_sign(
+                &SignContext::no_ledger(SigPurpose::Bip340Untagged),
+                hash.as_byte_array(),
+            ) {
+                Ok(sig) => sig,
+                Err(e) => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("collateral consent sign: {}", e)),
+                    )
+                }
+            }
         };
 
         // Record QuorumJoin on our own ledger

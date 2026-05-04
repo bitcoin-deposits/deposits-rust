@@ -232,12 +232,21 @@ impl Node {
                         amount_msat,
                         &operator_ledger_hash,
                     );
-                    let secp = &self.secp;
-                    let secret = self.wallet.operator_secret();
-                    let keypair = Keypair::from_secret_key(secp, &secret);
-                    let msg = Message::from_digest(msg_hash);
-                    let sig = secp.sign_schnorr(&msg, &keypair);
-                    (hex::encode(operator_ledger_hash), hex::encode(sig.serialize()))
+                    use deposits_signer_api::{SigPurpose, SignContext};
+                    let sig = match self.handler.signer.bip340_sign(
+                        &SignContext::no_ledger(SigPurpose::InvoiceCosign),
+                        &msg_hash,
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return (
+                                false,
+                                None,
+                                Some(format!("invoice cosign sign: {}", e)),
+                            )
+                        }
+                    };
+                    (hex::encode(operator_ledger_hash), hex::encode(sig))
                 };
                 let operator_pubkey_hex = self.node_id_hex.clone();
 
@@ -784,11 +793,14 @@ impl Node {
             &member_ledger_hash,
         );
 
-        let secp = &self.secp;
-        let msg = Message::from_digest(msg_hash);
-        let secret = self.wallet.operator_secret();
-        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(secp, &secret);
-        let sig = secp.sign_schnorr(&msg, &keypair);
+        use deposits_signer_api::{SigPurpose, SignContext};
+        let sig = match self.handler.signer.bip340_sign(
+            &SignContext::no_ledger(SigPurpose::InvoiceCosign),
+            &msg_hash,
+        ) {
+            Ok(s) => s,
+            Err(e) => return (false, None, Some(format!("invoice cosign sign: {}", e))),
+        };
 
         tracing::info!(
             "Co-signed invoice {} for ledger {}...",
@@ -797,7 +809,7 @@ impl Node {
         );
 
         let result = serde_json::json!({
-            "cosign_signature": hex::encode(sig.serialize()),
+            "cosign_signature": hex::encode(sig),
             "cosigner_pubkey": self.node_id_hex.clone(),
             "cosigner_ledger_hash": hex::encode(member_ledger_hash),
         });

@@ -672,13 +672,33 @@ impl Node {
 
         let hash = sha256::Hash::hash(&tagged_input);
 
-        // Sign with Schnorr (BIP-340)
-        let secp = &self.secp;
-        let msg = Message::from_digest(hash.to_byte_array());
-        let secret = self.wallet.operator_secret();
-        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(secp, &secret);
-        let sig = secp.sign_schnorr(&msg, &keypair);
-        let sig_bytes = sig.serialize();
+        // Sign with Schnorr (BIP-340) via the Signer — anti-equivocation
+        // policy keys off cosign_update(operator_ledger, seq, member_head).
+        let operator_ledger_id_bytes: [u8; 32] = match hex::decode(&request.ledger_id)
+            .ok()
+            .and_then(|v| v.try_into().ok())
+        {
+            Some(b) => b,
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("invalid operator ledger_id".to_string()),
+                )
+            }
+        };
+        use deposits_signer_api::SignContext;
+        let sig_bytes = match self.handler.signer.bip340_sign(
+            &SignContext::cosign_update(
+                operator_ledger_id_bytes,
+                sequence_number,
+                member_ledger_hash,
+            ),
+            hash.as_byte_array(),
+        ) {
+            Ok(s) => s,
+            Err(e) => return (false, None, Some(format!("cosign sign: {}", e))),
+        };
 
         tracing::debug!(
             "Co-signed update seq={} for ledger {}... (member_ledger_hash: {}...)",
@@ -905,13 +925,15 @@ impl Node {
             &member_ledger_hash,
         );
 
-        // Sign with Schnorr (BIP-340)
-        let secp = &self.secp;
-        let msg = Message::from_digest(msg_hash);
-        let secret = self.wallet.operator_secret();
-        let keypair = bitcoin::secp256k1::Keypair::from_secret_key(secp, &secret);
-        let sig = secp.sign_schnorr(&msg, &keypair);
-        let sig_bytes = sig.serialize();
+        // Sign with Schnorr (BIP-340) via the Signer.
+        use deposits_signer_api::{SigPurpose, SignContext};
+        let sig_bytes = match self.handler.signer.bip340_sign(
+            &SignContext::no_ledger(SigPurpose::DepositOffer),
+            &msg_hash,
+        ) {
+            Ok(s) => s,
+            Err(e) => return (false, None, Some(format!("offer cosign sign: {}", e))),
+        };
 
         tracing::info!(
             "Co-signed offer {} for ledger {}... (member_ledger_hash: {}...)",

@@ -107,9 +107,6 @@ impl Node {
         );
 
         // Use the node's operator key
-        let secp = &self.secp;
-        let secret_key = self.wallet.operator_secret();
-        let keypair = Keypair::from_secret_key(secp, &secret_key);
         let our_pubkey = self.node_id;
 
         tracing::info!("    Our key: {}...", &our_pubkey.to_string()[..16]);
@@ -249,10 +246,15 @@ impl Node {
 
         tracing::info!("    Verified: we are a quorum member");
 
-        // Sign the sighash
-        let msg = Message::from_digest(sighash_bytes);
-        let signature = secp.sign_schnorr(&msg, &keypair);
-        let signature_bytes = signature.serialize();
+        // Sign the sighash via the Signer (Tapscript script-spend on confiscation tx).
+        use deposits_signer_api::{SigPurpose, SignContext};
+        let signature_bytes = match self.handler.signer.bip340_sign(
+            &SignContext::no_ledger(SigPurpose::OnchainSighash),
+            &sighash_bytes,
+        ) {
+            Ok(s) => s,
+            Err(e) => return (false, None, Some(format!("custody sighash sign: {}", e))),
+        };
 
         tracing::info!(
             "    Signed sighash: {}...",
@@ -305,17 +307,25 @@ impl Node {
             return (false, None, Some("Not armed for this dispute".to_string()));
         }
 
-        // Sign the sighash
-        let secp = &self.secp;
-        let keypair =
-            bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
-        let msg = Message::from_digest(sighash_bytes);
-        let signature = secp.sign_schnorr(&msg, &keypair);
+        // Sign the sighash via the Signer (confiscation tx Tapscript script-spend).
+        use deposits_signer_api::{SigPurpose, SignContext};
+        let signature_bytes = match self.handler.signer.bip340_sign(
+            &SignContext::no_ledger(SigPurpose::OnchainSighash),
+            &sighash_bytes,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("confiscation sighash sign: {}", e)),
+                )
+            }
+        };
 
-        let _our_pubkey = keypair.public_key();
         let result = serde_json::json!({
             "signer": self.node_id_hex.clone(),
-            "signature": hex::encode(signature.serialize()),
+            "signature": hex::encode(signature_bytes),
         });
 
         tracing::info!(
