@@ -272,7 +272,7 @@ impl Node {
     /// Call this after appending an operation to sign the update before broadcasting.
     pub fn sign_last_update(&self, ledger_id: &str) -> Result<(), Error> {
         use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::Message;
+        use deposits_signer_api::SignContext;
 
         // Get the ledger by ledger_id
         let ledger_arc = self
@@ -285,18 +285,18 @@ impl Node {
             .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
 
         let mut ledger = ledger_arc.write().unwrap();
+        let ledger_id_bytes = ledger.ledger_id();
 
         if let Some(update) = ledger.history.last_mut() {
             // Sign using operator_signing_data (cosign_data + all cosig_signatures)
             let data = update.operator_signing_data();
             let hash = sha256::Hash::hash(&data);
-            let secp = &self.secp;
-            let msg = Message::from_digest(*hash.as_byte_array());
-            let keypair =
-                bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
-            let sig = secp.sign_schnorr(&msg, &keypair);
-
-            update.operator_signature = sig.serialize();
+            let ctx = SignContext::operator_update(ledger_id_bytes, update.sequence_number);
+            update.operator_signature = self
+                .handler
+                .signer
+                .bip340_sign(&ctx, hash.as_byte_array())
+                .map_err(|e| Error::Protocol(format!("operator sign failed: {}", e)))?;
             tracing::debug!(
                 "Signed update seq={} for ledger {}",
                 update.sequence_number,

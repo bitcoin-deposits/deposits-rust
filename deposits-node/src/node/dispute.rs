@@ -18,12 +18,7 @@ impl Node {
 
         use deposits_core::messages::LedgerOperation;
 
-        let secp = &self.secp;
-
-        // Get our operator keypair
-        let keypair =
-            bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
-        let our_pubkey = keypair.public_key();
+        let our_pubkey = self.node_id;
 
         // 0. Create a fork of the disputed ledger (or reuse existing one)
         let fork_key = self.create_dispute_fork(ledger_id, last_valid_seq)?;
@@ -362,10 +357,6 @@ impl Node {
     /// 3. Winner: claim lottery output + publish DisputeAcquire
     /// 4. Loser: publish DisputeYield
     pub(crate) async fn auto_lottery_claim_or_yield(&self) {
-        let secp = &self.secp;
-        let keypair =
-            bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
-
         // Find revealed marker files in data_dir
         let entries = match std::fs::read_dir(&self.data_dir) {
             Ok(e) => e,
@@ -422,7 +413,7 @@ impl Node {
             };
 
             // Try to claim or yield
-            match self.try_lottery_claim_or_yield(&ledger_id, &keypair).await {
+            match self.try_lottery_claim_or_yield(&ledger_id).await {
                 Ok(completed) => {
                     if completed {
                         // Create completed marker
@@ -443,7 +434,6 @@ impl Node {
     pub(crate) async fn try_lottery_claim_or_yield(
         &self,
         ledger_id: &str,
-        keypair: &bitcoin::secp256k1::Keypair,
     ) -> Result<bool, Error> {
         use crate::nostr::{KIND_LEDGER_REQUEST, KIND_LEDGER_UPDATE};
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -455,7 +445,7 @@ impl Node {
 
         use nostr_sdk::{Filter, Kind, TagKind};
 
-        let our_pubkey = keypair.public_key();
+        let our_pubkey = self.node_id;
 
         // Use the slow relay client for historical fetch
         let client = self.nostr.fetch_client();
@@ -583,7 +573,6 @@ impl Node {
                 &ordered_preimages,
                 winner_index,
                 &our_armed,
-                keypair,
             )
             .await?;
         } else {
@@ -592,8 +581,7 @@ impl Node {
                 "We lost the lottery for ledger {}. Publishing DisputeYield.",
                 &ledger_id[..16]
             );
-            self.publish_custody_yield(ledger_id, &our_armed, keypair)
-                .await?;
+            self.publish_custody_yield(ledger_id, &our_armed).await?;
         }
 
         Ok(true)
@@ -610,19 +598,17 @@ impl Node {
         ordered_preimages: &[Vec<u8>],
         winner_index: usize,
         our_armed: &deposits_core::SignedLedgerUpdate,
-        keypair: &bitcoin::secp256k1::Keypair,
     ) -> Result<(), Error> {
         use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::Message;
         use bitcoin::sighash::{SighashCache, TapSighashType};
         use bitcoin::taproot::TapLeafHash;
         use bitcoin::{Amount, ScriptBuf, Transaction, TxIn, TxOut, Witness};
         use deposits_core::messages::LedgerOperation;
         use deposits_core::tapscript_reserves::{LotteryParticipant, LotteryScriptBuilder};
         use deposits_core::{SignedLedgerUpdate, TlvEncode};
+        use deposits_signer_api::{SigPurpose, SignContext};
 
-        let secp = &self.secp;
-        let our_pubkey = keypair.public_key();
+        let our_pubkey = self.node_id;
         let (_, winner_participant) = &participants[winner_index];
 
         // Build lottery participants list
@@ -718,10 +704,15 @@ impl Node {
             )
             .map_err(|e| Error::Protocol(format!("Failed to compute sighash: {}", e)))?;
 
-        // Sign
-        let msg = Message::from_digest(*sighash.as_ref());
-        let signature = secp.sign_schnorr(&msg, keypair);
-        let sig_bytes: [u8; 64] = *signature.as_ref();
+        // Sign — Taproot script-spend on the lottery claim leaf.
+        let sig_bytes = self
+            .handler
+            .signer
+            .bip340_sign(
+                &SignContext::no_ledger(SigPurpose::OnchainSighash),
+                sighash.as_ref(),
+            )
+            .map_err(|e| Error::Protocol(format!("lottery sighash sign: {}", e)))?;
 
         // Create witness
         let witness = lottery_output
@@ -771,14 +762,20 @@ impl Node {
             hex::encode(new_hash)
         );
         let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-        let msg = Message::from_digest(*msg_hash.as_ref());
-        let signature = secp.sign_schnorr(&msg, keypair);
-        let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
         let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
             .map_err(|e| Error::Protocol(format!("Invalid ledger_id: {}", e)))?
             .try_into()
             .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
+
+        let operator_sig_bytes = self
+            .handler
+            .signer
+            .bip340_sign(
+                &SignContext::operator_update(ledger_id_bytes, sequence),
+                msg_hash.as_ref(),
+            )
+            .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
 
         let signed_update = SignedLedgerUpdate {
             message: message_bytes,
@@ -812,15 +809,13 @@ impl Node {
         &self,
         ledger_id: &str,
         our_armed: &deposits_core::SignedLedgerUpdate,
-        keypair: &bitcoin::secp256k1::Keypair,
     ) -> Result<(), Error> {
         use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::Message;
         use deposits_core::messages::LedgerOperation;
         use deposits_core::{SignedLedgerUpdate, TlvEncode};
+        use deposits_signer_api::SignContext;
 
-        let secp = &self.secp;
-        let our_pubkey = keypair.public_key();
+        let our_pubkey = self.node_id;
 
         let current_block = self.wallet.get_block_height().unwrap_or(0);
         let current_block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
@@ -845,14 +840,20 @@ impl Node {
             hex::encode(new_hash)
         );
         let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-        let msg = Message::from_digest(*msg_hash.as_ref());
-        let signature = secp.sign_schnorr(&msg, keypair);
-        let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
         let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
             .map_err(|e| Error::Protocol(format!("Invalid ledger_id: {}", e)))?
             .try_into()
             .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
+
+        let operator_sig_bytes = self
+            .handler
+            .signer
+            .bip340_sign(
+                &SignContext::operator_update(ledger_id_bytes, sequence),
+                msg_hash.as_ref(),
+            )
+            .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
 
         let signed_update = SignedLedgerUpdate {
             message: message_bytes,
@@ -1098,9 +1099,8 @@ impl Node {
         use nostr_sdk::{Filter, Kind};
         use std::collections::HashMap;
 
-        let secp = &self.secp;
-        let keypair = Keypair::from_secret_key(secp, &self.wallet.operator_secret());
-        let our_pubkey = keypair.public_key();
+        use deposits_signer_api::{SigPurpose, SignContext};
+        let our_pubkey = self.node_id;
 
         // Find armed markers (ledgers where we've armed)
         let entries = match std::fs::read_dir(&self.data_dir) {
@@ -1484,12 +1484,20 @@ impl Node {
 
             let sighash_bytes: [u8; 32] = *sighash.as_ref();
 
-            // Sign with our key
-            let msg = Message::from_digest(sighash_bytes);
-            let our_signature = secp.sign_schnorr(&msg, &keypair);
+            // Sign with our key — Taproot script-spend on confiscation tx.
+            let our_signature = match self.handler.signer.bip340_sign(
+                &SignContext::no_ledger(SigPurpose::OnchainSighash),
+                &sighash_bytes,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Confiscation sighash sign failed: {}", e);
+                    continue;
+                }
+            };
 
             let mut signatures: HashMap<PublicKey, [u8; 64]> = HashMap::new();
-            signatures.insert(our_pubkey, our_signature.serialize());
+            signatures.insert(our_pubkey, our_signature);
 
             tracing::info!("  Signed with our key");
 
@@ -1915,10 +1923,7 @@ impl Node {
 
         use nostr_sdk::{Filter, Kind};
 
-        let secp = &self.secp;
-        let keypair =
-            bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
-        let our_pubkey = keypair.public_key();
+        let our_pubkey = self.node_id;
 
         // Use the slow relay client for historical fetch
         let client = self.nostr.fetch_client();

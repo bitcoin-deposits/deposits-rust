@@ -6,19 +6,17 @@ impl Node {
         use crate::nostr::KIND_LEDGER_UPDATE;
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::{Message, PublicKey};
+        use bitcoin::secp256k1::PublicKey;
         use bitcoin::{Amount, ScriptBuf, Transaction, TxIn, TxOut, Witness};
         use deposits_core::messages::LedgerOperation;
         use deposits_core::{
             SignedLedgerUpdate, TapscriptReservesBuilder, TlvDecode, TlvEncode, VoterSet,
         };
+        use deposits_signer_api::{SigPurpose, SignContext};
 
         use nostr_sdk::{Filter, Kind};
 
-        let secp = &self.secp;
-        let keypair =
-            bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
-        let our_pubkey = keypair.public_key();
+        let our_pubkey = self.node_id;
 
         // Use the slow relay client for historical fetch
         let client = self.nostr.fetch_client();
@@ -182,8 +180,14 @@ impl Node {
             )
             .map_err(|e| Error::Protocol(format!("Sighash error: {}", e)))?;
 
-        let msg = Message::from_digest(*sighash.as_ref());
-        let signature = secp.sign_ecdsa(&msg, &self.wallet.operator_secret());
+        let signature = self
+            .handler
+            .signer
+            .ecdsa_sign_sighash(
+                &SignContext::no_ledger(SigPurpose::OnchainSighash),
+                sighash.as_ref(),
+            )
+            .map_err(|e| Error::Protocol(format!("rotate sighash sign: {}", e)))?;
 
         // Build witness
         let mut sig_bytes = signature.serialize_der().to_vec();
@@ -258,14 +262,20 @@ impl Node {
             hex::encode(new_hash)
         );
         let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-        let msg = Message::from_digest(*msg_hash.as_ref());
-        let signature = secp.sign_schnorr(&msg, &keypair);
-        let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
         let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
             .map_err(|e| Error::Protocol(format!("Invalid ledger_id: {}", e)))?
             .try_into()
             .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
+
+        let operator_sig_bytes = self
+            .handler
+            .signer
+            .bip340_sign(
+                &SignContext::operator_update(ledger_id_bytes, sequence),
+                msg_hash.as_ref(),
+            )
+            .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
 
         let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
         let signed_update = SignedLedgerUpdate {
@@ -302,16 +312,13 @@ impl Node {
         use crate::nostr::KIND_LEDGER_UPDATE;
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::Message;
         use deposits_core::messages::LedgerOperation;
         use deposits_core::{SignedLedgerUpdate, TlvDecode, TlvEncode};
+        use deposits_signer_api::SignContext;
 
         use nostr_sdk::{Filter, Kind};
 
-        let secp = &self.secp;
-        let keypair =
-            bitcoin::secp256k1::Keypair::from_secret_key(secp, &self.wallet.operator_secret());
-        let our_pubkey = keypair.public_key();
+        let our_pubkey = self.node_id;
 
         // Use the slow relay client for historical fetch
         let client = self.nostr.fetch_client();
@@ -406,14 +413,20 @@ impl Node {
                 hex::encode(new_hash)
             );
             let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-            let msg = Message::from_digest(*msg_hash.as_ref());
-            let signature = secp.sign_schnorr(&msg, &keypair);
-            let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
             let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
                 .map_err(|e| Error::Protocol(format!("Invalid ledger_id: {}", e)))?
                 .try_into()
                 .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
+
+            let operator_sig_bytes = self
+                .handler
+                .signer
+                .bip340_sign(
+                    &SignContext::operator_update(ledger_id_bytes, sequence),
+                    msg_hash.as_ref(),
+                )
+                .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
 
             let signed_update = SignedLedgerUpdate {
                 message: message_bytes,
