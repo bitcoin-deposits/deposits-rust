@@ -9,8 +9,9 @@
 
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{Message, Secp256k1};
+use bitcoin::Network;
 use deposits_node::remote_signer::RemoteSigner;
-use deposits_signer::data::{DataDir, TransportKey};
+use deposits_signer::data::{derive_keys_from_seed, DataDir, TransportKey};
 use deposits_signer_api::{LocalSigner, SigPurpose, SignContext, Signer, SignerError};
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -117,7 +118,10 @@ fn remote_signer_bip340_matches_local_signer() {
     // compute the expected sig locally. (Deterministic signing means we can
     // compare bit-for-bit.)
     let operator_seed = [0x42u8; 32];
-    let operator_secret = bitcoin::secp256k1::SecretKey::from_slice(&operator_seed).unwrap();
+    // Mirror the signer's derivation so the local comparison key matches
+    // what the deposits-signer process derives at m/86'/0'/0'/0/0.
+    let (operator_secret, _nostr_secret) =
+        derive_keys_from_seed(&operator_seed, Network::Bitcoin).unwrap();
     let local = LocalSigner::new(operator_secret);
     let expected_pubkey = local.pubkey();
     let expected_xonly = local.xonly_pubkey();
@@ -162,7 +166,10 @@ fn remote_signer_bip340_matches_local_signer() {
 #[test]
 fn remote_signer_ecdsa_matches_local_signer() {
     let operator_seed = [0x33u8; 32];
-    let operator_secret = bitcoin::secp256k1::SecretKey::from_slice(&operator_seed).unwrap();
+    // Mirror the signer's derivation so the local comparison key matches
+    // what the deposits-signer process derives at m/86'/0'/0'/0/0.
+    let (operator_secret, _nostr_secret) =
+        derive_keys_from_seed(&operator_seed, Network::Bitcoin).unwrap();
     let local = LocalSigner::new(operator_secret);
 
     let node_transport = TransportKey::random();
@@ -182,6 +189,42 @@ fn remote_signer_ecdsa_matches_local_signer() {
         sig_local.serialize_compact(),
         sig_remote.serialize_compact()
     );
+}
+
+#[test]
+fn remote_signer_issues_nostr_secret_distinct_from_operator() {
+    // Confirm the signer derives a Nostr secret at m/85'/0'/0'/0/0 which is
+    // distinct from the operator at m/86'/0'/0'/0/0, returns it over the
+    // wire, and that the issued bytes are a valid secp256k1 secret.
+    let operator_seed = [0x77u8; 32];
+    let node_transport = TransportKey::random();
+    let (proc, signer_transport_pubkey) = spawn_signer(operator_seed, node_transport.public);
+    let remote = RemoteSigner::connect(
+        &proc.socket,
+        node_transport.secret,
+        signer_transport_pubkey,
+    )
+    .unwrap();
+
+    let issued = remote.issue_nostr_secret().expect("issue must succeed");
+    let issued_sk = bitcoin::secp256k1::SecretKey::from_slice(&issued)
+        .expect("issued bytes must form a valid secret");
+
+    // The Nostr secret must not be the operator secret.
+    let issued_pk = bitcoin::secp256k1::PublicKey::from_secret_key(
+        &bitcoin::secp256k1::Secp256k1::new(),
+        &issued_sk,
+    );
+    assert_ne!(
+        issued_pk,
+        remote.pubkey(),
+        "Nostr identity pubkey must differ from operator pubkey"
+    );
+
+    // Idempotent: a second call returns the same secret. (The signer's
+    // derivation is stable; no surprise rotation.)
+    let issued2 = remote.issue_nostr_secret().expect("idempotent");
+    assert_eq!(issued, issued2);
 }
 
 #[test]
@@ -228,7 +271,10 @@ fn remote_signer_anti_equivocation_refuses_seq_regression() {
 #[test]
 fn remote_signer_ecdh_matches_local_signer() {
     let operator_seed = [0x55u8; 32];
-    let operator_secret = bitcoin::secp256k1::SecretKey::from_slice(&operator_seed).unwrap();
+    // Mirror the signer's derivation so the local comparison key matches
+    // what the deposits-signer process derives at m/86'/0'/0'/0/0.
+    let (operator_secret, _nostr_secret) =
+        derive_keys_from_seed(&operator_seed, Network::Bitcoin).unwrap();
     let local = LocalSigner::new(operator_secret);
 
     let node_transport = TransportKey::random();

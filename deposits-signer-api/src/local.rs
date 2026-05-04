@@ -18,10 +18,14 @@ pub struct LocalSigner {
     pubkey: PublicKey,
     xonly: XOnlyPublicKey,
     secp: Secp256k1<bitcoin::secp256k1::All>,
+    /// Sibling-derived Nostr identity secret, if the signer was constructed
+    /// to issue one. See [`Signer::issue_nostr_secret`].
+    nostr_secret: Option<SecretKey>,
 }
 
 impl LocalSigner {
     /// Build a signer from a derived operator/identity secret.
+    /// `issue_nostr_secret()` will return `Unsupported`.
     pub fn new(secret: SecretKey) -> Self {
         let secp = Secp256k1::new();
         let pubkey = PublicKey::from_secret_key(&secp, &secret);
@@ -31,7 +35,19 @@ impl LocalSigner {
             pubkey,
             xonly,
             secp,
+            nostr_secret: None,
         }
+    }
+
+    /// Build a signer from both an operator key and a sibling-derived Nostr
+    /// identity key. The Nostr key is what `issue_nostr_secret()` returns.
+    /// Caller is responsible for the BIP-32 derivation; `deposits-signer`'s
+    /// data layer derives the Nostr key at `m/85'/0'/0'/0/0` from the same
+    /// seed the operator key (`m/86'/0'/0'/0/0`) comes from.
+    pub fn with_nostr_secret(operator_secret: SecretKey, nostr_secret: SecretKey) -> Self {
+        let mut s = Self::new(operator_secret);
+        s.nostr_secret = Some(nostr_secret);
+        s
     }
 
     /// Test/dev helper: a signer with a fresh random secret.
@@ -84,6 +100,15 @@ impl Signer for LocalSigner {
     fn ecdh(&self, peer: &PublicKey) -> Result<[u8; 32], SignerError> {
         let shared = SharedSecret::new(peer, &self.secret);
         Ok(shared.secret_bytes())
+    }
+
+    fn issue_nostr_secret(&self) -> Result<[u8; 32], SignerError> {
+        match self.nostr_secret {
+            Some(sk) => Ok(sk.secret_bytes()),
+            None => Err(SignerError::Unsupported(
+                "this LocalSigner was not constructed with a Nostr secret".to_string(),
+            )),
+        }
     }
 }
 
@@ -151,5 +176,35 @@ mod tests {
         let a_to_b = alice.ecdh(&bob.pubkey()).unwrap();
         let b_to_a = bob.ecdh(&alice.pubkey()).unwrap();
         assert_eq!(a_to_b, b_to_a, "ECDH must be symmetric");
+    }
+
+    #[test]
+    fn new_signer_refuses_to_issue_nostr_secret() {
+        let s = LocalSigner::random();
+        let err = s.issue_nostr_secret().unwrap_err();
+        assert!(matches!(err, SignerError::Unsupported(_)));
+    }
+
+    #[test]
+    fn with_nostr_secret_returns_distinct_key() {
+        let op = LocalSigner::random();
+        let nostr = LocalSigner::random();
+        let signer = LocalSigner::with_nostr_secret(*op.secret_key_for_test(), *nostr.secret_key_for_test());
+        // Operator-side ops use the operator secret.
+        assert_eq!(signer.pubkey(), op.pubkey());
+        // The issued Nostr secret matches what we passed in (and is *not*
+        // the operator secret).
+        let issued = signer.issue_nostr_secret().unwrap();
+        assert_eq!(issued, nostr.secret_key_for_test().secret_bytes());
+        assert_ne!(issued, op.secret_key_for_test().secret_bytes());
+    }
+}
+
+#[cfg(test)]
+impl LocalSigner {
+    /// Test-only accessor for the underlying operator secret. Not exposed
+    /// outside `cfg(test)` — production code can't pull the secret back out.
+    pub fn secret_key_for_test(&self) -> &SecretKey {
+        &self.secret
     }
 }

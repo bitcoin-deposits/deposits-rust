@@ -15,11 +15,14 @@
 //! `transport_secret` and `seed` at write time; permissions are not
 //! re-checked on every load (the runtime depends on filesystem ACLs).
 
+use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+use bitcoin::Network;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DataError {
@@ -132,6 +135,21 @@ impl DataDir {
         Ok(())
     }
 
+    /// Derive the operator + Nostr identity secrets from the loaded seed.
+    /// Operator: `m/86'/0'/0'/0/0` (matches what `deposits-node` derives).
+    /// Nostr:    `m/85'/0'/0'/0/0` (sibling, deliberately distinct prime
+    /// path so the keys are structurally separate — leaking the Nostr key
+    /// can't be confused with leaking the operator key).
+    pub fn derive_keys(
+        &self,
+        network: Network,
+    ) -> Result<(SecretKey, SecretKey), DataError> {
+        let seed = self
+            .load_seed()?
+            .ok_or_else(|| DataError::Key("seed not installed; run `import-seed`".to_string()))?;
+        derive_keys_from_seed(&seed, network)
+    }
+
     pub fn load_allowlist(&self) -> Result<Vec<PublicKey>, DataError> {
         if !self.is_initialized() {
             return Err(DataError::NotInitialized(self.root.clone()));
@@ -167,6 +185,30 @@ impl DataDir {
         write_public(&self.allowlist_path(), &(body + "\n"))?;
         Ok(true)
     }
+}
+
+/// Free function so callers (the binary's `run` subcommand, tests) can use
+/// the same derivation without instantiating a [`DataDir`].
+pub fn derive_keys_from_seed(
+    seed: &[u8; 32],
+    network: Network,
+) -> Result<(SecretKey, SecretKey), DataError> {
+    let secp = Secp256k1::new();
+    let xpriv = Xpriv::new_master(network, seed)
+        .map_err(|e| DataError::Key(format!("xpriv: {}", e)))?;
+    let operator_path = DerivationPath::from_str("m/86'/0'/0'/0/0")
+        .map_err(|e| DataError::Key(format!("operator path: {}", e)))?;
+    let nostr_path = DerivationPath::from_str("m/85'/0'/0'/0/0")
+        .map_err(|e| DataError::Key(format!("nostr path: {}", e)))?;
+    let op = xpriv
+        .derive_priv(&secp, &operator_path)
+        .map_err(|e| DataError::Key(format!("derive operator: {}", e)))?
+        .private_key;
+    let nostr = xpriv
+        .derive_priv(&secp, &nostr_path)
+        .map_err(|e| DataError::Key(format!("derive nostr: {}", e)))?
+        .private_key;
+    Ok((op, nostr))
 }
 
 #[derive(Debug)]

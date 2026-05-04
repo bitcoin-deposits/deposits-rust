@@ -199,6 +199,27 @@ pub trait Signer: Send + Sync {
     /// envelope crypto. The signer does only the asymmetric step; the daemon
     /// runs the symmetric AEAD.
     fn ecdh(&self, peer: &PublicKey) -> Result<[u8; 32], SignerError>;
+
+    /// Issue a sibling-derived **Nostr identity** secret that the daemon
+    /// holds locally for Nostr-layer ops (event signing, NIP-04 ECDH,
+    /// gift-wrap seals).
+    ///
+    /// The Nostr key is structurally separate from the operator/protocol key:
+    /// compromise of the daemon leaks the Nostr key (attacker can sign fake
+    /// events from the daemon's Nostr pubkey, decrypt DMs sent to it,
+    /// encrypt outbound), but the operator key — the one slashing depends on
+    /// — stays put on the signer. The `Signer` trait sees this as an
+    /// explicit privilege escalation request, distinct from
+    /// per-call signature ops.
+    ///
+    /// Returns the 32-byte secret. Default impl returns `Unsupported` for
+    /// signer flavors that don't support derivation (e.g. a single-key
+    /// `LocalSigner` constructed via [`LocalSigner::new`]).
+    fn issue_nostr_secret(&self) -> Result<[u8; 32], SignerError> {
+        Err(SignerError::Unsupported(
+            "this signer does not issue a Nostr identity secret".to_string(),
+        ))
+    }
 }
 
 /// Newtype around a 64-byte BIP-340 signature so callers don't accidentally

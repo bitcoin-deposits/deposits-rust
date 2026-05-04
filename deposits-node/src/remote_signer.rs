@@ -213,6 +213,20 @@ impl Signer for RemoteSigner {
         self.xonly
     }
 
+    fn issue_nostr_secret(&self) -> Result<[u8; 32], SignerError> {
+        // No ledger context for an out-of-band secret issuance — it's not
+        // a ledger sig.
+        let ctx = SignContext::no_ledger(deposits_signer_api::SigPurpose::Bip340Untagged);
+        match self.rpc(&ctx, SignOp::IssueNostrSecret)? {
+            SignResult::IssuedSecret { sk } => Ok(sk),
+            SignResult::Error { kind, message } => Err(map_sign_result_to_error(kind, message)),
+            other => Err(SignerError::Transport(format!(
+                "IssueNostrSecret returned unexpected variant: {:?}",
+                other
+            ))),
+        }
+    }
+
     fn bip340_sign(
         &self,
         ctx: &SignContext,

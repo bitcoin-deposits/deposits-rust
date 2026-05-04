@@ -240,12 +240,12 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
 
     let transport = dd.load_transport().map_err(|e| e.to_string())?;
     let allowlist = dd.load_allowlist().map_err(|e| e.to_string())?;
-    let seed = dd
-        .load_seed()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "seed not installed; run `import-seed` first".to_string())?;
-    let operator_secret = bitcoin::secp256k1::SecretKey::from_slice(&seed)
-        .map_err(|e| format!("seed not a valid secp256k1 secret: {}", e))?;
+    // Derive both the operator secret (m/86'/0'/0'/0/0) and the Nostr
+    // identity secret (m/85'/0'/0'/0/0) from the loaded seed. The Nostr
+    // key is what `IssueNostrSecret` hands back to the daemon.
+    let (operator_secret, nostr_secret) = dd
+        .derive_keys(bitcoin::Network::Bitcoin)
+        .map_err(|e| format!("derive keys: {}", e))?;
 
     if allowlist.is_empty() {
         tracing::warn!("allowlist is empty — no daemon will be permitted to connect");
@@ -259,6 +259,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         transport.secret,
         allowlist,
         operator_secret,
+        nostr_secret,
         policy,
     ));
 

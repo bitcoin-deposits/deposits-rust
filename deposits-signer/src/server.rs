@@ -54,11 +54,15 @@ impl ServerCtx {
         transport_secret: bitcoin::secp256k1::SecretKey,
         allowlist: Vec<PublicKey>,
         operator_secret: bitcoin::secp256k1::SecretKey,
+        nostr_secret: bitcoin::secp256k1::SecretKey,
         policy: Arc<SeqPolicy>,
     ) -> Self {
         let secp = Secp256k1::new();
         let transport = Keypair::from_secret_key(&secp, &transport_secret);
-        let signer: Arc<dyn Signer> = Arc::new(LocalSigner::new(operator_secret));
+        let signer: Arc<dyn Signer> = Arc::new(LocalSigner::with_nostr_secret(
+            operator_secret,
+            nostr_secret,
+        ));
         Self {
             transport,
             allowlist,
@@ -169,6 +173,10 @@ fn handle_request(
         SignOp::PubkeyQuery => SignResult::Pubkey {
             pubkey: signer.pubkey(),
             xonly: signer.xonly_pubkey(),
+        },
+        SignOp::IssueNostrSecret => match signer.issue_nostr_secret() {
+            Ok(sk) => SignResult::IssuedSecret { sk },
+            Err(e) => signer_error_to_result(e),
         },
     };
     SignResponse { id: req.id, result }

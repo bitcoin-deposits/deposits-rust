@@ -152,6 +152,11 @@ pub enum SignOp {
     /// Just return the signer's identity pubkeys. The daemon caches these
     /// after handshake; `PubkeyQuery` exists for warm reconnect.
     PubkeyQuery,
+    /// Issue a sibling-derived Nostr identity secret. Distinct from the
+    /// per-call sign ops: the signer relinquishes a long-lived secret to
+    /// the daemon (smaller blast-radius than the operator key, but still a
+    /// privilege escalation). Daemon caches the result.
+    IssueNostrSecret,
 }
 
 /// Server response to a [`SignRequest`]. Sent inside an AEAD-sealed frame.
@@ -184,6 +189,12 @@ pub enum SignResult {
     Pubkey {
         pubkey: PublicKey,
         xonly: XOnlyPublicKey,
+    },
+    /// Result of `IssueNostrSecret`. The signer-side encoding is a 32-byte
+    /// secret; the daemon imports it as its long-lived Nostr identity key.
+    IssuedSecret {
+        #[serde(with = "hexarray")]
+        sk: [u8; 32],
     },
     /// Signer refused or failed to satisfy the request. The daemon
     /// surfaces this as a `SignerError`.
@@ -291,6 +302,7 @@ mod tests {
             SignOp::Ecdsa { sighash: [4u8; 32] },
             SignOp::Ecdh { peer: pk },
             SignOp::PubkeyQuery,
+            SignOp::IssueNostrSecret,
         ];
         for op in cases {
             let req = SignRequest {
@@ -315,6 +327,7 @@ mod tests {
             },
             SignResult::EcdhSecret { shared: [7u8; 32] },
             SignResult::Pubkey { pubkey: pk, xonly },
+            SignResult::IssuedSecret { sk: [8u8; 32] },
             SignResult::Error {
                 kind: SignErrorKind::PolicyRefused,
                 message: "seq regression".to_string(),
