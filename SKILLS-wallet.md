@@ -137,6 +137,8 @@ The balance shown by `balance` is computed locally from the validated chain; it 
 
 For deeper verification (per-update TLV breakdown, BIP-340 signature check, content_hash recomputation, cosignature linkage), see [SKILLS-protocol.md](SKILLS-protocol.md).
 
+**Operator pubkey vs. event publisher pubkey.** When an operator runs with a separate signer ([SIGNER.md](SIGNER.md)), the daemon's *Nostr publisher* pubkey is structurally distinct from the operator's *protocol* pubkey. Kind 9100 / 39100 events are published under the Nostr pubkey; the operator's protocol pubkey appears in the event's *content* (e.g. the advertisement's `operator_id` field, or a ledger update's `operator_id`). When the wallet verifies `operator_signature`, it always uses the *protocol* pubkey from content — not the event's outer `pubkey`. Wallets that filter or subscribe by the operator's npub will need to use the publisher pubkey for that, and the protocol pubkey for trust assertions. (Today's wallets treat them as the same; the depositor-facing protocol update is staged, not yet shipped.)
+
 ---
 
 ## 7. When things go wrong

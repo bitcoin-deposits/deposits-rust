@@ -102,6 +102,10 @@ The web explorer's per-update view does all three client-side. For offline verif
 
 **Tagged hashes.** Some signatures use BIP-340 tagged hashes (e.g. invoice cosign). Tag string matters; it's a domain separator. Don't roll your own with the wrong tag.
 
+**Where signatures come from doesn't affect verification.** Production operators may run `deposits-signer` as a separate process (see [SIGNER.md](SIGNER.md)); the daemon talks to it over a Unix socket and never holds the operator-protocol secret. Receivers see only the resulting BIP-340 sig and verify against the operator's pubkey from the ledger — the wire protocol is unchanged. `deposits-signer-api::Signer` is the trait through which every protocol-level operator/cosign sig flows in the daemon.
+
+**Operator pubkey vs. Nostr publisher pubkey.** When an operator runs with a separate signer, the daemon holds a *Nostr identity* secret distinct from the operator-protocol key (sibling derivation at `m/85'/0'/0'/0/0` vs `m/86'/0'/0'/0/0`). Kind 9100 / 39100 events are published under the Nostr pubkey; the operator's protocol pubkey appears in event *content* (e.g. `LedgerOpen.operator_id`, advertisement content). Verifiers should always check `operator_signature` against the operator pubkey from the ledger, not the event's outer `pubkey`.
+
 ---
 
 ## 6. Cosignatures and member ledgers
@@ -241,6 +245,10 @@ The 2026-05 addition of `quorum_member_ledger_ids` (commit 61faf99) is a worked 
 | Reserves UTXO + Tapscript | `deposits-core/src/reserves.rs` |
 | Web explorer (the forensic UI) | `deposits-web/explorer/` |
 | Decoding helpers | `deposits-tools/bin/decode-update.py`, `replay-ledger.sh` |
+| Signer trait + role/purpose taxonomy | `deposits-signer-api/src/` |
+| Out-of-process signer binary | `deposits-signer/src/` |
+| RemoteSigner client (daemon side) | `deposits-node/src/remote_signer.rs` |
+| Signer reference + operator runbook | [SIGNER.md](SIGNER.md) |
 
 ---
 

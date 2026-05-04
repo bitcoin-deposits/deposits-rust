@@ -8,11 +8,12 @@ For full runbooks, [OPERATIONS.md](deposits-tools/OPERATIONS.md) covers regtest 
 
 ## 1. What an operator runs
 
-An operator is the long-running daemon (`deposits-node run`) plus a few sidecars. Three boxes of state live behind it:
+An operator is the long-running daemon (`deposits-node run`) plus a few sidecars. Boxes of state behind it:
 
-- **The seed.** The single non-reconstructible secret. Everything else can be rebuilt from `seed + relay`.
+- **The seed.** The single non-reconstructible secret. Everything else can be rebuilt from `seed + relay`. In a production deployment the seed lives inside `deposits-signer` (see §6), not on the daemon's filesystem; in regtest / single-host setups it's on the daemon.
 - **`data-dir/`.** Local cache: ledger state, BDK wallet, persisted indexes. Rebuildable from the seed + relay (slow), but worth backing up.
 - **The LDK sidecar.** A separate container running `ldk-server-cli` for invoice creation and Lightning payments.
+- **`deposits-signer` (optional, recommended for mainnet).** A separate process holding the operator seed. Daemon talks to it over a Unix socket; daemon's host never holds the operator-protocol secret. See §6 for operating it; full reference in [SIGNER.md](SIGNER.md).
 
 Plus two relays the operator talks to: a **ledgers relay** (durable, port 17779 — the source of truth for ledger state) and a **messaging relay** (ephemeral, port 17780 — for wallet ↔ operator request/response). The Docker image bundles both via strfry so an operator can self-host.
 
@@ -82,7 +83,46 @@ The daemon shells out to `ldk-server-cli` for invoice creation, Lightning paymen
 
 ---
 
-## 6. Quorum lifecycle
+## 6. The signer (out-of-process)
+
+`deposits-signer` is a separate process that holds the operator seed. The daemon talks to it over a Unix socket; the daemon's host filesystem never sees the operator-protocol secret. Anti-equivocation policy on the signer side refuses to sign two updates at the same `seq` — the safety net that makes hot-spare daemon configurations viable. Full reference: [SIGNER.md](SIGNER.md).
+
+**Why use it:** if your daemon process gets compromised, the attacker walks away with a Nostr identity key (annoying, fixable) instead of the operator key (slashable, catastrophic). On regtest / single-host you can skip it; on mainnet you should always run it.
+
+**Two seeds, structurally distinct:**
+
+- **Operator key** at `m/86'/0'/0'/0/0` — protocol-level signs (operator_signature, cosignatures, invoice cosigns, attestations). Lives only in the signer.
+- **Nostr identity** at `m/85'/0'/0'/0/0` — event signing, NIP-04 ECDH. Issued to the daemon at startup; daemon holds it locally.
+
+**Bring-up:**
+
+```bash
+# Init signer with the seed; print the signer's transport pubkey.
+deposits-signer init --data-dir /var/lib/dsigner --seed-file /run/seed
+# → signer transport pubkey: dsig…
+
+# Start the daemon, pin the signer's pubkey, point at the socket.
+deposits-node run --signer-pubkey <dsig hex> \
+                  --signer-socket /run/dsigner.sock \
+                  ...
+# Daemon prints its own transport pubkey on first connect.
+
+# Allowlist the daemon on the signer side, then start the signer.
+deposits-signer trust add --data-dir /var/lib/dsigner <node hex>
+deposits-signer run --data-dir /var/lib/dsigner --socket /run/dsigner.sock
+```
+
+Pinning is mutual + explicit (no TOFU). The daemon's `--signer-pubkey` flag pins the signer's transport pubkey; the signer's allowlist names the daemon's. Either side rejecting the handshake means the wrong process is on the other end.
+
+**Anti-equivocation policy.** The signer maintains a `(ledger_id, role) → max_seq` store at `<data-dir>/anti_equivocation.json`. Every operator-update or cosign-update sign request that would regress or repeat its `seq` is refused with `SignerError::PolicyRefused`. The daemon's logs will surface this; if you see it during normal operation, something is racing or duplicating sign work.
+
+**Current limit.** `Node::new` today still takes a `SecretKey` and constructs a `LocalSigner` internally; the `RemoteSigner` wiring is exercised by `deposits-node/tests/remote_signer_e2e.rs` but the production CLI path doesn't yet have `--signer-pubkey` / `--signer-socket` flags. Tracked in `PLAN-remote-signer.md` as the next-step follow-up. Until then: `deposits-signer` is plumbed end-to-end and integration-testable, but a real mainnet deployment runs the seed on the daemon's host.
+
+**Backups.** The signer's seed is the only non-reconstructible secret; back it up like the daemon's seed today (multiple media, multiple physical locations). The signer's `transport_secret` is fine to lose — `init` regenerates it; you re-pin the new pubkey at the daemon and re-add it to the allowlist.
+
+---
+
+## 7. Quorum lifecycle
 
 The five-phase loop, in order:
 
@@ -98,7 +138,7 @@ The five-phase loop, in order:
 
 ---
 
-## 7. Cosign duties and common failures
+## 8. Cosign duties and common failures
 
 When you're a cosigner on someone else's ledger:
 
@@ -118,7 +158,7 @@ If you see this in production, walk the three in order before assuming a deeper 
 
 ---
 
-## 8. Dispute response
+## 9. Dispute response
 
 Disputes are automated end-to-end; an operator's job is to not trigger one. But you'll watch them happen on ledgers you cosign.
 
@@ -137,7 +177,7 @@ Disputes are automated end-to-end; an operator's job is to not trigger one. But 
 
 ---
 
-## 9. Monitoring
+## 10. Monitoring
 
 Per memory: `reference_perf_observability.md`.
 
@@ -154,11 +194,17 @@ Watch:
 
 ---
 
-## 10. Recovery scenarios
+## 11. Recovery scenarios
 
 **Lost `data-dir` but seed is safe.** Restart with the same seed; the daemon rebuilds state from the relay. Slow but complete.
 
-**Lost seed.** Catastrophic. There's no operator-side recovery; collateral is forfeit, depositors will go through the dispute lottery. Back it up to multiple media in multiple physical locations.
+**Lost seed.** Catastrophic. There's no operator-side recovery; collateral is forfeit, depositors will go through the dispute lottery. Back it up to multiple media in multiple physical locations. If you're running with a separate signer (§6), the seed lives in `<signer-data-dir>/seed`, not the daemon's data-dir — back up *that* file.
+
+**Daemon process compromise (signer running separately).** Attacker gets the Nostr identity key (event signing, NIP-04 ECDH for inbound DMs to the Nostr pubkey). They can spam fake events from the daemon's Nostr pubkey and decrypt past inbound DMs. They cannot produce protocol-level operator signatures or cosignatures — those flow through the signer, which is a separate process they don't control. Mitigation: rotate the daemon's host, regenerate the Nostr identity (re-derive on a new seed if the daemon's filesystem leaked the cached Nostr key), restart against the same signer. The operator's collateral and ledgers are untouched.
+
+**Daemon process compromise (no signer, single-host setup).** Attacker has the operator seed. Same blast radius as a stolen private key — they can sign protocol-level updates as the operator, drain reserves via co-signers if they can also subvert them, etc. There is no in-band recovery; you re-key by publishing a fresh `LedgerOpen` from a new seed, but every existing ledger backed by the compromised key is lost. **This is exactly why running the signer separately matters for mainnet.**
+
+**Signer process compromise.** Catastrophic — same as "lost seed" above. The signer's host is the trust root; treat it accordingly (separate machine, hardened OS, restricted egress, ideally an HSM-adjacent host).
 
 **Operator's UTXO node is compromised.** The operator can't unilaterally move funds — Tier 0 spending requires majority cosigners. But they can stall, denying cosign requests, until `quorum_expiry`. Cosigners then dispute via `QuorumExpired` (respectful path).
 
@@ -168,7 +214,7 @@ Watch:
 
 ---
 
-## 11. Code map for operators
+## 12. Code map for operators
 
 | Concern | Path |
 |---|---|
@@ -179,14 +225,18 @@ Watch:
 | Inbound fan-in | `deposits-node/src/node/inbound.rs` |
 | Wallet integration (BDK + UTXO ops) | `deposits-node/src/node/wallet.rs` |
 | LDK glue | `deposits-node/src/lightning/`, `deposits-tools/bin/ldk-cli-wrapper.sh` |
+| Signer client (RemoteSigner + connect/handshake) | `deposits-node/src/remote_signer.rs` |
+| Signer trait + LocalSigner reference impl | `deposits-signer-api/src/` |
+| Signer binary (init, trust, run, anti-equivocation) | `deposits-signer/src/` |
 | Operator policies | `deposits-tools/permissive-write-policy.py`, `secrets/operator_policy.json` |
 | Bring-up scripts | `deposits-tools/bin/setup.sh`, `start-operators.sh`, `redeploy.sh` |
 | Mainnet runbook | [MAINNET_DEPLOYMENT.md](MAINNET_DEPLOYMENT.md) |
 | Regtest runbook | [OPERATIONS.md](deposits-tools/OPERATIONS.md) |
+| Out-of-process signer reference | [SIGNER.md](SIGNER.md) |
 
 ---
 
-## 12. Useful one-liners
+## 13. Useful one-liners
 
 ```bash
 # Status across all containerised operators
@@ -209,4 +259,13 @@ docker exec alice deposits-node quorum begin <ledger_id>
 
 # Inspect the outbox of a stuck node
 docker exec alice deposits-node debug outbox --ledger <ledger_id>
+
+# Signer: print transport pubkey for paste into --signer-pubkey
+deposits-signer pubkey --data-dir /var/lib/dsigner
+
+# Signer: list allowlisted node pubkeys
+deposits-signer trust list --data-dir /var/lib/dsigner
+
+# Signer: dump anti-equivocation state (max seq per ledger/role)
+cat /var/lib/dsigner/anti_equivocation.json | jq
 ```
