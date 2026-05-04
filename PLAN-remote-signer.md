@@ -265,29 +265,20 @@ trait extensions:
       sighash routed through the Signer. ~200-400 LoC of BDK glue;
       separable from the rest of the work.
 
-  - **Cluster 3 (nostr.rs)** — documented blocker, no migration yet.
-    - **Event signing** (`sign_with_keys(&self.keys)`, ~30 sites) can be
-      replaced by computing the event id, calling `signer.bip340_sign`,
-      and using `UnsignedEvent::add_signature(sig)` — straightforward.
-      Or by implementing `nostr_sdk::NostrSigner` on a delegate.
-    - **NIP-04 encrypt/decrypt** (`nip04::encrypt(self.keys.secret_key(),
-      peer, ...)`, ~12 sites) is the **load-bearing blocker**. NIP-04
-      derives its symmetric key by taking the *raw X coordinate* of the
-      ECDH shared point (`ecdh::shared_secret_point` followed by
-      truncation to 32 bytes) — **not** the SHA-256-hashed
-      `SharedSecret` value our `Signer::ecdh` currently returns. They
-      are different bytes; using the wrong one produces unreadable
-      ciphertext.
-    - **Path forward:** add a new trait method
-      `Signer::shared_secret_point(peer) -> [u8; 32]` returning the raw
-      X coord, alongside the existing `ecdh()`. LocalSigner implements
-      it via `bitcoin::secp256k1::ecdh::shared_secret_point`; RemoteSigner
-      adds a new `SignOp::SharedPoint` variant on the wire; `deposits-signer`
-      dispatches it. Once that lands, the NIP-04 sites migrate
-      mechanically and `nostr.rs` can drop the `Keys::new(secret_key)`
-      construction. (NIP-44 uses a different scheme — HKDF over the
-      compressed point — and would need its own method or a unified
-      `shared_point_compressed`. NIP-44 is feature-gated; optional v2.)
+  - **Cluster 3 (nostr.rs)** — resolved via sibling-derived Nostr secret.
+    The `Signer::shared_secret_point` extension was avoided in favor of
+    the simpler "signer hands the daemon a separate Nostr identity key"
+    approach: signer derives at `m/85'/0'/0'/0/0`, daemon fetches via
+    `SignOp::IssueNostrSecret` and holds it locally. NIP-04 sites
+    continue to use `nip04::encrypt(self.keys.secret_key(), ...)` —
+    `self.keys.secret_key()` is now the Nostr key (not the operator
+    key), so the raw-X ECDH still happens against the right secret;
+    the operator key never touches NIP-04. The Nostr publisher pubkey
+    no longer matches the operator's protocol pubkey, which is a
+    depositor-facing wallet protocol update (advertisement content
+    carries the operator pubkey separately; depositors encrypt DMs
+    to the event's `pubkey`). `DepositsHandler.secret_key` removed
+    in the same change.
 
 ### Trait-shape refinements from the audit
 
