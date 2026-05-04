@@ -23,6 +23,7 @@
 //!    into the signer (phase-6+), this gets stronger.
 
 mod local;
+pub mod wire;
 
 pub use local::LocalSigner;
 
