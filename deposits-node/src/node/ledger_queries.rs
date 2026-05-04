@@ -961,6 +961,7 @@ impl Node {
             // We commit those mutations only after the rotation is
             // confirmed *and* the QuorumBegin op has applied.
             let (result, legacy, pending) = self.wallet.build_rotation_to_taproot(
+                &*self.handler.signer,
                 quorum_members.clone(),
                 quorum_expiries.clone(),
                 ledger_hash,

@@ -1044,6 +1044,7 @@ impl Wallet {
     /// simply rebuild from the same source UTXO.
     pub fn build_rotation_to_taproot(
         &self,
+        signer: &dyn deposits_signer_api::Signer,
         quorum_members: Vec<PublicKey>,
         member_expiries: Vec<u32>,
         ledger_hash: [u8; 32],
@@ -1128,10 +1129,18 @@ impl Wallet {
             )
             .map_err(|e| Error::Wallet(format!("Failed to compute sighash: {:?}", e)))?;
 
-        // Sign with operator's key
-        let secp = Secp256k1::new();
-        let msg = bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
-        let sig = secp.sign_ecdsa(&msg, &self.operator_secret);
+        // Sign with operator's key via the Signer (legacy P2WSH single-sig
+        // path, OP_ELSE branch). RemoteSigner / anti-equivocation policy
+        // sees this as no_ledger(OnchainSighash) — the rotation TX itself
+        // doesn't carry a seq commitment.
+        let sig = signer
+            .ecdsa_sign_sighash(
+                &deposits_signer_api::SignContext::no_ledger(
+                    deposits_signer_api::SigPurpose::OnchainSighash,
+                ),
+                &sighash.to_byte_array(),
+            )
+            .map_err(|e| Error::Wallet(format!("rotation sighash sign: {}", e)))?;
         let ecdsa_sig = EcdsaSignature::sighash_all(sig);
 
         // Build the witness for P2WSH single-sig (OP_ELSE branch)
@@ -1765,22 +1774,19 @@ impl Wallet {
     /// or None if we're not a voter.
     pub fn sign_custody_transfer_sighash(
         &self,
+        signer: &dyn deposits_signer_api::Signer,
         sighash: &[u8; 32],
     ) -> Result<Option<[u8; 64]>, Error> {
-        use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
-
-        let secp = Secp256k1::new();
-        let msg = Message::from_digest(*sighash);
-
-        // Create keypair for Schnorr signing
-        let keypair = Keypair::from_secret_key(&secp, &self.operator_secret);
-
-        // Sign with Schnorr (BIP-340)
-        let sig = secp.sign_schnorr(&msg, &keypair);
-
-        let mut sig_bytes = [0u8; 64];
-        sig_bytes.copy_from_slice(sig.as_ref());
-
+        // Custody transfer Tapscript script-spend — same OnchainSighash
+        // bucket as the rotation path.
+        let sig_bytes = signer
+            .bip340_sign(
+                &deposits_signer_api::SignContext::no_ledger(
+                    deposits_signer_api::SigPurpose::OnchainSighash,
+                ),
+                sighash,
+            )
+            .map_err(|e| Error::Wallet(format!("custody transfer sighash sign: {}", e)))?;
         Ok(Some(sig_bytes))
     }
 
@@ -1851,6 +1857,7 @@ impl Wallet {
     /// use the individual create/sign/finalize methods to coordinate signatures.
     pub fn execute_custody_transfer(
         &self,
+        signer: &dyn deposits_signer_api::Signer,
         destination_address: Address,
         fee_rate: u64,
     ) -> Result<DisputeAcquireResult, Error> {
@@ -1870,7 +1877,7 @@ impl Wallet {
 
         // Sign with our key
         let our_sig = self
-            .sign_custody_transfer_sighash(&spend.sighash)?
+            .sign_custody_transfer_sighash(signer, &spend.sighash)?
             .ok_or_else(|| Error::Wallet("Failed to sign".to_string()))?;
 
         // For a proper custody transfer, we need 2 signatures (Tier 2 threshold)
