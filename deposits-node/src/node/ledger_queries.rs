@@ -1153,9 +1153,10 @@ impl Node {
         );
         let offer_id = DepositOffer::compute_offer_id(&signing_message);
 
-        // Sign the offer
-        let signature = deposits_core::create_deposit_offer_signature(
-            &self.wallet.operator_secret(),
+        // Sign the offer through the Signer (digest construction stays in
+        // deposits-core; signing goes through the trait so RemoteSigner /
+        // anti-equivocation policy can intercept).
+        let offer_digest = deposits_core::signing::deposit_offer_signing_digest(
             &self.node_id,
             ledger_id,
             &deposit_id,
@@ -1163,8 +1164,17 @@ impl Node {
             max_amount_sats,
             min_amount_sats,
             deadline_block,
-        )
-        .map_err(|e| Error::Protocol(format!("Failed to sign offer: {:?}", e)))?;
+        );
+        let signature = self
+            .handler
+            .signer
+            .bip340_sign(
+                &deposits_signer_api::SignContext::no_ledger(
+                    deposits_signer_api::SigPurpose::DepositOffer,
+                ),
+                &offer_digest,
+            )
+            .map_err(|e| Error::Protocol(format!("Failed to sign offer: {}", e)))?;
 
         // Create the offer
         let offer = DepositOffer {

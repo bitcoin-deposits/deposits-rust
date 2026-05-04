@@ -201,10 +201,7 @@ pub fn create_deposit_offer_signature(
     min_amount_sats: u64,
     deadline_block: u32,
 ) -> Result<[u8; 64], DepositsError> {
-    use crate::types::DepositOffer;
-
-    // Create the canonical signing message
-    let signing_message = DepositOffer::signing_message(
+    let message_hash = deposit_offer_signing_digest(
         operator_id,
         ledger_id,
         deposit_id,
@@ -214,14 +211,7 @@ pub fn create_deposit_offer_signature(
         deadline_block,
     );
 
-    // Hash the message
-    let message_hash = sha256::Hash::hash(signing_message.as_bytes());
-    let secp_message = Message::from_digest_slice(message_hash.as_ref()).map_err(|_| {
-        DepositsError::ProtocolViolation {
-            violation_type: "invalid_message_hash".to_string(),
-            details: "Failed to create secp256k1 message from hash".to_string(),
-        }
-    })?;
+    let secp_message = Message::from_digest(message_hash);
 
     // Sign the message with Schnorr (BIP-340)
     let secp = Secp256k1::signing_only();
@@ -229,6 +219,34 @@ pub fn create_deposit_offer_signature(
     let signature = secp.sign_schnorr_no_aux_rand(&secp_message, &keypair);
 
     Ok(signature.serialize())
+}
+
+/// Build the 32-byte digest a deposit-offer signature commits to.
+///
+/// Splitting the digest construction out of [`create_deposit_offer_signature`]
+/// lets daemon-path callers feed the digest into a `Signer` (e.g. the
+/// remote-signer abstraction in `deposits-signer-api`) instead of reaching
+/// for the raw operator secret.
+pub fn deposit_offer_signing_digest(
+    operator_id: &PublicKey,
+    ledger_id: &str,
+    deposit_id: &crate::types::DepositId,
+    funding_address: &str,
+    max_amount_sats: u64,
+    min_amount_sats: u64,
+    deadline_block: u32,
+) -> [u8; 32] {
+    use crate::types::DepositOffer;
+    let signing_message = DepositOffer::signing_message(
+        operator_id,
+        ledger_id,
+        deposit_id,
+        funding_address,
+        max_amount_sats,
+        min_amount_sats,
+        deadline_block,
+    );
+    sha256::Hash::hash(signing_message.as_bytes()).to_byte_array()
 }
 
 /// Verify a deposit offer signature
