@@ -49,6 +49,7 @@ pub mod node;
 pub mod node_cli;
 pub mod nostr;
 pub mod operator_policy;
+pub mod remote_signer;
 // deposits-node/src/cli was split: nostr_commands + recovery moved to
 // node_cli/; handlers.rs was dead code (zero callers) and got deleted.
 pub mod wallet;

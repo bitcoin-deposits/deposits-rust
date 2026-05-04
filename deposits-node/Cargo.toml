@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 # Core protocol logic
 deposits-core = { path = "../deposits-core" }
 deposits-signer-api = { path = "../deposits-signer-api" }
+deposits-signer = { path = "../deposits-signer" }
 
 # Bitcoin
 bitcoin = { version = "0.32", features = ["serde"] }
