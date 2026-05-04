@@ -350,6 +350,21 @@ async fn noble_curves_js() -> ([(axum::http::HeaderName, &'static str); 1], &'st
     )
 }
 
+/// GET /shared.js
+///
+/// ES module of helpers shared across the explorer pages — TLV
+/// decoder, QuorumBegin/QuorumAddMember derivers, content_hash search.
+/// Bundled at compile time alongside the HTML.
+async fn shared_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        SHARED_JS,
+    )
+}
+
 const EXPLORER_LEDGER_HTML: &str =
     include_str!("../../../deposits-web/explorer/ledger.html");
 const EXPLORER_OVERVIEW_HTML: &str =
@@ -360,6 +375,8 @@ const TLV_CATALOG_JS: &str =
     include_str!("../../../deposits-web/wallet/tlv-catalog.js");
 const NOBLE_CURVES_JS: &str =
     include_str!("../../../deposits-web/wallet/vendor/noble-curves-secp256k1.js");
+const SHARED_JS: &str =
+    include_str!("../../../deposits-web/explorer/shared.js");
 
 /// GET /.well-known/lnurlp/<deposit_pubkey>
 ///
@@ -1047,6 +1064,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/explorer", get(explorer_overview))
         .route("/update", get(explorer_update))
         .route("/tlv-catalog.js", get(tlv_catalog_js))
+        .route("/shared.js", get(shared_js))
         .route("/vendor/noble-curves-secp256k1.js", get(noble_curves_js))
         .with_state(state);
 

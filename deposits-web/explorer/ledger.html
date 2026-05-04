@@ -281,6 +281,7 @@
 
 <script type="module">
 import { OP_NAMES } from './tlv-catalog.js';
+import { fetchCosignerLedgerMap } from './shared.js';
 
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
@@ -405,7 +406,7 @@ function opCategory(name) {
 function opName(disc) { return OP_NAMES[Number(disc)] || `op(${disc})`; }
 function tagValue(event, name) { const t = event.tags?.find(t => t[0] === name); return t ? t[1] : null; }
 
-function renderOverview(ad) {
+function renderOverview(ad, cosignerLedgers) {
   const el = document.getElementById('overview-body');
   if (!ad) {
     el.innerHTML = `<div class="empty err">No advertisement found for this ledger on
@@ -458,12 +459,22 @@ function renderOverview(ad) {
         <h3>quorum (${ad.quorum_members?.length || 0})</h3>
         ${ad.quorum_members?.length ? `
           <div class="quorum-list">
-            ${ad.quorum_members.map((m, i) => `
-              <div class="quorum-item">
-                <span class="quorum-num">${i + 1}.</span>
-                <span class="quorum-pk">${escapeHtml(m)}</span>
-              </div>
-            `).join('')}
+            ${ad.quorum_members.map((m, i) => {
+              // Member's pubkey on the ad is 33-byte compressed (66
+              // hex). Look up their member_ledger_id; link to it when
+              // we found one. Until we have an operator view, we just
+              // hop to that operator's ledger detail.
+              const lid = cosignerLedgers?.get(m);
+              const pkSpan = lid
+                ? `<a class="quorum-pk" href="/ledger#ledger=${encodeURIComponent(lid)}&relay=${encodeURIComponent(RELAY_URL)}" style="color:var(--accent);text-decoration:none;">${escapeHtml(m)}</a>`
+                : `<span class="quorum-pk">${escapeHtml(m)}</span>`;
+              return `
+                <div class="quorum-item">
+                  <span class="quorum-num">${i + 1}.</span>
+                  ${pkSpan}
+                </div>
+              `;
+            }).join('')}
           </div>
         ` : `<div class="big-sub">no members listed (legacy ad or pre-QuorumBegin)</div>`}
       </div>
@@ -527,9 +538,14 @@ async function main() {
   const adFilter = { kinds: [39100], '#d': [ledgerId], limit: 1 };
   const updateFilter = { kinds: [9100], '#d': [ledgerId.slice(0, 16)], limit: 30 };
 
-  const [adEvents, updateEvents] = await Promise.all([
+  // Quorum members on the ad are bare pubkey hex; fetch the
+  // pubkey → member_ledger_id map alongside so each member entry
+  // can link to that operator's own ledger detail (we don't yet
+  // have a dedicated operator view).
+  const [adEvents, updateEvents, cosignerLedgers] = await Promise.all([
     nostrFetch(RELAY_URL, adFilter),
     nostrFetch(RELAY_URL, updateFilter),
+    fetchCosignerLedgerMap(RELAY_URL, ledgerId.slice(0, 16)),
   ]);
 
   let ad = null;
@@ -537,7 +553,7 @@ async function main() {
     adEvents.sort((a, b) => b.created_at - a.created_at);
     try { ad = JSON.parse(adEvents[0].content); } catch {}
   }
-  renderOverview(ad);
+  renderOverview(ad, cosignerLedgers);
   renderActivity(updateEvents);
 }
 

@@ -283,14 +283,12 @@
 <script type="module">
 import { OP_NAMES, FIELD_NAMES } from './tlv-catalog.js';
 import { schnorr } from './vendor/noble-curves-secp256k1.js';
+import {
+  getParam, bytesToHex, b64ToBytes, nostrFetch, parseTlv,
+  computeContentHash, fetchCosignerLedgerMap, findEventByContentHash,
+} from './shared.js';
 
-// ── helpers ─────────────────────────────────────────────────────
-
-function getParam(name) {
-  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-  if (hashParams.has(name)) return hashParams.get(name);
-  return new URLSearchParams(window.location.search).get(name);
-}
+// ── page-specific helpers (most are imported from ./shared.js) ──
 
 const RELAY_URL =
   getParam('relay')
@@ -303,67 +301,12 @@ function escapeHtml(s) {
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 }
 
-function bytesToHex(buf) {
-  return [...buf].map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-function b64ToBytes(s) {
-  return Uint8Array.from(atob(s), c => c.charCodeAt(0));
-}
-
 async function sha256(buf) {
   const h = await crypto.subtle.digest('SHA-256', buf);
   return new Uint8Array(h);
 }
 
 function utf8(s) { return new TextEncoder().encode(s); }
-
-function nostrFetch(relayUrl, filter, { timeoutMs = 8000 } = {}) {
-  return new Promise((resolve) => {
-    const events = [];
-    let ws;
-    try { ws = new WebSocket(relayUrl); }
-    catch { resolve([]); return; }
-    const subId = 'q' + Math.random().toString(36).slice(2, 8);
-    const finish = () => { try { ws.close(); } catch {} clearTimeout(timer); resolve(events); };
-    const timer = setTimeout(finish, timeoutMs);
-    ws.onopen = () => ws.send(JSON.stringify(['REQ', subId, filter]));
-    ws.onmessage = (msg) => {
-      try {
-        const d = JSON.parse(msg.data);
-        if (d[0] === 'EVENT' && d[1] === subId) events.push(d[2]);
-        else if (d[0] === 'EOSE' && d[1] === subId) finish();
-      } catch {}
-    };
-    ws.onerror = finish;
-    ws.onclose = finish;
-  });
-}
-
-// ── Bitcoin VarInt (Compact Size) ──────────────────────────────────
-function readVarint(buf, off) {
-  const b = buf[off];
-  if (b < 0xfd) return [b, off + 1];
-  if (b === 0xfd) return [(buf[off+1] << 8) | buf[off+2], off + 3];
-  if (b === 0xfe) return [(buf[off+1] << 24) | (buf[off+2] << 16) | (buf[off+3] << 8) | buf[off+4], off + 5];
-  let val = 0; for (let i = 0; i < 8; i++) val = val * 256 + buf[off + 1 + i];
-  return [val, off + 9];
-}
-
-// ── TLV parser (matches deposits-protocol's wire encoding) ─────────
-function parseTlv(buf) {
-  const records = [];
-  let off = 0;
-  while (off < buf.length) {
-    const startOff = off;
-    const [type_, o1] = readVarint(buf, off);
-    const [len, o2] = readVarint(buf, o1);
-    const value = buf.slice(o2, o2 + len);
-    records.push({ type: type_, value, off: startOff, headerLen: o2 - startOff });
-    off = o2 + len;
-  }
-  return records;
-}
 
 // ── interpret a TLV value ──────────────────────────────────────────
 //
@@ -540,120 +483,6 @@ function renderUpdateFields(records, hashOk) {
     </div>`;
 }
 
-// Decode a QuorumBegin op's `quorum_members` (tag 6, concat of 33-byte
-// compressed pubkeys) and the parallel `QUORUM_MEMBER_LEDGER_IDS`
-// (tag 276, length-prefixed strings). Returns Map<pubkey_hex, ledger_id>.
-// Empty map if the op is older and doesn't carry the ledger_id field.
-function decodeQuorumBeginMembers(opBytes) {
-  const out = new Map();
-  let inner;
-  try { inner = parseTlv(opBytes); } catch { return out; }
-  // Sanity: discriminant (tag 0) should be 12 (QuorumBegin).
-  const disc = inner.find(r => r.type === 0);
-  if (!disc || disc.value.length !== 1 || disc.value[0] !== 12) return out;
-
-  const membersField = inner.find(r => r.type === 6);
-  if (!membersField) return out;
-  // 33 bytes per pubkey
-  const pubkeys = [];
-  let off = 0;
-  while (off + 33 <= membersField.value.length) {
-    pubkeys.push(bytesToHex(membersField.value.slice(off, off + 33)));
-    off += 33;
-  }
-  // Tag 276: parallel array of ledger_ids, each `u8 len || bytes`.
-  // Absent on older ops — pubkeys then map to empty strings.
-  const lidsField = inner.find(r => r.type === 276);
-  const ledgerIds = [];
-  if (lidsField) {
-    let loff = 0;
-    while (loff < lidsField.value.length) {
-      const len = lidsField.value[loff];
-      loff += 1;
-      if (loff + len > lidsField.value.length) break;
-      const lid = new TextDecoder().decode(lidsField.value.slice(loff, loff + len));
-      ledgerIds.push(lid);
-      loff += len;
-    }
-  }
-  pubkeys.forEach((pk, i) => out.set(pk, ledgerIds[i] || ''));
-  return out;
-}
-
-// Decode a QuorumAddMember op: returns [pubkey_hex, ledger_id] or null.
-// Used as the fallback derivation path when the ledger's QuorumBegin
-// predates QUORUM_MEMBER_LEDGER_IDS (tag 276) and so doesn't carry the
-// pairing inline. Each QuorumAddMember TLV holds:
-//   tag 0   = discriminant (must be 43)
-//   tag 44  = quorum_member (33-byte compressed pubkey)
-//   tag 114 = member_ledger_id (string)
-function decodeQuorumAddMember(opBytes) {
-  let inner;
-  try { inner = parseTlv(opBytes); } catch { return null; }
-  const disc = inner.find(r => r.type === 0);
-  if (!disc || disc.value.length !== 1 || disc.value[0] !== 43) return null;
-  const pkRec = inner.find(r => r.type === 44);
-  const lidRec = inner.find(r => r.type === 114);
-  if (!pkRec || pkRec.value.length !== 33 || !lidRec) return null;
-  let lid;
-  try { lid = new TextDecoder('utf-8', { fatal: false }).decode(lidRec.value); }
-  catch { return null; }
-  return [bytesToHex(pkRec.value), lid];
-}
-
-// Stage-C derivation: build pubkey → member_ledger_id map for the
-// cosigners of this ledger.
-//
-// Two-tier lookup, freshest data wins:
-//   1. Most-recent QuorumBegin's QUORUM_MEMBER_LEDGER_IDS (the new
-//      wire field, populated since 11bc5c0). If a non-empty map
-//      comes back here, we're done.
-//   2. Walk QuorumAddMember ops on this ledger (op-type tag t=43)
-//      and zip pubkey with member_ledger_id.
-//
-// Older ledgers whose QuorumBegin lacks the new field still get a
-// useful answer this way — QuorumAddMember has always carried
-// member_ledger_id, the rotation summary just dropped it.
-async function fetchCosignerLedgerMap(ledgerPrefix) {
-  // Tier 1: QuorumBegin (op-type tag t=12).
-  let events = await nostrFetch(RELAY_URL, {
-    kinds: [9100], '#d': [ledgerPrefix], '#t': ['12'], limit: 5,
-  });
-  events.sort((a, b) => b.created_at - a.created_at);
-  for (const ev of events) {
-    let raw, outer, msg;
-    try {
-      raw = b64ToBytes(ev.content);
-      outer = parseTlv(raw);
-      msg = outer.find(r => r.type === 8)?.value;
-    } catch { continue; }
-    if (!msg) continue;
-    const map = decodeQuorumBeginMembers(msg);
-    if (map.size > 0 && [...map.values()].some(v => v)) return map;
-  }
-
-  // Tier 2: QuorumAddMember ops (op-type tag t=43).
-  const adds = await nostrFetch(RELAY_URL, {
-    kinds: [9100], '#d': [ledgerPrefix], '#t': ['43'], limit: 100,
-  });
-  // Newest-last so a later add overrides an earlier one (covers the
-  // re-add edge case). Sort ascending by created_at.
-  adds.sort((a, b) => a.created_at - b.created_at);
-  const map = new Map();
-  for (const ev of adds) {
-    let raw, outer, msg;
-    try {
-      raw = b64ToBytes(ev.content);
-      outer = parseTlv(raw);
-      msg = outer.find(r => r.type === 8)?.value;
-    } catch { continue; }
-    if (!msg) continue;
-    const pair = decodeQuorumAddMember(msg);
-    if (pair) map.set(pair[0], pair[1]);
-  }
-  return map;
-}
-
 // Parse the multi-cosig (tag 22) blob: each entry is a 2-byte
 // big-endian length prefix followed by `pk(33) || sig(64) || mh(32)`
 // = 129 bytes. Mirrors the wallet's decoder (deposits-web/wallet/index.html).
@@ -719,6 +548,15 @@ function renderCosignatures(records, cosignerLedgers) {
         const lidLink = lid
           ? `<a href="/ledger#ledger=${encodeURIComponent(lid)}&relay=${encodeURIComponent(RELAY_URL)}" style="color:var(--accent);font-family:var(--mono);">${escapeHtml(lid)}</a>`
           : '<span class="muted">(no QuorumBegin or QuorumAddMember on this relay binds this pubkey to a ledger)</span>';
+        // member_ledger_hash → the actual update on the cosigner's
+        // ledger that produced that hash. Links go through /update's
+        // content_hash lookup mode (see main()), which scans the
+        // cosigner's events and redirects to the matching event_id.
+        // Only useful when we know the cosigner's ledger.
+        const mhHex = bytesToHex(e.member_ledger_hash);
+        const mhDisplay = lid
+          ? `<a href="/update#content_hash=${encodeURIComponent(mhHex)}&ledger=${encodeURIComponent(lid)}&relay=${encodeURIComponent(RELAY_URL)}" style="color:var(--accent);">${escapeHtml(mhHex)}</a>`
+          : escapeHtml(mhHex);
         return `
         <div style="margin: ${i === 0 ? '0' : '0.85rem 0 0'}; padding: ${i === 0 ? '0' : '0.85rem 0 0'}; ${i === 0 ? '' : 'border-top: 1px solid var(--border);'}">
           <dl class="kv" style="grid-template-columns: 9rem 1fr;">
@@ -727,7 +565,7 @@ function renderCosignatures(records, cosignerLedgers) {
             <dt>member ledger</dt>
             <dd>${lidLink}</dd>
             <dt>member ledger hash</dt>
-            <dd class="mono">${escapeHtml(bytesToHex(e.member_ledger_hash))}</dd>
+            <dd class="mono">${mhDisplay}</dd>
             <dt>signature</dt>
             <dd class="mono">${escapeHtml(bytesToHex(e.signature))}</dd>
             ${e.extra ? `<dt>trailing bytes</dt><dd class="mono">${escapeHtml(bytesToHex(e.extra))} <span class="muted">(${e.extra.length} bytes — newer fields the explorer doesn't know about yet)</span></dd>` : ''}
@@ -781,53 +619,42 @@ function renderHexDump(label, buf) {
     </div>`;
 }
 
-// ── Compute the SignedLedgerUpdate's content_hash the same way the ──
-// ── operator does (sequence_number || previous_hash || message      ──
-// ── [ || cosignature triples ]).                                    ──
-async function computeContentHash(records) {
-  const get = (t) => records.find(r => r.type === t)?.value;
-
-  const seqRaw = get(4);
-  if (!seqRaw) return null;
-  // seq is stored as 8 bytes; the wallet treats the buffer as a u64
-  // little-endian here. Match that.
-  const seqBytes = new Uint8Array(8);
-  for (let i = 0; i < Math.min(8, seqRaw.length); i++) seqBytes[i] = seqRaw[i];
-
-  const prevHash = get(6) || new Uint8Array(32);
-  const msg = get(8) || new Uint8Array(0);
-
-  const parts = [seqBytes, prevHash, msg];
-
-  const cosigsRaw = get(22);
-  if (cosigsRaw && cosigsRaw.length >= 131) {
-    let cOff = 0;
-    while (cOff + 2 <= cosigsRaw.length) {
-      const entryLen = (cosigsRaw[cOff] << 8) | cosigsRaw[cOff + 1];
-      cOff += 2;
-      if (cOff + entryLen > cosigsRaw.length || entryLen < 129) break;
-      const sig = cosigsRaw.slice(cOff + 33, cOff + 97);
-      const mh = cosigsRaw.slice(cOff + 97, cOff + 129);
-      parts.push(mh); parts.push(sig);
-      cOff += entryLen;
-    }
-  } else {
-    const memberHash = get(16);
-    const cosignSig = get(18) || new Uint8Array(64);
-    if (memberHash) parts.push(memberHash);
-    if (cosignSig.some(b => b !== 0)) parts.push(cosignSig);
-  }
-
-  const total = parts.reduce((s, p) => s + p.length, 0);
-  const all = new Uint8Array(total);
-  let o = 0;
-  for (const p of parts) { all.set(p, o); o += p.length; }
-  return await sha256(all);
-}
-
 // ── main ──────────────────────────────────────────────────────────
 
 async function main() {
+  // Lookup-by-content-hash mode: caller provides `ledger=<hex>` and
+  // `content_hash=<hex>` instead of `event=<id>`. Used by the
+  // cosignatures section to jump from a cosigner's member_ledger_hash
+  // to the actual update on the cosigner's ledger that produced it.
+  // We scan that ledger's recent events, recompute each one's
+  // content_hash, and redirect to the matching event_id form once
+  // found.
+  if (!getParam('event') && getParam('content_hash') && getParam('ledger')) {
+    const targetHash = getParam('content_hash').toLowerCase();
+    const targetLedger = getParam('ledger').toLowerCase();
+    document.getElementById('event-id').textContent = '— resolving content_hash …';
+    document.getElementById('body').innerHTML = `
+      <div class="empty">
+        Looking up which update on
+        <a href="/ledger#ledger=${encodeURIComponent(targetLedger)}&relay=${encodeURIComponent(RELAY_URL)}"
+           style="font-family:var(--mono);color:var(--accent);">${escapeHtml(targetLedger.slice(0, 16))}…</a>
+        has content_hash
+        <span style="font-family:var(--mono);color:var(--fg);">${escapeHtml(targetHash.slice(0, 16))}…</span>
+      </div>`;
+    const found = await findEventByContentHash(RELAY_URL, targetLedger.slice(0, 16), targetHash);
+    if (found) {
+      const params = new URLSearchParams({ event: found, relay: RELAY_URL });
+      window.location.replace(`/update#${params.toString()}`);
+      return;
+    }
+    document.getElementById('body').innerHTML = `
+      <div class="empty err">Couldn't find an update on
+        <span style="font-family:var(--mono)">${escapeHtml(targetLedger.slice(0, 16))}…</span>
+        with content_hash <span style="font-family:var(--mono)">${escapeHtml(targetHash)}</span>
+        on <span style="font-family:var(--mono)">${escapeHtml(RELAY_URL)}</span>.</div>`;
+    return;
+  }
+
   const eventId = getParam('event');
   if (!eventId || eventId.length !== 64 || !/^[0-9a-f]+$/i.test(eventId)) {
     document.getElementById('event-id').textContent = '— missing/invalid event id';
@@ -910,7 +737,7 @@ async function main() {
   // empty map and the cosignatures section says so per row).
   let cosignerLedgers = new Map();
   if (ledgerTagD) {
-    cosignerLedgers = await fetchCosignerLedgerMap(ledgerTagD);
+    cosignerLedgers = await fetchCosignerLedgerMap(RELAY_URL, ledgerTagD);
   }
   html += renderCosignatures(outerRecords, cosignerLedgers);
 
