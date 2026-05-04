@@ -248,6 +248,8 @@ The "older than" check on `member_ledger_hash` is the harder one — the signer 
 ## Open follow-ups (not v1)
 
 - **`member_ledger_hash` freshness on the signer.** Have the signer subscribe to its own ledger relay and refuse cosignature requests committing to a head it doesn't recognize as current.
+- **Node identity ≠ operator identity.** Today the daemon uses the operator's seed-derived key for *everything* on Nostr — outer event signatures, ECDH for NIP-04/44, gift-wrap seals. Of these, only inbound NIP-04 decrypt (clients encrypting Kind 20101 to the operator npub) and the inner `operator_signature` / cosignatures / invoice cosigns *require* the operator key. Outer event sigs and outbound encrypts are convention. A future protocol annex (DEP-04-shaped operator→node-host delegation) would let the daemon sign Nostr outers with its own per-host key and only call the Signer for the genuinely operator-bound ops. Cuts ~80% of Signer round-trips on a busy daemon. Worth doing once RemoteSigner load is real; not before.
+
 - **Hole-punched transport.** Same RPC, different framing. libp2p / NAT traversal is the heavy lift, the wire above it is unchanged.
 - **Hot-spare daemon coordination.** Leader election layer between hot-spare nodes; the signer's seq policy is the safety net, but you don't want to rely on it for steady-state correctness.
 - **Threshold signing.** Different shape entirely; would need a DEP because slashing semantics change. Out of scope here.
