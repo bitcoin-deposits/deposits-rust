@@ -236,6 +236,59 @@ The "older than" check on `member_ledger_hash` is the harder one — the signer 
 | `deposits-node/src/bin/transfer-simulator.rs` | 1 | Standalone tool |
 | `deposits-node/src/bin/nostr-bench.rs` | 1 | Bench harness |
 
+### Phase-3 finish state (post-implementation)
+
+5 of 7 clusters fully migrated, 2 with documented blockers requiring
+trait extensions:
+
+  - **Cluster 1 (handler.rs / ledger_actor.rs)** — done.
+  - **Cluster 2 (dispute / init / ledger_queries)** — done.
+  - **Cluster 1.5 (request_handlers/*)** — done. admin.rs's lock/fulfill
+    sigs deferred (depositor-key derivation, see follow-ups).
+  - **Cluster 5 (deposits-core/signing.rs)** — done for the daemon-path
+    `create_deposit_offer_signature` site; the other helpers
+    (`create_payment_signature`, `create_withdrawal_signature`,
+    `create_deposit_guarantee_signature`, etc.) are called from
+    depositor-side flows in `node_cli/{lightning,withdraw}.rs` that
+    derive depositor keys via the daemon's master seed. Splitting their
+    digests out is mechanical but lands with the keypath-Signer extension.
+
+  - **Cluster 4 (wallet.rs)** — partially done.
+    - The two manual sign sites (`build_rotation_to_taproot` legacy P2WSH
+      ECDSA, `sign_custody_transfer_sighash` Tapscript script-spend) are
+      migrated to take `&dyn Signer` and route through
+      `signer.ecdsa_sign_sighash` / `signer.bip340_sign`.
+    - The four BDK `wallet.sign(&mut psbt)` sites (806, 933, 1281, 1549)
+      remain. **Blocker:** BDK 1.0's `Wallet::sign` finds the secret key
+      via the descriptor's xprv. To migrate, the daemon needs a watch-only
+      descriptor variant + per-input sighash extraction, with each
+      sighash routed through the Signer. ~200-400 LoC of BDK glue;
+      separable from the rest of the work.
+
+  - **Cluster 3 (nostr.rs)** — documented blocker, no migration yet.
+    - **Event signing** (`sign_with_keys(&self.keys)`, ~30 sites) can be
+      replaced by computing the event id, calling `signer.bip340_sign`,
+      and using `UnsignedEvent::add_signature(sig)` — straightforward.
+      Or by implementing `nostr_sdk::NostrSigner` on a delegate.
+    - **NIP-04 encrypt/decrypt** (`nip04::encrypt(self.keys.secret_key(),
+      peer, ...)`, ~12 sites) is the **load-bearing blocker**. NIP-04
+      derives its symmetric key by taking the *raw X coordinate* of the
+      ECDH shared point (`ecdh::shared_secret_point` followed by
+      truncation to 32 bytes) — **not** the SHA-256-hashed
+      `SharedSecret` value our `Signer::ecdh` currently returns. They
+      are different bytes; using the wrong one produces unreadable
+      ciphertext.
+    - **Path forward:** add a new trait method
+      `Signer::shared_secret_point(peer) -> [u8; 32]` returning the raw
+      X coord, alongside the existing `ecdh()`. LocalSigner implements
+      it via `bitcoin::secp256k1::ecdh::shared_secret_point`; RemoteSigner
+      adds a new `SignOp::SharedPoint` variant on the wire; `deposits-signer`
+      dispatches it. Once that lands, the NIP-04 sites migrate
+      mechanically and `nostr.rs` can drop the `Keys::new(secret_key)`
+      construction. (NIP-44 uses a different scheme — HKDF over the
+      compressed point — and would need its own method or a unified
+      `shared_point_compressed`. NIP-44 is feature-gated; optional v2.)
+
 ### Trait-shape refinements from the audit
 
 1. **Add `ecdsa_sign_sighash`** to the `Signer` trait. The legacy P2WSH path in `wallet.rs:1134` needs ECDSA, not BIP-340. Single call site, but it's on the daemon hot path and we can't pretend it isn't there.
