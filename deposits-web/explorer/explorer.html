@@ -135,8 +135,18 @@
     .ledger-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-      gap: 1px;
-      background: var(--border);
+      /* Wider gap (4px) makes the underlying texture readable
+         between tiles. Empty trailing tracks (auto-fill keeps them)
+         show the same texture, so the grid never looks "amputated"
+         when ledger count doesn't fill the row. */
+      gap: 4px;
+      background: repeating-linear-gradient(
+        -45deg,
+        var(--bg-card) 0,
+        var(--bg-card) 14px,
+        var(--bg-elev) 14px,
+        var(--bg-elev) 28px
+      );
     }
     .ledger-tile {
       background: var(--bg-card);

@@ -117,27 +117,6 @@
       color: var(--fg-muted);
     }
 
-    /* Decorative barberpole filler for the dead grid cells trailing
-       the overview cards. Two shades of the existing blue palette —
-       neutral so it reads as "intentionally blank" rather than
-       drawing attention. Spans 2 cells in the typical 4-col layout's
-       empty bottom-right; collapses on narrow viewports. */
-    .barberpole {
-      grid-column: span 2;
-      min-height: 120px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: repeating-linear-gradient(
-        -45deg,
-        var(--bg-card) 0,
-        var(--bg-card) 14px,
-        var(--bg-elev) 14px,
-        var(--bg-elev) 28px
-      );
-    }
-    @media (max-width: 700px) {
-      .barberpole { grid-column: span 1; min-height: 60px; }
-    }
     .kv {
       display: grid;
       grid-template-columns: max-content 1fr;
@@ -467,7 +446,6 @@ function renderOverview(ad) {
           </div>
         ` : `<div class="big-sub">no members listed (legacy ad or pre-QuorumBegin)</div>`}
       </div>
-      <div class="barberpole" aria-hidden="true"></div>
     </div>
   `;
 }
