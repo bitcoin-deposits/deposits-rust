@@ -116,6 +116,30 @@
       font-size: 0.78rem;
       color: var(--fg-muted);
     }
+
+    /* Decorative barberpole filler for the dead grid cells trailing
+       the overview cards. Bitcoin-orange-tinted diagonal stripes on
+       the same dark base as the card row. Spans 2 grid cells so it
+       occupies the typical 4-col / 2-row layout's empty bottom-right;
+       gracefully shrinks at narrower widths. */
+    .barberpole {
+      grid-column: span 2;
+      min-height: 120px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background:
+        repeating-linear-gradient(
+          -45deg,
+          rgba(247, 147, 26, 0.06) 0,
+          rgba(247, 147, 26, 0.06) 14px,
+          transparent 14px,
+          transparent 28px
+        ),
+        var(--bg-card);
+    }
+    @media (max-width: 700px) {
+      .barberpole { grid-column: span 1; min-height: 60px; }
+    }
     .kv {
       display: grid;
       grid-template-columns: max-content 1fr;
@@ -445,6 +469,7 @@ function renderOverview(ad) {
           </div>
         ` : `<div class="big-sub">no members listed (legacy ad or pre-QuorumBegin)</div>`}
       </div>
+      <div class="barberpole" aria-hidden="true"></div>
     </div>
   `;
 }
