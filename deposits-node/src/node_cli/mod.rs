@@ -1053,6 +1053,15 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
         ad.quorum_state = q_state;
         ad.quorum_members = q_members;
 
+        // Refresh runtime-settable fields from the live node config so
+        // an operator who set NODE_NAME (or MAX_DEPOSIT_BALANCE_MSATS)
+        // for the first time after the initial ad-publish doesn't have
+        // their preference silently dropped on every restart.
+        if let Some(name) = node.operator_name() {
+            ad.operator_name = Some(name.to_string());
+        }
+        ad.max_deposit_balance_msats = node.max_deposit_balance_msats();
+
         match node.nostr.publish_ledger_advertisement(&ad).await {
             Ok(_) => {
                 published += 1;

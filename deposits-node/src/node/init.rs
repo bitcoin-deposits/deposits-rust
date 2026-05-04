@@ -195,6 +195,7 @@ impl Node {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0),
+            operator_name: config.operator_name.clone(),
             data_dir: config.data_dir,
             relay_url,
             fast_poll: config.fast_poll,
@@ -251,6 +252,14 @@ impl Node {
     /// only after paying.
     pub fn max_deposit_balance_msats(&self) -> u64 {
         self.max_deposit_balance_msats
+    }
+
+    /// Operator display name (`--name` / `NODE_NAME`). Used by the
+    /// ad-publish path to refresh the name on every republish so an
+    /// operator who set their name after the initial publish doesn't
+    /// have it silently dropped.
+    pub fn operator_name(&self) -> Option<&str> {
+        self.operator_name.as_deref()
     }
 
     /// Lightweight sync: just block height + hash (cheap)

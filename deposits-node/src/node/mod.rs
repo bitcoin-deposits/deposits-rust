@@ -403,6 +403,11 @@ pub struct Node {
     /// Loaded from MAX_DEPOSIT_BALANCE_MSATS env var.
     max_deposit_balance_msats: u64,
 
+    /// Operator display name from `--name` / `NODE_NAME`. Surfaced on
+    /// the ledger advertisement so wallets / explorer label this
+    /// operator with something more readable than the hex pubkey.
+    operator_name: Option<String>,
+
     /// Data directory for persistence
     data_dir: PathBuf,
 
