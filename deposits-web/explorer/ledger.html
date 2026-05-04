@@ -238,6 +238,27 @@
       <a href="/ledger" class="active">ledger</a>
     </div>
   </nav>
+  <script>
+    // When the page is loaded on a `<bech32-or-hex>.ledger.<basedomain>`
+    // subdomain, any nav link that leaves the per-ledger view (today
+    // just /explorer; tomorrow whatever else we add) should hop off
+    // the ledger subdomain to `explorer.<basedomain>` rather than just
+    // change the path on the same host. The host-aware root route would
+    // otherwise keep serving the per-ledger view since the subdomain
+    // still matches a ledger.
+    (function () {
+      const host = window.location.hostname;
+      const m = host.match(/^[^.]+\.ledger\.(.+)$/);
+      if (!m) return;
+      const base = m[1];
+      // Anything pointing at /explorer on the same host gets rewritten
+      // to the explorer subdomain. Same-ledger links (/ledger, /update)
+      // stay on the current host.
+      document.querySelectorAll('.nav-links a[href^="/explorer"]').forEach(a => {
+        a.href = `${window.location.protocol}//explorer.${base}/`;
+      });
+    })();
+  </script>
 
   <main>
     <div class="hero">
