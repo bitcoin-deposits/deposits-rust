@@ -1273,7 +1273,7 @@ impl Ledger {
                 .map(|m| (m.pubkey, m))
                 .collect();
             for declared in quorum_members {
-                if !staged.contains_key(declared) {
+                if !staged.contains_key(&declared.pubkey) {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "quorum_member_unstaged".to_string(),
                         details: format!(
@@ -1281,7 +1281,7 @@ impl Ledger {
                              corresponding QuorumAddMember consent in \
                              next_quorum_members. Operator must record consent \
                              before including a member in a rotation.",
-                            declared
+                            declared.pubkey
                         ),
                     });
                 }
@@ -1295,7 +1295,7 @@ impl Ledger {
             // only encode one timelock.
             let min_committed: Option<u32> = quorum_members
                 .iter()
-                .filter_map(|pk| staged.get(pk).and_then(|m| m.membership_until))
+                .filter_map(|m| staged.get(&m.pubkey).and_then(|s| s.membership_until))
                 .min();
             if let Some(ceiling) = min_committed {
                 if *quorum_expiry > ceiling {
@@ -2516,6 +2516,8 @@ mod tests {
         ledger.state.reserves_amount = 1_000_000;
 
         let make_op = |cosigners: Vec<PublicKey>| LedgerOperation::QuorumBegin {
+            // (closure body unchanged below; quorum_members wraps each pubkey in
+            //  QuorumMemberRef::pubkey_only — see the field assignment.)
             reserves_id: "rid".into(),
             spending_txid: [0; 32],
             new_outpoint_txid: [0; 32],
@@ -2523,7 +2525,10 @@ mod tests {
             amount: 1_000_000,
             quorum_expiry: 1_000_000,
             ledger_hash: [0; 32],
-            quorum_members: cosigners,
+            quorum_members: cosigners
+                .into_iter()
+                .map(crate::messages::QuorumMemberRef::pubkey_only)
+                .collect(),
             collateral_amount: 0,
         };
 

@@ -40,6 +40,12 @@ impl Node {
         let mut current_reserves_address: Option<String> = None;
         let mut our_latest: Option<SignedLedgerUpdate> = None;
         let mut quorum_members: Vec<PublicKey> = Vec::new();
+        // Pubkey → member_ledger_id, sourced from QuorumAddMember ops as
+        // we walk the history. Used at QuorumBegin construction time
+        // below to populate `QuorumMemberRef.member_ledger_id` so the
+        // rotation summary doesn't lose the per-member ledger pairing.
+        let mut member_ledger_ids: std::collections::HashMap<PublicKey, String> =
+            std::collections::HashMap::new();
 
         for event in events.iter() {
             if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
@@ -53,10 +59,17 @@ impl Node {
                             {
                                 current_reserves_address = Some(new_reserves_address.clone());
                             }
-                            if let LedgerOperation::QuorumAddMember { quorum_member, .. } = op {
+                            if let LedgerOperation::QuorumAddMember {
+                                quorum_member,
+                                ref member_ledger_id,
+                                ..
+                            } = op
+                            {
                                 if !quorum_members.contains(&quorum_member) {
                                     quorum_members.push(quorum_member);
                                 }
+                                member_ledger_ids
+                                    .insert(quorum_member, member_ledger_id.clone());
                             }
                         }
                         if our_latest.is_none()
@@ -219,7 +232,13 @@ impl Node {
             amount: reserves_msats,
             quorum_expiry,
             ledger_hash,
-            quorum_members: quorum_members.clone(),
+            quorum_members: quorum_members
+                .iter()
+                .map(|pk| deposits_core::messages::QuorumMemberRef::new(
+                    *pk,
+                    member_ledger_ids.get(pk).cloned().unwrap_or_default(),
+                ))
+                .collect(),
             collateral_amount: collateral_msats,
         };
 
@@ -764,27 +783,24 @@ impl Node {
                 .clone()
         };
 
-        let (quorum_members, quorum_expiries, ledger_hash, total_collateral) = {
+        let (quorum_members, member_ledger_ids, quorum_expiries, ledger_hash, total_collateral) = {
             let ledger = ledger_arc.read().unwrap();
 
             // QuorumBegin promotes next_quorum_members -> quorum_members, so at rotation
             // time the members are still in next_quorum_members (pending).
             // Fall back to active quorum_members for re-rotation after an existing QuorumBegin.
-            let members: Vec<PublicKey> = if !ledger.state.next_quorum_members.is_empty() {
-                ledger
-                    .state
-                    .next_quorum_members
-                    .iter()
-                    .map(|m| m.pubkey)
-                    .collect()
+            //
+            // Build a parallel ledger_id list so the QuorumBegin we publish
+            // below can carry both halves. The local `members` stays
+            // Vec<PublicKey> because downstream code (taproot reconstruction,
+            // logging, length checks) keys off pubkeys.
+            let source = if !ledger.state.next_quorum_members.is_empty() {
+                &ledger.state.next_quorum_members
             } else {
-                ledger
-                    .state
-                    .quorum_members
-                    .iter()
-                    .map(|m| m.pubkey)
-                    .collect()
+                &ledger.state.quorum_members
             };
+            let members: Vec<PublicKey> = source.iter().map(|m| m.pubkey).collect();
+            let lids: Vec<String> = source.iter().map(|m| m.ledger_id.clone()).collect();
 
             let current_block = self.wallet.get_block_height().unwrap_or(0);
             let default_expiry = current_block + 1000; // ~1 week
@@ -795,7 +811,7 @@ impl Node {
             let hash = ledger.hash();
             let collateral = ledger.state.total_collateral();
 
-            (members, expiries, hash, collateral)
+            (members, lids, expiries, hash, collateral)
         };
 
         if quorum_members.is_empty() {
@@ -1029,7 +1045,11 @@ impl Node {
             amount: reserves_msats,
             quorum_expiry: result.quorum_expiry,
             ledger_hash,
-            quorum_members: quorum_members.clone(),
+            quorum_members: quorum_members
+                .iter()
+                .zip(member_ledger_ids.iter())
+                .map(|(pk, lid)| deposits_core::messages::QuorumMemberRef::new(*pk, lid.clone()))
+                .collect(),
             collateral_amount: collateral_msats,
         };
 

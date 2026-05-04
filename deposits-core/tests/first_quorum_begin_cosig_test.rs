@@ -65,7 +65,11 @@ fn quorum_begin_op(staged_pks: &[PublicKey]) -> LedgerOperation {
         amount: 1_000_000_000,        // msats
         quorum_expiry: 900_000,
         ledger_hash: [0u8; 32],
-        quorum_members: staged_pks.to_vec(),
+        quorum_members: staged_pks
+            .iter()
+            .copied()
+            .map(deposits_core::messages::QuorumMemberRef::pubkey_only)
+            .collect(),
         collateral_amount: 500_000_000,
     }
 }

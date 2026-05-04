@@ -284,12 +284,12 @@ impl Operator {
                 filler = filler.wrapping_add(1);
             }
         }
-        let members: Vec<PublicKey> = self
+        let members: Vec<deposits_core::messages::QuorumMemberRef> = self
             .ledger
             .state
             .next_quorum_members
             .iter()
-            .map(|m| m.pubkey)
+            .map(|m| deposits_core::messages::QuorumMemberRef::pubkey_only(m.pubkey))
             .collect();
         // Bind expiry to the MIN of staged members' membership_until per
         // protocol rule (operator can shorten but not extend any member's

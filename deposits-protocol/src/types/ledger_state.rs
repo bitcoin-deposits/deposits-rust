@@ -231,7 +231,7 @@ impl LedgerState {
                 // Members in next_quorum_members that the operation
                 // *omitted* are dropped — they never enter the active set.
                 let declared: std::collections::HashSet<_> =
-                    quorum_members.iter().copied().collect();
+                    quorum_members.iter().map(|m| m.pubkey).collect();
                 let staged = std::mem::take(&mut next.next_quorum_members);
                 next.quorum_members = staged
                     .into_iter()

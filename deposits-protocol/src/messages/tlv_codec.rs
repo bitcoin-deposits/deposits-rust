@@ -10,6 +10,10 @@ mod ledger_op_tlv {
     pub const AMOUNT: u64 = 2;
     // 4 was SPEND_TO (unused; declare freed)
     pub const QUORUM_MEMBERS: u64 = 6;
+    /// Parallel array to QUORUM_MEMBERS — one ledger_id string per
+    /// member, length-prefixed (u8). Empty when constructed by older
+    /// callers; new producers populate from QuorumAddMember.member_ledger_id.
+    pub const QUORUM_MEMBER_LEDGER_IDS: u64 = 276;
     pub const FEES: u64 = 12;
     pub const PAYMENT_HASH: u64 = 14;
     pub const INVOICE: u64 = 16;
@@ -145,9 +149,23 @@ impl TlvEncode for LedgerOperation {
                 quorum_members,
                 collateral_amount,
             } => {
+                // Pubkeys: concat of 33-byte compressed pubkeys (existing
+                // shape — kept for backwards compatibility).
                 let mut members_bytes = Vec::new();
-                for pk in quorum_members {
-                    members_bytes.extend_from_slice(&pk.serialize());
+                for m in quorum_members {
+                    members_bytes.extend_from_slice(&m.pubkey.serialize());
+                }
+                // Member ledger_ids: parallel array, each entry is
+                // `u8 len || ledger_id_bytes`. Skipped entirely if all
+                // entries are empty (older producers / legacy callers).
+                let any_lids = quorum_members.iter().any(|m| !m.member_ledger_id.is_empty());
+                let mut lids_bytes = Vec::new();
+                if any_lids {
+                    for m in quorum_members {
+                        let lid = m.member_ledger_id.as_bytes();
+                        lids_bytes.push(lid.len() as u8);
+                        lids_bytes.extend_from_slice(lid);
+                    }
                 }
                 builder = builder
                     .string_field(RESERVES_ID, reserves_id)
@@ -159,6 +177,9 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(LEDGER_HASH, ledger_hash)
                     .bytes_field(QUORUM_MEMBERS, &members_bytes)
                     .u64_field(TOTAL_COLLATERAL, *collateral_amount);
+                if any_lids {
+                    builder = builder.bytes_field(QUORUM_MEMBER_LEDGER_IDS, &lids_bytes);
+                }
             }
             Self::DepositOpen {
                 deposit_id,
@@ -526,16 +547,40 @@ impl TlvDecode for LedgerOperation {
             }),
             12 => {
                 let members_bytes = reader.read_raw_opt(QUORUM_MEMBERS).unwrap_or(&[]);
-                let mut quorum_members = Vec::new();
+                let mut pubkeys = Vec::new();
                 let mut off = 0;
                 while off + 33 <= members_bytes.len() {
                     if let Ok(pk) =
                         bitcoin::secp256k1::PublicKey::from_slice(&members_bytes[off..off + 33])
                     {
-                        quorum_members.push(pk);
+                        pubkeys.push(pk);
                     }
                     off += 33;
                 }
+                // Parallel ledger_id list. New field; absent in older
+                // events. Each entry is `u8 len || ledger_id_bytes`.
+                let lids_bytes = reader.read_raw_opt(QUORUM_MEMBER_LEDGER_IDS).unwrap_or(&[]);
+                let mut ledger_ids: Vec<String> = Vec::new();
+                let mut loff = 0;
+                while loff < lids_bytes.len() {
+                    let len = lids_bytes[loff] as usize;
+                    loff += 1;
+                    if loff + len > lids_bytes.len() {
+                        break;
+                    }
+                    ledger_ids.push(
+                        String::from_utf8_lossy(&lids_bytes[loff..loff + len]).into_owned()
+                    );
+                    loff += len;
+                }
+                let quorum_members: Vec<QuorumMemberRef> = pubkeys
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, pk)| QuorumMemberRef {
+                        pubkey: pk,
+                        member_ledger_id: ledger_ids.get(i).cloned().unwrap_or_default(),
+                    })
+                    .collect();
                 Ok(Self::QuorumBegin {
                     reserves_id: reader.read_string(RESERVES_ID)?,
                     spending_txid: reader.read_bytes(SPENDING_TXID)?,

@@ -4088,14 +4088,24 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     );
     println!("  Latest sequence: {}", our_latest.sequence_number);
 
-    // Get quorum members from our branch (rebuilt during dispute)
+    // Get quorum members from our branch (rebuilt during dispute).
+    // Capture each member's ledger_id from the QuorumAddMember op so
+    // the QuorumBegin we build below carries that pairing too.
     let mut quorum_members: Vec<PublicKey> = Vec::new();
+    let mut member_ledger_ids: std::collections::HashMap<PublicKey, String> =
+        std::collections::HashMap::new();
     for update in &our_updates {
         if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-            if let LedgerOperation::QuorumAddMember { quorum_member, .. } = op {
+            if let LedgerOperation::QuorumAddMember {
+                quorum_member,
+                ref member_ledger_id,
+                ..
+            } = op
+            {
                 if !quorum_members.contains(&quorum_member) {
                     quorum_members.push(quorum_member);
                 }
+                member_ledger_ids.insert(quorum_member, member_ledger_id.clone());
             }
         }
     }
@@ -4255,7 +4265,13 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         amount: output_amount,
         quorum_expiry,
         ledger_hash,
-        quorum_members: quorum_members.clone(),
+        quorum_members: quorum_members
+            .iter()
+            .map(|pk| deposits_core::messages::QuorumMemberRef::new(
+                *pk,
+                member_ledger_ids.get(pk).cloned().unwrap_or_default(),
+            ))
+            .collect(),
         collateral_amount: 0, // recovery — collateral will be re-attested
     };
 

@@ -141,6 +141,40 @@ pub struct LedgerUpdateResponseMsg {
     pub confirmed_hash: [u8; 32],
 }
 
+/// A single quorum member's identity at the moment of `QuorumBegin`.
+///
+/// Records both the member's signing pubkey (which appears in
+/// `cosignatures` when this member co-signs an update) and the
+/// member's own ledger ID — the ledger that holds their collateral
+/// and whose tip hash they commit in `member_ledger_hash` when
+/// cosigning. Without the ledger_id pairing, fraud-proof verifiers
+/// (and the explorer) had to derive it from prior `QuorumAddMember`
+/// operations on the operator's history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuorumMemberRef {
+    pub pubkey: PublicKey,
+    /// 64-char hex ledger_id of the member's own ledger. Empty when
+    /// constructed from older callers that didn't have it on hand —
+    /// new construction sites should populate it from the matching
+    /// `QuorumAddMember.member_ledger_id`.
+    pub member_ledger_id: String,
+}
+
+impl QuorumMemberRef {
+    /// Wrap a pubkey when the caller doesn't have a ledger_id at hand
+    /// (recovery flows, tests, etc.). The on-wire encoding still
+    /// emits an entry; consumers that depend on the ledger_id should
+    /// fall back to QuorumAddMember-history derivation when this is
+    /// the empty string.
+    pub fn pubkey_only(pubkey: PublicKey) -> Self {
+        Self { pubkey, member_ledger_id: String::new() }
+    }
+
+    pub fn new(pubkey: PublicKey, member_ledger_id: impl Into<String>) -> Self {
+        Self { pubkey, member_ledger_id: member_ledger_id.into() }
+    }
+}
+
 /// All possible ledger operations (29 variants)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LedgerOperation {
@@ -190,8 +224,13 @@ pub enum LedgerOperation {
         quorum_expiry: u32,
         /// Ledger hash committed in the Taproot script
         ledger_hash: [u8; 32],
-        /// Quorum member pubkeys included in this rotation
-        quorum_members: Vec<bitcoin::secp256k1::PublicKey>,
+        /// Quorum members frozen at this rotation. Each entry pairs the
+        /// member's signing pubkey with the ledger_id of the member's own
+        /// ledger (where their collateral lives). The pubkey is what shows
+        /// up in `cosignatures.cosigner_pubkey`; the ledger_id lets
+        /// verifiers / explorer pull the ledger that backs the member
+        /// without re-deriving from prior `QuorumAddMember` history.
+        quorum_members: Vec<QuorumMemberRef>,
         /// Collateral amount in millisatoshis (security bond portion of UTXO).
         collateral_amount: u64,
     },
@@ -948,6 +987,12 @@ impl BinaryCodec for LedgerOperation {
                 write_u32(w, *quorum_expiry)?;
                 write_32(w, ledger_hash)?;
                 write_u64(w, *collateral_amount)?;
+                // Legacy BinaryEncode for QuorumBegin doesn't actually
+                // emit member identities (it only writes the count
+                // twice — historical bug). The TLV codec is the real
+                // wire format; this branch is only used by old test
+                // shims. The ledger_id pairing on each member rides
+                // exclusively on the TLV side.
             }
             // Legacy encoding - deposit operations now use deposit_id/descriptor, but we encode
             // the deposit_id bytes as a placeholder for legacy compatibility

@@ -181,7 +181,7 @@ fn quorum_members_from_history(
             return Some(
                 quorum_members
                     .iter()
-                    .map(|pk| hex::encode(pk.serialize()))
+                    .map(|m| hex::encode(m.pubkey.serialize()))
                     .collect(),
             );
         }

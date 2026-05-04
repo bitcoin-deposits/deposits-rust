@@ -207,7 +207,10 @@ impl ProtocolSim {
                     amount: 400_000,
                     quorum_expiry: 999_999,
                     ledger_hash: [0x33; 32],
-                    quorum_members: member_pks,
+                    quorum_members: member_pks
+                        .into_iter()
+                        .map(deposits_core::messages::QuorumMemberRef::pubkey_only)
+                        .collect(),
                     collateral_amount: 600_000,
                 })
                 .unwrap();

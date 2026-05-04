@@ -406,7 +406,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 amount: 100_000_000,
                 quorum_expiry: 1000,
                 ledger_hash: h32(),
-                quorum_members: vec![pk()],
+                quorum_members: vec![deposits_protocol::messages::QuorumMemberRef::pubkey_only(pk())],
                 collateral_amount: 50_000_000,
             },
         ),

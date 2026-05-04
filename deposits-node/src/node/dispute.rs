@@ -1225,7 +1225,9 @@ impl Node {
                                         latest_quorum_begin_seq = Some(seq);
                                         reserves_address = Some(reserves_id);
                                         ledger_hash = Some(lh);
-                                        quorum_members = qm;
+                                        // Local var is Vec<PublicKey> for downstream
+                                        // Taproot reconstruction; extract just the keys.
+                                        quorum_members = qm.into_iter().map(|m| m.pubkey).collect();
                                     }
                                 }
                                 LedgerOperation::DisputeArmed {

@@ -261,7 +261,10 @@ mod tests {
                 amount: 100_000_000,
                 quorum_expiry: 1_000_000,
                 ledger_hash: [0x33; 32],
-                quorum_members: vec![member_key, member2_key, member3_key],
+                quorum_members: vec![member_key, member2_key, member3_key]
+                    .into_iter()
+                    .map(deposits_core::messages::QuorumMemberRef::pubkey_only)
+                    .collect(),
                 collateral_amount: 50_000,
             })
             .unwrap();
