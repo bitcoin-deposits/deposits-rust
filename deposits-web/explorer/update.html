@@ -524,6 +524,75 @@ function renderUpdateFields(records, hashOk) {
     </div>`;
 }
 
+// Decode a QuorumBegin op's `quorum_members` (tag 6, concat of 33-byte
+// compressed pubkeys) and the parallel `QUORUM_MEMBER_LEDGER_IDS`
+// (tag 276, length-prefixed strings). Returns Map<pubkey_hex, ledger_id>.
+// Empty map if the op is older and doesn't carry the ledger_id field.
+function decodeQuorumBeginMembers(opBytes) {
+  const out = new Map();
+  let inner;
+  try { inner = parseTlv(opBytes); } catch { return out; }
+  // Sanity: discriminant (tag 0) should be 12 (QuorumBegin).
+  const disc = inner.find(r => r.type === 0);
+  if (!disc || disc.value.length !== 1 || disc.value[0] !== 12) return out;
+
+  const membersField = inner.find(r => r.type === 6);
+  if (!membersField) return out;
+  // 33 bytes per pubkey
+  const pubkeys = [];
+  let off = 0;
+  while (off + 33 <= membersField.value.length) {
+    pubkeys.push(bytesToHex(membersField.value.slice(off, off + 33)));
+    off += 33;
+  }
+  // Tag 276: parallel array of ledger_ids, each `u8 len || bytes`.
+  // Absent on older ops — pubkeys then map to empty strings.
+  const lidsField = inner.find(r => r.type === 276);
+  const ledgerIds = [];
+  if (lidsField) {
+    let loff = 0;
+    while (loff < lidsField.value.length) {
+      const len = lidsField.value[loff];
+      loff += 1;
+      if (loff + len > lidsField.value.length) break;
+      const lid = new TextDecoder().decode(lidsField.value.slice(loff, loff + len));
+      ledgerIds.push(lid);
+      loff += len;
+    }
+  }
+  pubkeys.forEach((pk, i) => out.set(pk, ledgerIds[i] || ''));
+  return out;
+}
+
+// Stage-C derivation: for ledgers whose QuorumBegin predates the
+// member_ledger_id wire change, fetch the most-recent QuorumBegin on
+// this ledger and try to read it. If absent or empty, we'd want to
+// also walk QuorumAddMember ops — left as a follow-up; today the map
+// is empty in that case and the cosignatures section just doesn't
+// show a "ledger" column.
+async function fetchCosignerLedgerMap(ledgerPrefix) {
+  // Filter on op-type tag (TAG_OP_TYPE = "t", QuorumBegin = 12).
+  // The operator emits both (deposits-node/src/nostr.rs publish path).
+  const events = await nostrFetch(RELAY_URL, {
+    kinds: [9100], '#d': [ledgerPrefix], '#t': ['12'], limit: 5,
+  });
+  if (!events.length) return new Map();
+  // Most recent first
+  events.sort((a, b) => b.created_at - a.created_at);
+  for (const ev of events) {
+    let raw, outer, msg;
+    try {
+      raw = b64ToBytes(ev.content);
+      outer = parseTlv(raw);
+      msg = outer.find(r => r.type === 8)?.value;
+    } catch { continue; }
+    if (!msg) continue;
+    const map = decodeQuorumBeginMembers(msg);
+    if (map.size > 0) return map;
+  }
+  return new Map();
+}
+
 // Parse the multi-cosig (tag 22) blob: each entry is a 2-byte
 // big-endian length prefix followed by `pk(33) || sig(64) || mh(32)`
 // = 129 bytes. Mirrors the wallet's decoder (deposits-web/wallet/index.html).
@@ -546,7 +615,7 @@ function parseCosignatures(buf) {
   return { entries, leftover: buf.length - off };
 }
 
-function renderCosignatures(records) {
+function renderCosignatures(records, cosignerLedgers) {
   // Multi-cosig (tag 22) is the modern shape. The legacy single-cosig
   // path (tags 16/18) was always a 1-of-N at most; show it under the
   // same card if present.
@@ -583,19 +652,28 @@ function renderCosignatures(records) {
   return `
     <div class="card" id="cosignatures">
       <h3>cosignatures <span class="ann" style="font-family:var(--sans);font-size:0.78rem;color:var(--fg-muted);margin-left:0.4rem;">${escapeHtml(note)}</span></h3>
-      ${entries.map((e, i) => `
+      ${entries.map((e, i) => {
+        const pkHex = e.pubkey ? bytesToHex(e.pubkey) : null;
+        const lid = pkHex ? cosignerLedgers?.get(pkHex) : null;
+        const lidLink = lid
+          ? `<a href="/ledger#ledger=${encodeURIComponent(lid)}&relay=${encodeURIComponent(RELAY_URL)}" style="color:var(--accent);font-family:var(--mono);">${escapeHtml(lid)}</a>`
+          : '<span class="muted">(unknown — older QuorumBegin lacks ledger pairing)</span>';
+        return `
         <div style="margin: ${i === 0 ? '0' : '0.85rem 0 0'}; padding: ${i === 0 ? '0' : '0.85rem 0 0'}; ${i === 0 ? '' : 'border-top: 1px solid var(--border);'}">
           <dl class="kv" style="grid-template-columns: 9rem 1fr;">
             <dt>cosigner</dt>
-            <dd class="mono">${e.pubkey ? escapeHtml(bytesToHex(e.pubkey)) : '<span class="muted">(legacy — not encoded)</span>'}</dd>
-            <dt>signature</dt>
-            <dd class="mono">${escapeHtml(bytesToHex(e.signature))}</dd>
+            <dd class="mono">${e.pubkey ? escapeHtml(pkHex) : '<span class="muted">(legacy — not encoded)</span>'}</dd>
+            <dt>member ledger</dt>
+            <dd>${lidLink}</dd>
             <dt>member ledger hash</dt>
             <dd class="mono">${escapeHtml(bytesToHex(e.member_ledger_hash))}</dd>
+            <dt>signature</dt>
+            <dd class="mono">${escapeHtml(bytesToHex(e.signature))}</dd>
             ${e.extra ? `<dt>trailing bytes</dt><dd class="mono">${escapeHtml(bytesToHex(e.extra))} <span class="muted">(${e.extra.length} bytes — newer fields the explorer doesn't know about yet)</span></dd>` : ''}
           </dl>
         </div>
-      `).join('')}
+      `;
+      }).join('')}
       ${leftover > 0 ? `<div class="ann" style="margin-top:0.85rem;color:var(--red);font-family:var(--sans);font-size:0.78rem;">${leftover} byte(s) of trailing junk in the cosignatures blob — parse may be incomplete.</div>` : ''}
     </div>`;
 }
@@ -764,7 +842,16 @@ async function main() {
   // Per-cosigner breakdown of the cosignatures field (tag 22) or
   // legacy single-cosig fallback (tags 16/18). Skipped silently if
   // neither is present.
-  html += renderCosignatures(outerRecords);
+  //
+  // Look up which member-ledger each cosigner operates by fetching
+  // this ledger's most-recent QuorumBegin (it carries
+  // QUORUM_MEMBER_LEDGER_IDS as of `11bc5c0`; older events return an
+  // empty map and the cosignatures section says so per row).
+  let cosignerLedgers = new Map();
+  if (ledgerTagD) {
+    cosignerLedgers = await fetchCosignerLedgerMap(ledgerTagD);
+  }
+  html += renderCosignatures(outerRecords, cosignerLedgers);
 
   // Inner operation
   const msgBytes = outerRecords.find(r => r.type === 8)?.value;
