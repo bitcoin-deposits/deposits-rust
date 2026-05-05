@@ -321,8 +321,11 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
     start_node "$i"
 done
 # Give the daemons time to open relay subscriptions and sync the wallet
-# against the funded UTXOs.
-sleep 5
+# against the funded UTXOs. 10 daemons coming up at once need esplora
+# enough time to index — 5s wasn't always enough; 12s is the new floor.
+# Override via DEPOSITS_PHASE1B_SYNC_SLEEP if your host's electrs is
+# slow.
+sleep "${DEPOSITS_PHASE1B_SYNC_SLEEP:-12}"
 log_ok "Started $NODE_COUNT daemons"
 echo ""
 
@@ -370,9 +373,11 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
         # and may still serve the now-spent UTXO ("bad-txns-inputs-
         # missingorspent"). Both surfaced on Q=3 runs.
         mine_blocks 1
-        # 3s gives electrs time to index the new block and BDK time to
-        # pull it via esplora. 1s wasn't enough on Q=3 retries.
-        sleep 3
+        # Sleep gives electrs time to index the new block and BDK time
+        # to pull it via esplora. Adjust via DEPOSITS_PHASE2_SYNC_SLEEP
+        # env if your host's electrs is slow. 1s wasn't enough on Q=3
+        # retries; 3s wasn't always enough either; 8s as the new floor.
+        sleep "${DEPOSITS_PHASE2_SYNC_SLEEP:-8}"
     done
     # Per-op advertisement pass — `ledger advertise` walks the operator's
     # ledgers and publishes a kind:39100 for each. Without this, wallet
