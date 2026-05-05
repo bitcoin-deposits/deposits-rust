@@ -65,6 +65,21 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         eprintln!(
             "  arm <ledger_id>                        Pre-commit: publish DisputeArmed operation"
         );
+        eprintln!(
+            "    [--target-reserves <addr>]           Bitcoin address for winnings (defaults to operator P2WPKH)"
+        );
+        eprintln!(
+            "    [--replacement-collateral-outpoint <txid:vout>"
+        );
+        eprintln!(
+            "     --replacement-collateral-amount <sats>]"
+        );
+        eprintln!(
+            "                                         Pledge a wallet UTXO as replacement collateral"
+        );
+        eprintln!(
+            "                                         (must be at operator-key P2WPKH; see DEP-03)"
+        );
         eprintln!("  claim <ledger_id>                      After entropy: DisputeAcquire (win) or DisputeYield (lose)");
         eprintln!("  continue <ledger_id> [--count N]       Winner: add operations to continue the ledger");
         eprintln!("  spend <ledger_id>                      Execute on-chain spend (winner only)");
@@ -1922,6 +1937,8 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     let mut ledger_id: Option<String> = None;
     let mut target_reserves: Option<String> = None;
+    let mut rc_outpoint_str: Option<String> = None;
+    let mut rc_amount_sats: Option<u64> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -1930,6 +1947,25 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
             "--target-reserves" | "--target" => {
                 if i + 1 < args.len() {
                     target_reserves = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--replacement-collateral-outpoint" => {
+                if i + 1 < args.len() {
+                    rc_outpoint_str = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--replacement-collateral-amount" => {
+                if i + 1 < args.len() {
+                    rc_amount_sats = args[i + 1].parse::<u64>().ok();
+                    if rc_amount_sats.is_none() {
+                        return Err(format!(
+                            "--replacement-collateral-amount expects a u64 sats value, got: {}",
+                            args[i + 1]
+                        )
+                        .into());
+                    }
                     i += 1;
                 }
             }
@@ -1947,6 +1983,17 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
             }
         }
         i += 1;
+    }
+
+    // Both replacement-collateral flags must come together. Strict cosigners
+    // require a populated declaration; falling back to None when only one
+    // flag is supplied is almost certainly a typo.
+    if rc_outpoint_str.is_some() != rc_amount_sats.is_some() {
+        return Err(
+            "--replacement-collateral-outpoint requires --replacement-collateral-amount \
+             (and vice versa)"
+                .into(),
+        );
     }
 
     let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
@@ -2038,10 +2085,90 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .map_err(|e| format!("Failed to store preimage: {}", e))?;
     println!("  Stored lottery preimage in: {}", preimage_file);
 
+    // Resolve --replacement-collateral-outpoint into a structured declaration.
+    // Verifies the UTXO exists and sits at the operator-key P2WPKH (which is
+    // what the RC4 claim-TX path knows how to sign). Other address types
+    // need extending the claim-TX builder; we fail loudly here rather than
+    // accept a declaration the winner can't actually claim against.
+    let replacement_collateral = match (rc_outpoint_str.as_deref(), rc_amount_sats) {
+        (None, _) => None,
+        (Some(s), Some(amount)) => {
+            let (txid_hex, vout_str) = s.split_once(':').ok_or_else(|| {
+                format!(
+                    "--replacement-collateral-outpoint: expected TXID:VOUT, got {}",
+                    s
+                )
+            })?;
+            let txid_bytes_vec = hex::decode(txid_hex).map_err(|e| {
+                format!("--replacement-collateral-outpoint txid: {}", e)
+            })?;
+            let txid_bytes: [u8; 32] = txid_bytes_vec.try_into().map_err(|_| {
+                "--replacement-collateral-outpoint txid: must be 32 bytes (64 hex chars)"
+                    .to_string()
+            })?;
+            let vout: u32 = vout_str.parse().map_err(|e| {
+                format!("--replacement-collateral-outpoint vout: {}", e)
+            })?;
+            // Verify the UTXO on-chain.
+            let txid_obj = bitcoin::Txid::from_raw_hash(
+                bitcoin::hashes::Hash::from_byte_array(txid_bytes),
+            );
+            let tx = esplora
+                .get_tx(&txid_obj)
+                .map_err(|e| format!("Failed to fetch declared UTXO tx: {:?}", e))?
+                .ok_or_else(|| format!("declared UTXO tx {} not on-chain", txid_obj))?;
+            let output = tx
+                .output
+                .get(vout as usize)
+                .ok_or_else(|| format!("declared UTXO vout {} out of range", vout))?;
+            if output.value.to_sat() < amount {
+                return Err(format!(
+                    "declared UTXO holds {} sats < declared amount {}",
+                    output.value.to_sat(),
+                    amount
+                )
+                .into());
+            }
+            // Script-type guardrail: must be operator-key P2WPKH so the
+            // RC4 claim-TX builder can sign it. Loosening this requires
+            // generalising the claim path's signing logic — file a
+            // follow-up before declaring at any other script type.
+            let pk_bytes: [u8; 33] = our_pubkey.serialize();
+            let compressed = bitcoin::CompressedPublicKey::from_slice(&pk_bytes)
+                .map_err(|e| format!("compressed pubkey: {}", e))?;
+            let expected_script =
+                bitcoin::Address::p2wpkh(&compressed, config.network).script_pubkey();
+            if output.script_pubkey != expected_script {
+                return Err(
+                    "declared UTXO is not at the operator-key P2WPKH address. \
+                     The RC4 claim-TX builder only signs that script type today; \
+                     send funds to your operator address before arming, or extend \
+                     the claim-TX builder to handle other scripts."
+                        .into(),
+                );
+            }
+            Some(deposits_core::messages::ReplacementCollateral {
+                txid: txid_bytes,
+                vout,
+                amount,
+            })
+        }
+        (Some(_), None) => unreachable!("guarded above"),
+    };
+
+    if replacement_collateral.is_none() {
+        eprintln!(
+            "WARNING: arming without replacement_collateral. Strict cosigners will \
+             refuse to sign confiscation; use --replacement-collateral-outpoint \
+             TXID:VOUT --replacement-collateral-amount SATS to declare a UTXO."
+        );
+    }
+
     let custody_armed = LedgerOperation::DisputeArmed {
         armed_block: current_block_height,
         commitment_hash,
         target_reserves: target_reserves_addr.clone(),
+        replacement_collateral,
     };
 
     let message_bytes = custody_armed.tlv_encode();
