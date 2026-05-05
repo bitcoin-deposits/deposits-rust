@@ -20,7 +20,7 @@ REPO_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 cd "$REPO_ROOT"
 
 MODE="--release"
-CORE_BINS=(deposits-node deposits-wallet)
+CORE_BINS=(deposits-node deposits-wallet deposits-signer)
 EXTRA_BINS=(
     nostr-ping
     nostr-bench

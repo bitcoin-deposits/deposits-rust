@@ -8,6 +8,7 @@
 use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
 use bitcoin::Network;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 pub fn keygen() {
@@ -94,5 +95,45 @@ pub fn derive_deposit_key(args: &[String]) -> Result<(), String> {
         hex::encode(deposit_xpriv.private_key.secret_bytes())
     );
 
+    Ok(())
+}
+
+/// Print the daemon's transport pubkey (the one a `deposits-signer` allowlist
+/// must contain). Idempotent: generates a fresh transport keypair under
+/// `<data-dir>/transport_secret` if absent, otherwise reads the persisted one.
+/// Same code path as `Node::new` takes when bootstrapping `RemoteSigner`,
+/// so the pubkey printed here is exactly what the daemon will present
+/// during the handshake.
+///
+/// Use case: cluster bring-up scripts that need to allowlist the daemon
+/// on the signer side *before* starting either process.
+pub fn transport_pubkey(args: &[String]) -> Result<(), String> {
+    let mut data_dir: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--data-dir" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--data-dir requires a value".to_string());
+                }
+                data_dir = Some(PathBuf::from(&args[i]));
+            }
+            other => return Err(format!("unknown flag {:?}", other)),
+        }
+        i += 1;
+    }
+    let data_dir = data_dir.ok_or_else(|| "missing --data-dir".to_string())?;
+    if !data_dir.exists() {
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|e| format!("create_dir_all {}: {}", data_dir.display(), e))?;
+    }
+    let secret = crate::Node::load_or_init_transport_secret(&data_dir)
+        .map_err(|e| format!("load_or_init_transport_secret: {}", e))?;
+    let secp = Secp256k1::new();
+    let pubkey = PublicKey::from_secret_key(&secp, &secret);
+    // 33-byte compressed hex on stdout (single line, no trailing prose),
+    // for trivial bash capture: `pk=$(deposits-node transport-pubkey ...)`.
+    println!("{}", hex::encode(pubkey.serialize()));
     Ok(())
 }

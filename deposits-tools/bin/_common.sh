@@ -22,6 +22,7 @@ DC="docker compose -f $TOOLS_DIR/docker-compose.yml"
 # Binary paths (host-compiled)
 DEPOSITS_NODE="${DEPOSITS_NODE:-$REPO_ROOT/target/release/deposits-node}"
 DEPOSITS_WALLET="${DEPOSITS_WALLET:-$REPO_ROOT/target/release/deposits-wallet}"
+DEPOSITS_SIGNER="${DEPOSITS_SIGNER:-$REPO_ROOT/target/release/deposits-signer}"
 
 # Data directory root for all nodes
 DATA_ROOT="${DATA_ROOT:-$TOOLS_DIR/data}"
@@ -926,6 +927,73 @@ start_node() {
     fi
 
     local esplora_url=$(get_node_electrs_url "$node")
+
+    # Optionally provision a per-operator deposits-signer.
+    # Triggered by DEPOSITS_USE_SIGNER=1 in the environment. When set, we
+    # spawn a signer process co-located with the daemon (separate process,
+    # same host) and pass --signer-pubkey/--signer-socket to the daemon.
+    # Deliberately co-located rather than separate-host: this exercises
+    # the full wire protocol end-to-end while keeping the test setup
+    # tractable. The point of the env-gate is opt-in coverage; existing
+    # tests stay on the simpler LocalSigner path by default.
+    local signer_flags=""
+    if [ "${DEPOSITS_USE_SIGNER:-}" = "1" ]; then
+        local signer_data_dir="$data_dir/signer"
+        local signer_socket="$data_dir/signer.sock"
+
+        # 1. Init signer with the same seed as the daemon's wallet.
+        #    Idempotent — `init` refuses if the dir is already initialized,
+        #    which is the recovery / re-deploy case we want.
+        if [ ! -f "$signer_data_dir/transport_secret" ]; then
+            local seed_file="$data_dir/_signer_seed.tmp"
+            echo "$seed" > "$seed_file"
+            chmod 0600 "$seed_file"
+            "$DEPOSITS_SIGNER" init \
+                --data-dir "$signer_data_dir" \
+                --seed-file "$seed_file" >/dev/null
+            rm -f "$seed_file"
+        fi
+
+        # 2. Pre-generate the daemon's transport pubkey via the
+        #    transport-pubkey subcommand so we can allowlist it before
+        #    either process talks to a socket.
+        local node_transport_pubkey
+        node_transport_pubkey=$("$DEPOSITS_NODE" transport-pubkey --data-dir "$data_dir" 2>/dev/null)
+
+        # 3. Allowlist the daemon on the signer (idempotent).
+        "$DEPOSITS_SIGNER" trust add \
+            --data-dir "$signer_data_dir" \
+            "$node_transport_pubkey" >/dev/null 2>&1 || true
+
+        # 4. Capture the signer's pubkey for daemon CLI.
+        local signer_pubkey
+        signer_pubkey=$("$DEPOSITS_SIGNER" pubkey --data-dir "$signer_data_dir")
+
+        # 5. Spawn the signer in the background.
+        rm -f "$signer_socket"
+        RUST_LOG=info \
+        "$DEPOSITS_SIGNER" run \
+            --data-dir "$signer_data_dir" \
+            --socket "$signer_socket" \
+            > "$data_dir/signer.log" 2>&1 &
+        local signer_pid=$!
+        echo "$signer_pid" > "$data_dir/signer.pid"
+
+        # 6. Wait for the socket to come up. ~3s ceiling — first-launch
+        #    rust binary loads + starts listening fast on warm caches.
+        local waited=0
+        while [ ! -S "$signer_socket" ] && [ $waited -lt 30 ]; do
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+        if [ ! -S "$signer_socket" ]; then
+            log_warn "$node: deposits-signer socket never appeared at $signer_socket"
+        fi
+
+        signer_flags="--signer-pubkey $signer_pubkey --signer-socket $signer_socket"
+        log_info "$node: signer spawned (pid $signer_pid, socket $signer_socket, pubkey ${signer_pubkey:0:16}...)"
+    fi
+
     RUST_LOG=info,nostr_relay_pool=warn,nostr_sdk=warn \
     DEPOSITS_ENABLE_METRICS_EMITTER=1 \
     "$DEPOSITS_NODE" run \
@@ -938,6 +1006,7 @@ start_node() {
         --metrics-port "$metrics_port" \
         --fast-poll \
         --skip-nostr-verify \
+        $signer_flags \
         > "$data_dir/node.log" 2>&1 &
 
     local pid=$!
@@ -975,6 +1044,27 @@ stop_node() {
 
     # Belt and suspenders: kill any remaining deposits-node processes for this node
     pkill -f "deposits-node.*--data-dir $data_dir" 2>/dev/null || true
+
+    # If a co-located signer was spawned (DEPOSITS_USE_SIGNER=1), kill it too.
+    local signer_pidfile="$data_dir/signer.pid"
+    if [ -f "$signer_pidfile" ]; then
+        local signer_pid=$(cat "$signer_pidfile")
+        if kill -0 "$signer_pid" 2>/dev/null; then
+            kill "$signer_pid" 2>/dev/null || true
+            local attempts=0
+            while kill -0 "$signer_pid" 2>/dev/null && [ $attempts -lt 10 ]; do
+                sleep 0.5
+                attempts=$((attempts + 1))
+            done
+            if kill -0 "$signer_pid" 2>/dev/null; then
+                kill -9 "$signer_pid" 2>/dev/null || true
+            fi
+            log_info "Stopped $node deposits-signer (pid $signer_pid)"
+        fi
+        rm -f "$signer_pidfile"
+    fi
+    pkill -f "deposits-signer.*--data-dir $data_dir/signer" 2>/dev/null || true
+    rm -f "$data_dir/signer.sock"
 }
 
 # Start all node daemons
