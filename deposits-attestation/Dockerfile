@@ -23,9 +23,11 @@ COPY deposits-core/Cargo.toml     ./deposits-core/Cargo.toml
 COPY deposits-node/Cargo.toml     ./deposits-node/Cargo.toml
 COPY deposits-wallet/Cargo.toml   ./deposits-wallet/Cargo.toml
 COPY deposits-lnurl/Cargo.toml    ./deposits-lnurl/Cargo.toml
+COPY deposits-signer-api/Cargo.toml ./deposits-signer-api/Cargo.toml
+COPY deposits-signer/Cargo.toml     ./deposits-signer/Cargo.toml
 COPY deposits-tools/Cargo.toml    ./deposits-tools/Cargo.toml
 COPY deposits-test/Cargo.toml     ./deposits-test/Cargo.toml
-RUN for c in deposits-protocol deposits-core deposits-node deposits-wallet deposits-lnurl deposits-tools deposits-test; do \
+RUN for c in deposits-protocol deposits-core deposits-node deposits-wallet deposits-lnurl deposits-signer-api deposits-signer deposits-tools deposits-test; do \
         mkdir -p "$c/src" && echo "" > "$c/src/lib.rs"; \
     done && \
     mkdir -p deposits-node/src/bin deposits-wallet/src/bin deposits-tools/src/bin && \

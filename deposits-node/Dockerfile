@@ -19,6 +19,8 @@ COPY deposits-protocol/ deposits-protocol/
 COPY deposits-core/ deposits-core/
 COPY deposits-node/ deposits-node/
 COPY deposits-ringsig/ deposits-ringsig/
+COPY deposits-signer-api/ deposits-signer-api/
+COPY deposits-signer/ deposits-signer/
 COPY deposits-wallet/ deposits-wallet/
 
 # Workspace members we don't build still need their Cargo.toml + a
@@ -64,6 +66,7 @@ ARG FEATURES=""
 RUN cargo build --release \
     -p deposits-node --bin deposits-node \
     -p deposits-wallet --bin deposits-wallet \
+    -p deposits-signer --bin deposits-signer \
     $(test -n "$FEATURES" && echo "--features deposits-node/$FEATURES")
 
 # Stub for glibc's `__res_init`. gcompat 1.1.0 (Alpine 3.18, what
@@ -101,6 +104,7 @@ RUN apk add --no-cache ca-certificates libgcc gcompat && \
 
 COPY --from=builder /build/target/release/deposits-node /usr/local/bin/
 COPY --from=builder /build/target/release/deposits-wallet /usr/local/bin/
+COPY --from=builder /build/target/release/deposits-signer /usr/local/bin/
 COPY --from=builder /tmp/libres_init_stub.so /lib/libres_init_stub.so
 
 # strfry ships at /app/strfry — expose it on PATH for the entrypoint.

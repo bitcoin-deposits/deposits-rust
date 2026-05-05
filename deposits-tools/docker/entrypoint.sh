@@ -308,6 +308,50 @@ if [ -n "$LDK_REAL_CLI_PATH" ] && [ -d "/ldk/$NETWORK" ]; then
     echo "  LDK:          $LDK_HOST:$LDK_PORT (cli=$LDK_CLI, real=$LDK_REAL_CLI${LDK_LD_PRELOAD:+, preload=$LDK_LD_PRELOAD})"
 fi
 
+# --- Optionally provision a co-located deposits-signer ----------------------
+# Triggered by DEPOSITS_USE_SIGNER=1 in the environment. Spawns one signer
+# process per container, sharing the operator's seed but exposing it only
+# over a Unix socket inside the container. The daemon connects via
+# --signer-pubkey/--signer-socket.
+#
+# Co-located rather than sidecar-container by design: the wire protocol
+# is exercised end-to-end and isolation per-container is what matters
+# for these tests; deployment realism (signer on a different host) is a
+# separate operational concern.
+SIGNER_FLAGS=""
+if [ "${DEPOSITS_USE_SIGNER:-}" = "1" ]; then
+    SIGNER_DATA_DIR="$DATA_DIR/signer"
+    SIGNER_SOCKET="$DATA_DIR/signer.sock"
+    if [ ! -f "$SIGNER_DATA_DIR/transport_secret" ]; then
+        deposits-signer init \
+            --data-dir "$SIGNER_DATA_DIR" \
+            --seed-file "$SEED_PATH" >/dev/null
+    fi
+    NODE_TRANSPORT_PUBKEY=$(deposits-node transport-pubkey --data-dir "$DATA_DIR" 2>/dev/null)
+    deposits-signer trust add \
+        --data-dir "$SIGNER_DATA_DIR" \
+        "$NODE_TRANSPORT_PUBKEY" >/dev/null 2>&1 || true
+    SIGNER_PUBKEY=$(deposits-signer pubkey --data-dir "$SIGNER_DATA_DIR")
+    rm -f "$SIGNER_SOCKET"
+    deposits-signer run \
+        --data-dir "$SIGNER_DATA_DIR" \
+        --socket "$SIGNER_SOCKET" \
+        > "$DATA_DIR/signer.log" 2>&1 &
+    SIGNER_PID=$!
+    waited=0
+    while [ ! -S "$SIGNER_SOCKET" ] && [ "$waited" -lt 30 ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    if [ ! -S "$SIGNER_SOCKET" ]; then
+        echo "ERROR: deposits-signer never bound socket $SIGNER_SOCKET" >&2
+        cat "$DATA_DIR/signer.log" >&2 || true
+        exit 1
+    fi
+    SIGNER_FLAGS="--signer-pubkey $SIGNER_PUBKEY --signer-socket $SIGNER_SOCKET"
+    echo "  Signer:       co-located (pid $SIGNER_PID, socket $SIGNER_SOCKET, pk=${SIGNER_PUBKEY:0:16}...)"
+fi
+
 # --- Start deposits-node daemon (runs through phases 2 + 3 via admin DMs) ---
 echo ""
 echo "Starting deposits-node daemon..."
@@ -327,7 +371,8 @@ deposits-node run \
     $RELAYS \
     --data-dir "$DATA_DIR" \
     --metrics-port "$METRICS_PORT" \
-    $NAME_FLAG &
+    $NAME_FLAG \
+    $SIGNER_FLAGS &
 DAEMON_PID=$!
 
 # Give the daemon time to open its relay subscriptions before we start
@@ -494,5 +539,6 @@ EOF
     fi
 fi
 
-# --- Keep daemon in foreground ---
+# --- Keep daemon in foreground; clean up co-located signer on exit ---
+trap 'if [ -n "${SIGNER_PID:-}" ]; then kill "$SIGNER_PID" 2>/dev/null || true; fi' EXIT INT TERM
 wait $DAEMON_PID

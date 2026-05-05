@@ -60,6 +60,11 @@ services:
       METRICS_PORT: "9100"
       DEPOSIT_ACCESS_CONTROL: "${DEPOSIT_ACCESS_CONTROL:-false}"
       MAX_DEPOSIT_BALANCE_MSATS: "${MAX_DEPOSIT_BALANCE_MSATS:-0}"
+      # When set to "1", the entrypoint spawns a co-located
+      # `deposits-signer` and points the daemon at it via
+      # --signer-pubkey/--signer-socket. Off by default — flip it on
+      # to exercise the signer-backed path against this stack.
+      DEPOSITS_USE_SIGNER: "${DEPOSITS_USE_SIGNER:-0}"
     ports:
       - "7801:7777"   # strfry relay
       - "9101:9100"   # prometheus metrics
