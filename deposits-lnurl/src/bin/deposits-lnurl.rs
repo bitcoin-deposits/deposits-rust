@@ -443,12 +443,32 @@ async fn discover_ledger_info(state: &AppState, ledger_id: &str) -> Option<Ledge
         .await
         .ok()?;
     let event = events.into_iter().max_by_key(|e| e.created_at)?;
-    // The ad's JSON body carries field-level limits; the operator pubkey
-    // is the event signer. Fields default to 0 if the operator's on an
-    // older version that doesn't publish them.
+    // The ad's JSON body carries field-level limits.
+    //
+    // For messaging: the daemon's *delegate* Nostr pubkey is in
+    // `content.delegate_pubkey`. When present, gift-wrapped requests
+    // must be encrypted to that key (the daemon decrypts inbound NIP-04
+    // with its delegate secret). When absent (legacy daemon, pre-2026-05),
+    // fall back to the event's outer author pubkey — old daemons signed
+    // their own advertisements with the operator key, so author == the
+    // key that decrypts.
+    //
+    // See DEP-04 §Operator → Delegate Delegation.
     let ad: serde_json::Value = serde_json::from_str(&event.content).ok()?;
+    let messaging_pubkey = ad
+        .get("delegate_pubkey")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .and_then(|hex_str| {
+            // Content carries 33-byte compressed; nostr_sdk wants xonly.
+            let bytes = hex::decode(hex_str).ok()?;
+            let secp_pk = bitcoin::secp256k1::PublicKey::from_slice(&bytes).ok()?;
+            let xonly = secp_pk.x_only_public_key().0;
+            PublicKey::from_slice(&xonly.serialize()).ok()
+        })
+        .unwrap_or(event.pubkey);
     let info = LedgerInfo {
-        operator_pubkey: event.pubkey,
+        operator_pubkey: messaging_pubkey,
         max_deposit_balance_msats: ad
             .get("max_deposit_balance_msats")
             .and_then(|v| v.as_u64())

@@ -112,7 +112,8 @@ Wallets send ephemeral Kind 20101 events to operator relays. The content is JSON
 
 Operators publish NIP-33 replaceable events advertising their terms. The `d` tag is the ledger_id, ensuring only the latest advertisement per ledger is retained. Content includes:
 
-- Operator name and pubkey
+- `operator_pubkey` — the operator's protocol-level secp256k1 pubkey (33-byte compressed hex). This is the trust anchor: slashing, ledger updates' `operator_signature`, and on-chain custody all flow from this identity. Wallets MUST verify the advertisement's outer Nostr event signature against this key.
+- `delegate_pubkey` — *(optional, since 2026-05)* the daemon's per-host **delegate Nostr key** (33-byte compressed hex). When non-empty, this is the pubkey wallets address Nostr-layer messaging to (NIP-04 DM recipient, Kind 9100 event author). The operator's protocol-level key never leaves the signer; the delegate handles everything else. Empty (`""`) on advertisements published by daemons that haven't been moved off the "operator key for everything" model — wallets MUST then fall back to `operator_pubkey` for messaging. See §Operator → Delegate Delegation below.
 - Reserves amount (the deposit-capacity portion of the on-chain UTXO)
 - Collateral amount (the security-bond portion; mirrors `collateral_amount_msats` from the ledger's most recent `LedgerOpen` / `QuorumBegin`)
 - Fee schedules (periodic and transfer)
@@ -124,6 +125,43 @@ Operators publish NIP-33 replaceable events advertising their terms. The `d` tag
 Earlier drafts also carried `total_obligations` and `available_headroom`. Both were dropped — the operator can trivially inflate them with self-paid Lightning invoices, so they're not reliable trust signals. Wallets that need capacity information should either discover a courier already holding funds on this ledger, or trust the protocol invariant `reserves ≥ obligations` enforced by the quorum's co-signers.
 
 Wallets discover operators by fetching Kind 39100 events from ledger relays.
+
+## Operator → Delegate Delegation
+
+A two-key model separates the operator's *protocol-level identity* from the daemon's *Nostr-layer identity*.
+
+**The operator key** (`operator_pubkey`) is the trust anchor. It signs:
+- The advertisement's outer Nostr event signature (Kind 39100)
+- The `operator_signature` inside every `SignedLedgerUpdate` (Kind 9100 content)
+- Cosignatures on other operators' ledgers (when this operator is a quorum member)
+- Invoice cosignatures (the operator's half of a co-signed BOLT11 attestation)
+- DEP-04 subkey attestations
+
+In a deployment running `deposits-signer` (out-of-process signer holding the operator seed), this key never leaves the signer. The daemon talks to the signer over a local Unix socket and receives BIP-340 signatures back over the wire.
+
+**The delegate key** (`delegate_pubkey`) is the daemon's per-host Nostr identity. It signs:
+- Kind 9100 ledger update events (outer Nostr event signature only — the inner `operator_signature` is still signed by the operator key)
+- All Nostr-layer DM envelopes (NIP-04 / NIP-44 encrypt + decrypt; the daemon decrypts inbound DMs to its delegate npub)
+- Gift-wrap envelopes (Kind 1059 outer)
+
+The delegate key is held in process by the daemon and persisted under the daemon's data directory. Compromise of the daemon's host leaks the delegate key but **not** the operator key — slashing-equivalent fraud is structurally unavailable to an attacker who has only the delegate.
+
+### Wallet trust path
+
+A wallet acquires `operator_pubkey` out-of-band (e.g. configured manually, discovered via a public listing). To interact with that operator:
+
+1. Fetch the advertisement: `kind=39100, author=operator_pubkey`. Verify outer event sig against `operator_pubkey`.
+2. Read `delegate_pubkey` from advertisement content. If empty, treat `operator_pubkey` as the delegate (legacy fallback).
+3. For ledger updates: subscribe to `kind=9100, #l=<ledger_id>` and verify two layers — the outer Nostr event sig against `delegate_pubkey`, and the inner `operator_signature` against `operator_pubkey` (from the ledger's `LedgerOpen`). The operator-protocol verification is what protects the deposit; the outer is just transport authenticity.
+4. For NIP-04/44 DMs: encrypt to `delegate_pubkey`. Decrypt inbound DMs from the operator with `delegate_pubkey` as the sender.
+
+### Why this isn't NIP-26 / DEP-04 subkey attestation
+
+NIP-26 delegated event signing and the existing DEP-04 subkey-attestation pattern (Kind 10301) are *wallet-side* mechanisms — a user delegates from a long-lived account key to ephemeral subkeys. The operator → delegate split here is *operator-side* and uses the advertisement itself as the delegation document: the operator's signature on the advertisement carries the delegate pubkey in the content, so the trust path is "wallet trusts operator → operator endorses delegate." A separate Kind 10301 attestation event would be redundant.
+
+### Backwards compatibility
+
+Older wallets that don't read `delegate_pubkey` will treat the advertisement's event author as the operator's messaging identity. This works as long as the daemon's `self.keys` is the operator key (operator-key-for-everything mode). Once the daemon switches to delegate-key-for-Nostr (this commit's follow-up), the advertisement still authors as `operator_pubkey` (signed by signer), but Kind 9100 events author as `delegate_pubkey`. Older wallets filtering Kind 9100 by `author=operator_pubkey` will miss them and need to follow the delegation. Operators rolling forward should publish a transition advertisement with both keys' addresses available before flipping.
 
 ## Wallet Identity and NIP-07
 

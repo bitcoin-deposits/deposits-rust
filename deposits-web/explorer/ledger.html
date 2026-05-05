@@ -452,6 +452,7 @@ function renderOverview(ad, cosignerLedgers) {
         <dl class="kv">
           <dt>name</dt><dd>${escapeHtml(ad.operator_name || '—')}</dd>
           <dt>pubkey</dt><dd class="mono">${escapeHtml(ad.operator_pubkey || '—')}</dd>
+          ${ad.delegate_pubkey ? `<dt>nostr delegate</dt><dd class="mono" title="Daemon's per-host Nostr key (DEP-04 §Operator → Delegate). Kind 9100 events + NIP-04 DMs flow here; the operator pubkey above is the trust anchor.">${escapeHtml(ad.delegate_pubkey)}</dd>` : ''}
           <dt>reserves addr</dt><dd class="mono">${escapeHtml(fmt.short(ad.reserves_address || '—', 32))}</dd>
         </dl>
       </div>

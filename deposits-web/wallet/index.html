@@ -1721,12 +1721,22 @@ async function sendRequest(ledgerId, action, params, timeoutMs = 30000) {
     ['action', action],
   ];
 
-  // Gift-wrap the request if we know the operator's pubkey
+  // Gift-wrap the request if we know the operator's pubkey.
+  //
+  // Encrypt to the daemon's *delegate* Nostr pubkey when present
+  // (DEP-04 §Operator → Delegate Delegation): the daemon decrypts
+  // inbound NIP-04 with its delegate secret, while the operator
+  // pubkey stays inside the signer. Fall back to operator_pubkey
+  // for advertisements from older daemons that don't carry a
+  // delegate field.
   const ad = (window._discoveredAds || {})[ledgerId];
   const operatorPubkey = ad?.operator_pubkey;
+  const messagingPubkey = (ad?.delegate_pubkey && ad.delegate_pubkey.length > 0)
+    ? ad.delegate_pubkey
+    : operatorPubkey;
   let event;
-  if (operatorPubkey) {
-    event = await giftWrap(nostrKey, operatorPubkey, 20101, content, tags);
+  if (messagingPubkey) {
+    event = await giftWrap(nostrKey, messagingPubkey, 20101, content, tags);
   } else {
     // Fallback to plaintext (pre-discovery or no ad)
     event = await createEvent(nostrKey, 20101, content, tags);
@@ -1740,7 +1750,7 @@ async function sendRequest(ledgerId, action, params, timeoutMs = 30000) {
 
     pendingRequests.set(event.id, { resolve, reject, timeout });
     wsSendForLedger(['EVENT', event], ledgerId);
-    log(`Sent ${action} request (${event.id.slice(0, 12)}...${operatorPubkey ? ' encrypted' : ''})`);
+    log(`Sent ${action} request (${event.id.slice(0, 12)}...${messagingPubkey ? ' encrypted' : ''})`);
   });
 }
 
