@@ -291,7 +291,14 @@ trait extensions:
 
 ## Open follow-ups (not v1)
 
-- **`member_ledger_hash` freshness on the signer.** Have the signer subscribe to its own ledger relay and refuse cosignature requests committing to a head it doesn't recognize as current.
+- **`member_ledger_hash` freshness on the signer.** Today the signer's anti-equivocation policy enforces seq-monotonicity per `(ledger_id, role)` but trusts the daemon-supplied `member_ledger_hash` on cosignature requests. The hardened version: the signer subscribes to *its own* ledger relay (the cosigner ledger it's tracking) and refuses cosign requests committing to a head it doesn't recognize as current.
+
+  Concretely:
+  - Add a per-cosigner-ledger watcher to `deposits-signer`. Connects to the same ledgers relay the daemon uses; subscribes to `kind=9100, author=<our_pubkey>` (or `#l=<ledger_id>` if the cosigner identity is split per the delegate scheme).
+  - Maintain `cosigner_head[ledger_id] -> [u8; 32]` alongside the existing `cosigner_seq` map in `anti_equivocation.json`.
+  - On every `bip340_sign` with `SigRole::CosignUpdate { member_ledger_hash, .. }`: compare `member_ledger_hash` against the watcher's most recent observed head. Reject with `PolicyRefused` if the daemon is asking us to commit to an old head.
+  - One subtlety: the signer's view of "current" lags the relay slightly. Acceptable window is "head observed in the last K seconds" (configurable; tight enough to catch backdating, loose enough to absorb relay round-trips).
+  - This closes the cosigner-side defense. Without it, a compromised daemon could produce stale cosignatures even with seq-monotonicity in place.
 - **Node identity ≠ operator identity.** Today the daemon uses the operator's seed-derived key for *everything* on Nostr — outer event signatures, ECDH for NIP-04/44, gift-wrap seals. Of these, only inbound NIP-04 decrypt (clients encrypting Kind 20101 to the operator npub) and the inner `operator_signature` / cosignatures / invoice cosigns *require* the operator key. Outer event sigs and outbound encrypts are convention. A future protocol annex (DEP-04-shaped operator→node-host delegation) would let the daemon sign Nostr outers with its own per-host key and only call the Signer for the genuinely operator-bound ops. Cuts ~80% of Signer round-trips on a busy daemon. Worth doing once RemoteSigner load is real; not before.
 
 - **Hole-punched transport.** Same RPC, different framing. libp2p / NAT traversal is the heavy lift, the wire above it is unchanged.
