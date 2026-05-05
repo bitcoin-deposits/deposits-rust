@@ -1377,7 +1377,21 @@ impl Wallet {
         Ok(())
     }
 
-    /// Broadcast a transaction
+    /// Broadcast a transaction.
+    ///
+    /// After a successful broadcast, the tx is folded into BDK's
+    /// in-memory mempool view via `apply_unconfirmed_txs` so the next
+    /// coin-selection call doesn't re-pick the same input. Without this,
+    /// rapid back-to-back broadcasts (e.g. setup.sh creating multiple
+    /// reserves UTXOs in a tight loop) race against esplora indexing +
+    /// BDK sync — `wallet.create_tx` selects an input that's already
+    /// pending in mempool, bitcoind rejects with
+    /// `bad-txns-inputs-missingorspent`. Telling BDK directly avoids
+    /// the round-trip entirely.
+    ///
+    /// `last_seen` is the unix timestamp at which we observed this tx.
+    /// BDK uses it to order conflicting unconfirmed txs (later-seen
+    /// wins). Real wall-clock now() is the right value here.
     pub fn broadcast(&self, tx: &Transaction) -> Result<Txid, Error> {
         let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
 
@@ -1387,6 +1401,20 @@ impl Wallet {
 
         let txid = tx.compute_txid();
         tracing::info!("Broadcast tx: {}", txid);
+
+        // Stamp the tx into BDK's mempool view immediately. The lock is
+        // already exclusively held by us (every other wallet caller goes
+        // through this Mutex), so this is contention-free.
+        let last_seen = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut wallet = self
+            .inner
+            .lock()
+            .map_err(|e| Error::Wallet(format!("BDK wallet mutex poisoned: {}", e)))?;
+        wallet.apply_unconfirmed_txs(std::iter::once((tx.clone(), last_seen)));
+
         Ok(txid)
     }
 
