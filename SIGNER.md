@@ -212,7 +212,19 @@ let remote = RemoteSigner::connect(
 
 `pubkey()` and `xonly_pubkey()` answer synchronously after `connect()` (cached via the post-handshake `PubkeyQuery`). Every other op makes one round-trip.
 
-**Current limit:** the daemon's startup (`Node::new` → `DepositsHandler::new`) still takes a `SecretKey` and constructs a `LocalSigner` internally. Wiring it to use a `RemoteSigner` instead requires the daemon's CLI to grow `--signer-pubkey` / `--signer-socket` flags and skip the seed-load. End-to-end "real daemon talking to a real signer" is the natural follow-up commit; the e2e tests in [`deposits-node/tests/remote_signer_e2e.rs`](deposits-node/tests/remote_signer_e2e.rs) exercise the `RemoteSigner` directly today.
+**Production CLI flags:** `--signer-pubkey <33-byte hex>` and `--signer-socket <path>`. Both required together; half-config is rejected at parse-time. The daemon persists its own transport keypair at `<data-dir>/transport_secret` (0600); first-run logs the pubkey with the exact `deposits-signer trust add` command-line for the operator to run on the signer side.
+
+For idempotent ahead-of-time provisioning (e.g. cluster bring-up scripts that need the daemon's pubkey *before* either process starts), use `deposits-node transport-pubkey --data-dir <p>`. Same `load_or_init_transport_secret` code path `Node::new` takes; the printed pubkey is exactly what the daemon will present at handshake.
+
+**Cluster bring-up:** `deposits-tools/bin/_common.sh::start_node` provisions a per-operator signer when `DEPOSITS_USE_SIGNER=1` is set in the environment:
+
+```bash
+DEPOSITS_USE_SIGNER=1 ./bin/setup.sh 3
+```
+
+Every operator gets its own signer process (separate process, same host, signer data dir under `<node-data-dir>/signer/`). Existing tier-3 integration tests in `deposits-test/` work unchanged with this flag set — same protocol, same daemon behaviour, just operator-protocol sigs flowing over the wire instead of in-process.
+
+`deposits-tools/bin/test-signer.sh` is a fast smoke test that exercises the signer-spawn + handshake plumbing without needing the full cluster (no bitcoin / relays / esplora). Useful for CI and iteration.
 
 A second blocker: the wallet (BDK) constructs its descriptor from the seed and uses internal key knowledge for PSBT signing. To run the daemon entirely without the seed, BDK needs a watch-only descriptor + per-input external sighash signing. See `PLAN-remote-signer.md` §Phase-3 finish state cluster 4.
 
@@ -244,13 +256,14 @@ This is a small wallet-side update, not a DEP. Tracked as a depositor-facing fol
 
 - `deposits-signer-api`: trait, types, wire, `LocalSigner`, `LocalSigner::with_nostr_secret`. 13 unit + 4 serde tests.
 - `deposits-signer`: binary, handshake server, framing, anti-equivocation policy, init/trust/run subcommands. 16 unit + 3 in-process handshake tests including a wire-level seq-regression refusal test.
-- `deposits-node`: `RemoteSigner` client + 5 e2e tests with a real spawned signer process. Operator-protocol signing throughout the daemon flows through `Arc<dyn Signer>`.
+- `deposits-node`: `RemoteSigner` client + 8 e2e tests with a real spawned signer process. Operator-protocol signing throughout the daemon flows through `Arc<dyn Signer>`.
 - Anti-equivocation: persistent state, atomic writes, refused-request-doesn't-poison-state semantics.
 - Sibling Nostr secret issuance: signer derives at `m/85'/0'/0'/0/0`, daemon takes it via `SignOp::IssueNostrSecret`, `Nostr` layer constructed against it. `DepositsHandler.secret_key` field removed.
+- **Layer 1 — Daemon CLI integration.** `--signer-pubkey` + `--signer-socket` flags on `deposits-node run`. `Node::new` builds a `LocalSigner` (default) or `RemoteSigner` (when both flags are present). Daemon transport keypair persisted at `<data-dir>/transport_secret`. New `deposits-node transport-pubkey` subcommand for ahead-of-time provisioning by bring-up scripts.
+- **Layer 2 — Cluster bring-up.** `DEPOSITS_USE_SIGNER=1` env-gate in `deposits-tools/bin/_common.sh::start_node` provisions a per-operator signer (init data dir, allowlist daemon, spawn signer, pass `--signer-pubkey`/`--signer-socket` to daemon). `deposits-tools/bin/test-signer.sh` smoke-tests the full plumbing without bitcoin/relays.
 
 **Not yet wired (future commits):**
 
-- **`Node::new` taking `Arc<dyn Signer>` directly.** Currently the daemon construction takes a `SecretKey` and builds a `LocalSigner` internally. Adding `--signer-pubkey` + `--signer-socket` CLI flags + a constructor variant that connects a `RemoteSigner` is a straightforward follow-up. Today's e2e tests exercise `RemoteSigner` against a real signer process, but the real daemon doesn't yet drive that path.
 - **Wallet (BDK) descriptor split.** `wallet.rs` still derives the operator key from the seed for BDK. Migrating to a watch-only descriptor with per-input external sighash signing is its own architectural work (~200-400 LoC of BDK glue). Until it lands, the daemon's host still needs the seed at startup for the wallet path; the operator/protocol signing is already remote-signer-ready.
 - **Hole-punched transport.** Same wire protocol, network framing instead of Unix socket. AEAD sealing of post-handshake frames lands at the same time.
 - **Hot-spare daemon coordination.** Multiple daemons sharing one signer: leader election layer on the daemon side. Anti-equivocation on the signer is the safety net that makes the configuration viable; coordination keeps it from being noisy.

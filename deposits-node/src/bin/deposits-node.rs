@@ -51,7 +51,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         let env_filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new("info"));
 
-        let fmt_layer = tracing_subscriber::fmt::layer();
+        // tracing writes to stderr so subcommands that produce parseable
+        // stdout output (e.g. `transport-pubkey` printing a single hex
+        // line for bash capture) aren't polluted by structured log
+        // output. fmt::layer's default writer is stdout, which conflicts.
+        let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
         match std::env::var("TRACING_FLAME_PATH") {
             Ok(path) if !path.is_empty() => {

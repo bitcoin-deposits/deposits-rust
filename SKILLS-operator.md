@@ -116,7 +116,9 @@ Pinning is mutual + explicit (no TOFU). The daemon's `--signer-pubkey` flag pins
 
 **Anti-equivocation policy.** The signer maintains a `(ledger_id, role) → max_seq` store at `<data-dir>/anti_equivocation.json`. Every operator-update or cosign-update sign request that would regress or repeat its `seq` is refused with `SignerError::PolicyRefused`. The daemon's logs will surface this; if you see it during normal operation, something is racing or duplicating sign work.
 
-**Current limit.** `Node::new` today still takes a `SecretKey` and constructs a `LocalSigner` internally; the `RemoteSigner` wiring is exercised by `deposits-node/tests/remote_signer_e2e.rs` but the production CLI path doesn't yet have `--signer-pubkey` / `--signer-socket` flags. Tracked in `PLAN-remote-signer.md` as the next-step follow-up. Until then: `deposits-signer` is plumbed end-to-end and integration-testable, but a real mainnet deployment runs the seed on the daemon's host.
+**Cluster bring-up shortcut.** `DEPOSITS_USE_SIGNER=1 ./bin/setup.sh 3` provisions a per-operator signer automatically — the `start_node` helper spawns one signer process per operator, allowlists the daemon's transport pubkey, and wires `--signer-pubkey`/`--signer-socket` into the daemon's run line. Existing tier-3 integration tests work unchanged with the flag set; they exercise the same protocol behaviour but with operator-protocol sigs flowing over the wire.
+
+**Smoke test:** `./bin/test-signer.sh` exercises the spawn + handshake plumbing in ~5 seconds without needing bitcoin / relays / esplora. Useful for CI and iteration.
 
 **Backups.** The signer's seed is the only non-reconstructible secret; back it up like the daemon's seed today (multiple media, multiple physical locations). The signer's `transport_secret` is fine to lose — `init` regenerates it; you re-pin the new pubkey at the daemon and re-add it to the allowlist.
 
