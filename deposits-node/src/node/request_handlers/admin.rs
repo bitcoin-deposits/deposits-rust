@@ -249,10 +249,6 @@ impl Node {
             }
         };
 
-        let sk = match self.derive_deposit_key_at(index as u32) {
-            Ok(k) => k,
-            Err(e) => return (false, None, Some(format!("derive: {}", e))),
-        };
         let descriptor = format!("pk({})", entry.deposit_pubkey);
         let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
 
@@ -271,17 +267,35 @@ impl Node {
         // The deposits-core `create_payment_signature` helper signs a
         // DIFFERENT shape (pubkey || payment_id || amount) that the
         // validator rejects — don't use it here.
+        //
+        // Routes through the signer with KeyPath::Deposit { index } so
+        // RemoteSigner deployments don't need the master seed for these
+        // internal-deposit lock/fulfill flows. Daemon configured with
+        // LocalSigner::from_xpriv (signer-backed cluster bring-up) or
+        // a remote `deposits-signer` will both serve this path.
         let msg_digest = deposits_core::signature_utils::invoice_lock_signing_message(
             &deposit_id, &payment_id, amount_msats,
         );
-        let msg = bitcoin::secp256k1::Message::from_digest(msg_digest);
-        let kp = bitcoin::secp256k1::Keypair::from_secret_key(&self.secp, &sk);
-        let lock_sig = self.secp.sign_schnorr(&msg, &kp).serialize();
+        let lock_ctx = deposits_signer_api::SignContext::deposit(
+            index as u32,
+            deposits_signer_api::SigPurpose::PaymentAuthorization,
+        );
+        let lock_sig = match self.handler.signer.bip340_sign(&lock_ctx, &msg_digest) {
+            Ok(s) => s,
+            Err(e) => return (false, None, Some(format!("lock sign: {}", e))),
+        };
         let lock_witness = deposits_core::types::DescriptorWitness {
             stack: vec![lock_sig.to_vec()],
         };
         // Fulfill uses the same signing message (same deposit, payment_id, amount).
-        let fulfill_sig = self.secp.sign_schnorr(&msg, &kp).serialize();
+        let fulfill_ctx = deposits_signer_api::SignContext::deposit(
+            index as u32,
+            deposits_signer_api::SigPurpose::Payment,
+        );
+        let fulfill_sig = match self.handler.signer.bip340_sign(&fulfill_ctx, &msg_digest) {
+            Ok(s) => s,
+            Err(e) => return (false, None, Some(format!("fulfill sign: {}", e))),
+        };
         let fulfill_witness = deposits_core::types::DescriptorWitness {
             stack: vec![fulfill_sig.to_vec()],
         };
