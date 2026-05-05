@@ -98,6 +98,47 @@ pub fn derive_deposit_key(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Print the daemon's *delegate Nostr pubkey* — the one used for Nostr-
+/// layer ops (event signing, NIP-04 ECDH for inbound DMs). Idempotent:
+/// generates a fresh delegate keypair under `<data-dir>/delegate_secret`
+/// + `<data-dir>/delegate_pubkey` if absent, otherwise reads the
+/// persisted one. Same code path the daemon takes at `Node::new`, so
+/// the pubkey printed here is exactly what subsequent Kind 39100
+/// advertisements will carry as `delegate_pubkey`.
+///
+/// Use case: admin tooling on the same host that needs to encrypt
+/// NIP-04 DMs to the daemon (e.g. setup.sh's `reserves create` /
+/// `ledger open` admin requests) before any advertisement has been
+/// published.
+pub fn delegate_pubkey(args: &[String]) -> Result<(), String> {
+    let mut data_dir: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--data-dir" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--data-dir requires a value".to_string());
+                }
+                data_dir = Some(PathBuf::from(&args[i]));
+            }
+            other => return Err(format!("unknown flag {:?}", other)),
+        }
+        i += 1;
+    }
+    let data_dir = data_dir.ok_or_else(|| "missing --data-dir".to_string())?;
+    if !data_dir.exists() {
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|e| format!("create_dir_all {}: {}", data_dir.display(), e))?;
+    }
+    let secret = crate::Node::load_or_init_delegate_secret(&data_dir)
+        .map_err(|e| format!("load_or_init_delegate_secret: {}", e))?;
+    let secp = Secp256k1::new();
+    let pubkey = PublicKey::from_secret_key(&secp, &secret);
+    println!("{}", hex::encode(pubkey.serialize()));
+    Ok(())
+}
+
 /// Print the daemon's transport pubkey (the one a `deposits-signer` allowlist
 /// must contain). Idempotent: generates a fresh transport keypair under
 /// `<data-dir>/transport_secret` if absent, otherwise reads the persisted one.

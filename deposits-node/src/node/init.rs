@@ -54,6 +54,17 @@ impl Node {
             }
         };
         let node_id = signer.pubkey();
+
+        // Pre-generate the daemon's *delegate Nostr key* and persist it
+        // under `<data-dir>/delegate_secret`. Currently advertised in
+        // Kind 39100 `delegate_pubkey` for wallets to discover; the
+        // daemon-side switch to using this key for the Nostr layer
+        // (replacing operator_secret in `self.keys`) is the next
+        // follow-up — touches NostrTransport's filter sites and the
+        // admin-DM tooling on the same host.
+        let delegate_secret = Self::load_or_init_delegate_secret(&config.data_dir)?;
+        let delegate_pubkey =
+            PublicKey::from_secret_key(&secp, &delegate_secret);
         let nostr_secret = operator_secret;
 
         // Store relay URL for later use
@@ -67,6 +78,10 @@ impl Node {
             config.skip_nostr_verify,
         )
         .await?;
+        // Tell the transport about our delegate so every published
+        // advertisement carries `LedgerAdvertisement.delegate_pubkey`
+        // for delegation-aware wallets.
+        nostr.set_delegate_pubkey(delegate_pubkey);
 
         // Create handler with data_dir for ledger persistence
         let handler_data_dir = config.data_dir.join("wallet");
@@ -360,6 +375,29 @@ impl Node {
     /// `<id>.actor.log` shadow file never gets written.
     ///
     /// Idempotent: returns immediately if an actor is already registered.
+    /// Load (or generate) the daemon's *delegate Nostr key*. This is the
+    /// key the daemon uses for Nostr-layer operations — Kind 9100 event
+    /// signing, NIP-04 ECDH for inbound DMs, gift-wrap envelopes. The
+    /// operator's protocol-level key (which lives in the Signer when
+    /// running with deposits-signer) only signs Kind 39100 advertisement
+    /// events; the advertisement carries `delegate_pubkey` so wallets
+    /// know to address subsequent traffic here.
+    ///
+    /// Persisted at `<data-dir>/delegate_secret` (0600) and
+    /// `<data-dir>/delegate_pubkey` (0644 — useful for admin tooling on
+    /// the same host). Generated fresh on first run, stable thereafter
+    /// (rotating it would invalidate every active wallet's view of
+    /// "which npub is this operator").
+    pub fn load_or_init_delegate_secret(
+        data_dir: &std::path::Path,
+    ) -> Result<bitcoin::secp256k1::SecretKey, Error> {
+        Self::load_or_init_persistent_secret(
+            data_dir,
+            "delegate_secret",
+            Some("delegate_pubkey"),
+        )
+    }
+
     /// Load (or generate) the daemon's transport keypair under
     /// `<data_dir>/transport_secret`. Returns the secret; the caller derives
     /// the pubkey for handshake. On first run we generate fresh, write 0600,
@@ -367,16 +405,28 @@ impl Node {
     pub fn load_or_init_transport_secret(
         data_dir: &std::path::Path,
     ) -> Result<bitcoin::secp256k1::SecretKey, Error> {
+        Self::load_or_init_persistent_secret(data_dir, "transport_secret", None)
+    }
+
+    /// Generic helper: load or generate a 32-byte secret persisted under
+    /// `<data_dir>/<name>`. If `pubkey_filename` is `Some`, also writes
+    /// the corresponding compressed pubkey to `<data_dir>/<pubkey_filename>`
+    /// (0644) so external tooling on the same host can read it without
+    /// invoking the daemon's CLI.
+    fn load_or_init_persistent_secret(
+        data_dir: &std::path::Path,
+        name: &str,
+        pubkey_filename: Option<&str>,
+    ) -> Result<bitcoin::secp256k1::SecretKey, Error> {
         use std::os::unix::fs::PermissionsExt;
-        let path = data_dir.join("transport_secret");
+        let path = data_dir.join(name);
         if path.exists() {
-            let raw = std::fs::read_to_string(&path).map_err(|e| {
-                Error::Wallet(format!("read transport_secret {}: {}", path.display(), e))
-            })?;
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|e| Error::Wallet(format!("read {} {}: {}", name, path.display(), e)))?;
             let bytes = hex::decode(raw.trim())
-                .map_err(|e| Error::Wallet(format!("transport_secret hex: {}", e)))?;
+                .map_err(|e| Error::Wallet(format!("{} hex: {}", name, e)))?;
             let sk = bitcoin::secp256k1::SecretKey::from_slice(&bytes)
-                .map_err(|e| Error::Wallet(format!("transport_secret: {}", e)))?;
+                .map_err(|e| Error::Wallet(format!("{}: {}", name, e)))?;
             return Ok(sk);
         }
         // Generate fresh.
@@ -389,27 +439,56 @@ impl Node {
         let secp = bitcoin::secp256k1::Secp256k1::new();
         let (sk, pk) = secp.generate_keypair(&mut OsRng);
         let body = hex::encode(sk.secret_bytes());
-        let mut f = std::fs::File::create(&path).map_err(|e| {
-            Error::Wallet(format!("create transport_secret {}: {}", path.display(), e))
-        })?;
+        let mut f = std::fs::File::create(&path)
+            .map_err(|e| Error::Wallet(format!("create {} {}: {}", name, path.display(), e)))?;
         use std::io::Write;
         f.write_all(body.as_bytes())
             .and_then(|_| f.write_all(b"\n"))
-            .map_err(|e| Error::Wallet(format!("write transport_secret: {}", e)))?;
+            .map_err(|e| Error::Wallet(format!("write {}: {}", name, e)))?;
         let mut perms = f
             .metadata()
-            .map_err(|e| Error::Wallet(format!("stat transport_secret: {}", e)))?
+            .map_err(|e| Error::Wallet(format!("stat {}: {}", name, e)))?
             .permissions();
         perms.set_mode(0o600);
         f.set_permissions(perms)
-            .map_err(|e| Error::Wallet(format!("chmod transport_secret: {}", e)))?;
-        tracing::warn!(
-            "Generated daemon transport keypair: pubkey={}. Add it to the \
-             signer's allowlist with `deposits-signer trust add --data-dir \
-             <signer-data-dir> {}` before the next handshake will succeed.",
-            hex::encode(pk.serialize()),
-            hex::encode(pk.serialize()),
-        );
+            .map_err(|e| Error::Wallet(format!("chmod {}: {}", name, e)))?;
+
+        // Optionally drop the public side for tooling that needs to
+        // discover the pubkey without invoking the CLI.
+        if let Some(pubkey_name) = pubkey_filename {
+            let pub_path = data_dir.join(pubkey_name);
+            let pub_body = hex::encode(pk.serialize());
+            let mut pf = std::fs::File::create(&pub_path).map_err(|e| {
+                Error::Wallet(format!("create {} {}: {}", pubkey_name, pub_path.display(), e))
+            })?;
+            pf.write_all(pub_body.as_bytes())
+                .and_then(|_| pf.write_all(b"\n"))
+                .map_err(|e| Error::Wallet(format!("write {}: {}", pubkey_name, e)))?;
+            let mut pub_perms = pf
+                .metadata()
+                .map_err(|e| Error::Wallet(format!("stat {}: {}", pubkey_name, e)))?
+                .permissions();
+            pub_perms.set_mode(0o644);
+            pf.set_permissions(pub_perms)
+                .map_err(|e| Error::Wallet(format!("chmod {}: {}", pubkey_name, e)))?;
+        }
+
+        match name {
+            "transport_secret" => tracing::warn!(
+                "Generated daemon transport keypair: pubkey={}. Add it to the \
+                 signer's allowlist with `deposits-signer trust add --data-dir \
+                 <signer-data-dir> {}` before the next handshake will succeed.",
+                hex::encode(pk.serialize()),
+                hex::encode(pk.serialize()),
+            ),
+            "delegate_secret" => tracing::info!(
+                "Generated daemon Nostr delegate keypair: pubkey={}. \
+                 Carried in Kind 39100 advertisement.delegate_pubkey; \
+                 wallets that follow the delegation address messages here.",
+                hex::encode(pk.serialize()),
+            ),
+            _ => {}
+        }
         Ok(sk)
     }
 

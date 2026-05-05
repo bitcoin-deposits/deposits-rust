@@ -216,6 +216,15 @@ pub struct NostrTransport {
     /// Our secp256k1 pubkey (same as deposits node ID)
     our_pubkey: PublicKey,
 
+    /// Daemon's *delegate* Nostr pubkey. Populated via `set_delegate_pubkey`
+    /// at startup. Currently used only to fill `LedgerAdvertisement.delegate_pubkey`
+    /// before publish; the daemon-side switch to actually using this key
+    /// for the Nostr layer (replacing `self.keys` from operator → delegate)
+    /// is a separate follow-up that needs filter / cache updates throughout
+    /// this file. For now the field is informational + advertises the
+    /// delegate to wallets that follow the delegation pattern.
+    delegate_pubkey: std::sync::Mutex<Option<PublicKey>>,
+
     /// Pending inbound messages (encrypted DMs).
     /// Wrapped in Mutex so try_recv can take &self (enables per-ledger parallel dispatch).
     inbound_rx: std::sync::Mutex<mpsc::UnboundedReceiver<InboundMessage>>,
@@ -526,8 +535,26 @@ pub struct LedgerAdvertisement {
     /// Ledger identifier (64-char hex hash)
     pub ledger_id: String,
 
-    /// Operator's secp256k1 pubkey (hex)
+    /// Operator's secp256k1 pubkey (hex). The trust anchor: wallets verify
+    /// the advertisement's outer Nostr event signature against this key.
+    /// Slashing and on-chain custody flow from this identity.
     pub operator_pubkey: String,
+
+    /// **Delegate Nostr pubkey** (33-byte compressed secp256k1, hex). The
+    /// daemon publishes this advertisement signed by `operator_pubkey`
+    /// (the outer Nostr event author + sig), but every other Nostr-layer
+    /// op — Kind 9100 ledger updates, NIP-04 DM recipient, gift-wrap
+    /// envelopes — uses this delegate key. Wallets that follow the
+    /// delegation address messages to `delegate_pubkey` while still
+    /// trusting `operator_pubkey` as the protocol-level identity.
+    ///
+    /// Empty (`""`) on advertisements published by older daemons that
+    /// haven't been moved off the "operator key for everything" model.
+    /// Wallets seeing an empty `delegate_pubkey` should fall back to
+    /// `operator_pubkey` for messaging — the key is always sound, just
+    /// less leak-resistant on the daemon's host.
+    #[serde(default)]
+    pub delegate_pubkey: String,
 
     /// Current reserves address (for verification)
     pub reserves_address: String,
@@ -859,6 +886,7 @@ impl LedgerAdvertisement {
         Self {
             ledger_id,
             operator_pubkey,
+            delegate_pubkey: String::new(),
             reserves_address,
             operator_name: None,
             description: None,
@@ -1080,6 +1108,7 @@ impl NostrTransport {
         };
 
         Ok(Self {
+            delegate_pubkey: std::sync::Mutex::new(None),
             client,
             primary_relay_url,
             slow_client,
@@ -2617,12 +2646,39 @@ impl NostrTransport {
     ///
     /// Uses NIP-33 parameterized replaceable events, so only the latest
     /// advertisement per ledger_id is retained by relays.
+    /// Set the daemon's delegate Nostr pubkey. Once set, every
+    /// subsequently-published Kind 39100 advertisement carries this
+    /// pubkey in `LedgerAdvertisement.delegate_pubkey`. Wallets that
+    /// follow the delegation address messages here while still
+    /// trusting the operator's pubkey as the protocol-level identity.
+    ///
+    /// Idempotent. The same delegate pubkey is expected for the
+    /// daemon's lifetime (it's persisted under `<data-dir>/delegate_secret`).
+    pub fn set_delegate_pubkey(&self, pk: PublicKey) {
+        if let Ok(mut guard) = self.delegate_pubkey.lock() {
+            *guard = Some(pk);
+        }
+    }
+
     /// Queries the relay for existing advertisement timestamp to ensure
     /// the new event has a strictly greater timestamp.
     pub async fn publish_ledger_advertisement(
         &self,
         ad: &LedgerAdvertisement,
     ) -> Result<String, Error> {
+        // Stamp the daemon's delegate pubkey into the ad if we know it.
+        // Caller may have already set it; otherwise fill from our cached
+        // value. Either way the on-wire ad carries delegate_pubkey for
+        // wallets following the delegation pattern.
+        let mut ad = ad.clone();
+        if ad.delegate_pubkey.is_empty() {
+            if let Ok(guard) = self.delegate_pubkey.lock() {
+                if let Some(pk) = guard.as_ref() {
+                    ad.delegate_pubkey = hex::encode(pk.serialize());
+                }
+            }
+        }
+        let ad = &ad;
         // Cache locally so we don't need relay round-trips to read our own ads
         self.ad_cache
             .write()
