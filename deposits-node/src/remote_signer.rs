@@ -1,91 +1,114 @@
 //! `RemoteSigner` — a `Signer` impl that talks to a `deposits-signer`
 //! process over a Unix socket.
 //!
-//! The `Signer` trait is sync; the wire is async. To bridge the two,
-//! `RemoteSigner` owns a single-thread tokio runtime and serializes calls
-//! through a per-call `block_on`. A `tokio::sync::Mutex<UnixStream>`
-//! guards the connection so one request finishes before the next starts;
-//! id-correlation on the wire lets the protocol stay in lock-step with
-//! the server's request loop.
+//! The `Signer` trait is sync; the wire is async. Bridging the two in a
+//! way that works whether the *caller* is inside a tokio runtime or not
+//! is the whole point of this module:
 //!
-//! Connection lifecycle: opened in [`RemoteSigner::connect`] (the daemon
-//! does the handshake there). Reused for the daemon's lifetime. If the
-//! socket disconnects, every subsequent call returns `SignerError::Transport`
-//! and the daemon is responsible for handling the failure (today: bubble
-//! up; phase 6+: reconnect).
+//!   - A dedicated OS thread owns a tokio runtime + the connection.
+//!   - Trait calls send a `RpcRequest` (the SignOp + a oneshot reply
+//!     channel) into the worker over an `std::sync::mpsc`. The trait
+//!     method blocks on the reply.
+//!   - The worker reads requests off its channel, drives the wire, and
+//!     forwards results back. Connection state stays single-threaded
+//!     inside the worker, so no `Arc<Mutex<Conn>>` for the connection.
+//!
+//! Why this shape: an earlier iteration had `RemoteSigner::connect`
+//! create its own `current_thread` runtime and `block_on` directly.
+//! That panicked when `Node::new` (which itself runs under tokio) called
+//! it: "Cannot start a runtime from within a runtime." Worker-thread
+//! pattern dodges that — the worker's runtime is created on a thread
+//! that isn't inside any other runtime.
 
 use bitcoin::secp256k1::{
-    ecdh::SharedSecret, ecdsa, Keypair, Message, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey,
+    ecdsa, Keypair, Message, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey,
 };
 use deposits_signer_api::{
     wire::{
         auth_digest, hello_ack_digest, Auth, Hello, HelloAck, SignErrorKind, SignOp, SignRequest,
         SignResponse, SignResult,
     },
-    SignContext, Signer, SignerError,
+    SigPurpose, SignContext, Signer, SignerError,
 };
 use deposits_signer::framing::{read_frame, write_frame, FrameError};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use tokio::io::{ReadHalf, WriteHalf};
+use std::sync::{mpsc, Mutex};
+use std::thread::{self, JoinHandle};
 use tokio::net::UnixStream;
-use tokio::runtime::Runtime;
-use tokio::sync::Mutex as AsyncMutex;
 
 /// `Signer` impl backed by a connected `deposits-signer` over Unix socket.
+///
+/// Construct via [`RemoteSigner::connect`]. The instance owns a worker
+/// thread + tokio runtime + connection until dropped.
 pub struct RemoteSigner {
-    rt: Runtime,
-    inner: Arc<AsyncMutex<Conn>>,
+    /// Worker-bound request channel. `Mutex` because `mpsc::Sender` is
+    /// `Send` but not `Sync`, and the `Signer` trait requires `Sync`.
+    /// The lock is held only across a non-blocking `send()`, so contention
+    /// is bounded by the daemon's outbound rate.
+    request_tx: Mutex<mpsc::Sender<RpcRequest>>,
+    /// Joined on drop. `Option` so `Drop` can take ownership.
+    worker: Mutex<Option<JoinHandle<()>>>,
+    /// Caller-allocated id; the worker echoes it on the response. Lives
+    /// outside the worker so the trait's pubkey()/xonly_pubkey() can stay
+    /// synchronous (cached from the connect-time PubkeyQuery).
     next_id: AtomicU64,
     pubkey: PublicKey,
     xonly: XOnlyPublicKey,
 }
 
-struct Conn {
-    reader: ReadHalf<UnixStream>,
-    writer: WriteHalf<UnixStream>,
+struct RpcRequest {
+    ctx: SignContext,
+    op: SignOp,
+    /// One-shot reply channel. We use `mpsc::Sender` with capacity 1 in
+    /// std rather than tokio's oneshot since the trait method blocks on
+    /// `recv()` from a (possibly) sync context.
+    reply: mpsc::Sender<Result<SignResult, SignerError>>,
 }
 
 impl RemoteSigner {
-    /// Connect to a signer at `socket_path`, run the handshake, and pin the
-    /// remote's transport pubkey to `expected_signer_pubkey`. Returns a ready
-    /// `RemoteSigner` whose underlying signer is the operator key the
-    /// `deposits-signer` process is configured with.
+    /// Connect to a signer at `socket_path`, run the handshake, and pin
+    /// the remote's transport pubkey to `expected_signer_pubkey`. Returns
+    /// a ready `RemoteSigner`.
+    ///
+    /// Safe to call from inside a tokio runtime — the worker thread that
+    /// drives async I/O is spawned via `std::thread::spawn`, so it
+    /// doesn't inherit the caller's runtime.
     pub fn connect(
         socket_path: &Path,
         node_transport_secret: SecretKey,
         expected_signer_pubkey: PublicKey,
     ) -> Result<Self, SignerError> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| SignerError::Transport(format!("tokio rt: {}", e)))?;
+        let socket_path = socket_path.to_path_buf();
 
-        let conn = rt.block_on(async {
-            let mut stream = UnixStream::connect(socket_path)
-                .await
-                .map_err(|e| SignerError::Transport(format!("connect {:?}: {}", socket_path, e)))?;
+        let (request_tx, request_rx) = mpsc::channel::<RpcRequest>();
+        // Worker uses this to deliver the connect-time pubkey query result
+        // (or a connect error) back to the constructor.
+        let (ready_tx, ready_rx) =
+            mpsc::channel::<Result<(PublicKey, XOnlyPublicKey), SignerError>>();
 
-            handshake(
-                &mut stream,
+        let worker = thread::spawn(move || {
+            worker_main(
+                socket_path,
                 node_transport_secret,
                 expected_signer_pubkey,
-            )
-            .await?;
+                request_rx,
+                ready_tx,
+            );
+        });
 
-            let (reader, writer) = tokio::io::split(stream);
-            Ok::<_, SignerError>(Conn { reader, writer })
-        })?;
-
-        // Cache pubkey via PubkeyQuery so the trait's pubkey() / xonly_pubkey()
-        // can answer synchronously without a wire round-trip.
-        let conn_arc = Arc::new(AsyncMutex::new(conn));
-        let (pubkey, xonly) = rt.block_on(query_pubkey(Arc::clone(&conn_arc)))?;
+        let (pubkey, xonly) = match ready_rx.recv() {
+            Ok(res) => res?,
+            Err(_) => {
+                return Err(SignerError::Transport(
+                    "signer worker thread exited before handshake completed".into(),
+                ));
+            }
+        };
 
         Ok(Self {
-            rt,
-            inner: conn_arc,
+            request_tx: Mutex::new(request_tx),
+            worker: Mutex::new(Some(worker)),
             next_id: AtomicU64::new(1),
             pubkey,
             xonly,
@@ -93,14 +116,144 @@ impl RemoteSigner {
     }
 
     fn rpc(&self, ctx: &SignContext, op: SignOp) -> Result<SignResult, SignerError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let req = SignRequest {
-            id,
+        let (reply_tx, reply_rx) = mpsc::channel::<Result<SignResult, SignerError>>();
+        let req = RpcRequest {
             ctx: ctx.clone(),
             op,
+            reply: reply_tx,
         };
-        self.rt.block_on(rpc_one(Arc::clone(&self.inner), req, id))
+        // Bump the id (wire-side correlation) — actually unused on the
+        // sender end since the worker assigns its own monotonic ids inside
+        // its single-flight loop. Kept here for symmetry / future fan-out.
+        let _ = self.next_id.fetch_add(1, Ordering::Relaxed);
+
+        self.request_tx
+            .lock()
+            .map_err(|_| SignerError::Transport("RemoteSigner mutex poisoned".into()))?
+            .send(req)
+            .map_err(|_| SignerError::Transport("RemoteSigner worker channel closed".into()))?;
+
+        match reply_rx.recv() {
+            Ok(result) => result,
+            Err(_) => Err(SignerError::Transport(
+                "RemoteSigner worker dropped reply channel".into(),
+            )),
+        }
     }
+}
+
+impl Drop for RemoteSigner {
+    fn drop(&mut self) {
+        // Drop the sender so the worker's `request_rx.recv()` returns
+        // `Err`, breaking the loop. Then join.
+        //
+        // The lock here is best-effort — if it's poisoned we still want
+        // to take the handle and try to join. Replace-then-drop pattern
+        // gets the Sender out of the Mutex so its destructor runs.
+        if let Ok(mut guard) = self.request_tx.lock() {
+            // Replace with a fresh dead channel; the original Sender is
+            // dropped at end of scope.
+            let (dead_tx, _dead_rx) = mpsc::channel();
+            let _old = std::mem::replace(&mut *guard, dead_tx);
+        }
+        if let Ok(mut guard) = self.worker.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+fn worker_main(
+    socket_path: std::path::PathBuf,
+    node_transport_secret: SecretKey,
+    expected_signer_pubkey: PublicKey,
+    request_rx: mpsc::Receiver<RpcRequest>,
+    ready_tx: mpsc::Sender<Result<(PublicKey, XOnlyPublicKey), SignerError>>,
+) {
+    // Worker-owned runtime. Created on this thread, which is *not* part
+    // of any caller's runtime (we spawned via std::thread::spawn).
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let _ = ready_tx.send(Err(SignerError::Transport(format!("tokio rt: {}", e))));
+            return;
+        }
+    };
+
+    rt.block_on(async move {
+        // 1. Connect + handshake.
+        let mut stream = match UnixStream::connect(&socket_path).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = ready_tx.send(Err(SignerError::Transport(format!(
+                    "connect {:?}: {}",
+                    socket_path, e
+                ))));
+                return;
+            }
+        };
+        if let Err(e) = handshake(
+            &mut stream,
+            node_transport_secret,
+            expected_signer_pubkey,
+        )
+        .await
+        {
+            let _ = ready_tx.send(Err(e));
+            return;
+        }
+
+        let (mut reader, mut writer) = tokio::io::split(stream);
+
+        // 2. Cache the operator's pubkey (PubkeyQuery on the freshly
+        //    handshaken connection). Send the result back through the
+        //    `ready_tx` to unblock RemoteSigner::connect.
+        let mut next_id: u64 = 1;
+        let pk_id = next_id;
+        next_id += 1;
+        let pk_req = SignRequest {
+            id: pk_id,
+            ctx: SignContext::no_ledger(SigPurpose::Bip340Untagged),
+            op: SignOp::PubkeyQuery,
+        };
+        let pk_result = rpc_one(&mut reader, &mut writer, pk_req, pk_id).await;
+        let (pubkey, xonly) = match pk_result {
+            Ok(SignResult::Pubkey { pubkey, xonly }) => (pubkey, xonly),
+            Ok(other) => {
+                let _ = ready_tx.send(Err(SignerError::Transport(format!(
+                    "PubkeyQuery returned unexpected variant: {:?}",
+                    other
+                ))));
+                return;
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+                return;
+            }
+        };
+        if ready_tx.send(Ok((pubkey, xonly))).is_err() {
+            // RemoteSigner went away during connect — give up.
+            return;
+        }
+
+        // 3. Serve trait calls until the request channel closes
+        //    (RemoteSigner dropped).
+        while let Ok(req) = request_rx.recv() {
+            let id = next_id;
+            next_id += 1;
+            let wire_req = SignRequest {
+                id,
+                ctx: req.ctx,
+                op: req.op,
+            };
+            let result = rpc_one(&mut reader, &mut writer, wire_req, id).await;
+            let _ = req.reply.send(result);
+        }
+    });
 }
 
 async fn handshake(
@@ -122,9 +275,7 @@ async fn handshake(
         node_pubkey,
         nonce_a,
     };
-    write_frame(stream, &hello)
-        .await
-        .map_err(map_frame_err)?;
+    write_frame(stream, &hello).await.map_err(map_frame_err)?;
 
     let ack: HelloAck = read_frame(stream).await.map_err(map_frame_err)?;
     if ack.signer_pubkey != expected_signer_pubkey {
@@ -135,7 +286,6 @@ async fn handshake(
         )));
     }
 
-    // Verify HelloAck sig against signer_pubkey + nonce_a + node_pubkey.
     let dgst = hello_ack_digest(&nonce_a, &node_pubkey);
     let msg = Message::from_digest(dgst);
     let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(&ack.sig_signer)
@@ -144,7 +294,6 @@ async fn handshake(
     secp.verify_schnorr(&sig, &msg, &signer_xonly)
         .map_err(|e| SignerError::Transport(format!("ack sig verify: {}", e)))?;
 
-    // Sign + send Auth.
     let auth_dgst = auth_digest(&ack.nonce_b, &ack.signer_pubkey);
     let auth_msg = Message::from_digest(auth_dgst);
     let sig_node = secp
@@ -155,34 +304,18 @@ async fn handshake(
     Ok(())
 }
 
-async fn query_pubkey(
-    conn: Arc<AsyncMutex<Conn>>,
-) -> Result<(PublicKey, XOnlyPublicKey), SignerError> {
-    let req = SignRequest {
-        id: 0,
-        ctx: SignContext::no_ledger(deposits_signer_api::SigPurpose::Bip340Untagged),
-        op: SignOp::PubkeyQuery,
-    };
-    let res = rpc_one(conn, req, 0).await?;
-    match res {
-        SignResult::Pubkey { pubkey, xonly } => Ok((pubkey, xonly)),
-        other => Err(SignerError::Transport(format!(
-            "PubkeyQuery returned unexpected variant: {:?}",
-            other
-        ))),
-    }
-}
-
-async fn rpc_one(
-    conn: Arc<AsyncMutex<Conn>>,
+async fn rpc_one<R, W>(
+    reader: &mut R,
+    writer: &mut W,
     req: SignRequest,
     expected_id: u64,
-) -> Result<SignResult, SignerError> {
-    let mut guard = conn.lock().await;
-    write_frame(&mut guard.writer, &req)
-        .await
-        .map_err(map_frame_err)?;
-    let resp: SignResponse = read_frame(&mut guard.reader).await.map_err(map_frame_err)?;
+) -> Result<SignResult, SignerError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    write_frame(writer, &req).await.map_err(map_frame_err)?;
+    let resp: SignResponse = read_frame(reader).await.map_err(map_frame_err)?;
     if resp.id != expected_id {
         return Err(SignerError::Transport(format!(
             "id mismatch: sent {}, got {}",
@@ -214,9 +347,7 @@ impl Signer for RemoteSigner {
     }
 
     fn issue_nostr_secret(&self) -> Result<[u8; 32], SignerError> {
-        // No ledger context for an out-of-band secret issuance — it's not
-        // a ledger sig.
-        let ctx = SignContext::no_ledger(deposits_signer_api::SigPurpose::Bip340Untagged);
+        let ctx = SignContext::no_ledger(SigPurpose::Bip340Untagged);
         match self.rpc(&ctx, SignOp::IssueNostrSecret)? {
             SignResult::IssuedSecret { sk } => Ok(sk),
             SignResult::Error { kind, message } => Err(map_sign_result_to_error(kind, message)),
@@ -259,8 +390,7 @@ impl Signer for RemoteSigner {
     }
 
     fn ecdh(&self, peer: &PublicKey) -> Result<[u8; 32], SignerError> {
-        // ECDH has no ledger context; use a placeholder SignContext.
-        let ctx = SignContext::no_ledger(deposits_signer_api::SigPurpose::Bip340Untagged);
+        let ctx = SignContext::no_ledger(SigPurpose::Bip340Untagged);
         match self.rpc(&ctx, SignOp::Ecdh { peer: *peer })? {
             SignResult::EcdhSecret { shared } => Ok(shared),
             SignResult::Error { kind, message } => Err(map_sign_result_to_error(kind, message)),
@@ -270,12 +400,4 @@ impl Signer for RemoteSigner {
             ))),
         }
     }
-}
-
-// Suppress dead_code warning on `SharedSecret` since the trait surface
-// re-uses LocalSigner's import path; we want to keep `SharedSecret` reachable
-// here for cross-checking in tests, but no in-tree code uses it directly.
-#[allow(dead_code)]
-fn _shared_secret_kept_for_test_imports() -> usize {
-    std::mem::size_of::<SharedSecret>()
 }
