@@ -3442,6 +3442,14 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let our_pubkey = keypair.public_key();
 
+    // Signer for claim-TX inputs. Routes both the lottery script-spend
+    // (Schnorr) and the replacement-collateral wpkh input (ECDSA) through
+    // the trait so deployments running deposits-signer (RemoteSigner)
+    // don't have to keep the seed locally for the manual claim step.
+    // LocalSigner (default) reuses the seed-derived secret in process —
+    // identical bytes to the prior `secp.sign_*` path.
+    let signer = crate::node_cli::signer_from_config(&config)?;
+
     println!(
         "Checking lottery result for ledger: {}...",
         &ledger_id[..16.min(ledger_id.len())]
@@ -3476,8 +3484,14 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         .await
         .map_err(|e| format!("Failed to fetch reveals: {:?}", e))?;
 
-    // Extract DisputeArmed participants
+    // Extract DisputeArmed participants. Also keep the per-participant
+    // `replacement_collateral` declaration so the winner can build a
+    // multi-input claim TX (DEP-03 §"Claim transaction (multi-input)").
     let mut participants: Vec<(PublicKey, LotteryParticipant)> = Vec::new();
+    let mut replacement_collateral_decls: std::collections::HashMap<
+        PublicKey,
+        deposits_core::messages::ReplacementCollateral,
+    > = std::collections::HashMap::new();
 
     for event in update_events.iter() {
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
@@ -3486,6 +3500,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
                     if let LedgerOperation::DisputeArmed {
                         commitment_hash,
                         target_reserves,
+                        replacement_collateral,
                         ..
                     } = op
                     {
@@ -3494,6 +3509,9 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
                             update.operator_id,
                             LotteryParticipant::new(x_only, commitment_hash, target_reserves),
                         ));
+                        if let Some(rc) = replacement_collateral {
+                            replacement_collateral_decls.insert(update.operator_id, rc);
+                        }
                     }
                 }
             }
@@ -3647,6 +3665,29 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     println!("YOU WON! Building claim transaction...");
     println!();
 
+    // Look up our own replacement collateral declaration. The multi-input
+    // claim TX consumes (lottery_output + declared_replacement_utxo) and
+    // sweeps both into the new vault. Failing to include the declared
+    // input is observable on-chain — see DEP-03 §"Claim transaction
+    // (multi-input)" and the WinnerCollateralDeviation fraud type.
+    let our_replacement_collateral = replacement_collateral_decls.get(&our_pubkey).copied();
+    if our_replacement_collateral.is_none() {
+        eprintln!(
+            "WARNING: no replacement_collateral declared in your DisputeArmed; \
+             building single-input claim TX (legacy path). Strict cosigners \
+             would have refused confiscation, so this path is only reachable \
+             when nobody enforced the inequality. The post-takeover ledger \
+             will be under-collateralized."
+        );
+    } else {
+        println!(
+            "  Replacement collateral: {} sats from {}:{}",
+            our_replacement_collateral.unwrap().amount,
+            hex::encode(our_replacement_collateral.unwrap().txid),
+            our_replacement_collateral.unwrap().vout
+        );
+    }
+
     // Extract quorum members and original operator from ledger
     let mut quorum_members: Vec<PublicKey> = Vec::new();
     let mut original_operator: Option<PublicKey> = None;
@@ -3760,35 +3801,88 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         .require_network(config.network)
         .map_err(|e| format!("Address network mismatch: {}", e))?;
 
-    // Build claim transaction
-    use bitcoin::{Amount, ScriptBuf, TxIn, TxOut, Witness};
+    // Build claim transaction. Single-input shape (lottery only) is the
+    // legacy path used when no `replacement_collateral` is declared; the
+    // multi-input shape (lottery + declared collateral UTXO) is what
+    // strict cosigners expect (DEP-03 §"Claim transaction (multi-input)").
+    use bitcoin::{Amount, OutPoint, ScriptBuf, TxIn, TxOut, Witness};
 
-    let claim_fee = 400u64; // Reasonable fee for single-input tx
-    let output_amount = lottery_amount.saturating_sub(claim_fee);
+    // Fee budget: 400 sats for single-input parity; 1200 sats for the
+    // multi-input case (~3× the bytes due to the second input + ECDSA
+    // witness). Both are well under the cosigner policy default of 5000.
+    let (claim_fee, mut tx_inputs, mut prevouts, replacement_collateral_input) =
+        if let Some(rc) = our_replacement_collateral {
+            let rc_txid = bitcoin::Txid::from_raw_hash(
+                bitcoin::hashes::Hash::from_byte_array(rc.txid),
+            );
+            let rc_outpoint = OutPoint::new(rc_txid, rc.vout);
+            // Operator-key controlled wpkh — see RC4 design note in
+            // recovery.rs: the disputant declares a UTXO at their
+            // operator pubkey's P2WPKH address. RC6 will tighten arm-time
+            // construction to enforce that placement.
+            let our_compressed = bitcoin::CompressedPublicKey::from_slice(
+                &our_pubkey.serialize(),
+            )
+            .map_err(|e| format!("Compressed pubkey: {}", e))?;
+            let rc_script = bitcoin::Address::p2wpkh(&our_compressed, config.network)
+                .script_pubkey();
+            let prevs = vec![
+                TxOut {
+                    value: Amount::from_sat(lottery_amount),
+                    script_pubkey: lottery_script.clone(),
+                },
+                TxOut {
+                    value: Amount::from_sat(rc.amount),
+                    script_pubkey: rc_script.clone(),
+                },
+            ];
+            let inputs = vec![
+                TxIn {
+                    previous_output: lottery_outpoint,
+                    script_sig: ScriptBuf::new(),
+                    sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+                TxIn {
+                    previous_output: rc_outpoint,
+                    script_sig: ScriptBuf::new(),
+                    sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+            ];
+            (1200u64, inputs, prevs, Some((rc, rc_script)))
+        } else {
+            let prevs = vec![TxOut {
+                value: Amount::from_sat(lottery_amount),
+                script_pubkey: lottery_script.clone(),
+            }];
+            let inputs = vec![TxIn {
+                previous_output: lottery_outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }];
+            (400u64, inputs, prevs, None)
+        };
+    let _ = (&mut tx_inputs, &mut prevouts);
+
+    let total_input_value: u64 = prevouts.iter().map(|o| o.value.to_sat()).sum();
+    let output_amount = total_input_value.saturating_sub(claim_fee);
 
     let claim_tx = bitcoin::Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: bitcoin::absolute::LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: lottery_outpoint,
-            script_sig: ScriptBuf::new(),
-            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-            witness: Witness::new(),
-        }],
+        input: tx_inputs,
         output: vec![TxOut {
             value: Amount::from_sat(output_amount),
             script_pubkey: target_address.script_pubkey(),
         }],
     };
 
-    // Compute sighash for the lottery script path
-    use bitcoin::sighash::{SighashCache, TapSighashType};
+    // Compute sighashes. Lottery input (index 0) uses Taproot script-spend;
+    // replacement collateral input (index 1, if present) uses BIP143 wpkh.
+    use bitcoin::sighash::{EcdsaSighashType, SighashCache, TapSighashType};
     use bitcoin::taproot::TapLeafHash;
-
-    let prevouts = vec![TxOut {
-        value: Amount::from_sat(lottery_amount),
-        script_pubkey: lottery_script.clone(),
-    }];
 
     let leaf_hash = TapLeafHash::from_script(
         &lottery_output.lottery_script,
@@ -3803,24 +3897,57 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
             leaf_hash,
             TapSighashType::Default,
         )
-        .map_err(|e| format!("Failed to compute sighash: {}", e))?;
+        .map_err(|e| format!("Failed to compute lottery sighash: {}", e))?;
 
     let sighash_bytes: [u8; 32] = *sighash.as_ref();
 
-    // Sign with our key
-    let msg = bitcoin::secp256k1::Message::from_digest(sighash_bytes);
-    let signature = secp.sign_schnorr(&msg, &keypair);
-    let sig_bytes: [u8; 64] = *signature.as_ref();
+    // Lottery script-spend: BIP-340 Schnorr via the Signer trait. Routed
+    // through `signer.bip340_sign` so RemoteSigner deployments work without
+    // shipping the seed to the recovery operator. SignContext is no_ledger
+    // because the claim TX itself doesn't carry a sequence commitment —
+    // matches the rotation TX path in wallet.rs.
+    use deposits_signer_api::{SigPurpose, SignContext};
+    let sig_bytes = signer
+        .bip340_sign(
+            &SignContext::no_ledger(SigPurpose::OnchainSighash),
+            &sighash_bytes,
+        )
+        .map_err(|e| format!("lottery sighash sign: {}", e))?;
 
-    println!("  Signed claim transaction");
-
-    // Create witness
-    let witness = lottery_output
+    let lottery_witness = lottery_output
         .create_claim_witness(&sig_bytes, &ordered_preimages)
-        .map_err(|e| format!("Failed to create witness: {:?}", e))?;
+        .map_err(|e| format!("Failed to create lottery witness: {:?}", e))?;
 
     let mut claim_tx = claim_tx;
-    claim_tx.input[0].witness = witness;
+    claim_tx.input[0].witness = lottery_witness;
+
+    // Replacement-collateral input (BIP143 wpkh, ECDSA via Signer).
+    if let Some((rc, rc_script)) = replacement_collateral_input {
+        let mut sighash_cache = SighashCache::new(&claim_tx);
+        let rc_sighash = sighash_cache
+            .p2wpkh_signature_hash(
+                1,
+                &rc_script,
+                Amount::from_sat(rc.amount),
+                EcdsaSighashType::All,
+            )
+            .map_err(|e| format!("Failed to compute collateral sighash: {}", e))?;
+        let rc_sighash_bytes: [u8; 32] = *rc_sighash.as_ref();
+        let rc_sig = signer
+            .ecdsa_sign_sighash(
+                &SignContext::no_ledger(SigPurpose::OnchainSighash),
+                &rc_sighash_bytes,
+            )
+            .map_err(|e| format!("collateral sighash sign: {}", e))?;
+        let mut rc_sig_bytes = rc_sig.serialize_der().to_vec();
+        rc_sig_bytes.push(EcdsaSighashType::All as u8);
+        let mut rc_witness = Witness::new();
+        rc_witness.push(&rc_sig_bytes);
+        rc_witness.push(&our_pubkey.serialize());
+        claim_tx.input[1].witness = rc_witness;
+    }
+
+    println!("  Signed claim transaction");
 
     // Broadcast
     println!("  Broadcasting claim transaction...");

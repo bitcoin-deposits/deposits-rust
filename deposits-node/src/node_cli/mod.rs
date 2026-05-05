@@ -51,6 +51,42 @@ pub fn derive_operator_secret(
     Ok(operator_xpriv.private_key)
 }
 
+/// Build a `Signer` from CLI config. LocalSigner by default; RemoteSigner
+/// when `config.signer` is set. Mirrors the daemon-side construction in
+/// `Node::new` so CLI commands that sign on-chain can route through the
+/// same anti-equivocation path daemons use.
+///
+/// Used by recovery flows (claim TX signing — the disputant winner's
+/// multi-input TX) so that deployments running `deposits-signer` don't
+/// have to keep the seed locally for the manual claim step.
+pub fn signer_from_config(
+    config: &NodeConfig,
+) -> Result<std::sync::Arc<dyn deposits_signer_api::Signer>, String> {
+    use deposits_signer_api::LocalSigner;
+    let secret = derive_operator_secret(&config.seed, config.network)?;
+    match &config.signer {
+        None => Ok(std::sync::Arc::new(LocalSigner::new(secret))),
+        Some(sig_cfg) => {
+            let transport_secret =
+                crate::Node::load_or_init_transport_secret(&config.data_dir)
+                    .map_err(|e| format!("transport secret: {}", e))?;
+            let remote = crate::remote_signer::RemoteSigner::connect(
+                &sig_cfg.socket_path,
+                transport_secret,
+                sig_cfg.signer_pubkey,
+            )
+            .map_err(|e| {
+                format!(
+                    "connect to deposits-signer at {}: {}",
+                    sig_cfg.socket_path.display(),
+                    e
+                )
+            })?;
+            Ok(std::sync::Arc::new(remote))
+        }
+    }
+}
+
 pub fn print_usage(program: &str) {
     println!(
         r#"deposits-node - Bitcoin Deposits Protocol Node (BDK + Nostr)
