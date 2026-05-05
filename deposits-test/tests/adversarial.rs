@@ -297,6 +297,7 @@ fn attack_false_custody_claim() {
         armed_block: 800_000,
         commitment_hash: [0xAA; 20],
         target_reserves: "bcrt1qtarget".to_string(),
+        replacement_collateral: None,
     };
     net.op_mut("alice").ledger.apply_operation(&arm).unwrap();
 

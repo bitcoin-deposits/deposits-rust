@@ -352,6 +352,21 @@ fn custody_armed() {
         armed_block: 300,
         commitment_hash: [0xab; 20],
         target_reserves: "bcrt1qtarget".into(),
+        replacement_collateral: None,
+    });
+}
+
+#[test]
+fn custody_armed_with_replacement_collateral() {
+    test_roundtrip(&LedgerOperation::DisputeArmed {
+        armed_block: 300,
+        commitment_hash: [0xab; 20],
+        target_reserves: "bcrt1qtarget".into(),
+        replacement_collateral: Some(deposits_protocol::ReplacementCollateral {
+            txid: h32(),
+            vout: 7,
+            amount: 25_000_000,
+        }),
     });
 }
 

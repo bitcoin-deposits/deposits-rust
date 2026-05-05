@@ -1366,6 +1366,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     armed_block,
                     commitment_hash,
                     target_reserves,
+                    ..
                 } => {
                     let hash_hex = hex::encode(commitment_hash);
                     let target_short = if target_reserves.len() > 16 {

@@ -27,7 +27,7 @@ pub use constants::{
     MIN_EMERGENCY_TIMEOUT_BLOCKS, MIN_RESERVES_OUTPUT_SATS, MIN_RESERVES_RATIO_PERCENT,
 };
 pub use error::{DepositsError, DepositsResult, HandlerError};
-pub use messages::{DepositsMessage, HashStrategy, LedgerOperation};
+pub use messages::{DepositsMessage, HashStrategy, LedgerOperation, ReplacementCollateral};
 pub use signature_utils::{
     compute_transfer_id, invoice_cosign_signing_message, invoice_lock_signing_message,
     offer_cosign_signing_message, transfer_lock_signing_message, withdrawal_signing_message,

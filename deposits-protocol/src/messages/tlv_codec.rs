@@ -62,6 +62,12 @@ mod ledger_op_tlv {
     // DisputeArmed lottery fields
     pub const COMMITMENT_HASH: u64 = 112;
     pub const TARGET_RESERVES: u64 = 122;
+    /// DisputeArmed replacement-collateral declaration (DEP-03 §"Replacement
+    /// collateral declaration"). All three are written when a producer
+    /// pledges replacement collateral; absent on legacy events.
+    pub const REPLACEMENT_COLLATERAL_TXID: u64 = 280; // [u8; 32]
+    pub const REPLACEMENT_COLLATERAL_VOUT: u64 = 282; // u32
+    pub const REPLACEMENT_COLLATERAL_AMOUNT: u64 = 284; // u64 sats
     // Quorum/Collateral ledger binding fields
     pub const MEMBER_LEDGER_ID: u64 = 114;
     // 124 was COLLATERAL_LEDGER_ID (removed with collateral-in-UTXO migration)
@@ -496,11 +502,18 @@ impl TlvEncode for LedgerOperation {
                 armed_block,
                 commitment_hash,
                 target_reserves,
+                replacement_collateral,
             } => {
                 builder = builder
                     .u32_field(ARMED_BLOCK, *armed_block)
                     .bytes_field(COMMITMENT_HASH, commitment_hash)
                     .string_field(TARGET_RESERVES, target_reserves);
+                if let Some(rc) = replacement_collateral {
+                    builder = builder
+                        .bytes_field(REPLACEMENT_COLLATERAL_TXID, &rc.txid)
+                        .u32_field(REPLACEMENT_COLLATERAL_VOUT, rc.vout)
+                        .u64_field(REPLACEMENT_COLLATERAL_AMOUNT, rc.amount);
+                }
             }
             Self::DisputeAcquire {
                 new_custodian,
@@ -735,11 +748,34 @@ impl TlvDecode for LedgerOperation {
                 new_reserves_address: reader.read_string(NEW_RESERVES_ADDRESS)?,
             }),
             56 => Ok(Self::DisputeYield),
-            57 => Ok(Self::DisputeArmed {
-                armed_block: reader.read_u32(ARMED_BLOCK)?,
-                commitment_hash: reader.read_bytes(COMMITMENT_HASH)?,
-                target_reserves: reader.read_string(TARGET_RESERVES)?,
-            }),
+            57 => {
+                let armed_block = reader.read_u32(ARMED_BLOCK)?;
+                let commitment_hash = reader.read_bytes(COMMITMENT_HASH)?;
+                let target_reserves = reader.read_string(TARGET_RESERVES)?;
+                // Replacement collateral: optional, all-or-nothing. New
+                // producers emit all three fields; legacy events omit them.
+                // Partial presence (some fields, not all) is a malformed
+                // event and falls through to MissingRequiredField.
+                let rc_txid = reader.read_bytes_opt::<32>(REPLACEMENT_COLLATERAL_TXID)?;
+                let rc_vout = reader.read_u32_opt(REPLACEMENT_COLLATERAL_VOUT)?;
+                let rc_amount = reader.read_u64_opt(REPLACEMENT_COLLATERAL_AMOUNT)?;
+                let replacement_collateral = match (rc_txid, rc_vout, rc_amount) {
+                    (Some(txid), Some(vout), Some(amount)) => {
+                        Some(ReplacementCollateral { txid, vout, amount })
+                    }
+                    (None, None, None) => None,
+                    _ => return Err(TlvError::InvalidFieldValue {
+                        field_type: REPLACEMENT_COLLATERAL_TXID,
+                        reason: "DisputeArmed replacement_collateral fields must be all present or all absent".into(),
+                    }),
+                };
+                Ok(Self::DisputeArmed {
+                    armed_block,
+                    commitment_hash,
+                    target_reserves,
+                    replacement_collateral,
+                })
+            },
             80 => Ok(Self::DeliveryEmbed {
                 request_hash: reader.read_bytes(REQUEST_HASH)?,
                 target_ledger_id: reader.read_bytes(TARGET_LEDGER_ID)?,

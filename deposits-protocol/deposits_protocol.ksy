@@ -289,6 +289,16 @@ types:
   #   120 = new_reserves_address (string, DisputeAcquire)
   #   112 = commitment_hash (20 bytes HASH160, DisputeArmed)
   #   122 = target_reserves (string, DisputeArmed)
+  #   280 = replacement_collateral_txid (32 bytes, DisputeArmed,
+  #         optional — emitted by new producers since 2026-05; old armed
+  #         events omit fields 280/282/284 entirely. See DEP-03
+  #         §"Replacement collateral declaration".)
+  #   282 = replacement_collateral_vout (u32, DisputeArmed, optional)
+  #   284 = replacement_collateral_amount (u64 sats, DisputeArmed,
+  #         optional — sats pledged from the declared UTXO toward the
+  #         post-takeover vault. Cosigners enforce
+  #         `amount ≥ obligations × collateral_ratio + fee_estimate`
+  #         at confiscation cosign time.)
   # Note: 106 and 116 (entropy_block_hash, entropy_block_height) were
   # used by the pre-lottery DisputeAcquire shape and are now retired.
 

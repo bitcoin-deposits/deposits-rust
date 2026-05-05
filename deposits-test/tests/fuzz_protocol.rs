@@ -852,6 +852,7 @@ impl ProtocolSim {
                 h
             },
             target_reserves: format!("bcrt1q_op{}_recovers_{}", disputer, victim),
+            replacement_collateral: None,
         };
         let replica = match self.operators[disputer].replicas.get(&victim) {
             Some(r) => r.clone(),
@@ -1840,6 +1841,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
                     h
                 },
                 target_reserves: format!("bcrt1q_bogus_{}", proposer),
+                replacement_collateral: None,
             },
             2 => LedgerOperation::DisputeAcquire {
                 new_custodian: op.public_key,
@@ -2374,6 +2376,7 @@ fn adv_majority_quorum_can_take_over_honest_ledger() {
         armed_block: sim.block_height,
         commitment_hash: [0x11; 20],
         target_reserves: format!("bcrt1q_{}", attacker),
+        replacement_collateral: None,
     };
     assert_eq!(
         sim.adversary_propose_on_victim(victim, attacker, armed),

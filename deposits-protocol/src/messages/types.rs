@@ -160,6 +160,27 @@ pub struct QuorumMemberRef {
     pub member_ledger_id: String,
 }
 
+/// A disputant's pledged replacement collateral, declared in `DisputeArmed`.
+///
+/// At confiscation cosign time, every cosigner verifies the declared UTXO
+/// exists and is unspent at their tip, holds at least `amount` sats, and
+/// satisfies `amount ≥ obligations × collateral_ratio + claim_fee_estimate`.
+/// If the disputant wins the lottery, their claim TX MUST consume this UTXO
+/// as Input 1 and route at least `amount` to the new vault output —
+/// deviation is a `WinnerCollateralDeviation` fraud proof. See
+/// DEP-03 §"Replacement collateral declaration".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReplacementCollateral {
+    /// Outpoint txid (Bitcoin-internal byte order — same convention as
+    /// `QuorumBegin.new_outpoint_txid`).
+    pub txid: [u8; 32],
+    /// Outpoint vout.
+    pub vout: u32,
+    /// Sats pledged from this UTXO toward the new reserves vault.
+    /// MUST be ≤ the on-chain UTXO value.
+    pub amount: u64,
+}
+
 impl QuorumMemberRef {
     /// Wrap a pubkey when the caller doesn't have a ledger_id at hand
     /// (recovery flows, tests, etc.). The on-wire encoding still
@@ -479,6 +500,10 @@ pub enum LedgerOperation {
         commitment_hash: [u8; 20],
         /// Bitcoin address where winner wants reserves sent.
         target_reserves: String,
+        /// Replacement collateral the disputant pledges to commit to the new
+        /// vault if they win. `None` on legacy events; new producers MUST
+        /// populate it. See DEP-03 §"Replacement collateral declaration".
+        replacement_collateral: Option<ReplacementCollateral>,
     },
 
     /// Acquire custody after winning the on-chain lottery.
@@ -1322,10 +1347,25 @@ impl BinaryCodec for LedgerOperation {
                 armed_block,
                 commitment_hash,
                 target_reserves,
+                replacement_collateral,
             } => {
                 write_u32(w, *armed_block)?;
                 write_20(w, commitment_hash)?;
                 write_string(w, target_reserves)?;
+                // Replacement collateral: u8 flag (0/1) + (txid|vout|amount)
+                // when present. Old readers stop after target_reserves; new
+                // readers detect EOF and treat the field as None.
+                match replacement_collateral {
+                    Some(rc) => {
+                        write_u8(w, 1)?;
+                        write_32(w, &rc.txid)?;
+                        write_u32(w, rc.vout)?;
+                        write_u64(w, rc.amount)?;
+                    }
+                    None => {
+                        write_u8(w, 0)?;
+                    }
+                }
             }
             Self::DisputeAcquire {
                 new_custodian,
@@ -1664,11 +1704,32 @@ impl BinaryCodec for LedgerOperation {
             // DisputeYield (56)
             56 => Ok(Self::DisputeYield),
             // DisputeArmed (57)
-            57 => Ok(Self::DisputeArmed {
-                armed_block: read_u32(r)?,
-                commitment_hash: read_20(r)?,
-                target_reserves: read_string(r)?,
-            }),
+            57 => {
+                let armed_block = read_u32(r)?;
+                let commitment_hash = read_20(r)?;
+                let target_reserves = read_string(r)?;
+                // Replacement collateral: optional. Old events end after
+                // target_reserves; if read_u8 returns EOF, treat as None.
+                let replacement_collateral = match read_u8(r) {
+                    Ok(0) => None,
+                    Ok(1) => Some(ReplacementCollateral {
+                        txid: read_32(r)?,
+                        vout: read_u32(r)?,
+                        amount: read_u64(r)?,
+                    }),
+                    Ok(v) => return Err(CodecError::InvalidData(format!(
+                        "invalid replacement_collateral flag: {}",
+                        v
+                    ))),
+                    Err(_) => None,
+                };
+                Ok(Self::DisputeArmed {
+                    armed_block,
+                    commitment_hash,
+                    target_reserves,
+                    replacement_collateral,
+                })
+            }
             // DeliveryEmbed (80)
             80 => Ok(Self::DeliveryEmbed {
                 request_hash: read_32(r)?,

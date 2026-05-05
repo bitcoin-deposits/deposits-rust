@@ -807,6 +807,7 @@ fn invariant_l2_lottery_liveness() {
             armed_block: 800_000,
             commitment_hash: [0xAA; 20],
             target_reserves: "bcrt1q".into(),
+            replacement_collateral: None,
         })
         .unwrap();
 
