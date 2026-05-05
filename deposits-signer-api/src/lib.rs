@@ -118,6 +118,39 @@ pub enum SigPurpose {
     OnchainSighash,
 }
 
+/// Which seed-derived key this signature should come from.
+///
+/// `Operator` is the default — it's the one the signer's transport
+/// pubkey resolves to and the one the protocol's slashing semantics
+/// gate on. `Deposit { index }` covers the daemon's "internal deposit"
+/// flows (`admin.rs` lock/fulfill, `node_cli/{lightning,withdraw}.rs`
+/// settle paths) that historically derived their key locally via
+/// `derive_deposit_key_at(index)` against the daemon's master seed.
+/// Routing them through the same Signer means the daemon doesn't need
+/// the master seed in process for those paths either.
+///
+/// New variants land here when more daemon-internal keys need
+/// signer-mediated access. Kept narrow on purpose: every variant the
+/// signer accepts is a privilege escalation, so each addition is
+/// deliberate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyPath {
+    /// Operator/identity key. BIP-32 path `m/86'/0'/0'/0/0` against the
+    /// master seed. The default for every protocol-level sign.
+    Operator,
+    /// Internal-deposit key at `m/84'/0'/0'/0/{index}`. Same derivation
+    /// `derive_deposit_key_at(index)` produces in `node_cli/keys.rs`.
+    Deposit {
+        index: u32,
+    },
+}
+
+impl Default for KeyPath {
+    fn default() -> Self {
+        Self::Operator
+    }
+}
+
 /// All metadata a signer needs about a single signature request.
 ///
 /// Carried as a thin struct so future extensions (audit timestamp, request id,
@@ -126,6 +159,11 @@ pub enum SigPurpose {
 pub struct SignContext {
     pub role: SigRole,
     pub purpose: SigPurpose,
+    /// Which seed-derived key to sign with. Defaults to `Operator` so
+    /// existing call sites that don't care about the new field don't
+    /// need to change.
+    #[serde(default)]
+    pub key: KeyPath,
 }
 
 impl SignContext {
@@ -136,6 +174,7 @@ impl SignContext {
         Self {
             role: SigRole::NoLedger,
             purpose,
+            key: KeyPath::Operator,
         }
     }
 
@@ -144,6 +183,7 @@ impl SignContext {
         Self {
             role: SigRole::OperatorUpdate { ledger_id, seq },
             purpose: SigPurpose::Bip340Untagged,
+            key: KeyPath::Operator,
         }
     }
 
@@ -160,7 +200,26 @@ impl SignContext {
                 member_ledger_hash,
             },
             purpose: SigPurpose::Bip340Untagged,
+            key: KeyPath::Operator,
         }
+    }
+
+    /// Sign with an internal deposit key at the given index. Used by
+    /// admin lock/fulfill and node_cli/{lightning,withdraw}.rs flows
+    /// that act on behalf of internal deposits the daemon owns.
+    pub fn deposit(index: u32, purpose: SigPurpose) -> Self {
+        Self {
+            role: SigRole::NoLedger,
+            purpose,
+            key: KeyPath::Deposit { index },
+        }
+    }
+
+    /// Builder-style override: change which key this context targets.
+    /// Useful for tests or for specializing a stock context.
+    pub fn with_key(mut self, key: KeyPath) -> Self {
+        self.key = key;
+        self
     }
 }
 

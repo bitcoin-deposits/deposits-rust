@@ -1,11 +1,13 @@
 //! In-process signer that holds a `SecretKey`. Matches the daemon's pre-refactor
 //! behaviour bit-for-bit so phase-3 call-site refactors are mechanical.
 
+use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::secp256k1::{
     ecdh::SharedSecret, ecdsa, Keypair, Message, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey,
 };
+use std::str::FromStr;
 
-use crate::{SignContext, Signer, SignerError};
+use crate::{KeyPath, SignContext, Signer, SignerError};
 
 /// `Signer` impl that holds a single `SecretKey` in process.
 ///
@@ -14,6 +16,7 @@ use crate::{SignContext, Signer, SignerError};
 /// `deposits-node/src/node_cli/mod.rs::derive_operator_secret`). Phase-2 keeps
 /// derivation in the daemon — `deposits-signer-api` doesn't take a seed.
 pub struct LocalSigner {
+    /// Operator/identity key. Always present; this is what `pubkey()` reports.
     secret: SecretKey,
     pubkey: PublicKey,
     xonly: XOnlyPublicKey,
@@ -21,11 +24,20 @@ pub struct LocalSigner {
     /// Sibling-derived Nostr identity secret, if the signer was constructed
     /// to issue one. See [`Signer::issue_nostr_secret`].
     nostr_secret: Option<SecretKey>,
+    /// Master xpriv, populated when the signer was built via [`from_xpriv`]
+    /// or [`from_xpriv_with_nostr`]. Required to honour `KeyPath::Deposit
+    /// { index }` requests — the per-deposit key is derived on demand from
+    /// `m/84'/0'/0'/0/{index}`. Constructions via [`new`] or
+    /// [`with_nostr_secret`] leave this `None` and refuse non-`Operator`
+    /// key paths with `SignerError::Unsupported`.
+    xpriv: Option<Xpriv>,
 }
 
 impl LocalSigner {
     /// Build a signer from a derived operator/identity secret.
-    /// `issue_nostr_secret()` will return `Unsupported`.
+    /// `issue_nostr_secret()` will return `Unsupported`. Sign requests
+    /// with a non-`Operator` `KeyPath` will also fail — use
+    /// [`from_xpriv`] for the depositor-key flows.
     pub fn new(secret: SecretKey) -> Self {
         let secp = Secp256k1::new();
         let pubkey = PublicKey::from_secret_key(&secp, &secret);
@@ -36,6 +48,7 @@ impl LocalSigner {
             xonly,
             secp,
             nostr_secret: None,
+            xpriv: None,
         }
     }
 
@@ -48,6 +61,75 @@ impl LocalSigner {
         let mut s = Self::new(operator_secret);
         s.nostr_secret = Some(nostr_secret);
         s
+    }
+
+    /// Build a signer from a master `Xpriv`. The operator key is derived
+    /// at `m/86'/0'/0'/0/0`. Subsequent sign requests can carry any
+    /// `KeyPath` — `Deposit { index }` is derived on demand from this
+    /// stored xpriv.
+    ///
+    /// This is the constructor a real `deposits-signer` process would use;
+    /// `LocalSigner::new` stays for tests and call sites that are
+    /// deliberately operator-key-only.
+    pub fn from_xpriv(xpriv: Xpriv) -> Result<Self, SignerError> {
+        let secp = Secp256k1::<bitcoin::secp256k1::All>::new();
+        let path = DerivationPath::from_str("m/86'/0'/0'/0/0")
+            .map_err(|e| SignerError::Crypto(format!("operator path: {}", e)))?;
+        let operator_xpriv = xpriv
+            .derive_priv(&secp, &path)
+            .map_err(|e| SignerError::Crypto(format!("derive operator: {}", e)))?;
+        let secret = operator_xpriv.private_key;
+        let pubkey = PublicKey::from_secret_key(&secp, &secret);
+        let (xonly, _parity) = pubkey.x_only_public_key();
+        Ok(Self {
+            secret,
+            pubkey,
+            xonly,
+            secp,
+            nostr_secret: None,
+            xpriv: Some(xpriv),
+        })
+    }
+
+    /// Like [`from_xpriv`] but also caches a sibling-derived Nostr secret
+    /// (`m/85'/0'/0'/0/0`) for `issue_nostr_secret()`.
+    pub fn from_xpriv_with_nostr(xpriv: Xpriv) -> Result<Self, SignerError> {
+        let secp = Secp256k1::<bitcoin::secp256k1::All>::new();
+        let nostr_path = DerivationPath::from_str("m/85'/0'/0'/0/0")
+            .map_err(|e| SignerError::Crypto(format!("nostr path: {}", e)))?;
+        let nostr_secret = xpriv
+            .derive_priv(&secp, &nostr_path)
+            .map_err(|e| SignerError::Crypto(format!("derive nostr: {}", e)))?
+            .private_key;
+        let mut s = Self::from_xpriv(xpriv)?;
+        s.nostr_secret = Some(nostr_secret);
+        Ok(s)
+    }
+
+    /// Resolve a `KeyPath` to a `SecretKey`. `Operator` returns the cached
+    /// secret in O(1); `Deposit { index }` derives on demand and requires
+    /// the signer was constructed with an `Xpriv`.
+    fn resolve_key(&self, key: KeyPath) -> Result<SecretKey, SignerError> {
+        match key {
+            KeyPath::Operator => Ok(self.secret),
+            KeyPath::Deposit { index } => {
+                let xpriv = self.xpriv.as_ref().ok_or_else(|| {
+                    SignerError::Unsupported(format!(
+                        "this LocalSigner was not constructed with an Xpriv; \
+                         cannot sign with KeyPath::Deposit {{ index: {} }}",
+                        index
+                    ))
+                })?;
+                let path = DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", index))
+                    .map_err(|e| {
+                        SignerError::Crypto(format!("deposit path index={}: {}", index, e))
+                    })?;
+                let derived = xpriv.derive_priv(&self.secp, &path).map_err(|e| {
+                    SignerError::Crypto(format!("derive deposit index={}: {}", index, e))
+                })?;
+                Ok(derived.private_key)
+            }
+        }
     }
 
     /// Test/dev helper: a signer with a fresh random secret.
@@ -74,11 +156,12 @@ impl Signer for LocalSigner {
 
     fn bip340_sign(
         &self,
-        _ctx: &SignContext,
+        ctx: &SignContext,
         digest: &[u8; 32],
     ) -> Result<[u8; 64], SignerError> {
+        let secret = self.resolve_key(ctx.key)?;
         let msg = Message::from_digest(*digest);
-        let keypair = Keypair::from_secret_key(&self.secp, &self.secret);
+        let keypair = Keypair::from_secret_key(&self.secp, &secret);
         // No aux rand to match the daemon's existing behaviour. The protocol
         // commits to BIP-340 sigs that verify; deterministic signing is fine
         // and avoids a live-RNG dependency in the signer hot path.
@@ -90,11 +173,12 @@ impl Signer for LocalSigner {
 
     fn ecdsa_sign_sighash(
         &self,
-        _ctx: &SignContext,
+        ctx: &SignContext,
         sighash: &[u8; 32],
     ) -> Result<ecdsa::Signature, SignerError> {
+        let secret = self.resolve_key(ctx.key)?;
         let msg = Message::from_digest(*sighash);
-        Ok(self.secp.sign_ecdsa(&msg, &self.secret))
+        Ok(self.secp.sign_ecdsa(&msg, &secret))
     }
 
     fn ecdh(&self, peer: &PublicKey) -> Result<[u8; 32], SignerError> {
@@ -119,10 +203,7 @@ mod tests {
     use bitcoin::secp256k1::Secp256k1;
 
     fn ctx() -> SignContext {
-        SignContext {
-            role: SigRole::NoLedger,
-            purpose: SigPurpose::Bip340Untagged,
-        }
+        SignContext::no_ledger(SigPurpose::Bip340Untagged)
     }
 
     #[test]
@@ -183,6 +264,85 @@ mod tests {
         let s = LocalSigner::random();
         let err = s.issue_nostr_secret().unwrap_err();
         assert!(matches!(err, SignerError::Unsupported(_)));
+    }
+
+    #[test]
+    fn from_xpriv_signs_at_operator_path() {
+        // Reproduce the same operator key the daemon's wallet derives, then
+        // confirm a from_xpriv-built LocalSigner reports the same pubkey.
+        use bitcoin::Network;
+        let seed = [0xCC; 32];
+        let xpriv = Xpriv::new_master(Network::Regtest, &seed).unwrap();
+        let signer = LocalSigner::from_xpriv(xpriv).unwrap();
+        let secp = Secp256k1::<bitcoin::secp256k1::All>::new();
+        let path = DerivationPath::from_str("m/86'/0'/0'/0/0").unwrap();
+        let expected = xpriv.derive_priv(&secp, &path).unwrap().private_key;
+        let expected_pk = PublicKey::from_secret_key(&secp, &expected);
+        assert_eq!(signer.pubkey(), expected_pk);
+    }
+
+    #[test]
+    fn from_xpriv_signs_at_deposit_index() {
+        // Signing at KeyPath::Deposit { index } uses the m/84' path —
+        // matches what derive_deposit_key_at(index) in node_cli/keys.rs
+        // produces.
+        use bitcoin::Network;
+        use crate::{KeyPath, SigPurpose, SignContext};
+
+        let seed = [0xDD; 32];
+        let xpriv = Xpriv::new_master(Network::Regtest, &seed).unwrap();
+        let signer = LocalSigner::from_xpriv(xpriv).unwrap();
+
+        let ctx = SignContext::deposit(7, SigPurpose::DepositGuarantee);
+        let digest = [0x42u8; 32];
+        let sig_bytes = signer.bip340_sign(&ctx, &digest).unwrap();
+
+        // Derive expected key at m/84'/0'/0'/0/7 and verify against it.
+        let secp = Secp256k1::<bitcoin::secp256k1::All>::new();
+        let path = DerivationPath::from_str("m/84'/0'/0'/0/7").unwrap();
+        let expected_sk = xpriv.derive_priv(&secp, &path).unwrap().private_key;
+        let expected_pk = PublicKey::from_secret_key(&secp, &expected_sk);
+        let (expected_xonly, _) = expected_pk.x_only_public_key();
+
+        let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes).unwrap();
+        let msg = Message::from_digest(digest);
+        secp.verify_schnorr(&sig, &msg, &expected_xonly)
+            .expect("sig should verify against m/84'/0'/0'/0/7's xonly pubkey");
+        // And the operator-key check should fail (sanity).
+        assert!(
+            secp.verify_schnorr(&sig, &msg, &signer.xonly_pubkey())
+                .is_err(),
+            "deposit-key sig must NOT verify against operator pubkey"
+        );
+    }
+
+    #[test]
+    fn new_signer_refuses_deposit_key_path() {
+        use crate::{SigPurpose, SignContext};
+        let signer = LocalSigner::random();
+        let ctx = SignContext::deposit(0, SigPurpose::DepositGuarantee);
+        let err = signer.bip340_sign(&ctx, &[0; 32]).unwrap_err();
+        assert!(matches!(err, SignerError::Unsupported(_)));
+    }
+
+    #[test]
+    fn deposit_key_indexes_are_distinct() {
+        use bitcoin::Network;
+        use crate::{SigPurpose, SignContext};
+
+        let seed = [0xEE; 32];
+        let xpriv = Xpriv::new_master(Network::Regtest, &seed).unwrap();
+        let signer = LocalSigner::from_xpriv(xpriv).unwrap();
+
+        // Different indexes → different sigs over the same digest.
+        let digest = [0x99u8; 32];
+        let s0 = signer
+            .bip340_sign(&SignContext::deposit(0, SigPurpose::DepositGuarantee), &digest)
+            .unwrap();
+        let s1 = signer
+            .bip340_sign(&SignContext::deposit(1, SigPurpose::DepositGuarantee), &digest)
+            .unwrap();
+        assert_ne!(s0, s1);
     }
 
     #[test]

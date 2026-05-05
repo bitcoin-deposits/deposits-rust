@@ -240,12 +240,13 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
 
     let transport = dd.load_transport().map_err(|e| e.to_string())?;
     let allowlist = dd.load_allowlist().map_err(|e| e.to_string())?;
-    // Derive both the operator secret (m/86'/0'/0'/0/0) and the Nostr
-    // identity secret (m/85'/0'/0'/0/0) from the loaded seed. The Nostr
-    // key is what `IssueNostrSecret` hands back to the daemon.
-    let (operator_secret, nostr_secret) = dd
-        .derive_keys(bitcoin::Network::Bitcoin)
-        .map_err(|e| format!("derive keys: {}", e))?;
+    // Load the master xpriv from the seed. The operator secret (m/86')
+    // and Nostr identity (m/85') derive on demand inside the LocalSigner
+    // backing this server; per-deposit keys (m/84'/.../{index}) derive
+    // on demand too, when daemons send a `KeyPath::Deposit` request.
+    let xpriv = dd
+        .load_master_xpriv(bitcoin::Network::Bitcoin)
+        .map_err(|e| format!("load master xpriv: {}", e))?;
 
     if allowlist.is_empty() {
         tracing::warn!("allowlist is empty — no daemon will be permitted to connect");
@@ -255,13 +256,10 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         SeqPolicy::load(dd.policy_path()).map_err(|e| format!("load policy: {}", e))?,
     );
 
-    let ctx = std::sync::Arc::new(ServerCtx::from_local(
-        transport.secret,
-        allowlist,
-        operator_secret,
-        nostr_secret,
-        policy,
-    ));
+    let ctx = std::sync::Arc::new(
+        ServerCtx::from_xpriv(transport.secret, allowlist, xpriv, policy)
+            .map_err(|e| format!("ServerCtx::from_xpriv: {}", e))?,
+    );
 
     // Async runtime for the listener + per-conn tasks.
     let rt = tokio::runtime::Builder::new_multi_thread()

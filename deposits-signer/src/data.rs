@@ -150,6 +150,18 @@ impl DataDir {
         derive_keys_from_seed(&seed, network)
     }
 
+    /// Load the master `Xpriv` from the seed. Used by the `run`
+    /// subcommand to construct a `LocalSigner` that can serve every
+    /// `KeyPath` variant — operator, Nostr identity, and per-deposit
+    /// keys derived on demand.
+    pub fn load_master_xpriv(&self, network: Network) -> Result<Xpriv, DataError> {
+        let seed = self
+            .load_seed()?
+            .ok_or_else(|| DataError::Key("seed not installed; run `import-seed`".to_string()))?;
+        Xpriv::new_master(network, &seed)
+            .map_err(|e| DataError::Key(format!("xpriv: {}", e)))
+    }
+
     pub fn load_allowlist(&self) -> Result<Vec<PublicKey>, DataError> {
         if !self.is_initialized() {
             return Err(DataError::NotInitialized(self.root.clone()));

@@ -50,6 +50,10 @@ pub struct ServerCtx {
 }
 
 impl ServerCtx {
+    /// Legacy two-secret constructor — operator + Nostr only. Refuses
+    /// `KeyPath::Deposit { index }` requests because there's no master
+    /// xpriv to derive from. Kept for tests; production builds use
+    /// `from_xpriv` which can serve every key path.
     pub fn from_local(
         transport_secret: bitcoin::secp256k1::SecretKey,
         allowlist: Vec<PublicKey>,
@@ -69,6 +73,30 @@ impl ServerCtx {
             signer,
             policy,
         }
+    }
+
+    /// Master-xpriv constructor. The signer can serve every `KeyPath`
+    /// the daemon asks for — operator (m/86'/0'/0'/0/0), Nostr identity
+    /// (m/85'/0'/0'/0/0), and per-index deposit keys (m/84'/0'/0'/0/N).
+    /// Used by the `run` subcommand on real cluster bring-up.
+    pub fn from_xpriv(
+        transport_secret: bitcoin::secp256k1::SecretKey,
+        allowlist: Vec<PublicKey>,
+        xpriv: bitcoin::bip32::Xpriv,
+        policy: Arc<SeqPolicy>,
+    ) -> Result<Self, ServerError> {
+        let secp = Secp256k1::new();
+        let transport = Keypair::from_secret_key(&secp, &transport_secret);
+        let local = LocalSigner::from_xpriv_with_nostr(xpriv).map_err(|e| {
+            ServerError::Crypto(format!("LocalSigner::from_xpriv_with_nostr: {}", e))
+        })?;
+        let signer: Arc<dyn Signer> = Arc::new(local);
+        Ok(Self {
+            transport,
+            allowlist,
+            signer,
+            policy,
+        })
     }
 }
 

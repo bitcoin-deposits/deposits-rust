@@ -405,6 +405,73 @@ fn signer_backed_daemon_init_path_round_trips() {
 }
 
 #[test]
+fn remote_signer_deposit_keypath_signs_at_correct_derivation() {
+    // KeyPath::Deposit { index } signs with m/84'/0'/0'/0/{index} from the
+    // signer's master xpriv — the same derivation the daemon's
+    // derive_deposit_key_at(index) used to produce locally. This is the
+    // wire-level confirmation that the KeyPath extension (cluster-#1
+    // follow-up) works end-to-end.
+    use bitcoin::bip32::{DerivationPath, Xpriv};
+    use deposits_signer_api::KeyPath;
+    use std::str::FromStr;
+
+    let operator_seed = [0xABu8; 32];
+    let node_transport = TransportKey::random();
+    let (proc, signer_transport_pubkey) = spawn_signer(operator_seed, node_transport.public);
+    let remote = RemoteSigner::connect(
+        &proc.socket,
+        node_transport.secret,
+        signer_transport_pubkey,
+    )
+    .unwrap();
+
+    // Sign at index=0.
+    let digest = sha256::Hash::hash(b"deposit keypath test").to_byte_array();
+    let ctx = SignContext::deposit(0, SigPurpose::DepositGuarantee);
+    let sig_bytes = remote
+        .bip340_sign(&ctx, &digest)
+        .expect("Deposit { index: 0 } sign must succeed");
+
+    // Independent expected pubkey: same derivation against the seed.
+    let xpriv = Xpriv::new_master(Network::Bitcoin, &operator_seed).unwrap();
+    let path = DerivationPath::from_str("m/84'/0'/0'/0/0").unwrap();
+    let secp = Secp256k1::new();
+    let expected_secret = xpriv.derive_priv(&secp, &path).unwrap().private_key;
+    let expected_pk = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &expected_secret);
+    let (expected_xonly, _) = expected_pk.x_only_public_key();
+
+    let sig =
+        bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes).expect("sig parse");
+    let msg = Message::from_digest(digest);
+    secp.verify_schnorr(&sig, &msg, &expected_xonly)
+        .expect("sig must verify against m/84'/0'/0'/0/0 xonly pubkey");
+
+    // The signer's operator pubkey is m/86' — different from the deposit key.
+    let operator_xonly = remote.xonly_pubkey();
+    assert_ne!(operator_xonly, expected_xonly);
+    assert!(
+        secp.verify_schnorr(&sig, &msg, &operator_xonly).is_err(),
+        "deposit-key sig must NOT verify against operator pubkey"
+    );
+
+    // Different indexes → different sigs.
+    let ctx_3 = SignContext::deposit(3, SigPurpose::DepositGuarantee);
+    let sig_3 = remote.bip340_sign(&ctx_3, &digest).unwrap();
+    assert_ne!(sig_bytes, sig_3, "different KeyPath::Deposit indexes must sign distinctly");
+
+    // The KeyPath::Operator path still signs with the operator key.
+    let ctx_op = SignContext {
+        role: deposits_signer_api::SigRole::NoLedger,
+        purpose: SigPurpose::Bip340Untagged,
+        key: KeyPath::Operator,
+    };
+    let sig_op = remote.bip340_sign(&ctx_op, &digest).unwrap();
+    let parsed = bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_op).unwrap();
+    secp.verify_schnorr(&parsed, &msg, &operator_xonly)
+        .expect("operator-key sig must verify against operator xonly");
+}
+
+#[test]
 fn remote_signer_anti_equivocation_refuses_seq_regression() {
     // Sign at seq=10, then try seq=10 again — RemoteSigner should surface
     // a PolicyRefused error from the signer.
