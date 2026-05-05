@@ -870,6 +870,29 @@ impl Node {
             return;
         }
 
+        // WinnerCollateralDeviation needs an extra step the protocol-layer
+        // dispatch couldn't run (no I/O at that layer): fetch the on-chain
+        // claim TX + the value the lottery output held, and feed both into
+        // `verify_winner_collateral_deviation`. The pure verifier returns
+        // Ok(()) iff a deviation is provable. See DEP-03 §"Claim
+        // transaction (multi-input)".
+        if matches!(
+            broadcast.proof.proof_type,
+            deposits_core::fraud::FraudProofType::WinnerCollateralDeviation
+        ) {
+            if let Err(e) = self
+                .verify_winner_collateral_deviation_onchain(broadcast, &oracle)
+                .await
+            {
+                tracing::warn!(
+                    "WinnerCollateralDeviation rejected ({}...): {}",
+                    &proof_hash_hex[..16],
+                    e
+                );
+                return;
+            }
+        }
+
         tracing::warn!(
             "Fraud proof VERIFIED: {} at seq {} on {}, evidence type {:?}",
             &proof_hash_hex[..16],
@@ -981,6 +1004,74 @@ impl Node {
                 tracing::error!("Failed to arm for fraud-proof dispute: {}", e);
             }
         }
+    }
+
+    /// Daemon-side wrapper for `verify_winner_collateral_deviation`. The
+    /// pure verifier in deposits-protocol can't do I/O — it needs the
+    /// already-fetched claim TX and the lottery output's value. This
+    /// helper bridges that gap by fetching both via Esplora before
+    /// invoking the verifier.
+    ///
+    /// Returns `Ok(())` only when the on-chain TX provably deviates from
+    /// the disputant's declared replacement collateral. Any other outcome
+    /// (no deviation, missing tx, etc.) becomes `Err(reason)` so the
+    /// caller can reject the fraud proof.
+    async fn verify_winner_collateral_deviation_onchain(
+        &self,
+        broadcast: &deposits_core::fraud::FraudBroadcast,
+        oracle: &dyn deposits_core::fraud::BlockOracle,
+    ) -> Result<(), String> {
+        let claim_txid_str = match &broadcast.proof.evidence {
+            deposits_core::fraud::FraudEvidence::WinnerCollateralDeviation {
+                claim_txid,
+                ..
+            } => claim_txid.clone(),
+            _ => return Err("evidence type mismatch".into()),
+        };
+        let claim_txid_bytes_vec = hex::decode(&claim_txid_str)
+            .map_err(|e| format!("claim_txid hex: {}", e))?;
+        let claim_txid_bytes: [u8; 32] = claim_txid_bytes_vec
+            .try_into()
+            .map_err(|_| "claim_txid: expected 32 bytes".to_string())?;
+        let claim_txid = bitcoin::Txid::from_raw_hash(
+            bitcoin::hashes::Hash::from_byte_array(claim_txid_bytes),
+        );
+        let claim_tx = self
+            .wallet
+            .get_transaction(claim_txid)
+            .await
+            .map_err(|e| format!("fetch claim TX: {}", e))?
+            .ok_or_else(|| format!("claim TX {} not on-chain", claim_txid))?;
+        // Lottery output value: read it off input 0's prevout. The claim
+        // TX must have at least one input. By RC4 convention input 0 is
+        // the lottery output. We can't use `get_outpoint_value_and_confs`
+        // here because it filters out spent outpoints (and this one is
+        // necessarily spent — the claim TX is what spent it). Fetch the
+        // prevout's TX directly and read `output[vout].value`.
+        let lottery_prevout = claim_tx
+            .input
+            .first()
+            .ok_or_else(|| "claim TX has no inputs".to_string())?
+            .previous_output;
+        let prevout_tx = self
+            .wallet
+            .get_transaction(lottery_prevout.txid)
+            .await
+            .map_err(|e| format!("fetch lottery prevout TX: {}", e))?
+            .ok_or_else(|| format!("prevout TX {} not on-chain", lottery_prevout.txid))?;
+        let lottery_amount_sats = prevout_tx
+            .output
+            .get(lottery_prevout.vout as usize)
+            .ok_or_else(|| format!("prevout vout {} out of range", lottery_prevout.vout))?
+            .value
+            .to_sat();
+        // Run the pure verifier.
+        deposits_core::fraud::verify_winner_collateral_deviation(
+            &broadcast.proof,
+            &claim_tx,
+            lottery_amount_sats,
+            oracle,
+        )
     }
 
     /// Check if we're a quorum member of a ledger (by ledger_id hash)

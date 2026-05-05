@@ -2713,3 +2713,323 @@ mod quorum_expired_verifier {
         assert!(err.contains("doesn't match the ledger's most"));
     }
 }
+
+#[cfg(test)]
+mod winner_collateral_deviation_tests {
+    use super::*;
+    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Witness};
+    use deposits_protocol::messages::{LedgerOperation, ReplacementCollateral};
+    use deposits_protocol::tlv::TlvEncode;
+    use deposits_protocol::types::SignedLedgerUpdate;
+    use std::collections::HashMap;
+
+    struct MockOracle(HashMap<[u8; 32], u32>);
+    impl BlockOracle for MockOracle {
+        fn confirms(&self, h: &[u8; 32]) -> Option<u32> {
+            self.0.get(h).copied()
+        }
+    }
+
+    fn winner_keypair() -> (Keypair, bitcoin::secp256k1::PublicKey) {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[0x77; 32]).unwrap();
+        let kp = Keypair::from_secret_key(&secp, &sk);
+        let pk = bitcoin::secp256k1::PublicKey::from_keypair(&kp);
+        (kp, pk)
+    }
+
+    /// Build a `DisputeArmed` SignedLedgerUpdate with the given declaration,
+    /// signed by the winner. Returns `(hex_bytes, target_script)`.
+    fn make_armed_update(
+        rc: Option<ReplacementCollateral>,
+        target_address: &str,
+    ) -> (String, ScriptBuf) {
+        let (_kp, pk) = winner_keypair();
+        let op = LedgerOperation::DisputeArmed {
+            armed_block: 800_100,
+            commitment_hash: [0xAB; 20],
+            target_reserves: target_address.into(),
+            replacement_collateral: rc,
+        };
+        let message = op.tlv_encode();
+        let update = SignedLedgerUpdate {
+            message,
+            message_type: 9, // LEDGER_UPDATE
+            operator_id: pk,
+            ledger_id: [0xAA; 32],
+            sequence_number: 5,
+            previous_hash: [0; 32],
+            content_hash: [0; 32],
+            block_height: 800_000,
+            block_hash: [0xBB; 32],
+            cosign_signature: [0; 64],
+            operator_signature: [0; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: vec![],
+        };
+        // The fraud verifier doesn't check this signature — it relies on
+        // the fact that the proof itself was published, and on cross-ledger
+        // attribution at broadcast verification time. Manual TLV here is
+        // sufficient for the deviation evidence path.
+        let bytes = update.tlv_encode();
+        let script = bitcoin::Address::from_str(target_address)
+            .unwrap()
+            .assume_checked()
+            .script_pubkey();
+        (hex::encode(&bytes), script)
+    }
+
+    fn make_claim_tx(
+        lottery_outpoint: OutPoint,
+        lottery_amount: u64,
+        rc_input: Option<(OutPoint, u64)>,
+        out_script: ScriptBuf,
+        out_amount: u64,
+    ) -> bitcoin::Transaction {
+        let mut input = vec![TxIn {
+            previous_output: lottery_outpoint,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }];
+        if let Some((rc_outpoint, _amount)) = rc_input {
+            input.push(TxIn {
+                previous_output: rc_outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            });
+        }
+        let _ = lottery_amount;
+        bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input,
+            output: vec![TxOut {
+                value: Amount::from_sat(out_amount),
+                script_pubkey: out_script,
+            }],
+        }
+    }
+
+    fn make_proof(armed_hex: String, claim_txid: String, anchor: [u8; 32]) -> FraudProof {
+        FraudProof {
+            proof_type: FraudProofType::WinnerCollateralDeviation,
+            accused: make_accused(),
+            ledger_id: make_ledger_id(),
+            evidence: FraudEvidence::WinnerCollateralDeviation {
+                winner_armed_update_hex: armed_hex,
+                claim_txid,
+                claim_block_hash: anchor,
+            },
+        }
+    }
+
+    use std::str::FromStr;
+
+    const REGTEST_TARGET: &str =
+        "bcrt1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qzf4jry";
+
+    #[test]
+    fn winner_did_not_deviate_returns_err() {
+        let (armed_hex, target_script) = make_armed_update(
+            Some(ReplacementCollateral {
+                txid: [0x11; 32],
+                vout: 3,
+                amount: 30_000,
+            }),
+            REGTEST_TARGET,
+        );
+        let lottery_outpoint = OutPoint::new(
+            bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([0x22; 32])),
+            0,
+        );
+        let lottery_amount = 100_000;
+        let rc_outpoint = OutPoint::new(
+            bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([0x11; 32])),
+            3,
+        );
+        let claim_tx = make_claim_tx(
+            lottery_outpoint,
+            lottery_amount,
+            Some((rc_outpoint, 30_000)),
+            target_script,
+            // lottery + declared - small fee, well above 10_000 budget floor
+            lottery_amount + 30_000 - 1_200,
+        );
+        let claim_txid = claim_tx.compute_txid().to_string();
+        let anchor = [0xCC; 32];
+        let mut oracle_map = HashMap::new();
+        oracle_map.insert(anchor, 800_500);
+        let oracle = MockOracle(oracle_map);
+        let proof = make_proof(armed_hex, claim_txid, anchor);
+        let err = verify_winner_collateral_deviation(&proof, &claim_tx, lottery_amount, &oracle)
+            .unwrap_err();
+        assert!(err.contains("matches the declared"), "got: {}", err);
+    }
+
+    #[test]
+    fn winner_skipped_declared_input_proves_deviation() {
+        let (armed_hex, target_script) = make_armed_update(
+            Some(ReplacementCollateral {
+                txid: [0x11; 32],
+                vout: 3,
+                amount: 30_000,
+            }),
+            REGTEST_TARGET,
+        );
+        let lottery_outpoint = OutPoint::new(
+            bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([0x22; 32])),
+            0,
+        );
+        let lottery_amount = 100_000;
+        // Single-input claim TX — declared collateral skipped.
+        let claim_tx = make_claim_tx(
+            lottery_outpoint,
+            lottery_amount,
+            None,
+            target_script,
+            lottery_amount - 400,
+        );
+        let claim_txid = claim_tx.compute_txid().to_string();
+        let anchor = [0xCC; 32];
+        let mut oracle_map = HashMap::new();
+        oracle_map.insert(anchor, 800_500);
+        let oracle = MockOracle(oracle_map);
+        let proof = make_proof(armed_hex, claim_txid, anchor);
+        verify_winner_collateral_deviation(&proof, &claim_tx, lottery_amount, &oracle).unwrap();
+    }
+
+    #[test]
+    fn winner_used_different_outpoint_proves_deviation() {
+        let (armed_hex, target_script) = make_armed_update(
+            Some(ReplacementCollateral {
+                txid: [0x11; 32],
+                vout: 3,
+                amount: 30_000,
+            }),
+            REGTEST_TARGET,
+        );
+        let lottery_outpoint = OutPoint::new(
+            bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([0x22; 32])),
+            0,
+        );
+        // Different outpoint than declared — deviation.
+        let wrong_outpoint = OutPoint::new(
+            bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([0x99; 32])),
+            7,
+        );
+        let lottery_amount = 100_000;
+        let claim_tx = make_claim_tx(
+            lottery_outpoint,
+            lottery_amount,
+            Some((wrong_outpoint, 30_000)),
+            target_script,
+            lottery_amount + 30_000 - 1_200,
+        );
+        let claim_txid = claim_tx.compute_txid().to_string();
+        let anchor = [0xCC; 32];
+        let mut oracle_map = HashMap::new();
+        oracle_map.insert(anchor, 800_500);
+        let oracle = MockOracle(oracle_map);
+        let proof = make_proof(armed_hex, claim_txid, anchor);
+        verify_winner_collateral_deviation(&proof, &claim_tx, lottery_amount, &oracle).unwrap();
+    }
+
+    #[test]
+    fn winner_routed_value_away_proves_deviation() {
+        let (armed_hex, target_script) = make_armed_update(
+            Some(ReplacementCollateral {
+                txid: [0x11; 32],
+                vout: 3,
+                amount: 30_000,
+            }),
+            REGTEST_TARGET,
+        );
+        let lottery_outpoint = OutPoint::new(
+            bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([0x22; 32])),
+            0,
+        );
+        let rc_outpoint = OutPoint::new(
+            bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([0x11; 32])),
+            3,
+        );
+        let lottery_amount = 100_000;
+        // Output is materially short — value siphoned to change.
+        let claim_tx = make_claim_tx(
+            lottery_outpoint,
+            lottery_amount,
+            Some((rc_outpoint, 30_000)),
+            target_script,
+            // Way short of expected lottery + declared - fee.
+            50_000,
+        );
+        let claim_txid = claim_tx.compute_txid().to_string();
+        let anchor = [0xCC; 32];
+        let mut oracle_map = HashMap::new();
+        oracle_map.insert(anchor, 800_500);
+        let oracle = MockOracle(oracle_map);
+        let proof = make_proof(armed_hex, claim_txid, anchor);
+        verify_winner_collateral_deviation(&proof, &claim_tx, lottery_amount, &oracle).unwrap();
+    }
+
+    #[test]
+    fn unconfirmed_anchor_block_rejects_proof() {
+        let (armed_hex, _target_script) = make_armed_update(
+            Some(ReplacementCollateral {
+                txid: [0x11; 32],
+                vout: 3,
+                amount: 30_000,
+            }),
+            REGTEST_TARGET,
+        );
+        let lottery_outpoint = OutPoint::new(
+            bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([0x22; 32])),
+            0,
+        );
+        let lottery_amount = 100_000;
+        let claim_tx = make_claim_tx(
+            lottery_outpoint,
+            lottery_amount,
+            None,
+            ScriptBuf::new(),
+            10_000,
+        );
+        let claim_txid = claim_tx.compute_txid().to_string();
+        // Oracle doesn't know about the anchor — verifier rejects.
+        let anchor = [0xCC; 32];
+        let oracle = MockOracle(HashMap::new());
+        let proof = make_proof(armed_hex, claim_txid, anchor);
+        let err = verify_winner_collateral_deviation(&proof, &claim_tx, lottery_amount, &oracle)
+            .unwrap_err();
+        assert!(err.contains("not in verifier's confirmed chain"), "got: {}", err);
+    }
+
+    #[test]
+    fn no_declaration_means_nothing_to_deviate_from() {
+        let (armed_hex, target_script) = make_armed_update(None, REGTEST_TARGET);
+        let lottery_outpoint = OutPoint::new(
+            bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([0x22; 32])),
+            0,
+        );
+        let lottery_amount = 100_000;
+        let claim_tx = make_claim_tx(
+            lottery_outpoint,
+            lottery_amount,
+            None,
+            target_script,
+            lottery_amount - 400,
+        );
+        let claim_txid = claim_tx.compute_txid().to_string();
+        let anchor = [0xCC; 32];
+        let mut oracle_map = HashMap::new();
+        oracle_map.insert(anchor, 800_500);
+        let oracle = MockOracle(oracle_map);
+        let proof = make_proof(armed_hex, claim_txid, anchor);
+        let err = verify_winner_collateral_deviation(&proof, &claim_tx, lottery_amount, &oracle)
+            .unwrap_err();
+        assert!(err.contains("nothing for the claim TX to deviate from"), "got: {}", err);
+    }
+}

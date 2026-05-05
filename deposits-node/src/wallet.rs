@@ -493,6 +493,22 @@ impl Wallet {
     /// Phase 4 simultaneously) saturated the runtime worker pool and
     /// caused the 5s cosign deadline to time out across the cluster
     /// — even when the operator's electrs already saw the tx confirmed.
+    /// Fetch a transaction from esplora by txid. Returns `None` if the
+    /// txid isn't on-chain (or in mempool). Used by fraud-proof verifiers
+    /// that need the raw TX bytes (e.g., `WinnerCollateralDeviation`).
+    pub async fn get_transaction(
+        &self,
+        txid: bitcoin::Txid,
+    ) -> Result<Option<bitcoin::Transaction>, Error> {
+        let client = EsploraBuilder::new(&self.electrum_url)
+            .build_async()
+            .map_err(|e| Error::Wallet(format!("Failed to build esplora client: {}", e)))?;
+        client
+            .get_tx(&txid)
+            .await
+            .map_err(|e| Error::Wallet(format!("Failed to fetch tx: {}", e)))
+    }
+
     pub async fn get_outpoint_value_and_confs(
         &self,
         txid: bitcoin::Txid,

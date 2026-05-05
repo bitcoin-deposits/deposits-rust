@@ -65,6 +65,14 @@ pub enum FraudProofType {
     /// anchor block hash whose height in the verifier's chain exceeds
     /// the ledger's recorded `quorum_expiry`.
     QuorumExpired,
+    /// The lottery winner broadcast a claim TX whose shape deviates
+    /// from the `replacement_collateral` they declared in their
+    /// `DisputeArmed`. Punitive: attributed to the winner's new
+    /// operator pubkey on whatever ledger they're operating after
+    /// takeover. Cross-ledger contagion applies as for any other
+    /// punitive proof. See DEP-03 §"Claim transaction (multi-input)"
+    /// for the canonical claim shape.
+    WinnerCollateralDeviation,
 }
 
 impl FraudProofType {
@@ -190,6 +198,23 @@ pub enum FraudEvidence {
     /// `quorum_expiry` (also carried here for binding + redundancy).
     /// Block heights are never trusted from the proof — only the hash's
     /// presence in the verifier's chain.
+    /// Lottery winner's broadcast claim TX deviates from their declared
+    /// replacement collateral. Verifier confirms `claim_block_hash` is
+    /// in its chain, fetches/inspects the named claim TX, and compares
+    /// against the winner's signed `DisputeArmed` declaration.
+    WinnerCollateralDeviation {
+        /// The winner's `DisputeArmed` SignedLedgerUpdate (TLV bytes,
+        /// lowercase hex). Carries the declared `replacement_collateral`
+        /// and the winner's signature, binding the declaration to them.
+        winner_armed_update_hex: String,
+        /// Hex txid of the claim TX the winner broadcast on-chain.
+        claim_txid: String,
+        /// Block hash anchoring the claim TX's confirmation. Verifier
+        /// confirms this hash is in its chain via `BlockOracle`.
+        #[serde(with = "crate::types::serde_32")]
+        claim_block_hash: [u8; 32],
+    },
+
     QuorumExpired {
         /// Anchor block whose chain-height proves the deadline has
         /// passed. Verifier looks this up via the BlockOracle.
@@ -698,6 +723,139 @@ pub fn verify_quorum_expired(
     Ok(())
 }
 
+/// Verify a `WinnerCollateralDeviation` claim.
+///
+/// The accusation: the lottery winner broadcast a claim TX whose shape
+/// deviates from the `replacement_collateral` they declared in their
+/// `DisputeArmed`. Concretely, one of:
+///   - claim TX is single-input (lottery only), skipping the declared
+///     replacement input
+///   - claim TX has a second input but at a different outpoint than
+///     declared
+///   - claim TX has the right declared input but routes value away from
+///     the new vault (output 0 doesn't match `target_reserves`, or the
+///     output value is short of `lottery + declared_amount − reasonable_fee`)
+///
+/// The verifier needs:
+///   1. The claim TX (caller fetches via Esplora)
+///   2. A `BlockOracle` to confirm the claim TX's anchor block
+///
+/// Returns `Ok(())` if the claim TX deviates (= fraud is proven), or
+/// `Err(...)` describing why no deviation was demonstrated.
+pub fn verify_winner_collateral_deviation(
+    proof: &FraudProof,
+    claim_tx: &bitcoin::Transaction,
+    lottery_amount_sats: u64,
+    block_oracle: &dyn BlockOracle,
+) -> Result<(), String> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::TlvDecode;
+
+    let FraudEvidence::WinnerCollateralDeviation {
+        winner_armed_update_hex,
+        claim_txid,
+        claim_block_hash,
+    } = &proof.evidence
+    else {
+        return Err("verify_winner_collateral_deviation: wrong evidence type".into());
+    };
+
+    // (1) anchor block confirmed in verifier's chain.
+    block_oracle.confirms(claim_block_hash).ok_or_else(|| {
+        format!(
+            "claim_block_hash {} not in verifier's confirmed chain",
+            hex::encode(&claim_block_hash[..8])
+        )
+    })?;
+
+    // (2) claim_tx's txid matches the claimed value (binds the proof to
+    //     the on-chain TX).
+    let actual_txid = claim_tx.compute_txid().to_string();
+    if actual_txid != *claim_txid {
+        return Err(format!(
+            "claim TX txid mismatch: proof claims {}, supplied tx is {}",
+            claim_txid, actual_txid
+        ));
+    }
+
+    // (3) decode the winner's signed armed update and extract their
+    //     declared replacement_collateral + target_reserves.
+    let armed_bytes = hex::decode(winner_armed_update_hex)
+        .map_err(|e| format!("winner_armed_update_hex: {}", e))?;
+    let armed = crate::types::SignedLedgerUpdate::tlv_decode(&armed_bytes)
+        .map_err(|e| format!("winner_armed_update decode: {}", e))?;
+    let armed_op = LedgerOperation::tlv_decode(&armed.message)
+        .map_err(|e| format!("winner_armed_update operation decode: {}", e))?;
+    let (target_reserves, declared) = match armed_op {
+        LedgerOperation::DisputeArmed {
+            target_reserves,
+            replacement_collateral,
+            ..
+        } => (target_reserves, replacement_collateral),
+        _ => {
+            return Err(
+                "winner_armed_update operation is not DisputeArmed".into()
+            );
+        }
+    };
+    let declared = declared.ok_or_else(|| {
+        "winner declared no replacement_collateral — there's nothing for \
+         the claim TX to deviate from"
+            .to_string()
+    })?;
+
+    // (4) inspect claim TX inputs. The claim TX must consume the declared
+    //     outpoint as one of its inputs. If it doesn't, that's deviation.
+    let declared_outpoint_present = claim_tx.input.iter().any(|txin| {
+        let prev_txid_bytes: [u8; 32] = *txin.previous_output.txid.as_ref();
+        prev_txid_bytes == declared.txid && txin.previous_output.vout == declared.vout
+    });
+    if !declared_outpoint_present {
+        return Ok(()); // deviation: declared input missing
+    }
+
+    // (5) inspect claim TX outputs. Output 0 must route to the declared
+    //     `target_reserves` address.
+    let target_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = target_reserves
+        .parse()
+        .map_err(|e| format!("target_reserves not a valid address: {}", e))?;
+    // Compare scriptPubKey-byte-for-byte against output 0. We compare via
+    // assume_checked() to skip network validation — the verifier's chain
+    // tells us the network indirectly via BlockOracle, and the same script
+    // bytes encode the same output regardless.
+    let target_script = target_addr.assume_checked().script_pubkey();
+    let output_0 = claim_tx
+        .output
+        .first()
+        .ok_or_else(|| "claim TX has no outputs".to_string())?;
+    if output_0.script_pubkey != target_script {
+        return Ok(()); // deviation: output 0 routes elsewhere
+    }
+
+    // (6) the output value should reflect both the lottery amount and
+    //     the declared replacement amount, minus a reasonable fee budget.
+    //     If output 0 is materially short, value was siphoned away.
+    //
+    //     We're generous on the fee budget here (10_000 sats covers any
+    //     realistic claim TX vsize) — the goal is to catch *material*
+    //     deviation, not nitpick fee surplus.
+    let max_fee_budget_sats: u64 = 10_000;
+    let expected_min = lottery_amount_sats
+        .saturating_add(declared.amount)
+        .saturating_sub(max_fee_budget_sats);
+    let output_0_sats = output_0.value.to_sat();
+    if output_0_sats < expected_min {
+        return Ok(()); // deviation: value siphoned
+    }
+
+    // No deviation observed.
+    Err(
+        "claim TX matches the declared replacement_collateral and target_reserves; \
+         no deviation found"
+            .into(),
+    )
+}
+
 /// Verify an `UncreditedOnchainPayment` claim.
 ///
 /// The accusation: a cosigned offer was issued, a Bitcoin tx funded the
@@ -1086,6 +1244,13 @@ pub fn verify_fraud_broadcast(
             })?;
             verify_quorum_expired(proof, &accused_history, block_oracle)?;
         }
+        FraudProofType::WinnerCollateralDeviation => {
+            // Verifying a deviation requires the on-chain claim TX (not
+            // available at this layer). The daemon-side wrapper fetches
+            // the TX via Esplora and calls `verify_winner_collateral_deviation`
+            // directly. Top-level broadcast verification accepts at this
+            // layer; daemon enforcement is upstream.
+        }
     }
 
     Ok(())
@@ -1162,6 +1327,7 @@ impl FraudProofType {
             Self::DisputeDereliction => 4,
             Self::NonConformingUpdate => 5,
             Self::QuorumExpired => 6,
+            Self::WinnerCollateralDeviation => 7,
         }
     }
 }
@@ -1237,6 +1403,15 @@ impl FraudEvidence {
             } => {
                 out.extend_from_slice(anchor_block_hash);
                 out.extend_from_slice(&quorum_expiry.to_le_bytes());
+            }
+            Self::WinnerCollateralDeviation {
+                winner_armed_update_hex,
+                claim_txid,
+                claim_block_hash,
+            } => {
+                out.extend_from_slice(winner_armed_update_hex.as_bytes());
+                out.extend_from_slice(claim_txid.as_bytes());
+                out.extend_from_slice(claim_block_hash);
             }
         }
         out
