@@ -435,6 +435,8 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     let mut operator_name = None;
     let mut fast_poll = false;
     let mut skip_nostr_verify = false;
+    let mut signer_socket: Option<PathBuf> = None;
+    let mut signer_pubkey: Option<bitcoin::secp256k1::PublicKey> = None;
     let mut data_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".deposits-node");
@@ -536,6 +538,25 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
             "--skip-nostr-verify" => {
                 skip_nostr_verify = true;
             }
+            "--signer-socket" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--signer-socket requires a path".to_string());
+                }
+                signer_socket = Some(PathBuf::from(&args[i]));
+            }
+            "--signer-pubkey" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--signer-pubkey requires a 33-byte hex".to_string());
+                }
+                let bytes = hex::decode(&args[i])
+                    .map_err(|e| format!("--signer-pubkey hex: {}", e))?;
+                signer_pubkey = Some(
+                    bitcoin::secp256k1::PublicKey::from_slice(&bytes)
+                        .map_err(|e| format!("--signer-pubkey: {}", e))?,
+                );
+            }
             arg => {
                 return Err(format!("Unknown argument: {}", arg));
             }
@@ -582,6 +603,24 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     // Create data directory
     std::fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create data dir: {}", e))?;
 
+    // Both --signer-socket and --signer-pubkey must be supplied together,
+    // or neither. Half-configured is a typo and should fail loudly.
+    let signer = match (signer_socket, signer_pubkey) {
+        (Some(socket_path), Some(signer_pubkey)) => {
+            Some(crate::node::RemoteSignerConfig {
+                socket_path,
+                signer_pubkey,
+            })
+        }
+        (None, None) => None,
+        (Some(_), None) => {
+            return Err("--signer-socket requires --signer-pubkey".to_string());
+        }
+        (None, Some(_)) => {
+            return Err("--signer-pubkey requires --signer-socket".to_string());
+        }
+    };
+
     Ok(NodeConfig {
         seed,
         network,
@@ -592,6 +631,7 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
         operator_name,
         fast_poll,
         skip_nostr_verify,
+        signer,
     })
 }
 

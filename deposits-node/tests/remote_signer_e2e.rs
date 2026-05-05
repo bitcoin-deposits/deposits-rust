@@ -10,7 +10,9 @@
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{Message, Secp256k1};
 use bitcoin::Network;
+use deposits_node::node_cli::parse_config;
 use deposits_node::remote_signer::RemoteSigner;
+use deposits_node::Node;
 use deposits_signer::data::{derive_keys_from_seed, DataDir, TransportKey};
 use deposits_signer_api::{LocalSigner, SigPurpose, SignContext, Signer, SignerError};
 use std::path::PathBuf;
@@ -225,6 +227,181 @@ fn remote_signer_issues_nostr_secret_distinct_from_operator() {
     // derivation is stable; no surprise rotation.)
     let issued2 = remote.issue_nostr_secret().expect("idempotent");
     assert_eq!(issued, issued2);
+}
+
+/// Parsing `--signer-pubkey` + `--signer-socket` populates `NodeConfig.signer`
+/// with a `RemoteSignerConfig`; either alone is a parse error.
+#[test]
+fn parse_config_wires_signer_flags() {
+    use std::path::PathBuf;
+    let seed = "11".repeat(32);
+    let socket = "/tmp/dsigner.sock";
+    let signer_pk = LocalSigner::random().pubkey();
+    let signer_pk_hex = hex::encode(signer_pk.serialize());
+
+    // Both flags present → signer config is populated.
+    let args: Vec<String> = vec![
+        "--seed",
+        &seed,
+        "--network",
+        "regtest",
+        "--data-dir",
+        "/tmp/dnode-pcfg-test",
+        "--signer-socket",
+        socket,
+        "--signer-pubkey",
+        &signer_pk_hex,
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let cfg = parse_config(&args).expect("parse with both flags");
+    let sig = cfg.signer.expect("signer config populated");
+    assert_eq!(sig.signer_pubkey, signer_pk);
+    assert_eq!(sig.socket_path, PathBuf::from(socket));
+
+    // Neither flag → no signer config.
+    let args: Vec<String> = vec![
+        "--seed",
+        &seed,
+        "--network",
+        "regtest",
+        "--data-dir",
+        "/tmp/dnode-pcfg-test",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let cfg = parse_config(&args).expect("parse without signer flags");
+    assert!(cfg.signer.is_none());
+
+    // --signer-socket alone → error.
+    let args: Vec<String> = vec![
+        "--seed",
+        &seed,
+        "--network",
+        "regtest",
+        "--data-dir",
+        "/tmp/dnode-pcfg-test",
+        "--signer-socket",
+        socket,
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let err = match parse_config(&args) {
+        Ok(_) => panic!("half-config should be rejected"),
+        Err(e) => e,
+    };
+    assert!(err.contains("--signer-pubkey"), "unexpected: {}", err);
+
+    // --signer-pubkey alone → error.
+    let args: Vec<String> = vec![
+        "--seed",
+        &seed,
+        "--network",
+        "regtest",
+        "--data-dir",
+        "/tmp/dnode-pcfg-test",
+        "--signer-pubkey",
+        &signer_pk_hex,
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let err = match parse_config(&args) {
+        Ok(_) => panic!("half-config should be rejected"),
+        Err(e) => e,
+    };
+    assert!(err.contains("--signer-socket"), "unexpected: {}", err);
+}
+
+/// `Node::load_or_init_transport_secret` generates fresh on first call and
+/// returns the same secret on a second call. File permissions are 0600.
+#[test]
+fn load_or_init_transport_secret_round_trip_and_perms() {
+    use std::os::unix::fs::PermissionsExt;
+    let suffix = rand_suffix();
+    let mut data_dir = std::env::temp_dir();
+    data_dir.push(format!("dnode-tport-{}", suffix));
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let sk1 = Node::load_or_init_transport_secret(&data_dir).unwrap();
+    let path = data_dir.join("transport_secret");
+    assert!(path.exists(), "transport_secret should be written");
+    let perms = std::fs::metadata(&path).unwrap().permissions();
+    assert_eq!(perms.mode() & 0o777, 0o600, "transport_secret must be 0600");
+
+    let sk2 = Node::load_or_init_transport_secret(&data_dir).unwrap();
+    assert_eq!(
+        sk1.secret_bytes(),
+        sk2.secret_bytes(),
+        "second call must return the persisted secret",
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// Layer-1 end-to-end smoke: spawn a real `deposits-signer`, persist the
+/// daemon's transport secret in a tmpdir-data-dir, allowlist it on the
+/// signer, and confirm `RemoteSigner::connect` (the inner of `Node::new`'s
+/// signer-init path) succeeds and signs.
+///
+/// We don't spin up the full `Node::new` here — that would pull in relays
+/// + electrum + Nostr connection setup which Layer 2 will exercise via
+/// regtest cluster bring-up. This test validates that the data-dir persistence
+/// + transport keypair + handshake chain works end-to-end given a config
+/// that exercises the same paths `parse_config` produces.
+#[test]
+fn signer_backed_daemon_init_path_round_trips() {
+    let operator_seed = [0xAAu8; 32];
+
+    // Daemon-side data dir; the same Node::load_or_init_transport_secret
+    // helper that init.rs uses on real startup writes a fresh keypair on
+    // first call.
+    let suffix = rand_suffix();
+    let mut daemon_data_dir = std::env::temp_dir();
+    daemon_data_dir.push(format!("dnode-l1-{}", suffix));
+    std::fs::create_dir_all(&daemon_data_dir).unwrap();
+    let node_transport_secret =
+        Node::load_or_init_transport_secret(&daemon_data_dir).unwrap();
+
+    // Derive the daemon's transport pubkey to allowlist it.
+    let secp = Secp256k1::new();
+    let node_pubkey =
+        bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &node_transport_secret);
+
+    // Spawn the signer with the daemon's transport pubkey allowlisted.
+    let (proc, signer_pubkey) = spawn_signer(operator_seed, node_pubkey);
+
+    // This is what init.rs's RemoteSigner branch does, end-to-end.
+    let remote = RemoteSigner::connect(&proc.socket, node_transport_secret, signer_pubkey)
+        .expect("signer-backed Node init path must connect");
+
+    // Exercise both the operator-protocol sign path and the Nostr-key
+    // issuance — the two things Node::new actually calls before passing
+    // signers down into the handler / Nostr layer.
+    let digest = sha256::Hash::hash(b"layer-1 e2e").to_byte_array();
+    let ctx = SignContext::operator_update([0xBB; 32], 1);
+    let sig = remote.bip340_sign(&ctx, &digest).expect("bip340_sign");
+
+    let (operator_secret, _nostr_secret) =
+        derive_keys_from_seed(&operator_seed, Network::Bitcoin).unwrap();
+    let local = LocalSigner::new(operator_secret);
+    let expected = local.bip340_sign(&ctx, &digest).unwrap();
+    assert_eq!(
+        sig, expected,
+        "remote-via-Layer-1 path must produce the same sig as LocalSigner",
+    );
+
+    // Nostr-secret issuance through the same connection.
+    let issued = remote.issue_nostr_secret().expect("issue_nostr_secret");
+    let issued_pk =
+        bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &
+            bitcoin::secp256k1::SecretKey::from_slice(&issued).unwrap());
+    assert_ne!(issued_pk, remote.pubkey(), "Nostr key must differ from operator");
+
+    let _ = std::fs::remove_dir_all(&daemon_data_dir);
 }
 
 #[test]

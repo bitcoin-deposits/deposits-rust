@@ -1,4 +1,5 @@
 use super::*;
+use deposits_signer_api::Signer as _;
 
 impl Node {
     /// Create a new node
@@ -14,22 +15,60 @@ impl Node {
             config.electrum_url.clone(),
         )?);
 
-        let secret_key = wallet.operator_secret();
-        let node_id = PublicKey::from_secret_key(&secp, &secret_key);
-
-        // Derive the *Nostr identity* secret at the sibling path
-        // m/85'/0'/0'/0/0 (same scheme `deposits-signer` uses for
-        // `IssueNostrSecret`). The Nostr layer holds this key locally for
-        // event signing + NIP-04 ECDH; the operator/protocol key stays out
-        // of nostr.rs so a daemon compromise doesn't leak the slashable
-        // identity. Today the seed is still in-process (LocalSigner path);
-        // a real-world RemoteSigner deployment would call
-        // `signer.issue_nostr_secret()` instead.
-        let (_op_check, nostr_secret) = deposits_signer::data::derive_keys_from_seed(
-            &config.seed,
-            config.network,
-        )
-        .map_err(|e| Error::Wallet(format!("derive nostr secret: {}", e)))?;
+        // Build the Signer abstraction. Two paths:
+        //   - LocalSigner: derive operator + Nostr keys from the seed,
+        //     wrap in a LocalSigner::with_nostr_secret. Default when
+        //     --signer-socket is not configured.
+        //   - RemoteSigner: connect to deposits-signer over Unix socket,
+        //     verify the pinned signer pubkey, fetch the Nostr secret via
+        //     IssueNostrSecret. The operator-protocol key stays in the
+        //     signer process; the daemon's host filesystem doesn't see it
+        //     (BDK still needs the seed for descriptors — cluster 4
+        //     follow-up to remove that last seed-on-disk requirement).
+        let (signer, nostr_secret): (
+            std::sync::Arc<dyn deposits_signer_api::Signer>,
+            bitcoin::secp256k1::SecretKey,
+        ) = match &config.signer {
+            None => {
+                let (op, nostr) = deposits_signer::data::derive_keys_from_seed(
+                    &config.seed,
+                    config.network,
+                )
+                .map_err(|e| Error::Wallet(format!("derive keys: {}", e)))?;
+                let signer = std::sync::Arc::new(
+                    deposits_signer_api::LocalSigner::with_nostr_secret(op, nostr),
+                ) as std::sync::Arc<dyn deposits_signer_api::Signer>;
+                (signer, nostr)
+            }
+            Some(sig_cfg) => {
+                let transport_secret = Self::load_or_init_transport_secret(&config.data_dir)?;
+                let remote = crate::remote_signer::RemoteSigner::connect(
+                    &sig_cfg.socket_path,
+                    transport_secret,
+                    sig_cfg.signer_pubkey,
+                )
+                .map_err(|e| {
+                    Error::Wallet(format!(
+                        "connect to deposits-signer at {}: {} \
+                         (have you `deposits-signer trust add`'d this node's \
+                         transport pubkey?)",
+                        sig_cfg.socket_path.display(),
+                        e
+                    ))
+                })?;
+                let nostr_bytes = remote.issue_nostr_secret().map_err(|e| {
+                    Error::Wallet(format!("signer issue_nostr_secret: {}", e))
+                })?;
+                let nostr = bitcoin::secp256k1::SecretKey::from_slice(&nostr_bytes)
+                    .map_err(|e| Error::Wallet(format!("issued nostr secret: {}", e)))?;
+                let signer: std::sync::Arc<dyn deposits_signer_api::Signer> =
+                    std::sync::Arc::new(remote);
+                (signer, nostr)
+            }
+        };
+        let node_id = signer.pubkey();
+        // BDK still needs the seed for descriptors; this stays for now.
+        let _wallet_secret_check = wallet.operator_secret();
 
         // Store relay URL for later use
         let relay_url = config.relays.first().cloned().unwrap_or_default();
@@ -48,7 +87,7 @@ impl Node {
         let enable_metrics_emitter =
             std::env::var("DEPOSITS_ENABLE_METRICS_EMITTER").as_deref() == Ok("1");
         let (handler, outbound_rx) = DepositsHandler::new(
-            secret_key,
+            std::sync::Arc::clone(&signer),
             wallet.clone(),
             handler_data_dir,
             enable_metrics_emitter,
@@ -335,6 +374,59 @@ impl Node {
     /// `<id>.actor.log` shadow file never gets written.
     ///
     /// Idempotent: returns immediately if an actor is already registered.
+    /// Load (or generate) the daemon's transport keypair under
+    /// `<data_dir>/transport_secret`. Returns the secret; the caller derives
+    /// the pubkey for handshake. On first run we generate fresh, write 0600,
+    /// and log the public side so the operator can `deposits-signer trust add`.
+    pub fn load_or_init_transport_secret(
+        data_dir: &std::path::Path,
+    ) -> Result<bitcoin::secp256k1::SecretKey, Error> {
+        use std::os::unix::fs::PermissionsExt;
+        let path = data_dir.join("transport_secret");
+        if path.exists() {
+            let raw = std::fs::read_to_string(&path).map_err(|e| {
+                Error::Wallet(format!("read transport_secret {}: {}", path.display(), e))
+            })?;
+            let bytes = hex::decode(raw.trim())
+                .map_err(|e| Error::Wallet(format!("transport_secret hex: {}", e)))?;
+            let sk = bitcoin::secp256k1::SecretKey::from_slice(&bytes)
+                .map_err(|e| Error::Wallet(format!("transport_secret: {}", e)))?;
+            return Ok(sk);
+        }
+        // Generate fresh.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Error::Wallet(format!("create_dir_all {}: {}", parent.display(), e))
+            })?;
+        }
+        use bitcoin::secp256k1::rand::rngs::OsRng;
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let (sk, pk) = secp.generate_keypair(&mut OsRng);
+        let body = hex::encode(sk.secret_bytes());
+        let mut f = std::fs::File::create(&path).map_err(|e| {
+            Error::Wallet(format!("create transport_secret {}: {}", path.display(), e))
+        })?;
+        use std::io::Write;
+        f.write_all(body.as_bytes())
+            .and_then(|_| f.write_all(b"\n"))
+            .map_err(|e| Error::Wallet(format!("write transport_secret: {}", e)))?;
+        let mut perms = f
+            .metadata()
+            .map_err(|e| Error::Wallet(format!("stat transport_secret: {}", e)))?
+            .permissions();
+        perms.set_mode(0o600);
+        f.set_permissions(perms)
+            .map_err(|e| Error::Wallet(format!("chmod transport_secret: {}", e)))?;
+        tracing::warn!(
+            "Generated daemon transport keypair: pubkey={}. Add it to the \
+             signer's allowlist with `deposits-signer trust add --data-dir \
+             <signer-data-dir> {}` before the next handshake will succeed.",
+            hex::encode(pk.serialize()),
+            hex::encode(pk.serialize()),
+        );
+        Ok(sk)
+    }
+
     pub(crate) fn ensure_actor_for(&self, ledger_id: &str) {
         {
             let map = self.ledger_actors.lock().unwrap();

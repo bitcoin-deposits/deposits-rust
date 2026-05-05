@@ -72,6 +72,29 @@ pub struct NodeConfig {
     /// Skip Schnorr signature verification of incoming Nostr events.
     /// Only use with trusted relays (e.g., local/private relays).
     pub skip_nostr_verify: bool,
+
+    /// If `Some`, the daemon connects to a `deposits-signer` process at
+    /// `socket_path` for operator-protocol signs (BIP-340 / ECDSA / ECDH /
+    /// IssueNostrSecret). The signer's transport pubkey is pinned at
+    /// connect; the daemon persists its own transport keypair under
+    /// `data_dir/transport_secret`. Mutually exclusive with
+    /// LocalSigner-from-seed (which is what the daemon does when this is
+    /// `None`).
+    ///
+    /// The wallet (BDK) still derives from `seed` regardless — the
+    /// watch-only descriptor split is its own follow-up.
+    pub signer: Option<RemoteSignerConfig>,
+}
+
+/// Configuration for the daemon ↔ signer link.
+#[derive(Debug, Clone)]
+pub struct RemoteSignerConfig {
+    /// Path to the signer's Unix socket.
+    pub socket_path: PathBuf,
+    /// Pinned signer transport pubkey (33-byte compressed). If the
+    /// signer's `HelloAck` doesn't sign with this key, the daemon
+    /// refuses to proceed.
+    pub signer_pubkey: bitcoin::secp256k1::PublicKey,
 }
 
 /// Result of rotating reserves to quorum-based Taproot spending

@@ -128,16 +128,14 @@ impl DepositsHandler {
     /// Returns the handler and a receiver for outbound messages that should
     /// be sent via Nostr transport asynchronously.
     pub fn new(
-        secret_key: SecretKey,
+        signer: Arc<dyn Signer>,
         wallet: Arc<Wallet>,
         data_dir: PathBuf,
         enable_metrics_emitter: bool,
     ) -> (Self, mpsc::UnboundedReceiver<OutboundMessage>) {
         use bitcoin::secp256k1::Secp256k1;
-        use deposits_signer_api::LocalSigner;
         let secp = Secp256k1::new();
-        let our_node_id = PublicKey::from_secret_key(&secp, &secret_key);
-        let signer: Arc<dyn Signer> = Arc::new(LocalSigner::new(secret_key));
+        let our_node_id = signer.pubkey();
 
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
 
@@ -1647,6 +1645,10 @@ mod tests {
         PublicKey::from_secret_key(&secp, &test_secret_key())
     }
 
+    fn test_local_signer() -> Arc<dyn Signer> {
+        Arc::new(deposits_signer_api::LocalSigner::new(test_secret_key()))
+    }
+
     fn create_mock_wallet(temp_dir: &TempDir) -> Arc<Wallet> {
         // Create a minimal wallet for testing
         Arc::new(Wallet::new_mock(temp_dir.path().to_path_buf()))
@@ -1658,7 +1660,7 @@ mod tests {
         let wallet = create_mock_wallet(&temp_dir);
         let data_dir = temp_dir.path().to_path_buf();
 
-        let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir, false);
+        let (handler, _rx) = DepositsHandler::new(test_local_signer(), wallet, data_dir, false);
 
         assert_eq!(handler.our_node_id, test_pubkey());
         assert!(handler.ledgers.lock().unwrap().is_empty());
@@ -1675,7 +1677,7 @@ mod tests {
         // Create handler and ledger
         {
             let (handler, _rx) =
-                DepositsHandler::new(test_secret_key(), wallet.clone(), data_dir.clone(), false);
+                DepositsHandler::new(test_local_signer(), wallet.clone(), data_dir.clone(), false);
 
             // Create a ledger (as partner, so we control when it's created)
             let other_pk = {
@@ -1693,7 +1695,7 @@ mod tests {
 
         // Reload and verify
         {
-            let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir, false);
+            let (handler, _rx) = DepositsHandler::new(test_local_signer(), wallet, data_dir, false);
 
             let ledgers = handler.ledgers.lock().unwrap();
             assert_eq!(ledgers.len(), 1);
@@ -1706,7 +1708,7 @@ mod tests {
         let wallet = create_mock_wallet(&temp_dir);
         let data_dir = temp_dir.path().to_path_buf();
 
-        let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir, false);
+        let (handler, _rx) = DepositsHandler::new(test_local_signer(), wallet, data_dir, false);
 
         // our_node_id should return our pubkey
         assert_eq!(handler.our_node_id(), test_pubkey());
@@ -1731,7 +1733,7 @@ mod tests {
         let wallet = create_mock_wallet(&temp_dir);
         let data_dir = temp_dir.path().to_path_buf();
 
-        let (handler, _rx) = DepositsHandler::new(test_secret_key(), wallet, data_dir, false);
+        let (handler, _rx) = DepositsHandler::new(test_local_signer(), wallet, data_dir, false);
 
         // Initially empty
         assert!(handler.drain_events().is_empty());
