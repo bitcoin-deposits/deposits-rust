@@ -16,6 +16,8 @@ This document specifies fraud proof construction, embedding, broadcast, and veri
 
 5. **Non-conforming update**: the operator signed a ledger update that violates protocol rules (e.g., spending more than balance, invalid fee collection).
 
+6. **Winner collateral deviation**: the lottery winner's broadcast claim TX deviates from the replacement collateral they committed to in `DisputeArmed` — missing the second input, pointing at a different UTXO, committing less than declared, or adding change outputs that drain the pledged amount. Verifiable on-chain by inspecting the claim TX against the disputant's stored `DisputeArmed` declaration.
+
 ## Proof Construction
 
 A fraud proof is a hashable evidence document:
@@ -82,8 +84,12 @@ Each participating quorum member appends `DisputeArmed` to their fork with:
 - **commitment_hash**: `HASH160(preimage)` where `preimage` is a 17-to-`(16+N)`-byte random value chosen by the member. The preimage's *length* contributes the entropy: `contribution = LEN(preimage) - 16` lies in `1..=N`.
 - **target_reserves**: the bitcoin address where the member wants their winnings sent if they win
 - **armed_block**: the block height at time of arming
+- **replacement_collateral_outpoint**: txid + vout of an unspent UTXO the disputant controls and pledges to commit to the new vault if they win (see DEP-03 §"Replacement collateral declaration")
+- **replacement_collateral_amount**: the value (in sats) they pledge to commit from that UTXO; must satisfy `≥ obligations × collateral_ratio + claim_fee_estimate` where `obligations` is the total deposits owed at `last_valid_sequence`
 
 Members must arm within `dispute_arm_blocks` after `DisputeEnter`. Late entries are excluded. `dispute_arm_blocks` is recorded in `QuorumAddMember` so all parties agree on the obligation at join time.
+
+A member that needs to amend their declaration (e.g., the originally pledged UTXO got spent) MAY append a fresh `DisputeArmed` before the arm window closes; the latest event from each disputant is the one cosigners verify against.
 
 The participant ordering (canonical, derived from sorted `quorum_pubkey`) and the committed hashes go into the lottery script that the confiscation transaction will lock funds into.
 

@@ -122,6 +122,7 @@ propagation:
 | `StaleCosignature`    | Punitive    | Cosigner backdated their `member_ledger_hash` (signed against an outdated state)   |
 | `DisputeDereliction`  | Punitive    | Cosigner was online but failed to act on a prior fraud proof within the window     |
 | `NonConformingUpdate` | Punitive    | Operator signed a ledger update that violates protocol rules                       |
+| `WinnerCollateralDeviation` | Punitive | Lottery winner's broadcast claim TX deviates from their `DisputeArmed` collateral declaration (missing input, smaller commit, or extra drain) |
 
 ### Respectful custody (QuorumExpired only)
 
@@ -163,6 +164,75 @@ When proof of provable misbehaviour is presented:
   triggering punitive disputes there as well. Cross-ledger contagion is
   the protocol's mechanism for ensuring an operator with multiple ledgers
   can't insulate one from misbehaviour on another.
+
+### Replacement collateral declaration
+
+Operating a ledger requires backing reserves with a collateral ratio `r`
+(see DEP-05). The lottery output by itself only covers the inherited
+`obligations` — it does not carry the collateral-ratio padding. To take
+custody, the winner must commit *fresh collateral* alongside the lottery
+output when constructing the claim transaction.
+
+For both respectful and punitive disputes, every disputant MUST declare
+in `DisputeArmed` a **replacement collateral UTXO** they would commit if
+they win:
+
+- `replacement_collateral_outpoint`: txid + vout of an unspent UTXO they
+  control
+- `replacement_collateral_amount`: the value (in sats) they pledge to the
+  new vault from that UTXO
+
+At confiscation cosign time, every cosigner verifies, against their own
+chain source, that each disputant's declaration satisfies all of:
+
+1. The outpoint exists on-chain and is unspent at the cosigner's tip
+2. Its value is ≥ `replacement_collateral_amount`
+3. The post-takeover collateralization inequality holds:
+
+   ```
+   replacement_collateral_amount  ≥  obligations × collateral_ratio + claim_fee_estimate
+   ```
+
+   where `obligations` is the total deposit value owed at
+   `last_valid_sequence` (the lottery output covers exactly this amount,
+   so only the ratio padding and fee need to come from the replacement).
+
+If any disputant's declaration fails any check, the cosigner MUST refuse
+to sign the confiscation transaction. The dispute is then stalled until
+the failing disputant amends `DisputeArmed` (re-arming with a sufficient
+UTXO before the arm window closes) or is excluded for missing the window.
+
+The fee estimate floor is policy. Recommended default: 200 sat/vB ×
+estimated multi-input claim TX vsize. A stricter cosigner is free to
+refuse what laxer cosigners would accept.
+
+### Claim transaction (multi-input)
+
+The winner's claim TX has two inputs and one output:
+
+- **Input 0**: lottery output (script-path spend through the primary or
+  partial-reveal leaf — see §"Witness Construction")
+- **Input 1**: the disputant's declared replacement collateral UTXO,
+  signed natively for whatever script controls it (typically wpkh from
+  the disputant's wallet)
+- **Output 0**: the new reserves vault at the winner's `target_reserves`
+  address, valued at `(input_sum − fee)`
+
+If the winner broadcasts a claim TX whose shape deviates from their
+declared commitment — single-input (skipping the replacement), pointing
+at a different replacement UTXO, committing a smaller amount than
+declared, or adding change outputs that drain replacement value — the
+deviation is observable on-chain by comparing the broadcast TX against
+the stored `DisputeArmed`. This deviation is a `WinnerCollateralDeviation`
+fraud proof: punitive, attributed to the winner's new operator pubkey on
+whatever ledger they're operating after takeover. Cross-ledger contagion
+applies as for any other punitive proof.
+
+Because Bitcoin script can't gate cross-input requirements atomically,
+the constraint is enforced at two edges: cosigner-attested arm-time
+verification (refuse to sign confiscation if the declaration is
+insufficient) and after-the-fact fraud proof (slash the winner if they
+broadcast a non-conforming claim).
 
 ## Related DEPs
 
