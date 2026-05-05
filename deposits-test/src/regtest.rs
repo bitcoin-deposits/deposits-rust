@@ -482,6 +482,83 @@ pub fn publish_fraud_broadcast(
     );
 }
 
+/// Send `amount_sats` to an operator's operator-key P2WPKH address from
+/// the cluster's bitcoin-cli faucet. Used by tests that exercise the
+/// dispute → auto-arm → multi-input claim TX path: RC6's auto-arm pulls
+/// a UTXO at this address to declare as `replacement_collateral`, and
+/// RC4's claim-TX builder signs against it. Without this funding step,
+/// the disputant would arm with `replacement_collateral: None` and a
+/// strict cosigner refuses confiscation per DEP-03.
+///
+/// Returns the txid of the funding transaction. Caller is responsible
+/// for mining sufficient confirmations (default cosigner policy is 1).
+pub fn fund_operator_key_address(op_idx: usize, amount_sats: u64) -> bitcoin::Txid {
+    use bitcoin::secp256k1::{PublicKey, Secp256k1};
+    use std::str::FromStr;
+    // Mirror derive_operator_secret: `m/86'/0'/0'/0/0` from seed.
+    let seed = op_seed(op_idx);
+    let seed_bytes = hex::decode(&seed).expect("op seed hex");
+    let secp = Secp256k1::new();
+    let xpriv = bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Regtest, &seed_bytes)
+        .expect("xpriv");
+    let path = bitcoin::bip32::DerivationPath::from_str("m/86'/0'/0'/0/0").unwrap();
+    let derived = xpriv.derive_priv(&secp, &path).expect("derive");
+    let op_pubkey = PublicKey::from_secret_key(&secp, &derived.private_key);
+    let compressed = bitcoin::CompressedPublicKey::from_slice(&op_pubkey.serialize()).unwrap();
+    let address = bitcoin::Address::p2wpkh(&compressed, bitcoin::Network::Regtest).to_string();
+
+    // Convert sats to BTC (bitcoin-cli sendtoaddress takes BTC). Use 8
+    // decimal places to avoid float precision issues for sub-sat amounts.
+    let btc_str = format!("{}.{:08}", amount_sats / 100_000_000, amount_sats % 100_000_000);
+    let out = Command::new("docker")
+        .args([
+            "exec",
+            "bitcoind",
+            "bitcoin-cli",
+            "-regtest",
+            "-rpcuser=user",
+            "-rpcpassword=pass",
+            "sendtoaddress",
+            &address,
+            &btc_str,
+        ])
+        .output()
+        .expect("docker exec bitcoin-cli sendtoaddress");
+    assert!(
+        out.status.success(),
+        "sendtoaddress failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let txid_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    bitcoin::Txid::from_str(&txid_str).expect("parse txid")
+}
+
+/// Mine `n` blocks to a throwaway address (regtest). Used to confirm the
+/// funding tx from `fund_operator_key_address` so the cosigner's Esplora
+/// check sees it as ≥ 1 confirmation.
+pub fn mine_blocks(n: u32) {
+    let out = Command::new("docker")
+        .args([
+            "exec",
+            "bitcoind",
+            "bitcoin-cli",
+            "-regtest",
+            "-rpcuser=user",
+            "-rpcpassword=pass",
+            "-generate",
+            &n.to_string(),
+        ])
+        .output()
+        .expect("docker exec bitcoin-cli -generate");
+    assert!(
+        out.status.success(),
+        "mine_blocks failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Poll all operator data dirs (op0..op9) for
 /// `confiscated_<ledger_id[..16]>.marker`. Returns the operator index
 /// whose dir produced the marker, or panics on timeout.
