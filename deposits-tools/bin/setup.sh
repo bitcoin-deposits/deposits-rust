@@ -155,6 +155,45 @@ start_node() {
     local data_dir="$DATA_ROOT/$name"
     local metrics_port=$((9100 + idx))
     mkdir -p "$data_dir"
+
+    # Optional: provision a co-located deposits-signer when
+    # DEPOSITS_USE_SIGNER=1 is set in the environment. Mirrors the
+    # _common.sh::start_node logic.
+    local signer_flags=""
+    if [ "${DEPOSITS_USE_SIGNER:-}" = "1" ]; then
+        local signer_data_dir="$data_dir/signer"
+        local signer_socket="$data_dir/signer.sock"
+        local signer_bin="${DEPOSITS_SIGNER:-$REPO_ROOT/target/release/deposits-signer}"
+        if [ ! -f "$signer_data_dir/transport_secret" ]; then
+            local seed_file="$data_dir/_signer_seed.tmp"
+            echo "$seed" > "$seed_file"
+            chmod 0600 "$seed_file"
+            "$signer_bin" init \
+                --data-dir "$signer_data_dir" \
+                --seed-file "$seed_file" >/dev/null
+            rm -f "$seed_file"
+        fi
+        local node_transport_pubkey
+        node_transport_pubkey=$("$DEPOSITS_NODE" transport-pubkey --data-dir "$data_dir" 2>/dev/null)
+        "$signer_bin" trust add \
+            --data-dir "$signer_data_dir" \
+            "$node_transport_pubkey" >/dev/null 2>&1 || true
+        local signer_pubkey
+        signer_pubkey=$("$signer_bin" pubkey --data-dir "$signer_data_dir")
+        rm -f "$signer_socket"
+        RUST_LOG=info "$signer_bin" run \
+            --data-dir "$signer_data_dir" \
+            --socket "$signer_socket" \
+            > "$data_dir/signer.log" 2>&1 &
+        echo "$!" > "$data_dir/signer.pid"
+        local waited=0
+        while [ ! -S "$signer_socket" ] && [ "$waited" -lt 30 ]; do
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+        signer_flags="--signer-pubkey $signer_pubkey --signer-socket $signer_socket"
+    fi
+
     RUST_LOG=warn LDK_CLI="$LDK_CLI" LDK_REAL_CLI="$LDK_REAL_CLI" \
         LDK_HOST="$LDK_HOST" LDK_PORT="$LDK_PORT" \
         LDK_API_KEY="$LDK_API_KEY" LDK_TLS_CERT="$LDK_TLS_CERT" \
@@ -165,7 +204,8 @@ start_node() {
         --esplora "$ELECTRS_URL" \
         --metrics-port "$metrics_port" \
         --fast-poll \
-        $RELAY_ARGS >> "$data_dir/daemon.log" 2>&1 &
+        $RELAY_ARGS \
+        $signer_flags >> "$data_dir/daemon.log" 2>&1 &
     echo "$!" > "$data_dir/daemon.pid"
 }
 
@@ -174,6 +214,11 @@ stop_nodes() {
         local pidfile="$DATA_ROOT/op$i/daemon.pid"
         if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
             kill "$(cat "$pidfile")" 2>/dev/null || true
+        fi
+        # Co-located signer (DEPOSITS_USE_SIGNER=1).
+        local signer_pidfile="$DATA_ROOT/op$i/signer.pid"
+        if [ -f "$signer_pidfile" ] && kill -0 "$(cat "$signer_pidfile")" 2>/dev/null; then
+            kill "$(cat "$signer_pidfile")" 2>/dev/null || true
         fi
     done
 }

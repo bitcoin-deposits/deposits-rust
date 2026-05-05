@@ -16,30 +16,24 @@ impl Node {
         )?);
 
         // Build the Signer abstraction. Two paths:
-        //   - LocalSigner: derive operator + Nostr keys from the seed,
-        //     wrap in a LocalSigner::with_nostr_secret. Default when
-        //     --signer-socket is not configured.
+        //   - LocalSigner: build from the seed-derived operator key.
+        //     Default when --signer-socket is not configured.
         //   - RemoteSigner: connect to deposits-signer over Unix socket,
-        //     verify the pinned signer pubkey, fetch the Nostr secret via
-        //     IssueNostrSecret. The operator-protocol key stays in the
-        //     signer process; the daemon's host filesystem doesn't see it
-        //     (BDK still needs the seed for descriptors — cluster 4
-        //     follow-up to remove that last seed-on-disk requirement).
-        let (signer, nostr_secret): (
-            std::sync::Arc<dyn deposits_signer_api::Signer>,
-            bitcoin::secp256k1::SecretKey,
-        ) = match &config.signer {
-            None => {
-                let (op, nostr) = deposits_signer::data::derive_keys_from_seed(
-                    &config.seed,
-                    config.network,
-                )
-                .map_err(|e| Error::Wallet(format!("derive keys: {}", e)))?;
-                let signer = std::sync::Arc::new(
-                    deposits_signer_api::LocalSigner::with_nostr_secret(op, nostr),
-                ) as std::sync::Arc<dyn deposits_signer_api::Signer>;
-                (signer, nostr)
-            }
+        //     verify the pinned signer pubkey. Operator-protocol signs
+        //     (the slashable ones) flow over the wire; anti-equivocation
+        //     policy is active on the signer side.
+        //
+        // The Nostr layer continues to use the operator secret directly
+        // (derived from the seed locally; daemon already has the seed for
+        // BDK). This keeps today's admin / depositor tooling unchanged —
+        // they encrypt NIP-04 DMs to the operator npub, which the daemon
+        // can decrypt with the operator secret. The "Nostr-key separation"
+        // (sibling-derived key for the Nostr layer, deposit-from-event-pubkey
+        // wallet-side update) is a planned protocol annex tracked in
+        // PLAN-remote-signer.md §Open follow-ups; not enabled yet.
+        let operator_secret = wallet.operator_secret();
+        let signer: std::sync::Arc<dyn deposits_signer_api::Signer> = match &config.signer {
+            None => std::sync::Arc::new(deposits_signer_api::LocalSigner::new(operator_secret)),
             Some(sig_cfg) => {
                 let transport_secret = Self::load_or_init_transport_secret(&config.data_dir)?;
                 let remote = crate::remote_signer::RemoteSigner::connect(
@@ -56,19 +50,11 @@ impl Node {
                         e
                     ))
                 })?;
-                let nostr_bytes = remote.issue_nostr_secret().map_err(|e| {
-                    Error::Wallet(format!("signer issue_nostr_secret: {}", e))
-                })?;
-                let nostr = bitcoin::secp256k1::SecretKey::from_slice(&nostr_bytes)
-                    .map_err(|e| Error::Wallet(format!("issued nostr secret: {}", e)))?;
-                let signer: std::sync::Arc<dyn deposits_signer_api::Signer> =
-                    std::sync::Arc::new(remote);
-                (signer, nostr)
+                std::sync::Arc::new(remote)
             }
         };
         let node_id = signer.pubkey();
-        // BDK still needs the seed for descriptors; this stays for now.
-        let _wallet_secret_check = wallet.operator_secret();
+        let nostr_secret = operator_secret;
 
         // Store relay URL for later use
         let relay_url = config.relays.first().cloned().unwrap_or_default();
