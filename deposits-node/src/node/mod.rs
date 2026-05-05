@@ -514,4 +514,5 @@ pub mod ledger_actor;
 pub mod ledger_queries;
 pub mod main_loop;
 pub mod operations;
+pub mod replacement_collateral;
 pub mod request_handlers;

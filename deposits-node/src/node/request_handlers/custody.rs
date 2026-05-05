@@ -275,8 +275,6 @@ impl Node {
         &self,
         request: &crate::nostr::LedgerRequest,
     ) -> (bool, Option<String>, Option<String>) {
-        use bitcoin::secp256k1::Message;
-
         tracing::info!(
             "Processing confiscation_sign request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]
@@ -307,6 +305,25 @@ impl Node {
             return (false, None, Some("Not armed for this dispute".to_string()));
         }
 
+        // Per DEP-03 §"Replacement collateral declaration": before
+        // signing the confiscation TX, every cosigner verifies that
+        // every disputant's pledged replacement collateral satisfies
+        // the post-takeover collateralization inequality. A cosigner
+        // that observes any failure MUST refuse to sign — the dispute
+        // stalls until the failing disputant amends their declaration
+        // or the arm window closes them out.
+        if let Err(reason) = self
+            .verify_disputants_replacement_collateral(request)
+            .await
+        {
+            tracing::warn!(
+                "Refusing confiscation_sign for ledger {}: {}",
+                ledger_prefix,
+                reason
+            );
+            return (false, None, Some(reason));
+        }
+
         // Sign the sighash via the Signer (confiscation tx Tapscript script-spend).
         use deposits_signer_api::{SigPurpose, SignContext};
         let signature_bytes = match self.handler.signer.bip340_sign(
@@ -333,6 +350,257 @@ impl Node {
             ledger_prefix
         );
         (true, Some(result.to_string()), None)
+    }
+
+    /// Walk the disputed ledger's history, replay to `last_valid_sequence`,
+    /// and verify every fork-branch `DisputeArmed`'s replacement-collateral
+    /// declaration. Returns `Err(refusal_reason)` for the cosigner to
+    /// surface back to the requester.
+    ///
+    /// Verification mirrors DEP-03 §"Replacement collateral declaration":
+    /// 1. Each disputant's `DisputeArmed` MUST carry a non-`None`
+    ///    `replacement_collateral`.
+    /// 2. The declared amount MUST satisfy
+    ///    `amount ≥ obligations × (collateral / reserves) + fee_estimate`.
+    /// 3. The declared outpoint MUST exist on-chain, be unspent, hold
+    ///    at least the declared amount, and have at least
+    ///    `policy.min_confirmations` confirmations.
+    async fn verify_disputants_replacement_collateral(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> Result<(), String> {
+        use crate::node::replacement_collateral::{
+            check_inequality, compute_required_replacement_sats, CollateralCheck, CollateralPolicy,
+        };
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use deposits_core::messages::ReplacementCollateral;
+        use deposits_core::types::LedgerState;
+        use deposits_core::SignedLedgerUpdate;
+        use nostr_sdk::prelude::*;
+
+        // The sender (operator initiating confiscation) provides
+        // `last_valid_sequence`. Older clients that don't yet send this
+        // field cause us to skip the replacement-collateral check and
+        // fall back to legacy behaviour — log loudly so misconfigured
+        // deployments are visible. RC6 will make this required.
+        let last_valid_sequence = match request
+            .params
+            .get("last_valid_sequence")
+            .and_then(|v| v.as_u64())
+        {
+            Some(seq) => seq,
+            None => {
+                tracing::warn!(
+                    "confiscation_sign request missing last_valid_sequence — \
+                     skipping replacement-collateral verification (legacy sender)"
+                );
+                return Ok(());
+            }
+        };
+
+        let ledger_id = &request.ledger_id;
+
+        // Fetch the ledger's full update history from the slow relay
+        // (mirrors the fetch pattern in custody_transfer_sign).
+        let client = self.nostr.fetch_client();
+        let filter = Filter::new()
+            .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
+            .custom_tag(
+                crate::nostr::TAG_LEDGER_ID,
+                [crate::nostr::ledger_tag(ledger_id.as_str())],
+            )
+            .limit(500);
+        let events = client
+            .fetch_events(vec![filter], None)
+            .await
+            .map_err(|e| format!("failed to fetch ledger updates: {}", e))?;
+
+        let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+        for event in events.iter() {
+            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+                if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                    updates.push(update);
+                }
+            }
+        }
+        updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
+        updates.dedup_by(|a, b| {
+            a.sequence_number == b.sequence_number
+                && a.operator_id == b.operator_id
+                && a.content_hash == b.content_hash
+        });
+
+        // Identify the original operator (sequence 0). All operator-key
+        // updates ≤ lvs come from them; updates with a different
+        // operator_id and sequence > lvs are fork-branch DisputeArmed
+        // candidates we need to verify.
+        let original_operator = updates
+            .iter()
+            .find(|u| u.sequence_number == 0)
+            .map(|u| u.operator_id)
+            .ok_or_else(|| "could not find ledger genesis".to_string())?;
+
+        // Replay LedgerState through lvs, capturing the latest QuorumBegin.
+        // The initial state's specific fields don't matter — apply(LedgerOpen)
+        // at seq 0 will overwrite operator_key/reserves_key/etc.
+        let mut state = LedgerState::new(original_operator, String::new(), 0);
+        let mut latest_qb_collateral_msat: u64 = 0;
+        let mut latest_qb_reserves_msat: u64 = 0;
+        let mut latest_qb_seq: i64 = -1;
+        for update in &updates {
+            if update.operator_id != original_operator {
+                continue;
+            }
+            if update.sequence_number > last_valid_sequence {
+                break;
+            }
+            let op = match deposits_core::messages::LedgerOperation::tlv_decode(&update.message) {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(format!(
+                        "decode error at seq {}: {}",
+                        update.sequence_number, e
+                    ));
+                }
+            };
+            if let deposits_core::messages::LedgerOperation::QuorumBegin {
+                amount,
+                collateral_amount,
+                ..
+            } = &op
+            {
+                if (update.sequence_number as i64) > latest_qb_seq {
+                    latest_qb_seq = update.sequence_number as i64;
+                    latest_qb_collateral_msat = *collateral_amount;
+                    latest_qb_reserves_msat = *amount;
+                }
+            }
+            state = state
+                .apply(&op)
+                .map_err(|e| format!("replay failed at seq {}: {:?}", update.sequence_number, e))?;
+        }
+        if latest_qb_seq < 0 {
+            // No QuorumBegin yet — there's no committed quorum to dispute,
+            // so the request itself is malformed. Refuse.
+            return Err("no QuorumBegin observed at or before last_valid_sequence".into());
+        }
+
+        let obligations_msat = state.total_deposit_balance();
+        let policy = CollateralPolicy::default();
+        let required_sats = compute_required_replacement_sats(
+            obligations_msat,
+            latest_qb_collateral_msat,
+            latest_qb_reserves_msat,
+            &policy,
+        )
+        .ok_or_else(|| "QuorumBegin reserves were zero".to_string())?;
+        tracing::info!(
+            "    Required replacement collateral ≥ {} sats (obligations_msat={}, ratio={}/{})",
+            required_sats,
+            obligations_msat,
+            latest_qb_collateral_msat,
+            latest_qb_reserves_msat
+        );
+
+        // Walk fork-branch DisputeArmed events. Each disputant's latest
+        // armed event in this dispute is the one we verify.
+        use std::collections::HashMap;
+        let mut latest_armed: HashMap<
+            bitcoin::secp256k1::PublicKey,
+            (u64, Option<ReplacementCollateral>),
+        > = HashMap::new();
+        for update in &updates {
+            if update.operator_id == original_operator {
+                continue;
+            }
+            if update.sequence_number <= last_valid_sequence {
+                continue;
+            }
+            let op = match deposits_core::messages::LedgerOperation::tlv_decode(&update.message) {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            if let deposits_core::messages::LedgerOperation::DisputeArmed {
+                replacement_collateral,
+                ..
+            } = op
+            {
+                let entry = latest_armed
+                    .entry(update.operator_id)
+                    .or_insert((0, None));
+                if update.sequence_number >= entry.0 {
+                    *entry = (update.sequence_number, replacement_collateral);
+                }
+            }
+        }
+
+        if latest_armed.is_empty() {
+            return Err("no fork-branch DisputeArmed events observed".into());
+        }
+
+        for (disputant, (_, decl)) in &latest_armed {
+            let serialized: [u8; 33] = disputant.serialize();
+            let prefix = hex::encode(&serialized[..8]);
+            let rc = match decl {
+                Some(rc) => rc,
+                None => {
+                    return Err(format!(
+                        "disputant {} declared no replacement_collateral",
+                        prefix
+                    ));
+                }
+            };
+            // Pure inequality check first (no I/O).
+            match check_inequality(rc.amount, required_sats) {
+                CollateralCheck::Ok => {}
+                other => {
+                    return Err(format!(
+                        "disputant {} replacement_collateral fails inequality: {:?}",
+                        prefix, other
+                    ));
+                }
+            }
+            // Esplora outpoint check.
+            let txid = bitcoin::Txid::from_raw_hash(
+                bitcoin::hashes::Hash::from_byte_array(rc.txid),
+            );
+            match self.wallet.get_outpoint_value_and_confs(txid, rc.vout).await {
+                Ok(Some((value_sats, confs))) => {
+                    if value_sats < rc.amount {
+                        return Err(format!(
+                            "disputant {} declared {} sats but UTXO holds only {} sats",
+                            prefix, rc.amount, value_sats
+                        ));
+                    }
+                    if confs < policy.min_confirmations {
+                        return Err(format!(
+                            "disputant {} UTXO has {} confirmations (< {} required)",
+                            prefix, confs, policy.min_confirmations
+                        ));
+                    }
+                    tracing::info!(
+                        "    Disputant {} replacement_collateral OK ({} sats @ {} confs)",
+                        prefix,
+                        value_sats,
+                        confs
+                    );
+                }
+                Ok(None) => {
+                    return Err(format!(
+                        "disputant {} replacement_collateral outpoint not on-chain or spent",
+                        prefix
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "esplora error checking disputant {}: {}",
+                        prefix, e
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub(crate) async fn process_custodian_query_request(

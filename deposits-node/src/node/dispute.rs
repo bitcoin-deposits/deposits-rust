@@ -210,10 +210,78 @@ impl Node {
                 let target_reserves =
                     bitcoin::Address::p2wpkh(&compressed, self.wallet.network()).to_string();
 
+                // Compute the cosigner-required replacement collateral floor
+                // and pick a wallet UTXO that meets it. Per
+                // DEP-03 §"Replacement collateral declaration", the
+                // declared amount must satisfy
+                // `obligations × (collateral / reserves) + fee_estimate`.
+                // The disputant's UTXO must sit at the operator's P2WPKH
+                // address — that's what RC4's claim-TX builder signs against.
+                let replacement_collateral = {
+                    use crate::node::replacement_collateral::{
+                        compute_required_replacement_sats, CollateralPolicy,
+                    };
+                    let obligations_msat = fork_ledger.state.total_deposit_balance();
+                    let collateral_msat = fork_ledger.state.collateral_amount;
+                    let reserves_msat = fork_ledger.state.reserves_amount;
+                    let policy = CollateralPolicy::default();
+                    let required_sats = compute_required_replacement_sats(
+                        obligations_msat,
+                        collateral_msat,
+                        reserves_msat,
+                        &policy,
+                    )
+                    .unwrap_or(0);
+                    let op_script = bitcoin::Address::p2wpkh(
+                        &compressed,
+                        self.wallet.network(),
+                    )
+                    .script_pubkey();
+                    match self.wallet.find_utxo_for_script(&op_script) {
+                        Ok(Some((outpoint, value_sats))) if value_sats >= required_sats => {
+                            let txid_bytes: [u8; 32] = *outpoint.txid.as_ref();
+                            tracing::info!(
+                                "Auto-arm replacement collateral: {} sats from {}:{} (required {})",
+                                value_sats, outpoint.txid, outpoint.vout, required_sats
+                            );
+                            Some(deposits_core::messages::ReplacementCollateral {
+                                txid: txid_bytes,
+                                vout: outpoint.vout,
+                                amount: value_sats,
+                            })
+                        }
+                        Ok(Some((_, value_sats))) => {
+                            tracing::warn!(
+                                "Auto-arm: operator-key P2WPKH UTXO has only {} sats, \
+                                 required ≥ {} — declaring None and falling back to a \
+                                 path strict cosigners will refuse",
+                                value_sats, required_sats
+                            );
+                            None
+                        }
+                        Ok(None) => {
+                            tracing::warn!(
+                                "Auto-arm: no UTXO found at operator-key P2WPKH; \
+                                 declaring no replacement_collateral"
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Auto-arm: esplora failure searching operator-key UTXO: {} \
+                                 — declaring no replacement_collateral",
+                                e
+                            );
+                            None
+                        }
+                    }
+                };
+
                 let armed_op = LedgerOperation::DisputeArmed {
                     armed_block: current_block,
                     commitment_hash,
                     target_reserves,
+                    replacement_collateral,
                 };
 
                 fork_ledger
@@ -1559,12 +1627,25 @@ impl Node {
             let unsigned_tx_bytes = bitcoin::consensus::encode::serialize(&confiscation_tx);
             let unsigned_tx_hex = hex::encode(&unsigned_tx_bytes);
 
+            // Pull last_valid_sequence out of the fork compound key
+            // (format `{ledger_id:64}_{fork_seq:06}_{op_prefix:16}`).
+            // Cosigners use it to replay the disputed ledger to the
+            // divergence point and verify each disputant's
+            // `replacement_collateral` declaration before signing
+            // (DEP-03 §"Replacement collateral declaration").
+            let last_valid_sequence: Option<u64> = if ledger_key.len() == 88 {
+                ledger_key.get(65..71).and_then(|s| s.parse::<u64>().ok())
+            } else {
+                None
+            };
+
             let request_params = serde_json::json!({
                 "ledger_id": ledger_id,
                 "sighash": hex::encode(sighash_bytes),
                 "unsigned_tx": unsigned_tx_hex,
                 "lottery_address": lottery_output.address.to_string(),
                 "violation_details": "Confiscation to lottery for dispute resolution",
+                "last_valid_sequence": last_valid_sequence,
             });
 
             let request_id = match self
