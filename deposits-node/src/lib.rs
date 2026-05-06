@@ -48,7 +48,12 @@ pub mod ledger_wallet;
 pub mod metrics;
 pub mod node;
 pub mod node_cli;
-pub mod nostr;
+/// Re-export of the `deposits-nostr` crate. The transport, message
+/// types, and wire constants used to live here as an inline module;
+/// they were lifted into a sibling crate so wallet-side consumers
+/// don't have to depend on the daemon. Existing `crate::nostr::…`
+/// paths inside deposits-node still resolve through this re-export.
+pub use deposits_nostr as nostr;
 pub mod operator_policy;
 pub mod remote_signer;
 // deposits-node/src/cli was split: nostr_commands + recovery moved to

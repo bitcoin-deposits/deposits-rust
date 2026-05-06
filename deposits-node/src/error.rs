@@ -27,6 +27,9 @@ pub enum Error {
     #[error("Handler error: {0}")]
     Handler(#[from] deposits_core::error::HandlerError),
 
+    #[error(transparent)]
+    NostrTransport(#[from] deposits_nostr::Error),
+
     #[error("Serialization error: {0}")]
     Serialization(String),
 

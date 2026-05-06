@@ -8,6 +8,11 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # Core protocol logic
 deposits-core = { path = "../deposits-core" }
+# Nostr transport, message types, and wire constants. Used to live
+# inline at `crate::nostr`; lifted out so `deposits-wallet` doesn't
+# have to depend on the daemon. Re-exported under the same path in
+# lib.rs so `crate::nostr::…` keeps working.
+deposits-nostr = { path = "../deposits-nostr" }
 deposits-signer-api = { path = "../deposits-signer-api" }
 deposits-signer = { path = "../deposits-signer" }
 

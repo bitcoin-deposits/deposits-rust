@@ -341,7 +341,7 @@ fn prompt_stdin(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
 /// flow (index.html `showVerificationFlow`) but over stdin instead of a
 /// modal.
 async fn run_verification_flow(
-    transport: &deposits_node::nostr::NostrTransport,
+    transport: &deposits_nostr::NostrTransport,
     verifier_pubkey: &str,
     allowed_domains: &[String],
     cli_lightning_address: Option<&str>,

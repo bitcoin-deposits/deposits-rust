@@ -10,7 +10,7 @@ use deposits_core::messages::LedgerOperation;
 use deposits_core::signature_utils::{compute_transfer_id, transfer_lock_signing_message};
 use deposits_core::tlv::TlvDecode;
 use deposits_core::types::{compute_deposit_id, TransferFeeSchedule};
-use deposits_node::nostr::{SwapAdvertisement, SwapRequest, SwapResponse};
+use deposits_nostr::{SwapAdvertisement, SwapRequest, SwapResponse};
 
 use super::{derive_secret_key, derive_secret_key_at_index, parse_config, NostrTransportBuilder};
 
@@ -24,7 +24,7 @@ fn default_operator_fee(amount_msats: u64) -> u64 {
 }
 
 async fn current_block_for(
-    transport: &deposits_node::nostr::NostrTransport,
+    transport: &deposits_nostr::NostrTransport,
     ledger_id: &str,
 ) -> Result<u32, Box<dyn std::error::Error>> {
     let ad = transport
@@ -42,7 +42,7 @@ async fn current_block_for(
 /// response subscription is set up lazily on the first call and is pinned
 /// to the filter at that moment (see nostr::subscribe_to_response).
 fn configure_swap_response_filter(
-    transport: &deposits_node::nostr::NostrTransport,
+    transport: &deposits_nostr::NostrTransport,
     left_ledger: &str,
     right_ledger: &str,
 ) {
@@ -57,7 +57,7 @@ fn configure_swap_response_filter(
 
 /// Submit a TransferLock via the operator. Returns the transfer_id.
 async fn submit_transfer_lock(
-    transport: &deposits_node::nostr::NostrTransport,
+    transport: &deposits_nostr::NostrTransport,
     ledger_id: &str,
     source_sk: &bitcoin::secp256k1::SecretKey,
     source_deposit_id: [u8; 16],
@@ -116,7 +116,7 @@ async fn submit_transfer_lock(
 }
 
 async fn submit_transfer_complete(
-    transport: &deposits_node::nostr::NostrTransport,
+    transport: &deposits_nostr::NostrTransport,
     ledger_id: &str,
     transfer_id: [u8; 32],
     preimage: [u8; 32],
@@ -142,7 +142,7 @@ async fn submit_transfer_complete(
 /// Poll `ledger_id` until a TransferLock matching (hash, dest, amount) lands,
 /// returning its transfer_id.
 async fn watch_for_lock(
-    transport: &deposits_node::nostr::NostrTransport,
+    transport: &deposits_nostr::NostrTransport,
     ledger_id: &str,
     hash_hex: &str,
     dest_deposit_id: [u8; 16],
@@ -184,7 +184,7 @@ async fn watch_for_lock(
 /// Poll `ledger_id` for the TransferComplete matching `transfer_id`, extract
 /// the revealed preimage.
 async fn watch_for_reveal(
-    transport: &deposits_node::nostr::NostrTransport,
+    transport: &deposits_nostr::NostrTransport,
     ledger_id: &str,
     transfer_id: [u8; 32],
     timeout_sec: u64,
@@ -982,7 +982,7 @@ pub async fn swap_listen(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 }
 
 async fn handle_swap_request(
-    transport: &std::sync::Arc<deposits_node::nostr::NostrTransport>,
+    transport: &std::sync::Arc<deposits_nostr::NostrTransport>,
     our_ads: &[SwapAdvertisement],
     deposits: &[serde_json::Value],
     config: &super::WalletConfig,
@@ -1215,7 +1215,7 @@ fn derive_ad_source_sk(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_maker_swap(
-    transport: &deposits_node::nostr::NostrTransport,
+    transport: &deposits_nostr::NostrTransport,
     ad: &SwapAdvertisement,
     req: &SwapRequest,
     maker_source_sk: &bitcoin::secp256k1::SecretKey,

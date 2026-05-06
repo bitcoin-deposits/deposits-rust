@@ -198,7 +198,7 @@ pub async fn batch_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
 async fn batch_transfer_lock(
     cmd: &serde_json::Value,
     deposits: &std::collections::HashMap<String, BatchDepositInfo>,
-    transport: &mut deposits_node::nostr::NostrTransport,
+    transport: &mut deposits_nostr::NostrTransport,
     secp: &Secp256k1<bitcoin::secp256k1::All>,
     _config: &WalletConfig,
 ) -> serde_json::Value {
@@ -335,7 +335,7 @@ async fn batch_transfer_lock(
 
 async fn batch_transfer_complete(
     cmd: &serde_json::Value,
-    transport: &mut deposits_node::nostr::NostrTransport,
+    transport: &mut deposits_nostr::NostrTransport,
     _config: &WalletConfig,
 ) -> serde_json::Value {
     let transfer_id_hex = match cmd.get("transfer_id").and_then(|v| v.as_str()) {

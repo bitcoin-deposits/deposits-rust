@@ -8,13 +8,10 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # Core protocol logic + state machine
 deposits-core = { path = "../deposits-core" }
-# Nostr transport, swap types, relay filters. Depending on deposits-node
-# at the library level is intentional — the wallet is a sibling CLI
-# that speaks the same wire protocol, and sharing the transport module
-# avoids drift. A future refactor could lift `deposits-node::nostr`
-# into its own deposits-transport crate if the wallet needs to
-# decouple.
-deposits-node = { path = "../deposits-node" }
+# Nostr transport, message types, wire constants. Lifted out of
+# `deposits-node` so the wallet is no longer coupled to the daemon's
+# library at compile time.
+deposits-nostr = { path = "../deposits-nostr" }
 # Anonymous web-of-trust gate (NIP-XX). Used by `ringsig-link`.
 deposits-ringsig = { path = "../deposits-ringsig" }
 

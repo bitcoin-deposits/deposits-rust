@@ -4,7 +4,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use deposits_core::messages::LedgerOperation;
 use deposits_core::tlv::TlvDecode;
 use deposits_core::SignedLedgerUpdate;
-use deposits_node::nostr::{ledger_tag, KIND_LEDGER_UPDATE, TAG_LEDGER_ID, TAG_SEQUENCE};
+use deposits_nostr::{ledger_tag, KIND_LEDGER_UPDATE, TAG_LEDGER_ID, TAG_SEQUENCE};
 use nostr_sdk::prelude::*;
 
 use super::{COLORS, RESET};

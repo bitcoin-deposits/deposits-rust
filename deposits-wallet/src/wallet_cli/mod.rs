@@ -13,7 +13,7 @@ use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{schnorr, Message, PublicKey, Secp256k1, SecretKey};
 use deposits_core::messages::LedgerOperation;
 use deposits_core::tlv::TlvDecode;
-use deposits_node::nostr::NostrTransportBuilder;
+use deposits_nostr::NostrTransportBuilder;
 use std::path::PathBuf;
 
 // ANSI color codes for --color-by-pk (used by ledger module)
@@ -462,7 +462,7 @@ pub fn verify_offer_cosignature(
 
 /// Verify that a public key is a quorum member for a ledger by checking ledger history
 pub async fn verify_quorum_membership(
-    transport: &deposits_node::nostr::NostrTransport,
+    transport: &deposits_nostr::NostrTransport,
     ledger_id: &str,
     cosigner_pubkey: &PublicKey,
 ) -> bool {

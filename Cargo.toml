@@ -2,6 +2,7 @@
 members = [
     "deposits-protocol",
     "deposits-core",
+    "deposits-nostr",
     "deposits-node",
     "deposits-wallet",
     "deposits-attestation",

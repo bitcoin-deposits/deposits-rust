@@ -44,7 +44,7 @@
 //!   - Tag `disputer`: disputer's pubkey (hex)
 //!   - Content: JSON with LedgerDispute details
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use ::base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use deposits_core::messages::DepositsMessage;
 use deposits_core::types::SignedLedgerUpdate;
@@ -55,8 +55,92 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use tokio::sync::mpsc;
 
-use crate::metrics;
-use crate::Error;
+/// Errors surfaced by the Nostr transport. Kept narrow on purpose —
+/// the daemon's catch-all `Error` type wraps this via `#[from]`, while
+/// wallet-side callers match on these variants directly without
+/// pulling in the rest of `deposits-node`.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Nostr error: {0}")]
+    Nostr(String),
+
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+
+    #[error("Protocol error: {0}")]
+    Protocol(String),
+}
+
+/// Tiny in-crate metrics façade. Each call expands to one `metrics`
+/// crate macro invocation; with no recorder registered they're cheap
+/// no-ops so wallet-side consumers don't pay anything. The daemon
+/// registers a `metrics-exporter-prometheus` recorder and these get
+/// picked up automatically.
+mod metrics {
+    use std::time::Duration;
+
+    pub fn record_broadcast_lag(receiver: &str, dropped: u64) {
+        ::metrics::counter!(
+            "broadcast_channel_lag_total",
+            "receiver" => receiver.to_string()
+        )
+        .increment(1);
+        ::metrics::counter!(
+            "broadcast_channel_lag_events_total",
+            "receiver" => receiver.to_string()
+        )
+        .increment(dropped);
+    }
+
+    pub fn record_notification_drain_count(count: u32) {
+        ::metrics::histogram!("notification_drain_count").record(count as f64);
+    }
+
+    pub fn record_notification_dedup_skipped(count: u32) {
+        ::metrics::counter!("notification_dedup_skipped_total").increment(count as u64);
+    }
+
+    pub fn record_nostr_publish(duration: Duration) {
+        ::metrics::histogram!("nostr_publish_seconds").record(duration.as_secs_f64());
+    }
+
+    pub fn record_connection() {
+        ::metrics::counter!("nostr_connections_total").increment(1);
+        ::metrics::gauge!("nostr_connections_active").increment(1.0);
+    }
+
+    pub fn set_active_connections(count: usize) {
+        ::metrics::gauge!("nostr_connections_active").set(count as f64);
+    }
+
+    pub fn record_request_sent(action: &str) {
+        ::metrics::counter!(
+            "nostr_requests_sent_total",
+            "action" => action.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn record_response_sent(action: &str, success: bool) {
+        let status = if success { "success" } else { "error" };
+        ::metrics::counter!(
+            "nostr_responses_sent_total",
+            "action" => action.to_string(),
+            "status" => status
+        )
+        .increment(1);
+    }
+
+    pub fn record_response_received(action: &str, success: bool) {
+        let status = if success { "success" } else { "error" };
+        ::metrics::counter!(
+            "nostr_responses_received_total",
+            "action" => action.to_string(),
+            "status" => status
+        )
+        .increment(1);
+    }
+}
 
 /// A received fraud proof broadcast from a wallet.
 #[derive(Clone, Debug)]
@@ -555,7 +639,7 @@ fn nip04_decrypt_with_shared_key(
 ) -> Result<String, &'static str> {
     use aes::cipher::block_padding::Pkcs7;
     use aes::cipher::{BlockDecryptMut, KeyIvInit};
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use ::base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
     let parts: Vec<&str> = ciphertext.split("?iv=").collect();
@@ -3393,7 +3477,7 @@ impl NostrTransport {
         &self,
         ledger_id: &str,
     ) -> Result<Vec<deposits_core::SignedLedgerUpdate>, Error> {
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use ::base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -3428,7 +3512,7 @@ impl NostrTransport {
         ledger_id: &str,
         seq: u64,
     ) -> Result<Option<deposits_core::SignedLedgerUpdate>, Error> {
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use ::base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -3461,7 +3545,7 @@ impl NostrTransport {
         from_seq: u64,
         to_seq: u64,
     ) -> Result<Vec<deposits_core::SignedLedgerUpdate>, Error> {
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use ::base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
