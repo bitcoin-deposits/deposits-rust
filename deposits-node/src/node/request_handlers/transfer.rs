@@ -7,37 +7,27 @@ impl Node {
     /// Process a withdrawal request from a depositor
     ///
     /// Params:
-    /// - deposit_pubkey: hex-encoded depositor's pubkey
-    /// - deposit_id: hex-encoded 16-byte deposit identifier
+    /// - descriptor: full miniscript expression that pays out the deposit
     /// - address: destination Bitcoin address
     /// - amount_sats: amount to withdraw
     /// - fee_sats: fee for the withdrawal transaction
     /// - nonce: hex-encoded 32-byte nonce
-    /// - signature: hex-encoded Schnorr signature over WITHDRAWAL message
+    /// - witness: DescriptorWitness over `withdrawal_signing_message`
     pub(crate) async fn process_withdraw_request(
         &self,
         request: &crate::nostr::LedgerRequest,
     ) -> (bool, Option<String>, Option<String>) {
-        use bitcoin::secp256k1::{schnorr::Signature, Message};
-
         tracing::info!(
             "Processing withdraw request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]
         );
 
-        // Extract parameters
-        let deposit_pubkey_hex = match request
-            .params
-            .get("deposit_pubkey")
-            .and_then(|v| v.as_str())
-        {
-            Some(p) => p,
-            None => return (false, None, Some("Missing deposit_pubkey".to_string())),
+        // Caller submits the descriptor; identity is its hash.
+        let (descriptor, deposit_id) = match super::deposits::parse_descriptor_param(request) {
+            Ok(parts) => parts,
+            Err(msg) => return (false, None, Some(msg)),
         };
-        let deposit_id_hex = match request.params.get("deposit_id").and_then(|v| v.as_str()) {
-            Some(d) => d,
-            None => return (false, None, Some("Missing deposit_id".to_string())),
-        };
+
         let address = match request.params.get("address").and_then(|v| v.as_str()) {
             Some(a) => a,
             None => return (false, None, Some("Missing address".to_string())),
@@ -54,43 +44,6 @@ impl Node {
             Some(n) => n,
             None => return (false, None, Some("Missing nonce".to_string())),
         };
-        let signature_hex = match request.params.get("signature").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => return (false, None, Some("Missing signature".to_string())),
-        };
-
-        // Parse deposit pubkey
-        let deposit_pubkey = match hex::decode(deposit_pubkey_hex)
-            .ok()
-            .and_then(|bytes| bitcoin::secp256k1::PublicKey::from_slice(&bytes).ok())
-        {
-            Some(pk) => pk,
-            None => return (false, None, Some("Invalid deposit_pubkey".to_string())),
-        };
-
-        // Parse deposit_id
-        let mut deposit_id = [0u8; 16];
-        match hex::decode(deposit_id_hex) {
-            Ok(bytes) if bytes.len() == 16 => deposit_id.copy_from_slice(&bytes),
-            _ => {
-                return (
-                    false,
-                    None,
-                    Some("Invalid deposit_id (must be 16 bytes hex)".to_string()),
-                )
-            }
-        }
-
-        // Verify deposit_id matches pubkey
-        let descriptor = format!("pk({})", deposit_pubkey_hex);
-        let expected_deposit_id = compute_deposit_id(&descriptor);
-        if deposit_id != expected_deposit_id {
-            return (
-                false,
-                None,
-                Some("deposit_id does not match deposit_pubkey".to_string()),
-            );
-        }
 
         // Parse nonce
         let nonce: [u8; 32] = match hex::decode(nonce_hex) {
@@ -108,16 +61,20 @@ impl Node {
             }
         };
 
-        // Parse signature
-        let signature = match hex::decode(signature_hex)
-            .ok()
-            .and_then(|bytes| Signature::from_slice(&bytes).ok())
-        {
-            Some(sig) => sig,
-            None => return (false, None, Some("Invalid signature".to_string())),
+        // Witness authorizes the withdrawal under the descriptor.
+        let depositor_witness: DescriptorWitness = match request
+            .params
+            .get("witness")
+            .ok_or_else(|| "Missing witness parameter".to_string())
+            .and_then(|v| {
+                serde_json::from_value::<DescriptorWitness>(v.clone())
+                    .map_err(|e| format!("Invalid witness: {}", e))
+            }) {
+            Ok(w) => w,
+            Err(e) => return (false, None, Some(e)),
         };
 
-        // Verify WITHDRAWAL signature (nonce, deposit_id, address, amount, fee)
+        // Verify witness against descriptor over withdrawal_signing_message.
         let msg_hash = deposits_core::signature_utils::withdrawal_signing_message(
             &nonce,
             &deposit_id,
@@ -125,16 +82,23 @@ impl Node {
             amount_sats,
             fee_sats,
         );
-        let secp = &self.secp;
-        let msg = Message::from_digest(msg_hash);
-        let x_only = deposit_pubkey.x_only_public_key().0;
-
-        if secp.verify_schnorr(&signature, &msg, &x_only).is_err() {
-            return (
-                false,
-                None,
-                Some("Invalid withdrawal signature".to_string()),
-            );
+        match deposits_core::descriptor::verify_witness(&descriptor, &depositor_witness, &msg_hash)
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    false,
+                    None,
+                    Some("Withdrawal witness does not satisfy descriptor".to_string()),
+                )
+            }
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("Withdrawal witness verification error: {:?}", e)),
+                )
+            }
         }
 
         // Find the ledger
@@ -144,15 +108,6 @@ impl Node {
         {
             Some(l) => l,
             None => return (false, None, Some("Ledger not found".to_string())),
-        };
-
-        // Compute deposit_id from pubkey
-        let descriptor = format!("pk({})", deposit_pubkey_hex);
-        let deposit_id = compute_deposit_id(&descriptor);
-
-        // Create witness from signature
-        let depositor_witness = DescriptorWitness {
-            stack: vec![signature.serialize().to_vec()],
         };
 
         // Lock the withdrawal with co-signing

@@ -3,6 +3,82 @@
 
 use super::super::*;
 
+/// Parse the `deposit_id` field (32 hex chars = 16 bytes) from a Nostr
+/// request's `params`. Used by every handler that operates on an
+/// existing deposit — `make_invoice`, `pay_invoice`, `make_offer`
+/// (existing-deposit branch), `balance_query`, `deposit_credit`,
+/// `withdraw`, `offer_status`, etc. Returns the canonical id-bytes or
+/// a human-readable error suitable for the request response.
+pub(super) fn parse_deposit_id_param(
+    request: &crate::nostr::LedgerRequest,
+) -> Result<deposits_core::types::DepositId, String> {
+    let s = request
+        .params
+        .get("deposit_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing deposit_id parameter".to_string())?;
+    let bytes = hex::decode(s).map_err(|_| {
+        format!("Invalid deposit_id (must be 32-char hex, got {:?})", s)
+    })?;
+    if bytes.len() != 16 {
+        return Err(format!(
+            "Invalid deposit_id length: expected 16 bytes, got {}",
+            bytes.len()
+        ));
+    }
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&bytes);
+    Ok(id)
+}
+
+/// Parse the `descriptor` field from a Nostr request's `params`. Used
+/// by `deposit_open`, `make_offer`, `make_invoice`, and `pay_invoice` —
+/// any handler whose semantics need the full miniscript expression
+/// (either to instantiate a deposit, or to verify a witness against
+/// the descriptor). Returns the descriptor string + its computed
+/// `deposit_id`.
+pub(super) fn parse_descriptor_param(
+    request: &crate::nostr::LedgerRequest,
+) -> Result<(String, deposits_core::types::DepositId), String> {
+    let descriptor = request
+        .params
+        .get("descriptor")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing descriptor parameter".to_string())?
+        .to_string();
+    if descriptor.is_empty() {
+        return Err("Empty descriptor".to_string());
+    }
+    let id = deposits_core::types::compute_deposit_id(&descriptor);
+    Ok((descriptor, id))
+}
+
+/// Verify a `receive_witness` (a `DescriptorWitness`-shaped JSON value)
+/// against a deposit's descriptor. The "message" is the deposit_id
+/// padded to 32 bytes, matching the legacy `receive_signature`
+/// convention. Used by `make_offer` and `make_invoice` whenever the
+/// deposit (or proposed deposit) has `receive_requires_sig`.
+pub(super) fn verify_receive_witness(
+    descriptor: &str,
+    deposit_id: &deposits_core::types::DepositId,
+    request: &crate::nostr::LedgerRequest,
+) -> Result<(), String> {
+    let witness_value = request
+        .params
+        .get("receive_witness")
+        .ok_or_else(|| "Deposit requires receive_witness".to_string())?;
+    let witness: deposits_core::types::DescriptorWitness =
+        serde_json::from_value(witness_value.clone())
+            .map_err(|e| format!("Invalid receive_witness shape: {}", e))?;
+    let mut msg = [0u8; 32];
+    msg[..16].copy_from_slice(deposit_id);
+    match deposits_core::descriptor::verify_witness(descriptor, &witness, &msg) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("receive_witness does not satisfy deposit descriptor".to_string()),
+        Err(e) => Err(format!("receive_witness verification error: {:?}", e)),
+    }
+}
+
 impl Node {
     pub(crate) async fn process_deposit_open_request(
         &self,
@@ -150,21 +226,13 @@ impl Node {
             Err(e) => return (false, None, Some(e)),
         };
 
-        // Extract deposit_pubkey from params
-        let deposit_pubkey_str = match request.params.get("deposit_pubkey") {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            _ => {
-                return (
-                    false,
-                    None,
-                    Some("Missing deposit_pubkey parameter".to_string()),
-                )
-            }
-        };
-
-        let _deposit_pubkey = match PublicKey::from_str(&deposit_pubkey_str) {
-            Ok(pk) => pk,
-            Err(e) => return (false, None, Some(format!("Invalid deposit_pubkey: {}", e))),
+        // Caller submits a full miniscript descriptor; we compute
+        // deposit_id from it. Identity comes from the descriptor,
+        // not from a single pubkey, so multi() / or() / etc. work
+        // end-to-end.
+        let (descriptor, deposit_id) = match parse_descriptor_param(request) {
+            Ok(parts) => parts,
+            Err(msg) => return (false, None, Some(msg)),
         };
 
         // Resolve fee minimums. The local operator_policy.json is
@@ -317,9 +385,6 @@ impl Node {
             }
         };
 
-        // Create descriptor from pubkey (single-key deposit)
-        let descriptor = format!("pk({})", deposit_pubkey_str);
-
         // Validate descriptor size against quorum's max_descriptor_bytes
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
@@ -360,7 +425,8 @@ impl Node {
         {
             Ok(deposit) => {
                 let result = serde_json::json!({
-                    "deposit_pubkey": deposit_pubkey_str,
+                    "deposit_id": hex::encode(deposit_id),
+                    "descriptor": descriptor,
                     "balance": deposit.balance,
                     "fees": {
                         "fixed": deposit.fees.annualized_msats,
@@ -372,7 +438,11 @@ impl Node {
                         "rate_bps": deposit.transfer_fees.rate_bps,
                     }
                 });
-                tracing::info!("Deposit opened for {}...", &deposit_pubkey_str[..16]);
+                tracing::info!(
+                    "Deposit opened: id={} descriptor={}",
+                    hex::encode(deposit_id),
+                    &descriptor[..32.min(descriptor.len())]
+                );
                 (true, Some(result.to_string()), None)
             }
             Err(e) => {
@@ -386,8 +456,6 @@ impl Node {
         &self,
         request: &crate::nostr::LedgerRequest,
     ) -> (bool, Option<String>, Option<String>) {
-        use std::str::FromStr;
-
         tracing::info!(
             "Processing make_offer request for ledger {}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]
@@ -413,21 +481,13 @@ impl Node {
             }
         };
 
-        // Extract deposit_pubkey from params
-        let deposit_pubkey_str = match request.params.get("deposit_pubkey") {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            _ => {
-                return (
-                    false,
-                    None,
-                    Some("Missing deposit_pubkey parameter".to_string()),
-                )
-            }
-        };
-
-        let deposit_pubkey = match PublicKey::from_str(&deposit_pubkey_str) {
-            Ok(pk) => pk,
-            Err(e) => return (false, None, Some(format!("Invalid deposit_pubkey: {}", e))),
+        // Caller submits the full miniscript descriptor; we compute
+        // deposit_id from it and pass the descriptor through to the
+        // offer. Identity comes from the descriptor, so multi() / or() /
+        // etc. work end-to-end (no `pk()`-only assumption baked in).
+        let (descriptor, deposit_id) = match parse_descriptor_param(request) {
+            Ok(parts) => parts,
+            Err(msg) => return (false, None, Some(msg)),
         };
 
         // Extract required parameters
@@ -542,57 +602,27 @@ impl Node {
             return (false, None, Some(format!("Fee validation failed: {}", e)));
         }
 
-        // Check if the deposit (if it already exists) requires a receive signature
+        // If the deposit already exists with `receive_requires_sig`,
+        // require a `receive_witness` that satisfies the descriptor.
+        // The witness covers the deposit_id padded to 32 bytes.
         {
-            let descriptor = format!("pk({})", deposit_pubkey_str);
-            let deposit_id = compute_deposit_id(&descriptor);
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&resolved_ledger_id) {
-                let ledger = ledger_arc.read().unwrap();
-                if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
-                    if deposit.receive_requires_sig {
-                        // Verify receive signature from deposit key
-                        use bitcoin::secp256k1::{schnorr::Signature, Message};
-                        let recv_sig_hex = match request
-                            .params
-                            .get("receive_signature")
-                            .and_then(|v| v.as_str())
-                        {
-                            Some(s) => s,
-                            None => {
-                                return (
-                                    false,
-                                    None,
-                                    Some(
-                                        "Deposit requires receive_signature for offers".to_string(),
-                                    ),
-                                )
-                            }
-                        };
-                        let recv_sig = match hex::decode(recv_sig_hex)
-                            .ok()
-                            .and_then(|bytes| Signature::from_slice(&bytes).ok())
-                        {
-                            Some(sig) => sig,
-                            None => {
-                                return (false, None, Some("Invalid receive_signature".to_string()))
-                            }
-                        };
-                        // Sign the deposit_id to authorize receiving
-                        let recv_msg = Message::from_digest({
-                            let mut h = [0u8; 32];
-                            h[..16].copy_from_slice(&deposit_id);
-                            h
-                        });
-                        let dest_pubkey = deposit_pubkey.x_only_public_key().0;
-                        let secp = &self.secp;
-                        if secp
-                            .verify_schnorr(&recv_sig, &recv_msg, &dest_pubkey)
-                            .is_err()
-                        {
-                            return (false, None, Some("Invalid receive_signature".to_string()));
-                        }
-                    }
+            let needs_witness = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(&resolved_ledger_id)
+                    .and_then(|ledger_arc| {
+                        let ledger = ledger_arc.read().unwrap();
+                        ledger
+                            .state
+                            .deposits
+                            .get(&deposit_id)
+                            .map(|d| d.receive_requires_sig)
+                    })
+                    .unwrap_or(false)
+            };
+            if needs_witness {
+                if let Err(msg) = verify_receive_witness(&descriptor, &deposit_id, request) {
+                    return (false, None, Some(msg));
                 }
             }
         }
@@ -610,8 +640,6 @@ impl Node {
         }
 
         // Check per-deposit balance limit
-        let descriptor = format!("pk({})", deposit_pubkey_str);
-        let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
         if let Some(err) =
             self.check_deposit_balance_limit(&resolved_ledger_id, &deposit_id, max_sats * 1000)
         {
@@ -621,7 +649,7 @@ impl Node {
         // Create the offer using ledger_id (stable across custody transfers)
         match self.create_deposit_offer(
             &resolved_ledger_id,
-            deposit_pubkey,
+            &descriptor,
             max_sats,
             min_sats,
             blocks_valid,
@@ -720,12 +748,12 @@ impl Node {
     /// Process an offer status query request
     ///
     /// Params:
-    /// - offer_id: hex-encoded 32-byte offer ID (optional)
-    /// - deposit_pubkey: hex-encoded depositor pubkey (optional, used if offer_id not found)
+    /// - offer_id: hex-encoded 32-byte offer ID (required)
+    /// - deposit_id: 32-char hex (16-byte) deposit_id (optional fallback)
     ///
     /// If offer_id is found, returns the offer status.
-    /// If offer_id is not found but deposit_pubkey is provided, checks if the deposit
-    /// exists in the ledger (meaning the offer was completed).
+    /// If offer_id is not found but `deposit_id` is provided, checks if the
+    /// deposit exists in the ledger (meaning the offer was completed).
     pub(crate) async fn process_offer_status_request(
         &self,
         request: &crate::nostr::LedgerRequest,
@@ -738,11 +766,9 @@ impl Node {
             None => return (false, None, Some("Missing offer_id parameter".to_string())),
         };
 
-        // Also extract deposit_pubkey if provided (for fallback lookup)
-        let deposit_pubkey_hex = request
-            .params
-            .get("deposit_pubkey")
-            .and_then(|v| v.as_str());
+        // Optional fallback: caller may pass deposit_id so we can answer
+        // "was the offer completed?" by looking the deposit up in the ledger.
+        let fallback_deposit_id = parse_deposit_id_param(request).ok();
 
         // Parse hex offer_id
         let offer_id_bytes = match hex::decode(offer_id_hex) {
@@ -809,13 +835,10 @@ impl Node {
                 (true, Some(result.to_string()), None)
             }
             None => {
-                // Offer not in our tracking. If we have deposit_pubkey, check if the deposit
-                // exists in the ledger (meaning it was funded and completed).
-                if let Some(pubkey_hex) = deposit_pubkey_hex {
-                    // Convert pubkey to deposit_id
-                    let descriptor = format!("pk({})", pubkey_hex);
-                    let deposit_id = compute_deposit_id(&descriptor);
-
+                // Offer not in our tracking. If we have a deposit_id, check
+                // if the deposit exists in the ledger (meaning it was funded
+                // and completed).
+                if let Some(deposit_id) = fallback_deposit_id {
                     // Check if deposit exists in the ledger
                     if let Some((_, ledger)) = self
                         .get_ledger_by_ledger_id(&request.ledger_id)
@@ -858,32 +881,17 @@ impl Node {
     /// Process a balance query request
     ///
     /// Params:
-    /// - deposit_pubkey: hex-encoded depositor's pubkey (legacy, converted to deposit_id)
+    /// - deposit_id: 32-char hex (16-byte) deposit identifier
     ///
     /// Returns the current balance in the ledger (in millisatoshis)
     pub(crate) async fn process_balance_query_request(
         &self,
         request: &crate::nostr::LedgerRequest,
     ) -> (bool, Option<String>, Option<String>) {
-        // Extract deposit_pubkey from params
-        let deposit_pubkey_hex = match request
-            .params
-            .get("deposit_pubkey")
-            .and_then(|v| v.as_str())
-        {
-            Some(pk) => pk,
-            None => {
-                return (
-                    false,
-                    None,
-                    Some("Missing deposit_pubkey parameter".to_string()),
-                )
-            }
+        let deposit_id = match parse_deposit_id_param(request) {
+            Ok(id) => id,
+            Err(msg) => return (false, None, Some(msg)),
         };
-
-        // Convert pubkey hex to deposit_id via descriptor
-        let descriptor = format!("pk({})", deposit_pubkey_hex);
-        let deposit_id = compute_deposit_id(&descriptor);
 
         // Find the ledger
         let (_, ledger) = match self
@@ -895,20 +903,20 @@ impl Node {
         };
 
         // Look up the deposit balance
+        let id_hex = hex::encode(deposit_id);
         match ledger.state.deposits.get(&deposit_id) {
             Some(deposit) => {
                 let block_height = self.wallet.get_block_height().unwrap_or(0);
                 let result = serde_json::json!({
-                    "deposit_pubkey": deposit_pubkey_hex,
-                    "deposit_id": hex::encode(deposit_id),
+                    "deposit_id": id_hex,
                     "balance_msats": deposit.balance,
                     "balance_sats": deposit.balance / 1000,
                     "locked_msats": deposit.locked_balance,
                     "block_height": block_height,
                 });
                 tracing::debug!(
-                    "Balance query: {}... -> {} msats",
-                    &deposit_pubkey_hex[..16],
+                    "Balance query: {} -> {} msats",
+                    id_hex,
                     deposit.balance
                 );
                 (true, Some(result.to_string()), None)
@@ -916,10 +924,7 @@ impl Node {
             None => (
                 false,
                 None,
-                Some(format!(
-                    "Deposit not found for pubkey: {}...",
-                    &deposit_pubkey_hex[..16]
-                )),
+                Some(format!("Deposit not found for id: {}", id_hex)),
             ),
         }
     }
@@ -998,19 +1003,9 @@ impl Node {
             &request.ledger_id[..16.min(request.ledger_id.len())]
         );
 
-        let deposit_pubkey_hex = match request
-            .params
-            .get("deposit_pubkey")
-            .and_then(|v| v.as_str())
-        {
-            Some(s) => s,
-            None => {
-                return (
-                    false,
-                    None,
-                    Some("Missing deposit_pubkey parameter".to_string()),
-                )
-            }
+        let deposit_id = match parse_deposit_id_param(request) {
+            Ok(id) => id,
+            Err(msg) => return (false, None, Some(msg)),
         };
         let amount_msats = match request.params.get("amount_msats").and_then(|v| v.as_u64()) {
             Some(v) => v,
@@ -1032,10 +1027,6 @@ impl Node {
                 )
             }
         };
-
-        // Compute deposit_id from pubkey
-        let descriptor = format!("pk({})", deposit_pubkey_hex);
-        let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
 
         // Generate payment hash from invoice_id
         use bitcoin::hashes::{sha256, Hash};

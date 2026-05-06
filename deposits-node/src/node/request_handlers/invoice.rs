@@ -9,9 +9,14 @@ impl Node {
     /// Uses LdkCli to talk to the ldk-server sidecar (same as `deposits-node lightning invoice`)
     ///
     /// Params:
-    /// - deposit_pubkey: hex-encoded depositor's pubkey
+    /// - descriptor: full miniscript expression that pays out the deposit, OR
+    /// - deposit_id: 32-char hex (16-byte) deposit identifier (looked up in
+    ///               the operator's existing deposit state — for clients that
+    ///               only know the ID, e.g. LNURL gateways routing to a known
+    ///               deposit)
     /// - amount_sats: amount for the invoice
     /// - description: optional invoice description
+    /// - receive_witness: required if the deposit has receive_requires_sig set
     pub(crate) async fn process_make_invoice_request(
         &self,
         request: &crate::nostr::LedgerRequest,
@@ -20,83 +25,67 @@ impl Node {
         use lightning_invoice::Bolt11Invoice;
         use std::str::FromStr;
 
-        // Extract parameters
-        let deposit_pubkey_hex = match request
-            .params
-            .get("deposit_pubkey")
-            .and_then(|v| v.as_str())
-        {
-            Some(pk) => pk,
-            None => {
-                return (
-                    false,
-                    None,
-                    Some("Missing deposit_pubkey parameter".to_string()),
-                )
-            }
-        };
-
-        // Convert pubkey hex to descriptor and deposit_id
-        let descriptor = format!("pk({})", deposit_pubkey_hex);
-        let deposit_id = compute_deposit_id(&descriptor);
-
-        // Check if deposit requires receive signature
-        {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
-                let ledger = ledger_arc.read().unwrap();
-                if let Some(deposit) = ledger.state.deposits.get(&deposit_id) {
-                    if deposit.receive_requires_sig {
-                        use bitcoin::secp256k1::{schnorr::Signature, Message};
-                        let recv_sig_hex = match request
-                            .params
-                            .get("receive_signature")
-                            .and_then(|v| v.as_str())
-                        {
-                            Some(s) => s,
-                            None => {
-                                return (
-                                    false,
-                                    None,
-                                    Some(
-                                        "Deposit requires receive_signature for invoices"
-                                            .to_string(),
-                                    ),
-                                )
-                            }
-                        };
-                        let recv_sig = match hex::decode(recv_sig_hex)
-                            .ok()
-                            .and_then(|bytes| Signature::from_slice(&bytes).ok())
-                        {
-                            Some(sig) => sig,
-                            None => {
-                                return (false, None, Some("Invalid receive_signature".to_string()))
-                            }
-                        };
-                        // Sign the deposit_id to authorize receiving
-                        let recv_msg = Message::from_digest({
-                            let mut h = [0u8; 32];
-                            h[..16].copy_from_slice(&deposit_id);
-                            h
+        // Caller may pass either `descriptor` (preferred — full identity)
+        // or `deposit_id` (in which case we look up the descriptor from
+        // existing ledger state). At least one must be present.
+        let (descriptor, deposit_id) = match super::deposits::parse_descriptor_param(request) {
+            Ok(parts) => parts,
+            Err(_descriptor_err) => match super::deposits::parse_deposit_id_param(request) {
+                Ok(id) => {
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    let descriptor = ledgers
+                        .get(&request.ledger_id)
+                        .and_then(|arc| {
+                            arc.read()
+                                .unwrap()
+                                .state
+                                .deposits
+                                .get(&id)
+                                .map(|d| d.descriptor.clone())
                         });
-                        let dest_pubkey = match hex::decode(deposit_pubkey_hex)
-                            .ok()
-                            .and_then(|b| bitcoin::secp256k1::PublicKey::from_slice(&b).ok())
-                        {
-                            Some(pk) => pk.x_only_public_key().0,
-                            None => {
-                                return (false, None, Some("Invalid deposit_pubkey".to_string()))
-                            }
-                        };
-                        let secp = &self.secp;
-                        if secp
-                            .verify_schnorr(&recv_sig, &recv_msg, &dest_pubkey)
-                            .is_err()
-                        {
-                            return (false, None, Some("Invalid receive_signature".to_string()));
+                    match descriptor {
+                        Some(d) => (d, id),
+                        None => {
+                            return (
+                                false,
+                                None,
+                                Some("Unknown deposit_id and no descriptor provided".to_string()),
+                            )
                         }
                     }
+                }
+                Err(_) => {
+                    return (
+                        false,
+                        None,
+                        Some("Missing descriptor or deposit_id parameter".to_string()),
+                    )
+                }
+            },
+        };
+
+        // If the deposit exists with receive_requires_sig, require the
+        // caller to attach a `receive_witness` that satisfies the descriptor.
+        {
+            let needs_witness = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(&request.ledger_id)
+                    .and_then(|ledger_arc| {
+                        let ledger = ledger_arc.read().unwrap();
+                        ledger
+                            .state
+                            .deposits
+                            .get(&deposit_id)
+                            .map(|d| d.receive_requires_sig)
+                    })
+                    .unwrap_or(false)
+            };
+            if needs_witness {
+                if let Err(msg) =
+                    super::deposits::verify_receive_witness(&descriptor, &deposit_id, request)
+                {
+                    return (false, None, Some(msg));
                 }
             }
         }
@@ -193,8 +182,8 @@ impl Node {
                 self.save_pending_invoices();
 
                 tracing::info!(
-                    "Created invoice for {}... amount={} sats, hash={}",
-                    &deposit_pubkey_hex[..16.min(deposit_pubkey_hex.len())],
+                    "Created invoice for {} amount={} sats, hash={}",
+                    hex::encode(deposit_id),
                     amount_sats,
                     hex::encode(&payment_hash[..8])
                 );
@@ -312,7 +301,6 @@ impl Node {
                             let result = serde_json::json!({
                                 "invoice": invoice_str,
                                 "amount_sats": amount_sats,
-                                "deposit_pubkey": deposit_pubkey_hex,
                                 "deposit_id": hex::encode(deposit_id),
                                 "payment_hash": hex::encode(payment_hash),
                                 "cosign_required": true,
@@ -338,7 +326,6 @@ impl Node {
                     let result = serde_json::json!({
                         "invoice": invoice_str,
                         "amount_sats": amount_sats,
-                        "deposit_pubkey": deposit_pubkey_hex,
                         "deposit_id": hex::encode(deposit_id),
                         "payment_hash": hex::encode(payment_hash),
                         "operator_pubkey": operator_pubkey_hex,
@@ -364,34 +351,24 @@ impl Node {
     /// Uses LdkCli to talk to the ldk-server sidecar (same as `deposits-node lightning pay`)
     ///
     /// Params:
-    /// - deposit_pubkey: hex-encoded depositor's pubkey
+    /// - descriptor: full miniscript expression that pays out the deposit
     /// - invoice: bolt11 invoice string
-    /// - nonce: hex-encoded 32-byte nonce
-    /// - signature: hex-encoded Schnorr signature over payment message
+    /// - payment_hash: 32-byte hex (must match invoice)
+    /// - amount_msats: amount in msats (must match invoice)
+    /// - witness: DescriptorWitness authorizing the spend over `invoice_lock_signing_message`
     pub(crate) async fn process_pay_invoice_request(
         &self,
         request: &crate::nostr::LedgerRequest,
     ) -> (bool, Option<String>, Option<String>) {
         use crate::ldk_cli::LdkCli;
-        use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
         use deposits_core::messages::LedgerOperation;
         use lightning_invoice::Bolt11Invoice;
         use std::str::FromStr;
 
-        // Extract parameters
-        let deposit_pubkey_hex = match request
-            .params
-            .get("deposit_pubkey")
-            .and_then(|v| v.as_str())
-        {
-            Some(pk) => pk,
-            None => {
-                return (
-                    false,
-                    None,
-                    Some("Missing deposit_pubkey parameter".to_string()),
-                )
-            }
+        // Caller submits the full miniscript descriptor; identity is its hash.
+        let (descriptor, deposit_id) = match super::deposits::parse_descriptor_param(request) {
+            Ok(parts) => parts,
+            Err(msg) => return (false, None, Some(msg)),
         };
 
         let invoice_str = match request.params.get("invoice").and_then(|v| v.as_str()) {
@@ -421,9 +398,20 @@ impl Node {
             }
         };
 
-        let signature_hex = match request.params.get("signature").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => return (false, None, Some("Missing signature parameter".to_string())),
+        // The witness is the full descriptor satisfaction (a stack of
+        // bytes per miniscript node). For pk(...) it's a single Schnorr
+        // signature; for multi(2,A,B,C) it's three signatures plus
+        // CMS placeholders, etc.
+        let witness: DescriptorWitness = match request
+            .params
+            .get("witness")
+            .ok_or_else(|| "Missing witness parameter".to_string())
+            .and_then(|v| {
+                serde_json::from_value::<DescriptorWitness>(v.clone())
+                    .map_err(|e| format!("Invalid witness: {}", e))
+            }) {
+            Ok(w) => w,
+            Err(e) => return (false, None, Some(e)),
         };
 
         // Parse payment_hash from client
@@ -458,45 +446,31 @@ impl Node {
             );
         }
 
-        // Convert pubkey hex to descriptor and deposit_id
-        let descriptor = format!("pk({})", deposit_pubkey_hex);
-        let deposit_id = compute_deposit_id(&descriptor);
-
-        // Parse pubkey for signature verification
-        let deposit_pubkey = match hex::decode(deposit_pubkey_hex)
-            .ok()
-            .and_then(|bytes| bitcoin::secp256k1::PublicKey::from_slice(&bytes).ok())
-        {
-            Some(pk) => pk,
-            None => return (false, None, Some("Invalid deposit_pubkey".to_string())),
-        };
-
-        // Verify INVOICE signature (deposit_id, payment_hash, amount)
-        let secp = Secp256k1::verification_only();
+        // Verify the witness against the descriptor. Message is the
+        // (deposit_id, payment_hash, amount_msat) lock binding — same
+        // as before, just dispatched through the descriptor verifier
+        // so multi() / or() / etc. work end-to-end.
         let msg_hash = deposits_core::signature_utils::invoice_lock_signing_message(
             &deposit_id,
             &payment_id,
             amount_msat,
         );
-        let msg = Message::from_digest(msg_hash);
-
-        let sig_bytes = match hex::decode(signature_hex) {
-            Ok(b) if b.len() == 64 => b,
-            _ => return (false, None, Some("Invalid signature format".to_string())),
-        };
-
-        let signature = match Signature::from_slice(&sig_bytes) {
-            Ok(s) => s,
-            Err(_) => return (false, None, Some("Invalid signature".to_string())),
-        };
-
-        let xonly = bitcoin::secp256k1::XOnlyPublicKey::from(deposit_pubkey);
-        if secp.verify_schnorr(&signature, &msg, &xonly).is_err() {
-            return (
-                false,
-                None,
-                Some("Signature verification failed".to_string()),
-            );
+        match deposits_core::descriptor::verify_witness(&descriptor, &witness, &msg_hash) {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    false,
+                    None,
+                    Some("Witness does not satisfy descriptor".to_string()),
+                )
+            }
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("Witness verification error: {:?}", e)),
+                )
+            }
         }
 
         // Find the ledger and check deposit balance
@@ -526,11 +500,6 @@ impl Node {
             }
 
             ledger.next_sequence()
-        };
-
-        // Create witness from signature
-        let witness = DescriptorWitness {
-            stack: vec![sig_bytes.clone()],
         };
 
         let lock_operation = LedgerOperation::InvoiceLock {
@@ -621,7 +590,7 @@ impl Node {
 
                 let result = serde_json::json!({
                     "payment_id": hex::encode(payment_id),
-                    "deposit_pubkey": deposit_pubkey_hex,
+                    "deposit_id": hex::encode(deposit_id),
                     "amount_msat": amount_msat,
                     "status": "succeeded",
                     "self_pay": true,
@@ -678,7 +647,7 @@ impl Node {
 
         let result = serde_json::json!({
             "payment_id": hex::encode(payment_id),
-            "deposit_pubkey": deposit_pubkey_hex,
+            "deposit_id": hex::encode(deposit_id),
             "amount_msat": amount_msat,
             "status": "pending",
         });

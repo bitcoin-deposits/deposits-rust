@@ -1006,7 +1006,7 @@ impl Node {
     pub fn create_deposit_offer(
         &self,
         ledger_id: &str,
-        deposit_pubkey: PublicKey,
+        descriptor: &str,
         max_amount_sats: u64,
         min_amount_sats: u64,
         blocks_valid: u32,
@@ -1020,9 +1020,8 @@ impl Node {
         let funding_address = self.wallet.get_new_address()?;
         let funding_address_str = funding_address.to_string();
 
-        // Create descriptor and compute deposit_id from pubkey
-        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
-        let deposit_id = compute_deposit_id(&descriptor);
+        // The descriptor is the source of identity; deposit_id is its hash.
+        let deposit_id = compute_deposit_id(descriptor);
 
         // Get the signing message and compute offer ID
         let signing_message = DepositOffer::signing_message(
@@ -1064,7 +1063,7 @@ impl Node {
             operator_id: self.node_id,
             ledger_id: ledger_id.to_string(),
             deposit_id,
-            descriptor,
+            descriptor: descriptor.to_string(),
             funding_address: funding_address_str,
             max_amount_sats,
             min_amount_sats,

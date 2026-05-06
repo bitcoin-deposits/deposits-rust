@@ -684,7 +684,8 @@ async fn batch_open_deposits(
     struct DepInfo {
         alias: String,
         ledger_id: String,
-        pubkey_hex: String,
+        descriptor: String,
+        deposit_id_hex: String,
         key_idx: u32,
     }
     let mut dep_infos = Vec::new();
@@ -692,10 +693,14 @@ async fn batch_open_deposits(
         let ledger_id = ledger_ids[i % ledger_ids.len()].clone();
         let secret_key = derive_secret_key_at_index(seed, network, key_index)?;
         let pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let descriptor = format!("pk({})", hex::encode(pubkey.serialize()));
+        let deposit_id =
+            deposits_core::types::compute_deposit_id(&descriptor);
         dep_infos.push(DepInfo {
             alias: alias.clone(),
             ledger_id,
-            pubkey_hex: hex::encode(pubkey.serialize()),
+            descriptor,
+            deposit_id_hex: hex::encode(deposit_id),
             key_idx: key_index,
         });
         key_index += 1;
@@ -710,7 +715,7 @@ async fn batch_open_deposits(
         for (batch_idx, info) in batch.iter().enumerate() {
             let fees = ledger_fees.get(&info.ledger_id);
             let open_params = serde_json::json!({
-                "deposit_pubkey": info.pubkey_hex,
+                "descriptor": info.descriptor,
                 "fee_fixed": fees.map_or(0, |f| f.annualized_fixed),
                 "fee_bps": fees.map_or(0, |f| f.annual_fee_bps),
                 "fee_frequency": fees.map_or(2016, |f| f.fee_period_blocks),
@@ -762,7 +767,7 @@ async fn batch_open_deposits(
         for info in &batch_infos {
             let fees = ledger_fees.get(&info.ledger_id);
             let offer_params = serde_json::json!({
-                "deposit_pubkey": info.pubkey_hex,
+                "descriptor": info.descriptor,
                 "max_sats": amount_sats,
                 "min_sats": std::cmp::min(1000_u64, amount_sats.saturating_sub(1).max(1)),
                 "blocks_valid": 10000_u64,
@@ -813,7 +818,8 @@ async fn batch_open_deposits(
                             "offer_id": offer_id,
                             "ledger_id": info.ledger_id,
                             "funding_address": address,
-                            "deposit_pubkey": info.pubkey_hex,
+                            "descriptor": info.descriptor,
+                            "deposit_id": info.deposit_id_hex,
                             "key_index": info.key_idx,
                             "min_sats": min,
                             "max_sats": max,

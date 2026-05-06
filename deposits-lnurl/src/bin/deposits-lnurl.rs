@@ -3,14 +3,15 @@
 //! Serves LUD-06/LUD-16 endpoints that translate LNURL-pay callbacks into
 //! deposits-node `make_invoice` requests via Nostr.
 //!
-//! Lightning address format: `<deposit_pubkey>@<ledger_prefix>.<base_domain>`
+//! Lightning address format: `<deposit_id>@<ledger_prefix>.<base_domain>`
 //!
+//! `deposit_id` is the 32-char hex hash of the deposit's miniscript descriptor.
 //! The ledger ID comes from the subdomain (wildcard DNS). A single server
 //! handles all ledgers via `*.<base_domain>`.
 //!
 //! Flow:
-//!   1. Payer resolves `pubkey@a08153ed.pay.example.com`
-//!   2. GET https://a08153ed.pay.example.com/.well-known/lnurlp/<pubkey>
+//!   1. Payer resolves `<deposit_id>@a08153ed.pay.example.com`
+//!   2. GET https://a08153ed.pay.example.com/.well-known/lnurlp/<deposit_id>
 //!   3. Response: metadata, min/max, callback URL
 //!   4. Payer calls callback with ?amount=<msats>
 //!   5. Server extracts ledger ID from Host header subdomain
@@ -378,13 +379,14 @@ const NOBLE_CURVES_JS: &str =
 const SHARED_JS: &str =
     include_str!("../../../deposits-web/explorer/shared.js");
 
-/// GET /.well-known/lnurlp/<deposit_pubkey>
+/// GET /.well-known/lnurlp/<deposit_id>
 ///
 /// Returns LNURL-pay metadata. Ledger ID comes from the Host subdomain.
+/// `deposit_id` is the 32-char hex deposit identifier (descriptor hash).
 async fn lnurlp_metadata(
     State(state): State<Arc<AppState>>,
     Host(host): Host,
-    Path(deposit_pubkey): Path<String>,
+    Path(deposit_id): Path<String>,
 ) -> Result<Json<LnurlPayResponse>, (StatusCode, Json<LnurlError>)> {
     let ledger_hex = extract_ledger_from_host(&host, &state.domain)
         .ok_or_else(|| lnurl_err("Could not determine ledger from host. Subdomain must be the full 52-char bech32 (or 64-char hex) ledger ID."))?;
@@ -406,14 +408,14 @@ async fn lnurlp_metadata(
     let addr_domain = host.clone();
     let metadata = format!(
         "[[\"text/plain\",\"Pay to deposit {}\"],[\"text/identifier\",\"{}@{}\"]]",
-        &deposit_pubkey[..16.min(deposit_pubkey.len())],
-        deposit_pubkey,
+        &deposit_id[..16.min(deposit_id.len())],
+        deposit_id,
         addr_domain,
     );
 
     Ok(Json(LnurlPayResponse {
         tag: "payRequest",
-        callback: format!("https://{}/lnurl/callback/{}", addr_domain, deposit_pubkey),
+        callback: format!("https://{}/lnurl/callback/{}", addr_domain, deposit_id),
         min_sendable: state.min_msats,
         max_sendable,
         metadata,
@@ -558,13 +560,13 @@ fn gift_unwrap_response(recipient: &Keys, event: &Event) -> Option<serde_json::V
     serde_json::from_str(inner_content).ok()
 }
 
-/// GET /lnurl/callback/<deposit_pubkey>?amount=<msats>
+/// GET /lnurl/callback/<deposit_id>?amount=<msats>
 ///
 /// Creates an invoice via the operator's deposits-node. Ledger from Host subdomain.
 async fn lnurlp_callback(
     State(state): State<Arc<AppState>>,
     Host(host): Host,
-    Path(deposit_pubkey): Path<String>,
+    Path(deposit_id): Path<String>,
     Query(params): Query<CallbackParams>,
 ) -> Result<Json<CallbackResponse>, (StatusCode, Json<LnurlError>)> {
     let ledger_id = extract_ledger_from_host(&host, &state.domain)
@@ -602,9 +604,11 @@ async fn lnurlp_callback(
     let description = params.comment.as_deref().unwrap_or("LNURL deposit");
 
     // Build make_invoice request — operator picks `h` field over `d`
-    // when description_hash is set.
+    // when description_hash is set. The gateway only knows the
+    // deposit_id from the URL; the daemon looks up the descriptor
+    // from existing deposit state.
     let mut content = serde_json::json!({
-        "deposit_pubkey": deposit_pubkey,
+        "deposit_id": deposit_id,
         "amount_sats": amount_sats,
         "description": description,
     });
@@ -660,7 +664,7 @@ async fn lnurlp_callback(
     log::info!(
         "Sent make_invoice: deposit={}-{}, amount={} sats, event={}... wrapped={}",
         &ledger_id[..16.min(ledger_id.len())],
-        &deposit_pubkey[..16.min(deposit_pubkey.len())],
+        &deposit_id[..16.min(deposit_id.len())],
         amount_sats,
         &event_id[..16],
         wrapped,
@@ -1029,7 +1033,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("  relays: {:?}", relay_urls);
     log::info!("  limits: {}-{} sats", min_sats, max_sats);
     log::info!(
-        "  address format: <deposit_pubkey>@<bech32_ledger_id>.{}",
+        "  address format: <deposit_id>@<bech32_ledger_id>.{}",
         domain
     );
 

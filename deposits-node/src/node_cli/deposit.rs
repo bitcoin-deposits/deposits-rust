@@ -6,9 +6,8 @@
 // accordance with one or both of these licenses.
 
 use super::{parse_config, send_daemon_request};
-use bitcoin::secp256k1::{PublicKey, Secp256k1};
+use bitcoin::secp256k1::Secp256k1;
 use crate::Node;
-use std::str::FromStr;
 
 /// Handle deposit subcommands
 pub async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -55,7 +54,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     use crate::nostr::NostrTransportBuilder;
 
     // Parse positional arguments:
-    // <reserves_id> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid>
+    // <reserves_id> <descriptor> <max_sats> <min_sats> <blocks_valid>
     let mut positional: Vec<String> = Vec::new();
     let mut config_args = Vec::new();
 
@@ -74,12 +73,14 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
 
     if positional.len() < 5 {
-        eprintln!("Usage: deposits-node deposit offer <ledger_id> <deposit_pubkey> <max_sats> <min_sats> <blocks_valid> [options]");
+        eprintln!("Usage: deposits-node deposit offer <ledger_id> <descriptor> <max_sats> <min_sats> <blocks_valid> [options]");
         eprintln!("\nExample:");
         eprintln!(
-            "  deposits-node deposit offer abc123...ledger_id 02def...deposit 1000000 10000 144"
+            "  deposits-node deposit offer abc123...ledger_id 'pk(02def...)' 1000000 10000 144"
         );
         eprintln!("\nThe ledger_id is the 64-char hex hash (stable across custody transfers).");
+        eprintln!("The descriptor is the full miniscript expression — pk(...), multi(2,A,B,C),");
+        eprintln!("etc. — that pays out the deposit. Identity is the descriptor's hash.");
         eprintln!("This creates a signed offer committing to credit the deposit");
         eprintln!("with on-chain funds sent to a new address, up to max_sats,");
         eprintln!("with minimum min_sats, valid for blocks_valid blocks.");
@@ -87,8 +88,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
 
     let ledger_id = &positional[0];
-    let deposit_pubkey = PublicKey::from_str(&positional[1])
-        .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
+    let descriptor = positional[1].clone();
     let max_sats: u64 = positional[2]
         .parse()
         .map_err(|_| format!("Invalid max_sats: {}", positional[2]))?;
@@ -139,7 +139,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
     println!("Creating deposit offer...");
     println!("  Ledger ID: {}...", &ledger_id[..16.min(ledger_id.len())]);
-    println!("  Deposit: {}", deposit_pubkey);
+    println!("  Descriptor: {}", descriptor);
     println!("  Max amount: {} sats", max_sats);
     println!("  Min amount: {} sats", min_sats);
     println!("  Valid for: {} blocks", blocks_valid);
@@ -147,7 +147,7 @@ async fn deposit_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     // Create the offer
     let offer = node.create_deposit_offer(
         ledger_id,
-        deposit_pubkey,
+        &descriptor,
         max_sats,
         min_sats,
         blocks_valid,
@@ -234,7 +234,7 @@ async fn deposit_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 }
 
 /// Show the lightning address for a deposit (for use with LNURL gateway).
-/// Usage: deposit address <ledger_id> <deposit_pubkey> [--domain pay.example.com]
+/// Usage: deposit address <ledger_id> <deposit_id> [--domain pay.example.com]
 fn deposit_address(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     const BECH32_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
@@ -274,15 +274,16 @@ fn deposit_address(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if positional.len() < 2 {
-        eprintln!("Usage: deposits-node deposit address <ledger_id> <deposit_pubkey> [--domain pay.example.com]");
+        eprintln!("Usage: deposits-node deposit address <ledger_id> <deposit_id> [--domain pay.example.com]");
+        eprintln!("deposit_id is the 32-char hex hash of the deposit descriptor.");
         return Ok(());
     }
 
     let ledger_id = &positional[0];
-    let pubkey = &positional[1];
+    let deposit_id = &positional[1];
     let subdomain = hex_to_bech32(ledger_id)?;
 
-    println!("{}@{}.{}", pubkey, subdomain, domain);
+    println!("{}@{}.{}", deposit_id, subdomain, domain);
 
     Ok(())
 }
@@ -306,13 +307,14 @@ async fn deposit_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     }
 
     if positional.len() < 3 {
-        eprintln!("Usage: deposits-node deposit invoice <ledger_id> <deposit_pubkey> <amount_sats> [description]");
+        eprintln!("Usage: deposits-node deposit invoice <ledger_id> <deposit_id> <amount_sats> [description]");
         eprintln!("\nCreates a BOLT11 invoice that credits the deposit when paid.");
+        eprintln!("deposit_id is the 32-char hex hash of the deposit descriptor.");
         return Ok(());
     }
 
     let ledger_id = &positional[0];
-    let deposit_pubkey = &positional[1];
+    let deposit_id = &positional[1];
     let amount_sats: u64 = positional[2].parse().map_err(|_| "Invalid amount_sats")?;
     let description = positional
         .get(3)
@@ -322,7 +324,7 @@ async fn deposit_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     let config = parse_config(&config_args)?;
 
     let params = serde_json::json!({
-        "deposit_pubkey": deposit_pubkey,
+        "deposit_id": deposit_id,
         "amount_sats": amount_sats,
         "description": description,
     });
@@ -411,7 +413,7 @@ async fn deposit_pending(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 }
 
 async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional arguments: <reserves_id> <deposit_pubkey>
+    // Parse positional arguments: <reserves_id> <descriptor>
     let mut positional: Vec<String> = Vec::new();
     let mut config_args = Vec::new();
 
@@ -430,27 +432,27 @@ async fn deposit_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     }
 
     if positional.len() < 2 {
-        eprintln!("Usage: deposits-node deposit open <reserves_id> <deposit_pubkey> [options]");
+        eprintln!("Usage: deposits-node deposit open <reserves_id> <descriptor> [options]");
         eprintln!("\nExample:");
-        eprintln!("  deposits-node deposit open 02abc...partner 02def...deposit");
+        eprintln!("  deposits-node deposit open 02abc...partner 'pk(02def...)'");
+        eprintln!("\nThe descriptor is the full miniscript expression — pk(...), multi(...),");
+        eprintln!("etc. — that pays out the deposit. Identity is the descriptor's hash.");
         return Ok(());
     }
 
     let ledger_id = &positional[0];
-    let deposit_pubkey = &positional[1];
-
-    // Validate pubkey
-    let _ = PublicKey::from_str(deposit_pubkey)
-        .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
+    let descriptor = &positional[1];
+    let deposit_id = deposits_core::types::compute_deposit_id(descriptor);
 
     let config = parse_config(&config_args)?;
 
     println!("Opening deposit...");
     println!("  Ledger ID: {}", ledger_id);
-    println!("  Deposit pubkey: {}", deposit_pubkey);
+    println!("  Descriptor: {}", descriptor);
+    println!("  Deposit ID: {}", hex::encode(deposit_id));
 
     let params = serde_json::json!({
-        "deposit_pubkey": deposit_pubkey,
+        "descriptor": descriptor,
     });
 
     let result = send_daemon_request(&config, ledger_id, "deposit_open", params).await?;
@@ -525,7 +527,7 @@ async fn deposit_ls(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Credit a deposit manually
 async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse positional arguments: <reserves_id> <deposit_pubkey> <amount_msats> <invoice_id>
+    // Parse positional arguments: <reserves_id> <deposit_id> <amount_msats> <invoice_id>
     let mut positional: Vec<String> = Vec::new();
     let mut config_args = Vec::new();
 
@@ -544,25 +546,31 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 
     if positional.len() < 4 {
-        eprintln!("Usage: deposits-node deposit credit <reserves_id> <deposit_pubkey> <amount_msats> <invoice_id> [options]");
+        eprintln!("Usage: deposits-node deposit credit <reserves_id> <deposit_id> <amount_msats> <invoice_id> [options]");
         eprintln!("\nExample:");
-        eprintln!("  deposits-node deposit credit 02abc...partner 02def...deposit 1000000 inv123");
+        eprintln!("  deposits-node deposit credit 02abc...partner abc123...deposit_id 1000000 inv123");
         eprintln!("\nThis credits the deposit with the specified amount via the running daemon.");
+        eprintln!("deposit_id is the 32-char hex hash of the deposit descriptor.");
         return Ok(());
     }
 
     let reserves_id_arg = &positional[0];
-    let deposit_pubkey_hex = &positional[1];
-    let _deposit_pubkey = PublicKey::from_str(deposit_pubkey_hex)
-        .map_err(|e| format!("Invalid deposit pubkey: {}", e))?;
+    let deposit_id_hex = &positional[1];
+    let deposit_id_bytes = hex::decode(deposit_id_hex)
+        .map_err(|e| format!("Invalid deposit_id hex: {}", e))?;
+    if deposit_id_bytes.len() != 16 {
+        return Err(format!(
+            "deposit_id must be 16 bytes / 32 hex chars, got {}",
+            deposit_id_bytes.len()
+        )
+        .into());
+    }
+    let mut deposit_id = [0u8; 16];
+    deposit_id.copy_from_slice(&deposit_id_bytes);
     let amount_msats: u64 = positional[2]
         .parse()
         .map_err(|_| format!("Invalid amount_msats: {}", positional[2]))?;
     let invoice_id = positional[3].clone();
-
-    // Compute deposit_id from pubkey
-    let descriptor = format!("pk({})", deposit_pubkey_hex);
-    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
 
     let config = parse_config(&config_args)?;
 
@@ -588,7 +596,7 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("  Invoice ID: {}", invoice_id);
 
     let params = serde_json::json!({
-        "deposit_pubkey": deposit_pubkey_hex,
+        "deposit_id": hex::encode(deposit_id),
         "amount_msats": amount_msats,
         "invoice_id": invoice_id,
     });
