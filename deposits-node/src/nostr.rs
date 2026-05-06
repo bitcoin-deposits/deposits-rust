@@ -217,13 +217,26 @@ pub struct NostrTransport {
     our_pubkey: PublicKey,
 
     /// Daemon's *delegate* Nostr pubkey. Populated via `set_delegate_pubkey`
-    /// at startup. Currently used only to fill `LedgerAdvertisement.delegate_pubkey`
-    /// before publish; the daemon-side switch to actually using this key
-    /// for the Nostr layer (replacing `self.keys` from operator → delegate)
-    /// is a separate follow-up that needs filter / cache updates throughout
-    /// this file. For now the field is informational + advertises the
-    /// delegate to wallets that follow the delegation pattern.
+    /// at startup. Today: filled into `LedgerAdvertisement.delegate_pubkey`
+    /// before publish, so wallets discover where to address messages.
     delegate_pubkey: std::sync::Mutex<Option<PublicKey>>,
+
+    /// Operator's protocol-level Nostr pubkey (xonly form, derived from
+    /// the operator secp256k1 pubkey). Populated via
+    /// `set_operator_pubkey` at startup. Used for:
+    ///  - The fallback NIP-04 decrypt path (when an inbound DM is
+    ///    encrypted to operator and the daemon's `self.keys` is the
+    ///    delegate, the daemon asks `self.signer` for a NIP-04 shared
+    ///    key against this pubkey).
+    ///  - Filters that target advertisements (always operator-authored).
+    operator_pubkey: std::sync::Mutex<Option<nostr_sdk::PublicKey>>,
+
+    /// Signer for operator-key signs/ECDH. Used to sign Kind 39100
+    /// advertisements (which must stay operator-authored even when
+    /// `self.keys` is the delegate) and to perform the fallback NIP-04
+    /// decrypt against the operator key. None when the daemon was
+    /// constructed without a Signer (legacy paths in tests).
+    signer: std::sync::Mutex<Option<std::sync::Arc<dyn deposits_signer_api::Signer>>>,
 
     /// Pending inbound messages (encrypted DMs).
     /// Wrapped in Mutex so try_recv can take &self (enables per-ledger parallel dispatch).
@@ -526,6 +539,39 @@ pub struct QuorumMemberInfo {
 
     /// Block height when the collateral lock expires
     pub lock_expires_block: u64,
+}
+
+/// AES-256-CBC decrypt with a precomputed NIP-04 shared key.
+///
+/// Mirrors `nostr/nips/nip04.rs::decrypt_to_bytes` but takes the shared
+/// key as input rather than deriving it from a `SecretKey`. Used by the
+/// NIP-04 fallback decrypt path on `NostrTransport` — when the daemon's
+/// `self.keys` (delegate) can't decrypt an inbound DM, it asks the
+/// `Signer` for an operator-key NIP-04 shared key, then routes the
+/// AES-CBC half through this helper.
+fn nip04_decrypt_with_shared_key(
+    shared_key: &[u8; 32],
+    ciphertext: &str,
+) -> Result<String, &'static str> {
+    use aes::cipher::block_padding::Pkcs7;
+    use aes::cipher::{BlockDecryptMut, KeyIvInit};
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+
+    let parts: Vec<&str> = ciphertext.split("?iv=").collect();
+    if parts.len() != 2 {
+        return Err("NIP-04: invalid ciphertext format (no `?iv=`)");
+    }
+    let ct = B64.decode(parts[0]).map_err(|_| "NIP-04: ciphertext not base64")?;
+    let iv = B64.decode(parts[1]).map_err(|_| "NIP-04: iv not base64")?;
+    if iv.len() != 16 {
+        return Err("NIP-04: iv must be 16 bytes");
+    }
+    let cipher = Aes256CbcDec::new(shared_key.into(), iv.as_slice().into());
+    let plaintext_bytes = cipher
+        .decrypt_padded_vec_mut::<Pkcs7>(&ct)
+        .map_err(|_| "NIP-04: AES-CBC decrypt / unpadding failed")?;
+    String::from_utf8(plaintext_bytes).map_err(|_| "NIP-04: plaintext not UTF-8")
 }
 
 /// A ledger advertisement (operator terms and limits)
@@ -1109,6 +1155,8 @@ impl NostrTransport {
 
         Ok(Self {
             delegate_pubkey: std::sync::Mutex::new(None),
+            operator_pubkey: std::sync::Mutex::new(None),
+            signer: std::sync::Mutex::new(None),
             client,
             primary_relay_url,
             slow_client,
@@ -1949,9 +1997,9 @@ impl NostrTransport {
             return Ok(v);
         }
         // Gift-unwrap: outer → seal (kind 13) → rumor.
-        let seal_json =
-            nip04::decrypt(self.keys.secret_key(), &event.pubkey, &event.content)
-                .map_err(|e| Error::Nostr(format!("verify unwrap outer: {}", e)))?;
+        let seal_json = self
+            .nip04_decrypt_with_fallback(&event.pubkey, &event.content)
+            .map_err(|e| Error::Nostr(format!("verify unwrap outer: {}", e)))?;
         let seal: serde_json::Value = serde_json::from_str(&seal_json)
             .map_err(|e| Error::Nostr(format!("verify seal parse: {}", e)))?;
         let seal_pubkey_hex = seal["pubkey"]
@@ -1959,12 +2007,9 @@ impl NostrTransport {
             .ok_or_else(|| Error::Nostr("verify seal missing pubkey".into()))?;
         let seal_pubkey = nostr_sdk::PublicKey::from_hex(seal_pubkey_hex)
             .map_err(|e| Error::Nostr(format!("verify seal pubkey parse: {}", e)))?;
-        let rumor_json = nip04::decrypt(
-            self.keys.secret_key(),
-            &seal_pubkey,
-            seal["content"].as_str().unwrap_or(""),
-        )
-        .map_err(|e| Error::Nostr(format!("verify rumor decrypt: {}", e)))?;
+        let rumor_json = self
+            .nip04_decrypt_with_fallback(&seal_pubkey, seal["content"].as_str().unwrap_or(""))
+            .map_err(|e| Error::Nostr(format!("verify rumor decrypt: {}", e)))?;
         let rumor: serde_json::Value = serde_json::from_str(&rumor_json)
             .map_err(|e| Error::Nostr(format!("verify rumor parse: {}", e)))?;
         let content = rumor["content"].as_str().unwrap_or_default();
@@ -2658,6 +2703,94 @@ impl NostrTransport {
         if let Ok(mut guard) = self.delegate_pubkey.lock() {
             *guard = Some(pk);
         }
+    }
+
+    /// Set the operator's protocol-level pubkey. Used for advertisement
+    /// signing (which stays operator-authored) and for the fallback
+    /// NIP-04 decrypt path (operator-encrypted DMs from wallets that
+    /// don't read advertisement.delegate_pubkey).
+    pub fn set_operator_pubkey(&self, pk: bitcoin::secp256k1::PublicKey) {
+        let xonly = pk.x_only_public_key().0;
+        if let Ok(nostr_pk) = nostr_sdk::PublicKey::from_slice(&xonly.serialize()) {
+            if let Ok(mut guard) = self.operator_pubkey.lock() {
+                *guard = Some(nostr_pk);
+            }
+        }
+    }
+
+    /// Set the daemon's `Signer` so the transport can request operator-key
+    /// signs/ECDH for the call sites that need them — Kind 39100
+    /// advertisements (`bip340_sign` on the event id) and the fallback
+    /// NIP-04 decrypt path (`nip04_shared_key`).
+    pub fn set_signer(
+        &self,
+        signer: std::sync::Arc<dyn deposits_signer_api::Signer>,
+    ) {
+        if let Ok(mut guard) = self.signer.lock() {
+            *guard = Some(signer);
+        }
+    }
+
+    /// NIP-04 decrypt with delegate-first / operator-fallback semantics.
+    ///
+    /// The daemon's `self.keys` holds the delegate secret; most wallets
+    /// (delegation-aware) encrypt to delegate, and this path returns
+    /// after one synchronous in-process decrypt — fast.
+    ///
+    /// Wallets that pre-date the delegation still encrypt to the
+    /// operator pubkey. Their messages fail the in-process decrypt;
+    /// we then ask the configured `Signer` for the NIP-04 raw-X shared
+    /// key against the operator key (one wire round-trip if RemoteSigner
+    /// is in use), do the AES-CBC decrypt locally, and return the result.
+    ///
+    /// Either branch returning `Ok` succeeded; only when both fail do
+    /// we surface the error. The error message is intentionally
+    /// the operator-side one (more useful for diagnosis since the
+    /// delegate-side failure on a legacy wallet is expected).
+    fn nip04_decrypt_with_fallback(
+        &self,
+        sender: &nostr_sdk::PublicKey,
+        ciphertext: &str,
+    ) -> Result<String, Error> {
+        // 1. Try delegate (in-process, fast).
+        if let Ok(plaintext) = nip04::decrypt(self.keys.secret_key(), sender, ciphertext) {
+            return Ok(plaintext);
+        }
+
+        // 2. Fall back to operator key via the Signer.
+        let signer = match self.signer.lock().ok().and_then(|g| g.clone()) {
+            Some(s) => s,
+            None => {
+                return Err(Error::Nostr(
+                    "NIP-04 decrypt failed (delegate) and no Signer configured for operator-key fallback"
+                        .to_string(),
+                ));
+            }
+        };
+
+        // Convert the nostr_sdk PublicKey (xonly) into a
+        // bitcoin::secp256k1::PublicKey for the signer call. NIP-04 sender
+        // is xonly; we lift it to compressed (with even-Y) since
+        // shared_secret_point operates on full points and the convention
+        // (matching nostr/util::generate_shared_key) is even-Y normalization.
+        let sender_bytes = sender.to_bytes();
+        let mut compressed = [0u8; 33];
+        compressed[0] = 0x02; // even Y
+        compressed[1..].copy_from_slice(&sender_bytes);
+        let sender_full = bitcoin::secp256k1::PublicKey::from_slice(&compressed).map_err(|e| {
+            Error::Nostr(format!("NIP-04 fallback: lift sender pubkey: {}", e))
+        })?;
+
+        let shared_key = signer.nip04_shared_key(&sender_full).map_err(|e| {
+            Error::Nostr(format!("NIP-04 fallback ECDH via signer: {}", e))
+        })?;
+
+        // AES-256-CBC decrypt with the shared key. Mirrors what
+        // nostr/nips/nip04.rs::decrypt_to_bytes does after
+        // `util::generate_shared_key`.
+        nip04_decrypt_with_shared_key(&shared_key, ciphertext).map_err(|e| {
+            Error::Nostr(format!("NIP-04 fallback AES-CBC: {}", e))
+        })
     }
 
     /// Queries the relay for existing advertisement timestamp to ensure
@@ -4021,8 +4154,10 @@ impl NostrTransport {
 
     /// Process an encrypted DM event
     fn process_dm(&self, event: &Event) -> Result<InboundMessage, Error> {
-        // Decrypt the content using NIP-04
-        let content = nip04::decrypt(self.keys.secret_key(), &event.pubkey, &event.content)
+        // Decrypt the content using NIP-04 — try delegate first, fall back
+        // to operator key (via Signer) so legacy wallets still work.
+        let content = self
+            .nip04_decrypt_with_fallback(&event.pubkey, &event.content)
             .map_err(|e| Error::Nostr(format!("Failed to decrypt DM: {}", e)))?;
 
         // Decode from hex
@@ -4100,10 +4235,11 @@ impl NostrTransport {
                 // envelope but uses NIP-04 (not NIP-44) and Kind 20101
                 // for the outer wrap; see `send_admin_request` for the
                 // rationale and divergences from real NIP-17.
-                let seal_json =
-                    nip04::decrypt(self.keys.secret_key(), &event.pubkey, &event.content).map_err(
-                        |e| Error::Nostr(format!("Gift unwrap outer decrypt failed: {}", e)),
-                    )?;
+                let seal_json = self
+                    .nip04_decrypt_with_fallback(&event.pubkey, &event.content)
+                    .map_err(|e| {
+                        Error::Nostr(format!("Gift unwrap outer decrypt failed: {}", e))
+                    })?;
                 let seal: serde_json::Value = serde_json::from_str(&seal_json)
                     .map_err(|e| Error::Nostr(format!("Gift unwrap seal parse failed: {}", e)))?;
                 let seal_pubkey_hex = seal["pubkey"]
@@ -4112,12 +4248,14 @@ impl NostrTransport {
                 let seal_pubkey = nostr_sdk::PublicKey::from_hex(seal_pubkey_hex).map_err(|e| {
                     Error::Nostr(format!("Gift unwrap: invalid seal pubkey: {}", e))
                 })?;
-                let rumor_json = nip04::decrypt(
-                    self.keys.secret_key(),
-                    &seal_pubkey,
-                    seal["content"].as_str().unwrap_or(""),
-                )
-                .map_err(|e| Error::Nostr(format!("Gift unwrap seal decrypt failed: {}", e)))?;
+                let rumor_json = self
+                    .nip04_decrypt_with_fallback(
+                        &seal_pubkey,
+                        seal["content"].as_str().unwrap_or(""),
+                    )
+                    .map_err(|e| {
+                        Error::Nostr(format!("Gift unwrap seal decrypt failed: {}", e))
+                    })?;
                 let rumor: serde_json::Value = serde_json::from_str(&rumor_json)
                     .map_err(|e| Error::Nostr(format!("Gift unwrap rumor parse failed: {}", e)))?;
 
@@ -4279,11 +4417,11 @@ impl NostrTransport {
             Ok(_) => event.content.clone(),
             Err(_) => {
                 // Gift-unwrap
-                let seal_json =
-                    nip04::decrypt(self.keys.secret_key(), &event.pubkey, &event.content)
-                        .map_err(|e| {
-                            Error::Nostr(format!("response gift unwrap outer failed: {}", e))
-                        })?;
+                let seal_json = self
+                    .nip04_decrypt_with_fallback(&event.pubkey, &event.content)
+                    .map_err(|e| {
+                        Error::Nostr(format!("response gift unwrap outer failed: {}", e))
+                    })?;
                 let seal: serde_json::Value = serde_json::from_str(&seal_json).map_err(|e| {
                     Error::Nostr(format!("response gift unwrap seal parse failed: {}", e))
                 })?;
@@ -4293,14 +4431,14 @@ impl NostrTransport {
                 let seal_pubkey = nostr_sdk::PublicKey::from_hex(seal_pubkey_hex).map_err(|e| {
                     Error::Nostr(format!("response gift unwrap: invalid seal pubkey: {}", e))
                 })?;
-                let rumor_json = nip04::decrypt(
-                    self.keys.secret_key(),
-                    &seal_pubkey,
-                    seal["content"].as_str().unwrap_or(""),
-                )
-                .map_err(|e| {
-                    Error::Nostr(format!("response gift unwrap seal decrypt failed: {}", e))
-                })?;
+                let rumor_json = self
+                    .nip04_decrypt_with_fallback(
+                        &seal_pubkey,
+                        seal["content"].as_str().unwrap_or(""),
+                    )
+                    .map_err(|e| {
+                        Error::Nostr(format!("response gift unwrap seal decrypt failed: {}", e))
+                    })?;
                 let rumor: serde_json::Value = serde_json::from_str(&rumor_json).map_err(|e| {
                     Error::Nostr(format!("response gift unwrap rumor parse failed: {}", e))
                 })?;

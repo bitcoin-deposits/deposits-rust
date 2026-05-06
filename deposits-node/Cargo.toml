@@ -22,6 +22,12 @@ esplora-client = { version = "0.11", default-features = false, features = ["asyn
 # Nostr for peer messaging
 nostr-sdk = { version = "0.37", features = ["nip44", "nip47", "nip59"] }
 
+# AES-256-CBC primitives for the NIP-04 fallback decrypt path
+# (`nip04_decrypt_with_shared_key` in `nostr.rs`). Pinned to versions
+# nostr-sdk pulls transitively so we don't end up with two copies.
+aes = "0.8"
+cbc = "0.1"
+
 # TLS crypto provider for nostr-sdk
 rustls = { version = "0.23", features = ["ring"] }
 
