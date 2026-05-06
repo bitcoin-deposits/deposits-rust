@@ -250,6 +250,63 @@ impl LdkCli {
             ))
         })
     }
+
+    /// Look up a single payment by its `payment_id` (= payment_hash hex).
+    /// Unlike `list-payments`, this returns INBOUND entries — invoices we
+    /// created via `bolt11-receive` — and exposes the BOLT11 preimage in
+    /// `payment.kind.kind.bolt11.preimage`. We need that on the self-pay
+    /// path: the operator never sends a Lightning payment for invoices it
+    /// settles internally, so it has to fish the preimage out of the
+    /// receive-side record to commit a real proof-of-payment in
+    /// `InvoiceFulfill.preimage`. Returns `Ok(None)` if LDK doesn't
+    /// recognize the id.
+    pub fn get_payment_preimage(
+        &self,
+        payment_id_hex: &str,
+    ) -> Result<Option<[u8; 32]>, Error> {
+        let output = match self.run_command(&["get-payment-details", payment_id_hex]) {
+            Ok(s) => s,
+            Err(e) => {
+                // get-payment-details returns 404 / error on unknown id;
+                // surface as None rather than propagating.
+                tracing::debug!(
+                    "get-payment-details {}: {} (treating as unknown)",
+                    &payment_id_hex[..16.min(payment_id_hex.len())],
+                    e
+                );
+                return Ok(None);
+            }
+        };
+        let v: serde_json::Value = serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!(
+                "Failed to parse get-payment-details: {} (output: {})",
+                e, output
+            ))
+        })?;
+        // Path: payment.kind.kind.bolt11.preimage. The double `kind` nesting
+        // mirrors LDK Server's discriminated-union JSON shape; we handle it
+        // by walking instead of typing it out, since the variants for
+        // BOLT12 / on-chain / etc. don't carry a preimage anyway.
+        let preimage_hex = match v
+            .pointer("/payment/kind/kind/bolt11/preimage")
+            .and_then(|p| p.as_str())
+        {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let bytes = hex::decode(preimage_hex).map_err(|e| {
+            Error::Protocol(format!("Bad preimage hex from LDK: {}", e))
+        })?;
+        if bytes.len() != 32 {
+            return Err(Error::Protocol(format!(
+                "Preimage from LDK was {} bytes, want 32",
+                bytes.len()
+            )));
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        Ok(Some(out))
+    }
 }
 
 // -- Status deserializer (handles both u8 and string formats) --

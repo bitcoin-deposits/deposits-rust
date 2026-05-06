@@ -544,37 +544,30 @@ impl Node {
                 // sides are on this operator's books — but LDK *does*
                 // know the preimage because it generated the invoice
                 // when `make_invoice` called `bolt11-receive`. Pull it
-                // from `list-payments` so the on-ledger InvoiceFulfill
-                // is real proof-of-payment, hashing to the BOLT11's
-                // payment_hash. Falls back to a zero preimage on the
-                // (rare) lookup failure; the wallet labels that
-                // explicitly rather than pretending it's real proof.
+                // via `get-payment-details <payment_hash>` (NOT
+                // list-payments, which only enumerates OUTBOUND
+                // payments and never finds receive-side invoices) so
+                // the on-ledger InvoiceFulfill is real proof-of-payment
+                // hashing to the BOLT11's payment_hash.
                 let payment_hex = hex::encode(payment_id);
                 let preimage = {
                     let cli = LdkCli::from_env();
-                    let from_ldk = cli
-                        .list_payments()
-                        .ok()
-                        .and_then(|r| r.payments.into_iter().find(|p| p.id == payment_hex))
-                        .and_then(|p| p.preimage)
-                        .and_then(|hex_str| hex::decode(&hex_str).ok())
-                        .and_then(|bytes| {
-                            if bytes.len() == 32 {
-                                let mut a = [0u8; 32];
-                                a.copy_from_slice(&bytes);
-                                Some(a)
-                            } else {
-                                None
-                            }
-                        });
-                    match from_ldk {
-                        Some(p) => p,
-                        None => {
+                    match cli.get_payment_preimage(&payment_hex) {
+                        Ok(Some(p)) => p,
+                        Ok(None) => {
                             tracing::warn!(
-                                "Self-pay {}: LDK didn't return a preimage; \
-                                 committing zero-preimage InvoiceFulfill. \
-                                 Wallet will label this as \"settled internally\".",
+                                "Self-pay {}: LDK has no payment record for this hash; \
+                                 committing zero-preimage InvoiceFulfill",
                                 &payment_hex[..16]
+                            );
+                            [0u8; 32]
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Self-pay {}: get-payment-details failed: {}; \
+                                 committing zero-preimage InvoiceFulfill",
+                                &payment_hex[..16],
+                                e
                             );
                             [0u8; 32]
                         }
