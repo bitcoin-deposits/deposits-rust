@@ -974,7 +974,9 @@ impl Node {
         };
 
         // Build and broadcast the transaction
-        let txid = self.wallet.send_withdrawal(&withdrawal)?;
+        let txid = self
+            .wallet
+            .send_withdrawal(&*self.handler.signer, &withdrawal)?;
 
         // Convert txid string to bytes for the ledger operation
         let txid_bytes: [u8; 32] = hex::decode(&txid)

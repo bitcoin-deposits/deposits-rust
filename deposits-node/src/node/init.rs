@@ -7,14 +7,6 @@ impl Node {
     pub async fn new(config: NodeConfig) -> Result<Self, Error> {
         let secp = Secp256k1::new();
 
-        // Create wallet
-        let wallet = Arc::new(Wallet::new(
-            config.seed,
-            config.network,
-            config.data_dir.join("wallet"),
-            config.electrum_url.clone(),
-        )?);
-
         // Build the Signer abstraction. Two paths:
         //   - LocalSigner: built from the seed via `from_xpriv_with_nostr`
         //     so it can derive wallet account xpubs / sibling Nostr keys
@@ -55,6 +47,17 @@ impl Node {
             }
         };
         let node_id = signer.pubkey();
+
+        // Build the node-level wallet from the signer's master xpub.
+        // Watch-only — the daemon never holds the master xpriv. Same
+        // `m/0/*` and `m/1/*` derivation as the legacy seed-embedded
+        // descriptor, so addresses are stable across the cutover.
+        let wallet = Arc::new(Wallet::new(
+            &*signer,
+            config.network,
+            config.data_dir.join("wallet"),
+            config.electrum_url.clone(),
+        )?);
 
         // Reload per-ledger wallets from disk. Each ledger we've ever
         // opened owns a `<data_dir>/wallet/ledgers/<ledger_id>/` dir

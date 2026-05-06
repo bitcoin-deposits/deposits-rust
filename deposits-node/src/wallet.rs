@@ -42,10 +42,9 @@ pub struct Wallet {
     /// Network
     network: Network,
 
-    /// Our operator secret key (for signing reserves)
-    operator_secret: SecretKey,
-
-    /// Our operator public key
+    /// Our operator public key (cached from `signer.pubkey()` at
+    /// construction). The corresponding secret never lives in the
+    /// daemon — production signs route through the signer.
     operator_pubkey: PublicKey,
 
     /// Current block height (updated on sync)
@@ -90,34 +89,28 @@ pub struct TaprootReservesInfo {
 }
 
 impl Wallet {
-    /// Create a new wallet from a seed
+    /// Create a new node-level wallet from a signer-issued master xpub.
+    ///
+    /// **Watch-only:** the descriptor is `wpkh(master_xpub/0/*)` +
+    /// `wpkh(master_xpub/1/*)` — the daemon never holds the master
+    /// xpriv. Signing on this wallet's UTXOs routes back through the
+    /// signer via [`KeyPath::NodeWallet`]. The receive addresses match
+    /// what the legacy seed-embedded `wpkh(xpriv/0/*)` produced — same
+    /// `m/0/*` and `m/1/*` derivation, just sourced via `xpub_at_master`.
     pub fn new(
-        seed: [u8; 32],
+        signer: &dyn deposits_signer_api::Signer,
         network: Network,
         data_dir: PathBuf,
         electrum_url: String,
     ) -> Result<Self, Error> {
-        let secp = Secp256k1::new();
+        let operator_pubkey = signer.pubkey();
 
-        // Derive operator key from seed
-        let xpriv = Xpriv::new_master(network, &seed)
-            .map_err(|e| Error::Wallet(format!("Failed to create master key: {}", e)))?;
+        let master_xpub = signer
+            .master_xpub()
+            .map_err(|e| Error::Wallet(format!("master_xpub: {}", e)))?;
 
-        let operator_path = DerivationPath::from_str("m/86'/0'/0'/0/0")
-            .map_err(|e| Error::Wallet(format!("Invalid derivation path: {}", e)))?;
-
-        let operator_xpriv = xpriv
-            .derive_priv(&secp, &operator_path)
-            .map_err(|e| Error::Wallet(format!("Failed to derive operator key: {}", e)))?;
-
-        let operator_secret = operator_xpriv.private_key;
-        let operator_pubkey = PublicKey::from_secret_key(&secp, &operator_secret);
-
-        // Use simple wpkh descriptor for the wallet
-        // External: m/0/* for receiving addresses
-        // Internal: m/1/* for change addresses
-        let external_desc = format!("wpkh({}/0/*)", xpriv);
-        let internal_desc = format!("wpkh({}/1/*)", xpriv);
+        let external_desc = format!("wpkh({}/0/*)", master_xpub);
+        let internal_desc = format!("wpkh({}/1/*)", master_xpub);
 
         // Ensure data directory exists
         if !data_dir.exists() {
@@ -145,7 +138,6 @@ impl Wallet {
             inner: Mutex::new(wallet),
             electrum_url,
             network,
-            operator_secret,
             operator_pubkey,
             block_height: Mutex::new(0),
             block_hash: Mutex::new([0u8; 32]),
@@ -183,11 +175,6 @@ impl Wallet {
     /// Get the operator's public key
     pub fn operator_pubkey(&self) -> PublicKey {
         self.operator_pubkey
-    }
-
-    /// Get the operator's secret key
-    pub fn operator_secret(&self) -> SecretKey {
-        self.operator_secret
     }
 
     /// Look up an on-chain outpoint and report its value (sats) and
@@ -556,8 +543,15 @@ impl Wallet {
     /// 2. Includes an OP_RETURN output with the withdrawal_id commitment
     pub fn send_withdrawal(
         &self,
+        signer: &dyn deposits_signer_api::Signer,
         withdrawal: &deposits_core::types::OnChainWithdrawal,
     ) -> Result<String, Error> {
+        use bdk_wallet::bitcoin::ecdsa::Signature as BtcEcdsaSignature;
+        use bdk_wallet::bitcoin::hashes::Hash as _;
+        use bdk_wallet::bitcoin::sighash::{EcdsaSighashType, SighashCache};
+        use bdk_wallet::bitcoin::Witness;
+        use deposits_signer_api::{KeyPath, SigPurpose, SigRole, SignContext};
+
         // Parse the destination address
         let dest_address = withdrawal
             .destination_address
@@ -573,18 +567,15 @@ impl Wallet {
             .push_slice(op_return_data)
             .into_script();
 
-        // Build the transaction
-        let mut wallet = self.inner.lock().unwrap();
-
+        // Build the PSBT (no sign).
         let mut psbt = {
+            let mut wallet = self.inner.lock().unwrap();
             let mut builder = wallet.build_tx();
             builder
-                // Main payment output
                 .add_recipient(
                     dest_address.script_pubkey(),
                     Amount::from_sat(withdrawal.amount_sats),
                 )
-                // OP_RETURN commitment output (0 value)
                 .add_recipient(op_return_script, Amount::ZERO)
                 .fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
             builder
@@ -592,21 +583,96 @@ impl Wallet {
                 .map_err(|e| Error::Wallet(format!("Failed to build withdrawal tx: {}", e)))?
         };
 
-        // Sign the transaction
-        wallet
-            .sign(&mut psbt, SignOptions::default())
-            .map_err(|e| Error::Wallet(format!("Failed to sign withdrawal tx: {}", e)))?;
+        // Per-input sighash signing routed through the signer. The
+        // node-level wallet uses `wpkh(master_xpub/<change>/*)`, so
+        // BDK's `bip32_derivation` records `[change, index]` relative
+        // to master. Same shape as `LedgerWallet::build_activation_tx`,
+        // just KeyPath::NodeWallet instead of KeyPath::Wallet.
+        let unsigned_tx_clone = psbt.unsigned_tx.clone();
+        let mut sighash_cache = SighashCache::new(&unsigned_tx_clone);
+        let input_count = psbt.inputs.len();
+        for input_index in 0..input_count {
+            let (script_pubkey, amount, leaf_pubkey, change, leaf_index) = {
+                let input = &psbt.inputs[input_index];
+                let utxo = input.witness_utxo.as_ref().ok_or_else(|| {
+                    Error::Wallet(format!(
+                        "withdrawal PSBT input {} missing witness_utxo",
+                        input_index
+                    ))
+                })?;
+                let (pk, (_fp, path)) = input.bip32_derivation.iter().next().ok_or_else(|| {
+                    Error::Wallet(format!(
+                        "withdrawal PSBT input {} has no bip32_derivation entry",
+                        input_index
+                    ))
+                })?;
+                let comps: Vec<u32> = path.into_iter().map(|c| (*c).into()).collect();
+                if comps.len() != 2 {
+                    return Err(Error::Wallet(format!(
+                        "withdrawal input {} bip32 path length {} != 2",
+                        input_index,
+                        comps.len()
+                    )));
+                }
+                if comps[0] > 1 {
+                    return Err(Error::Wallet(format!(
+                        "withdrawal input {} change={} (must be 0 or 1)",
+                        input_index, comps[0]
+                    )));
+                }
+                (
+                    utxo.script_pubkey.clone(),
+                    utxo.value,
+                    *pk,
+                    comps[0] as u8,
+                    comps[1],
+                )
+            };
+
+            let sighash = sighash_cache
+                .p2wpkh_signature_hash(input_index, &script_pubkey, amount, EcdsaSighashType::All)
+                .map_err(|e| {
+                    Error::Wallet(format!(
+                        "withdrawal sighash for input {}: {:?}",
+                        input_index, e
+                    ))
+                })?;
+
+            let ctx = SignContext {
+                role: SigRole::NoLedger,
+                purpose: SigPurpose::OnchainSighash,
+                key: KeyPath::NodeWallet {
+                    change,
+                    index: leaf_index,
+                },
+            };
+            let sig = signer
+                .ecdsa_sign_sighash(&ctx, sighash.as_byte_array())
+                .map_err(|e| {
+                    Error::Wallet(format!(
+                        "withdrawal signer sign input {} (change={}, index={}): {}",
+                        input_index, change, leaf_index, e
+                    ))
+                })?;
+
+            let btc_sig = BtcEcdsaSignature {
+                signature: sig,
+                sighash_type: EcdsaSighashType::All,
+            };
+            let mut witness = Witness::new();
+            witness.push(btc_sig.serialize());
+            witness.push(leaf_pubkey.serialize());
+            psbt.inputs[input_index].final_script_witness = Some(witness);
+            psbt.inputs[input_index].partial_sigs.clear();
+            psbt.inputs[input_index].bip32_derivation.clear();
+        }
 
         let tx = psbt
             .extract_tx()
             .map_err(|e| Error::Wallet(format!("Failed to extract withdrawal tx: {}", e)))?;
 
-        // Release wallet lock before broadcast
-        drop(wallet);
-
         // Broadcast the transaction
         let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
-
         client
             .broadcast(&tx)
             .map_err(|e| Error::Wallet(format!("Failed to broadcast withdrawal: {}", e)))?;
@@ -696,8 +762,8 @@ impl Wallet {
     #[cfg(test)]
     pub fn new_mock(data_dir: PathBuf) -> Self {
         let secp = Secp256k1::new();
-        let operator_secret = SecretKey::from_slice(&[1u8; 32]).unwrap();
-        let operator_pubkey = PublicKey::from_secret_key(&secp, &operator_secret);
+        let operator_pubkey =
+            PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[1u8; 32]).unwrap());
 
         // Create a minimal wallet with a simple descriptor
         let desc = "wpkh(tprv8ZgxMBicQKsPd9TeAdPADNnSyH9SSUUbTVeFszDE23Ki6TBB5nCefAdHkK8Fm3qMQR6sHwA56zqRmKmxnHk37JkiFzvncDqoKmPWubu7hDF/84'/1'/0'/0/*)";
@@ -712,7 +778,6 @@ impl Wallet {
             inner: Mutex::new(wallet),
             electrum_url: "".to_string(),
             network: Network::Signet,
-            operator_secret,
             operator_pubkey,
             block_height: Mutex::new(800_000),
             block_hash: Mutex::new([0u8; 32]),

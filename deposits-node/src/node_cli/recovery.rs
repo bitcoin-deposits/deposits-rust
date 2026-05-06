@@ -666,6 +666,9 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
         .build()
         .await?;
 
+    // publish_dispute takes &dyn Signer post phase-3; wrap the
+    // CLI-derived secret in a LocalSigner.
+    let dispute_signer = deposits_signer_api::LocalSigner::new(secret_key);
     let dispute_id = transport
         .publish_dispute(
             &ledger_id,
@@ -674,7 +677,7 @@ pub async fn recovery_start(args: &[String]) -> Result<(), Box<dyn std::error::E
             last_valid_hash,
             last_valid_sequence_u64,
             violation_sequence,
-            &keypair,
+            &dispute_signer,
         )
         .await?;
 
@@ -3404,8 +3407,20 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     println!("  Broadcasting confiscation transaction...");
 
     let data_dir = config.data_dir.clone();
+    // CLI builds a transient watch-only wallet for the broadcast.
+    // The seed travels through a per-call LocalSigner — same key
+    // material, same on-chain addresses as the legacy seed-embedded
+    // descriptor, just routed via the Signer trait.
+    let xpriv_for_wallet =
+        bitcoin::bip32::Xpriv::new_master(config.network, &config.seed).map_err(|e| {
+            crate::Error::Wallet(format!("xpriv from seed for transient wallet: {}", e))
+        })?;
+    let signer_for_wallet =
+        deposits_signer_api::LocalSigner::from_xpriv(xpriv_for_wallet).map_err(|e| {
+            crate::Error::Wallet(format!("LocalSigner::from_xpriv for transient wallet: {}", e))
+        })?;
     let wallet = crate::wallet::Wallet::new(
-        config.seed,
+        &signer_for_wallet,
         config.network,
         data_dir,
         config.electrum_url.clone(),
@@ -4080,8 +4095,20 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     println!("  Broadcasting claim transaction...");
 
     let data_dir = config.data_dir.clone();
+    // CLI builds a transient watch-only wallet for the broadcast.
+    // The seed travels through a per-call LocalSigner — same key
+    // material, same on-chain addresses as the legacy seed-embedded
+    // descriptor, just routed via the Signer trait.
+    let xpriv_for_wallet =
+        bitcoin::bip32::Xpriv::new_master(config.network, &config.seed).map_err(|e| {
+            crate::Error::Wallet(format!("xpriv from seed for transient wallet: {}", e))
+        })?;
+    let signer_for_wallet =
+        deposits_signer_api::LocalSigner::from_xpriv(xpriv_for_wallet).map_err(|e| {
+            crate::Error::Wallet(format!("LocalSigner::from_xpriv for transient wallet: {}", e))
+        })?;
     let wallet = crate::wallet::Wallet::new(
-        config.seed,
+        &signer_for_wallet,
         config.network,
         data_dir,
         config.electrum_url.clone(),
@@ -4481,8 +4508,20 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     println!("  Broadcasting rotation transaction...");
 
     let data_dir = config.data_dir.clone();
+    // CLI builds a transient watch-only wallet for the broadcast.
+    // The seed travels through a per-call LocalSigner — same key
+    // material, same on-chain addresses as the legacy seed-embedded
+    // descriptor, just routed via the Signer trait.
+    let xpriv_for_wallet =
+        bitcoin::bip32::Xpriv::new_master(config.network, &config.seed).map_err(|e| {
+            crate::Error::Wallet(format!("xpriv from seed for transient wallet: {}", e))
+        })?;
+    let signer_for_wallet =
+        deposits_signer_api::LocalSigner::from_xpriv(xpriv_for_wallet).map_err(|e| {
+            crate::Error::Wallet(format!("LocalSigner::from_xpriv for transient wallet: {}", e))
+        })?;
     let wallet = crate::wallet::Wallet::new(
-        config.seed,
+        &signer_for_wallet,
         config.network,
         data_dir,
         config.electrum_url.clone(),

@@ -2242,10 +2242,9 @@ impl NostrTransport {
         last_valid_hash: [u8; 32],
         last_valid_sequence: u64,
         violation_sequence: Option<u64>,
-        keypair: &bitcoin::secp256k1::Keypair,
+        signer: &dyn deposits_signer_api::Signer,
     ) -> Result<String, Error> {
         use bitcoin::hashes::{sha256, Hash};
-        use bitcoin::secp256k1::{Message, Secp256k1};
 
         // Build the message to sign
         let mut preimage = Vec::new();
@@ -2258,11 +2257,16 @@ impl NostrTransport {
         }
 
         let sighash = sha256::Hash::hash(&preimage);
-        let secp = Secp256k1::new();
-        let msg = Message::from_digest(sighash.to_byte_array());
-        let signature = secp.sign_schnorr(&msg, keypair);
+        let signature_bytes = signer
+            .bip340_sign(
+                &deposits_signer_api::SignContext::no_ledger(
+                    deposits_signer_api::SigPurpose::Bip340Untagged,
+                ),
+                &sighash.to_byte_array(),
+            )
+            .map_err(|e| Error::Nostr(format!("publish_dispute sign: {}", e)))?;
 
-        let disputer_pubkey = hex::encode(keypair.public_key().serialize());
+        let disputer_pubkey = hex::encode(signer.pubkey().serialize());
 
         let dispute = LedgerDispute {
             disputer_pubkey: disputer_pubkey.clone(),
@@ -2272,7 +2276,7 @@ impl NostrTransport {
             last_valid_hash: hex::encode(last_valid_hash),
             last_valid_sequence,
             violation_sequence,
-            signature: hex::encode(signature.serialize()),
+            signature: hex::encode(signature_bytes),
             event_id: String::new(),
             timestamp: 0,
         };

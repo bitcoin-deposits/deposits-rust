@@ -281,6 +281,12 @@ fn handle_request(
             },
             Err(e) => signer_error_to_result(e),
         },
+        SignOp::MasterXpub => match signer.master_xpub() {
+            Ok(xpub) => SignResult::MasterXpub {
+                xpub_str: xpub.to_string(),
+            },
+            Err(e) => signer_error_to_result(e),
+        },
     };
     SignResponse { id: req.id, result }
 }

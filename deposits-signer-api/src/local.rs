@@ -165,6 +165,35 @@ impl LocalSigner {
                 })?;
                 Ok(derived.private_key)
             }
+            KeyPath::NodeWallet { change, index } => {
+                let xpriv = self.xpriv.as_ref().ok_or_else(|| {
+                    SignerError::Unsupported(format!(
+                        "this LocalSigner was not constructed with an Xpriv; \
+                         cannot sign with KeyPath::NodeWallet {{ change: {}, index: {} }}",
+                        change, index
+                    ))
+                })?;
+                if change > 1 {
+                    return Err(SignerError::Crypto(format!(
+                        "node-wallet change must be 0 or 1; got {}",
+                        change
+                    )));
+                }
+                let path = DerivationPath::from_str(&format!("m/{}/{}", change, index))
+                    .map_err(|e| {
+                        SignerError::Crypto(format!(
+                            "node-wallet path change={} idx={}: {}",
+                            change, index, e
+                        ))
+                    })?;
+                let derived = xpriv.derive_priv(&self.secp, &path).map_err(|e| {
+                    SignerError::Crypto(format!(
+                        "derive node-wallet change={} idx={}: {}",
+                        change, index, e
+                    ))
+                })?;
+                Ok(derived.private_key)
+            }
         }
     }
 
@@ -257,6 +286,17 @@ impl Signer for LocalSigner {
             SignerError::Crypto(format!("derive wallet account acct={}: {}", account, e))
         })?;
         Ok(bitcoin::bip32::Xpub::from_priv(&self.secp, &derived))
+    }
+
+    fn master_xpub(&self) -> Result<bitcoin::bip32::Xpub, SignerError> {
+        let xpriv = self.xpriv.as_ref().ok_or_else(|| {
+            SignerError::Unsupported(
+                "this LocalSigner was not constructed with an Xpriv; \
+                 cannot issue master xpub"
+                    .to_string(),
+            )
+        })?;
+        Ok(bitcoin::bip32::Xpub::from_priv(&self.secp, xpriv))
     }
 }
 

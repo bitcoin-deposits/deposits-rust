@@ -438,4 +438,24 @@ impl Signer for RemoteSigner {
             ))),
         }
     }
+
+    fn master_xpub(&self) -> Result<bitcoin::bip32::Xpub, SignerError> {
+        let ctx = SignContext::no_ledger(SigPurpose::Bip340Untagged);
+        match self.rpc(&ctx, SignOp::MasterXpub)? {
+            SignResult::MasterXpub { xpub_str } => {
+                use std::str::FromStr;
+                bitcoin::bip32::Xpub::from_str(&xpub_str).map_err(|e| {
+                    SignerError::Transport(format!(
+                        "MasterXpub parse: {} (xpub_str={})",
+                        e, xpub_str
+                    ))
+                })
+            }
+            SignResult::Error { kind, message } => Err(map_sign_result_to_error(kind, message)),
+            other => Err(SignerError::Transport(format!(
+                "MasterXpub returned unexpected variant: {:?}",
+                other
+            ))),
+        }
+    }
 }

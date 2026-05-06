@@ -979,9 +979,9 @@ impl Node {
             Ok(()) => {
                 tracing::warn!("Successfully armed for dispute based on fraud proof");
 
-                // Also broadcast a dispute event referencing the fraud proof
-                let secret = self.wallet.operator_secret();
-                let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&self.secp, &secret);
+                // Also broadcast a dispute event referencing the fraud proof.
+                // Routes the operator-key BIP-340 sig through the Signer
+                // so the daemon doesn't need a local keypair.
                 if let Err(e) = self
                     .nostr
                     .publish_dispute(
@@ -991,7 +991,7 @@ impl Node {
                         broadcast.proof.proof_hash(),
                         last_valid_seq,
                         None,
-                        &keypair,
+                        &*self.handler.signer,
                     )
                     .await
                 {
@@ -1163,9 +1163,9 @@ impl Node {
         use deposits_core::messages::LedgerOperation;
         use deposits_core::TlvDecode;
 
-        let secp = &self.secp;
-        let our_pubkey =
-            bitcoin::secp256k1::PublicKey::from_secret_key(secp, &self.wallet.operator_secret());
+        // Operator pubkey straight from the signer — no per-call seed
+        // derivation, and no operator_secret field on Wallet anymore.
+        let our_pubkey = self.node_id;
 
         // Check if we already have a fork for this ledger
         if let Some(existing_fork) = self.handler.find_our_fork(ledger_id) {

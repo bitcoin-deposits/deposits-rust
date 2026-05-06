@@ -1745,11 +1745,11 @@ pub async fn nostr_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Er
                 .ok_or("No relay configured. Use --relay <url>")?
                 .clone();
 
-            // Build keypair from seed
-            let secp = Secp256k1::new();
+            // Build a LocalSigner around the operator key derived from
+            // the CLI seed; publish_dispute now takes `&dyn Signer`.
             let secret_key =
                 SecretKey::from_slice(&config.seed).map_err(|e| format!("Invalid seed: {}", e))?;
-            let keypair = Keypair::from_secret_key(&secp, &secret_key);
+            let signer = deposits_signer_api::LocalSigner::new(secret_key);
 
             println!("Publishing dispute...");
             println!("  Relay: {}", relay_url);
@@ -1772,7 +1772,7 @@ pub async fn nostr_dispute(args: &[String]) -> Result<(), Box<dyn std::error::Er
                     last_hash,
                     last_seq,
                     violation_seq,
-                    &keypair,
+                    &signer,
                 )
                 .await?;
 

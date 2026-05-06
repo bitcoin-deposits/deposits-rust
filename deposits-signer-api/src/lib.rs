@@ -153,6 +153,14 @@ pub enum KeyPath {
         change: u8,
         index: u32,
     },
+    /// Node-level (operator general-balance) wallet key at
+    /// `m/<change>/<index>`. The daemon holds the *master* xpub
+    /// (via [`Signer::master_xpub`]) and embeds it in a watch-only
+    /// descriptor; signing routes back through the signer here.
+    NodeWallet {
+        change: u8,
+        index: u32,
+    },
 }
 
 impl Default for KeyPath {
@@ -327,6 +335,21 @@ pub trait Signer: Send + Sync {
         let _ = account;
         Err(SignerError::Unsupported(
             "this signer cannot issue per-account xpubs".to_string(),
+        ))
+    }
+
+    /// BIP-32 xpub at the master path `m`. The daemon embeds it in a
+    /// watch-only descriptor `wpkh(master_xpub/<change>/*)` for the
+    /// node-level (operator general-balance) wallet — receiving
+    /// addresses for incoming deposits, change/internal addresses,
+    /// and the source of `wallet.send_withdrawal` UTXOs. Signing
+    /// routes back through the signer via [`KeyPath::NodeWallet`].
+    ///
+    /// Default impl returns `Unsupported`. Production deposits-signer
+    /// + xpriv-aware LocalSigner override.
+    fn master_xpub(&self) -> Result<bitcoin::bip32::Xpub, SignerError> {
+        Err(SignerError::Unsupported(
+            "this signer cannot issue a master xpub".to_string(),
         ))
     }
 }

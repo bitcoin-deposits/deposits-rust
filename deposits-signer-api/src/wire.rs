@@ -187,6 +187,12 @@ pub enum SignOp {
     WalletAccountXpub {
         account: u32,
     },
+    /// Return the master xpub at path `m`. The daemon embeds it in a
+    /// watch-only node-level wallet descriptor `wpkh(master_xpub/<change>/*)`
+    /// (the operator's general-balance wallet, used for incoming
+    /// deposit funding addresses + outbound withdrawals). Signing
+    /// routes back via [`crate::KeyPath::NodeWallet`].
+    MasterXpub,
 }
 
 /// Server response to a [`SignRequest`]. Sent inside an AEAD-sealed frame.
@@ -234,6 +240,10 @@ pub enum SignResult {
     /// Result of `WalletAccountXpub`. The serialized xpub (Base58Check
     /// encoded). Daemon parses with `bitcoin::bip32::Xpub::from_str`.
     WalletAccountXpub {
+        xpub_str: String,
+    },
+    /// Result of `MasterXpub`. The serialized master xpub (Base58Check).
+    MasterXpub {
         xpub_str: String,
     },
     /// Signer refused or failed to satisfy the request. The daemon
@@ -328,6 +338,7 @@ mod tests {
             version: [0u8; 16],
             node_pubkey: pk,
             nonce_a: [42u8; 32],
+            network: bitcoin::Network::Regtest,
         };
         let bytes = serde_json::to_vec(&hello).unwrap();
         let decoded: Hello = serde_json::from_slice(&bytes).unwrap();
