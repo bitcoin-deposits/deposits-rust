@@ -642,21 +642,32 @@ fn load_deposits(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let pubkey_hex = entry
-            .get("deposit_pubkey")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        // Source of identity: prefer the explicit `descriptor` (new
+        // format). Fall back to synthesizing pk(<deposit_pubkey>) for
+        // legacy records the operator hasn't re-opened yet.
+        let descriptor = match entry.get("descriptor").and_then(|v| v.as_str()) {
+            Some(d) if !d.is_empty() => d.to_string(),
+            _ => {
+                let pk = entry
+                    .get("deposit_pubkey")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if pk.is_empty() {
+                    continue;
+                }
+                format!("pk({})", pk)
+            }
+        };
         let key_index = entry.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let balance_msats = entry
             .get("balance_msats")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
-        if ledger_id.is_empty() || pubkey_hex.is_empty() {
+        if ledger_id.is_empty() {
             continue;
         }
 
-        let descriptor = format!("pk({})", pubkey_hex);
         let deposit_id = compute_deposit_id(&descriptor);
 
         let secret_key = derive_secret_key_at_index(&node.seed, network, key_index)?;

@@ -317,8 +317,10 @@ for idx in [84+0x80000000, 0x80000000, 0x80000000, 0, $INDEX]:
 pk = PrivateKey(key)
 pubkey_hex = pk.pubkey.serialize().hex()
 
-# Build and sign event
-content = json.dumps({'deposit_pubkey': '$PUBKEY'})
+# Build and sign event. Daemon Wave-1: takes `descriptor` (full miniscript)
+# rather than a raw pubkey. Wallet here always builds pk(...) since it
+# owns a single key per deposit.
+content = json.dumps({'descriptor': 'pk($PUBKEY)'})
 created_at = int(time.time())
 tags = [['l', '$LEDGER_ID'], ['action', 'deposit_open']]
 serialized = json.dumps([0, pubkey_hex[2:], created_at, 20101, tags, content], separators=(',',':'))
@@ -374,14 +376,20 @@ sys.exit(1)
 " 2>&1
 
     if [ $? -eq 0 ]; then
-        # Track the deposit locally (include relay so balance/invoice can find the operator)
+        # Track the deposit locally (include relay so balance/invoice can find the operator).
+        # We store the descriptor as the source of identity; deposit_id is its hash.
+        # `pubkey` is kept alongside for human-readable display only.
         python3 - "$WALLET_DIR" "$LEDGER_ID" "$PUBKEY" "$INDEX" "$ALL_RELAYS" << 'PYEOF'
-import json, os, sys
+import json, os, sys, hashlib
 wallet_dir, ledger_id, pubkey, index, relays = sys.argv[1:6]
 path = wallet_dir + '/deposits.json'
 deps = json.load(open(path)) if os.path.exists(path) else []
+descriptor = f'pk({pubkey})'
+deposit_id = hashlib.sha256(descriptor.encode()).digest()[:16].hex()
 deps.append({
     'ledger_id': ledger_id,
+    'descriptor': descriptor,
+    'deposit_id': deposit_id,
     'pubkey': pubkey,
     'key_index': int(index),
     'relay': relays.split(',')[0],
@@ -485,7 +493,7 @@ for idx in [84+0x80000000, 0x80000000, 0x80000000, 0, 0]:
 pk = PrivateKey(key)
 pubkey_hex = pk.pubkey.serialize()[1:].hex()  # x-only
 
-content = json.dumps({'deposit_pubkey': pubkey, 'amount_sats': int(amount_sats), 'description': 'Deposit funding'})
+content = json.dumps({'descriptor': f'pk({pubkey})', 'amount_sats': int(amount_sats), 'description': 'Deposit funding'})
 created_at = int(time.time())
 tags = [['l', ledger_id], ['action', 'make_invoice']]
 serialized = json.dumps([0, pubkey_hex, created_at, 20101, tags, content], separators=(',',':'))
@@ -617,7 +625,10 @@ pubkey_hex = pk.pubkey.serialize()[1:].hex()
 total_msats = 0
 for i, d in enumerate(deps):
     ledger_id = d.get('ledger_id', '?')
+    # Compute deposit_id locally — daemon's balance_query takes deposit_id only.
     deposit_pubkey = d.get('pubkey', '?')
+    descriptor = d.get('descriptor') or f'pk({deposit_pubkey})'
+    deposit_id_hex = hashlib.sha256(descriptor.encode()).digest()[:16].hex()
     # Use stored relay, fall back to CLI relay
     deposit_relay = d.get('relay', fallback_relay)
     relays = [r.strip() for r in deposit_relay.split(',') if r.strip()]
@@ -625,7 +636,7 @@ for i, d in enumerate(deps):
         relays.append(fallback_relay)
 
     # Send balance_query via Nostr
-    content = json.dumps({'deposit_pubkey': deposit_pubkey})
+    content = json.dumps({'deposit_id': deposit_id_hex})
     created_at = int(time.time())
     tags = [['l', ledger_id], ['action', 'balance_query']]
     serialized = json.dumps([0, pubkey_hex, created_at, 20101, tags, content], separators=(',',':'))
@@ -701,10 +712,15 @@ def bytes_to_bech32_data(b):
         out.append(CHARSET[(acc << (5 - bits)) & 0x1f])
     return "".join(out)
 
+import hashlib
+
 deps = json.load(open(wallet_dir + '/deposits.json'))
 for i, d in enumerate(deps):
     sub = bytes_to_bech32_data(bytes.fromhex(d['ledger_id']))
-    print(f"  [{i}] {d['pubkey']}@{sub}.{domain}")
+    # LNURL address now uses deposit_id (descriptor hash), not raw pubkey.
+    descriptor = d.get('descriptor') or f"pk({d.get('pubkey', '')})"
+    deposit_id_hex = hashlib.sha256(descriptor.encode()).digest()[:16].hex()
+    print(f"  [{i}] {deposit_id_hex}@{sub}.{domain}")
 PYEOF
     ;;
 
@@ -915,14 +931,15 @@ msg_hash = hashlib.sha256(sig_msg).digest()
 sig = deposit_sk.schnorr_sign(msg_hash, bip340tag=None, raw=True)
 
 # ── 5. pay_invoice via Nostr 20101 ────────────────────────────────────
-# Sign as the deposit_pubkey so the operator's pay_invoice handler sees
-# the same key that signed the invoice_lock_signing_message.
+# Daemon Wave-1: pay_invoice takes a `descriptor` + a `witness` shaped
+# as DescriptorWitness { stack: [...] }. For pk(...) the stack is just
+# the single Schnorr signature on invoice_lock_signing_message.
 content = json.dumps({
-    'deposit_pubkey': deposit_pubkey,
+    'descriptor': descriptor,
     'invoice': invoice,
     'payment_hash': payment_hash.hex(),
     'amount_msats': inv_amount_msat,
-    'signature': sig.hex(),
+    'witness': {'stack': [sig.hex()]},
 })
 created_at = int(time.time())
 tags = [['l', ledger_id], ['action', 'pay_invoice']]

@@ -1,7 +1,10 @@
 use bitcoin::secp256k1::Secp256k1;
 
 use super::deposit::{add_offer, open_new_deposit};
-use super::{derive_secret_key, derive_secret_key_at_index, parse_config, NostrTransportBuilder};
+use super::{
+    deposit_record_identity, derive_secret_key, derive_secret_key_at_index, parse_config,
+    NostrTransportBuilder,
+};
 
 /// Withdraw from a deposit
 pub async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -87,21 +90,28 @@ pub async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let secret_key = derive_secret_key_at_index(&config.seed, config.network, key_index)?;
     let secp = Secp256k1::new();
     let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret_key);
-    let our_pubkey = keypair.public_key();
 
     // Use nostr identity key (index 0) for transport signing
     let nostr_key = config.nostr_key()?;
 
-    // Compute deposit_id from descriptor
-    let descriptor = format!("pk({})", hex::encode(our_pubkey.serialize()));
-    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+    // Source the descriptor of truth from the deposit record. The
+    // `deposit_id` is its hash; the witness is whatever satisfies
+    // the descriptor over `withdrawal_signing_message`.
+    let (descriptor, deposit_id_hex) = deposit_record_identity(deposit)
+        .ok_or("Deposit record missing descriptor / deposit_pubkey — re-open this deposit")?;
+    let deposit_id_bytes =
+        hex::decode(&deposit_id_hex).map_err(|e| format!("Bad stored deposit_id: {}", e))?;
+    let mut deposit_id = [0u8; 16];
+    deposit_id.copy_from_slice(&deposit_id_bytes);
 
     // Generate nonce (becomes withdrawal_id when hashed)
     let mut rng = OsRng;
     let mut nonce = [0u8; 32];
     rng.fill_bytes(&mut nonce);
 
-    // Sign the WITHDRAWAL message (nonce, deposit_id, address, amount, fee)
+    // Sign the WITHDRAWAL message (nonce, deposit_id, address, amount, fee).
+    // For pk(...) descriptors the witness is a single Schnorr sig; multi(...)
+    // would push N sigs in stack order.
     let msg_hash = deposits_core::signature_utils::withdrawal_signing_message(
         &nonce,
         &deposit_id,
@@ -111,6 +121,9 @@ pub async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     );
     let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
     let signature = secp.sign_schnorr(&msg, &keypair);
+    let witness = deposits_core::types::DescriptorWitness {
+        stack: vec![signature.serialize().to_vec()],
+    };
 
     println!("Withdrawal Request");
     println!("==================");
@@ -127,13 +140,12 @@ pub async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         .await?;
 
     let request_params = serde_json::json!({
-        "deposit_pubkey": hex::encode(our_pubkey.serialize()),
-        "deposit_id": hex::encode(deposit_id),
+        "descriptor": descriptor,
         "address": destination,
         "amount_sats": amount_sats,
         "fee_sats": fee_sats,
         "nonce": hex::encode(nonce),
-        "signature": hex::encode(signature.serialize()),
+        "witness": witness,
     });
 
     println!("Sending signed withdrawal request...");
@@ -722,8 +734,11 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
 
     // Get block height from a balance query
     transport.set_response_ledger_filter(vec![from_ledger.to_string(), to_ledger.to_string()]);
+    let from_deposit_id_hex_str = deposit_record_identity(from_dep)
+        .map(|(_, id)| id)
+        .ok_or("From-deposit record missing descriptor / deposit_pubkey")?;
     let balance_req = serde_json::json!({
-        "deposit_pubkey": from_dep["deposit_pubkey"].as_str().unwrap_or(""),
+        "deposit_id": from_deposit_id_hex_str,
     });
     let bal_req_id = transport
         .send_ledger_request(from_ledger, "balance_query", balance_req)
@@ -1118,10 +1133,8 @@ pub async fn make_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .and_then(|v| v.as_str())
         .ok_or("Invalid deposit record: missing ledger_id")?;
 
-    let deposit_pubkey = deposit
-        .get("deposit_pubkey")
-        .and_then(|v| v.as_str())
-        .ok_or("Invalid deposit record: missing deposit_pubkey")?;
+    let (descriptor, _deposit_id_hex) = deposit_record_identity(deposit)
+        .ok_or("Deposit record missing descriptor / deposit_pubkey — re-open this deposit")?;
 
     // Use nostr identity key for transport
     let nostr_key = config.nostr_key()?;
@@ -1132,7 +1145,7 @@ pub async fn make_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .await?;
 
     let request_params = serde_json::json!({
-        "deposit_pubkey": deposit_pubkey,
+        "descriptor": descriptor,
         "amount_sats": amount_sats,
         "description": description.unwrap_or_else(|| format!("Deposit to {}", alias)),
     });
@@ -1235,7 +1248,6 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     let secret_key = derive_secret_key_at_index(&config.seed, config.network, key_index)?;
     let secp = Secp256k1::new();
     let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret_key);
-    let our_pubkey = keypair.public_key();
 
     // Use nostr identity key for transport
     let nostr_key = config.nostr_key()?;
@@ -1255,11 +1267,17 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         .amount_milli_satoshis()
         .ok_or("Invoice has no amount")?;
 
-    // Compute deposit_id from descriptor
-    let descriptor = format!("pk({})", hex::encode(our_pubkey.serialize()));
-    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+    // Source descriptor of truth from the deposit record.
+    let (descriptor, deposit_id_hex) = deposit_record_identity(deposit)
+        .ok_or("Deposit record missing descriptor / deposit_pubkey — re-open this deposit")?;
+    let deposit_id_bytes =
+        hex::decode(&deposit_id_hex).map_err(|e| format!("Bad stored deposit_id: {}", e))?;
+    let mut deposit_id = [0u8; 16];
+    deposit_id.copy_from_slice(&deposit_id_bytes);
 
-    // Sign the INVOICE message (deposit_id, payment_hash, amount)
+    // Sign the INVOICE message (deposit_id, payment_hash, amount). The
+    // witness is whatever satisfies the descriptor — for pk(...) it's
+    // a single Schnorr sig on the message hash.
     let msg_hash = deposits_core::signature_utils::invoice_lock_signing_message(
         &deposit_id,
         &payment_hash_bytes,
@@ -1267,6 +1285,9 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     );
     let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
     let signature = secp.sign_schnorr(&msg, &keypair);
+    let witness = deposits_core::types::DescriptorWitness {
+        stack: vec![signature.serialize().to_vec()],
+    };
 
     let transport = NostrTransportBuilder::new(nostr_key)
         .relay(&config.relays[0])
@@ -1274,11 +1295,11 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         .await?;
 
     let request_params = serde_json::json!({
-        "deposit_pubkey": hex::encode(our_pubkey.serialize()),
+        "descriptor": descriptor,
         "invoice": invoice,
         "payment_hash": hex::encode(payment_hash_bytes),
         "amount_msats": amount_msats,
-        "signature": hex::encode(signature.serialize()),
+        "witness": witness,
     });
 
     println!("Paying Lightning invoice...");

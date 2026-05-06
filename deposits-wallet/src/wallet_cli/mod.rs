@@ -363,6 +363,29 @@ pub fn derive_secret_key(
     derive_secret_key_at_index(seed, network, 0)
 }
 
+/// Resolve a deposit record's descriptor and deposit_id (hex) from the
+/// shape stored in `deposits.json`. New records carry `descriptor` and
+/// `deposit_id` directly; older records have `deposit_pubkey` only, in
+/// which case we synthesize `pk(<pubkey>)` and recompute the id. The
+/// returned descriptor is the source of identity — always pass it
+/// through to the daemon, never re-derive from the pubkey.
+pub fn deposit_record_identity(
+    deposit: &serde_json::Value,
+) -> Option<(String, String)> {
+    let descriptor = match deposit.get("descriptor").and_then(|v| v.as_str()) {
+        Some(d) => d.to_string(),
+        None => {
+            let pk = deposit.get("deposit_pubkey").and_then(|v| v.as_str())?;
+            format!("pk({})", pk)
+        }
+    };
+    let deposit_id_hex = match deposit.get("deposit_id").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => hex::encode(deposits_core::types::compute_deposit_id(&descriptor)),
+    };
+    Some((descriptor, deposit_id_hex))
+}
+
 /// Derive a secret key at a specific index for per-deposit key isolation
 pub fn derive_secret_key_at_index(
     seed: &[u8; 32],

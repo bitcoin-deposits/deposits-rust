@@ -2,9 +2,9 @@ use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use chrono::Utc;
 
 use super::{
-    derive_secret_key, derive_secret_key_at_index, load_deposit_key_index, parse_config,
-    save_deposit_key_index, verify_offer_cosignature, verify_quorum_membership,
-    NostrTransportBuilder,
+    deposit_record_identity, derive_secret_key, derive_secret_key_at_index,
+    load_deposit_key_index, parse_config, save_deposit_key_index, verify_offer_cosignature,
+    verify_quorum_membership, NostrTransportBuilder,
 };
 
 /// Open a new deposit account on a ledger. Only creates the empty
@@ -163,9 +163,14 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
     };
     println!();
 
-    // Send deposit_open request to create the deposit account.
+    // Send deposit_open request to create the deposit account. Identity
+    // is the deposit's miniscript descriptor; deposit_id is its hash.
+    // The wallet currently always builds pk(...) — multi-key descriptors
+    // would replace this single line.
+    let descriptor = format!("pk({})", hex::encode(our_pubkey.serialize()));
+    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
     let open_params = serde_json::json!({
-        "deposit_pubkey": hex::encode(our_pubkey.serialize()),
+        "descriptor": descriptor,
         "fee_fixed": fee_fixed,
         "fee_bps": fee_bps,
         "fee_frequency": fee_frequency,
@@ -303,7 +308,8 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
     deposits.push(serde_json::json!({
         "alias": final_alias,
         "ledger_id": ledger_id,
-        "deposit_pubkey": hex::encode(our_pubkey.serialize()),
+        "deposit_id": hex::encode(deposit_id),
+        "descriptor": descriptor,
         "key_index": key_index,
         "status": "open",
         "created_at": Utc::now().to_rfc3339(),
@@ -554,8 +560,6 @@ pub async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         .and_then(|v| v.as_str())
         .ok_or("Invalid deposit record: missing ledger_id")?;
 
-    let deposit_pubkey = deposit.get("deposit_pubkey").and_then(|v| v.as_str());
-
     println!("Adding funds to deposit...");
     println!("  Alias: {}", alias);
     println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
@@ -572,10 +576,16 @@ pub async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let secp = Secp256k1::new();
     let our_pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
 
-    // Use stored pubkey or derive fresh (should match what's in the record)
-    let pubkey_hex = deposit_pubkey
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| hex::encode(our_pubkey.serialize()));
+    // Source descriptor of truth: deposits.json. New records carry it
+    // directly; older records only have `deposit_pubkey`, in which case
+    // we synthesize the pk(...) descriptor on the fly.
+    let descriptor = if let Some(d) = deposit.get("descriptor").and_then(|v| v.as_str()) {
+        d.to_string()
+    } else if let Some(pk) = deposit.get("deposit_pubkey").and_then(|v| v.as_str()) {
+        format!("pk({})", pk)
+    } else {
+        format!("pk({})", hex::encode(our_pubkey.serialize()))
+    };
 
     // Use nostr identity key (index 0) for transport signing
     let nostr_key = config.nostr_key()?;
@@ -605,7 +615,7 @@ pub async fn add_offer(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
     // Send make_offer request for existing deposit
     let request_params = serde_json::json!({
-        "deposit_pubkey": pubkey_hex,
+        "descriptor": descriptor,
         "max_sats": amount_sats,
         "min_sats": 1000_u64,
         "blocks_valid": 144_u64,
@@ -740,27 +750,11 @@ pub async fn list_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Er
             .get("created_at")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let deposit_pubkey = deposit
-            .get("deposit_pubkey")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        // Compute descriptor and deposit_id from pubkey
-        let descriptor = if !deposit_pubkey.is_empty() {
-            format!("pk({})", deposit_pubkey)
-        } else {
-            "unknown".to_string()
-        };
-        let deposit_id = if !deposit_pubkey.is_empty() {
-            use bitcoin::hashes::{sha256, Hash};
-            let hash = sha256::Hash::hash(descriptor.as_bytes());
-            hex::encode(&hash[..16])
-        } else {
-            "unknown".to_string()
-        };
+        let (descriptor, deposit_id_hex) = deposit_record_identity(deposit)
+            .unwrap_or(("unknown".into(), "unknown".into()));
 
         println!("  {} ", alias);
-        println!("    Deposit ID:  {}", deposit_id);
+        println!("    Deposit ID:  {}", deposit_id_hex);
         println!("    Descriptor:  {}", descriptor);
         println!(
             "    Ledger:      {}...",
@@ -825,10 +819,9 @@ pub async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Err
             .get("alias")
             .and_then(|v| v.as_str())
             .unwrap_or("(none)");
-        let deposit_pubkey = deposit
-            .get("deposit_pubkey")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+        let id_hex = deposit_record_identity(deposit)
+            .map(|(_, id)| id)
+            .unwrap_or_else(|| "unknown".into());
         let amount = deposit
             .get("amount_sats")
             .and_then(|v| v.as_u64())
@@ -848,22 +841,16 @@ pub async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Err
             _ => "?",
         };
 
+        let id_short = &id_hex[..8.min(id_hex.len())];
         if locked > 0 {
             println!(
                 "  {} {} {:>10} sats  ({})  [{} pending]",
-                status_symbol,
-                alias,
-                amount,
-                &deposit_pubkey[..8.min(deposit_pubkey.len())],
-                locked
+                status_symbol, alias, amount, id_short, locked
             );
         } else {
             println!(
                 "  {} {} {:>10} sats  ({})",
-                status_symbol,
-                alias,
-                amount,
-                &deposit_pubkey[..8.min(deposit_pubkey.len())]
+                status_symbol, alias, amount, id_short
             );
         }
 
@@ -968,24 +955,22 @@ pub async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Er
             .get("ledger_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let deposit_pubkey = deposit
-            .get("deposit_pubkey")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let identity = deposit_record_identity(deposit);
+        let deposit_id_hex = identity.as_ref().map(|(_, id)| id.clone());
         let current_status = deposit
             .get("status")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
 
-        // If we have deposit_pubkey, use balance_query (works for all funded deposits)
-        // This is more reliable than offer_status since the daemon may have cleaned up offers
-        if let (Some(ledger_id), Some(ref deposit_pubkey)) =
-            (ledger_id.as_ref(), deposit_pubkey.as_ref())
+        // If we have a deposit_id, use balance_query (works for all funded deposits).
+        // More reliable than offer_status since the daemon may have cleaned up offers.
+        if let (Some(ledger_id), Some(ref deposit_id_hex)) =
+            (ledger_id.as_ref(), deposit_id_hex.as_ref())
         {
-            if !deposit_pubkey.is_empty() {
+            if !deposit_id_hex.is_empty() {
                 let params = serde_json::json!({
-                    "deposit_pubkey": deposit_pubkey,
+                    "deposit_id": deposit_id_hex,
                 });
 
                 let request_id = transport
@@ -1079,12 +1064,13 @@ pub async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Er
         }
 
         if let (Some(ref offer_id), Some(ledger_id)) = (offer_id.as_ref(), ledger_id.as_ref()) {
-            // Query daemon for offer status
-            // Include deposit_pubkey so daemon can check ledger if offer not found
-            let params = if let Some(ref pubkey) = deposit_pubkey {
+            // Query daemon for offer status. Include deposit_id so the
+            // daemon can check the ledger directly if the offer record
+            // has already been cleaned up.
+            let params = if let Some(ref id_hex) = deposit_id_hex {
                 serde_json::json!({
                     "offer_id": offer_id,
-                    "deposit_pubkey": pubkey,
+                    "deposit_id": id_hex,
                 })
             } else {
                 serde_json::json!({

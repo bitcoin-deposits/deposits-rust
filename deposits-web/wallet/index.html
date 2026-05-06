@@ -895,12 +895,31 @@ async function publishEvent(kind, content, tags) {
 }
 
 // ============================================================
-// Deposit ID computation (matches Rust: SHA256("pk(<compressed_pubkey_hex>)")[0..16])
+// Deposit ID computation (matches Rust: SHA256(<descriptor>)[0..16])
 // ============================================================
 function computeDepositId(compressedPubkey) {
   const descriptor = `pk(${bytesToHex(compressedPubkey)})`;
   const hash = sha256(utf8ToBytes(descriptor));
   return hash.slice(0, 16); // 16 bytes
+}
+
+function computeDepositIdFromDescriptor(descriptor) {
+  return sha256(utf8ToBytes(descriptor)).slice(0, 16);
+}
+
+// Resolve the (descriptor, deposit_id_hex) for a stored deposit record.
+// New records carry both directly. Legacy records have only `deposit_pubkey`,
+// so we synthesize pk(<pubkey>) and recompute. Returns null if neither
+// source is available.
+function depositIdentity(d) {
+  if (!d) return null;
+  let descriptor = d.descriptor;
+  if (!descriptor) {
+    if (!d.deposit_pubkey) return null;
+    descriptor = `pk(${d.deposit_pubkey})`;
+  }
+  const depositIdHex = d.deposit_id || bytesToHex(computeDepositIdFromDescriptor(descriptor));
+  return { descriptor, depositIdHex };
 }
 
 // ============================================================
@@ -1358,9 +1377,12 @@ async function recoverDeposits() {
           ? `${operatorName}-${cand.index}`
           : `recovered-${cand.index}`;
 
+        const recoveredDescriptor = `pk(${cand.pubkeyHex})`;
         state.deposits.push({
           alias,
           ledger_id: ledgerId,
+          descriptor: recoveredDescriptor,
+          deposit_id: depositIdHex,
           deposit_pubkey: cand.pubkeyHex,
           key_index: cand.index,
           status: 'active',
@@ -2365,7 +2387,11 @@ window.doOpenDeposit = async function() {
     }
 
     log(`Opening deposit on ${operatorName || ledgerId.slice(0, 12)}...`);
-    const openParams = { deposit_pubkey: pubkeyHex };
+    // Wave-1 daemon: identity is the descriptor, not a raw pubkey.
+    // Single-key wallet → pk(<pubkey>); multi-key would replace this line.
+    const descriptor = `pk(${pubkeyHex})`;
+    const depositIdHex = bytesToHex(computeDepositId(hexToBytes(pubkeyHex)));
+    const openParams = { descriptor };
     if (feeFixed || feeBps) { openParams.fee_fixed = feeFixed; openParams.fee_bps = feeBps; openParams.fee_frequency = feeFreq; }
     const openResponse = await sendRequest(ledgerId, 'deposit_open', openParams);
 
@@ -2388,6 +2414,8 @@ window.doOpenDeposit = async function() {
     state.deposits.push({
       alias,
       ledger_id: ledgerId,
+      descriptor,
+      deposit_id: depositIdHex,
       deposit_pubkey: pubkeyHex,
       key_index: keyIndex,
       status: 'pending',
@@ -2712,7 +2740,9 @@ function verifyShowResult(msg, type, canRetryOpen) {
 async function retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorName, feeFixed, feeBps, feeFreq) {
   log('Retrying deposit open...');
 
-  const retryParams = { deposit_pubkey: pubkeyHex };
+  const descriptor = `pk(${pubkeyHex})`;
+  const depositIdHex = bytesToHex(computeDepositId(hexToBytes(pubkeyHex)));
+  const retryParams = { descriptor };
   if (feeFixed || feeBps) { retryParams.fee_fixed = feeFixed; retryParams.fee_bps = feeBps; retryParams.fee_frequency = feeFreq || 2016; }
   const openResponse = await sendRequest(ledgerId, 'deposit_open', retryParams);
 
@@ -2723,6 +2753,8 @@ async function retryDepositOpen(ledgerId, alias, pubkeyHex, keyIndex, operatorNa
   state.deposits.push({
     alias,
     ledger_id: ledgerId,
+    descriptor,
+    deposit_id: depositIdHex,
     deposit_pubkey: pubkeyHex,
     key_index: keyIndex,
     status: 'pending',
@@ -3071,7 +3103,9 @@ window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
 
   try {
     log(`Opening deposit on ${operatorName || ledgerId.slice(0,12)}...`);
-    const quickOpenParams = { deposit_pubkey: pubkeyHex };
+    const descriptor = `pk(${pubkeyHex})`;
+    const depositIdHex = bytesToHex(computeDepositId(hexToBytes(pubkeyHex)));
+    const quickOpenParams = { descriptor };
     if (feeFixed || feeBps) { quickOpenParams.fee_fixed = feeFixed; quickOpenParams.fee_bps = feeBps; quickOpenParams.fee_frequency = feeFreq; }
     const resp = await sendRequest(ledgerId, 'deposit_open', quickOpenParams);
     if (!resp.success && !(resp.error || '').includes('already')) {
@@ -3088,7 +3122,7 @@ window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
       throw new Error(resp.error || 'Failed');
     }
 
-    state.deposits.push({ alias, ledger_id: ledgerId, deposit_pubkey: pubkeyHex, key_index: keyIndex, status: 'pending', operator_name: operatorName });
+    state.deposits.push({ alias, ledger_id: ledgerId, descriptor, deposit_id: depositIdHex, deposit_pubkey: pubkeyHex, key_index: keyIndex, status: 'pending', operator_name: operatorName });
     state.keyIndex = keyIndex + 1;
     saveState();
     renderDeposits();
@@ -3186,8 +3220,10 @@ window.doAutoSpread = async function() {
     try {
       // 1. Create invoice on destination
       log(`Creating invoice for ₿${amount.toLocaleString()} on ${dest.alias}...`);
+      const destIdent = depositIdentity(dest);
+      if (!destIdent) { log(`Skip ${dest.alias}: no descriptor/pubkey`, 'error'); continue; }
       const invResp = await sendRequest(dest.ledger_id, 'make_invoice', {
-        deposit_pubkey: dest.deposit_pubkey,
+        descriptor: destIdent.descriptor,
         amount_sats: amount,
         description: `Spread to ${dest.alias}`,
       }, 60000);
@@ -3208,12 +3244,14 @@ window.doAutoSpread = async function() {
       const sig = schnorr.sign(msgHash, secretKey);
 
       log(`Paying ₿${amount.toLocaleString()} from ${source.alias}...`);
+      const srcIdent = depositIdentity(source);
+      if (!srcIdent) { log(`Skip ${source.alias}: no descriptor/pubkey`, 'error'); continue; }
       const payResp = await sendRequest(source.ledger_id, 'pay_invoice', {
-        deposit_pubkey: source.deposit_pubkey,
+        descriptor: srcIdent.descriptor,
         invoice: bolt11,
         payment_hash: bytesToHex(paymentHash),
         amount_msats: amountMsat,
-        signature: bytesToHex(sig),
+        witness: { stack: [bytesToHex(sig)] },
       }, 60000);
 
       if (payResp.success) {
@@ -3271,8 +3309,10 @@ window.doRebalance = async function() {
     try {
       // 1. Create invoice on destination
       log(`₿${amount.toLocaleString()}: ${source.alias} → ${dest.alias}...`);
+      const destIdent = depositIdentity(dest);
+      if (!destIdent) { log(`Skip ${dest.alias}: no descriptor/pubkey`, 'error'); continue; }
       const invResp = await sendRequest(dest.ledger_id, 'make_invoice', {
-        deposit_pubkey: dest.deposit_pubkey,
+        descriptor: destIdent.descriptor,
         amount_sats: amount,
         description: `Rebalance to ${dest.alias}`,
       }, 60000);
@@ -3292,12 +3332,14 @@ window.doRebalance = async function() {
       const msgHash = invoiceLockSigningMessage(depositId, paymentHash, amountMsat);
       const sig = schnorr.sign(msgHash, secretKey);
 
+      const srcIdent = depositIdentity(source);
+      if (!srcIdent) { log(`Skip ${source.alias}: no descriptor/pubkey`, 'error'); continue; }
       const payResp = await sendRequest(source.ledger_id, 'pay_invoice', {
-        deposit_pubkey: source.deposit_pubkey,
+        descriptor: srcIdent.descriptor,
         invoice: bolt11,
         payment_hash: bytesToHex(paymentHash),
         amount_msats: amountMsat,
-        signature: bytesToHex(sig),
+        witness: { stack: [bytesToHex(sig)] },
       }, 60000);
 
       if (payResp.success) {
@@ -3667,8 +3709,10 @@ window.doWalletRecvLightning = async function() {
 
   try {
     log(`Creating Lightning invoice for ₿${amount}...`);
+    const ident = depositIdentity(deposit);
+    if (!ident) { log('Deposit record missing descriptor/pubkey', 'error'); return; }
     const response = await sendRequest(deposit.ledger_id, 'make_invoice', {
-      deposit_pubkey: deposit.deposit_pubkey,
+      descriptor: ident.descriptor,
       amount_sats: amount,
       description: `Fund ${deposit.alias}`,
     }, 60000);
@@ -3726,8 +3770,10 @@ window.doWalletRecvOnchain = async function() {
       } catch {}
     }
 
+    const ident = depositIdentity(deposit);
+    if (!ident) { log('Deposit record missing descriptor/pubkey', 'error'); return; }
     const response = await sendRequest(deposit.ledger_id, 'make_offer', {
-      deposit_pubkey: deposit.deposit_pubkey,
+      descriptor: ident.descriptor,
       max_sats: amount,
       min_sats: Math.min(1000, Math.max(1, amount - 1)),
       blocks_valid: 144,
@@ -3821,12 +3867,14 @@ window.doWalletPayInvoice = async function() {
     const sig = schnorr.sign(msgHash, secretKey);
 
     log(`Paying ₿${amountMsat / 1000}...`);
+    const ident = depositIdentity(deposit);
+    if (!ident) { log('Deposit record missing descriptor/pubkey', 'error'); return; }
     const response = await sendRequest(deposit.ledger_id, 'pay_invoice', {
-      deposit_pubkey: deposit.deposit_pubkey,
+      descriptor: ident.descriptor,
       invoice: bolt11,
       payment_hash: bytesToHex(paymentHash),
       amount_msats: amountMsat,
-      signature: bytesToHex(sig),
+      witness: { stack: [bytesToHex(sig)] },
     }, 60000);
 
     if (response.success) {
@@ -3859,11 +3907,12 @@ window.doWalletWithdraw = async function() {
     const sig = schnorr.sign(msgHash, secretKey);
 
     log(`Withdrawing ₿${amount}...`);
+    const ident = depositIdentity(deposit) || { descriptor: `pk(${bytesToHex(pubkey)})` };
     const response = await sendRequest(deposit.ledger_id, 'withdraw', {
-      deposit_pubkey: bytesToHex(pubkey),
-      deposit_id: bytesToHex(depositId),
+      descriptor: ident.descriptor,
       address, amount_sats: amount, fee_sats: feeSats,
-      nonce: bytesToHex(nonce), signature: bytesToHex(sig),
+      nonce: bytesToHex(nonce),
+      witness: { stack: [bytesToHex(sig)] },
     }, 60000);
 
     if (response.success) {
@@ -3990,10 +4039,11 @@ async function syncAll() {
   log('Syncing balances...');
   let updated = false;
   for (const deposit of state.deposits) {
-    if (!deposit.deposit_pubkey || !deposit.ledger_id) continue;
+    const ident = depositIdentity(deposit);
+    if (!ident || !deposit.ledger_id) continue;
     try {
       const response = await sendRequest(deposit.ledger_id, 'balance_query', {
-        deposit_pubkey: deposit.deposit_pubkey,
+        deposit_id: ident.depositIdHex,
       }, 10000);
 
       if (response.success) {
@@ -4325,14 +4375,14 @@ window.doWithdraw = async function() {
     const msgHash = withdrawalSigningMessage(nonce, depositId, address, amount, feeSats);
     const sig = schnorr.sign(msgHash, secretKey);
 
+    const ident = depositIdentity(selectedDeposit) || { descriptor: `pk(${bytesToHex(pubkey)})` };
     const response = await sendRequest(selectedDeposit.ledger_id, 'withdraw', {
-      deposit_pubkey: bytesToHex(pubkey),
-      deposit_id: bytesToHex(depositId),
+      descriptor: ident.descriptor,
       address: address,
       amount_sats: amount,
       fee_sats: feeSats,
       nonce: bytesToHex(nonce),
-      signature: bytesToHex(sig),
+      witness: { stack: [bytesToHex(sig)] },
     }, 60000);
 
     if (response.success) {
@@ -4367,8 +4417,10 @@ window.doAddOffer = async function() {
       } catch {}
     }
 
+    const ident = depositIdentity(selectedDeposit);
+    if (!ident) { log('Deposit record missing descriptor/pubkey', 'error'); return; }
     const response = await sendRequest(selectedDeposit.ledger_id, 'make_offer', {
-      deposit_pubkey: selectedDeposit.deposit_pubkey,
+      descriptor: ident.descriptor,
       max_sats: amount,
       min_sats: Math.min(1000, Math.max(1, amount - 1)),
       blocks_valid: 144,
@@ -4419,8 +4471,10 @@ window.doFundLightning = async function() {
 
   try {
     log(`Creating Lightning invoice for ₿${amount}...`);
+    const ident = depositIdentity(selectedDeposit);
+    if (!ident) { log('Deposit record missing descriptor/pubkey', 'error'); return; }
     const response = await sendRequest(selectedDeposit.ledger_id, 'make_invoice', {
-      deposit_pubkey: selectedDeposit.deposit_pubkey,
+      descriptor: ident.descriptor,
       amount_sats: amount,
       description: `Fund deposit ${selectedDeposit.alias}`,
     }, 60000);
@@ -4557,12 +4611,13 @@ window.doPayInvoiceSubmit = async function() {
     const sig = schnorr.sign(msgHash, secretKey);
 
     log('Paying invoice...');
+    const ident = depositIdentity(selectedDeposit) || { descriptor: `pk(${bytesToHex(pubkey)})` };
     const response = await sendRequest(selectedDeposit.ledger_id, 'pay_invoice', {
-      deposit_pubkey: selectedDeposit.deposit_pubkey,
+      descriptor: ident.descriptor,
       invoice: bolt11,
       payment_hash: bytesToHex(paymentHash),
       amount_msats: amountMsat,
-      signature: bytesToHex(sig),
+      witness: { stack: [bytesToHex(sig)] },
     }, 60000);
 
     if (response.success) {
@@ -5178,8 +5233,10 @@ window.doMakeInvoice = async function() {
   if (!amount) { log('Missing amount', 'error'); return; }
 
   try {
+    const ident = depositIdentity(deposit);
+    if (!ident) { log('Deposit record missing descriptor/pubkey', 'error'); return; }
     const response = await sendRequest(deposit.ledger_id, 'make_invoice', {
-      deposit_pubkey: deposit.deposit_pubkey,
+      descriptor: ident.descriptor,
       amount_sats: amount,
       description: `Deposit to ${alias}`,
     }, 60000);
@@ -5205,8 +5262,10 @@ window.doPayInvoice = async function() {
   if (!bolt11) { log('Missing invoice', 'error'); return; }
 
   try {
+    const ident = depositIdentity(deposit);
+    if (!ident) { log('Deposit record missing descriptor/pubkey', 'error'); return; }
     const response = await sendRequest(deposit.ledger_id, 'pay_invoice', {
-      deposit_pubkey: deposit.deposit_pubkey,
+      descriptor: ident.descriptor,
       bolt11: bolt11,
     }, 60000);
 

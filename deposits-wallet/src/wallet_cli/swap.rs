@@ -1055,12 +1055,9 @@ async fn handle_swap_request(
     let maker_dest = deposits.iter().find(|d| {
         let ledger_match = d.get("ledger_id").and_then(|v| v.as_str())
             == Some(&req.taker_source_ledger);
-        let pubkey_hex = d
-            .get("deposit_pubkey")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let descriptor = format!("pk({})", pubkey_hex);
-        let our_did = hex::encode(compute_deposit_id(&descriptor));
+        let our_did = crate::wallet_cli::deposit_record_identity(d)
+            .map(|(_, id)| id)
+            .unwrap_or_default();
         ledger_match && our_did != taker_source_id_hex
     });
     let maker_dest = match maker_dest {
