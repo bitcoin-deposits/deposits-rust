@@ -186,6 +186,17 @@ impl Signer for LocalSigner {
         Ok(shared.secret_bytes())
     }
 
+    fn nip04_shared_key(&self, peer: &PublicKey) -> Result<[u8; 32], SignerError> {
+        // Same derivation `nostr/util::generate_shared_key` performs:
+        // ecdh::shared_secret_point yields the 64-byte point; NIP-04 uses
+        // the first 32 (the X coordinate). No hashing.
+        use bitcoin::secp256k1::ecdh::shared_secret_point;
+        let ssp = shared_secret_point(peer, &self.secret);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&ssp[..32]);
+        Ok(out)
+    }
+
     fn issue_nostr_secret(&self) -> Result<[u8; 32], SignerError> {
         match self.nostr_secret {
             Some(sk) => Ok(sk.secret_bytes()),
@@ -257,6 +268,41 @@ mod tests {
         let a_to_b = alice.ecdh(&bob.pubkey()).unwrap();
         let b_to_a = bob.ecdh(&alice.pubkey()).unwrap();
         assert_eq!(a_to_b, b_to_a, "ECDH must be symmetric");
+    }
+
+    #[test]
+    fn nip04_shared_key_is_symmetric() {
+        let alice = LocalSigner::random();
+        let bob = LocalSigner::random();
+        let a_to_b = alice.nip04_shared_key(&bob.pubkey()).unwrap();
+        let b_to_a = bob.nip04_shared_key(&alice.pubkey()).unwrap();
+        assert_eq!(a_to_b, b_to_a, "NIP-04 raw-X shared key must be symmetric");
+    }
+
+    #[test]
+    fn nip04_shared_key_differs_from_hashed_ecdh() {
+        // The two derivations of "ECDH shared secret" produce different
+        // bytes — getting them mixed up yields unreadable ciphertext.
+        // Lock the difference here so the wrong one can't sneak in.
+        let alice = LocalSigner::random();
+        let bob = LocalSigner::random();
+        let raw_x = alice.nip04_shared_key(&bob.pubkey()).unwrap();
+        let hashed = alice.ecdh(&bob.pubkey()).unwrap();
+        assert_ne!(raw_x, hashed, "NIP-04 raw-X must differ from hashed ECDH");
+    }
+
+    #[test]
+    fn nip04_shared_key_matches_secp256k1_shared_secret_point() {
+        // Cross-check against the canonical derivation from the
+        // secp256k1 crate. nostr/util::generate_shared_key uses the
+        // same primitive; this test future-proofs against NIP-04
+        // changing the convention out from under us.
+        use bitcoin::secp256k1::ecdh::shared_secret_point;
+        let alice = LocalSigner::random();
+        let bob = LocalSigner::random();
+        let from_signer = alice.nip04_shared_key(&bob.pubkey()).unwrap();
+        let ssp = shared_secret_point(&bob.pubkey(), alice.secret_key_for_test());
+        assert_eq!(&from_signer[..], &ssp[..32]);
     }
 
     #[test]

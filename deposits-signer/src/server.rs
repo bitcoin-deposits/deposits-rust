@@ -198,6 +198,10 @@ fn handle_request(
             Ok(shared) => SignResult::EcdhSecret { shared },
             Err(e) => signer_error_to_result(e),
         },
+        SignOp::Nip04SharedKey { peer } => match signer.nip04_shared_key(&peer) {
+            Ok(key) => SignResult::Nip04SharedKey { key },
+            Err(e) => signer_error_to_result(e),
+        },
         SignOp::PubkeyQuery => SignResult::Pubkey {
             pubkey: signer.pubkey(),
             xonly: signer.xonly_pubkey(),

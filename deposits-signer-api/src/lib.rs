@@ -254,10 +254,33 @@ pub trait Signer: Send + Sync {
         sighash: &[u8; 32],
     ) -> Result<ecdsa::Signature, SignerError>;
 
-    /// ECDH shared secret with `peer`, used by `nostr.rs` for NIP-04 / NIP-44
-    /// envelope crypto. The signer does only the asymmetric step; the daemon
-    /// runs the symmetric AEAD.
+    /// ECDH shared secret with `peer` — *SHA-256-hashed form*, returned by
+    /// `bitcoin::secp256k1::ecdh::SharedSecret::new`. Used by NIP-44 (which
+    /// HKDFs over this) and any caller that wants the standard hashed
+    /// shared-secret. **Not** what NIP-04 uses; NIP-04 wants the raw X
+    /// coordinate of the shared point — see [`nip04_shared_key`].
     fn ecdh(&self, peer: &PublicKey) -> Result<[u8; 32], SignerError>;
+
+    /// NIP-04 shared key with `peer`: the first 32 bytes of the raw ECDH
+    /// shared *point* (`ecdh::shared_secret_point`), no hashing applied.
+    /// Matches `nostr/util::generate_shared_key` and is the symmetric key
+    /// for NIP-04's AES-256-CBC envelope.
+    ///
+    /// Distinct from [`ecdh`] because NIP-04 chose a non-standard
+    /// derivation that pre-dates the convention `secp256k1::SharedSecret`
+    /// applies. They produce different bytes; using the wrong one yields
+    /// unreadable ciphertext.
+    ///
+    /// Default impl returns `Unsupported` for signers that don't support
+    /// the raw-X form (e.g. an HSM-style signer that only exposes the
+    /// hashed variant). Production deposits-signer + LocalSigner both
+    /// override.
+    fn nip04_shared_key(&self, peer: &PublicKey) -> Result<[u8; 32], SignerError> {
+        let _ = peer;
+        Err(SignerError::Unsupported(
+            "this signer does not expose the NIP-04 raw-X shared key".to_string(),
+        ))
+    }
 
     /// Issue a sibling-derived **Nostr identity** secret that the daemon
     /// holds locally for Nostr-layer ops (event signing, NIP-04 ECDH,

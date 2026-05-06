@@ -144,9 +144,18 @@ pub enum SignOp {
         #[serde(with = "hexarray")]
         sighash: [u8; 32],
     },
-    /// ECDH shared secret with `peer`. Used by `nostr.rs` for NIP-04/44
-    /// envelope crypto; the daemon does the symmetric AEAD itself.
+    /// ECDH shared secret with `peer` (SHA-256-hashed form). Used by
+    /// NIP-44 and other consumers that expect the standard hashed
+    /// shared-secret.
     Ecdh {
+        peer: PublicKey,
+    },
+    /// NIP-04 raw-X shared key with `peer`. Returns the first 32 bytes
+    /// of the ECDH shared *point* (no hashing) — what NIP-04's AES-CBC
+    /// envelope uses as its symmetric key. Distinct wire op from `Ecdh`
+    /// because the two derivations produce different bytes; using the
+    /// wrong one yields unreadable ciphertext.
+    Nip04SharedKey {
         peer: PublicKey,
     },
     /// Just return the signer's identity pubkeys. The daemon caches these
@@ -185,6 +194,11 @@ pub enum SignResult {
     EcdhSecret {
         #[serde(with = "hexarray")]
         shared: [u8; 32],
+    },
+    /// Result of [`SignOp::Nip04SharedKey`]: 32-byte raw-X NIP-04 key.
+    Nip04SharedKey {
+        #[serde(with = "hexarray")]
+        key: [u8; 32],
     },
     Pubkey {
         pubkey: PublicKey,
@@ -301,6 +315,7 @@ mod tests {
             SignOp::Bip340 { digest: [3u8; 32] },
             SignOp::Ecdsa { sighash: [4u8; 32] },
             SignOp::Ecdh { peer: pk },
+            SignOp::Nip04SharedKey { peer: pk },
             SignOp::PubkeyQuery,
             SignOp::IssueNostrSecret,
         ];
@@ -326,6 +341,7 @@ mod tests {
                 sig_compact: [6u8; 64],
             },
             SignResult::EcdhSecret { shared: [7u8; 32] },
+            SignResult::Nip04SharedKey { key: [0xa5u8; 32] },
             SignResult::Pubkey { pubkey: pk, xonly },
             SignResult::IssuedSecret { sk: [8u8; 32] },
             SignResult::Error {

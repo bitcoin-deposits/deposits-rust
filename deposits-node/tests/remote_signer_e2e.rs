@@ -513,6 +513,38 @@ fn remote_signer_anti_equivocation_refuses_seq_regression() {
 }
 
 #[test]
+fn remote_signer_nip04_shared_key_matches_local() {
+    // The wire op that unblocks NIP-04 fallback decrypt against the
+    // operator key when the daemon's self.keys is the delegate.
+    let operator_seed = [0xBBu8; 32];
+    let (operator_secret, _) =
+        derive_keys_from_seed(&operator_seed, Network::Bitcoin).unwrap();
+    let local = LocalSigner::new(operator_secret);
+
+    let node_transport = TransportKey::random();
+    let (proc, signer_transport_pubkey) = spawn_signer(operator_seed, node_transport.public);
+    let remote = RemoteSigner::connect(
+        &proc.socket,
+        node_transport.secret,
+        signer_transport_pubkey,
+    )
+    .unwrap();
+
+    // Pick an arbitrary peer.
+    let peer = LocalSigner::random();
+    let local_key = local.nip04_shared_key(&peer.pubkey()).unwrap();
+    let remote_key = remote.nip04_shared_key(&peer.pubkey()).unwrap();
+    assert_eq!(
+        local_key, remote_key,
+        "RemoteSigner NIP-04 raw-X must match LocalSigner bit-for-bit"
+    );
+
+    // Also distinct from the hashed ECDH form — confirm both endpoints agree.
+    let hashed = remote.ecdh(&peer.pubkey()).unwrap();
+    assert_ne!(remote_key, hashed);
+}
+
+#[test]
 fn remote_signer_ecdh_matches_local_signer() {
     let operator_seed = [0x55u8; 32];
     // Mirror the signer's derivation so the local comparison key matches

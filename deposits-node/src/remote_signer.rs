@@ -400,4 +400,16 @@ impl Signer for RemoteSigner {
             ))),
         }
     }
+
+    fn nip04_shared_key(&self, peer: &PublicKey) -> Result<[u8; 32], SignerError> {
+        let ctx = SignContext::no_ledger(SigPurpose::Bip340Untagged);
+        match self.rpc(&ctx, SignOp::Nip04SharedKey { peer: *peer })? {
+            SignResult::Nip04SharedKey { key } => Ok(key),
+            SignResult::Error { kind, message } => Err(map_sign_result_to_error(kind, message)),
+            other => Err(SignerError::Transport(format!(
+                "Nip04SharedKey returned unexpected variant: {:?}",
+                other
+            ))),
+        }
+    }
 }
