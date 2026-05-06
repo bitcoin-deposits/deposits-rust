@@ -21,6 +21,13 @@ bitcoin = { version = "0.32", features = ["serde"] }
 # Nostr SDK — the actual relay/transport stack.
 nostr-sdk = { version = "0.37", features = ["nip44", "nip47", "nip59"] }
 
+# rustls + ring crypto provider. nostr-sdk pulls these transitively
+# but rustls 0.23+ requires an explicit `install_default()` before
+# the first TLS handshake; we expose `install_default_crypto_provider()`
+# so every binary that uses NostrTransport over wss:// can wire it
+# up in one call from `main()`.
+rustls = { version = "0.23", features = ["ring"] }
+
 # Encoding
 base64 = "0.21"
 hex = "0.4"

@@ -13,8 +13,12 @@ path = "src/bin/deposits-lnurl.rs"
 # Web server
 axum = "0.7"
 
+# Pulled in for the rustls `install_default_crypto_provider()` helper —
+# binaries that talk to wss:// relays need to call it once at startup.
+deposits-nostr = { path = "../deposits-nostr" }
+
 # Nostr transport. nip04 is required for the NIP-59-shaped gift-wrap envelope
-# the operator daemon uses (see deposits-node/src/nostr.rs send_admin_request).
+# the operator daemon uses (see deposits-nostr send_admin_request).
 nostr-sdk = { version = "0.37", features = ["nip04"] }
 
 # Async runtime

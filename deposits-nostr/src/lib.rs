@@ -55,6 +55,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use tokio::sync::mpsc;
 
+/// Install `ring` as the process-wide rustls `CryptoProvider`.
+/// rustls 0.23+ refuses to auto-pick a provider even with a single
+/// feature enabled — the first TLS handshake panics with
+/// "Could not automatically determine the process-level CryptoProvider".
+/// Every binary that uses [`NostrTransport`] over `wss://` must call
+/// this once at startup, before any relay connection. It's idempotent:
+/// if a provider is already installed (by this call or by the
+/// consumer), the second attempt is silently ignored.
+pub fn install_default_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Errors surfaced by the Nostr transport. Kept narrow on purpose —
 /// the daemon's catch-all `Error` type wraps this via `#[from]`, while
 /// wallet-side callers match on these variants directly without

@@ -21,8 +21,10 @@ bitcoin = { version = "0.32", features = ["serde"] }
 # Nostr for peer messaging
 nostr-sdk = { version = "0.37", features = ["nip44", "nip47", "nip59"] }
 
-# TLS crypto provider for nostr-sdk (must be installed before first use)
-rustls = { version = "0.23", features = ["ring"] }
+# TLS crypto provider: deposits-nostr re-exports `ring` via the
+# `install_default_crypto_provider()` helper called from `main()`.
+# rustls 0.23+ requires that to happen before the first TLS handshake;
+# without it, the first wss:// connection panics.
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

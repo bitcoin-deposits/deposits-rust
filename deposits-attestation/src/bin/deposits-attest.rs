@@ -1766,6 +1766,8 @@ async fn send_ringsig_error(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    deposits_nostr::install_default_crypto_provider();
+
     env_logger::init();
 
     // Load config

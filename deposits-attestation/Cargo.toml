@@ -49,5 +49,9 @@ env_logger = "0.10"
 # and bound-pubkey binding proofs.
 deposits-ringsig = { path = "../deposits-ringsig" }
 
+# Used for `install_default_crypto_provider()` — rustls 0.23+ requires
+# an explicit provider install before the first wss:// handshake.
+deposits-nostr = { path = "../deposits-nostr" }
+
 [lints]
 workspace = true

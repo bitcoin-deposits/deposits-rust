@@ -20,8 +20,10 @@ use deposits_node::node_cli;
 use deposits_node::node_cli::{nostr_commands, recovery};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Install ring as the default rustls crypto provider (required by nostr-sdk).
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // rustls 0.23+ doesn't auto-pick a CryptoProvider even when only
+    // one is feature-enabled; the first wss:// handshake panics
+    // otherwise. The helper is idempotent.
+    deposits_nostr::install_default_crypto_provider();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

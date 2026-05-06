@@ -996,6 +996,8 @@ async fn handle_ledger_update_event(state: &AppState, event: &Event) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    deposits_nostr::install_default_crypto_provider();
+
     env_logger::init();
 
     // Parse config
