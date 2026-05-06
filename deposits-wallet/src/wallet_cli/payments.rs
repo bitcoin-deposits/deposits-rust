@@ -1311,24 +1311,45 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         .send_ledger_request(ledger_id, "pay_invoice", request_params)
         .await?;
 
-    // Wait for response using real-time subscription (longer timeout for LN payments)
-    match transport.wait_for_response(&request_id, 120000).await {
+    // The daemon's pay_invoice handler holds the response until LDK
+    // resolves the payment (~seconds for typical hops, capped at 60s
+    // operator-side). The Kind 20102 success body carries the preimage,
+    // which is the on-network proof of payment. 90s timeout here gives
+    // the operator's 60s plus relay/round-trip slack.
+    match transport.wait_for_response(&request_id, 90_000).await {
         Ok(response) => {
             if response.success {
                 println!();
-                println!("Payment successful!");
+                println!("Payment confirmed!");
                 if let Some(result) = &response.result {
                     if let Some(preimage) = result.get("preimage").and_then(|v| v.as_str()) {
-                        println!("  Preimage: {}", preimage);
+                        // All-zero preimage = self-pay shortcut (operator
+                        // settled internally without a Lightning hop).
+                        // Treat it as "no proof" rather than a real preimage.
+                        if preimage.chars().all(|c| c == '0') {
+                            println!(
+                                "  preimage: (operator settled internally; \
+                                 no Lightning preimage)"
+                            );
+                        } else {
+                            println!("  preimage:     {}", preimage);
+                        }
                     }
                 }
+                println!("  payment_hash: {}", hex::encode(payment_hash_bytes));
                 Ok(())
             } else {
                 let error = response.error.as_deref().unwrap_or("Unknown error");
                 Err(format!("Payment failed: {}", error).into())
             }
         }
-        Err(e) => Err(format!("Timeout waiting for payment confirmation: {}", e).into()),
+        Err(e) => Err(format!(
+            "Timeout waiting for payment confirmation ({}). \
+             The payment may still be in-flight — run `deposits-wallet sync` later \
+             to pick up the eventual fulfillment.",
+            e
+        )
+        .into()),
     }
 }
 

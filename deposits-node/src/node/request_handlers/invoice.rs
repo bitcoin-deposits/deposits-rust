@@ -599,27 +599,34 @@ impl Node {
             }
         }
 
-        // Pay invoice via LdkCli — dispatch payment and return immediately.
-        // The background auto_complete_outbound_payments task will poll LDK
-        // and commit InvoiceFulfill or InvoiceFail.
+        // Pay invoice via LdkCli, then wait synchronously for LDK to
+        // settle. We return one Kind 20102 carrying the actual outcome
+        // — preimage on success, error on failure — so the wallet
+        // doesn't have to poll Kind 9100 ledger updates to learn what
+        // happened. The auto-task remains as the crash-recovery path:
+        // if the daemon dies between dispatch and resolve, the
+        // open_invoice_lock survives on disk and gets reconciled
+        // against LDK on the next periodic tick.
         let cli = LdkCli::from_env();
         match cli.pay_invoice(invoice_str) {
             Ok(_) => {
                 tracing::info!(
-                    "LDK payment dispatched for {}..., will complete in background",
+                    "LDK payment dispatched for {}..., waiting for resolution",
                     hex::encode(&payment_id[..8])
                 );
             }
             Err(e) => {
                 let err_str = e.to_string();
-                // "already initiated" means the invoice exists on the shared LDK node
-                // (created by another operator). This is cross-node self-pay — the payment
-                // will settle internally via LDK. Let auto_complete_outbound_payments handle it.
                 if err_str.contains("already been initiated")
                     || err_str.contains("already initiated")
                 {
-                    tracing::info!("Cross-node self-pay detected for {}... (shared LDK node), will complete in background",
-                        hex::encode(&payment_id[..8]));
+                    // Cross-node self-pay (shared LDK node, invoice
+                    // already known to LDK). Fall through to the
+                    // resolution poll below — LDK already has it.
+                    tracing::info!(
+                        "Cross-node self-pay detected for {}..., polling LDK for resolution",
+                        hex::encode(&payment_id[..8])
+                    );
                 } else {
                     tracing::warn!(
                         "LDK pay_invoice failed for {}...: {}, failing lock",
@@ -645,13 +652,125 @@ impl Node {
             }
         }
 
-        let result = serde_json::json!({
-            "payment_id": hex::encode(payment_id),
-            "deposit_id": hex::encode(deposit_id),
-            "amount_msat": amount_msat,
-            "status": "pending",
-        });
-        (true, Some(result.to_string()), None)
+        // Poll LDK every second for up to 60s waiting for the payment
+        // to resolve. Lightning typically settles within a couple of
+        // seconds; the longer ceiling covers multi-hop retries. If we
+        // hit the ceiling without resolution, return an error to the
+        // wallet — auto_complete_outbound_payments will pick the lock
+        // up and commit the right operation when LDK eventually
+        // reports.
+        let payment_hex = hex::encode(payment_id);
+        let resolve_deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
+        let poll_interval = tokio::time::Duration::from_secs(1);
+        let resolution = loop {
+            if tokio::time::Instant::now() >= resolve_deadline {
+                break None;
+            }
+            tokio::time::sleep(poll_interval).await;
+            let payments = match cli.list_payments() {
+                Ok(r) => r.payments,
+                Err(e) => {
+                    tracing::debug!("list_payments error (will retry): {}", e);
+                    continue;
+                }
+            };
+            if let Some(p) = payments.iter().find(|p| p.id == payment_hex) {
+                match p.status {
+                    1 => break Some(Ok(p.preimage.clone())),
+                    2 => break Some(Err(())),
+                    _ => continue, // 0 = pending; keep polling
+                }
+            }
+        };
+
+        match resolution {
+            Some(Ok(preimage_hex)) => {
+                let mut preimage = [0u8; 32];
+                if let Some(ref hex_str) = preimage_hex {
+                    if let Ok(bytes) = hex::decode(hex_str) {
+                        if bytes.len() == 32 {
+                            preimage.copy_from_slice(&bytes);
+                        }
+                    }
+                }
+
+                // Commit InvoiceFulfill with the real preimage so the
+                // ledger record is also proof-of-payment.
+                let fulfill_sequence = {
+                    let ledger = ledger_arc.read().unwrap();
+                    ledger.next_sequence()
+                };
+                let fulfill_op = LedgerOperation::InvoiceFulfill {
+                    deposit_id,
+                    amount: amount_msat,
+                    payment_id,
+                    sequence_number: fulfill_sequence,
+                    witness: DescriptorWitness { stack: vec![] },
+                    preimage,
+                };
+                if let Err(e) = self.commit_operation(ledger_id, fulfill_op).await {
+                    return (
+                        false,
+                        None,
+                        Some(format!("Failed to commit InvoiceFulfill: {}", e)),
+                    );
+                }
+
+                tracing::info!(
+                    "Payment {}... fulfilled via LDK ({} msats)",
+                    &payment_hex[..16],
+                    amount_msat
+                );
+
+                let result = serde_json::json!({
+                    "payment_id": payment_hex,
+                    "deposit_id": hex::encode(deposit_id),
+                    "amount_msat": amount_msat,
+                    "preimage": hex::encode(preimage),
+                    "status": "succeeded",
+                });
+                (true, Some(result.to_string()), None)
+            }
+            Some(Err(())) => {
+                let fail_sequence = {
+                    let ledger = ledger_arc.read().unwrap();
+                    ledger.next_sequence()
+                };
+                let fail_op = LedgerOperation::InvoiceFail {
+                    deposit_id,
+                    amount: amount_msat,
+                    payment_id,
+                    sequence_number: fail_sequence,
+                };
+                if let Err(e) = self.commit_operation(ledger_id, fail_op).await {
+                    tracing::error!("Failed to commit InvoiceFail: {}", e);
+                }
+                (
+                    false,
+                    None,
+                    Some("Payment failed: LDK reported failure".to_string()),
+                )
+            }
+            None => {
+                // 60s without LDK reporting either way. Don't commit
+                // anything — the open_invoice_lock stays on the
+                // ledger and the auto-task will reconcile it.
+                tracing::warn!(
+                    "Payment {}... still pending after 60s; auto_complete_outbound_payments will reconcile",
+                    &payment_hex[..16]
+                );
+                (
+                    false,
+                    None,
+                    Some(
+                        "Payment timeout: LDK didn't resolve in 60s. \
+                         Run `deposits-wallet sync` later to pick up the eventual outcome."
+                            .to_string(),
+                    ),
+                )
+            }
+        }
     }
 
     pub(crate) async fn process_cosign_invoice_request(
