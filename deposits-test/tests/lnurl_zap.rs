@@ -105,8 +105,9 @@ impl Drop for LnurlServer {
 }
 
 /// Open a fresh deposit account on `ledger` and return (wallet_dir,
-/// deposit_pubkey_hex). Uses a brand-new seed each time so the test is
-/// idempotent against repeated runs.
+/// deposit_id_hex). Uses a brand-new seed each time so the test is
+/// idempotent against repeated runs. The lnurl gateway expects
+/// `deposit_id` (not deposit_pubkey) in the URL slot post-Wave-1.
 fn open_fresh_deposit(ledger: &str) -> (PathBuf, String) {
     let wdir = tempdir();
     let (sec, _xonly) = keygen();
@@ -122,8 +123,20 @@ fn open_fresh_deposit(ledger: &str) -> (PathBuf, String) {
 
     let deposits_json = std::fs::read_to_string(wdir.join("deposits.json")).unwrap();
     let deposits: serde_json::Value = serde_json::from_str(&deposits_json).unwrap();
-    let pubkey = deposits[0]["deposit_pubkey"].as_str().unwrap().to_string();
-    (wdir, pubkey)
+    // Wave-2 wallet writes `deposit_id` directly. Older records only have
+    // `deposit_pubkey`; recompute from the synthesized pk(...) descriptor
+    // so the test still works against legacy state.
+    let deposit_id = match deposits[0]["deposit_id"].as_str() {
+        Some(id) => id.to_string(),
+        None => {
+            let pk = deposits[0]["deposit_pubkey"]
+                .as_str()
+                .expect("deposit record missing both deposit_id and deposit_pubkey");
+            let descriptor = format!("pk({})", pk);
+            hex::encode(deposits_core::types::compute_deposit_id(&descriptor))
+        }
+    };
+    (wdir, deposit_id)
 }
 
 #[test]
@@ -141,7 +154,7 @@ fn lnurl_pay_flow_metadata_and_invoice() {
     }
 
     let ledger = discover_op0_ledger();
-    let (_wdir, deposit_pubkey) = open_fresh_deposit(&ledger);
+    let (_wdir, deposit_id) = open_fresh_deposit(&ledger);
 
     let port = free_port();
     let domain = format!("lnurl-test.local:{}", port);
@@ -158,7 +171,7 @@ fn lnurl_pay_flow_metadata_and_invoice() {
         .unwrap();
 
     // --- Step 1: LNURL-pay metadata (LUD-06/LUD-16) ---
-    let metadata_url = format!("{}/.well-known/lnurlp/{}", lnurl.base_url(), deposit_pubkey);
+    let metadata_url = format!("{}/.well-known/lnurlp/{}", lnurl.base_url(), deposit_id);
     let resp = http
         .get(&metadata_url)
         .header("Host", &ledger_host)
@@ -172,8 +185,8 @@ fn lnurl_pay_flow_metadata_and_invoice() {
     let meta: serde_json::Value = resp.json().expect("metadata response not JSON");
     assert_eq!(meta["tag"], "payRequest", "wrong tag in metadata: {:?}", meta);
     assert!(
-        meta["callback"].as_str().unwrap().contains(&deposit_pubkey),
-        "callback URL doesn't reference the deposit pubkey: {:?}",
+        meta["callback"].as_str().unwrap().contains(&deposit_id),
+        "callback URL doesn't reference the deposit id: {:?}",
         meta
     );
     let min = meta["minSendable"].as_u64().unwrap();
@@ -196,7 +209,7 @@ fn lnurl_pay_flow_metadata_and_invoice() {
     let callback_url = format!(
         "{}/lnurl/callback/{}?amount={}",
         lnurl.base_url(),
-        deposit_pubkey,
+        deposit_id,
         amount_msats
     );
     let resp = http

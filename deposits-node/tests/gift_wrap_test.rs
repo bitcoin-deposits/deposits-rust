@@ -117,7 +117,7 @@ fn gift_wrap_round_trip() {
     let wallet_keys = test_keys(0xAA);
     let node_keys = test_keys(0xBB);
 
-    let content = r#"{"deposit_pubkey":"02abc...","amount_sats":1000}"#;
+    let content = r#"{"descriptor":"pk(02abc...)","amount_sats":1000}"#;
     let tags = vec![
         Tag::custom(
             TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),

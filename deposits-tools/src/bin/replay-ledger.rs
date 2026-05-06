@@ -1370,7 +1370,9 @@ fn lookup_op_field(tag: u64) -> (&'static str, Enc) {
         16 => ("invoice", Enc::Str),
         18 => ("cosigner_sig", Enc::Sig),
         20 => ("new_fees", Enc::FeeTlv),
-        24 => ("deposit_pubkey", Enc::Pubkey),
+        // 24 reserved (was deposit_pubkey on legacy wire — never emitted
+        // by current code, dropped post-Wave-1 since identity is the
+        // miniscript descriptor, not a single pubkey)
         26 => ("invoice_id", Enc::Str),
         28 => ("sequence_number", Enc::U64),
         30 => ("payment_id", Enc::Hash),

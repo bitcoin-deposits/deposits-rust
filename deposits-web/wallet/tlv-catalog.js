@@ -40,7 +40,7 @@ export const FIELD_NAMES = {
   16: 'invoice',
   18: 'cosigner_sig',
   20: 'new_fees',
-  24: 'deposit_pubkey',
+  // 24 reserved (was deposit_pubkey — descriptor-based identity post-Wave-1)
   26: 'invoice_id',
   28: 'sequence_number',
   30: 'payment_id',

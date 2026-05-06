@@ -208,20 +208,39 @@ pub fn htlc_agent_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Credit `amount_msats` to `deposit_pubkey_hex` on `ledger_id` via
+/// Credit `amount_msats` to a deposit on `ledger_id` via
 /// `deposits-node deposit credit` from `op_idx`'s data dir. This is the
 /// fast fund-a-deposit path used by setup-htlc-agent — bypasses real
 /// on-chain confirmation, so tests run in seconds.
+///
+/// `deposit_pubkey_or_id_hex` may be either a 33-byte compressed pubkey
+/// (legacy) or a 16-byte deposit_id (post-Wave-1). The CLI now takes
+/// deposit_id directly; if a pubkey is passed we synthesize pk(...) and
+/// hash it ourselves.
 ///
 /// `invoice_id` should be unique per call (using `payment_hash` style).
 /// Returns combined stdout+stderr; panics on non-zero exit.
 pub fn operator_credit_deposit(
     op_idx: usize,
     ledger_id: &str,
-    deposit_pubkey_hex: &str,
+    deposit_pubkey_or_id_hex: &str,
     amount_msats: u64,
     invoice_id: &str,
 ) -> String {
+    // Normalize to deposit_id. 32 hex chars = 16 raw bytes = id; 66 hex
+    // chars = 33 raw bytes = compressed pubkey, hash to id.
+    let deposit_id_hex = match deposit_pubkey_or_id_hex.len() {
+        32 => deposit_pubkey_or_id_hex.to_string(),
+        66 => {
+            let descriptor = format!("pk({})", deposit_pubkey_or_id_hex);
+            hex::encode(deposits_core::types::compute_deposit_id(&descriptor))
+        }
+        n => panic!(
+            "operator_credit_deposit: expected 32 or 66 hex chars, got {} (`{}`)",
+            n, deposit_pubkey_or_id_hex
+        ),
+    };
+
     let seed = op_seed(op_idx);
     let data_dir = op_data_dir(op_idx);
     let name = format!("op{}", op_idx);
@@ -230,7 +249,7 @@ pub fn operator_credit_deposit(
             "deposit",
             "credit",
             ledger_id,
-            deposit_pubkey_hex,
+            &deposit_id_hex,
             &amount_msats.to_string(),
             invoice_id,
         ])
@@ -285,31 +304,39 @@ pub fn wallet_route(
 }
 
 /// Look up the htlc-agent's deposit on `ledger_id` and return the
-/// deposit_pubkey hex (33-byte compressed). Returns `None` if the
-/// agent doesn't have a deposit on that ledger or if its deposits.json
-/// is missing. Useful for tests that need to credit the agent's
-/// destination deposit before triggering a route.
+/// deposit_id hex (32-char hash of the descriptor). Returns `None` if
+/// the agent doesn't have a deposit on that ledger or if its
+/// deposits.json is missing. Useful for tests that need to credit the
+/// agent's destination deposit before triggering a route.
 pub fn htlc_agent_deposit_pubkey(ledger_id: &str) -> Option<String> {
     let path = repo_root()
         .join("deposits-tools/data/htlc-agent/deposits.json");
     let raw = std::fs::read_to_string(&path).ok()?;
     let deposits: Vec<serde_json::Value> = serde_json::from_str(&raw).ok()?;
     for d in deposits {
-        if d.get("ledger_id").and_then(|v| v.as_str()) == Some(ledger_id) {
-            return d
-                .get("deposit_pubkey")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+        if d.get("ledger_id").and_then(|v| v.as_str()) != Some(ledger_id) {
+            continue;
+        }
+        // Wave-2 record: `deposit_id` directly. Older record: synthesize
+        // pk(<deposit_pubkey>) and hash.
+        if let Some(id) = d.get("deposit_id").and_then(|v| v.as_str()) {
+            return Some(id.to_string());
+        }
+        if let Some(pk) = d.get("deposit_pubkey").and_then(|v| v.as_str()) {
+            let descriptor = format!("pk({})", pk);
+            return Some(hex::encode(
+                deposits_core::types::compute_deposit_id(&descriptor),
+            ));
         }
     }
     None
 }
 
-/// Read a wallet's `deposits.json` and return `(deposit_pubkey_hex,
+/// Read a wallet's `deposits.json` and return `(deposit_id_hex,
 /// amount_sats)` for the deposit with the given alias. `amount_sats`
-/// is `0` for a deposit that hasn't been funded yet (the field is
-/// absent on the freshly-opened "open" status). Returns `None` if no
-/// deposit with that alias is present.
+/// is `0` for a deposit that hasn't been funded yet. Returns `None`
+/// if no deposit with that alias is present, or if the record is
+/// missing both `deposit_id` and `deposit_pubkey`.
 pub fn wallet_lookup_deposit(
     data_dir: &Path,
     alias: &str,
@@ -318,11 +345,19 @@ pub fn wallet_lookup_deposit(
     let raw = std::fs::read_to_string(&path).ok()?;
     let deposits: Vec<serde_json::Value> = serde_json::from_str(&raw).ok()?;
     for d in deposits {
-        if d.get("alias").and_then(|v| v.as_str()) == Some(alias) {
-            let pk = d.get("deposit_pubkey")?.as_str()?.to_string();
-            let amount = d.get("amount_sats").and_then(|v| v.as_u64()).unwrap_or(0);
-            return Some((pk, amount));
+        if d.get("alias").and_then(|v| v.as_str()) != Some(alias) {
+            continue;
         }
+        let id_hex = if let Some(id) = d.get("deposit_id").and_then(|v| v.as_str()) {
+            id.to_string()
+        } else if let Some(pk) = d.get("deposit_pubkey").and_then(|v| v.as_str()) {
+            let descriptor = format!("pk({})", pk);
+            hex::encode(deposits_core::types::compute_deposit_id(&descriptor))
+        } else {
+            return None;
+        };
+        let amount = d.get("amount_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+        return Some((id_hex, amount));
     }
     None
 }

@@ -19,7 +19,9 @@ mod ledger_op_tlv {
     pub const INVOICE: u64 = 16;
     pub const COSIGNER_SIG: u64 = 18;
     pub const NEW_FEES: u64 = 20;
-    pub const DEPOSIT_PUBKEY: u64 = 24;
+    // 24 reserved (was DEPOSIT_PUBKEY on legacy wire — never emitted
+    // by current code, dropped post-Wave-1 since identity is the
+    // miniscript descriptor, not a single pubkey)
     pub const INVOICE_ID: u64 = 26;
     pub const SEQUENCE_NUMBER: u64 = 28;
     pub const PAYMENT_ID: u64 = 30;

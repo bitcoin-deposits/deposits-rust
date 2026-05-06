@@ -109,8 +109,19 @@ async fn make_invoice_returns_valid_cosignature() {
 
     let deposits_json = std::fs::read_to_string(wdir.join("deposits.json")).unwrap();
     let deposits: serde_json::Value = serde_json::from_str(&deposits_json).unwrap();
-    let deposit_pubkey = deposits[0]["deposit_pubkey"].as_str().unwrap().to_string();
-    eprintln!("[setup]  deposit_pubkey={}…", &deposit_pubkey[..16]);
+    // Wave-2: wallets persist `descriptor` directly. Fall back to
+    // synthesizing pk(<deposit_pubkey>) so the test still passes against
+    // older deposit records during the migration window.
+    let descriptor = match deposits[0]["descriptor"].as_str() {
+        Some(d) => d.to_string(),
+        None => {
+            let pk = deposits[0]["deposit_pubkey"]
+                .as_str()
+                .expect("deposit record missing both descriptor and deposit_pubkey");
+            format!("pk({})", pk)
+        }
+    };
+    eprintln!("[setup]  descriptor={}…", &descriptor[..32.min(descriptor.len())]);
 
     // ── 2. Connect a Nostr transport with the wallet's signing key ──
     let user_secret_key = bitcoin::secp256k1::SecretKey::from_slice(
@@ -155,7 +166,7 @@ async fn make_invoice_returns_valid_cosignature() {
             &ledger_id,
             "make_invoice",
             serde_json::json!({
-                "deposit_pubkey": &deposit_pubkey,
+                "descriptor": &descriptor,
                 "amount_sats": amount_sats,
                 "description": "invoice_cosign integration test",
             }),
@@ -244,7 +255,7 @@ async fn make_invoice_returns_valid_cosignature() {
         .try_into()
         .expect("cosign_signature 64 bytes");
 
-    let deposit_id = compute_deposit_id(&format!("pk({})", deposit_pubkey));
+    let deposit_id = compute_deposit_id(&descriptor);
     let amount_msat = amount_sats * 1000;
     let msg_hash = invoice_cosign_signing_message(
         &ledger_id,

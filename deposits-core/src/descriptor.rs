@@ -80,7 +80,9 @@ fn try_verify_pk(
 /// Verify a witness against a general miniscript descriptor.
 ///
 /// Parses the descriptor, checks each signature in the witness stack
-/// against the message hash, and evaluates satisfaction.
+/// against the message hash, and evaluates satisfaction. Each key may
+/// only be credited once, so duplicate signatures don't cumulate
+/// toward the threshold.
 fn verify_miniscript(
     descriptor: &str,
     witness: &DescriptorWitness,
@@ -117,27 +119,34 @@ fn verify_miniscript(
     let mut keys = Vec::new();
     extract_keys(&desc, &mut keys);
 
-    // Verify each signature in the witness against the known keys
-    let mut valid_sigs = 0usize;
-    for sig_bytes in &witness.stack {
-        if sig_bytes.len() != 64 {
-            continue;
-        }
-        if let Ok(sig) = bitcoin::secp256k1::schnorr::Signature::from_slice(sig_bytes) {
-            for key in &keys {
-                let x_only = key.x_only_public_key().0;
+    // For each key, count it as "satisfied" iff at least one stack entry
+    // is a valid Schnorr signature by that key. Tallying per-key (rather
+    // than per-stack-entry) prevents a single signature from doubling up
+    // toward a threshold.
+    let mut satisfied = 0usize;
+    for key in &keys {
+        let x_only = key.x_only_public_key().0;
+        let mut hit = false;
+        for sig_bytes in &witness.stack {
+            if sig_bytes.len() != 64 {
+                continue;
+            }
+            if let Ok(sig) = bitcoin::secp256k1::schnorr::Signature::from_slice(sig_bytes) {
                 if secp.verify_schnorr(&sig, &msg, &x_only).is_ok() {
-                    valid_sigs += 1;
+                    hit = true;
                     break;
                 }
             }
         }
+        if hit {
+            satisfied += 1;
+        }
     }
 
     // Determine required signatures from the descriptor structure
-    let required = required_sigs(&desc);
+    let required = required_sigs(descriptor);
 
-    Ok(valid_sigs >= required)
+    Ok(satisfied >= required)
 }
 
 /// Extract all public keys from a descriptor.
@@ -167,22 +176,69 @@ fn extract_keys(
     });
 }
 
-/// Determine the minimum number of signatures required by a descriptor.
-fn required_sigs(desc: &miniscript::Descriptor<miniscript::DescriptorPublicKey>) -> usize {
-    // Simple heuristic: count keys in the descriptor
-    // For pk(): 1, for multi(k,..): k, for and(pk,pk): 2
-    // A full implementation would walk the miniscript tree
-    let mut key_count = 0usize;
-    use miniscript::ForEachKey;
-    desc.for_each_key(|_| {
-        key_count += 1;
-        true
-    });
+/// Determine the minimum number of signatures required to satisfy a
+/// descriptor. We special-case the most common multi-key shapes —
+/// `multi(k, ...)` and `thresh(k, ...)` at the top of the descriptor
+/// (optionally wrapped in `wsh(...)` / `sh(...)`) — by parsing `k`
+/// directly from the descriptor string. Anything else is treated
+/// conservatively as N-of-N over the keys it references, mirroring
+/// the behavior before the threshold cases were special-cased.
+fn required_sigs(descriptor: &str) -> usize {
+    // Strip a single leading wrapper (wsh / sh / tr) so we see the
+    // payload shape directly.
+    let inner = strip_wrapper(descriptor.trim());
+    if let Some(k) = parse_threshold_k(inner) {
+        return k.max(1);
+    }
 
-    // For threshold descriptors, we'd need to inspect the structure
-    // For now, assume all keys are required (conservative)
-    // TODO: extract threshold from multi() and thresh() nodes
-    key_count.max(1)
+    // Fallback: count distinct pubkey appearances. This is conservative
+    // (treats and(A,B) as 2-of-2, and over-rejects or() variants) but
+    // it preserves the pre-threshold behavior for anything we don't
+    // recognize structurally.
+    use miniscript::{Descriptor, DescriptorPublicKey, ForEachKey};
+    use std::str::FromStr;
+    let desc_str = if descriptor.starts_with("wsh(")
+        || descriptor.starts_with("sh(")
+        || descriptor.starts_with("tr(")
+    {
+        descriptor.to_string()
+    } else {
+        format!("wsh({})", descriptor)
+    };
+    if let Ok(desc) = Descriptor::<DescriptorPublicKey>::from_str(&desc_str) {
+        let mut count = 0usize;
+        desc.for_each_key(|_| {
+            count += 1;
+            true
+        });
+        return count.max(1);
+    }
+    1
+}
+
+/// Peel one layer of `wsh(...)`, `sh(...)`, or `tr(...)` if present.
+fn strip_wrapper(s: &str) -> &str {
+    for prefix in ["wsh(", "sh(", "tr("] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            if let Some(inner) = rest.strip_suffix(')') {
+                return inner;
+            }
+        }
+    }
+    s
+}
+
+/// Extract `k` from `multi(k, ...)` or `thresh(k, ...)` at the start
+/// of `s`. Returns `None` if `s` isn't shaped like that.
+fn parse_threshold_k(s: &str) -> Option<usize> {
+    for prefix in ["multi(", "thresh(", "multi_a(", "sortedmulti("] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            // First comma-delimited field is the threshold integer.
+            let k_str = rest.split(',').next()?.trim();
+            return k_str.parse::<usize>().ok();
+        }
+    }
+    None
 }
 
 /// Witness verifier implementation using real cryptographic verification.
@@ -307,5 +363,73 @@ mod tests {
 
         let result = verify_witness("not_a_descriptor", &witness, &msg_hash);
         assert!(result.is_err());
+    }
+
+    /// Build a fresh keypair from a 32-byte seed slice. Used to drive
+    /// the multi-key descriptor tests with three independent keys.
+    fn keypair_from_seed(seed: u8) -> (SecretKey, bitcoin::secp256k1::PublicKey) {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[seed; 32]).unwrap();
+        let pk = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk);
+        (sk, pk)
+    }
+
+    /// Multi-key descriptor regression: a 2-of-3 multisig over Schnorr
+    /// keys is satisfied by *any* two valid signatures (in any order).
+    /// This is the principal regression target for Phase-4 — it would
+    /// have failed under the old `pk()`-only assumption baked into the
+    /// daemon's wire-protocol surface.
+    #[test]
+    fn multi_2_of_3_satisfies_with_two_sigs() {
+        let (sk_a, pk_a) = keypair_from_seed(1);
+        let (sk_b, pk_b) = keypair_from_seed(2);
+        let (_, pk_c) = keypair_from_seed(3);
+
+        // Use raw compressed-hex form — matches the wallet's descriptor shape.
+        let descriptor = format!(
+            "multi(2,{},{},{})",
+            hex::encode(pk_a.serialize()),
+            hex::encode(pk_b.serialize()),
+            hex::encode(pk_c.serialize())
+        );
+        let msg_hash = [0xCD; 32];
+
+        // A + B sign — should satisfy.
+        let witness_ab = DescriptorWitness {
+            stack: vec![sign_message(&sk_a, &msg_hash).to_vec(), sign_message(&sk_b, &msg_hash).to_vec()],
+        };
+        assert!(
+            verify_witness(&descriptor, &witness_ab, &msg_hash).unwrap(),
+            "2-of-3: A+B sigs should satisfy"
+        );
+
+        // Only A signs — under-threshold, must fail.
+        let witness_a = DescriptorWitness {
+            stack: vec![sign_message(&sk_a, &msg_hash).to_vec()],
+        };
+        assert!(
+            !verify_witness(&descriptor, &witness_a, &msg_hash).unwrap(),
+            "2-of-3: A alone must NOT satisfy"
+        );
+
+        // A signs twice with the same key — duplicates don't count.
+        let sig_a = sign_message(&sk_a, &msg_hash);
+        let witness_aa = DescriptorWitness {
+            stack: vec![sig_a.to_vec(), sig_a.to_vec()],
+        };
+        assert!(
+            !verify_witness(&descriptor, &witness_aa, &msg_hash).unwrap(),
+            "2-of-3: dup A sigs must NOT satisfy threshold"
+        );
+
+        // Wrong message — sigs valid but bound to a different digest.
+        let other_hash = [0xEF; 32];
+        let witness_ab_wrong = DescriptorWitness {
+            stack: vec![sign_message(&sk_a, &msg_hash).to_vec(), sign_message(&sk_b, &msg_hash).to_vec()],
+        };
+        assert!(
+            !verify_witness(&descriptor, &witness_ab_wrong, &other_hash).unwrap(),
+            "2-of-3: sigs over wrong message must NOT satisfy"
+        );
     }
 }
