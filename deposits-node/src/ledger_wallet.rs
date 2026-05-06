@@ -232,28 +232,40 @@ impl LedgerWallet {
         Ok(bal.confirmed.to_sat() + bal.trusted_pending.to_sat())
     }
 
-    /// Full sync via Esplora. Calls every revealed script-pubkey on
-    /// both keychains; ~40 HTTP requests for a fresh wallet, scales
-    /// linearly with revealed addresses afterward.
+    /// Full descriptor-scan via Esplora. Walks both keychains from
+    /// index 0 with a stop-gap of `SCAN_GAP` so externally-funded
+    /// UTXOs (faucet → `ledger address` output) get picked up even
+    /// when this process has never revealed any addresses itself.
+    ///
+    /// Uses BDK's `start_full_scan` rather than `start_sync` —
+    /// full_scan registers each scanned spk in the wallet's index
+    /// before checking it, so apply_update will recognize matching
+    /// txs as wallet-owned. A plain SyncRequest only checks already-
+    /// indexed scripts, which gives back-to-back zero-balance reads
+    /// when (as in our flow) the daemon's per-ledger BDK wallet has
+    /// never had `reveal_next_address` called on it.
     pub fn sync(&self) -> Result<(), Error> {
+        const SCAN_GAP: usize = 20;
         let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
 
         let mut wallet = self.inner.lock().unwrap();
-        let spks: Vec<_> = wallet
-            .all_unbounded_spk_iters()
-            .into_iter()
-            .flat_map(|(_, iter)| iter.take(20).map(|(_, spk)| spk))
-            .collect();
-        if spks.is_empty() {
-            return Ok(());
-        }
-        let request = SyncRequest::builder().spks(spks).build();
+        let request = wallet.start_full_scan();
         let update = client
-            .sync(request, 5)
-            .map_err(|e| Error::Wallet(format!("ledger wallet sync: {}", e)))?;
+            .full_scan(request, SCAN_GAP, 5)
+            .map_err(|e| Error::Wallet(format!("ledger wallet full_scan: {}", e)))?;
         wallet
             .apply_update(update)
             .map_err(|e| Error::Wallet(format!("ledger wallet apply_update: {}", e)))?;
+        let bal = wallet.balance();
+        let utxo_count = wallet.list_unspent().count();
+        tracing::info!(
+            "LedgerWallet[{} acct={}] sync done: confirmed={} pending={} utxos={}",
+            &self.ledger_id[..16.min(self.ledger_id.len())],
+            self.account_index,
+            bal.confirmed.to_sat(),
+            bal.trusted_pending.to_sat() + bal.untrusted_pending.to_sat(),
+            utxo_count,
+        );
         Ok(())
     }
 

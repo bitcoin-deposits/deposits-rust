@@ -342,11 +342,20 @@ current_block=$(get_block_height)
 # output to a log file for post-mortem.
 PHASE2_LOG="$DATA_ROOT/phase2.log"
 : > "$PHASE2_LOG"
+# Per-ledger funding amount: reserves + collateral (legacy split kept
+# for documentation; the on-chain Taproot vault no longer separates
+# them, but the total reflects the same intent).
+PER_LEDGER_SATS=$((RESERVES_SATS + COLLATERAL_SATS))
+PER_LEDGER_BTC=$(python3 -c "print('{:.8f}'.format($PER_LEDGER_SATS / 100000000))")
+
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     for l in $(seq 1 $LEDGERS_PER_OP); do
-        # `ledger open` is now a pure declaration — no on-chain reserves
-        # tx until `quorum begin`, which spends from the operator wallet
-        # directly into the Taproot Q=N vault.
+        # `ledger open` is a pure declaration. The on-chain commitment
+        # happens later at `quorum begin`, which draws inputs from the
+        # ledger's *own* per-ledger BDK wallet (introduced in phase 1).
+        # Each ledger has an isolated UTXO set, so multiple `quorum
+        # begin` calls on the same operator can't race for the same
+        # coins.
         output=$(run_cmd "$i" ledger open 2>&1 | tee -a "$PHASE2_LOG")
         ledger_id=$(echo "$output" | grep "Ledger ID:" | awk '{print $3}')
         if [ -z "$ledger_id" ]; then
@@ -356,12 +365,27 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
             exit 1
         fi
         store "ledger_${i}_${l}" "$ledger_id"
+
+        # Pre-fund the ledger from the faucet. `ledger address` returns
+        # a fresh receive address from the per-ledger wallet; the
+        # bitcoin-core faucet wallet sends $PER_LEDGER_BTC there.
+        # External pre-funding by design — the daemon never needs to
+        # juggle a shared wallet, and the funding source is the
+        # operator's choice (here: the regtest faucet).
+        addr=$(run_cmd "$i" ledger address "$ledger_id" 2>>"$PHASE2_LOG" | tail -1)
+        if [ -z "$addr" ]; then
+            log_warn "op$i/L$l ($ledger_id): ledger address produced no output"
+            log_warn "full Phase 2 transcript at $PHASE2_LOG"
+            exit 1
+        fi
+        bitcoin_cli -rpcwallet=faucet sendtoaddress "$addr" "$PER_LEDGER_BTC" \
+            >> "$PHASE2_LOG" 2>&1 || {
+                log_warn "op$i/L$l: faucet sendtoaddress $addr failed — see $PHASE2_LOG"
+                exit 1
+            }
     done
     # Per-op advertisement pass — `ledger advertise` walks the operator's
-    # ledgers and publishes a kind:39100 for each. Without this, wallet
-    # `discover` returns nothing because `ledger open` doesn't advertise
-    # on its own. Send to the durable relay so the ad survives the
-    # duration of the test run; the messaging relay drops events.
+    # ledgers and publishes a kind:39100 for each.
     run_cmd "$i" ledger advertise \
         --name "op$i" \
         --advertise-relay "ws://localhost:$LEDGER_RELAY_PORT" \
@@ -370,9 +394,12 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
         }
     echo -n "."
 done
-mine_blocks 1
+# Confirm all the pre-funding txs in one block. With per-ledger
+# wallets each tx pays a distinct address — no UTXO contention with
+# previous iterations, no need to mine between iterations.
+mine_blocks 6
 echo ""
-log_ok "Created $((NODE_COUNT * LEDGERS_PER_OP)) ledgers"
+log_ok "Created + pre-funded $((NODE_COUNT * LEDGERS_PER_OP)) ledgers ($PER_LEDGER_BTC BTC each)"
 echo ""
 
 # ============================================================================
