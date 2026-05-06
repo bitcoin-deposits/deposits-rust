@@ -44,6 +44,7 @@
 pub mod error;
 pub mod handler;
 pub mod ldk_cli;
+pub mod ledger_wallet;
 pub mod metrics;
 pub mod node;
 pub mod node_cli;
