@@ -21,15 +21,13 @@ use bdk_wallet::bitcoin::{
 };
 use bdk_wallet::chain::spk_client::SyncRequest;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet as BdkWallet};
-use deposits_core::{
-    TaprootReservesOutput, TapscriptReservesBuilder, ThresholdConfig, ThresholdTier, VoterSet,
-};
+use deposits_core::TaprootReservesOutput;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Mutex, RwLock};
+use std::sync::Mutex;
 
 use crate::Error;
 
@@ -49,9 +47,6 @@ pub struct Wallet {
 
     /// Our operator public key
     operator_pubkey: PublicKey,
-
-    /// Tracked Taproot reserves outputs (quorum-based)
-    taproot_reserves: RwLock<HashMap<OutPoint, TaprootReservesInfo>>,
 
     /// Current block height (updated on sync)
     block_height: Mutex<u32>,
@@ -92,36 +87,6 @@ pub struct TaprootReservesInfo {
 
     /// Whether this output is confirmed
     pub confirmed: bool,
-}
-
-/// Serializable version of TaprootReservesInfo for persistence
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TaprootReservesInfoSerde {
-    outpoint_txid: String,
-    outpoint_vout: u32,
-    amount: u64,
-    operator: String,
-    quorum_members: Vec<String>,
-    quorum_expiry: u32,
-    ledger_hash: String, // hex encoded
-    address: String,     // Taproot address
-    confirmed: bool,
-}
-
-impl From<&TaprootReservesInfo> for TaprootReservesInfoSerde {
-    fn from(info: &TaprootReservesInfo) -> Self {
-        Self {
-            outpoint_txid: info.outpoint.txid.to_string(),
-            outpoint_vout: info.outpoint.vout,
-            amount: info.amount,
-            operator: info.operator.to_string(),
-            quorum_members: info.quorum_members.iter().map(|p| p.to_string()).collect(),
-            quorum_expiry: info.quorum_expiry,
-            ledger_hash: hex::encode(info.ledger_hash),
-            address: info.taproot_output.address.to_string(),
-            confirmed: info.confirmed,
-        }
-    }
 }
 
 impl Wallet {
@@ -176,17 +141,12 @@ impl Wallet {
             wallet.reveal_next_address(KeychainKind::External);
         }
 
-        // Load existing taproot reserves from disk
-        let taproot_reserves =
-            Self::load_taproot_reserves_from_disk(&data_dir, operator_pubkey, network)?;
-
         Ok(Self {
             inner: Mutex::new(wallet),
             electrum_url,
             network,
             operator_secret,
             operator_pubkey,
-            taproot_reserves: RwLock::new(taproot_reserves),
             block_height: Mutex::new(0),
             block_hash: Mutex::new([0u8; 32]),
             data_dir,
@@ -217,96 +177,6 @@ impl Wallet {
         let index_file = data_dir.join("address_index.txt");
         fs::write(&index_file, index.to_string())
             .map_err(|e| Error::Wallet(format!("Failed to write address index: {}", e)))?;
-        Ok(())
-    }
-
-    /// Load Taproot reserves from disk
-    fn load_taproot_reserves_from_disk(
-        data_dir: &PathBuf,
-        operator_pubkey: PublicKey,
-        network: Network,
-    ) -> Result<HashMap<OutPoint, TaprootReservesInfo>, Error> {
-        let reserves_file = data_dir.join("taproot_reserves.json");
-        if !reserves_file.exists() {
-            return Ok(HashMap::new());
-        }
-
-        let contents = fs::read_to_string(&reserves_file)
-            .map_err(|e| Error::Wallet(format!("Failed to read taproot reserves file: {}", e)))?;
-
-        let serde_list: Vec<TaprootReservesInfoSerde> = serde_json::from_str(&contents)
-            .map_err(|e| Error::Wallet(format!("Failed to parse taproot reserves file: {}", e)))?;
-
-        let mut reserves = HashMap::new();
-        for serde_info in serde_list {
-            // Parse the basic info
-            let txid = Txid::from_str(&serde_info.outpoint_txid)
-                .map_err(|e| Error::Wallet(format!("Invalid txid: {}", e)))?;
-            let outpoint = OutPoint {
-                txid,
-                vout: serde_info.outpoint_vout,
-            };
-            let operator = PublicKey::from_str(&serde_info.operator)
-                .map_err(|e| Error::Wallet(format!("Invalid operator pubkey: {}", e)))?;
-            let quorum_members: Result<Vec<PublicKey>, _> = serde_info
-                .quorum_members
-                .iter()
-                .map(|p| PublicKey::from_str(p))
-                .collect();
-            let quorum_members = quorum_members
-                .map_err(|e| Error::Wallet(format!("Invalid quorum member pubkey: {}", e)))?;
-            let ledger_hash_bytes = hex::decode(&serde_info.ledger_hash)
-                .map_err(|e| Error::Wallet(format!("Invalid ledger hash hex: {}", e)))?;
-            let mut ledger_hash = [0u8; 32];
-            ledger_hash.copy_from_slice(&ledger_hash_bytes);
-
-            // Rebuild the TaprootReservesOutput using default config to match custody transfer
-            let voter_set = VoterSet::new(operator_pubkey, quorum_members.clone());
-            let config = if quorum_members.is_empty() {
-                ThresholdConfig::custom(vec![ThresholdTier::new(1, true, 0, "Operator only")])
-            } else {
-                ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
-            };
-
-            let builder = TapscriptReservesBuilder::new(voter_set, config, network, ledger_hash);
-            let taproot_output = builder
-                .build()
-                .map_err(|e| Error::Wallet(format!("Failed to rebuild Taproot output: {:?}", e)))?;
-
-            let info = TaprootReservesInfo {
-                outpoint,
-                amount: serde_info.amount,
-                operator,
-                quorum_members,
-                quorum_expiry: serde_info.quorum_expiry,
-                ledger_hash,
-                taproot_output,
-                confirmed: serde_info.confirmed,
-            };
-
-            reserves.insert(outpoint, info);
-        }
-
-        tracing::info!("Loaded {} Taproot reserves from disk", reserves.len());
-        Ok(reserves)
-    }
-
-    /// Save Taproot reserves to disk
-    fn save_taproot_reserves_to_disk(&self) -> Result<(), Error> {
-        let reserves = self.taproot_reserves.read().unwrap();
-        let serde_list: Vec<TaprootReservesInfoSerde> = reserves
-            .values()
-            .map(TaprootReservesInfoSerde::from)
-            .collect();
-
-        let contents = serde_json::to_string_pretty(&serde_list)
-            .map_err(|e| Error::Wallet(format!("Failed to serialize Taproot reserves: {}", e)))?;
-
-        let reserves_file = self.data_dir.join("taproot_reserves.json");
-        fs::write(&reserves_file, contents)
-            .map_err(|e| Error::Wallet(format!("Failed to write Taproot reserves file: {}", e)))?;
-
-        tracing::info!("Saved {} Taproot reserves to disk", reserves.len());
         Ok(())
     }
 
@@ -577,324 +447,6 @@ impl Wallet {
     ///
     /// # Returns
     /// A `TaprootReservesCreateResult` with the transaction and reserves info
-    pub fn create_taproot_reserves_output(
-        &self,
-        amount_sats: u64,
-        quorum_members: Vec<PublicKey>,
-        member_expiries: Vec<u32>,
-        ledger_hash: [u8; 32],
-    ) -> Result<TaprootReservesCreateResult, Error> {
-        if quorum_members.len() != member_expiries.len() {
-            return Err(Error::Wallet(
-                "Quorum members and expiries must have same length".to_string(),
-            ));
-        }
-
-        // Find the minimum expiry (first quorum member timeout)
-        let first_expiry = *member_expiries.iter().min().unwrap_or(&0);
-        let current_height = self.get_block_height()?;
-
-        if first_expiry > 0 && first_expiry <= current_height {
-            return Err(Error::Wallet(format!(
-                "First quorum member expiry {} is already past current block {}",
-                first_expiry, current_height
-            )));
-        }
-
-        // Create VoterSet: operator is tie-breaker, quorum members are primary voters
-        let voter_set = VoterSet::new(self.operator_pubkey, quorum_members.clone());
-
-        // Use default threshold configuration to ensure custody transfer can rebuild the same address
-        // This uses: Tier 0 (majority+operator), Tier 1 (2-of-n quorum override), Tier 2 (emergency)
-        let config = if quorum_members.is_empty() {
-            ThresholdConfig::custom(vec![ThresholdTier::new(
-                1,
-                true,
-                0,
-                "Operator only (no quorum)",
-            )])
-        } else {
-            ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
-        };
-
-        // Build the Taproot reserves output
-        let builder = TapscriptReservesBuilder::new(voter_set, config, self.network, ledger_hash);
-
-        let taproot_output = builder
-            .build()
-            .map_err(|e| Error::Wallet(format!("Failed to build Taproot reserves: {:?}", e)))?;
-
-        // Get the P2TR script pubkey
-        let script_pubkey = taproot_output.script_pubkey();
-
-        // Build the transaction
-        let mut wallet = self.inner.lock().unwrap();
-
-        let mut psbt = {
-            let mut builder = wallet.build_tx();
-            builder
-                .add_recipient(script_pubkey.clone(), Amount::from_sat(amount_sats))
-                .fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
-            builder
-                .finish()
-                .map_err(|e| Error::Wallet(format!("Failed to build tx: {}", e)))?
-        };
-
-        // Sign the transaction
-        wallet
-            .sign(&mut psbt, SignOptions::default())
-            .map_err(|e| Error::Wallet(format!("Failed to sign tx: {}", e)))?;
-
-        let tx = psbt
-            .extract_tx()
-            .map_err(|e| Error::Wallet(format!("Failed to extract tx: {}", e)))?;
-
-        // Find the Taproot output index
-        let vout = tx
-            .output
-            .iter()
-            .position(|o| o.script_pubkey == script_pubkey)
-            .ok_or_else(|| Error::Wallet("Taproot output not found in tx".to_string()))?;
-
-        let outpoint = OutPoint {
-            txid: tx.compute_txid(),
-            vout: vout as u32,
-        };
-
-        // Track this Taproot reserves output
-        let info = TaprootReservesInfo {
-            outpoint,
-            amount: amount_sats,
-            operator: self.operator_pubkey,
-            quorum_members: quorum_members.clone(),
-            quorum_expiry: first_expiry,
-            ledger_hash,
-            taproot_output: taproot_output.clone(),
-            confirmed: false,
-        };
-
-        drop(wallet); // Release lock before acquiring write lock
-        self.taproot_reserves
-            .write()
-            .unwrap()
-            .insert(outpoint, info);
-
-        tracing::info!(
-            "Created Taproot reserves at {} with {} quorum members, first expiry at block {}",
-            outpoint,
-            quorum_members.len(),
-            first_expiry
-        );
-
-        Ok(TaprootReservesCreateResult {
-            outpoint,
-            address: taproot_output.address.clone(),
-            amount: amount_sats,
-            tx,
-            taproot_output,
-            quorum_expiry: first_expiry,
-            ledger_hash,
-        })
-    }
-
-    /// Get all tracked Taproot reserves
-    pub fn get_taproot_reserves(&self) -> Vec<TaprootReservesInfo> {
-        self.taproot_reserves
-            .read()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect()
-    }
-
-    /// Get the first/primary Taproot reserves outpoint
-    pub fn get_taproot_reserves_outpoint(&self) -> Option<OutPoint> {
-        self.taproot_reserves.read().unwrap().keys().next().copied()
-    }
-
-    /// Mark a Taproot reserves output as confirmed
-    pub fn confirm_taproot_reserves(&self, outpoint: &OutPoint) -> Result<(), Error> {
-        let mut taproot_reserves = self.taproot_reserves.write().unwrap();
-        if let Some(info) = taproot_reserves.get_mut(outpoint) {
-            info.confirmed = true;
-            Ok(())
-        } else {
-            Err(Error::Wallet(format!(
-                "Taproot reserves output not found: {}",
-                outpoint
-            )))
-        }
-    }
-
-    /// Rotate existing P2WSH reserves to a new Taproot output with quorum-based spending
-    ///
-    /// This spends the existing P2WSH reserves output and creates a new P2TR output.
-    /// The operator signs the P2WSH input using the single-sig path (OP_ELSE branch).
-    ///
-    /// # Arguments
-    /// * `quorum_members` - The quorum member pubkeys (will be voters)
-    /// * `member_expiries` - Block heights when each quorum member expires
-    /// * `ledger_hash` - The current ledger hash to commit to in the Taproot tree
-    ///
-    /// # Returns
-    /// A `TaprootReservesCreateResult` with the rotation transaction
-    /// Build (but do NOT broadcast or persist) a rotation tx from a legacy
-    /// P2WSH reserves UTXO to a fresh Taproot quorum vault.
-    ///
-    /// Returns the unsigned (well, operator-signed) tx + the future
-    /// [`TaprootReservesInfo`] that should be tracked once the rotation is
-    /// confirmed *and* the QuorumBegin ledger op has committed. The legacy
-    /// reserves outpoint that will be retired is also returned so the
-    /// caller can pair it with the new info in [`commit_rotation_to_taproot`].
-    ///
-    /// This function does **no** state mutation — the wallet's two reserves
-    /// maps are unchanged on return. Only after the broadcast confirms and
-    /// the ledger-side QuorumBegin commits should the caller invoke
-    /// `commit_rotation_to_taproot` to atomically retire the legacy entry
-    /// and start tracking the new taproot UTXO. If anything fails between
-    /// build and commit, the legacy entry stays intact and a retry can
-    /// simply rebuild from the same source UTXO.
-    /// Build (but do NOT broadcast or persist) a *genesis* rotation tx that
-    /// spends operator wallet UTXOs directly into a fresh Taproot Q=N quorum
-    /// vault. This is the new-model entry path: no legacy P2WSH reserves
-    /// UTXO is involved.
-    ///
-    /// Differs from [`build_rotation_to_taproot`]:
-    /// - Inputs come from BDK-managed wallet UTXOs (HD-derived addresses),
-    ///   selected and signed by BDK; the operator's secret key signs each
-    ///   input via the standard wallet path.
-    /// - There's no legacy reserves outpoint to return for retirement.
-    ///
-    /// Returns the operator-signed tx + the future TaprootReservesInfo to
-    /// track once both the rotation confirms and the QuorumBegin ledger op
-    /// commits. Caller drives broadcast → confs → cosign+commit, then
-    /// invokes [`commit_genesis_rotation`].
-    pub fn build_genesis_rotation_tx(
-        &self,
-        quorum_members: Vec<PublicKey>,
-        member_expiries: Vec<u32>,
-        ledger_hash: [u8; 32],
-        amount_sats: u64,
-        fee_rate_sat_per_vb: f32,
-    ) -> Result<(TaprootReservesCreateResult, TaprootReservesInfo), Error> {
-        if quorum_members.len() != member_expiries.len() {
-            return Err(Error::Wallet(
-                "Quorum members and expiries must have same length".to_string(),
-            ));
-        }
-
-        let first_expiry = *member_expiries.iter().min().unwrap_or(&0);
-
-        // Build the Taproot output (operator + cosigners, all configured tiers).
-        let voter_set = VoterSet::new(self.operator_pubkey, quorum_members.clone());
-        let config = if quorum_members.is_empty() {
-            ThresholdConfig::custom(vec![ThresholdTier::new(
-                1,
-                true,
-                0,
-                "Operator only (no quorum)",
-            )])
-        } else {
-            ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
-        };
-        let builder = TapscriptReservesBuilder::new(voter_set, config, self.network, ledger_hash);
-        let taproot_output = builder
-            .build()
-            .map_err(|e| Error::Wallet(format!("Failed to build Taproot reserves: {:?}", e)))?;
-        let new_script_pubkey = taproot_output.script_pubkey();
-
-        // BDK selects + signs wallet UTXOs to fund the rotation. The
-        // change output (if any) returns to the operator's wallet — only
-        // `amount_sats` lands in the taproot vault. This is the genesis
-        // case: no rotation FROM an existing reserves UTXO, just a fresh
-        // funding tx with a quorum-controlled output.
-        let mut wallet = self.inner.lock().unwrap();
-        let mut psbt = {
-            let mut tx_builder = wallet.build_tx();
-            tx_builder
-                .add_recipient(new_script_pubkey.clone(), Amount::from_sat(amount_sats))
-                .fee_rate(FeeRate::from_sat_per_vb_unchecked(
-                    fee_rate_sat_per_vb.max(1.0) as u64,
-                ));
-            tx_builder
-                .finish()
-                .map_err(|e| Error::Wallet(format!("Failed to build genesis rotation tx: {}", e)))?
-        };
-        wallet
-            .sign(&mut psbt, SignOptions::default())
-            .map_err(|e| Error::Wallet(format!("Failed to sign genesis rotation tx: {}", e)))?;
-        let tx = psbt
-            .extract_tx()
-            .map_err(|e| Error::Wallet(format!("Failed to extract tx: {}", e)))?;
-        drop(wallet);
-
-        // Find the taproot output's vout (BDK may place change first).
-        let vout = tx
-            .output
-            .iter()
-            .position(|o| o.script_pubkey == new_script_pubkey)
-            .ok_or_else(|| {
-                Error::Wallet("Taproot reserves output not found in genesis tx".to_string())
-            })? as u32;
-
-        let new_outpoint = OutPoint {
-            txid: tx.compute_txid(),
-            vout,
-        };
-        let new_info = TaprootReservesInfo {
-            outpoint: new_outpoint,
-            amount: amount_sats,
-            operator: self.operator_pubkey,
-            quorum_members: quorum_members.clone(),
-            quorum_expiry: first_expiry,
-            ledger_hash,
-            taproot_output: taproot_output.clone(),
-            confirmed: false,
-        };
-
-        tracing::info!(
-            "Built genesis rotation: wallet UTXOs → Taproot {} ({}sat, Q={}, expiry block {})",
-            new_outpoint,
-            amount_sats,
-            quorum_members.len(),
-            first_expiry
-        );
-
-        let result = TaprootReservesCreateResult {
-            outpoint: new_outpoint,
-            address: taproot_output.address.clone(),
-            amount: amount_sats,
-            tx,
-            taproot_output,
-            quorum_expiry: first_expiry,
-            ledger_hash,
-        };
-        Ok((result, new_info))
-    }
-
-    /// Atomically start tracking a genesis Taproot rotation. No legacy
-    /// reserves entry to retire (this is the genesis case). Persists
-    /// immediately. Call only after the rotation tx has confirmed AND the
-    /// QuorumBegin ledger op has committed.
-    pub fn commit_genesis_rotation(
-        &self,
-        new_info: TaprootReservesInfo,
-    ) -> Result<(), Error> {
-        let new_outpoint = new_info.outpoint;
-        let member_count = new_info.quorum_members.len();
-        {
-            let mut new_reserves = self.taproot_reserves.write().unwrap();
-            new_reserves.insert(new_outpoint, new_info);
-        }
-        self.save_taproot_reserves_to_disk()?;
-        tracing::info!(
-            "Committed genesis rotation: tracking Taproot {} (Q={})",
-            new_outpoint,
-            member_count
-        );
-        Ok(())
-    }
-
     /// Broadcast a transaction.
     ///
     /// After a successful broadcast, the tx is folded into BDK's
@@ -1140,243 +692,6 @@ impl Wallet {
         Ok(None)
     }
 
-    // ========================================================================
-    // Custody Transfer (Quorum Override) Spending
-    // ========================================================================
-
-    /// Prepare a custody transfer spend transaction
-    ///
-    /// This creates an unsigned transaction that spends the Taproot reserves
-    /// via the Tier 2 spending path (2-of-n without operator, after 2016 blocks).
-    /// This path allows quorum members to confiscate reserves from a non-conforming operator.
-    ///
-    /// # Arguments
-    /// * `request` - The custody transfer parameters
-    ///
-    /// # Returns
-    /// A `DisputeAcquireSpend` with the unsigned tx and sighash for signing
-    pub fn create_custody_transfer_spend(
-        &self,
-        request: &DisputeAcquireRequest,
-    ) -> Result<DisputeAcquireSpend, Error> {
-        use deposits_core::ReservesSpendBuilder;
-
-        // Get the Taproot reserves info
-        let reserves_info = {
-            let reserves = self.taproot_reserves.read().unwrap();
-            reserves
-                .get(&request.reserves_outpoint)
-                .cloned()
-                .ok_or_else(|| {
-                    Error::Wallet(format!(
-                        "Taproot reserves not found: {}",
-                        request.reserves_outpoint
-                    ))
-                })?
-        };
-
-        // Find the quorum-override tier: one that doesn't require tie-breaker (operator)
-        // and has threshold > 1 (not emergency single-sig). This allows quorum members
-        // to spend without the operator's cooperation.
-        let (tier_index, tier) = reserves_info
-            .taproot_output
-            .config
-            .tiers
-            .iter()
-            .enumerate()
-            .find(|(_, t)| !t.requires_tie_breaker && t.threshold > 1)
-            .ok_or_else(|| {
-                Error::Wallet(
-                    "No quorum-override tier found (requires_tie_breaker=false, threshold>1)"
-                        .to_string(),
-                )
-            })?;
-
-        // Rebuild the leaf script for this tier
-        let builder = deposits_core::TapscriptReservesBuilder::new(
-            reserves_info.taproot_output.voter_set.clone(),
-            reserves_info.taproot_output.config.clone(),
-            self.network,
-            reserves_info.ledger_hash,
-        );
-
-        let leaf_script = builder
-            .build_threshold_leaf(tier)
-            .map_err(|e| Error::Wallet(format!("Failed to build spending script: {:?}", e)))?;
-
-        // Get the control block
-        let control_block = reserves_info
-            .taproot_output
-            .control_block_for_tier(tier_index)
-            .ok_or_else(|| Error::Wallet("Failed to get control block for tier".to_string()))?;
-
-        // Build the spend transaction parameters
-        let spend_params = deposits_core::SpendTxParams {
-            reserves_outpoint: request.reserves_outpoint,
-            reserves_amount: reserves_info.amount,
-            destination_script: request.destination_address.script_pubkey(),
-            fee_rate_sat_vbyte: request.fee_rate,
-        };
-
-        let reserves_script_pubkey = reserves_info.taproot_output.script_pubkey();
-
-        // Build the unsigned transaction
-        let unsigned_tx =
-            ReservesSpendBuilder::build_spend_transaction(&spend_params, &reserves_script_pubkey)
-                .map_err(|e| Error::Wallet(format!("Failed to build spend tx: {:?}", e)))?;
-
-        // Compute the sighash
-        let sighash = ReservesSpendBuilder::compute_sighash(
-            &unsigned_tx,
-            0, // input index
-            reserves_info.amount,
-            &reserves_script_pubkey,
-            &leaf_script,
-        )
-        .map_err(|e| Error::Wallet(format!("Failed to compute sighash: {:?}", e)))?;
-
-        // Get sorted voter pubkeys (signature order must match)
-        let voter_pubkeys: Vec<PublicKey> = reserves_info
-            .taproot_output
-            .voter_set
-            .all_voters()
-            .into_iter()
-            .collect();
-
-        Ok(DisputeAcquireSpend {
-            unsigned_tx,
-            sighash: sighash.to_byte_array(),
-            leaf_script,
-            control_block,
-            voter_pubkeys,
-            tier_index,
-            reserves_amount: reserves_info.amount,
-            reserves_script_pubkey,
-        })
-    }
-
-    /// Sign a custody transfer sighash with our key
-    ///
-    /// Returns a 64-byte Schnorr signature if our key is in the voter set,
-    /// or None if we're not a voter.
-    pub fn sign_custody_transfer_sighash(
-        &self,
-        signer: &dyn deposits_signer_api::Signer,
-        sighash: &[u8; 32],
-    ) -> Result<Option<[u8; 64]>, Error> {
-        // Custody transfer Tapscript script-spend — same OnchainSighash
-        // bucket as the rotation path.
-        let sig_bytes = signer
-            .bip340_sign(
-                &deposits_signer_api::SignContext::no_ledger(
-                    deposits_signer_api::SigPurpose::OnchainSighash,
-                ),
-                sighash,
-            )
-            .map_err(|e| Error::Wallet(format!("custody transfer sighash sign: {}", e)))?;
-        Ok(Some(sig_bytes))
-    }
-
-    /// Finalize a custody transfer spend with collected signatures
-    ///
-    /// # Arguments
-    /// * `spend` - The custody transfer spend prepared earlier
-    /// * `signatures` - Signatures from voters, keyed by their pubkey
-    ///
-    /// # Returns
-    /// A `DisputeAcquireResult` with the signed transaction
-    pub fn finalize_custody_transfer(
-        &self,
-        spend: &DisputeAcquireSpend,
-        signatures: &std::collections::HashMap<PublicKey, [u8; 64]>,
-    ) -> Result<DisputeAcquireResult, Error> {
-        use deposits_core::ReservesSpendBuilder;
-
-        // Build the signature array in the correct order (matching voter pubkey order)
-        // For CHECKSIGADD, we need signatures in the order of keys in the script
-        let sorted_pubkeys = spend
-            .voter_pubkeys
-            .iter()
-            .map(|pk| pk.x_only_public_key().0)
-            .collect::<Vec<_>>();
-
-        let sorted_keys_with_sigs: Vec<_> = sorted_pubkeys
-            .iter()
-            .map(|xonly| {
-                // Find the full pubkey and its signature
-                for (pk, sig) in signatures.iter() {
-                    if pk.x_only_public_key().0 == *xonly {
-                        return Some(*sig);
-                    }
-                }
-                None
-            })
-            .collect();
-
-        // Sort by x-only pubkey (same order as script construction)
-        let mut indexed: Vec<_> = sorted_pubkeys
-            .iter()
-            .zip(sorted_keys_with_sigs.iter())
-            .enumerate()
-            .collect();
-        indexed.sort_by(|a, b| a.1 .0.serialize().cmp(&b.1 .0.serialize()));
-
-        let ordered_sigs: Vec<Option<[u8; 64]>> =
-            indexed.iter().map(|(_, (_, sig))| **sig).collect();
-
-        // Create the witness
-        let signed_tx = ReservesSpendBuilder::finalize_spend_transaction(
-            spend.unsigned_tx.clone(),
-            &ordered_sigs,
-            &spend.leaf_script,
-            &spend.control_block,
-        );
-
-        let txid = signed_tx.compute_txid();
-
-        Ok(DisputeAcquireResult { signed_tx, txid })
-    }
-
-    /// Execute a complete custody transfer (for testing/single-node scenarios)
-    ///
-    /// This is a convenience method that creates, signs, and optionally broadcasts
-    /// a custody transfer spend. For production use with multiple quorum members,
-    /// use the individual create/sign/finalize methods to coordinate signatures.
-    pub fn execute_custody_transfer(
-        &self,
-        signer: &dyn deposits_signer_api::Signer,
-        destination_address: Address,
-        fee_rate: u64,
-    ) -> Result<DisputeAcquireResult, Error> {
-        // Get the first Taproot reserves
-        let reserves_outpoint = self
-            .get_taproot_reserves_outpoint()
-            .ok_or_else(|| Error::Wallet("No Taproot reserves found".to_string()))?;
-
-        let request = DisputeAcquireRequest {
-            reserves_outpoint,
-            destination_address,
-            fee_rate,
-        };
-
-        // Create the spend
-        let spend = self.create_custody_transfer_spend(&request)?;
-
-        // Sign with our key
-        let our_sig = self
-            .sign_custody_transfer_sighash(signer, &spend.sighash)?
-            .ok_or_else(|| Error::Wallet("Failed to sign".to_string()))?;
-
-        // For a proper custody transfer, we need 2 signatures (Tier 2 threshold)
-        // In a real scenario, we'd collect from other quorum members via Nostr
-        // For now, just use our signature (will fail if threshold > 1)
-        let mut signatures = std::collections::HashMap::new();
-        signatures.insert(self.operator_pubkey, our_sig);
-
-        // Finalize
-        self.finalize_custody_transfer(&spend, &signatures)
-    }
-
     /// Create a mock wallet for testing
     #[cfg(test)]
     pub fn new_mock(data_dir: PathBuf) -> Self {
@@ -1399,7 +714,6 @@ impl Wallet {
             network: Network::Signet,
             operator_secret,
             operator_pubkey,
-            taproot_reserves: RwLock::new(HashMap::new()),
             block_height: Mutex::new(800_000),
             block_hash: Mutex::new([0u8; 32]),
             data_dir,
@@ -1408,7 +722,10 @@ impl Wallet {
     }
 }
 
-/// Result of creating a Taproot reserves output
+/// Output of building a Taproot Q=N activation tx (used by
+/// `LedgerWallet::build_activation_tx`). Stays in this module because
+/// it embeds `TaprootReservesOutput` which is shared between the
+/// wallet and ledger-wallet code paths.
 #[derive(Debug, Clone)]
 pub struct TaprootReservesCreateResult {
     /// The outpoint (valid after broadcast)
@@ -1431,45 +748,4 @@ pub struct TaprootReservesCreateResult {
 
     /// The ledger hash committed to in the Taproot tree
     pub ledger_hash: [u8; 32],
-}
-
-/// Parameters for a custody transfer spend
-#[derive(Debug, Clone)]
-pub struct DisputeAcquireRequest {
-    /// The Taproot reserves outpoint to spend
-    pub reserves_outpoint: OutPoint,
-    /// Destination address (new custodian's receiving address)
-    pub destination_address: Address,
-    /// Fee rate in sat/vbyte
-    pub fee_rate: u64,
-}
-
-/// Result of preparing a custody transfer spend
-#[derive(Debug, Clone)]
-pub struct DisputeAcquireSpend {
-    /// The unsigned spend transaction
-    pub unsigned_tx: Transaction,
-    /// The sighash that each quorum member must sign
-    pub sighash: [u8; 32],
-    /// The Tapscript leaf being used (Tier 2: 2-of-n without operator)
-    pub leaf_script: ScriptBuf,
-    /// The control block for the leaf
-    pub control_block: bitcoin::taproot::ControlBlock,
-    /// Sorted list of voter pubkeys (signature order must match)
-    pub voter_pubkeys: Vec<PublicKey>,
-    /// The tier index being used (2 = quorum override)
-    pub tier_index: usize,
-    /// The reserves amount (needed for sighash verification)
-    pub reserves_amount: u64,
-    /// The reserves script pubkey
-    pub reserves_script_pubkey: ScriptBuf,
-}
-
-/// Result of finalizing a custody transfer spend
-#[derive(Debug, Clone)]
-pub struct DisputeAcquireResult {
-    /// The signed transaction ready for broadcast
-    pub signed_tx: Transaction,
-    /// The transaction ID
-    pub txid: Txid,
 }

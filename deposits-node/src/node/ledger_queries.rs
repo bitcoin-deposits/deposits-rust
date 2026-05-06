@@ -769,38 +769,36 @@ impl Node {
         use bitcoin::OutPoint;
         use deposits_core::QuorumState;
 
-        // --- Phase 2: build the rotation tx (no wallet state mutation yet) ---
+        // --- Phase 2: build the activation tx on the per-ledger wallet ---
         //
-        // First, detect a resume case: a previous QuorumBegin attempt may
-        // have built and broadcast the rotation tx, recorded the new
-        // TaprootReservesInfo in the wallet, but timed out before the
-        // QuorumBegin ledger op committed. In that state the legacy reserves
-        // entry is gone, the wallet's taproot_reserves has the new outpoint,
-        // and the ledger is still in PreQuorum. Building a fresh rotation
-        // here would fail ("No existing reserves to rotate"). Instead, reuse
-        // the existing entry and jump straight to the cosign+commit phase.
+        // Each ledger has its own BDK wallet rooted at a per-ledger
+        // BIP-32 account. Inputs come exclusively from that wallet's
+        // own UTXOs, so concurrent `quorum begin` calls across ledgers
+        // can't race for shared coins.
         //
-        // Detection: wallet has any taproot_reserves entry AND ledger is
-        // PreQuorum. The entry's quorum_members must match the staged set
-        // — if they don't, the operator added/removed members after the
-        // failed attempt, which we can't reconcile here (would need to
-        // RBF the rotation tx with a fresh script tree).
+        // First, detect a resume case: a previous QuorumBegin attempt
+        // may have built and broadcast the activation tx and recorded
+        // its TaprootReservesInfo, but timed out before the QuorumBegin
+        // ledger op committed. The ledger stays PreQuorum and the
+        // ledger wallet still has the entry. Reuse it instead of
+        // building a fresh tx.
+        let ledger_wallet = self.ensure_ledger_wallet(&ledger_id)?;
+        if let Err(e) = ledger_wallet.sync() {
+            tracing::warn!("Ledger wallet sync failed before quorum_begin: {}", e);
+        }
+
         let pending_resume = {
             let pre_quorum =
                 ledger_arc.read().unwrap().state.quorum_state == QuorumState::PreQuorum;
             if pre_quorum {
-                self.wallet
-                    .get_taproot_reserves()
-                    .into_iter()
-                    .find(|t| t.quorum_members == quorum_members)
+                ledger_wallet
+                    .taproot_reserves()
+                    .filter(|t| t.quorum_members == quorum_members)
             } else {
                 None
             }
         };
 
-        // Resume path: a half-finished QuorumBegin already broadcast a
-        // taproot tx. Skip build+broadcast and jump straight to
-        // confirmation+cosign. Otherwise build a fresh activation tx.
         let (result, pending_taproot): (TaprootReservesCreateResult, TaprootReservesInfo) =
             if let Some(existing) = pending_resume {
                 tracing::info!(
@@ -826,36 +824,40 @@ impl Node {
                 };
                 (synth_result, existing)
             } else {
-                // Genesis path: spend wallet UTXOs directly into a fresh Q=N
-                // taproot vault. amount_sats defaults to wallet balance
-                // minus a small fee buffer when not explicitly specified.
+                // amount_sats defaults to the ledger wallet's confirmed
+                // balance minus a small fee buffer. With external
+                // pre-funding, the operator has already sent the
+                // activation amount to the ledger's deposit address.
                 let chosen_amount = match amount_sats {
                     Some(a) => a,
                     None => {
-                        let bal = self.wallet.get_wallet_balance().unwrap_or(0);
+                        let bal = ledger_wallet.balance_sats().unwrap_or(0);
                         if bal <= 1000 {
                             return Err(Error::Wallet(format!(
-                                "QuorumBegin: insufficient wallet balance: {} sats \
-                                 (need > 1000 sats to leave a fee buffer)",
-                                bal
+                                "QuorumBegin: insufficient ledger wallet balance: {} sats \
+                                 (need > 1000 sats to leave a fee buffer; \
+                                 use `deposits-node ledger address {}` and pre-fund it)",
+                                bal,
+                                &ledger_id[..16.min(ledger_id.len())]
                             )));
                         }
                         bal.saturating_sub(1000)
                     }
                 };
                 tracing::info!(
-                    "QuorumBegin: spending {} sats from wallet UTXOs into Q={} taproot vault",
+                    "QuorumBegin: spending {} sats from ledger {} wallet into Q={} taproot vault",
                     chosen_amount,
+                    &ledger_id[..16.min(ledger_id.len())],
                     quorum_members.len()
                 );
-                let (result, pending) = self.wallet.build_genesis_rotation_tx(
+                let (result, pending) = ledger_wallet.build_activation_tx(
                     quorum_members.clone(),
                     quorum_expiries.clone(),
                     ledger_hash,
                     chosen_amount,
                     5.0,
                 )?;
-                let txid = self.wallet.broadcast(&result.tx)?;
+                let txid = ledger_wallet.broadcast(&result.tx)?;
                 tracing::info!(
                     "Broadcast taproot activation: txid={}, address={}, {} members, first expiry at block {}",
                     txid,
@@ -970,7 +972,7 @@ impl Node {
         // broadcast would fail because the input is already spent on-chain,
         // exposing the half-rotated state to the operator rather than
         // silently losing track of funds.
-        self.wallet.commit_genesis_rotation(pending_taproot)?;
+        ledger_wallet.commit_taproot_reserves(pending_taproot)?;
 
         tracing::info!(
             "Committed QuorumBegin operation to ledger: txid={}, quorum={} members",

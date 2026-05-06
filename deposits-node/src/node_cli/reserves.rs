@@ -33,23 +33,29 @@ pub async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error:
     }
 }
 
-/// List all reserves outputs
+/// List Taproot reserves UTXOs across every per-ledger wallet on this
+/// operator. Each ledger's vault has its own entry; the listing groups
+/// by ledger id.
 pub async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_config(args)?;
     let node = Node::new(config).await?;
 
-    // Sync wallet first
-    node.sync_wallet()?;
+    let ledger_wallets: Vec<_> = node
+        .ledger_wallets
+        .read()
+        .unwrap()
+        .iter()
+        .map(|(id, w)| (id.clone(), w.clone()))
+        .collect();
 
-    let taproot_reserves = node.wallet.get_taproot_reserves();
-
-    if taproot_reserves.is_empty() {
-        println!("No reserves outputs found.");
-        return Ok(());
-    }
-
-    println!("=== Taproot Reserves (Quorum-based) ===");
-    for info in &taproot_reserves {
+    let mut found_any = false;
+    for (ledger_id, lw) in ledger_wallets {
+        let info = match lw.taproot_reserves() {
+            Some(i) => i,
+            None => continue,
+        };
+        found_any = true;
+        println!("=== Ledger {} ===", &ledger_id);
         println!("  Outpoint: {}", info.outpoint);
         println!("    Amount: {} sats", info.amount);
         println!("    Operator: {}", info.operator);
@@ -61,7 +67,6 @@ pub async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Er
         println!("    Ledger Hash: {}", hex::encode(&info.ledger_hash[..8]));
         println!("    Confirmed: {}", info.confirmed);
 
-        // Dump Taproot details
         println!();
         println!("    === Taproot Script Details ===");
         println!("    Internal Key: {}", info.taproot_output.internal_key());
@@ -83,23 +88,18 @@ pub async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Er
                 tier.requires_tie_breaker,
                 tier.timelock_blocks
             );
-
-            // Get the control block for this tier
             if let Some(cb) = info.taproot_output.control_block_for_tier(i) {
                 println!("      Control Block: {}", hex::encode(cb.serialize()));
             }
         }
         println!();
-
-        // Dump the full script tree
         println!("    === Full Script Tree (for decoding) ===");
-        // Rebuild and show each leaf script
         let voter_set = deposits_core::VoterSet::new(info.operator, info.quorum_members.clone());
         for (i, tier) in info.taproot_output.config.tiers.iter().enumerate() {
             let builder = deposits_core::TapscriptReservesBuilder::new(
                 voter_set.clone(),
                 info.taproot_output.config.clone(),
-                node.wallet.network(),
+                lw.network(),
                 info.ledger_hash,
             );
             if let Ok(script) = builder.build_threshold_leaf(tier) {
@@ -109,6 +109,9 @@ pub async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Er
         println!();
     }
 
+    if !found_any {
+        println!("No reserves outputs found.");
+    }
     Ok(())
 }
 
@@ -126,6 +129,7 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let mut destination: Option<String> = None;
     let mut keys: Vec<String> = Vec::new();
     let mut seed_dir: Option<String> = None;
+    let mut ledger_id_arg: Option<String> = None;
     let mut tier: usize = 0;
     let mut fee_rate: u64 = 2; // sat/vb default
 
@@ -138,6 +142,10 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
             }
             "--seed-dir" if i + 1 < args.len() => {
                 seed_dir = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--ledger" if i + 1 < args.len() => {
+                ledger_id_arg = Some(args[i + 1].clone());
                 i += 2;
             }
             "--tier" if i + 1 < args.len() => {
@@ -166,7 +174,7 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 
     let destination = destination.ok_or(
-        "Usage: reserves spend <dest_address> --seed-dir <path> [--key <hex>] [--tier N] [--fee-rate N]"
+        "Usage: reserves spend <dest_address> --ledger <ledger_id> --seed-dir <path> [--key <hex>] [--tier N] [--fee-rate N]"
     )?;
 
     if keys.is_empty() && seed_dir.is_none() {
@@ -252,14 +260,18 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         return Err("No keys found. Provide --seed-dir or --key.".into());
     }
 
-    // Find taproot reserves
-    let taproot_reserves = node.wallet.get_taproot_reserves();
-    if taproot_reserves.is_empty() {
-        return Err("No taproot reserves found. Use 'reserves list' to check.".into());
-    }
-
-    // Use first taproot reserve (or let user pick)
-    let reserves = &taproot_reserves[0];
+    // Locate the ledger's taproot reserves. Per-ledger storage means the
+    // caller must say which ledger they're recovering — there's no
+    // global "first reserves" anymore.
+    let ledger_id = ledger_id_arg.ok_or(
+        "Pass --ledger <id> to identify which ledger's reserves to spend (use `reserves list` to enumerate).",
+    )?;
+    let lw = node
+        .ledger_wallet(&ledger_id)
+        .ok_or_else(|| format!("No ledger wallet for {}", ledger_id))?;
+    let reserves = lw
+        .taproot_reserves()
+        .ok_or_else(|| format!("Ledger {} has no taproot reserves", ledger_id))?;
     let outpoint = reserves.outpoint;
     let amount = reserves.amount;
 
