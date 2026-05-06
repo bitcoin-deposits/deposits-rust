@@ -540,6 +540,47 @@ impl Node {
             let pending = self.pending_invoices.lock().unwrap().remove(&payment_id);
             self.save_pending_invoices();
             if let Some(pending) = pending {
+                // We never route this payment through Lightning — both
+                // sides are on this operator's books — but LDK *does*
+                // know the preimage because it generated the invoice
+                // when `make_invoice` called `bolt11-receive`. Pull it
+                // from `list-payments` so the on-ledger InvoiceFulfill
+                // is real proof-of-payment, hashing to the BOLT11's
+                // payment_hash. Falls back to a zero preimage on the
+                // (rare) lookup failure; the wallet labels that
+                // explicitly rather than pretending it's real proof.
+                let payment_hex = hex::encode(payment_id);
+                let preimage = {
+                    let cli = LdkCli::from_env();
+                    let from_ldk = cli
+                        .list_payments()
+                        .ok()
+                        .and_then(|r| r.payments.into_iter().find(|p| p.id == payment_hex))
+                        .and_then(|p| p.preimage)
+                        .and_then(|hex_str| hex::decode(&hex_str).ok())
+                        .and_then(|bytes| {
+                            if bytes.len() == 32 {
+                                let mut a = [0u8; 32];
+                                a.copy_from_slice(&bytes);
+                                Some(a)
+                            } else {
+                                None
+                            }
+                        });
+                    match from_ldk {
+                        Some(p) => p,
+                        None => {
+                            tracing::warn!(
+                                "Self-pay {}: LDK didn't return a preimage; \
+                                 committing zero-preimage InvoiceFulfill. \
+                                 Wallet will label this as \"settled internally\".",
+                                &payment_hex[..16]
+                            );
+                            [0u8; 32]
+                        }
+                    }
+                };
+
                 // Fulfill the lock (debit sender)
                 let fulfill_sequence = {
                     let ledger = ledger_arc.read().unwrap();
@@ -552,7 +593,7 @@ impl Node {
                     payment_id,
                     sequence_number: fulfill_sequence,
                     witness: witness.clone(),
-                    preimage: [0u8; 32],
+                    preimage,
                 };
 
                 if let Err(e) = self.commit_operation(ledger_id, fulfill_operation).await {
@@ -589,9 +630,10 @@ impl Node {
                 );
 
                 let result = serde_json::json!({
-                    "payment_id": hex::encode(payment_id),
+                    "payment_id": payment_hex,
                     "deposit_id": hex::encode(deposit_id),
                     "amount_msat": amount_msat,
+                    "preimage": hex::encode(preimage),
                     "status": "succeeded",
                     "self_pay": true,
                 });
