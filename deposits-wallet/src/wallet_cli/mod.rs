@@ -128,9 +128,10 @@ pub fn print_usage(program: &str) {
     eprintln!("  regtest-faucet <alias|addr> [sats]  Send faucet sats + mine a block");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --relay <url>       Nostr relay URL (required; pass multiple for fallback)");
+    eprintln!("  --relay <url>       Nostr relay URL. Pass multiple for fallback.");
+    eprintln!("                      Default: wss://relay.bitcoindeposits.net");
     eprintln!(
-        "  --network <net>     Network: bitcoin, testnet, signet, regtest (default: regtest)"
+        "  --network <net>     Network: bitcoin, testnet, signet, regtest (default: bitcoin)"
     );
     eprintln!("  --data-dir <path>   Data directory (default: ~/.deposits-wallet)");
     eprintln!("  --seed <hex>        Wallet seed (32 bytes hex)");
@@ -149,7 +150,8 @@ pub fn print_usage(program: &str) {
     eprintln!("  BITCOIN_RPC_{{HOST,PORT,USER,PASS,WALLET}}  regtest-faucet RPC target");
     eprintln!();
     eprintln!("Examples:");
-    eprintln!("  {} discover --relay ws://localhost:17779", program);
+    eprintln!("  {} discover                                        # bitcoin via the default relay", program);
+    eprintln!("  {} discover --network regtest --relay ws://localhost:17779", program);
     eprintln!("  {} open abc123... --alias savings", program);
     eprintln!("  {} offer savings 50000          # on-chain: returns funding address", program);
     eprintln!("  {} make_invoice savings 50000   # lightning: returns BOLT11", program);
@@ -177,17 +179,22 @@ pub fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error:
         None
     };
     let mut network = match std::env::var("WALLET_NETWORK").as_deref() {
-        Ok("bitcoin") | Ok("mainnet") => bitcoin::Network::Bitcoin,
+        Ok("bitcoin") | Ok("mainnet") | Ok("") | Err(_) => bitcoin::Network::Bitcoin,
         Ok("testnet") => bitcoin::Network::Testnet,
         Ok("signet") => bitcoin::Network::Signet,
-        Ok("regtest") | Ok("") | Err(_) => bitcoin::Network::Regtest,
+        Ok("regtest") => bitcoin::Network::Regtest,
         Ok(other) => return Err(format!("Unknown WALLET_NETWORK: {}", other).into()),
     };
     let mut data_dir: Option<PathBuf> = std::env::var("WALLET_DATA_DIR").ok().map(PathBuf::from);
+    // No `--relay` and no `WALLET_RELAY` → fall back to the public
+    // deposits relay so a fresh checkout can `discover` against the
+    // live network without extra flags. Any explicit `--relay` (or
+    // `WALLET_RELAY`) wins.
     let mut relays = match std::env::var("WALLET_RELAY") {
         Ok(url) if !url.is_empty() => vec![url],
-        _ => Vec::new(),
+        _ => vec!["wss://relay.bitcoindeposits.net".to_string()],
     };
+    let mut explicit_relay = false;
     let mut nostr_nsec: Option<SecretKey> = None;
     let mut subkey_account: Option<String> = None;
     let mut subkey_attestation: Option<String> = None;
@@ -239,6 +246,12 @@ pub fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error:
                 i += 1;
             }
             "--relay" if i + 1 < args.len() => {
+                if !explicit_relay {
+                    // First explicit --relay drops the default. Subsequent
+                    // --relay flags on the same command line accumulate.
+                    relays.clear();
+                    explicit_relay = true;
+                }
                 relays.push(args[i + 1].clone());
                 i += 1;
             }
