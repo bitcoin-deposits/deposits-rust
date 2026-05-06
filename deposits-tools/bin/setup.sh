@@ -194,7 +194,7 @@ start_node() {
         signer_flags="--signer-pubkey $signer_pubkey --signer-socket $signer_socket"
     fi
 
-    RUST_LOG=warn LDK_CLI="$LDK_CLI" LDK_REAL_CLI="$LDK_REAL_CLI" \
+    RUST_LOG="${SETUP_RUST_LOG:-warn}" LDK_CLI="$LDK_CLI" LDK_REAL_CLI="$LDK_REAL_CLI" \
         LDK_HOST="$LDK_HOST" LDK_PORT="$LDK_PORT" \
         LDK_API_KEY="$LDK_API_KEY" LDK_TLS_CERT="$LDK_TLS_CERT" \
         LDK_SELF_PAY_DIR="$LDK_SELF_PAY_DIR" \
@@ -483,7 +483,14 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
         # survives rotations, so a retry via setup-resume.sh works.
         ledger_id=$(get "ledger_${i}_${l}")
         [ -z "$ledger_id" ] && continue
-        run_cmd "$i" quorum begin "$ledger_id" \
+        # Activation amount = exactly what we pre-funded, minus a fee
+        # buffer. Without this, the daemon defaults to spending the
+        # ledger wallet's full balance — which on a re-run also
+        # includes leftover UTXOs from previous setups (the address
+        # is deterministic from the operator seed), inflating the
+        # spend past available coins.
+        ACTIVATION_SATS=$((PER_LEDGER_SATS - 1000))
+        run_cmd "$i" quorum begin "$ledger_id" --amount-sats $ACTIVATION_SATS \
             > "$BEGIN_LOG_DIR/op${i}_l${l}.log" 2>&1 &
         begin_pids+=("$!")
     done

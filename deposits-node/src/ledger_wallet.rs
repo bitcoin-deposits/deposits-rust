@@ -257,14 +257,13 @@ impl LedgerWallet {
             .apply_update(update)
             .map_err(|e| Error::Wallet(format!("ledger wallet apply_update: {}", e)))?;
         let bal = wallet.balance();
-        let utxo_count = wallet.list_unspent().count();
-        tracing::info!(
-            "LedgerWallet[{} acct={}] sync done: confirmed={} pending={} utxos={}",
+        tracing::debug!(
+            "LedgerWallet[{} acct={}] sync done: confirmed={}sat pending={}sat utxos={}",
             &self.ledger_id[..16.min(self.ledger_id.len())],
             self.account_index,
             bal.confirmed.to_sat(),
             bal.trusted_pending.to_sat() + bal.untrusted_pending.to_sat(),
-            utxo_count,
+            wallet.list_unspent().count(),
         );
         Ok(())
     }
@@ -641,6 +640,92 @@ mod tests {
         ) {
             Err(e) => assert!(format!("{:?}", e).contains("already exists")),
             Ok(_) => panic!("expected create to refuse overwrite"),
+        }
+    }
+
+    /// Three sibling per-ledger wallets at accounts 0/1/2 must keep
+    /// their UTXO sets disjoint — receiving funds at one account's
+    /// address must NOT show up in the other two wallets' balances.
+    /// Reproduces the cluster-level "4 BTC available" misread by
+    /// stripping Esplora out of the loop and feeding txs directly via
+    /// BDK's mempool API.
+    #[test]
+    fn sibling_accounts_do_not_share_utxos() {
+        use bdk_wallet::bitcoin::{
+            absolute::LockTime, transaction::Version, Amount, OutPoint, Sequence, Transaction,
+            TxIn, TxOut, Witness,
+        };
+
+        let tmp = TempDir::new().unwrap();
+        let w0 = open(0, "L0", tmp.path());
+        let w1 = open(1, "L1", tmp.path());
+        let w2 = open(2, "L2", tmp.path());
+
+        // Reveal the first address on each wallet to mirror the
+        // production flow (CLI calls `ledger address` once before
+        // pre-funding).
+        let a0 = w0.get_new_address().unwrap();
+        let a1 = w1.get_new_address().unwrap();
+        let a2 = w2.get_new_address().unwrap();
+        assert_ne!(a0, a1);
+        assert_ne!(a1, a2);
+        assert_ne!(a0, a2);
+
+        // Build a synthetic funding tx that pays 1 BTC to each of the
+        // three addresses. Inputs are bogus (we're injecting it via
+        // `apply_unconfirmed_txs` which doesn't validate them).
+        let funding_tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: Default::default(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(100_000_000),
+                    script_pubkey: a0.script_pubkey(),
+                },
+                TxOut {
+                    value: Amount::from_sat(100_000_000),
+                    script_pubkey: a1.script_pubkey(),
+                },
+                TxOut {
+                    value: Amount::from_sat(100_000_000),
+                    script_pubkey: a2.script_pubkey(),
+                },
+            ],
+        };
+
+        // Apply to each wallet — same tx, same time. BDK should fold
+        // only the spk-matching outputs into each wallet's UTXO set.
+        let now = 1_700_000_000u64;
+        for w in [&w0, &w1, &w2] {
+            let mut inner = w.inner.lock().unwrap();
+            inner.apply_unconfirmed_txs(std::iter::once((funding_tx.clone(), now)));
+        }
+
+        // Each wallet should see exactly 1 BTC trusted-pending — its
+        // own output. Untrusted-pending should be zero (BDK trusts
+        // unconfirmed payments to its own descriptors by default).
+        for (i, w) in [&w0, &w1, &w2].iter().enumerate() {
+            let inner = w.inner.lock().unwrap();
+            let bal = inner.balance();
+            let total = bal.confirmed.to_sat()
+                + bal.trusted_pending.to_sat()
+                + bal.untrusted_pending.to_sat();
+            assert_eq!(
+                total, 100_000_000,
+                "wallet at account {} saw {} sats (confirmed={}, trusted={}, untrusted={}); \
+                 expected 100_000_000 — sibling-account UTXO leak?",
+                i,
+                total,
+                bal.confirmed.to_sat(),
+                bal.trusted_pending.to_sat(),
+                bal.untrusted_pending.to_sat(),
+            );
         }
     }
 
