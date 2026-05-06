@@ -851,6 +851,7 @@ impl Node {
                     quorum_members.len()
                 );
                 let (result, pending) = ledger_wallet.build_activation_tx(
+                    &*self.handler.signer,
                     quorum_members.clone(),
                     quorum_expiries.clone(),
                     ledger_hash,
@@ -2075,26 +2076,52 @@ impl Node {
         if let Some(w) = wallets.get(ledger_id).cloned() {
             return Ok(w);
         }
-        let mut next = self.next_ledger_account.lock().unwrap();
-        let account = *next;
-        let lw = crate::ledger_wallet::LedgerWallet::create(
-            &self.seed,
-            self.wallet.network(),
-            account,
-            ledger_id,
-            &self.data_dir,
-            self.electrum_url.clone(),
-        )?;
-        *next = next.checked_add(1).ok_or_else(|| {
-            Error::Wallet("BIP-32 ledger-wallet account counter overflowed u32".into())
-        })?;
+        // Disk-side reconciliation: a sibling process (e.g. the CLI
+        // `ledger address` invoked between `ledger open` and the next
+        // daemon op) may have already created the ledger wallet on
+        // disk. Detect that and `load` instead of refusing on the
+        // "already exists" check.
+        let existing_dir =
+            crate::ledger_wallet::LedgerWallet::ledger_dir(&self.data_dir, ledger_id);
+        let lw = if existing_dir.join("account_index.txt").exists() {
+            crate::ledger_wallet::LedgerWallet::load(
+                &*self.handler.signer,
+                self.wallet.network(),
+                ledger_id,
+                &self.data_dir,
+                self.electrum_url.clone(),
+            )?
+        } else {
+            let mut next = self.next_ledger_account.lock().unwrap();
+            let account = *next;
+            let lw = crate::ledger_wallet::LedgerWallet::create(
+                &*self.handler.signer,
+                self.wallet.network(),
+                account,
+                ledger_id,
+                &self.data_dir,
+                self.electrum_url.clone(),
+            )?;
+            *next = next.checked_add(1).ok_or_else(|| {
+                Error::Wallet("BIP-32 ledger-wallet account counter overflowed u32".into())
+            })?;
+            tracing::info!(
+                "Created ledger wallet for {} at BIP-32 account {}",
+                &ledger_id[..16.min(ledger_id.len())],
+                account,
+            );
+            lw
+        };
         let arc = Arc::new(lw);
         wallets.insert(ledger_id.to_string(), Arc::clone(&arc));
-        tracing::info!(
-            "Created ledger wallet for {} at BIP-32 account {}",
-            &ledger_id[..16.min(ledger_id.len())],
-            account,
-        );
+        // The on-disk counter may have advanced past `next_ledger_account`
+        // if a sibling process bumped it; re-sync so the daemon doesn't
+        // hand out a duplicate account on its next create.
+        let on_disk_acct = arc.account_index();
+        let mut next = self.next_ledger_account.lock().unwrap();
+        if *next <= on_disk_acct {
+            *next = on_disk_acct + 1;
+        }
         Ok(arc)
     }
 

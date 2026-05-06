@@ -83,6 +83,19 @@ pub struct Hello {
     /// Fresh 32-byte challenge nonce.
     #[serde(with = "hexarray")]
     pub nonce_a: [u8; 32],
+    /// Bitcoin network the daemon is operating on. The signer uses
+    /// this to construct its master xpriv with matching version
+    /// bytes so any xpub it returns (e.g. via [`SignOp::WalletAccountXpub`])
+    /// parses correctly in BDK descriptors on the daemon side.
+    /// `#[serde(default)]` keeps wire compatibility — older daemons
+    /// that don't include the field will be treated as `Bitcoin`,
+    /// matching the prior hard-coded default in deposits-signer.
+    #[serde(default = "default_network")]
+    pub network: bitcoin::Network,
+}
+
+fn default_network() -> bitcoin::Network {
+    bitcoin::Network::Bitcoin
 }
 
 /// Signer's response to [`Hello`].

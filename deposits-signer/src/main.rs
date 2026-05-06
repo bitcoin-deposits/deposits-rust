@@ -240,13 +240,17 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
 
     let transport = dd.load_transport().map_err(|e| e.to_string())?;
     let allowlist = dd.load_allowlist().map_err(|e| e.to_string())?;
-    // Load the master xpriv from the seed. The operator secret (m/86')
-    // and Nostr identity (m/85') derive on demand inside the LocalSigner
-    // backing this server; per-deposit keys (m/84'/.../{index}) derive
-    // on demand too, when daemons send a `KeyPath::Deposit` request.
-    let xpriv = dd
-        .load_master_xpriv(bitcoin::Network::Bitcoin)
-        .map_err(|e| format!("load master xpriv: {}", e))?;
+    // Load the seed itself. Each connection then builds its own
+    // per-network LocalSigner so xpubs returned to the daemon carry
+    // version bytes that match the daemon's network (per the Hello
+    // message). Per-deposit keys, the operator secret, and the Nostr
+    // identity all derive from the same seed on demand.
+    let seed = dd
+        .load_seed()
+        .map_err(|e| format!("load seed: {}", e))?
+        .ok_or_else(|| {
+            "seed not installed; run `import-seed` (or `init --seed-file`) first".to_string()
+        })?;
 
     if allowlist.is_empty() {
         tracing::warn!("allowlist is empty — no daemon will be permitted to connect");
@@ -257,8 +261,8 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     );
 
     let ctx = std::sync::Arc::new(
-        ServerCtx::from_xpriv(transport.secret, allowlist, xpriv, policy)
-            .map_err(|e| format!("ServerCtx::from_xpriv: {}", e))?,
+        ServerCtx::from_seed(transport.secret, allowlist, seed, policy)
+            .map_err(|e| format!("ServerCtx::from_seed: {}", e))?,
     );
 
     // Async runtime for the listener + per-conn tasks.

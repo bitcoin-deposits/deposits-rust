@@ -40,7 +40,16 @@ pub struct ServerCtx {
     /// Pubkeys allowed to connect.
     pub allowlist: Vec<PublicKey>,
     /// Carries out the actual signs once the handshake completes.
+    /// Used as a fallback when no `seed` is configured (legacy
+    /// constructors), or before the per-connection signer is built
+    /// from the daemon-supplied network.
     pub signer: Arc<dyn Signer>,
+    /// Master seed. When present, every connection builds its own
+    /// `LocalSigner` from `(seed, network from Hello)` so the xpubs
+    /// the daemon receives carry version bytes that match the
+    /// daemon's network — no `Invalid network` rejection on the BDK
+    /// descriptor side.
+    pub seed: Option<[u8; 32]>,
     /// Anti-equivocation policy: refuses operator/cosigner sigs that would
     /// regress or repeat a `(ledger_id, role) → max_seq`. Shared across all
     /// connections (a hot-spare daemon racing on the same key would have
@@ -53,7 +62,8 @@ impl ServerCtx {
     /// Legacy two-secret constructor — operator + Nostr only. Refuses
     /// `KeyPath::Deposit { index }` requests because there's no master
     /// xpriv to derive from. Kept for tests; production builds use
-    /// `from_xpriv` which can serve every key path.
+    /// `from_seed` which can serve every key path *and* match the
+    /// daemon's network on per-connection xpubs.
     pub fn from_local(
         transport_secret: bitcoin::secp256k1::SecretKey,
         allowlist: Vec<PublicKey>,
@@ -71,14 +81,15 @@ impl ServerCtx {
             transport,
             allowlist,
             signer,
+            seed: None,
             policy,
         }
     }
 
-    /// Master-xpriv constructor. The signer can serve every `KeyPath`
-    /// the daemon asks for — operator (m/86'/0'/0'/0/0), Nostr identity
-    /// (m/85'/0'/0'/0/0), and per-index deposit keys (m/84'/0'/0'/0/N).
-    /// Used by the `run` subcommand on real cluster bring-up.
+    /// Master-xpriv constructor. Kept for tests that hand in a
+    /// pre-built xpriv and don't need network-aware xpubs (the xpriv's
+    /// network is whatever the caller picked at construction).
+    /// Production code uses [`from_seed`] instead.
     pub fn from_xpriv(
         transport_secret: bitcoin::secp256k1::SecretKey,
         allowlist: Vec<PublicKey>,
@@ -95,8 +106,54 @@ impl ServerCtx {
             transport,
             allowlist,
             signer,
+            seed: None,
             policy,
         })
+    }
+
+    /// Seed-based constructor. The seed is retained so each
+    /// connection can build a per-network LocalSigner once Hello
+    /// reports the daemon's network. The fallback `signer` is built
+    /// at `Network::Bitcoin` (matches the prior hard-coded default
+    /// for any code path that doesn't yet read the network).
+    pub fn from_seed(
+        transport_secret: bitcoin::secp256k1::SecretKey,
+        allowlist: Vec<PublicKey>,
+        seed: [u8; 32],
+        policy: Arc<SeqPolicy>,
+    ) -> Result<Self, ServerError> {
+        let secp = Secp256k1::new();
+        let transport = Keypair::from_secret_key(&secp, &transport_secret);
+        let xpriv = bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Bitcoin, &seed)
+            .map_err(|e| ServerError::Crypto(format!("Xpriv::new_master: {}", e)))?;
+        let local = LocalSigner::from_xpriv_with_nostr(xpriv).map_err(|e| {
+            ServerError::Crypto(format!("LocalSigner::from_xpriv_with_nostr: {}", e))
+        })?;
+        let signer: Arc<dyn Signer> = Arc::new(local);
+        Ok(Self {
+            transport,
+            allowlist,
+            signer,
+            seed: Some(seed),
+            policy,
+        })
+    }
+
+    /// Build a per-connection `Signer` for the given network. Falls
+    /// back to the pre-built `self.signer` when `self.seed` is None.
+    pub(crate) fn signer_for_network(&self, network: bitcoin::Network) -> Arc<dyn Signer> {
+        let seed = match self.seed {
+            Some(s) => s,
+            None => return Arc::clone(&self.signer),
+        };
+        let xpriv = match bitcoin::bip32::Xpriv::new_master(network, &seed) {
+            Ok(x) => x,
+            Err(_) => return Arc::clone(&self.signer),
+        };
+        match LocalSigner::from_xpriv_with_nostr(xpriv) {
+            Ok(local) => Arc::new(local),
+            Err(_) => Arc::clone(&self.signer),
+        }
     }
 }
 
@@ -142,9 +199,17 @@ where
         .map_err(|e| ServerError::Handshake(format!("auth sig verify: {}", e)))?;
 
     tracing::info!(
-        "handshake ok with node {}",
-        &hex::encode(hello.node_pubkey.serialize())[..12]
+        "handshake ok with node {} (network={:?})",
+        &hex::encode(hello.node_pubkey.serialize())[..12],
+        hello.network,
     );
+
+    // Build a per-connection signer rooted at the daemon's network.
+    // For seed-based ServerCtx this means xpubs returned via
+    // `WalletAccountXpub` carry the right version bytes for the
+    // daemon's BDK descriptors. Fallback ctx (no seed configured)
+    // uses the pre-built signer as before.
+    let conn_signer = ctx.signer_for_network(hello.network);
 
     // 4. Per-call dispatch loop. Frames stay plaintext over the local
     //    Unix socket (filesystem perms + handshake do the access control);
@@ -158,7 +223,7 @@ where
             }
             Err(e) => return Err(ServerError::Frame(e)),
         };
-        let response = handle_request(&*ctx.signer, &ctx.policy, req);
+        let response = handle_request(&*conn_signer, &ctx.policy, req);
         write_frame(stream, &response).await?;
     }
 }

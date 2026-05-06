@@ -28,10 +28,8 @@
 
 use bdk_esplora::esplora_client::Builder as EsploraBuilder;
 use bdk_esplora::EsploraExt;
-use bdk_wallet::bitcoin::bip32::{DerivationPath, Xpriv};
-use bdk_wallet::bitcoin::secp256k1::{PublicKey, Secp256k1};
+use bdk_wallet::bitcoin::secp256k1::PublicKey;
 use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Network, OutPoint, Transaction, Txid};
-use bdk_wallet::chain::spk_client::SyncRequest;
 use bdk_wallet::{KeychainKind, SignOptions, Wallet as BdkWallet};
 use deposits_core::{
     TapscriptReservesBuilder, ThresholdConfig, ThresholdTier, VoterSet,
@@ -43,6 +41,7 @@ use std::sync::{Mutex, RwLock};
 
 use crate::wallet::{TaprootReservesCreateResult, TaprootReservesInfo};
 use crate::Error;
+use deposits_signer_api::Signer;
 
 /// Per-ledger BDK wallet. One instance per `ledger_id`.
 ///
@@ -79,8 +78,14 @@ impl LedgerWallet {
     /// for that case). The check guards against silently re-creating a
     /// wallet at a different account than the one a ledger was opened
     /// with.
+    ///
+    /// `signer` is used twice: to fetch the BIP-32 xpub at
+    /// `m/86'/0'/<account>'` (used to build the *watch-only* BDK
+    /// descriptor) and to read the operator's protocol pubkey
+    /// (cached for taproot-reserves rebuilds). Neither call needs the
+    /// seed — the daemon never sees it.
     pub fn create(
-        seed: &[u8; 32],
+        signer: &dyn Signer,
         network: Network,
         account_index: u32,
         ledger_id: &str,
@@ -100,16 +105,24 @@ impl LedgerWallet {
         fs::write(&account_file, account_index.to_string())
             .map_err(|e| Error::Wallet(format!("write account_index.txt: {}", e)))?;
 
-        Self::open(seed, network, account_index, ledger_id, dir, electrum_url, 0)
+        Self::open(
+            signer,
+            network,
+            account_index,
+            ledger_id,
+            dir,
+            electrum_url,
+            0,
+        )
     }
 
     /// Load an existing per-ledger wallet from disk.
     ///
     /// Reads `account_index.txt` and `address_index.txt` from the
-    /// ledger's data dir; rebuilds the BDK wallet from the seed at the
-    /// recorded account.
+    /// ledger's data dir; asks the signer for the watch-only xpub
+    /// at the recorded account and rebuilds the BDK wallet from it.
     pub fn load(
-        seed: &[u8; 32],
+        signer: &dyn Signer,
         network: Network,
         ledger_id: &str,
         data_dir_root: &Path,
@@ -130,7 +143,7 @@ impl LedgerWallet {
             .map_err(|e| Error::Wallet(format!("parse account_index.txt: {}", e)))?;
         let address_index = Self::load_address_index(&dir)?;
         Self::open(
-            seed,
+            signer,
             network,
             account_index,
             ledger_id,
@@ -141,7 +154,7 @@ impl LedgerWallet {
     }
 
     fn open(
-        seed: &[u8; 32],
+        signer: &dyn Signer,
         network: Network,
         account_index: u32,
         ledger_id: &str,
@@ -149,27 +162,23 @@ impl LedgerWallet {
         electrum_url: String,
         address_index: u32,
     ) -> Result<Self, Error> {
-        let secp = Secp256k1::new();
-        let xpriv = Xpriv::new_master(network, seed)
-            .map_err(|e| Error::Wallet(format!("Xpriv::new_master: {}", e)))?;
+        // Watch-only descriptor: ask the signer for the xpub at
+        // `m/86'/0'/<account>'`, then build `wpkh(account_xpub/0/*)`
+        // / `wpkh(account_xpub/1/*)` from it. BDK can derive every
+        // child key publicly (the unhardened `0/*`/`1/*` tail is
+        // beyond the last hardened step), but it has no secrets —
+        // signing routes back to the signer per input via
+        // KeyPath::Wallet.
+        let account_xpub = signer.wallet_account_xpub(account_index).map_err(|e| {
+            Error::Wallet(format!(
+                "wallet_account_xpub(account={}): {}",
+                account_index, e
+            ))
+        })?;
+        let operator_pubkey = signer.pubkey();
 
-        // Operator (protocol) pubkey at the same path the node-level
-        // wallet uses (`m/86'/0'/0'/0/0`). Cached on Self so we don't
-        // need a Secp256k1 + derivation on every taproot-reserves
-        // operation.
-        let operator_path = DerivationPath::from_str("m/86'/0'/0'/0/0")
-            .map_err(|e| Error::Wallet(format!("operator derivation path: {}", e)))?;
-        let operator_xpriv = xpriv
-            .derive_priv(&secp, &operator_path)
-            .map_err(|e| Error::Wallet(format!("derive operator xpriv: {}", e)))?;
-        let operator_pubkey = PublicKey::from_secret_key(&secp, &operator_xpriv.private_key);
-
-        // wpkh descriptors with a per-ledger BIP-32 account. The
-        // hardened-account number in the descriptor isolates this
-        // ledger's UTXO set from every other ledger and from the
-        // legacy node-level wallet's `m/0/*`/`m/1/*`.
-        let external_desc = format!("wpkh({}/86'/0'/{}'/0/*)", xpriv, account_index);
-        let internal_desc = format!("wpkh({}/86'/0'/{}'/1/*)", xpriv, account_index);
+        let external_desc = format!("wpkh({}/0/*)", account_xpub);
+        let internal_desc = format!("wpkh({}/1/*)", account_xpub);
 
         let mut wallet = BdkWallet::create(external_desc, internal_desc)
             .network(network)
@@ -282,16 +291,28 @@ impl LedgerWallet {
     /// only — no shared pool with other ledgers, so concurrent
     /// `quorum begin` calls across ledgers can't race.
     ///
+    /// **Watch-only signing:** the BDK wallet holds an xpub-only
+    /// descriptor; we ask `signer` to ECDSA-sign each input's segwit-v0
+    /// sighash via [`KeyPath::Wallet { account, change, index }`]. The
+    /// daemon never holds the per-input private key.
+    ///
     /// Caller drives broadcast → confs → cosign+commit, then invokes
     /// [`commit_taproot_reserves`] to persist the entry.
     pub fn build_activation_tx(
         &self,
+        signer: &dyn Signer,
         quorum_members: Vec<PublicKey>,
         member_expiries: Vec<u32>,
         ledger_hash: [u8; 32],
         amount_sats: u64,
         fee_rate_sat_per_vb: f32,
     ) -> Result<(TaprootReservesCreateResult, TaprootReservesInfo), Error> {
+        use bdk_wallet::bitcoin::ecdsa::Signature as BtcEcdsaSignature;
+        use bdk_wallet::bitcoin::hashes::Hash as _;
+        use bdk_wallet::bitcoin::sighash::{EcdsaSighashType, SighashCache};
+        use bdk_wallet::bitcoin::Witness;
+        use deposits_signer_api::{KeyPath, SigPurpose, SigRole, SignContext};
+
         if quorum_members.len() != member_expiries.len() {
             return Err(Error::Wallet(
                 "Quorum members and expiries must have same length".to_string(),
@@ -317,8 +338,11 @@ impl LedgerWallet {
             .map_err(|e| Error::Wallet(format!("build taproot reserves: {:?}", e)))?;
         let new_script_pubkey = taproot_output.script_pubkey();
 
-        let mut wallet = self.inner.lock().unwrap();
+        // Build the PSBT (no sign yet). Drop the BDK lock as soon as we
+        // have the PSBT — manual per-input signing only needs the PSBT
+        // itself, not the wallet.
         let mut psbt = {
+            let mut wallet = self.inner.lock().unwrap();
             let mut tx_builder = wallet.build_tx();
             tx_builder
                 .add_recipient(new_script_pubkey.clone(), Amount::from_sat(amount_sats))
@@ -329,13 +353,106 @@ impl LedgerWallet {
                 .finish()
                 .map_err(|e| Error::Wallet(format!("build activation tx: {}", e)))?
         };
-        wallet
-            .sign(&mut psbt, SignOptions::default())
-            .map_err(|e| Error::Wallet(format!("sign activation tx: {}", e)))?;
+
+        // Manually sign every input by walking the PSBT's bip32_derivation
+        // hints (BDK fills these in based on which descriptor leaf each
+        // selected UTXO belongs to). We compute the segwit-v0 sighash
+        // ourselves and route it through `signer.ecdsa_sign_sighash`.
+        // For the descriptor `wpkh(account_xpub/<change>/*)`, BDK records
+        // the path *relative* to the xpub root: a 2-element [change,
+        // index] derivation list. The xpub corresponds to BIP-32 account
+        // `self.account_index`; the daemon sends that account along to
+        // the signer via `KeyPath::Wallet`.
+        let unsigned_tx_clone = psbt.unsigned_tx.clone();
+        let mut sighash_cache = SighashCache::new(&unsigned_tx_clone);
+        let input_count = psbt.inputs.len();
+        for input_index in 0..input_count {
+            let (script_pubkey, amount, leaf_pubkey, change, leaf_index) = {
+                let input = &psbt.inputs[input_index];
+                let utxo = input.witness_utxo.as_ref().ok_or_else(|| {
+                    Error::Wallet(format!(
+                        "PSBT input {} missing witness_utxo (BDK should have populated this)",
+                        input_index
+                    ))
+                })?;
+                let (pk, (_fp, path)) = input.bip32_derivation.iter().next().ok_or_else(|| {
+                    Error::Wallet(format!(
+                        "PSBT input {} has no bip32_derivation entry",
+                        input_index
+                    ))
+                })?;
+                let comps: Vec<u32> = path.into_iter().map(|c| (*c).into()).collect();
+                if comps.len() != 2 {
+                    return Err(Error::Wallet(format!(
+                        "PSBT input {} bip32 path length {} != 2 (expected [change, index] \
+                         relative to descriptor xpub)",
+                        input_index,
+                        comps.len()
+                    )));
+                }
+                if comps[0] > 1 {
+                    return Err(Error::Wallet(format!(
+                        "PSBT input {} change={} (must be 0 or 1)",
+                        input_index, comps[0]
+                    )));
+                }
+
+                (
+                    utxo.script_pubkey.clone(),
+                    utxo.value,
+                    *pk,
+                    comps[0] as u8,
+                    comps[1],
+                )
+            };
+
+            // BDK's `p2wpkh_signature_hash` wants the *prevout's*
+            // scriptPubKey (the P2WPKH `OP_0 <pkh>` form). It builds
+            // the BIP-143 script_code internally.
+            let sighash = sighash_cache
+                .p2wpkh_signature_hash(input_index, &script_pubkey, amount, EcdsaSighashType::All)
+                .map_err(|e| {
+                    Error::Wallet(format!(
+                        "compute p2wpkh sighash for input {}: {:?}",
+                        input_index, e
+                    ))
+                })?;
+
+            let ctx = SignContext {
+                role: SigRole::NoLedger,
+                purpose: SigPurpose::OnchainSighash,
+                key: KeyPath::Wallet {
+                    account: self.account_index,
+                    change,
+                    index: leaf_index,
+                },
+            };
+            let sig = signer
+                .ecdsa_sign_sighash(&ctx, sighash.as_byte_array())
+                .map_err(|e| {
+                    Error::Wallet(format!(
+                        "signer ECDSA sign for input {} (account={}, change={}, index={}): {}",
+                        input_index, self.account_index, change, leaf_index, e
+                    ))
+                })?;
+
+            let btc_sig = BtcEcdsaSignature {
+                signature: sig,
+                sighash_type: EcdsaSighashType::All,
+            };
+            let mut witness = Witness::new();
+            witness.push(btc_sig.serialize());
+            witness.push(leaf_pubkey.serialize());
+            psbt.inputs[input_index].final_script_witness = Some(witness);
+            // Wipe the partial fields BDK populated; finalization just
+            // needs `final_script_witness`.
+            psbt.inputs[input_index].partial_sigs.clear();
+            psbt.inputs[input_index].bip32_derivation.clear();
+        }
+
         let tx = psbt
             .extract_tx()
             .map_err(|e| Error::Wallet(format!("extract activation tx: {}", e)))?;
-        drop(wallet);
 
         let vout = tx
             .output
@@ -564,13 +681,20 @@ struct TaprootReservesInfoSerde {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deposits_signer_api::LocalSigner;
     use tempfile::TempDir;
 
     const SEED: [u8; 32] = [42u8; 32];
 
+    fn signer() -> LocalSigner {
+        let xpriv = bdk_wallet::bitcoin::bip32::Xpriv::new_master(Network::Regtest, &SEED)
+            .expect("xpriv from seed");
+        LocalSigner::from_xpriv(xpriv).expect("from_xpriv")
+    }
+
     fn open(account: u32, ledger_id: &str, root: &Path) -> LedgerWallet {
         LedgerWallet::create(
-            &SEED,
+            &signer(),
             Network::Regtest,
             account,
             ledger_id,
@@ -606,7 +730,7 @@ mod tests {
         // the next reveal is index 1, not 0; we already revealed 0
         // above and persisted address_index=1).
         let w2 = LedgerWallet::load(
-            &SEED,
+            &signer(),
             Network::Regtest,
             "ledger_x",
             tmp.path(),
@@ -631,7 +755,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let _w = open(0, "ledger_dup", tmp.path());
         match LedgerWallet::create(
-            &SEED,
+            &signer(),
             Network::Regtest,
             1, // different account — but the dir exists
             "ledger_dup",
@@ -733,7 +857,7 @@ mod tests {
     fn load_fails_when_uninitialized() {
         let tmp = TempDir::new().unwrap();
         match LedgerWallet::load(
-            &SEED,
+            &signer(),
             Network::Regtest,
             "ledger_missing",
             tmp.path(),

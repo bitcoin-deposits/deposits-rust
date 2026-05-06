@@ -74,6 +74,7 @@ pub fn signer_from_config(
                 &sig_cfg.socket_path,
                 transport_secret,
                 sig_cfg.signer_pubkey,
+                config.network,
             )
             .map_err(|e| {
                 format!(

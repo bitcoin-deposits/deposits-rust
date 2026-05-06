@@ -78,6 +78,7 @@ impl RemoteSigner {
         socket_path: &Path,
         node_transport_secret: SecretKey,
         expected_signer_pubkey: PublicKey,
+        network: bitcoin::Network,
     ) -> Result<Self, SignerError> {
         let socket_path = socket_path.to_path_buf();
 
@@ -92,6 +93,7 @@ impl RemoteSigner {
                 socket_path,
                 node_transport_secret,
                 expected_signer_pubkey,
+                network,
                 request_rx,
                 ready_tx,
             );
@@ -168,6 +170,7 @@ fn worker_main(
     socket_path: std::path::PathBuf,
     node_transport_secret: SecretKey,
     expected_signer_pubkey: PublicKey,
+    network: bitcoin::Network,
     request_rx: mpsc::Receiver<RpcRequest>,
     ready_tx: mpsc::Sender<Result<(PublicKey, XOnlyPublicKey), SignerError>>,
 ) {
@@ -200,6 +203,7 @@ fn worker_main(
             &mut stream,
             node_transport_secret,
             expected_signer_pubkey,
+            network,
         )
         .await
         {
@@ -260,6 +264,7 @@ async fn handshake(
     stream: &mut UnixStream,
     node_transport_secret: SecretKey,
     expected_signer_pubkey: PublicKey,
+    network: bitcoin::Network,
 ) -> Result<(), SignerError> {
     let secp = Secp256k1::<bitcoin::secp256k1::All>::new();
     let node_kp = Keypair::from_secret_key(&secp, &node_transport_secret);
@@ -274,6 +279,7 @@ async fn handshake(
         version: [0u8; 16],
         node_pubkey,
         nonce_a,
+        network,
     };
     write_frame(stream, &hello).await.map_err(map_frame_err)?;
 

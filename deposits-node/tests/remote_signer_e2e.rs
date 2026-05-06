@@ -138,6 +138,7 @@ fn remote_signer_bip340_matches_local_signer() {
         &proc.socket,
         node_transport.secret,
         signer_transport_pubkey,
+        Network::Bitcoin,
     )
     .expect("connect remote signer");
 
@@ -180,6 +181,7 @@ fn remote_signer_ecdsa_matches_local_signer() {
         &proc.socket,
         node_transport.secret,
         signer_transport_pubkey,
+        Network::Bitcoin,
     )
     .unwrap();
 
@@ -205,6 +207,7 @@ fn remote_signer_issues_nostr_secret_distinct_from_operator() {
         &proc.socket,
         node_transport.secret,
         signer_transport_pubkey,
+        Network::Bitcoin,
     )
     .unwrap();
 
@@ -375,7 +378,8 @@ fn signer_backed_daemon_init_path_round_trips() {
     let (proc, signer_pubkey) = spawn_signer(operator_seed, node_pubkey);
 
     // This is what init.rs's RemoteSigner branch does, end-to-end.
-    let remote = RemoteSigner::connect(&proc.socket, node_transport_secret, signer_pubkey)
+    let remote =
+        RemoteSigner::connect(&proc.socket, node_transport_secret, signer_pubkey, Network::Bitcoin)
         .expect("signer-backed Node init path must connect");
 
     // Exercise both the operator-protocol sign path and the Nostr-key
@@ -422,6 +426,7 @@ fn remote_signer_deposit_keypath_signs_at_correct_derivation() {
         &proc.socket,
         node_transport.secret,
         signer_transport_pubkey,
+        Network::Bitcoin,
     )
     .unwrap();
 
@@ -488,6 +493,7 @@ fn remote_signer_wallet_account_xpub_matches_local_derivation() {
         &proc.socket,
         node_transport.secret,
         signer_transport_pubkey,
+        Network::Bitcoin,
     )
     .unwrap();
 
@@ -526,6 +532,7 @@ fn remote_signer_anti_equivocation_refuses_seq_regression() {
         &proc.socket,
         node_transport.secret,
         signer_transport_pubkey,
+        Network::Bitcoin,
     )
     .unwrap();
 
@@ -571,6 +578,7 @@ fn remote_signer_nip04_shared_key_matches_local() {
         &proc.socket,
         node_transport.secret,
         signer_transport_pubkey,
+        Network::Bitcoin,
     )
     .unwrap();
 
@@ -603,6 +611,7 @@ fn remote_signer_ecdh_matches_local_signer() {
         &proc.socket,
         node_transport.secret,
         signer_transport_pubkey,
+        Network::Bitcoin,
     )
     .unwrap();
 

@@ -15,10 +15,53 @@ impl Node {
             config.electrum_url.clone(),
         )?);
 
+        // Build the Signer abstraction. Two paths:
+        //   - LocalSigner: built from the seed via `from_xpriv_with_nostr`
+        //     so it can derive wallet account xpubs / sibling Nostr keys
+        //     in addition to the operator key. Default when
+        //     --signer-socket is not configured.
+        //   - RemoteSigner: connect to deposits-signer over Unix socket,
+        //     verify the pinned signer pubkey. Operator-protocol signs
+        //     (the slashable ones) flow over the wire; anti-equivocation
+        //     policy is active on the signer side.
+        let signer: std::sync::Arc<dyn deposits_signer_api::Signer> = match &config.signer {
+            None => {
+                let xpriv = bitcoin::bip32::Xpriv::new_master(config.network, &config.seed)
+                    .map_err(|e| Error::Wallet(format!("xpriv from seed: {}", e)))?;
+                let local =
+                    deposits_signer_api::LocalSigner::from_xpriv_with_nostr(xpriv).map_err(|e| {
+                        Error::Wallet(format!("LocalSigner::from_xpriv_with_nostr: {}", e))
+                    })?;
+                std::sync::Arc::new(local)
+            }
+            Some(sig_cfg) => {
+                let transport_secret = Self::load_or_init_transport_secret(&config.data_dir)?;
+                let remote = crate::remote_signer::RemoteSigner::connect(
+                    &sig_cfg.socket_path,
+                    transport_secret,
+                    sig_cfg.signer_pubkey,
+                    config.network,
+                )
+                .map_err(|e| {
+                    Error::Wallet(format!(
+                        "connect to deposits-signer at {}: {} \
+                         (have you `deposits-signer trust add`'d this node's \
+                         transport pubkey?)",
+                        sig_cfg.socket_path.display(),
+                        e
+                    ))
+                })?;
+                std::sync::Arc::new(remote)
+            }
+        };
+        let node_id = signer.pubkey();
+
         // Reload per-ledger wallets from disk. Each ledger we've ever
         // opened owns a `<data_dir>/wallet/ledgers/<ledger_id>/` dir
-        // with its own BDK descriptor account; we rebuild the
-        // `LedgerWallet` from the seed at the recorded account.
+        // with its own BDK descriptor account; rebuilding the
+        // `LedgerWallet` asks the signer for the watch-only xpub at
+        // that account, so the daemon never holds the per-ledger
+        // private material.
         let (ledger_wallets, next_ledger_account) = {
             let mut map: HashMap<String, Arc<crate::ledger_wallet::LedgerWallet>> = HashMap::new();
             let mut max_seen: i64 = -1;
@@ -39,7 +82,7 @@ impl Node {
                     }
                     let ledger_id = entry.file_name().to_string_lossy().to_string();
                     let lw = match crate::ledger_wallet::LedgerWallet::load(
-                        &config.seed,
+                        &*signer,
                         config.network,
                         &ledger_id,
                         &config.data_dir,
@@ -47,9 +90,6 @@ impl Node {
                     ) {
                         Ok(lw) => lw,
                         Err(e) => {
-                            // Tolerate uninitialized/leftover dirs so a
-                            // half-created ledger doesn't bring the daemon
-                            // down at startup.
                             tracing::warn!(
                                 "skipping ledger wallet at {:?}: {}",
                                 entry.path(),
@@ -69,46 +109,6 @@ impl Node {
             );
             (map, (max_seen + 1) as u32)
         };
-
-        // Build the Signer abstraction. Two paths:
-        //   - LocalSigner: build from the seed-derived operator key.
-        //     Default when --signer-socket is not configured.
-        //   - RemoteSigner: connect to deposits-signer over Unix socket,
-        //     verify the pinned signer pubkey. Operator-protocol signs
-        //     (the slashable ones) flow over the wire; anti-equivocation
-        //     policy is active on the signer side.
-        //
-        // The Nostr layer continues to use the operator secret directly
-        // (derived from the seed locally; daemon already has the seed for
-        // BDK). This keeps today's admin / depositor tooling unchanged —
-        // they encrypt NIP-04 DMs to the operator npub, which the daemon
-        // can decrypt with the operator secret. The "Nostr-key separation"
-        // (sibling-derived key for the Nostr layer, deposit-from-event-pubkey
-        // wallet-side update) is a planned protocol annex tracked in
-        // PLAN-remote-signer.md §Open follow-ups; not enabled yet.
-        let operator_secret = wallet.operator_secret();
-        let signer: std::sync::Arc<dyn deposits_signer_api::Signer> = match &config.signer {
-            None => std::sync::Arc::new(deposits_signer_api::LocalSigner::new(operator_secret)),
-            Some(sig_cfg) => {
-                let transport_secret = Self::load_or_init_transport_secret(&config.data_dir)?;
-                let remote = crate::remote_signer::RemoteSigner::connect(
-                    &sig_cfg.socket_path,
-                    transport_secret,
-                    sig_cfg.signer_pubkey,
-                )
-                .map_err(|e| {
-                    Error::Wallet(format!(
-                        "connect to deposits-signer at {}: {} \
-                         (have you `deposits-signer trust add`'d this node's \
-                         transport pubkey?)",
-                        sig_cfg.socket_path.display(),
-                        e
-                    ))
-                })?;
-                std::sync::Arc::new(remote)
-            }
-        };
-        let node_id = signer.pubkey();
 
         // Generate (or load) the daemon's *delegate Nostr key* and use it
         // as the daemon's Nostr identity (`self.keys` inside NostrTransport).
