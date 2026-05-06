@@ -1107,11 +1107,6 @@ impl Node {
                     tracing::warn!("Block height sync failed: {}", e);
                 }
 
-                // Emit reserves balance
-                if let Ok(reserves) = self.reserves_balance() {
-                    metrics::set_reserves_balance_sats(reserves);
-                }
-
                 // Spawn cosign-heavy periodic tasks as background work so the main
                 // loop stays free to pump events and route cosign responses.
                 // These tasks call sign_and_broadcast → request_cosign, which needs

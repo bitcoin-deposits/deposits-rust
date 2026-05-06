@@ -39,14 +39,13 @@ impl Node {
         let is_cosign_request = request.action == "cosign_update"
             || request.action == "cosign_offer"
             || request.action == "cosign_invoice";
-        // Admin actions aren't tied to a ledger (e.g. reserves_create,
-        // ledger_open are about spinning one up). Gift-wrap unwrapping
-        // already populates gift_wrap_sender, and the handlers enforce
-        // via check_admin_authorized — skip the ledger ownership check.
+        // Admin actions aren't tied to a ledger (e.g. ledger_open is
+        // about spinning one up). Gift-wrap unwrapping already populates
+        // gift_wrap_sender, and the handlers enforce via
+        // check_admin_authorized — skip the ledger ownership check.
         let is_admin_request = matches!(
             request.action.as_str(),
-            "reserves_create"
-                | "ledger_open"
+            "ledger_open"
                 | "admin_buffer_open"
                 | "admin_buffer_fill"
                 | "admin_buffer_drain"
@@ -291,7 +290,6 @@ impl Node {
             "delivery_embed" => self.process_delivery_embed_request(&request).await,
             "make_invoice" => self.process_make_invoice_request(&request).await,
             "pay_invoice" => self.process_pay_invoice_request(&request).await,
-            "reserves_create" => self.process_reserves_create_request(&request).await,
             "ledger_open" => self.process_ledger_open_request(&request).await,
             "admin_buffer_open" => self.process_admin_buffer_open_request(&request).await,
             "admin_buffer_fill" => self.process_admin_buffer_fill_request(&request).await,

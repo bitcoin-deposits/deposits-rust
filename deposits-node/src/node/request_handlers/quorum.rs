@@ -640,11 +640,6 @@ impl Node {
             }
         };
 
-        // Reload reserves from disk (CLI may have created them after daemon started)
-        if let Err(e) = self.wallet.reload_reserves_from_disk() {
-            tracing::warn!("Failed to reload reserves from disk: {}", e);
-        }
-
         // Sync wallet to see current UTXOs
         if let Err(e) = self.wallet.sync() {
             tracing::warn!("Wallet sync failed before quorum_begin: {}", e);

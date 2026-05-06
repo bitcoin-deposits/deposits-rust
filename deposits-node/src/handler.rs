@@ -904,17 +904,10 @@ impl DepositsHandler {
         // If we created a new ledger for ourselves, add initial operations
         if is_new && operator == self.our_node_id {
             // Resolve the LedgerOpen split. Caller-provided value
-            // takes precedence; otherwise treat the whole wallet
-            // reserves balance as `reserves_amount` with zero
-            // collateral (legacy partner-side-import shape).
-            let (reserves_msats, collateral_msats) = split_msats.unwrap_or_else(|| {
-                let total = self
-                    .wallet
-                    .get_reserves_balance()
-                    .unwrap_or(0)
-                    .saturating_mul(1000);
-                (total, 0)
-            });
+            // takes precedence; otherwise this is genesis mode with
+            // zero on-chain commitment yet (the first QuorumBegin will
+            // populate the real amounts).
+            let (reserves_msats, collateral_msats) = split_msats.unwrap_or((0, 0));
 
             // Add LedgerOpen operation
             {
@@ -1566,12 +1559,10 @@ impl ValidationContext for DepositsHandler {
     }
 
     fn get_commitment_tx_reserves_amount(&self, _operator: PublicKey) -> Option<u64> {
-        // In BDK implementation, reserves are on-chain UTXOs, not commitment tx outputs
-        // Return the wallet balance for reserves, converted from sats to msats
-        self.wallet
-            .get_reserves_balance()
-            .ok()
-            .map(|sats| sats.saturating_mul(1000))
+        // Legacy P2WSH reserves are gone; the per-ledger Taproot vault carries
+        // its own committed amount in `LedgerOpen.reserves_amount`. This hook
+        // is no longer the authoritative source.
+        None
     }
 }
 

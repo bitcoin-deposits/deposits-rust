@@ -1492,10 +1492,6 @@ pub async fn show_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         println!("Wallet sync failed: {}", e);
     } else {
         println!("Wallet balance: {} sats", node.wallet_balance()?);
-        println!("Reserves balance: {} sats", node.reserves_balance()?);
-        if let Some(addr) = node.wallet.get_reserves_address() {
-            println!("Reserves address: {}", addr);
-        }
     }
 
     Ok(())

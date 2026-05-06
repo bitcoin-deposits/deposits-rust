@@ -33,8 +33,6 @@ use std::sync::{Mutex, RwLock};
 
 use crate::Error;
 
-const RESERVES_TIMEOUT_BLOCKS: u32 = 144; // ~1 day
-
 /// BDK-based wallet for reserves management
 pub struct Wallet {
     /// The BDK wallet instance
@@ -52,9 +50,6 @@ pub struct Wallet {
     /// Our operator public key
     operator_pubkey: PublicKey,
 
-    /// Tracked reserves outputs (legacy P2WSH)
-    reserves: RwLock<HashMap<OutPoint, ReservesInfo>>,
-
     /// Tracked Taproot reserves outputs (quorum-based)
     taproot_reserves: RwLock<HashMap<OutPoint, TaprootReservesInfo>>,
 
@@ -69,34 +64,6 @@ pub struct Wallet {
 
     /// Last revealed address index (persisted to disk)
     address_index: Mutex<u32>,
-}
-
-/// Information about a reserves output
-#[derive(Debug, Clone)]
-pub struct ReservesInfo {
-    /// The outpoint
-    pub outpoint: OutPoint,
-
-    /// Amount in satoshis
-    pub amount: u64,
-
-    /// The operator pubkey
-    pub operator: PublicKey,
-
-    /// Partner pubkeys for multisig recovery
-    pub partners: Vec<PublicKey>,
-
-    /// Threshold for partner multisig
-    pub threshold: usize,
-
-    /// Timeout block height for operator reclaim
-    pub timeout_height: u32,
-
-    /// The redeem script (for spending)
-    pub redeem_script: ScriptBuf,
-
-    /// Whether this output is confirmed
-    pub confirmed: bool,
 }
 
 /// Information about a Taproot reserves output (quorum-based spending)
@@ -127,20 +94,6 @@ pub struct TaprootReservesInfo {
     pub confirmed: bool,
 }
 
-/// Serializable version of ReservesInfo for persistence
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ReservesInfoSerde {
-    outpoint_txid: String,
-    outpoint_vout: u32,
-    amount: u64,
-    operator: String,
-    partners: Vec<String>,
-    threshold: usize,
-    timeout_height: u32,
-    redeem_script_hex: String,
-    confirmed: bool,
-}
-
 /// Serializable version of TaprootReservesInfo for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TaprootReservesInfoSerde {
@@ -168,58 +121,6 @@ impl From<&TaprootReservesInfo> for TaprootReservesInfoSerde {
             address: info.taproot_output.address.to_string(),
             confirmed: info.confirmed,
         }
-    }
-}
-
-impl From<&ReservesInfo> for ReservesInfoSerde {
-    fn from(info: &ReservesInfo) -> Self {
-        use bitcoin::consensus::encode::serialize_hex;
-        Self {
-            outpoint_txid: info.outpoint.txid.to_string(),
-            outpoint_vout: info.outpoint.vout,
-            amount: info.amount,
-            operator: info.operator.to_string(),
-            partners: info.partners.iter().map(|p| p.to_string()).collect(),
-            threshold: info.threshold,
-            timeout_height: info.timeout_height,
-            redeem_script_hex: serialize_hex(&info.redeem_script),
-            confirmed: info.confirmed,
-        }
-    }
-}
-
-impl ReservesInfoSerde {
-    fn to_reserves_info(&self) -> Result<ReservesInfo, Error> {
-        use bitcoin::consensus::encode::deserialize;
-        let txid = Txid::from_str(&self.outpoint_txid)
-            .map_err(|e| Error::Wallet(format!("Invalid txid: {}", e)))?;
-        let operator = PublicKey::from_str(&self.operator)
-            .map_err(|e| Error::Wallet(format!("Invalid operator pubkey: {}", e)))?;
-        let partners: Result<Vec<PublicKey>, _> = self
-            .partners
-            .iter()
-            .map(|p| PublicKey::from_str(p))
-            .collect();
-        let partners =
-            partners.map_err(|e| Error::Wallet(format!("Invalid partner pubkey: {}", e)))?;
-        let script_bytes = hex::decode(&self.redeem_script_hex)
-            .map_err(|e| Error::Wallet(format!("Invalid redeem script hex: {}", e)))?;
-        let redeem_script: ScriptBuf = deserialize(&script_bytes)
-            .map_err(|e| Error::Wallet(format!("Invalid redeem script: {}", e)))?;
-
-        Ok(ReservesInfo {
-            outpoint: OutPoint {
-                txid,
-                vout: self.outpoint_vout,
-            },
-            amount: self.amount,
-            operator,
-            partners,
-            threshold: self.threshold,
-            timeout_height: self.timeout_height,
-            redeem_script,
-            confirmed: self.confirmed,
-        })
     }
 }
 
@@ -275,8 +176,7 @@ impl Wallet {
             wallet.reveal_next_address(KeychainKind::External);
         }
 
-        // Load existing reserves from disk
-        let reserves = Self::load_reserves_from_disk(&data_dir)?;
+        // Load existing taproot reserves from disk
         let taproot_reserves =
             Self::load_taproot_reserves_from_disk(&data_dir, operator_pubkey, network)?;
 
@@ -286,7 +186,6 @@ impl Wallet {
             network,
             operator_secret,
             operator_pubkey,
-            reserves: RwLock::new(reserves),
             taproot_reserves: RwLock::new(taproot_reserves),
             block_height: Mutex::new(0),
             block_hash: Mutex::new([0u8; 32]),
@@ -318,66 +217,6 @@ impl Wallet {
         let index_file = data_dir.join("address_index.txt");
         fs::write(&index_file, index.to_string())
             .map_err(|e| Error::Wallet(format!("Failed to write address index: {}", e)))?;
-        Ok(())
-    }
-
-    /// Load reserves from disk
-    fn load_reserves_from_disk(
-        data_dir: &PathBuf,
-    ) -> Result<HashMap<OutPoint, ReservesInfo>, Error> {
-        let reserves_file = data_dir.join("reserves.json");
-        if !reserves_file.exists() {
-            return Ok(HashMap::new());
-        }
-
-        let contents = fs::read_to_string(&reserves_file)
-            .map_err(|e| Error::Wallet(format!("Failed to read reserves file: {}", e)))?;
-
-        let serde_list: Vec<ReservesInfoSerde> = serde_json::from_str(&contents)
-            .map_err(|e| Error::Wallet(format!("Failed to parse reserves file: {}", e)))?;
-
-        let mut reserves = HashMap::new();
-        for serde_info in serde_list {
-            let info = serde_info.to_reserves_info()?;
-            reserves.insert(info.outpoint, info);
-        }
-
-        tracing::info!("Loaded {} reserves from disk", reserves.len());
-        Ok(reserves)
-    }
-
-    /// Reload reserves from disk (picks up reserves created by CLI while daemon was running)
-    pub fn reload_reserves_from_disk(&self) -> Result<(), Error> {
-        let loaded = Self::load_reserves_from_disk(&self.data_dir)?;
-        if !loaded.is_empty() {
-            let mut reserves = self.reserves.write().unwrap();
-            for (outpoint, info) in loaded {
-                reserves.entry(outpoint).or_insert(info);
-            }
-        }
-        Ok(())
-    }
-
-    /// Save reserves to disk
-    fn save_reserves_to_disk(&self) -> Result<(), Error> {
-        // Save legacy P2WSH reserves
-        let reserves = self.reserves.read().unwrap();
-        let serde_list: Vec<ReservesInfoSerde> =
-            reserves.values().map(ReservesInfoSerde::from).collect();
-
-        let contents = serde_json::to_string_pretty(&serde_list)
-            .map_err(|e| Error::Wallet(format!("Failed to serialize reserves: {}", e)))?;
-
-        let reserves_file = self.data_dir.join("reserves.json");
-        fs::write(&reserves_file, contents)
-            .map_err(|e| Error::Wallet(format!("Failed to write reserves file: {}", e)))?;
-
-        tracing::info!("Saved {} legacy reserves to disk", reserves.len());
-        drop(reserves);
-
-        // Save Taproot reserves
-        self.save_taproot_reserves_to_disk()?;
-
         Ok(())
     }
 
@@ -623,16 +462,6 @@ impl Wallet {
         }
     }
 
-    /// Get the total reserves balance (sum of all tracked reserves outputs)
-    pub fn get_reserves_balance(&self) -> Result<u64, Error> {
-        let reserves = self.reserves.read().unwrap();
-        // Count all reserves - confirmation status is tracked separately
-        // but for balance purposes, if we created and broadcast the reserves,
-        // they should be counted toward our reserves balance
-        let total = reserves.values().map(|r| r.amount).sum();
-        Ok(total)
-    }
-
     /// Get the wallet balance (non-reserves funds)
     pub fn get_wallet_balance(&self) -> Result<u64, Error> {
         let wallet = self.inner.lock().unwrap();
@@ -733,139 +562,6 @@ impl Wallet {
     ///     <threshold> <partner1> ... <partnerN> <N> OP_CHECKMULTISIG
     /// OP_ENDIF
     /// ```
-    pub fn build_reserves_script(
-        operator: &PublicKey,
-        partners: &[PublicKey],
-        threshold: usize,
-        timeout_height: u32,
-    ) -> ScriptBuf {
-        let mut builder = ScriptBuilder::new();
-
-        // OP_IF branch: operator can spend after timeout
-        builder = builder
-            .push_opcode(opcodes::all::OP_IF)
-            .push_int(timeout_height as i64)
-            .push_opcode(opcodes::all::OP_CLTV)
-            .push_opcode(opcodes::all::OP_DROP)
-            .push_slice(operator.serialize())
-            .push_opcode(opcodes::all::OP_CHECKSIG);
-
-        // OP_ELSE branch: partners can spend via multisig
-        builder = builder.push_opcode(opcodes::all::OP_ELSE);
-
-        if partners.is_empty() {
-            // No partners yet - just require operator sig (fallback)
-            builder = builder
-                .push_slice(operator.serialize())
-                .push_opcode(opcodes::all::OP_CHECKSIG);
-        } else {
-            // threshold-of-n multisig
-            builder = builder.push_int(threshold as i64);
-            for partner in partners {
-                builder = builder.push_slice(partner.serialize());
-            }
-            builder = builder
-                .push_int(partners.len() as i64)
-                .push_opcode(opcodes::all::OP_CHECKMULTISIG);
-        }
-
-        builder = builder.push_opcode(opcodes::all::OP_ENDIF);
-
-        builder.into_script()
-    }
-
-    /// Create a reserves output
-    ///
-    /// This creates a P2WSH output with the reserves script.
-    pub fn create_reserves_output(
-        &self,
-        amount_sats: u64,
-        partners: Vec<PublicKey>,
-        threshold: usize,
-    ) -> Result<ReservesOutput, Error> {
-        let current_height = self.get_block_height()?;
-        // Offset timeout by number of existing reserves so each has a unique
-        // redeem script (and thus unique P2WSH address) even when created at the
-        // same block height.
-        let existing_count = self.reserves.read().unwrap().len() as u32;
-        let timeout_height = current_height + RESERVES_TIMEOUT_BLOCKS + existing_count;
-
-        // Build the redeem script
-        let redeem_script = Self::build_reserves_script(
-            &self.operator_pubkey,
-            &partners,
-            threshold,
-            timeout_height,
-        );
-
-        // Create P2WSH address
-        let script_hash = sha256::Hash::hash(redeem_script.as_bytes());
-        let witness_program = ScriptBuf::new_p2wsh(&script_hash.into());
-        let address = Address::from_script(&witness_program, self.network)
-            .map_err(|e| Error::Wallet(format!("Failed to create address: {}", e)))?;
-
-        // Build the transaction
-        let mut wallet = self.inner.lock().unwrap();
-
-        let mut psbt = {
-            let mut builder = wallet.build_tx();
-            builder
-                .add_recipient(witness_program.clone(), Amount::from_sat(amount_sats))
-                .fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
-            builder
-                .finish()
-                .map_err(|e| Error::Wallet(format!("Failed to build tx: {}", e)))?
-        };
-
-        // Sign the transaction
-        wallet
-            .sign(&mut psbt, SignOptions::default())
-            .map_err(|e| Error::Wallet(format!("Failed to sign tx: {}", e)))?;
-
-        let tx = psbt
-            .extract_tx()
-            .map_err(|e| Error::Wallet(format!("Failed to extract tx: {}", e)))?;
-
-        // Find the reserves output index
-        let vout = tx
-            .output
-            .iter()
-            .position(|o| o.script_pubkey == witness_program)
-            .ok_or_else(|| Error::Wallet("Reserves output not found in tx".to_string()))?;
-
-        let outpoint = OutPoint {
-            txid: tx.compute_txid(),
-            vout: vout as u32,
-        };
-
-        // Track this reserves output
-        let info = ReservesInfo {
-            outpoint,
-            amount: amount_sats,
-            operator: self.operator_pubkey,
-            partners: partners.clone(),
-            threshold,
-            timeout_height,
-            redeem_script: redeem_script.clone(),
-            confirmed: false,
-        };
-
-        drop(wallet); // Release lock before acquiring write lock
-        self.reserves.write().unwrap().insert(outpoint, info);
-
-        // Persist reserves to disk
-        self.save_reserves_to_disk()?;
-
-        Ok(ReservesOutput {
-            outpoint,
-            address,
-            amount: amount_sats,
-            tx,
-            redeem_script,
-            timeout_height,
-        })
-    }
-
     /// Create a Taproot reserves output with quorum-based spending
     ///
     /// This creates a P2TR output with tiered spending policies:
@@ -1058,184 +754,6 @@ impl Wallet {
     /// and start tracking the new taproot UTXO. If anything fails between
     /// build and commit, the legacy entry stays intact and a retry can
     /// simply rebuild from the same source UTXO.
-    pub fn build_rotation_to_taproot(
-        &self,
-        signer: &dyn deposits_signer_api::Signer,
-        quorum_members: Vec<PublicKey>,
-        member_expiries: Vec<u32>,
-        ledger_hash: [u8; 32],
-    ) -> Result<(TaprootReservesCreateResult, OutPoint, TaprootReservesInfo), Error> {
-        use bitcoin::ecdsa::Signature as EcdsaSignature;
-        use bitcoin::sighash::{EcdsaSighashType, SighashCache};
-        use bitcoin::Witness;
-
-        if quorum_members.len() != member_expiries.len() {
-            return Err(Error::Wallet(
-                "Quorum members and expiries must have same length".to_string(),
-            ));
-        }
-
-        // Get existing reserves info
-        let reserves_info = {
-            let reserves = self.reserves.read().unwrap();
-            reserves
-                .values()
-                .next()
-                .cloned()
-                .ok_or_else(|| Error::Wallet("No existing reserves to rotate".to_string()))?
-        };
-
-        let amount_sats = reserves_info.amount;
-        let fee_sats = 200; // Simple fee estimate for 1-in-1-out
-        let output_amount = amount_sats.saturating_sub(fee_sats);
-
-        // Find the minimum expiry (first quorum member timeout)
-        let first_expiry = *member_expiries.iter().min().unwrap_or(&0);
-        let _current_height = self.get_block_height()?;
-
-        // Create VoterSet: operator is tie-breaker, quorum members are primary voters
-        let voter_set = VoterSet::new(self.operator_pubkey, quorum_members.clone());
-
-        // Use default threshold configuration to ensure custody transfer can rebuild the same address
-        let config = if quorum_members.is_empty() {
-            ThresholdConfig::custom(vec![ThresholdTier::new(
-                1,
-                true,
-                0,
-                "Operator only (no quorum)",
-            )])
-        } else {
-            ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
-        };
-
-        // Build the Taproot reserves output
-        let builder = TapscriptReservesBuilder::new(voter_set, config, self.network, ledger_hash);
-
-        let taproot_output = builder
-            .build()
-            .map_err(|e| Error::Wallet(format!("Failed to build Taproot reserves: {:?}", e)))?;
-
-        let new_script_pubkey = taproot_output.script_pubkey();
-
-        // Build the rotation transaction
-        let mut tx = Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![bitcoin::TxIn {
-                previous_output: reserves_info.outpoint,
-                script_sig: ScriptBuf::new(), // Empty for SegWit
-                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: Amount::from_sat(output_amount),
-                script_pubkey: new_script_pubkey.clone(),
-            }],
-        };
-
-        // Compute sighash for the P2WSH input
-
-        let mut sighash_cache = SighashCache::new(&tx);
-        let sighash = sighash_cache
-            .p2wsh_signature_hash(
-                0,
-                &reserves_info.redeem_script,
-                Amount::from_sat(amount_sats),
-                EcdsaSighashType::All,
-            )
-            .map_err(|e| Error::Wallet(format!("Failed to compute sighash: {:?}", e)))?;
-
-        // Sign with operator's key via the Signer (legacy P2WSH single-sig
-        // path, OP_ELSE branch). RemoteSigner / anti-equivocation policy
-        // sees this as no_ledger(OnchainSighash) — the rotation TX itself
-        // doesn't carry a seq commitment.
-        let sig = signer
-            .ecdsa_sign_sighash(
-                &deposits_signer_api::SignContext::no_ledger(
-                    deposits_signer_api::SigPurpose::OnchainSighash,
-                ),
-                &sighash.to_byte_array(),
-            )
-            .map_err(|e| Error::Wallet(format!("rotation sighash sign: {}", e)))?;
-        let ecdsa_sig = EcdsaSignature::sighash_all(sig);
-
-        // Build the witness for P2WSH single-sig (OP_ELSE branch)
-        // Witness stack: <signature> <FALSE> <redeem_script>
-        // FALSE selects the OP_ELSE branch
-        let mut witness = Witness::new();
-        witness.push(ecdsa_sig.to_vec());
-        witness.push([]); // OP_FALSE to select ELSE branch
-        witness.push(reserves_info.redeem_script.as_bytes());
-
-        tx.input[0].witness = witness;
-
-        // Calculate new outpoint
-        let new_outpoint = OutPoint {
-            txid: tx.compute_txid(),
-            vout: 0,
-        };
-
-        // Track the new Taproot reserves
-        let new_info = TaprootReservesInfo {
-            outpoint: new_outpoint,
-            amount: output_amount,
-            operator: self.operator_pubkey,
-            quorum_members: quorum_members.clone(),
-            quorum_expiry: first_expiry,
-            ledger_hash,
-            taproot_output: taproot_output.clone(),
-            confirmed: false,
-        };
-
-        // No state mutation here — the caller drives broadcast, confs,
-        // and ledger commit before invoking commit_rotation_to_taproot.
-        tracing::info!(
-            "Built rotation from {} to Taproot {} with {} quorum members (not yet broadcast)",
-            reserves_info.outpoint,
-            new_outpoint,
-            quorum_members.len()
-        );
-
-        let result = TaprootReservesCreateResult {
-            outpoint: new_outpoint,
-            address: taproot_output.address.clone(),
-            amount: output_amount,
-            tx,
-            taproot_output,
-            quorum_expiry: first_expiry,
-            ledger_hash,
-        };
-        Ok((result, reserves_info.outpoint, new_info))
-    }
-
-    /// Atomically retire the legacy reserves entry and start tracking the
-    /// new Taproot UTXO. Persists immediately. Call only after the rotation
-    /// tx has confirmed AND the QuorumBegin ledger op has committed.
-    pub fn commit_rotation_to_taproot(
-        &self,
-        legacy_outpoint: OutPoint,
-        new_info: TaprootReservesInfo,
-    ) -> Result<(), Error> {
-        let new_outpoint = new_info.outpoint;
-        let member_count = new_info.quorum_members.len();
-        {
-            let mut old_reserves = self.reserves.write().unwrap();
-            old_reserves.remove(&legacy_outpoint);
-        }
-        {
-            let mut new_reserves = self.taproot_reserves.write().unwrap();
-            new_reserves.insert(new_outpoint, new_info);
-        }
-        self.save_reserves_to_disk()?;
-        tracing::info!(
-            "Committed rotation: retired legacy {} → tracking Taproot {} (Q={})",
-            legacy_outpoint,
-            new_outpoint,
-            member_count
-        );
-        Ok(())
-    }
-
     /// Build (but do NOT broadcast or persist) a *genesis* rotation tx that
     /// spends operator wallet UTXOs directly into a fresh Taproot Q=N quorum
     /// vault. This is the new-model entry path: no legacy P2WSH reserves
@@ -1368,7 +886,7 @@ impl Wallet {
             let mut new_reserves = self.taproot_reserves.write().unwrap();
             new_reserves.insert(new_outpoint, new_info);
         }
-        self.save_reserves_to_disk()?;
+        self.save_taproot_reserves_to_disk()?;
         tracing::info!(
             "Committed genesis rotation: tracking Taproot {} (Q={})",
             new_outpoint,
@@ -1477,81 +995,6 @@ impl Wallet {
         }
 
         Ok(None)
-    }
-
-    /// Get all tracked reserves
-    pub fn get_reserves(&self) -> Vec<ReservesInfo> {
-        self.reserves.read().unwrap().values().cloned().collect()
-    }
-
-    /// Get the first/primary reserves outpoint
-    pub fn get_reserves_outpoint(&self) -> Option<OutPoint> {
-        self.reserves.read().unwrap().keys().next().copied()
-    }
-
-    /// Get the reserves address (P2WSH address of the primary reserves)
-    pub fn get_reserves_address(&self) -> Option<Address> {
-        let reserves = self.reserves.read().unwrap();
-        reserves
-            .values()
-            .next()
-            .map(|info| Address::p2wsh(&info.redeem_script, self.network))
-    }
-
-    /// Mark a reserves output as confirmed
-    pub fn confirm_reserves(&self, outpoint: &OutPoint) -> Result<(), Error> {
-        {
-            let mut reserves = self.reserves.write().unwrap();
-            if let Some(info) = reserves.get_mut(outpoint) {
-                info.confirmed = true;
-            } else {
-                return Err(Error::Wallet(format!(
-                    "Reserves output not found: {}",
-                    outpoint
-                )));
-            }
-        }
-        // Persist updated state
-        self.save_reserves_to_disk()
-    }
-
-    /// Create a recovery transaction (pre-signed by operator)
-    ///
-    /// This transaction spends the reserves via the partner multisig path
-    /// and sends to a recovery address.
-    pub fn create_recovery_tx(
-        &self,
-        reserves_outpoint: OutPoint,
-        recovery_address: Address,
-    ) -> Result<RecoveryTx, Error> {
-        let reserves = self.reserves.read().unwrap();
-        let info = reserves
-            .get(&reserves_outpoint)
-            .ok_or_else(|| Error::Wallet("Reserves not found".to_string()))?;
-
-        // Build the recovery transaction
-        // For now, just create the structure - actual signing happens in recovery flow
-        let tx = Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![bitcoin::TxIn {
-                previous_output: reserves_outpoint,
-                script_sig: ScriptBuf::new(),
-                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: bitcoin::Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: Amount::from_sat(info.amount.saturating_sub(500)), // Leave room for fee
-                script_pubkey: recovery_address.script_pubkey(),
-            }],
-        };
-
-        Ok(RecoveryTx {
-            tx,
-            reserves_outpoint,
-            redeem_script: info.redeem_script.clone(),
-            operator_sig: None, // Will be signed separately
-        })
     }
 
     /// Send an on-chain withdrawal with OP_RETURN commitment
@@ -1956,7 +1399,6 @@ impl Wallet {
             network: Network::Signet,
             operator_secret,
             operator_pubkey,
-            reserves: RwLock::new(HashMap::new()),
             taproot_reserves: RwLock::new(HashMap::new()),
             block_height: Mutex::new(800_000),
             block_hash: Mutex::new([0u8; 32]),
@@ -1964,44 +1406,6 @@ impl Wallet {
             address_index: Mutex::new(0),
         }
     }
-}
-
-/// A reserves output ready for broadcast
-#[derive(Debug, Clone)]
-pub struct ReservesOutput {
-    /// The outpoint (valid after broadcast)
-    pub outpoint: OutPoint,
-
-    /// The P2WSH address
-    pub address: Address,
-
-    /// Amount in satoshis
-    pub amount: u64,
-
-    /// The signed transaction
-    pub tx: Transaction,
-
-    /// The redeem script (needed for spending)
-    pub redeem_script: ScriptBuf,
-
-    /// Timeout height for operator reclaim
-    pub timeout_height: u32,
-}
-
-/// A recovery transaction (partially signed)
-#[derive(Debug, Clone)]
-pub struct RecoveryTx {
-    /// The transaction
-    pub tx: Transaction,
-
-    /// The reserves outpoint being spent
-    pub reserves_outpoint: OutPoint,
-
-    /// The redeem script
-    pub redeem_script: ScriptBuf,
-
-    /// Operator's signature (if signed)
-    pub operator_sig: Option<Vec<u8>>,
 }
 
 /// Result of creating a Taproot reserves output

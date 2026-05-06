@@ -1066,61 +1066,6 @@ impl Node {
         }
     }
 
-    /// Admin: create a reserves UTXO from the wallet's on-chain balance.
-    /// Params: `{amount_sats: u64}` (defaults to available balance - 1000 if missing).
-    pub(crate) async fn process_reserves_create_request(
-        &self,
-        request: &crate::nostr::LedgerRequest,
-    ) -> (bool, Option<String>, Option<String>) {
-        if let Err(denial) = self.check_admin_authorized(request) {
-            return denial;
-        }
-
-        if let Err(e) = self.sync_wallet() {
-            return (false, None, Some(format!("wallet sync failed: {}", e)));
-        }
-        let balance = match self.wallet_balance() {
-            Ok(b) => b,
-            Err(e) => return (false, None, Some(format!("wallet_balance: {}", e))),
-        };
-
-        // If the caller specified an amount, honor it; otherwise consume the
-        // full balance minus a small reserve for the transaction fee.
-        let amount_sats = request
-            .params
-            .get("amount_sats")
-            .and_then(|v| v.as_u64())
-            .unwrap_or_else(|| balance.saturating_sub(1000));
-        if amount_sats + 1000 > balance {
-            return (
-                false,
-                None,
-                Some(format!(
-                    "insufficient balance: {} sats (need {} + fees)",
-                    balance, amount_sats
-                )),
-            );
-        }
-
-        let reserves = match self.create_reserves(amount_sats, vec![], 0) {
-            Ok(r) => r,
-            Err(e) => return (false, None, Some(format!("create_reserves: {}", e))),
-        };
-        let txid = match self.wallet.broadcast(&reserves.tx) {
-            Ok(t) => t,
-            Err(e) => return (false, None, Some(format!("broadcast: {}", e))),
-        };
-
-        let result = serde_json::json!({
-            "txid": txid.to_string(),
-            "vout": reserves.outpoint.vout,
-            "amount_sats": reserves.amount,
-            "address": reserves.address.to_string(),
-            "timeout_height": reserves.timeout_height,
-        });
-        (true, Some(result.to_string()), None)
-    }
-
     /// Admin: open a ledger against an existing reserves UTXO.
     pub(crate) async fn process_ledger_open_request(
         &self,

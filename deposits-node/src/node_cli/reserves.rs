@@ -13,18 +13,16 @@ use crate::Node;
 pub async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() || args[0].starts_with("--") {
         eprintln!(
-            "Usage: deposits-node reserves <create|list|spend> [args...]\n\
+            "Usage: deposits-node reserves <list|spend> [args...]\n\
              \n\
              Subcommands:\n\
-               create [amount_sats]   Create a new reserves UTXO (defaults to wallet balance - 1000)\n\
-               list                   List existing reserves UTXOs\n\
-               spend                  Spend a reserves UTXO back to the operator wallet"
+               list    List the operator's Taproot reserves UTXOs\n\
+               spend   Emergency-spend a Taproot reserves UTXO using quorum keys"
         );
         return Ok(());
     }
 
     match args[0].as_str() {
-        "create" => reserves_create(&args[1..]).await,
         "list" => reserves_list(&args[1..]).await,
         "spend" => reserves_spend(&args[1..]).await,
         cmd => {
@@ -35,58 +33,6 @@ pub async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error:
     }
 }
 
-/// Create a new reserves UTXO by asking the running daemon (gift-wrapped
-/// admin request). The daemon holds the BDK wallet lock; we can't safely
-/// build a second Node over the same data_dir.
-async fn reserves_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse amount from first positional argument
-    let mut amount_sats: u64 = 100_000_000; // Default 1 BTC
-    let mut config_args = Vec::new();
-
-    let mut i = 0;
-    while i < args.len() {
-        if args[i].starts_with("--") {
-            // Config argument - pass through
-            config_args.push(args[i].clone());
-            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                config_args.push(args[i + 1].clone());
-                i += 1;
-            }
-        } else {
-            // Positional argument - amount in sats
-            amount_sats = args[i]
-                .parse()
-                .map_err(|_| format!("Invalid amount: {}", args[i]))?;
-        }
-        i += 1;
-    }
-
-    let config = parse_config(&config_args)?;
-    println!("Creating reserves output for {} sats (via daemon)...", amount_sats);
-
-    let params = serde_json::json!({ "amount_sats": amount_sats });
-    let result = super::send_admin_daemon_request(&config, "reserves_create", params).await?;
-
-    println!("Reserves created!");
-    if let Some(txid) = result.get("txid").and_then(|v| v.as_str()) {
-        println!("  TXID: {}", txid);
-    }
-    if let Some(vout) = result.get("vout").and_then(|v| v.as_u64()) {
-        println!("  Vout: {}", vout);
-    }
-    if let Some(amt) = result.get("amount_sats").and_then(|v| v.as_u64()) {
-        println!("  Amount: {} sats", amt);
-    }
-    if let Some(addr) = result.get("address").and_then(|v| v.as_str()) {
-        println!("  Address: {}", addr);
-    }
-    if let Some(th) = result.get("timeout_height").and_then(|v| v.as_u64()) {
-        println!("  Timeout height: {}", th);
-    }
-
-    Ok(())
-}
-
 /// List all reserves outputs
 pub async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_config(args)?;
@@ -95,25 +41,11 @@ pub async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Er
     // Sync wallet first
     node.sync_wallet()?;
 
-    let reserves = node.wallet.get_reserves();
     let taproot_reserves = node.wallet.get_taproot_reserves();
 
-    if reserves.is_empty() && taproot_reserves.is_empty() {
+    if taproot_reserves.is_empty() {
         println!("No reserves outputs found.");
         return Ok(());
-    }
-
-    println!("=== Legacy Reserves (P2WSH) ===");
-    for info in &reserves {
-        let addr = bitcoin::Address::p2wsh(&info.redeem_script, node.wallet.network());
-        println!("  Outpoint: {}", info.outpoint);
-        println!("    Address: {}", addr);
-        println!("    Amount: {} sats", info.amount);
-        println!("    Operator: {}", info.operator);
-        println!("    Partners: {}", info.partners.len());
-        println!("    Timeout: block {}", info.timeout_height);
-        println!("    Confirmed: {}", info.confirmed);
-        println!();
     }
 
     println!("=== Taproot Reserves (Quorum-based) ===");

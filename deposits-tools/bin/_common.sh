@@ -659,26 +659,6 @@ get_node_info() {
     run_node_cmd "$node" info
 }
 
-# Create reserves UTXO on a node
-create_node_reserves() {
-    local node=$1
-    local amount_sats=${2:-100000000}  # Default 1 BTC
-
-    log_info "Creating reserves on $node: $amount_sats sats..."
-
-    local output=$(run_node_cmd "$node" reserves "$amount_sats")
-
-    if echo "$output" | grep -q "Reserves created"; then
-        local txid=$(echo "$output" | grep "TXID:" | awk '{print $2}')
-        log_success "$node reserves created: $txid"
-        echo "$txid"
-        return 0
-    else
-        log_error "$node reserves failed: $output"
-        return 1
-    fi
-}
-
 # Fund a node (sends BTC but does NOT mine — caller must mine to confirm)
 fund_node() {
     local node=$1

@@ -283,11 +283,10 @@ echo ""
 # Phase 1b: Start daemons
 # ============================================================================
 #
-# `reserves create`, `ledger open`, `quorum add`, and `quorum begin` are
-# now gift-wrapped Nostr requests that go to the running daemon (commit
-# 30c268a). Start the daemons now — *before* Phase 2 — so the requests
-# there have a daemon to talk to. Without this, Phase 2 times out after
-# 60s with "admin request timeout".
+# `ledger open`, `quorum add`, and `quorum begin` are gift-wrapped Nostr
+# requests that go to the running daemon. Start the daemons now —
+# *before* Phase 2 — so the requests there have a daemon to talk to.
+# Without this, Phase 2 times out after 60s with "admin request timeout".
 
 log_info "=== Phase 1b: Start Daemons ==="
 
@@ -345,17 +344,9 @@ PHASE2_LOG="$DATA_ROOT/phase2.log"
 : > "$PHASE2_LOG"
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     for l in $(seq 1 $LEDGERS_PER_OP); do
-        utxo_sats=$((RESERVES_SATS + COLLATERAL_SATS))
-        output=$(run_cmd "$i" reserves create "$utxo_sats" 2>&1 | tee -a "$PHASE2_LOG")
-        reserves_id=$(echo "$output" | grep "Address:" | awk '{print $2}')
-        if [ -z "$reserves_id" ]; then
-            log_warn "op$i/L$l: reserves create produced no Address — full output:"
-            echo "$output" | sed 's/^/    /' >&2
-            log_warn "full Phase 2 transcript at $PHASE2_LOG"
-            exit 1
-        fi
-        store "reserves_${i}_${l}" "$reserves_id"
-
+        # `ledger open` is now a pure declaration — no on-chain reserves
+        # tx until `quorum begin`, which spends from the operator wallet
+        # directly into the Taproot Q=N vault.
         output=$(run_cmd "$i" ledger open 2>&1 | tee -a "$PHASE2_LOG")
         ledger_id=$(echo "$output" | grep "Ledger ID:" | awk '{print $3}')
         if [ -z "$ledger_id" ]; then
@@ -365,19 +356,6 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
             exit 1
         fi
         store "ledger_${i}_${l}" "$ledger_id"
-        # Confirm before the next reserves create and let the daemon's
-        # wallet finish its post-mine esplora sync. Without the mine the
-        # wallet may pick the same input for the next reserves tx and
-        # collide in mempool ("insufficient fee, rejecting replacement").
-        # Without the sleep the daemon hasn't yet observed the new tip
-        # and may still serve the now-spent UTXO ("bad-txns-inputs-
-        # missingorspent"). Both surfaced on Q=3 runs.
-        mine_blocks 1
-        # Sleep gives electrs time to index the new block and BDK time
-        # to pull it via esplora. Adjust via DEPOSITS_PHASE2_SYNC_SLEEP
-        # env if your host's electrs is slow. 1s wasn't enough on Q=3
-        # retries; 3s wasn't always enough either; 8s as the new floor.
-        sleep "${DEPOSITS_PHASE2_SYNC_SLEEP:-8}"
     done
     # Per-op advertisement pass — `ledger advertise` walks the operator's
     # ledgers and publishes a kind:39100 for each. Without this, wallet
