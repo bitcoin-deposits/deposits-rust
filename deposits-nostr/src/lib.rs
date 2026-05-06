@@ -3580,6 +3580,54 @@ impl NostrTransport {
         Ok(updates)
     }
 
+    /// Fetch the subset of Kind 9100 updates that touch a specific
+    /// `deposit_id` on a specific `ledger_id`, filtered relay-side via
+    /// the `#d`, `#i`, and `author` tags. The author filter is
+    /// load-bearing: a third party can publish a Kind 9100 with our
+    /// ledger's `#d` and our `#i`, so without pinning the operator's
+    /// signing pubkey we'd accept forgeries. Caller passes the
+    /// operator's expected signing pubkey (almost always
+    /// `LedgerAdvertisement::expected_responder()`).
+    ///
+    /// Returns updates sorted by sequence number; same TLV-decode
+    /// pattern as `fetch_ledger_updates`. Updates whose body fails to
+    /// decode are silently dropped.
+    pub async fn fetch_deposit_updates(
+        &self,
+        ledger_id: &str,
+        deposit_id_hex: &str,
+        operator_pubkey: nostr_sdk::PublicKey,
+    ) -> Result<Vec<deposits_protocol::types::SignedLedgerUpdate>, Error> {
+        use ::base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+            .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id)])
+            .custom_tag(TAG_DEPOSIT_ID, [deposit_id_hex])
+            .author(operator_pubkey);
+
+        let events = self
+            .client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| {
+                Error::Nostr(format!("Failed to fetch deposit updates: {}", e))
+            })?;
+
+        let mut updates = Vec::new();
+        for event in events.iter() {
+            if let Ok(bytes) = BASE64.decode(&event.content) {
+                if let Ok(update) = deposits_protocol::types::SignedLedgerUpdate::tlv_decode(&bytes)
+                {
+                    updates.push(update);
+                }
+            }
+        }
+
+        updates.sort_by_key(|u| u.sequence_number);
+        Ok(updates)
+    }
+
     /// Fetch a single ledger update by sequence number from the relay.
     /// Filters by `#d` (ledger prefix) relay-side, then by seq client-side.
     pub async fn fetch_ledger_update_by_seq(

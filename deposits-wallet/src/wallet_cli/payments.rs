@@ -1355,19 +1355,37 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
 
 /// Show transaction history for a deposit
 pub async fn show_history(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut alias: Option<String> = None;
-    let mut config_args = Vec::new();
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tlv::TlvDecode;
 
-    for arg in args {
-        if arg.starts_with("--") {
-            config_args.push(arg.clone());
+    let mut alias: Option<String> = None;
+    let mut config_args: Vec<String> = Vec::new();
+
+    // Forward flag values to parse_config: when we see "--foo" we
+    // also forward the next token if it doesn't itself start with
+    // "--". This is the same shape `wallet_cli/deposit.rs::open_new_deposit`
+    // uses; the simpler "skip non-flag tokens after the alias" loop
+    // dropped flag values silently and `--data-dir <path>` got eaten.
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a.starts_with("--") {
+            config_args.push(a.clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
         } else if alias.is_none() {
-            alias = Some(arg.clone());
+            alias = Some(a.clone());
         }
+        i += 1;
     }
 
     let alias = alias.ok_or("Usage: deposits-wallet history <alias> --relay <url>")?;
     let config = parse_config(&config_args)?;
+    if config.relays.is_empty() {
+        return Err("No relay specified. Use --relay <url>".into());
+    }
 
     // Look up deposit by alias
     let deposits_file = config.data_dir.join("deposits.json");
@@ -1391,16 +1409,328 @@ pub async fn show_history(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let ledger_id = deposit
         .get("ledger_id")
         .and_then(|v| v.as_str())
-        .ok_or("Invalid deposit record: missing ledger_id")?;
+        .ok_or("Invalid deposit record: missing ledger_id")?
+        .to_string();
+
+    let (_, deposit_id_hex) = deposit_record_identity(deposit)
+        .ok_or("Deposit record missing descriptor / deposit_pubkey — re-open this deposit")?;
+    let deposit_id_bytes =
+        hex::decode(&deposit_id_hex).map_err(|e| format!("Bad stored deposit_id: {}", e))?;
+    let mut my_deposit_id = [0u8; 16];
+    my_deposit_id.copy_from_slice(&deposit_id_bytes);
 
     println!("Transaction History: {}", alias);
     println!("====================");
+    println!("  ledger:      {}", ledger_id);
+    println!("  deposit_id:  {}", deposit_id_hex);
     println!();
-    println!("  Ledger: {}", ledger_id);
+
+    // Connect, learn the operator's signing pubkey from the ad, then
+    // pull only the Kind 9100 updates tagged for this deposit (#i) on
+    // this ledger (#d) AND signed by the operator. Keeps the relay
+    // round-trip + client-side decode work proportional to the size
+    // of the deposit's history, not the size of the ledger.
+    let nostr_key = config.nostr_key()?;
+    let transport = NostrTransportBuilder::new(nostr_key)
+        .relay(&config.relays[0])
+        .build()
+        .await?;
+
+    let ad = transport
+        .fetch_ledger_advertisement(&ledger_id)
+        .await?
+        .ok_or("operator advertisement not found on the relay; can't authenticate updates")?;
+    let operator_pubkey = ad
+        .expected_responder()
+        .ok_or("ledger advertisement is missing both delegate_pubkey and operator_pubkey")?;
+
+    let updates = transport
+        .fetch_deposit_updates(&ledger_id, &deposit_id_hex, operator_pubkey)
+        .await?;
+
+    if updates.is_empty() {
+        println!("(no operations recorded for this deposit yet)");
+        return Ok(());
+    }
+
+    println!(
+        "{:>5}  {:<18} {:>14}  {}",
+        "seq", "op", "amount", "detail"
+    );
+    println!("{}", "-".repeat(70));
+
+    let mut net_msat: i128 = 0;
+    for update in &updates {
+        let op = match LedgerOperation::tlv_decode(&update.message) {
+            Ok(op) => op,
+            Err(_) => {
+                // Malformed body — show the seq + raw type so the user
+                // knows there's a gap rather than silently dropping it.
+                println!(
+                    "{:>5}  {:<18} {:>14}  (TLV decode failed)",
+                    update.sequence_number,
+                    format!("type=0x{:04X}", update.message_type),
+                    "?"
+                );
+                continue;
+            }
+        };
+        let row = describe_op(&op, &my_deposit_id);
+        let amount_str = match row.delta_msat {
+            Some(d) if d == 0 => "—".to_string(),
+            Some(d) => format_signed_msat_as_sats(d),
+            None => "—".to_string(),
+        };
+        if let Some(d) = row.delta_msat {
+            net_msat = net_msat.saturating_add(d as i128);
+        }
+        println!(
+            "{:>5}  {:<18} {:>14}  {}",
+            update.sequence_number, row.label, amount_str, row.detail
+        );
+    }
+
     println!();
-    println!("(History implementation pending - use deposits-node for now)");
+    let net_sats = (net_msat / 1000) as i64;
+    println!(
+        "  Net (sum of credits − debits, fees included): {:+} sats",
+        net_sats
+    );
+    println!(
+        "  Note: this is a transcript of ledger ops, not a current balance — \
+         use `deposits-wallet balance` for that."
+    );
 
     Ok(())
+}
+
+/// One row of `history` output. `delta_msat` is signed (positive
+/// = credit to this deposit, negative = debit). `None` means the op
+/// affects the deposit but doesn't move money (e.g. `DepositOpen`,
+/// `FeeChange`, `DepositKeyRotate`).
+struct HistoryRow {
+    label: String,
+    delta_msat: Option<i64>,
+    detail: String,
+}
+
+/// Map a `LedgerOperation` to a single history row from this deposit's
+/// perspective. Fee semantics:
+///   - InvoiceLock / OnchainLock / TransferLock outbound: `-amount`
+///     (the operator deducts the lock from the deposit immediately;
+///     fees are debited at fulfill time).
+///   - InvoiceFulfill / OnchainFulfill: 0 (the lock already debited;
+///     fulfill is a status transition).
+///   - InvoiceFail / OnchainFail / TransferFail (refund): `+amount`
+///     (the lock is released back to the deposit).
+///   - InvoiceCredit / OnchainCredit / TransferLock inbound: `+amount`.
+///   - FeeCollect: `-amount`.
+fn describe_op(
+    op: &deposits_core::messages::LedgerOperation,
+    me: &[u8; 16],
+) -> HistoryRow {
+    use deposits_core::messages::LedgerOperation as L;
+
+    fn row(label: &str, delta: Option<i64>, detail: String) -> HistoryRow {
+        HistoryRow {
+            label: label.to_string(),
+            delta_msat: delta,
+            detail,
+        }
+    }
+
+    match op {
+        L::DepositOpen { .. } => row("DepositOpen", None, "account opened".to_string()),
+        L::DepositClose { .. } => row("DepositClose", None, "account closed".to_string()),
+        L::FeeChange { .. } => {
+            row("FeeChange", None, "fee schedule updated".to_string())
+        }
+        L::DepositKeyRotate { .. } => row(
+            "DepositKeyRotate",
+            None,
+            "depositor key rotated".to_string(),
+        ),
+
+        L::OnchainLock {
+            amount,
+            destination_address,
+            ..
+        } => row(
+            "OnchainLock",
+            Some(-(*amount as i64)),
+            format!("→ {} (locked for withdrawal)", short(destination_address)),
+        ),
+        L::OnchainFulfill { txid, .. } => row(
+            "OnchainFulfill",
+            Some(0),
+            format!("txid {}", short(&hex::encode(txid))),
+        ),
+        L::OnchainFail { .. } => row(
+            "OnchainFail",
+            // `amount` field absent on OnchainFail in the current schema;
+            // surfaced as 0 since the corresponding lock's debit was
+            // already reflected and the wallet doesn't track refunds
+            // separately yet.
+            Some(0),
+            "withdrawal failed".to_string(),
+        ),
+        L::OnchainCredit {
+            amount,
+            txid,
+            ..
+        } => row(
+            "OnchainCredit",
+            Some(*amount as i64),
+            format!("from txid {}", short(&hex::encode(txid))),
+        ),
+
+        L::InvoiceLock {
+            amount,
+            payment_id,
+            ..
+        } => row(
+            "InvoiceLock",
+            Some(-(*amount as i64)),
+            format!("payment_hash {}", short(&hex::encode(payment_id))),
+        ),
+        L::InvoiceFulfill {
+            payment_id,
+            preimage,
+            ..
+        } => {
+            let detail = if *preimage == [0u8; 32] {
+                format!(
+                    "payment_hash {} (settled internally; no preimage)",
+                    short(&hex::encode(payment_id))
+                )
+            } else {
+                format!(
+                    "payment_hash {}, preimage {}",
+                    short(&hex::encode(payment_id)),
+                    short(&hex::encode(preimage))
+                )
+            };
+            row("InvoiceFulfill", Some(0), detail)
+        }
+        L::InvoiceFail { payment_id, .. } => row(
+            "InvoiceFail",
+            Some(0),
+            format!("payment_hash {} (failed)", short(&hex::encode(payment_id))),
+        ),
+        L::InvoiceCredit {
+            amount,
+            payment_hash,
+            ..
+        } => row(
+            "InvoiceCredit",
+            Some(*amount as i64),
+            format!(
+                "payment_hash {} ({} msats)",
+                short(&hex::encode(payment_hash)),
+                amount
+            ),
+        ),
+
+        L::TransferLock {
+            amount,
+            fee,
+            source_deposit_id,
+            destination_deposit_id,
+            transfer_id,
+            ..
+        } => {
+            let id_short = short(&hex::encode(transfer_id));
+            if source_deposit_id == me {
+                let total = (*amount as i64).saturating_add(*fee as i64);
+                row(
+                    "TransferLock (out)",
+                    Some(-total),
+                    format!(
+                        "→ {} (transfer_id {}, fee {} msats)",
+                        short(&hex::encode(destination_deposit_id)),
+                        id_short,
+                        fee
+                    ),
+                )
+            } else if destination_deposit_id == me {
+                row(
+                    "TransferLock (in)",
+                    // Inbound lock isn't yet creditable — the destination
+                    // sees the credit on TransferComplete. Show as 0 so
+                    // we don't double-count.
+                    Some(0),
+                    format!(
+                        "← {} (transfer_id {}, pending complete)",
+                        short(&hex::encode(source_deposit_id)),
+                        id_short
+                    ),
+                )
+            } else {
+                // Operator broadcast tagged us via `#i` but neither
+                // side matches — shouldn't normally happen, log raw.
+                row(
+                    "TransferLock",
+                    Some(0),
+                    format!("transfer_id {} (no side matched)", id_short),
+                )
+            }
+        }
+        L::TransferComplete { transfer_id, .. } => row(
+            "TransferComplete",
+            // Settlement of an inbound lock = credit. We don't have the
+            // amount here; the relay can correlate via transfer_id.
+            // Conservative: show as 0; the user sees the matching
+            // TransferLock inbound row above.
+            Some(0),
+            format!("transfer_id {}", short(&hex::encode(transfer_id))),
+        ),
+        L::TransferFail { transfer_id, .. } => row(
+            "TransferFail",
+            Some(0),
+            format!(
+                "transfer_id {} (refunded to source)",
+                short(&hex::encode(transfer_id))
+            ),
+        ),
+
+        L::FeeCollect { amount, .. } => row(
+            "FeeCollect",
+            Some(-(*amount as i64)),
+            format!("operator fee ({} msats)", amount),
+        ),
+
+        // Ledger-wide ops that the relay tagged with our #i for some
+        // reason (rotation membership change, dispute, etc.). Shouldn't
+        // normally appear here, but if they do we surface them so the
+        // user has the full chain visible.
+        L::LedgerOpen { .. } => row("LedgerOpen", None, "(ledger event)".to_string()),
+        L::QuorumAddMember { .. }
+        | L::QuorumRemoveMember { .. }
+        | L::QuorumJoin { .. }
+        | L::QuorumBegin { .. } => {
+            row("QuorumChange", None, "(quorum membership change)".to_string())
+        }
+        L::DisputeEnter { .. }
+        | L::DisputeArmed { .. }
+        | L::DisputeAcquire { .. }
+        | L::DisputeYield => row("Dispute", None, "(dispute lifecycle)".to_string()),
+        L::DeliveryEmbed { .. } => row("DeliveryEmbed", None, "(delivery proof)".to_string()),
+        L::LedgerClose => row("LedgerClose", None, "ledger closed".to_string()),
+    }
+}
+
+fn short(s: &str) -> String {
+    if s.len() <= 12 {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..12])
+    }
+}
+
+fn format_signed_msat_as_sats(msat: i64) -> String {
+    let sign = if msat >= 0 { "+" } else { "-" };
+    let abs_sats = (msat.unsigned_abs() / 1000) as f64;
+    format!("{}{:.0} sats", sign, abs_sats)
 }
 
 /// Happy-path intra-ledger transfer: synthesize preimage, lock, and immediately complete.
