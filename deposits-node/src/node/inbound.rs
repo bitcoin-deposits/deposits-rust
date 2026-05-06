@@ -441,11 +441,11 @@ impl Node {
             return; // Ledger not found locally
         };
 
-        // Step 3 of the per-ledger-actor migration: also forward this
-        // update to the ledger's actor. The actor's run loop is still a
-        // stub (no-op processing) — this exercises the routing path
-        // without changing observable behavior. Step 4 fills in the
-        // actor's real Inbound handler.
+        // Forward the inbound update to the ledger's actor for chain-
+        // continuity check + apply + persist. The actor's `Inbound`
+        // handler is the authoritative read path — `handler.ledgers`
+        // (which the rest of the daemon still queries synchronously)
+        // sees the actor's writes through the shared `Arc<RwLock<Ledger>>`.
         if let Some(handle) = self
             .ledger_actors
             .lock()

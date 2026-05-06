@@ -578,11 +578,11 @@ impl LedgerActor {
                 .map_err(|e| format!("operator sign failed: {}", e))?;
         }
 
-        // 4. Apply on the shared ledger. Phase C/D — `self.ledger`
-        //    is the same `Arc<RwLock<Ledger>>` `handler.ledgers`
-        //    holds, so `commit_staged` here is the authoritative
-        //    write that every reader sees. Take the write lock
-        //    briefly and drop before any subsequent .await.
+        // 4. Apply on the shared ledger. `self.ledger` is the same
+        //    `Arc<RwLock<Ledger>>` `handler.ledgers` holds, so
+        //    `commit_staged` here is the authoritative write that
+        //    every reader sees. Take the write lock briefly and drop
+        //    before any subsequent .await.
         let update_for_return = staged.update.clone();
         {
             let mut ledger = self.ledger.write().unwrap();
