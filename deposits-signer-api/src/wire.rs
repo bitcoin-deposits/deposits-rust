@@ -166,6 +166,14 @@ pub enum SignOp {
     /// the daemon (smaller blast-radius than the operator key, but still a
     /// privilege escalation). Daemon caches the result.
     IssueNostrSecret,
+    /// Return the BIP-32 xpub at `m/86'/0'/<account>'`. The daemon embeds
+    /// this in a watch-only descriptor so a per-ledger BDK wallet can
+    /// derive its own receive/change addresses without holding the seed,
+    /// and asks the signer to sign each PSBT input via
+    /// [`crate::KeyPath::Wallet`].
+    WalletAccountXpub {
+        account: u32,
+    },
 }
 
 /// Server response to a [`SignRequest`]. Sent inside an AEAD-sealed frame.
@@ -209,6 +217,11 @@ pub enum SignResult {
     IssuedSecret {
         #[serde(with = "hexarray")]
         sk: [u8; 32],
+    },
+    /// Result of `WalletAccountXpub`. The serialized xpub (Base58Check
+    /// encoded). Daemon parses with `bitcoin::bip32::Xpub::from_str`.
+    WalletAccountXpub {
+        xpub_str: String,
     },
     /// Signer refused or failed to satisfy the request. The daemon
     /// surfaces this as a `SignerError`.

@@ -129,6 +129,42 @@ impl LocalSigner {
                 })?;
                 Ok(derived.private_key)
             }
+            KeyPath::Wallet {
+                account,
+                change,
+                index,
+            } => {
+                let xpriv = self.xpriv.as_ref().ok_or_else(|| {
+                    SignerError::Unsupported(format!(
+                        "this LocalSigner was not constructed with an Xpriv; \
+                         cannot sign with KeyPath::Wallet {{ account: {}, change: {}, index: {} }}",
+                        account, change, index
+                    ))
+                })?;
+                if change > 1 {
+                    return Err(SignerError::Crypto(format!(
+                        "wallet change must be 0 or 1; got {}",
+                        change
+                    )));
+                }
+                let path = DerivationPath::from_str(&format!(
+                    "m/86'/0'/{}'/{}/{}",
+                    account, change, index
+                ))
+                .map_err(|e| {
+                    SignerError::Crypto(format!(
+                        "wallet path acct={} change={} idx={}: {}",
+                        account, change, index, e
+                    ))
+                })?;
+                let derived = xpriv.derive_priv(&self.secp, &path).map_err(|e| {
+                    SignerError::Crypto(format!(
+                        "derive wallet acct={} change={} idx={}: {}",
+                        account, change, index, e
+                    ))
+                })?;
+                Ok(derived.private_key)
+            }
         }
     }
 
@@ -204,6 +240,23 @@ impl Signer for LocalSigner {
                 "this LocalSigner was not constructed with a Nostr secret".to_string(),
             )),
         }
+    }
+
+    fn wallet_account_xpub(&self, account: u32) -> Result<bitcoin::bip32::Xpub, SignerError> {
+        let xpriv = self.xpriv.as_ref().ok_or_else(|| {
+            SignerError::Unsupported(format!(
+                "this LocalSigner was not constructed with an Xpriv; \
+                 cannot issue wallet account xpub for account={}",
+                account
+            ))
+        })?;
+        let path = DerivationPath::from_str(&format!("m/86'/0'/{}'", account)).map_err(|e| {
+            SignerError::Crypto(format!("wallet account path acct={}: {}", account, e))
+        })?;
+        let derived = xpriv.derive_priv(&self.secp, &path).map_err(|e| {
+            SignerError::Crypto(format!("derive wallet account acct={}: {}", account, e))
+        })?;
+        Ok(bitcoin::bip32::Xpub::from_priv(&self.secp, &derived))
     }
 }
 
@@ -389,6 +442,80 @@ mod tests {
             .bip340_sign(&SignContext::deposit(1, SigPurpose::DepositGuarantee), &digest)
             .unwrap();
         assert_ne!(s0, s1);
+    }
+
+    #[test]
+    fn wallet_keypath_distinct_per_account_change_index() {
+        use bitcoin::Network;
+        use crate::{KeyPath, SigPurpose, SignContext};
+
+        let seed = [0x77; 32];
+        let xpriv = Xpriv::new_master(Network::Regtest, &seed).unwrap();
+        let signer = LocalSigner::from_xpriv(xpriv).unwrap();
+
+        let digest = [0x42u8; 32];
+        let mut sigs = std::collections::HashSet::new();
+        for account in 0..3u32 {
+            for change in 0..2u8 {
+                for index in 0..3u32 {
+                    let ctx = SignContext {
+                        role: crate::SigRole::NoLedger,
+                        purpose: SigPurpose::Bip340Untagged,
+                        key: KeyPath::Wallet { account, change, index },
+                    };
+                    let sig = signer.bip340_sign(&ctx, &digest).unwrap();
+                    assert!(
+                        sigs.insert(sig),
+                        "duplicate sig for account={} change={} index={}",
+                        account, change, index
+                    );
+                }
+            }
+        }
+        assert_eq!(sigs.len(), 18);
+    }
+
+    #[test]
+    fn wallet_keypath_rejects_invalid_change() {
+        use bitcoin::Network;
+        use crate::{KeyPath, SigPurpose, SignContext};
+
+        let seed = [0x88; 32];
+        let xpriv = Xpriv::new_master(Network::Regtest, &seed).unwrap();
+        let signer = LocalSigner::from_xpriv(xpriv).unwrap();
+
+        let ctx = SignContext {
+            role: crate::SigRole::NoLedger,
+            purpose: SigPurpose::Bip340Untagged,
+            key: KeyPath::Wallet { account: 0, change: 2, index: 0 },
+        };
+        let err = signer.bip340_sign(&ctx, &[0u8; 32]).unwrap_err();
+        assert!(
+            format!("{:?}", err).contains("change must be 0 or 1"),
+            "expected change-validation error, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn wallet_keypath_refused_without_xpriv() {
+        use crate::{KeyPath, SigPurpose, SignContext};
+
+        // Plain `LocalSigner::new` doesn't carry an Xpriv — only the
+        // operator secret. Wallet-account paths require xpriv-aware
+        // construction (`from_xpriv` or `from_xpriv_with_nostr`).
+        let signer = LocalSigner::random();
+        let ctx = SignContext {
+            role: crate::SigRole::NoLedger,
+            purpose: SigPurpose::Bip340Untagged,
+            key: KeyPath::Wallet { account: 0, change: 0, index: 0 },
+        };
+        let err = signer.bip340_sign(&ctx, &[0u8; 32]).unwrap_err();
+        assert!(
+            format!("{:?}", err).contains("not constructed with an Xpriv"),
+            "expected unsupported error, got: {:?}",
+            err
+        );
     }
 
     #[test]

@@ -210,6 +210,12 @@ fn handle_request(
             Ok(sk) => SignResult::IssuedSecret { sk },
             Err(e) => signer_error_to_result(e),
         },
+        SignOp::WalletAccountXpub { account } => match signer.wallet_account_xpub(account) {
+            Ok(xpub) => SignResult::WalletAccountXpub {
+                xpub_str: xpub.to_string(),
+            },
+            Err(e) => signer_error_to_result(e),
+        },
     };
     SignResponse { id: req.id, result }
 }

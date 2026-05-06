@@ -143,6 +143,16 @@ pub enum KeyPath {
     Deposit {
         index: u32,
     },
+    /// Per-ledger BDK wallet key at `m/86'/0'/<account>'/<change>/<index>`.
+    /// Used by the watch-only on-chain signing path: the daemon holds an
+    /// xpub at `m/86'/0'/<account>'` and asks the signer to sign each
+    /// PSBT input's sighash at the corresponding `<change>/<index>` leaf.
+    /// `change` is 0 for external (receive) and 1 for internal (change).
+    Wallet {
+        account: u32,
+        change: u8,
+        index: u32,
+    },
 }
 
 impl Default for KeyPath {
@@ -300,6 +310,23 @@ pub trait Signer: Send + Sync {
     fn issue_nostr_secret(&self) -> Result<[u8; 32], SignerError> {
         Err(SignerError::Unsupported(
             "this signer does not issue a Nostr identity secret".to_string(),
+        ))
+    }
+
+    /// BIP-32 xpub at `m/86'/0'/<account>'`. The daemon embeds this in
+    /// the watch-only descriptor `wpkh(account_xpub/<change>/*)` for a
+    /// per-ledger BDK wallet, then asks the signer to sign each PSBT
+    /// input's sighash via [`KeyPath::Wallet { account, change, index }`].
+    /// The seed never leaves the signer; the daemon only ever sees
+    /// derived-public material.
+    ///
+    /// Default impl returns `Unsupported` for signers that don't have a
+    /// master xpriv. Production deposits-signer + xpriv-aware
+    /// LocalSigner override.
+    fn wallet_account_xpub(&self, account: u32) -> Result<bitcoin::bip32::Xpub, SignerError> {
+        let _ = account;
+        Err(SignerError::Unsupported(
+            "this signer cannot issue per-account xpubs".to_string(),
         ))
     }
 }

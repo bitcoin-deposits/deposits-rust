@@ -472,6 +472,50 @@ fn remote_signer_deposit_keypath_signs_at_correct_derivation() {
 }
 
 #[test]
+fn remote_signer_wallet_account_xpub_matches_local_derivation() {
+    // The signer should hand back the BIP-32 xpub at m/86'/0'/<account>'.
+    // The daemon embeds it into a watch-only descriptor so per-ledger
+    // BDK wallets can derive their own addresses without holding the
+    // seed. We check parity against an independent local derivation
+    // from the same seed.
+    use bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
+    use std::str::FromStr;
+
+    let operator_seed = [0x5Au8; 32];
+    let node_transport = TransportKey::random();
+    let (proc, signer_transport_pubkey) = spawn_signer(operator_seed, node_transport.public);
+    let remote = RemoteSigner::connect(
+        &proc.socket,
+        node_transport.secret,
+        signer_transport_pubkey,
+    )
+    .unwrap();
+
+    let secp = Secp256k1::new();
+    let xpriv = Xpriv::new_master(Network::Bitcoin, &operator_seed).unwrap();
+    for account in [0u32, 1, 2, 7, 100] {
+        let got = remote.wallet_account_xpub(account).unwrap_or_else(|e| {
+            panic!("wallet_account_xpub({}) failed: {:?}", account, e)
+        });
+
+        let path = DerivationPath::from_str(&format!("m/86'/0'/{}'", account)).unwrap();
+        let derived = xpriv.derive_priv(&secp, &path).unwrap();
+        let expected = Xpub::from_priv(&secp, &derived);
+
+        assert_eq!(
+            got, expected,
+            "remote signer's xpub at account={} differs from local derivation",
+            account
+        );
+    }
+
+    // Distinct accounts must produce distinct xpubs.
+    let a0 = remote.wallet_account_xpub(0).unwrap();
+    let a1 = remote.wallet_account_xpub(1).unwrap();
+    assert_ne!(a0, a1, "different accounts must yield different xpubs");
+}
+
+#[test]
 fn remote_signer_anti_equivocation_refuses_seq_regression() {
     // Sign at seq=10, then try seq=10 again — RemoteSigner should surface
     // a PolicyRefused error from the signer.
