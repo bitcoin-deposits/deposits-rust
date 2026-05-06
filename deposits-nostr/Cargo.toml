@@ -18,8 +18,14 @@ default = ["signer"]
 signer = ["dep:deposits-signer-api"]
 
 [dependencies]
-# Wire types + TLV codec.
-deposits-core = { path = "../deposits-core" }
+# Wire types + TLV codec. We pull from `deposits-protocol` directly
+# rather than the umbrella `deposits-core` re-exports — protocol owns
+# the actual definitions of `SignedLedgerUpdate`, `DepositsMessage`,
+# and the `Tlv{Encode,Decode}` traits, while core layers the state
+# machine, validators, miniscript handling, etc. on top. The transport
+# only needs the wire surface, so depending on the wire crate keeps
+# the deposits-nostr dep cone tight.
+deposits-protocol = { path = "../deposits-protocol" }
 # Signer trait — used by NostrTransport's operator-side methods. See
 # the `signer` feature above.
 deposits-signer-api = { path = "../deposits-signer-api", optional = true }

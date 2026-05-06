@@ -46,9 +46,9 @@
 
 use ::base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bitcoin::secp256k1::{PublicKey, SecretKey};
-use deposits_core::messages::DepositsMessage;
-use deposits_core::types::SignedLedgerUpdate;
-use deposits_core::{TlvDecode, TlvEncode};
+use deposits_protocol::messages::DepositsMessage;
+use deposits_protocol::tlv::{TlvDecode, TlvEncode};
+use deposits_protocol::types::SignedLedgerUpdate;
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -158,7 +158,7 @@ mod metrics {
 #[derive(Clone, Debug)]
 pub struct FraudProofEvent {
     /// The fraud broadcast (proof + embedding + causal chain).
-    pub broadcast: deposits_core::fraud::FraudBroadcast,
+    pub broadcast: deposits_protocol::fraud::FraudBroadcast,
     /// The Nostr event ID.
     pub event_id: String,
     /// Sender pubkey.
@@ -1065,8 +1065,8 @@ impl LedgerAdvertisement {
     /// → `annualized_msats`, `annual_fee_bps` → `annualized_bps`.
     /// If `fee_period_blocks` is 0, the resulting FeeStructure has
     /// `frequency_blocks=0` and the caller should treat it as unset.
-    pub fn to_fee_structure(&self) -> deposits_core::types::FeeStructure {
-        deposits_core::types::FeeStructure {
+    pub fn to_fee_structure(&self) -> deposits_protocol::types::FeeStructure {
+        deposits_protocol::types::FeeStructure {
             annualized_msats: self.annualized_fixed_msats,
             annualized_bps: self.annual_fee_bps as u16,
             frequency_blocks: self.fee_period_blocks,
@@ -1544,7 +1544,7 @@ impl NostrTransport {
             ));
 
         // Tag operation type and affected deposit IDs for relay-side filtering
-        if let Ok(op) = deposits_core::messages::LedgerOperation::tlv_decode(&update.message) {
+        if let Ok(op) = deposits_protocol::messages::LedgerOperation::tlv_decode(&update.message) {
             // Operation type tag (e.g. "QuorumAddMember", "TransferLock")
             builder = builder.tag(Tag::custom(
                 TagKind::SingleLetter(TAG_OP_TYPE),
@@ -1562,7 +1562,7 @@ impl NostrTransport {
             // LNURL gateway publishing NIP-57 zap receipts, third-party
             // monitoring) match a credit back to the originating BOLT11
             // without TLV-decoding the body.
-            if let deposits_core::messages::LedgerOperation::InvoiceCredit {
+            if let deposits_protocol::messages::LedgerOperation::InvoiceCredit {
                 payment_hash, ..
             } = &op
             {
@@ -3516,7 +3516,7 @@ impl NostrTransport {
     pub async fn fetch_ledger_updates(
         &self,
         ledger_id: &str,
-    ) -> Result<Vec<deposits_core::SignedLedgerUpdate>, Error> {
+    ) -> Result<Vec<deposits_protocol::types::SignedLedgerUpdate>, Error> {
         use ::base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
         let filter = Filter::new()
@@ -3533,7 +3533,7 @@ impl NostrTransport {
         for event in events.iter() {
             // Updates are base64-encoded SignedLedgerUpdate
             if let Ok(bytes) = BASE64.decode(&event.content) {
-                if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&bytes) {
+                if let Ok(update) = deposits_protocol::types::SignedLedgerUpdate::tlv_decode(&bytes) {
                     updates.push(update);
                 }
             }
@@ -3551,7 +3551,7 @@ impl NostrTransport {
         &self,
         ledger_id: &str,
         seq: u64,
-    ) -> Result<Option<deposits_core::SignedLedgerUpdate>, Error> {
+    ) -> Result<Option<deposits_protocol::types::SignedLedgerUpdate>, Error> {
         use ::base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
         let filter = Filter::new()
@@ -3566,7 +3566,7 @@ impl NostrTransport {
 
         for event in events.iter() {
             if let Ok(bytes) = BASE64.decode(&event.content) {
-                if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&bytes) {
+                if let Ok(update) = deposits_protocol::types::SignedLedgerUpdate::tlv_decode(&bytes) {
                     if update.sequence_number == seq {
                         return Ok(Some(update));
                     }
@@ -3584,7 +3584,7 @@ impl NostrTransport {
         ledger_id: &str,
         from_seq: u64,
         to_seq: u64,
-    ) -> Result<Vec<deposits_core::SignedLedgerUpdate>, Error> {
+    ) -> Result<Vec<deposits_protocol::types::SignedLedgerUpdate>, Error> {
         use ::base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
         let filter = Filter::new()
@@ -3600,7 +3600,7 @@ impl NostrTransport {
         let mut updates = Vec::new();
         for event in events.iter() {
             if let Ok(bytes) = BASE64.decode(&event.content) {
-                if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&bytes) {
+                if let Ok(update) = deposits_protocol::types::SignedLedgerUpdate::tlv_decode(&bytes) {
                     if update.sequence_number >= from_seq && update.sequence_number <= to_seq {
                         updates.push(update);
                     }
@@ -4707,7 +4707,7 @@ impl NostrTransport {
     }
 
     fn process_fraud_proof(&self, event: &Event) -> Result<FraudProofEvent, Error> {
-        let broadcast: deposits_core::fraud::FraudBroadcast = serde_json::from_str(&event.content)
+        let broadcast: deposits_protocol::fraud::FraudBroadcast = serde_json::from_str(&event.content)
             .map_err(|e| Error::Serialization(format!("Failed to parse fraud proof: {}", e)))?;
 
         // Structural verification (chain links connect properly)
