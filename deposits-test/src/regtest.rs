@@ -79,6 +79,29 @@ pub fn op_data_dir(i: usize) -> PathBuf {
     repo_root().join(format!("deposits-tools/data/op{}", i))
 }
 
+/// Derive a wallet's per-deposit secret key at `key_index`, mirroring
+/// `deposits-wallet`'s `derive_secret_key_at_index` so tests can sign
+/// witnesses against the deposit's BIP-340 identity. Path matches the
+/// wallet: `m/84'/0'/0'/0/{key_index}`.
+pub fn derive_deposit_secret(
+    seed: &[u8; 32],
+    network: bitcoin::Network,
+    key_index: u32,
+) -> bitcoin::secp256k1::SecretKey {
+    use bitcoin::bip32::{DerivationPath, Xpriv};
+    use bitcoin::secp256k1::Secp256k1;
+    use std::str::FromStr;
+
+    let xpriv = Xpriv::new_master(network, seed).expect("xpriv from seed");
+    let secp = Secp256k1::new();
+    let path = DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", key_index))
+        .expect("derivation path");
+    xpriv
+        .derive_priv(&secp, &path)
+        .expect("derive_priv")
+        .private_key
+}
+
 /// Build (or rebuild) `deposits-node` with the `dangerous-testing` feature
 /// enabled and return the binary path. The release build at
 /// `target/release/deposits-node` is replaced; `cluster_available()` will
