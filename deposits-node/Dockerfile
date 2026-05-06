@@ -17,6 +17,7 @@ COPY Cargo.toml ./
 # Crates we actually build (and their in-tree deps).
 COPY deposits-protocol/ deposits-protocol/
 COPY deposits-core/ deposits-core/
+COPY deposits-nostr/ deposits-nostr/
 COPY deposits-node/ deposits-node/
 COPY deposits-ringsig/ deposits-ringsig/
 COPY deposits-signer-api/ deposits-signer-api/

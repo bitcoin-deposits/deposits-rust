@@ -12,6 +12,11 @@ WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
 COPY deposits-lnurl ./deposits-lnurl
+# deposits-nostr is a real path-dep of deposits-lnurl
+# (`install_default_crypto_provider` + transport types).
+COPY deposits-nostr ./deposits-nostr
+# deposits-protocol is a real path-dep of deposits-nostr.
+COPY deposits-protocol ./deposits-protocol
 
 # Per-ledger explorer page baked into the binary at compile time via
 # `include_str!`. Lives outside the crate so the wallet can share the
@@ -21,7 +26,6 @@ COPY deposits-web ./deposits-web
 
 # Stub out other workspace members so the workspace manifest resolves
 # without pulling their source trees.
-COPY deposits-protocol/Cargo.toml ./deposits-protocol/Cargo.toml
 COPY deposits-core/Cargo.toml     ./deposits-core/Cargo.toml
 COPY deposits-node/Cargo.toml     ./deposits-node/Cargo.toml
 COPY deposits-wallet/Cargo.toml   ./deposits-wallet/Cargo.toml
@@ -31,7 +35,7 @@ COPY deposits-signer-api/Cargo.toml  ./deposits-signer-api/Cargo.toml
 COPY deposits-signer/Cargo.toml      ./deposits-signer/Cargo.toml
 COPY deposits-tools/Cargo.toml    ./deposits-tools/Cargo.toml
 COPY deposits-test/Cargo.toml     ./deposits-test/Cargo.toml
-RUN for c in deposits-protocol deposits-core deposits-node deposits-wallet deposits-attestation deposits-ringsig deposits-signer-api deposits-signer deposits-tools deposits-test; do \
+RUN for c in deposits-core deposits-node deposits-wallet deposits-attestation deposits-ringsig deposits-signer-api deposits-signer deposits-tools deposits-test; do \
         mkdir -p "$c/src" && echo "" > "$c/src/lib.rs"; \
     done
 

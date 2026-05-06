@@ -15,7 +15,10 @@ axum = "0.7"
 
 # Pulled in for the rustls `install_default_crypto_provider()` helper —
 # binaries that talk to wss:// relays need to call it once at startup.
-deposits-nostr = { path = "../deposits-nostr" }
+# `default-features = false` disables the `signer` feature (we don't
+# touch NostrTransport's operator-side methods) so deposits-signer-api
+# stays out of the lnurl gateway's build.
+deposits-nostr = { path = "../deposits-nostr", default-features = false }
 
 # Nostr transport. nip04 is required for the NIP-59-shaped gift-wrap envelope
 # the operator daemon uses (see deposits-nostr send_admin_request).

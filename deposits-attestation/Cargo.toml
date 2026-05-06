@@ -51,7 +51,10 @@ deposits-ringsig = { path = "../deposits-ringsig" }
 
 # Used for `install_default_crypto_provider()` — rustls 0.23+ requires
 # an explicit provider install before the first wss:// handshake.
-deposits-nostr = { path = "../deposits-nostr" }
+# `default-features = false` disables the `signer` feature (the
+# attestation service doesn't touch NostrTransport's operator-side
+# methods), keeping deposits-signer-api out of the build.
+deposits-nostr = { path = "../deposits-nostr", default-features = false }
 
 [lints]
 workspace = true
