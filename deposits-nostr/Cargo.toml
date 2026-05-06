@@ -6,14 +6,23 @@ description = "Nostr transport for the Bitcoin Deposits protocol — wire consta
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/anthropics/deposits-rust"
 
+[features]
+# `signer` enables the `Signer`-using methods on `NostrTransport` — the
+# daemon needs them to sign Kind 39100 advertisements as the operator
+# key (when the inbox key is a delegate) and to perform the NIP-04
+# fallback decrypt against the operator key. Wallets never touch this
+# surface; they construct `NostrTransport` from a raw `SecretKey` and
+# sign their own Nostr events directly. Default-on so the daemon is
+# unaffected; wallet-only consumers pass `default-features = false`.
+default = ["signer"]
+signer = ["dep:deposits-signer-api"]
+
 [dependencies]
 # Wire types + TLV codec.
 deposits-core = { path = "../deposits-core" }
-# Signer trait — NostrTransport accepts an `&dyn Signer` for outbound
-# event signing, NIP-04 ECDH, etc. The trait + wire types live in
-# deposits-signer-api so a wallet can ship a LocalSigner without ever
-# touching the daemon's signing infrastructure.
-deposits-signer-api = { path = "../deposits-signer-api" }
+# Signer trait — used by NostrTransport's operator-side methods. See
+# the `signer` feature above.
+deposits-signer-api = { path = "../deposits-signer-api", optional = true }
 
 # Bitcoin primitives (PublicKey/SecretKey for NIP-04 keying)
 bitcoin = { version = "0.32", features = ["serde"] }

@@ -331,7 +331,9 @@ pub struct NostrTransport {
     /// advertisements (which must stay operator-authored even when
     /// `self.keys` is the delegate) and to perform the fallback NIP-04
     /// decrypt against the operator key. None when the daemon was
-    /// constructed without a Signer (legacy paths in tests).
+    /// constructed without a Signer (legacy paths in tests). Only
+    /// present when the `signer` feature is enabled.
+    #[cfg(feature = "signer")]
     signer: std::sync::Mutex<Option<std::sync::Arc<dyn deposits_signer_api::Signer>>>,
 
     /// Pending inbound messages (encrypted DMs).
@@ -1252,6 +1254,7 @@ impl NostrTransport {
         Ok(Self {
             delegate_pubkey: std::sync::Mutex::new(None),
             operator_pubkey: std::sync::Mutex::new(None),
+            #[cfg(feature = "signer")]
             signer: std::sync::Mutex::new(None),
             client,
             primary_relay_url,
@@ -2330,6 +2333,8 @@ impl NostrTransport {
     ///
     /// This is broadcast when a quorum member detects a non-conforming ledger.
     /// Other quorum members listening will receive this and can initiate recovery.
+    /// Operator-side flow only — gated behind the `signer` feature.
+    #[cfg(feature = "signer")]
     pub async fn publish_dispute(
         &self,
         ledger_id: &str,
@@ -2821,7 +2826,9 @@ impl NostrTransport {
     /// Set the daemon's `Signer` so the transport can request operator-key
     /// signs/ECDH for the call sites that need them — Kind 39100
     /// advertisements (`bip340_sign` on the event id) and the fallback
-    /// NIP-04 decrypt path (`nip04_shared_key`).
+    /// NIP-04 decrypt path (`nip04_shared_key`). Gated behind the
+    /// `signer` feature; wallet-only consumers don't pull this in.
+    #[cfg(feature = "signer")]
     pub fn set_signer(
         &self,
         signer: std::sync::Arc<dyn deposits_signer_api::Signer>,
@@ -2857,40 +2864,54 @@ impl NostrTransport {
             return Ok(plaintext);
         }
 
-        // 2. Fall back to operator key via the Signer.
-        let signer = match self.signer.lock().ok().and_then(|g| g.clone()) {
-            Some(s) => s,
-            None => {
-                return Err(Error::Nostr(
-                    "NIP-04 decrypt failed (delegate) and no Signer configured for operator-key fallback"
-                        .to_string(),
-                ));
-            }
-        };
+        // 2. Fall back to operator key via the Signer. Only available
+        //    when the `signer` feature is enabled; wallet-only builds
+        //    don't have an operator key to fall back to in the first
+        //    place, so the delegate path is the only one.
+        #[cfg(feature = "signer")]
+        {
+            let signer = match self.signer.lock().ok().and_then(|g| g.clone()) {
+                Some(s) => s,
+                None => {
+                    return Err(Error::Nostr(
+                        "NIP-04 decrypt failed (delegate) and no Signer configured for operator-key fallback"
+                            .to_string(),
+                    ));
+                }
+            };
 
-        // Convert the nostr_sdk PublicKey (xonly) into a
-        // bitcoin::secp256k1::PublicKey for the signer call. NIP-04 sender
-        // is xonly; we lift it to compressed (with even-Y) since
-        // shared_secret_point operates on full points and the convention
-        // (matching nostr/util::generate_shared_key) is even-Y normalization.
-        let sender_bytes = sender.to_bytes();
-        let mut compressed = [0u8; 33];
-        compressed[0] = 0x02; // even Y
-        compressed[1..].copy_from_slice(&sender_bytes);
-        let sender_full = bitcoin::secp256k1::PublicKey::from_slice(&compressed).map_err(|e| {
-            Error::Nostr(format!("NIP-04 fallback: lift sender pubkey: {}", e))
-        })?;
+            // Convert the nostr_sdk PublicKey (xonly) into a
+            // bitcoin::secp256k1::PublicKey for the signer call. NIP-04 sender
+            // is xonly; we lift it to compressed (with even-Y) since
+            // shared_secret_point operates on full points and the convention
+            // (matching nostr/util::generate_shared_key) is even-Y normalization.
+            let sender_bytes = sender.to_bytes();
+            let mut compressed = [0u8; 33];
+            compressed[0] = 0x02; // even Y
+            compressed[1..].copy_from_slice(&sender_bytes);
+            let sender_full = bitcoin::secp256k1::PublicKey::from_slice(&compressed).map_err(|e| {
+                Error::Nostr(format!("NIP-04 fallback: lift sender pubkey: {}", e))
+            })?;
 
-        let shared_key = signer.nip04_shared_key(&sender_full).map_err(|e| {
-            Error::Nostr(format!("NIP-04 fallback ECDH via signer: {}", e))
-        })?;
+            let shared_key = signer.nip04_shared_key(&sender_full).map_err(|e| {
+                Error::Nostr(format!("NIP-04 fallback ECDH via signer: {}", e))
+            })?;
 
-        // AES-256-CBC decrypt with the shared key. Mirrors what
-        // nostr/nips/nip04.rs::decrypt_to_bytes does after
-        // `util::generate_shared_key`.
-        nip04_decrypt_with_shared_key(&shared_key, ciphertext).map_err(|e| {
-            Error::Nostr(format!("NIP-04 fallback AES-CBC: {}", e))
-        })
+            // AES-256-CBC decrypt with the shared key. Mirrors what
+            // nostr/nips/nip04.rs::decrypt_to_bytes does after
+            // `util::generate_shared_key`.
+            return nip04_decrypt_with_shared_key(&shared_key, ciphertext).map_err(|e| {
+                Error::Nostr(format!("NIP-04 fallback AES-CBC: {}", e))
+            });
+        }
+
+        #[cfg(not(feature = "signer"))]
+        Err(Error::Nostr(
+            "NIP-04 decrypt failed (delegate) and `signer` feature \
+             is not enabled — wallet-only builds can't fall back to \
+             operator-key decryption"
+                .to_string(),
+        ))
     }
 
     /// Queries the relay for existing advertisement timestamp to ensure
@@ -2960,7 +2981,10 @@ impl NostrTransport {
         // — when self.keys is the delegate (post-cutover) we'd produce ads
         // they reject, so we go back through the signer for this one.
         // Falls back to self.keys-signing when no signer is wired (test
-        // builds, legacy single-key deployments).
+        // builds, legacy single-key deployments, or builds without the
+        // `signer` feature). The Signer-using branch is gated behind the
+        // feature so wallet-only consumers don't pull deposits-signer-api.
+        #[cfg(feature = "signer")]
         let event = if let Some(signer) =
             self.signer.lock().ok().and_then(|g| g.clone())
         {
@@ -2995,6 +3019,10 @@ impl NostrTransport {
                 .sign_with_keys(&self.keys)
                 .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?
         };
+        #[cfg(not(feature = "signer"))]
+        let event = builder
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
 
         let event_id = event.id.to_hex();
 

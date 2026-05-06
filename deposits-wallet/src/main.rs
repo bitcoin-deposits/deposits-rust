@@ -52,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "attest" => wallet_cli::attest::attest_subkey(&args[2..]).await,
         "revoke" => wallet_cli::attest::revoke_subkey(&args[2..]).await,
         "subkeys" => wallet_cli::attest::list_subkeys(&args[2..]).await,
+        #[cfg(feature = "ringsig")]
         "ringsig-link" => wallet_cli::ringsig::ringsig_link(&args[2..]).await,
         "swap-advertise" => wallet_cli::swap::swap_advertise(&args[2..]).await,
         "swap-list" => wallet_cli::swap::swap_list(&args[2..]).await,
