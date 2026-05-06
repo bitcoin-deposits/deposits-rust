@@ -2839,7 +2839,7 @@ impl NostrTransport {
         // Update the static counter too for same-process rapid updates
         LAST_AD_TIMESTAMP.fetch_max(timestamp, Ordering::SeqCst);
 
-        let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_ADVERTISE), &content)
+        let builder = EventBuilder::new(Kind::Custom(KIND_LEDGER_ADVERTISE), &content)
             .custom_created_at(Timestamp::from(timestamp))
             .tag(Tag::custom(
                 TagKind::SingleLetter(TAG_LEDGER_ID),
@@ -2852,9 +2852,49 @@ impl NostrTransport {
             .tag(Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::O)),
                 [ad.operator_pubkey.as_str()],
-            ))
-            .sign_with_keys(&self.keys)
-            .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
+            ));
+
+        // Sign Kind 39100 advertisements with the operator key (via Signer)
+        // when one is configured. Wallets pin the *operator* pubkey from
+        // their bech32 ledger id and verify the ad's signature against it
+        // — when self.keys is the delegate (post-cutover) we'd produce ads
+        // they reject, so we go back through the signer for this one.
+        // Falls back to self.keys-signing when no signer is wired (test
+        // builds, legacy single-key deployments).
+        let event = if let Some(signer) =
+            self.signer.lock().ok().and_then(|g| g.clone())
+        {
+            // Operator xonly → nostr_sdk::PublicKey (same 32-byte encoding).
+            let xonly_secp = signer.xonly_pubkey();
+            let xonly_bytes = xonly_secp.serialize();
+            let operator_xonly = nostr_sdk::PublicKey::from_slice(&xonly_bytes).map_err(|e| {
+                Error::Nostr(format!("operator xonly → nostr pubkey: {}", e))
+            })?;
+
+            let unsigned = builder.build(operator_xonly);
+            let id = unsigned.id.ok_or_else(|| {
+                Error::Nostr("UnsignedEvent::build did not populate id".to_string())
+            })?;
+            let id_bytes: [u8; 32] = id.to_bytes();
+
+            let ctx = deposits_signer_api::SignContext::no_ledger(
+                deposits_signer_api::SigPurpose::NostrEvent,
+            );
+            let sig_bytes = signer.bip340_sign(&ctx, &id_bytes).map_err(|e| {
+                Error::Nostr(format!("signer bip340_sign for advertisement: {}", e))
+            })?;
+            let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes)
+                .map_err(|e| {
+                    Error::Nostr(format!("parse advertisement schnorr sig: {}", e))
+                })?;
+            unsigned.add_signature(sig).map_err(|e| {
+                Error::Nostr(format!("attach signature to advertisement: {}", e))
+            })?
+        } else {
+            builder
+                .sign_with_keys(&self.keys)
+                .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?
+        };
 
         let event_id = event.id.to_hex();
 
@@ -3238,9 +3278,20 @@ impl NostrTransport {
             None => return 0,
         };
 
+        // Filter by the author who actually signs the ad. Post-cutover that's
+        // the operator pubkey (signer-mediated); legacy single-key deployments
+        // still sign with self.keys (the daemon-held identity), so fall back
+        // to that when no operator pubkey was registered.
+        let author = self
+            .operator_pubkey
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .unwrap_or_else(|| self.keys.public_key());
+
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
-            .author(self.keys.public_key());
+            .author(author);
 
         let events = match self
             .client
@@ -3794,13 +3845,27 @@ impl NostrTransport {
 
     /// Start listening for inbound messages
     pub async fn start_listening(&self) -> Result<(), Error> {
-        // Subscribe to DMs addressed to us
-        let filter = Filter::new()
+        // Subscribe to DMs addressed to us. Post-cutover `self.keys` is the
+        // delegate, but legacy wallets still address by operator pubkey, so
+        // when we have a registered operator pubkey we add a second filter
+        // covering its `#p` tag too. The dual-decrypt path in
+        // `nip04_decrypt_with_fallback` then unwraps either kind.
+        let mut filters = vec![Filter::new()
             .kind(Kind::EncryptedDirectMessage)
-            .pubkey(self.keys.public_key());
+            .pubkey(self.keys.public_key())];
+
+        if let Some(op_pk) = self.operator_pubkey.lock().ok().and_then(|g| *g) {
+            if op_pk != self.keys.public_key() {
+                filters.push(
+                    Filter::new()
+                        .kind(Kind::EncryptedDirectMessage)
+                        .pubkey(op_pk),
+                );
+            }
+        }
 
         self.client
-            .subscribe(vec![filter], None)
+            .subscribe(filters, None)
             .await
             .map_err(|e| Error::Nostr(format!("Subscribe failed: {}", e)))?;
 
@@ -4060,14 +4125,30 @@ impl NostrTransport {
                 // ledger they reference. Without this, gift-wrapped admin
                 // requests (ledger_open, reserves_create) get dropped as
                 // soon as the daemon has any ledger in its interested set.
+                // Two valid recipients: the daemon's Nostr-layer pubkey
+                // (delegate post-cutover) and, when configured, the operator
+                // pubkey itself — the dual-decrypt path handles either, but
+                // we still need to *let the event through the gate* first.
                 let our_xonly_hex = {
                     let (xo, _) = self.our_pubkey.x_only_public_key();
                     hex::encode(xo.serialize())
                 };
+                let operator_xonly_hex = self
+                    .operator_pubkey
+                    .lock()
+                    .ok()
+                    .and_then(|g| *g)
+                    .map(|pk| pk.to_hex());
                 let addressed_to_us = event.tags.iter().any(|tag| {
-                    tag.kind()
-                        == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P))
-                        && tag.content() == Some(our_xonly_hex.as_str())
+                    if tag.kind()
+                        != TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P))
+                    {
+                        return false;
+                    }
+                    let content = tag.content();
+                    content == Some(our_xonly_hex.as_str())
+                        || (operator_xonly_hex.is_some()
+                            && content == operator_xonly_hex.as_deref())
                 });
 
                 if !addressed_to_us {

@@ -55,24 +55,24 @@ impl Node {
         };
         let node_id = signer.pubkey();
 
-        // Pre-generate the daemon's *delegate Nostr key* and persist it
-        // under `<data-dir>/delegate_secret`. Currently advertised in
-        // Kind 39100 `delegate_pubkey` for wallets to discover; the
-        // daemon-side switch to using this key for the Nostr layer
-        // (replacing operator_secret in `self.keys`) is the next
-        // follow-up — touches NostrTransport's filter sites and the
-        // admin-DM tooling on the same host.
+        // Generate (or load) the daemon's *delegate Nostr key* and use it
+        // as the daemon's Nostr identity (`self.keys` inside NostrTransport).
+        // Outbound DMs and gift-wraps from the daemon are now signed by the
+        // delegate; advertisements are still signed by the operator key via
+        // the Signer (see `publish_ledger_advertisement`). This matches the
+        // delegation pattern documented in DEP-04: wallets pin operator,
+        // address messages to delegate. The dual-decrypt path on inbound
+        // (`nip04_decrypt_with_fallback`) keeps legacy wallets working.
         let delegate_secret = Self::load_or_init_delegate_secret(&config.data_dir)?;
         let delegate_pubkey =
             PublicKey::from_secret_key(&secp, &delegate_secret);
-        let nostr_secret = operator_secret;
 
         // Store relay URL for later use
         let relay_url = config.relays.first().cloned().unwrap_or_default();
 
         // Create nostr transport (fast relays for subs/publish, slow relays for gap-fill)
         let nostr = NostrTransport::new_with_slow(
-            nostr_secret,
+            delegate_secret,
             config.relays,
             config.slow_relays,
             config.skip_nostr_verify,
@@ -82,6 +82,14 @@ impl Node {
         // advertisement carries `LedgerAdvertisement.delegate_pubkey`
         // for delegation-aware wallets.
         nostr.set_delegate_pubkey(delegate_pubkey);
+        // Wire the Signer + operator pubkey into the transport so it can
+        //   1. sign advertisements with the operator key (BIP-340 over event id)
+        //   2. NIP-04-decrypt inbound DMs that are still addressed to the
+        //      operator pubkey (legacy wallets), via the Signer's
+        //      raw-X-ECDH method
+        //   3. accept admin envelopes whose `#p` tag is the operator pubkey
+        nostr.set_signer(std::sync::Arc::clone(&signer));
+        nostr.set_operator_pubkey(node_id);
 
         // Create handler with data_dir for ledger persistence
         let handler_data_dir = config.data_dir.join("wallet");
