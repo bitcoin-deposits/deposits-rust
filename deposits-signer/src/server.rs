@@ -287,6 +287,10 @@ fn handle_request(
             },
             Err(e) => signer_error_to_result(e),
         },
+        SignOp::PubkeyAt { key_path } => match signer.pubkey_at(key_path) {
+            Ok(pubkey) => SignResult::PubkeyAt { pubkey },
+            Err(e) => signer_error_to_result(e),
+        },
     };
     SignResponse { id: req.id, result }
 }

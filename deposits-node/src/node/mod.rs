@@ -482,13 +482,6 @@ pub struct Node {
     /// persisted in {data_dir}/admin.npub (32-byte x-only hex).
     pub admin_pubkey: Option<nostr_sdk::PublicKey>,
 
-    /// Operator seed, retained for deriving buffer-deposit keys at
-    /// arbitrary BIP32 indices. Used by admin-only actions (`buffer
-    /// faucet`/`buffer sink`) to sign lock authorizations on deposits
-    /// the operator opened themselves. NOT used for customer-deposit
-    /// signing — those keys live in customer wallets.
-    pub(crate) seed: [u8; 32],
-
     /// Per-ledger BDK wallets. Each ledger has its own UTXO set so a
     /// `quorum begin` activation tx draws inputs only from the
     /// ledger's own funded outputs — no shared pool, no race across

@@ -253,6 +253,25 @@ pub trait Signer: Send + Sync {
     /// X-only form of [`pubkey`], for BIP-340 verification and Nostr.
     fn xonly_pubkey(&self) -> XOnlyPublicKey;
 
+    /// Return the pubkey at the given [`KeyPath`] without exposing the
+    /// secret. Used by daemon flows that need to *advertise* the
+    /// public material at a derivation path (e.g. compute a buffer
+    /// deposit's `deposit_pubkey` for a freshly-issued buffer index)
+    /// but never need to sign with it themselves.
+    ///
+    /// Default impl maps the common variants on top of [`pubkey`]
+    /// (which every signer must support). Signers that can derive
+    /// other paths override.
+    fn pubkey_at(&self, key_path: KeyPath) -> Result<PublicKey, SignerError> {
+        match key_path {
+            KeyPath::Operator => Ok(self.pubkey()),
+            other => Err(SignerError::Unsupported(format!(
+                "this signer does not support pubkey_at({:?})",
+                other
+            ))),
+        }
+    }
+
     /// BIP-340 sign a 32-byte digest.
     ///
     /// `ctx.role` and `ctx.purpose` carry context for audit and (later)

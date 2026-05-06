@@ -219,6 +219,19 @@ impl Signer for LocalSigner {
         self.xonly
     }
 
+    fn pubkey_at(&self, key_path: KeyPath) -> Result<PublicKey, SignerError> {
+        // Operator path is the cached operator pubkey — O(1), no
+        // derivation. Other paths derive via `resolve_key`, then
+        // multiply by G to get the pubkey.
+        match key_path {
+            KeyPath::Operator => Ok(self.pubkey),
+            other => {
+                let secret = self.resolve_key(other)?;
+                Ok(PublicKey::from_secret_key(&self.secp, &secret))
+            }
+        }
+    }
+
     fn bip340_sign(
         &self,
         ctx: &SignContext,

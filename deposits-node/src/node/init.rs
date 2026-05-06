@@ -257,7 +257,6 @@ impl Node {
 
         let node_id_hex = hex::encode(node_id.serialize());
         let admin_pubkey = Self::load_admin_pubkey(&config.data_dir);
-        let seed_for_buffer_ops = config.seed;
 
         Ok(Self {
             node_id,
@@ -329,7 +328,6 @@ impl Node {
             dirty_ledgers: Mutex::new(std::collections::HashSet::new()),
             operator_of_cache: Mutex::new(HashMap::new()),
             admin_pubkey,
-            seed: seed_for_buffer_ops,
             ledger_wallets: Arc::new(RwLock::new(ledger_wallets)),
             next_ledger_account: Mutex::new(next_ledger_account),
             electrum_url: config.electrum_url,

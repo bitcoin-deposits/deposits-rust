@@ -4,26 +4,6 @@
 use super::super::*;
 
 impl Node {
-    /// Derive a deposit key at the given BIP32 index using the operator
-    /// seed. Same path the CLI wallet's `derive_secret_key_at_index`
-    /// uses, so an admin can reconstruct buffer keys from the mnemonic
-    /// DM'd at bootstrap.
-    fn derive_deposit_key_at(
-        &self,
-        index: u32,
-    ) -> Result<bitcoin::secp256k1::SecretKey, String> {
-        use bitcoin::bip32::{DerivationPath, Xpriv};
-        use std::str::FromStr;
-        let xpriv = Xpriv::new_master(self.wallet.network(), &self.seed)
-            .map_err(|e| format!("master key: {}", e))?;
-        let path = DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", index))
-            .map_err(|e| format!("path: {}", e))?;
-        let derived = xpriv
-            .derive_priv(&self.secp, &path)
-            .map_err(|e| format!("derive: {}", e))?;
-        Ok(derived.private_key)
-    }
-
     /// Read the list of buffer indices this node tracks.
     fn load_buffer_indices(&self) -> Vec<BufferIndexEntry> {
         let path = self.data_dir.join("buffer_indices.json");
@@ -88,11 +68,25 @@ impl Node {
             );
         }
 
-        let sk = match self.derive_deposit_key_at(index) {
-            Ok(k) => k,
-            Err(e) => return (false, None, Some(format!("derive: {}", e))),
+        // Pubkey at `m/84'/0'/0'/0/{index}` via the Signer — the
+        // daemon never holds the secret. Buffer-fill / -drain later
+        // signs through `KeyPath::Deposit { index }` against the same
+        // path; the pubkey we publish here is what those sigs will
+        // verify against.
+        let pk = match self
+            .handler
+            .signer
+            .pubkey_at(deposits_signer_api::KeyPath::Deposit { index })
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("signer pubkey_at(Deposit {{ index: {} }}): {}", index, e)),
+                )
+            }
         };
-        let pk = bitcoin::secp256k1::PublicKey::from_secret_key(&self.secp, &sk);
         let deposit_pubkey_hex = hex::encode(pk.serialize());
 
         // Resolve ledger: explicit param, else primary owned ledger.

@@ -522,6 +522,82 @@ fn remote_signer_wallet_account_xpub_matches_local_derivation() {
 }
 
 #[test]
+fn remote_signer_pubkey_at_matches_local_derivation() {
+    // The signer should hand back a pubkey at any KeyPath without
+    // exposing the secret. Used by daemon admin flows (buffer-deposit
+    // open) that need to advertise public material at a derivation
+    // path. We check parity for Operator + Deposit + Wallet +
+    // NodeWallet against an independent local derivation.
+    use bitcoin::bip32::{DerivationPath, Xpriv};
+    use bitcoin::secp256k1::PublicKey;
+    use deposits_signer_api::KeyPath;
+    use std::str::FromStr;
+
+    let operator_seed = [0xC3u8; 32];
+    let node_transport = TransportKey::random();
+    let (proc, signer_transport_pubkey) = spawn_signer(operator_seed, node_transport.public);
+    let remote = RemoteSigner::connect(
+        &proc.socket,
+        node_transport.secret,
+        signer_transport_pubkey,
+        Network::Bitcoin,
+    )
+    .unwrap();
+
+    let secp = Secp256k1::new();
+    let xpriv = Xpriv::new_master(Network::Bitcoin, &operator_seed).unwrap();
+
+    let cases: &[(KeyPath, &str)] = &[
+        (KeyPath::Operator, "m/86'/0'/0'/0/0"),
+        (KeyPath::Deposit { index: 0 }, "m/84'/0'/0'/0/0"),
+        (KeyPath::Deposit { index: 7 }, "m/84'/0'/0'/0/7"),
+        (KeyPath::Deposit { index: 1_000_000 }, "m/84'/0'/0'/0/1000000"),
+        (
+            KeyPath::Wallet { account: 3, change: 0, index: 5 },
+            "m/86'/0'/3'/0/5",
+        ),
+        (
+            KeyPath::Wallet { account: 3, change: 1, index: 0 },
+            "m/86'/0'/3'/1/0",
+        ),
+        (
+            KeyPath::NodeWallet { change: 0, index: 0 },
+            "m/0/0",
+        ),
+        (
+            KeyPath::NodeWallet { change: 1, index: 12 },
+            "m/1/12",
+        ),
+    ];
+
+    for (kp, path_str) in cases {
+        let got = remote
+            .pubkey_at(*kp)
+            .unwrap_or_else(|e| panic!("pubkey_at({:?}) failed: {:?}", kp, e));
+
+        let path = DerivationPath::from_str(path_str).unwrap();
+        let derived = xpriv.derive_priv(&secp, &path).unwrap();
+        let expected = PublicKey::from_secret_key(&secp, &derived.private_key);
+
+        assert_eq!(
+            got, expected,
+            "remote signer pubkey at {:?} ({}) differs from local derivation",
+            kp, path_str
+        );
+    }
+
+    // Refuses change > 1 for Wallet / NodeWallet (validation matches
+    // the bip340_sign path).
+    let bad_wallet = KeyPath::Wallet { account: 0, change: 2, index: 0 };
+    let err = remote.pubkey_at(bad_wallet).unwrap_err();
+    assert!(
+        format!("{:?}", err).contains("change must be 0 or 1"),
+        "expected change-validation error, got: {:?}",
+        err
+    );
+}
+
+#[test]
 fn remote_signer_anti_equivocation_refuses_seq_regression() {
     // Sign at seq=10, then try seq=10 again — RemoteSigner should surface
     // a PolicyRefused error from the signer.

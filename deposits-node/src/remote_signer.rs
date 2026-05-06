@@ -458,4 +458,19 @@ impl Signer for RemoteSigner {
             ))),
         }
     }
+
+    fn pubkey_at(
+        &self,
+        key_path: deposits_signer_api::KeyPath,
+    ) -> Result<PublicKey, SignerError> {
+        let ctx = SignContext::no_ledger(SigPurpose::Bip340Untagged);
+        match self.rpc(&ctx, SignOp::PubkeyAt { key_path })? {
+            SignResult::PubkeyAt { pubkey } => Ok(pubkey),
+            SignResult::Error { kind, message } => Err(map_sign_result_to_error(kind, message)),
+            other => Err(SignerError::Transport(format!(
+                "PubkeyAt returned unexpected variant: {:?}",
+                other
+            ))),
+        }
+    }
 }

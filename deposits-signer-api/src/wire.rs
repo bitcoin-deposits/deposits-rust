@@ -193,6 +193,14 @@ pub enum SignOp {
     /// deposit funding addresses + outbound withdrawals). Signing
     /// routes back via [`crate::KeyPath::NodeWallet`].
     MasterXpub,
+    /// Return the pubkey at the given [`crate::KeyPath`] without
+    /// exposing the secret. Used by daemon admin flows that need to
+    /// advertise public material at a derivation path (e.g.
+    /// buffer-deposit `deposit_pubkey` for a freshly-issued buffer
+    /// index) without ever holding the secret.
+    PubkeyAt {
+        key_path: crate::KeyPath,
+    },
 }
 
 /// Server response to a [`SignRequest`]. Sent inside an AEAD-sealed frame.
@@ -245,6 +253,10 @@ pub enum SignResult {
     /// Result of `MasterXpub`. The serialized master xpub (Base58Check).
     MasterXpub {
         xpub_str: String,
+    },
+    /// Result of [`SignOp::PubkeyAt`]. The 33-byte compressed pubkey.
+    PubkeyAt {
+        pubkey: PublicKey,
     },
     /// Signer refused or failed to satisfy the request. The daemon
     /// surfaces this as a `SignerError`.
