@@ -488,6 +488,23 @@ pub struct Node {
     /// the operator opened themselves. NOT used for customer-deposit
     /// signing — those keys live in customer wallets.
     pub(crate) seed: [u8; 32],
+
+    /// Per-ledger BDK wallets. Each ledger has its own UTXO set so a
+    /// `quorum begin` activation tx draws inputs only from the
+    /// ledger's own funded outputs — no shared pool, no race across
+    /// ledgers. Lazy-created at `ledger open` time and reloaded from
+    /// `<data_dir>/wallet/ledgers/<ledger_id>/` at startup.
+    pub(crate) ledger_wallets:
+        Arc<RwLock<HashMap<String, Arc<crate::ledger_wallet::LedgerWallet>>>>,
+
+    /// Next BIP-32 account index to assign to a fresh ledger wallet.
+    /// Initialized to (max existing on disk) + 1 at startup, then
+    /// incremented per `ensure_ledger_wallet` call.
+    pub(crate) next_ledger_account: Mutex<u32>,
+
+    /// Esplora endpoint for chain sync, retained so per-ledger wallets
+    /// can build their own clients. Comes from `NodeConfig::electrum_url`.
+    pub(crate) electrum_url: String,
 }
 
 impl Node {

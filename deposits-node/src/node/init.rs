@@ -15,6 +15,61 @@ impl Node {
             config.electrum_url.clone(),
         )?);
 
+        // Reload per-ledger wallets from disk. Each ledger we've ever
+        // opened owns a `<data_dir>/wallet/ledgers/<ledger_id>/` dir
+        // with its own BDK descriptor account; we rebuild the
+        // `LedgerWallet` from the seed at the recorded account.
+        let (ledger_wallets, next_ledger_account) = {
+            let mut map: HashMap<String, Arc<crate::ledger_wallet::LedgerWallet>> = HashMap::new();
+            let mut max_seen: i64 = -1;
+            let dir = config.data_dir.join("wallet").join("ledgers");
+            if dir.exists() {
+                for entry in std::fs::read_dir(&dir).map_err(|e| {
+                    Error::Wallet(format!("read ledger wallets dir {:?}: {}", dir, e))
+                })? {
+                    let entry = entry.map_err(|e| {
+                        Error::Wallet(format!("read ledger wallets dir entry: {}", e))
+                    })?;
+                    if !entry
+                        .file_type()
+                        .map(|ft| ft.is_dir())
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let ledger_id = entry.file_name().to_string_lossy().to_string();
+                    let lw = match crate::ledger_wallet::LedgerWallet::load(
+                        &config.seed,
+                        config.network,
+                        &ledger_id,
+                        &config.data_dir,
+                        config.electrum_url.clone(),
+                    ) {
+                        Ok(lw) => lw,
+                        Err(e) => {
+                            // Tolerate uninitialized/leftover dirs so a
+                            // half-created ledger doesn't bring the daemon
+                            // down at startup.
+                            tracing::warn!(
+                                "skipping ledger wallet at {:?}: {}",
+                                entry.path(),
+                                e
+                            );
+                            continue;
+                        }
+                    };
+                    max_seen = max_seen.max(lw.account_index() as i64);
+                    map.insert(ledger_id, Arc::new(lw));
+                }
+            }
+            tracing::info!(
+                "Loaded {} per-ledger wallet(s); next BIP-32 account = {}",
+                map.len(),
+                max_seen + 1
+            );
+            (map, (max_seen + 1) as u32)
+        };
+
         // Build the Signer abstraction. Two paths:
         //   - LocalSigner: build from the seed-derived operator key.
         //     Default when --signer-socket is not configured.
@@ -272,6 +327,9 @@ impl Node {
             operator_of_cache: Mutex::new(HashMap::new()),
             admin_pubkey,
             seed: seed_for_buffer_ops,
+            ledger_wallets: Arc::new(RwLock::new(ledger_wallets)),
+            next_ledger_account: Mutex::new(next_ledger_account),
+            electrum_url: config.electrum_url,
         })
     }
 

@@ -546,6 +546,17 @@ impl Node {
             tracing::error!("Failed to persist ledger: {}", e);
         }
 
+        // Provision the per-ledger BDK wallet now so the operator can
+        // hand `deposits-node ledger address <id>` to whoever is
+        // pre-funding this ledger before `quorum begin` activates it.
+        if let Err(e) = self.ensure_ledger_wallet(&ledger_id) {
+            tracing::error!(
+                "Failed to provision per-ledger wallet for {}: {}",
+                ledger_id,
+                e
+            );
+        }
+
         // Lazy-spawn an actor for this freshly-created ledger so future
         // inbound + commit events are mirrored to its `.actor.log`. The
         // initial actor pool was sized from `handler.ledgers` at
@@ -2038,6 +2049,59 @@ impl Node {
             .unwrap()
             .insert(canonical_id, (result, history_len));
         result
+    }
+
+    // ========================================================================
+    // Per-ledger wallet management (phase 1c).
+    // ========================================================================
+
+    /// Return the per-ledger wallet for `ledger_id`, creating one at the
+    /// next available BIP-32 account if it doesn't exist yet.
+    ///
+    /// Idempotent: a second call with the same `ledger_id` returns the
+    /// existing wallet at the original account, without consuming an
+    /// account index.
+    pub fn ensure_ledger_wallet(
+        &self,
+        ledger_id: &str,
+    ) -> Result<Arc<crate::ledger_wallet::LedgerWallet>, Error> {
+        if let Some(w) = self.ledger_wallets.read().unwrap().get(ledger_id).cloned() {
+            return Ok(w);
+        }
+        let mut wallets = self.ledger_wallets.write().unwrap();
+        // Re-check after lock upgrade in case another thread raced to create.
+        if let Some(w) = wallets.get(ledger_id).cloned() {
+            return Ok(w);
+        }
+        let mut next = self.next_ledger_account.lock().unwrap();
+        let account = *next;
+        let lw = crate::ledger_wallet::LedgerWallet::create(
+            &self.seed,
+            self.wallet.network(),
+            account,
+            ledger_id,
+            &self.data_dir,
+            self.electrum_url.clone(),
+        )?;
+        *next = next.checked_add(1).ok_or_else(|| {
+            Error::Wallet("BIP-32 ledger-wallet account counter overflowed u32".into())
+        })?;
+        let arc = Arc::new(lw);
+        wallets.insert(ledger_id.to_string(), Arc::clone(&arc));
+        tracing::info!(
+            "Created ledger wallet for {} at BIP-32 account {}",
+            &ledger_id[..16.min(ledger_id.len())],
+            account,
+        );
+        Ok(arc)
+    }
+
+    /// Look up an existing per-ledger wallet without creating one.
+    pub fn ledger_wallet(
+        &self,
+        ledger_id: &str,
+    ) -> Option<Arc<crate::ledger_wallet::LedgerWallet>> {
+        self.ledger_wallets.read().unwrap().get(ledger_id).cloned()
     }
 }
 

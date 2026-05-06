@@ -13,7 +13,7 @@ use crate::Node;
 /// Handle ledger subcommands
 pub async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-node ledger <open|list|history|validate|health|export|import|advertise|discover> [args...]");
+        eprintln!("Usage: deposits-node ledger <open|list|history|validate|health|export|import|advertise|discover|address> [args...]");
         return Ok(());
     }
 
@@ -28,12 +28,45 @@ pub async fn ledger_command(args: &[String]) -> Result<(), Box<dyn std::error::E
         "advertise" => ledger_advertise(&args[1..]).await,
         "republish" => ledger_republish(&args[1..]).await,
         "discover" => ledger_discover(&args[1..]).await,
+        "address" => ledger_address(&args[1..]).await,
         cmd => {
             eprintln!("Unknown ledger subcommand: {}", cmd);
-            eprintln!("Usage: deposits-node ledger <open|list|history|validate|health|export|import|advertise|discover> [args...]");
+            eprintln!("Usage: deposits-node ledger <open|list|history|validate|health|export|import|advertise|discover|address> [args...]");
             Ok(())
         }
     }
+}
+
+/// Print a fresh receive address for the per-ledger BDK wallet.
+///
+/// Used by external pre-funding flows: `ledger open` provisions the
+/// wallet, `ledger address <id>` hands out an address, the operator
+/// (or a faucet) sends sats to it, then `quorum begin` builds the
+/// activation tx from the ledger's own UTXOs.
+async fn ledger_address(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut ledger_id: Option<String> = None;
+    let mut config_args = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if ledger_id.is_none() {
+            ledger_id = Some(args[i].clone());
+        }
+        i += 1;
+    }
+    let ledger_id = ledger_id.ok_or("Usage: deposits-node ledger address <ledger_id>")?;
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+    let wallet = node.ensure_ledger_wallet(&ledger_id)?;
+    let addr = wallet.get_new_address()?;
+    println!("{}", addr);
+    Ok(())
 }
 
 /// Open a new ledger backed by our reserves UTXO
