@@ -5,6 +5,21 @@ edition = "2021"
 description = "bLSAG ring signatures over secp256k1 (NIP-XX). Anonymity within a Nostr web-of-trust ring."
 license = "MIT OR Apache-2.0"
 
+# Standalone CLI for the wallet-side ring-signature first-contact flow.
+# Used to live in `deposits-wallet ringsig-link`; lifted out so wallets
+# that don't need the web-of-trust gate don't depend on the lib.
+[[bin]]
+name = "deposits-ringsig"
+path = "src/bin/deposits-ringsig.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# `cli` pulls in tokio + nostr-sdk for the standalone binary. Library
+# consumers that just want the bLSAG primitives can pass
+# `default-features = false`.
+cli = ["dep:tokio", "dep:nostr-sdk", "dep:dirs"]
+
 [dependencies]
 # secp256k1 primitives — point ops, scalar field, BIP-340 Schnorr.
 # `rand-std` re-exports the `rand` crate so callers and tests can pull
@@ -16,6 +31,12 @@ sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
+
+# CLI-only deps. Optional; only pulled when the `cli` feature is
+# active so library consumers stay slim.
+tokio = { version = "1", features = ["full"], optional = true }
+nostr-sdk = { version = "0.37", optional = true }
+dirs = { version = "5.0", optional = true }
 
 [lints]
 workspace = true

@@ -6,8 +6,6 @@ pub mod escalate;
 pub mod ledger;
 pub mod payments;
 pub mod regtest;
-#[cfg(feature = "ringsig")]
-pub mod ringsig;
 pub mod swap;
 
 use bitcoin::hashes::{sha256, Hash};

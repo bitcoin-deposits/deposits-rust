@@ -5,14 +5,6 @@ edition = "2021"
 description = "Bitcoin Deposits Protocol - Wallet CLI"
 license = "MIT OR Apache-2.0"
 
-[features]
-# `ringsig` enables the `ringsig-link` subcommand (anonymous web-of-trust
-# attestation). Default-on so existing builds are unchanged; external
-# consumers who only want the deposit/payment surface can pass
-# `default-features = false` and skip the ringsig dep.
-default = ["ringsig"]
-ringsig = ["dep:deposits-ringsig"]
-
 [dependencies]
 # Core protocol logic + state machine
 deposits-core = { path = "../deposits-core" }
@@ -20,8 +12,9 @@ deposits-core = { path = "../deposits-core" }
 # `deposits-node` so the wallet is no longer coupled to the daemon's
 # library at compile time.
 deposits-nostr = { path = "../deposits-nostr", default-features = false }
-# Anonymous web-of-trust gate (NIP-XX). Used by `ringsig-link`.
-deposits-ringsig = { path = "../deposits-ringsig", optional = true }
+# `ringsig-link` used to live as a wallet subcommand; it now ships as
+# the standalone `deposits-ringsig` binary so the wallet's compile
+# tree doesn't carry the ring-signature primitives.
 
 # Bitcoin
 bitcoin = { version = "0.32", features = ["serde"] }

@@ -1,20 +1,23 @@
-//! `ringsig-link` — anonymous web-of-trust attestation request (NIP-XX).
+//! `deposits-ringsig link` — anonymous web-of-trust attestation request (NIP-XX).
 //!
-//! High-level flow:
+//! Standalone version of the flow that used to live as
+//! `deposits-wallet ringsig-link`. Drives the first-contact handshake
+//! against a verifier whose Kind 35500 cover lists the wallet's
+//! identity npub:
 //!
 //!   1. Fetch the verifier's cover (kind 35500) from the relay,
 //!      keyed on `(author = verifier_npub, #d = cover_d_tag)`.
 //!   2. Find a ring whose members include the wallet's own xonly
 //!      pubkey. Bail if none — the wallet's npub isn't in this
-//!      verifier's web of trust, and ringsig membership can't be
+//!      verifier's web of trust, and ring membership can't be
 //!      conjured up locally.
 //!   3. Generate a fresh BIP-340 bound key `(sk_P, P)`. This is the
-//!      identity that will eventually sign deposit_open against op0;
-//!      the wallet's long-term seed-derived key never gets exposed
-//!      to the operator.
+//!      identity that will eventually open deposits against an
+//!      operator; the wallet's long-term seed-derived key never
+//!      gets exposed to the operator.
 //!   4. Compute the canonical event digest (with the `ringsig` and
 //!      `binding` tags excluded), produce a bLSAG ring signature
-//!      under the wallet's seed-derived key, and produce a Schnorr
+//!      under the wallet's identity key, and produce a Schnorr
 //!      binding proof tying `P` to that ring sig.
 //!   5. Publish the kind 25502 first-contact event signed by `P`,
 //!      wait for the verifier's kind 25503 reply.
@@ -22,6 +25,15 @@
 //!      the data dir under a user-chosen alias and append a record
 //!      to `ringsig.json`. The user can then open deposits with
 //!      `deposits-wallet open <ledger> --nsec-file <alias>.nsec`.
+//!
+//! Usage:
+//!
+//!   deposits-ringsig link <verifier_npub> \
+//!       --nsec-file <path>          # wallet's identity nsec
+//!       --relay <wss://...>         # repeatable
+//!       [--cover-d <id>]            # default: "default"
+//!       [--alias <name>]            # default: "ringsig-<8-char-bound>"
+//!       [--data-dir <path>]         # default: ~/.deposits-wallet
 
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::{All, PublicKey as SecpPubKey, Secp256k1, SecretKey as SecpSk};
@@ -31,20 +43,82 @@ use deposits_ringsig::wire::{
 };
 use deposits_ringsig::{binding, blsag, hash_point, presentation_nullifier};
 use nostr_sdk::prelude::*;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use super::parse_config;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut iter = args.iter().skip(1);
+    let subcmd = match iter.next() {
+        Some(s) => s.as_str(),
+        None => {
+            print_usage(&args[0]);
+            return Ok(());
+        }
+    };
 
-pub async fn ringsig_link(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    match subcmd {
+        "link" => {
+            let rest: Vec<String> = iter.cloned().collect();
+            link(&rest).await
+        }
+        "-h" | "--help" | "help" => {
+            print_usage(&args[0]);
+            Ok(())
+        }
+        other => {
+            eprintln!("Unknown subcommand: {}", other);
+            print_usage(&args[0]);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn print_usage(prog: &str) {
+    eprintln!("deposits-ringsig — anonymous web-of-trust attestation");
+    eprintln!();
+    eprintln!("Usage: {} link <verifier_npub> [options]", prog);
+    eprintln!();
+    eprintln!("Required:");
+    eprintln!("  --nsec-file <path>   Path to wallet identity nsec (hex or nsec1…)");
+    eprintln!("  --relay <url>        Nostr relay URL (repeatable)");
+    eprintln!();
+    eprintln!("Optional:");
+    eprintln!("  --cover-d <id>       Verifier cover d-tag (default: \"default\")");
+    eprintln!("  --alias <name>       Local alias for the bound nsec");
+    eprintln!("                       (default: \"ringsig-<8-char-bound>\")");
+    eprintln!("  --data-dir <path>    Where to persist bound nsec + ringsig.json");
+    eprintln!("                       (default: ~/.deposits-wallet)");
+    eprintln!();
+    eprintln!("Example:");
+    eprintln!(
+        "  {} link npub1... --nsec-file ~/.deposits-wallet/wallet.nsec \\",
+        prog
+    );
+    eprintln!("        --relay wss://relay.bitcoindeposits.net");
+}
+
+async fn link(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // ── arg parsing ─────────────────────────────────────────────────
     let mut verifier_arg: Option<String> = None;
+    let mut nsec_path: Option<PathBuf> = None;
+    let mut relays: Vec<String> = Vec::new();
     let mut cover_d_tag = String::from("default");
     let mut alias_arg: Option<String> = None;
-    let mut config_args = Vec::new();
+    let mut data_dir: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--nsec-file" if i + 1 < args.len() => {
+                nsec_path = Some(PathBuf::from(&args[i + 1]));
+                i += 1;
+            }
+            "--relay" if i + 1 < args.len() => {
+                relays.push(args[i + 1].clone());
+                i += 1;
+            }
             "--cover-d" if i + 1 < args.len() => {
                 cover_d_tag = args[i + 1].clone();
                 i += 1;
@@ -53,12 +127,12 @@ pub async fn ringsig_link(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 alias_arg = Some(args[i + 1].clone());
                 i += 1;
             }
+            "--data-dir" if i + 1 < args.len() => {
+                data_dir = Some(PathBuf::from(&args[i + 1]));
+                i += 1;
+            }
             s if s.starts_with("--") => {
-                config_args.push(args[i].clone());
-                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                    config_args.push(args[i + 1].clone());
-                    i += 1;
-                }
+                return Err(format!("unknown option: {}", s).into());
             }
             _ => {
                 if verifier_arg.is_none() {
@@ -70,14 +144,18 @@ pub async fn ringsig_link(args: &[String]) -> Result<(), Box<dyn std::error::Err
     }
 
     let verifier_arg = verifier_arg.ok_or(
-        "Usage: deposits-wallet ringsig-link <verifier_npub> \
-         [--cover-d <id>] [--alias <name>] --relay <url>",
+        "Usage: deposits-ringsig link <verifier_npub> --nsec-file <path> --relay <url>",
     )?;
     let verifier_xonly = parse_xonly_arg(&verifier_arg)?;
-    let config = parse_config(&config_args)?;
-    if config.relays.is_empty() {
-        return Err("No relay specified. Use --relay <url>".into());
+    let nsec_path = nsec_path.ok_or("--nsec-file is required")?;
+    if relays.is_empty() {
+        return Err("at least one --relay is required".into());
     }
+    let data_dir = data_dir.unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".deposits-wallet")
+    });
 
     println!("ringsig-link");
     println!("  verifier: {}…", &verifier_xonly[..16]);
@@ -85,13 +163,13 @@ pub async fn ringsig_link(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     // ── wallet identity → BIP-340 even-y ───────────────────────────
     //
-    // The wallet's seed-derived secret may produce an odd-y pubkey,
-    // but the cover stores members as 32-byte xonly hex. Lifting
-    // those back to a curve point assumes even-y; if our key has
-    // odd-y the lifted point is the negation of our true pubkey and
-    // the ring signature won't verify. Normalize once up front.
+    // The wallet's stored nsec may produce an odd-y pubkey, but the
+    // cover stores members as 32-byte xonly hex. Lifting those back
+    // to a curve point assumes even-y; if our key has odd-y the
+    // lifted point is the negation of our true pubkey and the ring
+    // signature won't verify. Normalize once up front.
     let secp = Secp256k1::new();
-    let our_sk_raw = config.nostr_key()?;
+    let our_sk_raw = load_nsec_file(&nsec_path)?;
     let (our_sk, our_pk) = to_bip340(&secp, our_sk_raw);
     let our_xonly = hex::encode(&our_pk.serialize()[1..]);
     println!("  our npub: {}…", &our_xonly[..16]);
@@ -99,7 +177,7 @@ pub async fn ringsig_link(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // ── connect, fetch cover ───────────────────────────────────────
     let our_keys = Keys::new(SecretKey::from_slice(&our_sk.secret_bytes())?);
     let client = Client::new(our_keys.clone());
-    for r in &config.relays {
+    for r in &relays {
         client.add_relay(r).await?;
     }
     client.connect().await;
@@ -142,8 +220,8 @@ pub async fn ringsig_link(args: &[String]) -> Result<(), Box<dyn std::error::Err
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
-    let cover_event = cover_event
-        .ok_or_else(|| format!("cover `{}` not found on relay", cover_d_tag))?;
+    let cover_event =
+        cover_event.ok_or_else(|| format!("cover `{}` not found on relay", cover_d_tag))?;
     let cover_event_id = cover_event.id.to_hex();
     let cover_tag_rows: Vec<Vec<String>> = cover_event
         .tags
@@ -252,7 +330,7 @@ pub async fn ringsig_link(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // sends + receives the response. Subscribing on this client lets
     // the relay route the kind 25503 to us via #p=bound_xonly.
     let bound_client = Client::new(bound_keys.clone());
-    for r in &config.relays {
+    for r in &relays {
         bound_client.add_relay(r).await?;
     }
     bound_client.connect().await;
@@ -311,11 +389,11 @@ pub async fn ringsig_link(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     // ── persist bound key + metadata ───────────────────────────────
     let alias = alias_arg.unwrap_or_else(|| format!("ringsig-{}", &bound_xonly[..8]));
-    std::fs::create_dir_all(&config.data_dir)?;
-    let bound_path = config.data_dir.join(format!("{}.nsec", alias));
+    std::fs::create_dir_all(&data_dir)?;
+    let bound_path = data_dir.join(format!("{}.nsec", alias));
     std::fs::write(&bound_path, hex::encode(bound_sk.secret_bytes()))?;
 
-    let meta_path = config.data_dir.join("ringsig.json");
+    let meta_path = data_dir.join("ringsig.json");
     let mut meta: serde_json::Value = std::fs::read_to_string(&meta_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -389,4 +467,28 @@ fn parse_xonly_arg(s: &str) -> Result<String, Box<dyn std::error::Error>> {
         return Ok(s[2..].to_lowercase());
     }
     Err(format!("expected npub1… or 64-char hex pubkey, got {:?}", s).into())
+}
+
+fn load_nsec_file(path: &std::path::Path) -> Result<SecpSk, Box<dyn std::error::Error>> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("--nsec-file {}: {}", path.display(), e))?;
+    let trimmed = raw.trim();
+    let bytes = if trimmed.starts_with("nsec1") {
+        // Bech32 nsec — let nostr_sdk decode.
+        let key = SecretKey::from_bech32(trimmed)
+            .map_err(|e| format!("--nsec-file {}: invalid nsec1 bech32: {}", path.display(), e))?;
+        key.as_secret_bytes().to_vec()
+    } else {
+        hex::decode(trimmed)
+            .map_err(|e| format!("--nsec-file {}: invalid hex: {}", path.display(), e))?
+    };
+    if bytes.len() != 32 {
+        return Err(format!(
+            "--nsec-file {}: expected 32 bytes, got {}",
+            path.display(),
+            bytes.len()
+        )
+        .into());
+    }
+    SecpSk::from_slice(&bytes).map_err(|e| format!("--nsec-file {}: {}", path.display(), e).into())
 }

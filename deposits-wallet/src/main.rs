@@ -52,8 +52,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "attest" => wallet_cli::attest::attest_subkey(&args[2..]).await,
         "revoke" => wallet_cli::attest::revoke_subkey(&args[2..]).await,
         "subkeys" => wallet_cli::attest::list_subkeys(&args[2..]).await,
-        #[cfg(feature = "ringsig")]
-        "ringsig-link" => wallet_cli::ringsig::ringsig_link(&args[2..]).await,
+        "ringsig-link" => {
+            eprintln!(
+                "ringsig-link moved to its own binary. Run:\n\
+                 \n\
+                 \x20  deposits-ringsig link <verifier_npub> --nsec-file <path> --relay <url>\n\
+                 \n\
+                 (was: `deposits-wallet ringsig-link …`)"
+            );
+            std::process::exit(1);
+        }
         "swap-advertise" => wallet_cli::swap::swap_advertise(&args[2..]).await,
         "swap-list" => wallet_cli::swap::swap_list(&args[2..]).await,
         "swap-request" => wallet_cli::swap::swap_request(&args[2..]).await,
