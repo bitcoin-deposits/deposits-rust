@@ -7,6 +7,23 @@ use super::{
     verify_quorum_membership, NostrTransportBuilder,
 };
 
+/// Tag a deposit's `deposits.json` entry with a sync failure so
+/// `show_balance` can flag it as "(query failed)" instead of
+/// confidently printing the cached `amount_sats`. Cleared the next
+/// time `sync_deposits` succeeds for this deposit. Carries an
+/// ISO-8601 timestamp + a short reason for the user.
+fn mark_sync_error(deposit: &mut serde_json::Value, reason: &str) {
+    if let Some(obj) = deposit.as_object_mut() {
+        obj.insert(
+            "sync_error".to_string(),
+            serde_json::json!({
+                "at":     Utc::now().to_rfc3339(),
+                "reason": reason,
+            }),
+        );
+    }
+}
+
 /// Open a new deposit account on a ledger. Only creates the empty
 /// account — use `offer <alias> <sats>` afterward to request an
 /// on-chain funding address, or fund by lightning / incoming transfer.
@@ -821,6 +838,7 @@ pub async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     let mut total_locked = 0u64;
 
+    let mut any_stale = false;
     for deposit in &deposits {
         let alias = deposit
             .get("alias")
@@ -842,14 +860,30 @@ pub async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Err
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
-        let status_symbol = match status {
-            "completed" | "funded" => "+",
-            "pending" => "~",
+        // sync_error is set by sync_deposits when balance_query times
+        // out or returns an error. Don't print the cached amount as
+        // authoritative: a freshly-credited deposit will sit at the
+        // last-seen value (often 0) until the next successful sync.
+        let sync_error_reason = deposit
+            .get("sync_error")
+            .and_then(|v| v.get("reason"))
+            .and_then(|v| v.as_str());
+
+        let status_symbol = match (status, sync_error_reason) {
+            (_, Some(_)) => "?",
+            ("completed" | "funded", _) => "+",
+            ("pending", _) => "~",
             _ => "?",
         };
 
         let id_short = &id_hex[..8.min(id_hex.len())];
-        if locked > 0 {
+        if let Some(reason) = sync_error_reason {
+            any_stale = true;
+            println!(
+                "  {} {} {:>10}        ({})  ⚠ balance unavailable ({})",
+                status_symbol, alias, "?", id_short, reason
+            );
+        } else if locked > 0 {
             println!(
                 "  {} {} {:>10} sats  ({})  [{} pending]",
                 status_symbol, alias, amount, id_short, locked
@@ -861,7 +895,9 @@ pub async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Err
             );
         }
 
-        if status == "funded" || status == "completed" {
+        // Only count toward the total when the on-disk number reflects
+        // the operator's view (no sync_error AND status confirmed).
+        if sync_error_reason.is_none() && (status == "funded" || status == "completed") {
             total_sats += amount;
             total_locked += locked;
         }
@@ -883,7 +919,20 @@ pub async fn show_balance(args: &[String]) -> Result<(), Box<dyn std::error::Err
         );
     }
     println!();
-    println!("  + = funded/completed, ~ = pending, [N pending] = locked for withdrawal");
+    println!(
+        "  + = funded/completed, ~ = pending, ? = sync failed / unknown, \
+         [N pending] = locked for withdrawal"
+    );
+    if any_stale {
+        println!();
+        println!(
+            "  ⚠ One or more balances are unavailable — the operator's \
+             balance_query didn't respond.\n\
+             \x20   Run `deposits-wallet sync` again in a few seconds; if \
+             the operator's busy the response often\n\
+             \x20   lands on the next attempt."
+        );
+    }
 
     Ok(())
 }
@@ -985,86 +1034,94 @@ pub async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Er
                     .await?;
                 eprintln!("  {} sent balance_query ({}...)", alias, &request_id[..16]);
 
-                // Give daemon a moment to process
-                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                // Use wait_for_response — relay-side subscription with the
+                // operator-pubkey-gated filter — instead of the older
+                // fetch_response poll loop. Lower latency in the happy
+                // path; real timeouts are now ~15s rather than 8s of
+                // best-effort poll.
+                match transport.wait_for_response(&request_id, 15_000).await {
+                    Ok(response) => {
+                        if response.success {
+                            if let Some(result) = &response.result {
+                                let balance_msats = result
+                                    .get("balance_msats")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let locked_msats = result
+                                    .get("locked_msats")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let available_sats =
+                                    (balance_msats.saturating_sub(locked_msats)) / 1000;
+                                let locked_sats = locked_msats / 1000;
 
-                // Wait for response (with timeout)
-                let start = std::time::Instant::now();
-                let timeout = std::time::Duration::from_secs(8);
-                let mut attempts = 0;
+                                let current_amount = deposit
+                                    .get("amount_sats")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let current_locked = deposit
+                                    .get("locked_sats")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
 
-                while start.elapsed() < timeout {
-                    attempts += 1;
-                    match transport.fetch_response(&request_id).await {
-                        Ok(Some(response)) => {
-                            if response.success {
-                                if let Some(result) = &response.result {
-                                    // Get balance and locked from response
-                                    let balance_msats = result
-                                        .get("balance_msats")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
-                                    let locked_msats = result
-                                        .get("locked_msats")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
-                                    let available_sats =
-                                        (balance_msats.saturating_sub(locked_msats)) / 1000;
-                                    let locked_sats = locked_msats / 1000;
-
-                                    let current_amount = deposit
-                                        .get("amount_sats")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
-                                    let current_locked = deposit
-                                        .get("locked_sats")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
-
-                                    if available_sats != current_amount
-                                        || locked_sats != current_locked
-                                    {
-                                        if locked_sats > 0 {
-                                            println!(
-                                                "  {} balance: {} sats ({} pending)",
-                                                alias, available_sats, locked_sats
-                                            );
-                                        } else {
-                                            println!(
-                                                "  {} balance: {} sats",
-                                                alias, available_sats
-                                            );
-                                        }
-                                        deposit["amount_sats"] = serde_json::json!(available_sats);
-                                        deposit["balance_msats"] =
-                                            serde_json::json!(balance_msats as i64);
-                                        deposit["locked_sats"] = serde_json::json!(locked_sats);
-                                        updated = true;
+                                if available_sats != current_amount
+                                    || locked_sats != current_locked
+                                {
+                                    if locked_sats > 0 {
+                                        println!(
+                                            "  {} balance: {} sats ({} pending)",
+                                            alias, available_sats, locked_sats
+                                        );
+                                    } else {
+                                        println!(
+                                            "  {} balance: {} sats",
+                                            alias, available_sats
+                                        );
                                     }
-
-                                    // Promote status to "funded" if daemon reports a balance
-                                    if balance_msats > 0 && current_status == "pending" {
-                                        deposit["status"] = serde_json::json!("funded");
-                                        updated = true;
-                                    }
+                                    deposit["amount_sats"] = serde_json::json!(available_sats);
+                                    deposit["balance_msats"] =
+                                        serde_json::json!(balance_msats as i64);
+                                    deposit["locked_sats"] = serde_json::json!(locked_sats);
+                                    updated = true;
                                 }
-                            } else {
-                                eprintln!("  {} query failed: {:?}", alias, response.error);
+
+                                // Promote status to "funded" if daemon reports a balance
+                                if balance_msats > 0 && current_status == "pending" {
+                                    deposit["status"] = serde_json::json!("funded");
+                                    updated = true;
+                                }
+
+                                // A successful query clears any prior
+                                // sync error marker so `show_balance`
+                                // stops flagging this deposit.
+                                if deposit.get("sync_error").is_some() {
+                                    if let Some(obj) = deposit.as_object_mut() {
+                                        obj.remove("sync_error");
+                                    }
+                                    updated = true;
+                                }
                             }
-                            break;
-                        }
-                        Ok(None) => {
-                            // No response yet, keep polling
-                            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                        }
-                        Err(e) => {
-                            eprintln!("  {} fetch error: {}", alias, e);
-                            break;
+                        } else {
+                            eprintln!(
+                                "  {} query failed: {}",
+                                alias,
+                                response.error.as_deref().unwrap_or("(no detail)")
+                            );
+                            mark_sync_error(deposit, "operator returned error");
+                            updated = true;
                         }
                     }
-                }
-                if start.elapsed() >= timeout {
-                    eprintln!("  {} timeout after {} attempts", alias, attempts);
+                    Err(e) => {
+                        eprintln!("  {} balance query did not complete: {}", alias, e);
+                        // Leave the cached `amount_sats` alone — but
+                        // record the failure so `show_balance` flags
+                        // this deposit as stale instead of confidently
+                        // printing "0 sats" for what could be a freshly-
+                        // credited balance the operator just hasn't
+                        // answered for yet.
+                        mark_sync_error(deposit, "no response within 15s");
+                        updated = true;
+                    }
                 }
             }
             continue;
