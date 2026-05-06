@@ -193,30 +193,37 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
 
         println!("  Request ID: {}...", &open_request_id[..16]);
 
+        // Forgery shield: accept any response — success OR error — so
+        // long as it was signed by the operator (or its delegate) we
+        // sent the request to. Anyone else on the relay can publish a
+        // bogus 20102 keyed on our request_id; nostr-sdk verifies the
+        // event signature on receive, so `responder_pubkey` is the
+        // trustworthy identity to gate on.
+        //
+        // Wallets that came up against an older daemon used to see
+        // "Timeout waiting for valid response" here even when the
+        // operator returned a perfectly informative error, because
+        // the previous filter only allow-listed a handful of
+        // known-shape errors. Now we surface every legitimate operator
+        // error to the user; only forged responses get silently dropped.
+        let expected_responder = advertisement
+            .as_ref()
+            .and_then(|ad| ad.expected_responder());
         let response = match transport
-            .wait_for_valid_response(&open_request_id, 30000, |response| {
-                if response.success {
-                    return true;
-                }
-                let error = response.error.as_deref().unwrap_or("");
-                if error.contains("already exists") || error.contains("Deposit already") {
-                    return true;
-                }
-                // Also accept attestation_required so the outer flow can run
-                // the verifier round-trip and retry. Without this the filter
-                // would swallow the rejection as "rogue operator" noise.
-                if let Some(result_val) = &response.result {
-                    if let Some(code) = result_val.get("code").and_then(|v| v.as_str()) {
-                        if code == "attestation_required"
-                            || code == "not_authorized"
-                            || code == "denied"
-                        {
-                            return true;
-                        }
-                    }
-                }
-                eprintln!("Warning: Rejecting error response: {}", error);
-                false
+            .wait_for_valid_response(&open_request_id, 30000, |response| match (
+                expected_responder,
+                response.responder_pubkey,
+            ) {
+                (Some(expected), Some(seen)) => seen == expected,
+                // No ad fetched (legacy / discovery race) — fall back to
+                // accepting any response. Pre-existing behaviour for
+                // this code path; the filter at least shields the
+                // common ad-known case.
+                (None, _) => true,
+                // Pre-Phase-4 LedgerResponse without responder_pubkey;
+                // shouldn't happen against a current daemon but keep
+                // the path open until we drop the field's `Option`.
+                (Some(_), None) => true,
             })
             .await
         {

@@ -521,6 +521,14 @@ pub struct LedgerResponse {
     /// Timestamp
     #[serde(skip)]
     pub timestamp: u64,
+
+    /// xonly Nostr pubkey of whoever signed this Kind 20102 event.
+    /// Populated by `process_ledger_response` from the verified
+    /// `event.pubkey`; let callers reject responses that didn't come
+    /// from the operator (or its delegate) they sent the request to.
+    /// `None` only on the legacy struct-construction fallback.
+    #[serde(skip)]
+    pub responder_pubkey: Option<nostr_sdk::PublicKey>,
 }
 
 /// A ledger dispute (invalid ledger detected)
@@ -1020,6 +1028,32 @@ pub struct SwapResponse {
 }
 
 impl LedgerAdvertisement {
+    /// Return the xonly Nostr pubkey we expect to *sign* the operator's
+    /// Kind 20102 ledger responses for this ledger. Prefer the daemon's
+    /// delegate when one is published; fall back to the operator key
+    /// for legacy ads. `None` if neither field is a parseable 33-byte
+    /// compressed hex.
+    ///
+    /// Use this to gate response acceptance: a wallet that just sent
+    /// a request to (delegate || operator) should reject any 20102
+    /// whose `event.pubkey` doesn't match this — every other publisher
+    /// on the relay is a stranger, regardless of how legitimate-looking
+    /// the error text is.
+    pub fn expected_responder(&self) -> Option<nostr_sdk::PublicKey> {
+        let hex_compressed = if !self.delegate_pubkey.is_empty() {
+            &self.delegate_pubkey
+        } else {
+            &self.operator_pubkey
+        };
+        // 33-byte compressed: drop the leading 0x02/0x03 sign byte
+        // → 32-byte xonly that nostr_sdk uses internally.
+        let bytes = hex::decode(hex_compressed).ok()?;
+        if bytes.len() != 33 {
+            return None;
+        }
+        nostr_sdk::PublicKey::from_slice(&bytes[1..]).ok()
+    }
+
     /// Create a new advertisement with required fields
     pub fn new(
         ledger_id: String,
@@ -2235,6 +2269,7 @@ impl NostrTransport {
             ledger_id: String::new(),
             event_id: String::new(),
             timestamp: 0,
+            responder_pubkey: None,
         };
 
         let plaintext_content = serde_json::to_string(&response)
@@ -4666,6 +4701,7 @@ impl NostrTransport {
                 ledger_id: String::new(),
                 event_id: String::new(),
                 timestamp: 0,
+                responder_pubkey: None,
             },
         );
 
@@ -4673,6 +4709,9 @@ impl NostrTransport {
         response.ledger_id = ledger_id;
         response.event_id = event.id.to_hex();
         response.timestamp = event.created_at.as_u64();
+        // Nostr-SDK has already verified the event signature on the
+        // way in, so `event.pubkey` is the trustworthy responder ID.
+        response.responder_pubkey = Some(event.pubkey);
 
         tracing::trace!(
             "Received ledger response: request={}, status={}, event={}",
