@@ -731,17 +731,28 @@ impl Node {
                 }
 
                 // Commit InvoiceFulfill with the real preimage so the
-                // ledger record is also proof-of-payment.
-                let fulfill_sequence = {
+                // ledger record is also proof-of-payment. The witness
+                // re-attaches the depositor's authorization that
+                // InvoiceLock cached on `open_invoice_locks` —
+                // conformance verifies witness over
+                // `invoice_lock_signing_message(deposit_id, payment_id,
+                // amount)`, the same message Lock signed.
+                let (fulfill_sequence, lock_witness) = {
                     let ledger = ledger_arc.read().unwrap();
-                    ledger.next_sequence()
+                    let witness = ledger
+                        .state
+                        .open_invoice_locks
+                        .get(&payment_id)
+                        .map(|l| l.witness.clone())
+                        .unwrap_or_default();
+                    (ledger.next_sequence(), witness)
                 };
                 let fulfill_op = LedgerOperation::InvoiceFulfill {
                     deposit_id,
                     amount: amount_msat,
                     payment_id,
                     sequence_number: fulfill_sequence,
-                    witness: DescriptorWitness { stack: vec![] },
+                    witness: lock_witness,
                     preimage,
                 };
                 if let Err(e) = self.commit_operation(ledger_id, fulfill_op).await {

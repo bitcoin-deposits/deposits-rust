@@ -318,6 +318,7 @@ impl LedgerState {
                 amount,
                 payment_id,
                 sequence_number,
+                witness,
                 ..
             } => {
                 let deposit = next
@@ -325,12 +326,23 @@ impl LedgerState {
                     .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.lock(*amount)?;
+                // Cache the depositor's witness on the open lock so the
+                // eventual InvoiceFulfill (committed asynchronously by
+                // the background payment-completion task once LDK
+                // reports the payment settled) can re-attach it. The
+                // conformance verifier requires every InvoiceFulfill
+                // carry a witness valid against the deposit's descriptor,
+                // and only the depositor can produce one — caching it
+                // at lock time is what lets the operator commit a
+                // valid Fulfill without round-tripping back to the
+                // wallet.
                 next.open_invoice_locks.insert(
                     *payment_id,
                     OpenInvoiceLock {
                         deposit_id: *deposit_id,
                         amount: *amount,
                         lock_sequence: *sequence_number,
+                        witness: witness.clone(),
                     },
                 );
             }

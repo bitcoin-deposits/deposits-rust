@@ -535,12 +535,19 @@ impl Node {
                         }
                     };
 
+                    // The witness was cached on `OpenInvoiceLock` at
+                    // InvoiceLock-apply time so we can re-attach it
+                    // here without round-tripping back to the wallet.
+                    // Conformance check: `verify_witness(descriptor,
+                    // witness, invoice_lock_signing_message(deposit_id,
+                    // payment_id, amount))` — same message the lock
+                    // signed, so the same witness validates.
                     let op = deposits_core::messages::LedgerOperation::InvoiceFulfill {
                         deposit_id: lock.deposit_id,
                         amount: lock.amount,
                         payment_id,
                         sequence_number: sequence,
-                        witness: DescriptorWitness { stack: vec![] },
+                        witness: lock.witness.clone(),
                         preimage,
                     };
 

@@ -264,6 +264,19 @@ pub struct OpenInvoiceLock {
     pub amount: u64,
     /// Sequence number of the InvoiceLock operation.
     pub lock_sequence: u64,
+    /// The depositor's authorization witness from the InvoiceLock op.
+    /// Cached here so a later `InvoiceFulfill` (committed by the
+    /// background `auto_complete_outbound_payments` task once LDK
+    /// reports the payment settled) can re-attach it. The conformance
+    /// verifier requires every InvoiceFulfill carry a witness that
+    /// satisfies the deposit descriptor over `invoice_lock_signing_message`,
+    /// and the only entity that can produce one is the depositor — so
+    /// the operator has to keep it from lock time. `serde(default)`
+    /// for backward compatibility with state files written before this
+    /// field existed; those locks will fail their eventual fulfill
+    /// conformance check (auto-task logs the failure).
+    #[serde(default)]
+    pub witness: DescriptorWitness,
 }
 
 /// Created by TransferLock, resolved by TransferComplete (funds to destination)
