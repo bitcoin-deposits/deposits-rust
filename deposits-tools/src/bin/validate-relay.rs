@@ -25,6 +25,7 @@ use deposits_core::SignedLedgerUpdate;
 use std::time::Duration;
 
 const DEFAULT_RELAY: &str = "wss://relay.bitcoindeposits.net";
+const DEFAULT_ESPLORA: &str = "https://mempool.space/api";
 
 #[derive(Debug)]
 enum LedgerVerdict {
@@ -53,11 +54,20 @@ enum LedgerVerdict {
     },
     /// Couldn't decode any updates from the relay payload.
     NoUpdates,
+    /// State machine accepted the chain, but on-chain verification of
+    /// a `QuorumBegin`'s reserves UTXO disagreed with the ledger's
+    /// recorded amount or spent state.
+    OnchainMismatch {
+        seq: u64,
+        detail: String,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut relay_url = DEFAULT_RELAY.to_string();
+    let mut esplora_url = DEFAULT_ESPLORA.to_string();
+    let mut skip_onchain = false;
     let mut prefix = String::new();
     let mut verbose = false;
     let mut limit: Option<usize> = None;
@@ -68,6 +78,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--relay" | "-r" if i + 1 < args.len() => {
                 relay_url = args[i + 1].clone();
                 i += 2;
+            }
+            "--esplora" | "-e" if i + 1 < args.len() => {
+                esplora_url = args[i + 1].clone();
+                i += 2;
+            }
+            "--skip-onchain" => {
+                skip_onchain = true;
+                i += 1;
             }
             "--prefix" | "-p" if i + 1 < args.len() => {
                 prefix = args[i + 1].clone();
@@ -83,10 +101,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: validate-relay [--relay URL] [--prefix PFX] [--limit N] [--verbose]\n\
+                    "Usage: validate-relay [OPTIONS]\n\
                      \n\
-                     Replay every ledger on the relay through current validation rules.\n\
-                     Exit code 0 iff every ledger passes."
+                     Replay every ledger on the relay through current validation\n\
+                     rules and verify each QuorumBegin's reserves UTXO against\n\
+                     Esplora. Exit code 0 iff every ledger passes both.\n\
+                     \n\
+                     Options:\n\
+                       --relay URL          Nostr relay (default: relay.bitcoindeposits.net)\n\
+                       --esplora URL        Esplora HTTP API (default: mempool.space/api)\n\
+                       --skip-onchain       Skip the reserves-UTXO verification phase\n\
+                       --prefix PFX         Only ledgers whose 16-hex `d` tag starts with PFX\n\
+                       --limit N            Cap to first N ledgers\n\
+                       --verbose            Per-step trace"
                 );
                 return Ok(());
             }
@@ -95,11 +122,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(run(&relay_url, &prefix, limit, verbose))
+    rt.block_on(run(
+        &relay_url,
+        &esplora_url,
+        skip_onchain,
+        &prefix,
+        limit,
+        verbose,
+    ))
 }
 
 async fn run(
     relay_url: &str,
+    esplora_url: &str,
+    skip_onchain: bool,
     prefix: &str,
     limit: Option<usize>,
     verbose: bool,
@@ -129,10 +165,29 @@ async fn run(
     let mut gap = 0usize;
     let mut fork = 0usize;
     let mut empty = 0usize;
+    let mut onchain_mismatch = 0usize;
     let mut first_failures: Vec<(String, u64, String)> = Vec::new();
 
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
+
     for (ledger_id, updates) in &sorted {
-        let verdict = validate_ledger(ledger_id, updates, verbose);
+        let mut verdict = validate_ledger(ledger_id, updates, verbose);
+
+        // If state-machine replay passed, ALSO check on-chain anchors
+        // for every QuorumBegin. The state machine alone proves the
+        // ledger is internally coherent; this proves it has on-chain
+        // backing matching what it claims.
+        if !skip_onchain {
+            if let LedgerVerdict::Pass { .. } = &verdict {
+                if let Some((seq, detail)) =
+                    verify_onchain_anchors(updates, esplora_url, &http, verbose).await
+                {
+                    verdict = LedgerVerdict::OnchainMismatch { seq, detail };
+                }
+            }
+        }
         let short = &ledger_id[..16.min(ledger_id.len())];
         match &verdict {
             LedgerVerdict::Pass { seq_count } => {
@@ -165,6 +220,11 @@ async fn run(
                 println!("· {}  no decodable updates", short);
                 empty += 1;
             }
+            LedgerVerdict::OnchainMismatch { seq, detail } => {
+                println!("⚠ {}  on-chain mismatch at seq {}: {}", short, seq, detail);
+                first_failures.push((ledger_id.clone(), *seq, detail.clone()));
+                onchain_mismatch += 1;
+            }
         }
     }
 
@@ -176,8 +236,9 @@ async fn run(
     println!("  ⊘ Gap:         {}", gap);
     println!("  ⌥ Fork:        {}", fork);
     println!("  · Empty:       {}", empty);
+    println!("  ⚠ On-chain:    {}", onchain_mismatch);
 
-    if fail > 0 {
+    if fail > 0 || onchain_mismatch > 0 {
         println!();
         println!("=== Failures (would block deployment) ===");
         for (lid, seq, reason) in &first_failures {
@@ -328,6 +389,191 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::DeliveryEmbed { .. } => "DeliveryEmbed",
         LedgerOperation::LedgerClose => "LedgerClose",
     }
+}
+
+/// For every `QuorumBegin` in the ledger's history, query Esplora to
+/// confirm the recorded reserves UTXO actually matches what's on-chain:
+///
+///   1. The output at `(new_outpoint_txid, new_outpoint_vout)` exists.
+///   2. Its sat value equals `(amount + collateral_amount) / 1000`
+///      (msat → sat). DEP-03 §QuorumBegin requires this exact equality.
+///   3. The most recent QuorumBegin's UTXO is **unspent** — that's the
+///      live reserves backing.
+///   4. Earlier QuorumBegins' UTXOs are **spent** (rotated forward).
+///      A still-unspent earlier UTXO means the rotation chain has a
+///      hole — the operator claimed to rotate but didn't.
+///
+/// Returns `None` on success, or `Some((seq, detail))` for the first
+/// problem found.
+async fn verify_onchain_anchors(
+    updates: &[SignedLedgerUpdate],
+    esplora_url: &str,
+    http: &reqwest::Client,
+    verbose: bool,
+) -> Option<(u64, String)> {
+    // Walk the chain (sorted) and collect QuorumBegin entries.
+    let mut sorted: Vec<&SignedLedgerUpdate> = updates.iter().collect();
+    sorted.sort_by_key(|u| u.sequence_number);
+
+    let mut qbs: Vec<(u64, u64, [u8; 32], u32)> = Vec::new();
+    for u in &sorted {
+        if let Ok(LedgerOperation::QuorumBegin {
+            amount,
+            collateral_amount,
+            new_outpoint_txid,
+            new_outpoint_vout,
+            ..
+        }) = LedgerOperation::tlv_decode(&u.message)
+        {
+            // amount + collateral_amount are in msat — convert to sat
+            // for comparison with Esplora's `value` field.
+            let total_sat = (amount.saturating_add(collateral_amount)) / 1000;
+            qbs.push((u.sequence_number, total_sat, new_outpoint_txid, new_outpoint_vout));
+        }
+    }
+
+    if qbs.is_empty() {
+        // No QuorumBegin yet — pre-rotation ledger, nothing to verify.
+        return None;
+    }
+
+    let last_idx = qbs.len() - 1;
+    for (i, (seq, expected_sat, txid, vout)) in qbs.iter().enumerate() {
+        // Bitcoin txids on-chain are big-endian-display-order; the
+        // protocol stores them as the raw 32-byte hash. Esplora's REST
+        // API takes the display form (which is the byte-reversed hash).
+        let txid_display = {
+            let mut rev = *txid;
+            rev.reverse();
+            hex::encode(rev)
+        };
+
+        // Step 1: tx exists + output value matches.
+        let tx_url = format!("{}/tx/{}", esplora_url.trim_end_matches('/'), txid_display);
+        if verbose {
+            eprintln!("  GET {}", tx_url);
+        }
+        let resp = match http.get(&tx_url).send().await {
+            Ok(r) => r,
+            Err(e) => return Some((*seq, format!("esplora unreachable: {}", e))),
+        };
+        if !resp.status().is_success() {
+            // 404 = tx not on chain. Anything else = transient.
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                return Some((
+                    *seq,
+                    format!("reserves tx {}:{} not on-chain", &txid_display[..16], vout),
+                ));
+            }
+            return Some((
+                *seq,
+                format!(
+                    "esplora /tx/{} returned status {}",
+                    &txid_display[..16],
+                    resp.status()
+                ),
+            ));
+        }
+        let tx_json: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => return Some((*seq, format!("esplora /tx parse: {}", e))),
+        };
+        let actual_sat = tx_json
+            .get("vout")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.get(*vout as usize))
+            .and_then(|o| o.get("value"))
+            .and_then(|v| v.as_u64());
+        let actual_sat = match actual_sat {
+            Some(s) => s,
+            None => {
+                return Some((
+                    *seq,
+                    format!(
+                        "vout {} not present in tx {} (only {} outputs)",
+                        vout,
+                        &txid_display[..16],
+                        tx_json
+                            .get("vout")
+                            .and_then(|v| v.as_array())
+                            .map(|a| a.len())
+                            .unwrap_or(0)
+                    ),
+                ));
+            }
+        };
+        if actual_sat != *expected_sat {
+            return Some((
+                *seq,
+                format!(
+                    "reserves UTXO value mismatch: ledger says {} sats, on-chain has {} sats",
+                    expected_sat, actual_sat
+                ),
+            ));
+        }
+
+        // Step 2: spent vs unspent. The latest QB's UTXO must be
+        // unspent; all earlier ones must be spent (rotated).
+        let outspend_url = format!(
+            "{}/tx/{}/outspend/{}",
+            esplora_url.trim_end_matches('/'),
+            txid_display,
+            vout
+        );
+        if verbose {
+            eprintln!("  GET {}", outspend_url);
+        }
+        let resp = match http.get(&outspend_url).send().await {
+            Ok(r) => r,
+            Err(e) => return Some((*seq, format!("esplora outspend unreachable: {}", e))),
+        };
+        if !resp.status().is_success() {
+            return Some((
+                *seq,
+                format!("esplora outspend status {}", resp.status()),
+            ));
+        }
+        let outspend: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => return Some((*seq, format!("esplora outspend parse: {}", e))),
+        };
+        let spent = outspend.get("spent").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        if i == last_idx {
+            // The latest QuorumBegin SHOULD be unspent — that's the
+            // live reserves. Spent here means the operator rotated
+            // off-ledger (claimed reserves are gone from chain but
+            // no follow-up QuorumBegin records the new outpoint).
+            if spent {
+                return Some((
+                    *seq,
+                    format!(
+                        "latest QuorumBegin UTXO {}:{} is SPENT but no \
+                         follow-up QuorumBegin exists — reserves rotated \
+                         off-ledger",
+                        &txid_display[..16],
+                        vout
+                    ),
+                ));
+            }
+        } else {
+            // Earlier QBs: should be spent by the rotation TX that
+            // produced the next QB. Unspent here means the operator
+            // emitted a new QuorumBegin without actually rotating.
+            if !spent {
+                return Some((
+                    *seq,
+                    format!(
+                        "QuorumBegin UTXO {}:{} is UNSPENT but a later \
+                         QuorumBegin exists — rotation chain has a hole",
+                        &txid_display[..16],
+                        vout
+                    ),
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// Pass 1: light enumeration. We don't decode TLV; we just read each
