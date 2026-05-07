@@ -146,33 +146,114 @@
     }
     .quorum-pk { word-break: break-all; }
 
-    .activity-card {
+    .branch-tabs { display: flex; gap: 0.3rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+    .branch-tab {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-left-width: 3px;
+      border-radius: 4px;
+      color: var(--fg-muted);
+      cursor: pointer;
+      font: 600 0.7rem var(--sans);
+      letter-spacing: 0.04em;
+      padding: 0.25rem 0.55rem;
+    }
+    .branch-tab:hover { background: var(--bg-card-h); color: var(--fg); }
+    .branch-tab.active { color: var(--fg-strong); background: var(--bg-card-h); }
+    .branch-tab .pk { color: var(--fg-dim); font-family: var(--mono); font-weight: 400; }
+
+    .vs-status {
+      color: var(--fg-muted);
+      font-size: 0.78rem;
+      margin-bottom: 0.5rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .vs-viewport {
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: 6px;
-      overflow: hidden;
+      overflow-y: auto;
+      position: relative;
+      height: 600px;
+      transition: height 0.15s;
     }
-    table.activity { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-    .activity th, .activity td {
-      text-align: left;
-      padding: 0.6rem 1rem;
+    .vs-spacer { width: 100%; }
+    .vs-rows { position: absolute; top: 0; left: 0; right: 0; }
+    .vs-row {
+      position: absolute;
+      left: 0; right: 0;
+      padding: 0.5rem 1rem;
       border-bottom: 1px solid var(--border);
+      border-left: 3px solid var(--border);
+      cursor: pointer;
+      font-size: 0.85rem;
+      background: var(--bg-card);
     }
-    .activity tr:last-child td { border-bottom: none; }
-    .activity tbody tr { cursor: pointer; }
-    .activity tbody tr:hover { background: var(--bg-card-h); }
-    .activity tbody tr:hover td.muted { color: var(--fg); }
-    .activity th {
-      color: var(--fg-muted);
-      font-weight: 600;
-      text-transform: uppercase;
-      font-size: 0.7rem;
-      letter-spacing: 0.06em;
+    .vs-row:hover { background: var(--bg-card-h); }
+    .vs-row.active { border-left-color: var(--accent); background: var(--bg-card-h); }
+    .vs-row .top {
+      display: flex; justify-content: space-between; align-items: baseline;
+      gap: 0.5rem;
+    }
+    .vs-row .seq {
+      color: var(--fg-dim); font: 0.72rem var(--mono); margin-right: 0.4rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .vs-row .opname { font-weight: 600; }
+    .vs-row .meta {
+      color: var(--fg-muted); font-size: 0.72rem; font-family: var(--mono);
+      margin-top: 0.1rem;
+    }
+    .vs-row .meta .op { color: var(--fg-dim); }
+    .vs-row .fork {
+      color: var(--red); font: 700 0.65rem var(--sans);
+      letter-spacing: 0.06em; margin-left: 0.4rem;
+    }
+    .vs-row .forklink {
+      font: 0.65rem var(--mono); margin-left: 0.4rem;
+    }
+
+    .vs-detail {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.95rem 1.1rem;
+      margin-top: 0.6rem;
+      max-height: 340px;
+      overflow-y: auto;
+    }
+    .vs-detail .head {
+      display: flex; justify-content: space-between; align-items: baseline;
+      gap: 1rem; margin-bottom: 0.3rem;
+    }
+    .vs-detail .title { font-size: 1rem; font-weight: 600; }
+    .vs-detail .actions a {
+      font-size: 0.78rem; color: var(--accent);
+    }
+    .vs-detail .submeta {
+      color: var(--fg-muted); font-size: 0.78rem; font-family: var(--mono);
+      margin-bottom: 0.7rem; word-break: break-all;
+    }
+    .vs-detail .close {
+      background: none; border: none; color: var(--fg-muted); cursor: pointer;
+      font-size: 0.78rem; padding: 0;
+    }
+    .vs-detail .close:hover { color: var(--accent); }
+
+    pre.hexdump {
+      margin: 0;
+      padding: 0.85rem 1rem;
       background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font: 0.78rem/1.45 var(--mono);
+      color: var(--fg);
+      overflow-x: auto;
+      white-space: pre;
     }
-    .activity td.mono { font-family: var(--mono); font-size: 0.8rem; }
-    .activity td.muted { color: var(--fg-muted); }
-    .activity td.num   { font-variant-numeric: tabular-nums; }
+    pre.hexdump .off { color: var(--fg-dim); }
+    pre.hexdump .ascii { color: var(--fg-muted); }
 
     .op {
       display: inline-block;
@@ -271,8 +352,15 @@
       <div class="loading">querying relay…</div>
     </div>
 
-    <h1 class="section-title">recent activity</h1>
-    <div id="activity-body" class="loading">…</div>
+    <h1 class="section-title">activity</h1>
+    <div id="branch-tabs" class="branch-tabs"></div>
+    <div id="vs-status" class="vs-status">querying relay…</div>
+    <div id="vs-viewport" class="vs-viewport" style="display:none;">
+      <div id="vs-spacer" class="vs-spacer"></div>
+      <div id="vs-rows" class="vs-rows"></div>
+    </div>
+    <div id="vs-detail" class="vs-detail" style="display:none;"></div>
+    <div id="vs-empty"></div>
 
     <footer>
       data via nostr relay <span class="mono" id="relay-url"></span>
@@ -280,7 +368,7 @@
   </main>
 
 <script type="module">
-import { OP_NAMES } from './tlv-catalog.js';
+import { OP_NAMES, FIELD_NAMES } from './tlv-catalog.js';
 import { fetchCosignerLedgerMap } from './shared.js';
 
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
@@ -390,23 +478,35 @@ function quorumBadge(state) {
   return `<span class="badge ${cls}">${escapeHtml(state || 'unknown')}</span>`;
 }
 
-// Color-code op types by category. OP_NAMES is the source of truth
-// for op name → discriminant; this just maps the name to a CSS class.
-function opCategory(name) {
-  if (!name) return 'unknown';
-  if (name.startsWith('Dispute')) return 'dispute';
-  if (name.startsWith('Quorum') || name.startsWith('Ledger')) return 'quorum';
-  if (name.startsWith('Transfer')) return 'transfer';
-  if (name.startsWith('Deposit') || name === 'FeeChange' || name === 'FeeCollect') return 'deposit';
-  if (name.endsWith('Credit') || name === 'InvoiceFulfill' || name === 'OnchainFulfill') return 'credit';
-  if (name.endsWith('Lock') || name.endsWith('Fail')) return 'lock';
-  return 'unknown';
+// Format a quorum-expiry status snippet for the overview card. The
+// inputs come from messages the wallet/explorer trust independently
+// of the operator's advertisement: `expiry` comes from the most
+// recent QuorumBegin op embedded in a Kind 9100 update; `tip` comes
+// from the most recent Kind 39101 price-oracle event (operators piggyback
+// the chain tip on the price feed).
+function quorumStatusBlock(expiry, tip) {
+  if (!expiry) {
+    return `<div class="big">—</div>
+            <div class="big-sub">no QuorumBegin observed yet</div>`;
+  }
+  if (!tip) {
+    return `<div class="big">block ${expiry}</div>
+            <div class="big-sub">expires at this block (chain tip unknown)</div>`;
+  }
+  if (tip >= expiry) {
+    const stale = tip - expiry;
+    return `<div class="big" style="color:var(--red, #d9534f)">EXPIRED</div>
+            <div class="big-sub">${stale} block(s) ago (~${(stale/144).toFixed(1)} day(s)) — tip ${tip}, expired at ${expiry}</div>`;
+  }
+  const remaining = expiry - tip;
+  const days = remaining / 144;
+  const human = days >= 1 ? `${days.toFixed(1)} day(s)` : `${(remaining*10/60).toFixed(1)} hour(s)`;
+  const warn = remaining < 144 ? ' style="color:var(--yellow, #f0ad4e)"' : '';
+  return `<div class="big"${warn}>${remaining} block(s) left</div>
+          <div class="big-sub">~${human} (tip ${tip} → expires at ${expiry})</div>`;
 }
 
-function opName(disc) { return OP_NAMES[Number(disc)] || `op(${disc})`; }
-function tagValue(event, name) { const t = event.tags?.find(t => t[0] === name); return t ? t[1] : null; }
-
-function renderOverview(ad, cosignerLedgers) {
+function renderOverview(ad, cosignerLedgers, quorumExpiry, chainTip) {
   const el = document.getElementById('overview-body');
   if (!ad) {
     el.innerHTML = `<div class="empty err">No advertisement found for this ledger on
@@ -416,8 +516,17 @@ function renderOverview(ad, cosignerLedgers) {
     return;
   }
 
+  // Prefer the chain-derived quorum state when we have both an
+  // expiry and a tip — the operator's self-reported `quorum_state`
+  // can be stale. Falls back to the ad's value otherwise.
+  let derivedState = ad.quorum_state;
+  if (quorumExpiry && chainTip) {
+    derivedState = chainTip >= quorumExpiry ? 'Expired' : 'Active';
+  } else if (!quorumExpiry) {
+    derivedState = 'PreQuorum';
+  }
   document.getElementById('hero-meta').innerHTML = `
-    ${quorumBadge(ad.quorum_state)}
+    ${quorumBadge(derivedState)}
     ${ad.quorum_members?.length ? `<span class="badge q">Q=${ad.quorum_members.length}</span>` : ''}
     ${ad.access_control ? `<span class="badge gated">gated</span>` : ''}
     <span style="color:var(--fg-dim)">·</span>
@@ -457,6 +566,10 @@ function renderOverview(ad, cosignerLedgers) {
         </dl>
       </div>
       <div class="card">
+        <h3>quorum status</h3>
+        ${quorumStatusBlock(quorumExpiry, chainTip)}
+      </div>
+      <div class="card">
         <h3>quorum (${ad.quorum_members?.length || 0})</h3>
         ${ad.quorum_members?.length ? `
           <div class="quorum-list">
@@ -483,45 +596,405 @@ function renderOverview(ad, cosignerLedgers) {
   `;
 }
 
-function renderActivity(events) {
-  const el = document.getElementById('activity-body');
-  if (!events.length) {
-    el.innerHTML = `<div class="empty">No ledger updates fetched. Either no activity or relay didn't surface this ledger's history.</div>`;
+// ===========================================================================
+// Virtual-scrolled activity list with cursor-based lazy fetching.
+// Designed for ledgers with millions of updates: only the loaded window is
+// kept in memory; older chunks load when the viewport approaches the bottom.
+// ===========================================================================
+
+const VS_ROW_H = 52;
+const VS_OVERSCAN = 5;
+const VS_PAGE = 500;             // events per relay round-trip
+const VS_NEAR_BOTTOM_PX = 400;   // trigger more-fetch when scrollBottom < this
+const VS_VIEWPORT_FULL = 600;
+const VS_VIEWPORT_DETAIL = 280;
+const BRANCH_COLORS = ['#4cae5a','#e8a','#5b8def','#f0ad4e','#d9534f','#0cc','#b58cf0','#fff'];
+
+const vsState = {
+  ledgerTag: '',
+  rendered: [],            // current view (after branch filter), seq desc
+  all: [],                 // every loaded entry, seq desc
+  expanded: null,          // index in `rendered`
+  branch: 'all',           // 'all' or branch index
+  oldestUntil: undefined,  // created_at cursor for next older fetch
+  hasMoreOlder: true,
+  fetching: false,
+  forkPoints: {},          // branchIdx → { forkSeq, branchSeq, operator }
+  opToBranch: {},
+  numBranches: 0,
+};
+
+function readVarint(buf, off) {
+  const b = buf[off];
+  if (b < 0xfd) return [b, off + 1];
+  if (b === 0xfd) return [(buf[off+1] << 8) | buf[off+2], off + 3];
+  if (b === 0xfe) return [(buf[off+1]<<24)|(buf[off+2]<<16)|(buf[off+3]<<8)|buf[off+4], off + 5];
+  let val = 0;
+  for (let i = 0; i < 8; i++) val = val * 256 + buf[off + 1 + i];
+  return [val, off + 9];
+}
+
+function parseTlv(buf) {
+  const records = [];
+  let off = 0;
+  while (off < buf.length) {
+    const [type_, o1] = readVarint(buf, off);
+    const [len, o2]   = readVarint(buf, o1);
+    records.push({ type: type_, value: buf.slice(o2, o2 + len) });
+    off = o2 + len;
+  }
+  return records;
+}
+
+function bytesToHex(buf) { return [...buf].map(b => b.toString(16).padStart(2, '0')).join(''); }
+
+// Pretty hex dump (16 bytes/row, ascii gutter). Same shape as update.html.
+function hexDump(buf) {
+  const lines = [];
+  for (let off = 0; off < buf.length; off += 16) {
+    const slice = buf.slice(off, off + 16);
+    const hex = [...slice].map(b => b.toString(16).padStart(2, '0')).join(' ');
+    const padded = hex.padEnd(16 * 3 - 1, ' ');
+    const ascii = [...slice].map(b => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : '·').join('');
+    const offHex = off.toString(16).padStart(6, '0');
+    lines.push(`<span class="off">${offHex}</span>  ${escapeHtml(padded)}  <span class="ascii">${escapeHtml(ascii)}</span>`);
+  }
+  return lines.join('\n');
+}
+
+async function sha256(buf) {
+  const h = await crypto.subtle.digest('SHA-256', buf);
+  return new Uint8Array(h);
+}
+
+async function decodeUpdate(base64Content) {
+  const raw = Uint8Array.from(atob(base64Content), c => c.charCodeAt(0));
+  const outer = parseTlv(raw);
+  const get = (t) => outer.find(r => r.type === t)?.value;
+  const getHex = (t) => { const v = get(t); return v ? bytesToHex(v) : ''; };
+  const getU64 = (t) => { const v = get(t); if (!v || v.length < 8) return 0; let n=0; for(let i=0;i<8;i++) n=n*256+v[i]; return n; };
+  const getU32 = (t) => { const v = get(t); if (!v || v.length < 4) return 0; return (v[0]<<24)|(v[1]<<16)|(v[2]<<8)|v[3]; };
+
+  const seq = getU64(4);
+  const prevHash = getHex(6);
+  const blockHeight = getU32(10);
+  const operatorHex = getHex(0);
+
+  const msgBytes = get(8);
+  let opName = '?', opDisc = 0, opFields = [];
+  if (msgBytes) {
+    const inner = parseTlv(msgBytes);
+    if (inner.length > 0 && inner[0].type === 0 && inner[0].value.length === 1) {
+      opDisc = inner[0].value[0];
+      opName = OP_NAMES[opDisc] || `Unknown(${opDisc})`;
+    }
+    opFields = inner.map(r => ({
+      type: r.type,
+      name: FIELD_NAMES[r.type] || `field_${r.type}`,
+      hex: bytesToHex(r.value).slice(0, 64) + (r.value.length > 32 ? '…' : ''),
+      len: r.value.length,
+      text: r.value.every(b => b >= 0x20 && b < 0x7f) ? new TextDecoder().decode(r.value) : null,
+      u64: r.value.length === 8 ? (() => { let n=0; for(let i=0;i<8;i++) n=n*256+r.value[i]; return n; })() : null,
+      u32: r.value.length === 4 ? ((r.value[0]<<24)|(r.value[1]<<16)|(r.value[2]<<8)|r.value[3]) : null,
+    }));
+  }
+
+  // Compute curHash matching the wallet (ksy hashing rules).
+  const seqBytes = new Uint8Array(8);
+  new DataView(seqBytes.buffer).setUint32(0, seq & 0xFFFFFFFF, true);
+  new DataView(seqBytes.buffer).setUint32(4, Math.floor(seq / 0x100000000), true);
+  const prevHashBytes = get(6) || new Uint8Array(32);
+  const parts = [seqBytes, prevHashBytes];
+  if (msgBytes) parts.push(msgBytes);
+  const cosignaturesRaw = get(22);
+  if (cosignaturesRaw && cosignaturesRaw.length >= 131) {
+    let cOff = 0;
+    while (cOff + 2 <= cosignaturesRaw.length) {
+      const entryLen = (cosignaturesRaw[cOff] << 8) | cosignaturesRaw[cOff + 1];
+      cOff += 2;
+      if (cOff + entryLen > cosignaturesRaw.length || entryLen < 129) break;
+      const sig = cosignaturesRaw.slice(cOff + 33, cOff + 97);
+      const mh  = cosignaturesRaw.slice(cOff + 97, cOff + 129);
+      parts.push(mh); parts.push(sig);
+      cOff += entryLen;
+    }
+  } else {
+    const memberHash = get(16);
+    const cosignSig = get(18) || new Uint8Array(64);
+    if (memberHash) parts.push(memberHash);
+    if (cosignSig.some(b => b !== 0)) parts.push(cosignSig);
+  }
+  const totalLen = parts.reduce((s, p) => s + p.length, 0);
+  const buf = new Uint8Array(totalLen);
+  let o = 0; for (const p of parts) { buf.set(p, o); o += p.length; }
+  const curHash = bytesToHex(await sha256(buf));
+
+  return { seq, prevHash, curHash, blockHeight, operatorHex, opName, opDisc, opFields, rawTlv: raw };
+}
+
+function vsRowColor(opName) {
+  if (!opName) return 'var(--fg)';
+  if (opName.endsWith('Credit') || opName === 'InvoiceFulfill' || opName === 'OnchainFulfill') return 'var(--green)';
+  if (opName.endsWith('Lock') || opName.endsWith('Fail')) return 'var(--yellow)';
+  if (opName.startsWith('Dispute') || opName === 'LedgerClose' || opName === 'DepositClose') return 'var(--red)';
+  if (opName.startsWith('Quorum') || opName.startsWith('Ledger')) return 'var(--purple)';
+  if (opName.startsWith('Transfer') || opName.startsWith('Deposit')) return 'var(--blue)';
+  return 'var(--fg)';
+}
+
+async function ingest(events) {
+  const seenKey = new Set(vsState.all.map(u => u.seq + ':' + u.curHash));
+  const decoded = [];
+  for (const ev of events) {
+    try {
+      const u = await decodeUpdate(ev.content);
+      const key = u.seq + ':' + u.curHash;
+      if (seenKey.has(key)) continue;
+      seenKey.add(key);
+      u.eventId = ev.id;
+      u.createdAt = ev.created_at;
+      decoded.push(u);
+    } catch {}
+  }
+  vsState.all.push(...decoded);
+  vsState.all.sort((a, b) => b.seq - a.seq || a.curHash.localeCompare(b.curHash));
+
+  // Mark forks (multiple distinct curHashes at the same seq).
+  const seqCount = {};
+  for (const u of vsState.all) seqCount[u.seq] = (seqCount[u.seq] || 0) + 1;
+  for (const u of vsState.all) u.isFork = seqCount[u.seq] > 1;
+
+  // Branch assignment by operator pubkey, in chronological order so the
+  // first-seen operator becomes branch 0.
+  const opToBranch = {};
+  let next = 0;
+  for (const u of [...vsState.all].sort((a, b) => a.seq - b.seq)) {
+    const op = u.operatorHex || '';
+    if (!(op in opToBranch)) opToBranch[op] = next++;
+  }
+  for (const u of vsState.all) {
+    u.branch = opToBranch[u.operatorHex || ''] ?? 0;
+    u.branchColor = BRANCH_COLORS[u.branch % BRANCH_COLORS.length];
+  }
+  vsState.opToBranch = opToBranch;
+  vsState.numBranches = next;
+
+  // Fork points: where a non-main-branch operator's first seq diverges.
+  vsState.forkPoints = {};
+  for (const u of [...vsState.all].sort((a, b) => a.seq - b.seq)) {
+    if (u.branch > 0 && !(u.branch in vsState.forkPoints)) {
+      const mainParent = vsState.all.find(m => m.branch === 0 && m.curHash === u.prevHash);
+      vsState.forkPoints[u.branch] = {
+        forkSeq: mainParent ? mainParent.seq : u.seq - 1,
+        branchSeq: u.seq,
+        operator: u.operatorHex,
+      };
+    }
+  }
+
+  applyBranchFilter();
+  renderBranchTabs();
+  renderStatus();
+}
+
+function applyBranchFilter() {
+  vsState.rendered = vsState.branch === 'all'
+    ? vsState.all
+    : vsState.all.filter(u => u.branch === vsState.branch);
+  document.getElementById('vs-spacer').style.height = (vsState.rendered.length * VS_ROW_H) + 'px';
+}
+
+function renderBranchTabs() {
+  const wrap = document.getElementById('branch-tabs');
+  if (vsState.numBranches <= 1) { wrap.innerHTML = ''; return; }
+  let html = '';
+  const totalAll = vsState.all.length;
+  html += `<button class="branch-tab ${vsState.branch === 'all' ? 'active' : ''}" data-branch="all" style="border-left-color:var(--border);">all <span class="pk">(${totalAll})</span></button>`;
+  for (let b = 0; b < vsState.numBranches; b++) {
+    const op = Object.entries(vsState.opToBranch).find(([, v]) => v === b)?.[0] || '';
+    const count = vsState.all.filter(u => u.branch === b).length;
+    const label = b === 0 ? 'operator' : `fork ${b}`;
+    const color = BRANCH_COLORS[b % BRANCH_COLORS.length];
+    html += `<button class="branch-tab ${vsState.branch === b ? 'active' : ''}" data-branch="${b}" style="border-left-color:${color};">${label} (${count}) <span class="pk">${escapeHtml(op.slice(0, 8))}…</span></button>`;
+  }
+  wrap.innerHTML = html;
+  wrap.querySelectorAll('button[data-branch]').forEach(btn => {
+    btn.onclick = () => {
+      const b = btn.dataset.branch;
+      vsState.branch = b === 'all' ? 'all' : Number(b);
+      vsState.expanded = null;
+      closeDetail();
+      applyBranchFilter();
+      vsRender();
+      renderBranchTabs();
+    };
+  });
+}
+
+function renderStatus() {
+  const el = document.getElementById('vs-status');
+  const loaded = vsState.all.length;
+  const more = vsState.hasMoreOlder ? ', loading more as you scroll' : ' (all loaded)';
+  el.textContent = `${loaded} update${loaded === 1 ? '' : 's'} loaded${more}`;
+}
+
+function vsRender() {
+  const viewport = document.getElementById('vs-viewport');
+  const rows = document.getElementById('vs-rows');
+  const scrollTop = viewport.scrollTop;
+  const viewH = viewport.clientHeight;
+
+  const first = Math.max(0, Math.floor(scrollTop / VS_ROW_H) - VS_OVERSCAN);
+  const last  = Math.min(vsState.rendered.length - 1, Math.ceil((scrollTop + viewH) / VS_ROW_H) + VS_OVERSCAN);
+
+  let html = '';
+  for (let i = first; i <= last; i++) {
+    const u = vsState.rendered[i];
+    const top = i * VS_ROW_H;
+    const time = u.createdAt ? fmt.ts(u.createdAt) : '';
+    const color = vsRowColor(u.opName);
+    const isExpanded = vsState.expanded === i;
+    const branchColor = u.branchColor || 'var(--border)';
+    const opLabel = (u.operatorHex || '').slice(0, 12);
+    const forkTag = u.isFork ? `<span class="fork">FORK</span>` : '';
+    let forkLink = '';
+    const fp = vsState.forkPoints[u.branch];
+    if (fp && u.seq === fp.branchSeq) {
+      forkLink = ` <a href="#seq=${fp.forkSeq}" class="forklink" style="color:${branchColor};" onclick="event.stopPropagation();">forked from #${fp.forkSeq}</a>`;
+    }
+    html += `<div class="vs-row ${isExpanded ? 'active' : ''}" style="top:${top}px; height:${VS_ROW_H}px; border-left-color:${branchColor};" data-idx="${i}">
+      <div class="top">
+        <span><span class="seq">#${u.seq}</span><span class="opname" style="color:${color};">${escapeHtml(u.opName)}</span>${forkTag}${forkLink}</span>
+        <span style="color:var(--fg-muted); font-size:0.72rem;">${escapeHtml(time)}</span>
+      </div>
+      <div class="meta">hash ${u.curHash.slice(0, 12)}… block ${u.blockHeight} <span class="op">op ${escapeHtml(opLabel)}…</span></div>
+    </div>`;
+  }
+  rows.innerHTML = html;
+  rows.querySelectorAll('.vs-row').forEach(r => {
+    r.onclick = () => vsToggle(Number(r.dataset.idx));
+  });
+}
+
+function vsToggle(idx) {
+  if (vsState.expanded === idx) {
+    closeDetail();
     return;
   }
-  events.sort((a, b) => b.created_at - a.created_at);
-  el.innerHTML = `
-    <div class="activity-card">
-      <table class="activity">
-        <thead>
-          <tr>
-            <th>seq</th>
-            <th>op</th>
-            <th>deposit</th>
-            <th>payment hash</th>
-            <th>when</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${events.map(e => {
-            const seq = tagValue(e, 'n') || '?';
-            const opDisc = tagValue(e, 't') || '';
-            const name = opName(opDisc);
-            const cat = opCategory(name);
-            const dep = tagValue(e, 'i');
-            const ph = tagValue(e, 'payment_hash');
-            const href = `/update#event=${e.id}&relay=${encodeURIComponent(RELAY_URL)}`;
-            return `<tr onclick="window.location='${escapeHtml(href)}'">
-              <td class="num muted">${escapeHtml(seq)}</td>
-              <td><span class="op ${cat}">${escapeHtml(name)}</span></td>
-              <td class="mono">${dep ? escapeHtml(fmt.short(dep, 16)) : '—'}</td>
-              <td class="mono">${ph ? escapeHtml(fmt.short(ph, 16)) : '—'}</td>
-              <td class="muted">${escapeHtml(fmt.ts(e.created_at))}</td>
-            </tr>`;
-          }).join('')}
-        </tbody>
-      </table>
-    </div>`;
+  vsState.expanded = idx;
+  const u = vsState.rendered[idx];
+  if (!u) return;
+  history.replaceState(null, '', `#seq=${u.seq}`);
+
+  const viewport = document.getElementById('vs-viewport');
+  viewport.style.height = VS_VIEWPORT_DETAIL + 'px';
+
+  const detail = document.getElementById('vs-detail');
+  const time = u.createdAt ? fmt.ts(u.createdAt) : '';
+  const color = vsRowColor(u.opName);
+  detail.innerHTML = `
+    <div class="head">
+      <div class="title"><span style="color:var(--fg-dim);">#${u.seq}</span> <span style="color:${color};">${escapeHtml(u.opName)}</span></div>
+      <div class="actions">
+        <a href="/update#event=${u.eventId}&relay=${encodeURIComponent(RELAY_URL)}">open ↗</a>
+        <button class="close" onclick="window._vsClose()">close</button>
+      </div>
+    </div>
+    <div class="submeta">${escapeHtml(time)} · block ${u.blockHeight} · hash ${u.curHash.slice(0, 16)}… · prev ${u.prevHash.slice(0, 16)}…</div>
+    <pre class="hexdump">${hexDump(u.rawTlv)}</pre>`;
+  detail.style.display = 'block';
+  vsRender();
+}
+
+function closeDetail() {
+  vsState.expanded = null;
+  document.getElementById('vs-detail').style.display = 'none';
+  document.getElementById('vs-viewport').style.height = VS_VIEWPORT_FULL + 'px';
+  history.replaceState(null, '', '#');
+  vsRender();
+}
+window._vsClose = closeDetail;
+
+async function loadMoreOlder() {
+  if (vsState.fetching || !vsState.hasMoreOlder) return;
+  vsState.fetching = true;
+  try {
+    const filter = { kinds: [9100], '#d': [vsState.ledgerTag], limit: VS_PAGE };
+    if (vsState.oldestUntil != null) filter.until = vsState.oldestUntil;
+    const events = await nostrFetch(RELAY_URL, filter);
+    if (!events.length) { vsState.hasMoreOlder = false; renderStatus(); return; }
+    const sizeBefore = vsState.all.length;
+    await ingest(events);
+    const oldest = events.reduce((m, e) => Math.min(m, e.created_at), Infinity);
+    vsState.oldestUntil = (vsState.oldestUntil != null && oldest >= vsState.oldestUntil) ? oldest - 1 : oldest;
+    if (vsState.all.length === sizeBefore) vsState.hasMoreOlder = false;
+    if (events.length < VS_PAGE) vsState.hasMoreOlder = false;
+    renderStatus();
+    vsRender();
+  } finally {
+    vsState.fetching = false;
+  }
+}
+
+async function jumpToSeq(seq) {
+  // Already loaded?
+  let idx = vsState.rendered.findIndex(u => u.seq === seq);
+  if (idx < 0) {
+    // Try a relay-side targeted fetch (#n).
+    const events = await nostrFetch(RELAY_URL, { kinds: [9100], '#d': [vsState.ledgerTag], '#n': [String(seq)], limit: 8 });
+    if (events.length) {
+      await ingest(events);
+      // Also pull a window of older events around it for context.
+      const target = events.reduce((m, e) => Math.min(m, e.created_at), Infinity);
+      const around = await nostrFetch(RELAY_URL, { kinds: [9100], '#d': [vsState.ledgerTag], until: target + 1, limit: VS_PAGE });
+      if (around.length) await ingest(around);
+    }
+    idx = vsState.rendered.findIndex(u => u.seq === seq);
+  }
+  if (idx < 0) return;
+  const viewport = document.getElementById('vs-viewport');
+  viewport.scrollTop = Math.max(0, idx * VS_ROW_H - viewport.clientHeight / 2);
+  vsRender();
+  vsToggle(idx);
+}
+
+function attachScrollHandler() {
+  const viewport = document.getElementById('vs-viewport');
+  viewport.addEventListener('scroll', () => {
+    vsRender();
+    const scrollBottom = viewport.scrollHeight - (viewport.scrollTop + viewport.clientHeight);
+    if (scrollBottom < VS_NEAR_BOTTOM_PX) loadMoreOlder();
+  });
+}
+
+async function loadActivity(ledgerId) {
+  vsState.ledgerTag = ledgerId.slice(0, 16);
+  const status = document.getElementById('vs-status');
+  status.textContent = 'querying relay…';
+  await loadMoreOlder();
+  if (vsState.all.length === 0) {
+    document.getElementById('vs-empty').innerHTML =
+      `<div class="empty">No ledger updates fetched. Either no activity or relay didn't surface this ledger's history.</div>`;
+    return;
+  }
+  document.getElementById('vs-viewport').style.display = 'block';
+  attachScrollHandler();
+  vsRender();
+
+  // Honor #seq=<n> in the URL after initial load.
+  const seqParam = getParam('seq');
+  if (seqParam != null) {
+    const n = Number(seqParam);
+    if (Number.isFinite(n)) jumpToSeq(n);
+  }
+
+  // Re-fire on hash changes (e.g. user clicks a "forked from #N" link).
+  window.addEventListener('hashchange', () => {
+    const s = getParam('seq');
+    if (s == null) { closeDetail(); return; }
+    const n = Number(s);
+    if (Number.isFinite(n)) jumpToSeq(n);
+  });
 }
 
 async function main() {
@@ -531,22 +1004,24 @@ async function main() {
     document.getElementById('ledger-id').textContent = '— error';
     document.getElementById('overview-body').innerHTML =
       `<div class="empty err">${escapeHtml(e.message)}</div>`;
-    document.getElementById('activity-body').innerHTML = '';
+    document.getElementById('vs-status').textContent = '';
     return;
   }
   document.getElementById('ledger-id').textContent = ledgerId;
 
   const adFilter = { kinds: [39100], '#d': [ledgerId], limit: 1 };
-  const updateFilter = { kinds: [9100], '#d': [ledgerId.slice(0, 16)], limit: 30 };
+  // Newest 1000 ledger updates is plenty to find the most recent
+  // QuorumBegin in practice — quorum rotations are infrequent and
+  // the filter is relay-side. If we miss it (super-active ledger),
+  // the card simply renders "no QuorumBegin observed yet".
+  const ledgerUpdatesFilter = { kinds: [9100], '#d': [ledgerId], limit: 1000 };
+  const priceFilter = { kinds: [39101], '#d': ['btcusd'], limit: 5 };
 
-  // Quorum members on the ad are bare pubkey hex; fetch the
-  // pubkey → member_ledger_id map alongside so each member entry
-  // can link to that operator's own ledger detail (we don't yet
-  // have a dedicated operator view).
-  const [adEvents, updateEvents, cosignerLedgers] = await Promise.all([
+  const [adEvents, cosignerLedgers, ledgerUpdateEvents, priceEvents] = await Promise.all([
     nostrFetch(RELAY_URL, adFilter),
-    nostrFetch(RELAY_URL, updateFilter),
     fetchCosignerLedgerMap(RELAY_URL, ledgerId.slice(0, 16)),
+    nostrFetch(RELAY_URL, ledgerUpdatesFilter),
+    nostrFetch(RELAY_URL, priceFilter),
   ]);
 
   let ad = null;
@@ -554,8 +1029,36 @@ async function main() {
     adEvents.sort((a, b) => b.created_at - a.created_at);
     try { ad = JSON.parse(adEvents[0].content); } catch {}
   }
-  renderOverview(ad, cosignerLedgers);
-  renderActivity(updateEvents);
+
+  // Find the most recent QuorumBegin (opDisc 12, quorum_expiry = field type 86).
+  let quorumExpiry = 0;
+  if (ledgerUpdateEvents.length) {
+    ledgerUpdateEvents.sort((a, b) => b.created_at - a.created_at);
+    for (const ev of ledgerUpdateEvents) {
+      try {
+        const u = await decodeUpdate(ev.content);
+        if (u.opDisc === 12) {
+          const f = u.opFields.find(f => f.type === 86);
+          if (f && f.u32 != null) { quorumExpiry = f.u32; break; }
+        }
+      } catch {}
+    }
+  }
+
+  // Chain tip from the most recent BTC/USD price oracle event.
+  let chainTip = 0;
+  if (priceEvents.length) {
+    priceEvents.sort((a, b) => b.created_at - a.created_at);
+    try {
+      const data = JSON.parse(priceEvents[0].content);
+      if (Number.isFinite(data.block_height) && data.block_height > 0) {
+        chainTip = data.block_height;
+      }
+    } catch {}
+  }
+
+  renderOverview(ad, cosignerLedgers, quorumExpiry, chainTip);
+  loadActivity(ledgerId);
 }
 
 main();

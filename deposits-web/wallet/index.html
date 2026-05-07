@@ -2396,6 +2396,21 @@ window.doOpenDeposit = async function() {
   }
 };
 
+// Encode hex to bech32-data (no HRP, no checksum) — matches deposits-lnurl's
+// bytes_to_bech32_data. 32-byte ledger_id → 52 chars, fits in a DNS label.
+function hexToBech32Data(hex) {
+  const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+  const bytes = hexToBytes(hex);
+  let acc = 0, bits = 0, out = '';
+  for (const b of bytes) {
+    acc = (acc << 8) | b;
+    bits += 8;
+    while (bits >= 5) { bits -= 5; out += CHARSET[(acc >> bits) & 0x1f]; }
+  }
+  if (bits > 0) out += CHARSET[(acc << (5 - bits)) & 0x1f];
+  return out;
+}
+
 // Decode bech32 npub/nsec/note to hex. Returns input unchanged if not bech32.
 function decodeBech32ToHex(str) {
   if (!str || typeof str !== 'string') return str;
@@ -5449,18 +5464,18 @@ async function populateLedgerQuickLinks() {
   container.innerHTML = html;
 }
 
+function ledgerExternalUrl(ledgerId, seq) {
+  const sub = hexToBech32Data(ledgerId);
+  const base = `https://${sub}.ledgers.bitcoindeposits.net`;
+  return seq != null ? `${base}#seq=${seq}` : base;
+}
+
 window.openLedgerTab = function(ledgerId) {
-  switchToTab('ledgers');
-  document.getElementById('ledger-explorer-id').value = ledgerId;
-  updateHash('ledger/' + ledgerId);
-  exploreLedger();
+  window.open(ledgerExternalUrl(ledgerId), '_blank', 'noopener,noreferrer');
 };
 
 window.openLedgerEntry = function(ledgerId, seq) {
-  switchToTab('ledgers');
-  document.getElementById('ledger-explorer-id').value = ledgerId;
-  updateHash('ledger/' + ledgerId + '/' + seq);
-  exploreLedger().then(() => highlightLedgerEntry(seq));
+  window.open(ledgerExternalUrl(ledgerId, seq), '_blank', 'noopener,noreferrer');
 };
 
 // Virtual scroll state
