@@ -129,11 +129,13 @@ pub struct ThresholdTier {
     pub threshold: usize,
     /// Whether tie-breaker signature is required
     pub requires_tie_breaker: bool,
-    /// Offset (in blocks) added to the ledger's `quorum_expiry` to form
-    /// the absolute `OP_CLTV` target for this tier. `0` means no
-    /// timelock — the tier is the immediate quorum-majority path that
-    /// routine rotations use. Non-zero values gate the post-expiry
-    /// recovery cascade (see DEP-03 §"Spending Tiers").
+    /// **Absolute** `OP_CLTV` target (block height) for this tier. `0`
+    /// means no timelock — the tier is the immediate quorum-majority
+    /// path routine rotations use. The Ruleset's tier-config factory
+    /// is responsible for picking the right value: `legacy` returns
+    /// plain literals (1008/2016/4032), `cltv-offset-v2` returns
+    /// `quorum_expiry + offset`. The script builder treats this as
+    /// the literal value to push before `OP_CLTV`.
     pub timelock_blocks: u32,
     /// Human-readable description
     pub description: String,
@@ -197,59 +199,19 @@ pub struct ThresholdConfig {
 }
 
 impl ThresholdConfig {
-    /// Default configuration for n voters (quorum members, not counting operator).
-    /// Per DEP-03 §"Spending Tiers", post-expiry tiers anchor to
-    /// `quorum_expiry + offset` via `OP_CLTV`. The offsets here are
-    /// added to the ledger's `quorum_expiry` at script-build time:
+    /// Build a [`ThresholdConfig`] for `n` voters under the
+    /// **legacy** ruleset — the shape every pre-`protocol_version`
+    /// QuorumBegin on chain commits to. `quorum_expiry` is ignored
+    /// (legacy tiers use plain literal CLTV targets).
     ///
-    /// - Tier 0: Majority of quorum, no operator — anytime (no timelock).
-    ///   Routine rotation flows through this tier.
-    /// - Tier 1: Minority of quorum, no operator — `expiry + 720`
-    ///   (~5 days). Degraded recovery when members disappear.
-    /// - Tier 2: Single quorum member, no operator — `expiry + 4032`
-    ///   (~4 weeks). Recovery when only one member is responsive.
-    /// - Tier 3: Operator only — `expiry + 8064` (~8 weeks). Last
-    ///   resort after every quorum-driven path has had time to act.
-    ///
-    /// For n ≤ 2 the minority and single-member tiers collapse, so the
-    /// shape is the 3-tier subset (anytime / +5d / +8w).
+    /// Provided as a thin compatibility shim so existing call sites
+    /// that haven't been ruleset-aware yet keep compiling. New code
+    /// should call `crate::ruleset::lookup(name)` and run that
+    /// ruleset's `tier_config_factory(n, quorum_expiry)` instead —
+    /// this routes through the version the ledger committed to in
+    /// its QuorumBegin.
     pub fn default_for_voter_count(n: usize) -> Self {
-        let tiers = if n <= 2 {
-            vec![
-                ThresholdTier::new(2, false, 0, "Both quorum members required"),
-                ThresholdTier::new(1, false, 720, "Single quorum member after expiry+5d"),
-                ThresholdTier::new(1, true, 8064, "Operator only after expiry+8w"),
-            ]
-        } else {
-            let majority = (n / 2) + 1;
-            let minority = (n / 3).max(1);
-            vec![
-                // Tier 0: majority of quorum (no operator) — anytime
-                ThresholdTier::new(
-                    majority,
-                    false,
-                    0,
-                    &format!("{}-of-{} quorum (anytime)", majority, n),
-                ),
-                // Tier 1: minority of quorum (no operator) — expiry + 5 days
-                ThresholdTier::new(
-                    minority,
-                    false,
-                    720,
-                    &format!("{}-of-{} quorum after expiry+5d", minority, n),
-                ),
-                // Tier 2: single quorum member (no operator) — expiry + 4 weeks
-                ThresholdTier::new(
-                    1,
-                    false,
-                    4032,
-                    "Single quorum member after expiry+4w",
-                ),
-                // Tier 3: operator only — expiry + 8 weeks (last resort)
-                ThresholdTier::new(1, true, 8064, "Operator only after expiry+8w"),
-            ]
-        };
-        Self { tiers }
+        (crate::ruleset::LEGACY.tier_config_factory)(n, 0)
     }
 
     /// Custom configuration
@@ -258,17 +220,19 @@ impl ThresholdConfig {
     }
 }
 
-/// Builder for Tapscript reserves outputs
+/// Builder for Tapscript reserves outputs.
+///
+/// Takes a fully-resolved `ThresholdConfig` whose `timelock_blocks`
+/// fields are already absolute `OP_CLTV` targets — the Ruleset's
+/// tier-config factory bakes the right shape (legacy literal vs.
+/// `quorum_expiry + offset`). The builder is otherwise ruleset-naive:
+/// it just builds the script tree from whatever config it's handed.
 pub struct TapscriptReservesBuilder {
     voter_set: VoterSet,
     config: ThresholdConfig,
     network: Network,
     /// Ledger hash committed to in the Taproot tree
     ledger_hash: [u8; 32],
-    /// Quorum's declared expiry (absolute block height). All non-zero
-    /// `ThresholdTier::timelock_blocks` are added to this to form the
-    /// `OP_CLTV` target for that tier. See DEP-03 §"Spending Tiers".
-    quorum_expiry: u32,
 }
 
 impl TapscriptReservesBuilder {
@@ -277,26 +241,23 @@ impl TapscriptReservesBuilder {
         config: ThresholdConfig,
         network: Network,
         ledger_hash: [u8; 32],
-        quorum_expiry: u32,
     ) -> Self {
         Self {
             voter_set,
             config,
             network,
             ledger_hash,
-            quorum_expiry,
         }
     }
 
-    /// Create with default threshold configuration
-    pub fn with_defaults(
-        voter_set: VoterSet,
-        network: Network,
-        ledger_hash: [u8; 32],
-        quorum_expiry: u32,
-    ) -> Self {
+    /// Create with the **legacy** ruleset's threshold configuration.
+    /// Compatibility shim for call sites not yet ruleset-aware. New
+    /// code should look up the ledger's active ruleset and run its
+    /// `tier_config_factory` directly so v2 ledgers don't get the
+    /// wrong cascade.
+    pub fn with_defaults(voter_set: VoterSet, network: Network, ledger_hash: [u8; 32]) -> Self {
         let config = ThresholdConfig::default_for_voter_count(voter_set.total_count());
-        Self::new(voter_set, config, network, ledger_hash, quorum_expiry)
+        Self::new(voter_set, config, network, ledger_hash)
     }
 
     /// Build an unspendable commitment leaf that embeds the ledger hash
@@ -314,17 +275,12 @@ impl TapscriptReservesBuilder {
     pub fn build_threshold_leaf(&self, tier: &ThresholdTier) -> DepositsResult<ScriptBuf> {
         let mut builder = Builder::new();
 
-        // Add timelock if specified. `timelock_blocks` is the offset
-        // from the ledger's `quorum_expiry`; the on-chain CLTV target is
-        // `quorum_expiry + offset` (absolute block height, BIP-65). A
-        // zero offset means no timelock — the immediate quorum-majority
-        // path used by routine rotations. See DEP-03 §"Spending Tiers".
+        // Add timelock if specified. `timelock_blocks` is the absolute
+        // CLTV target — the Ruleset's tier-config factory baked it in
+        // (legacy literal or `quorum_expiry + offset`).
         if tier.timelock_blocks > 0 {
-            let cltv_target = self
-                .quorum_expiry
-                .saturating_add(tier.timelock_blocks);
             builder = builder
-                .push_int(cltv_target as i64)
+                .push_int(tier.timelock_blocks as i64)
                 .push_opcode(OP_CLTV)
                 .push_opcode(OP_DROP);
         }
@@ -479,7 +435,6 @@ impl TapscriptReservesBuilder {
             config: self.config.clone(),
             network: self.network,
             ledger_hash: self.ledger_hash,
-            quorum_expiry: self.quorum_expiry,
         })
     }
 }
@@ -493,15 +448,12 @@ pub struct TaprootReservesOutput {
     pub spend_info: TaprootSpendInfo,
     /// The voter set for this output
     pub voter_set: VoterSet,
-    /// The threshold configuration
+    /// The threshold configuration (with absolute CLTV targets baked in)
     pub config: ThresholdConfig,
     /// The network this output is for
     pub network: Network,
     /// The ledger hash committed to in this output
     pub ledger_hash: [u8; 32],
-    /// Quorum expiry baked into the post-expiry tier CLTV targets.
-    /// Same value the ledger's `QuorumBegin` records.
-    pub quorum_expiry: u32,
 }
 
 impl TaprootReservesOutput {
@@ -543,7 +495,6 @@ impl TaprootReservesOutput {
             self.config.clone(),
             self.network,
             self.ledger_hash,
-            self.quorum_expiry,
         );
 
         let script = builder
@@ -584,14 +535,12 @@ pub fn verify_taproot_reserves(
     voter_set: VoterSet,
     network: bitcoin::Network,
     expected_ledger_hash: [u8; 32],
-    quorum_expiry: u32,
     on_chain_script: &ScriptBuf,
 ) -> bool {
     let builder = TapscriptReservesBuilder::with_defaults(
         voter_set,
         network,
         expected_ledger_hash,
-        quorum_expiry,
     );
     match builder.build() {
         Ok(output) => output.verify_script_pubkey(on_chain_script),
