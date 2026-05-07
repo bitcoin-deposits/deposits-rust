@@ -12,11 +12,12 @@ use std::str::FromStr;
 
 pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-node quorum <add|remove|join|begin|request|list> [args...]");
+        eprintln!("Usage: deposits-node quorum <add|remove|join|begin|refresh|request|list> [args...]");
         eprintln!("  add      Add a quorum member to our ledger");
         eprintln!("  remove   Remove a quorum member from our ledger");
         eprintln!("  join     Record that we joined another operator's quorum");
         eprintln!("  begin    Activate quorum-based Taproot spending");
+        eprintln!("  refresh  Re-add active members and rotate when all responded (idempotent)");
         eprintln!("  request  Request a peer to join our quorum");
         eprintln!("  list     List quorum relationships");
         return Ok(());
@@ -26,11 +27,12 @@ pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::E
         "remove" => quorum_remove(&args[1..]).await,
         "join" => quorum_join_cmd(&args[1..]).await,
         "begin" => quorum_begin(&args[1..]).await,
+        "refresh" => quorum_refresh(&args[1..]).await,
         "request" => quorum_request(&args[1..]).await,
         "list" => quorum_list(&args[1..]).await,
         cmd => {
             eprintln!("Unknown quorum subcommand: {}", cmd);
-            eprintln!("Usage: deposits-node quorum <add|remove|join|begin|request|list> [args...]");
+            eprintln!("Usage: deposits-node quorum <add|remove|join|begin|refresh|request|list> [args...]");
             Ok(())
         }
     }
@@ -464,6 +466,230 @@ async fn quorum_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 );
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Idempotent quorum-refresh state machine.
+///
+/// Each invocation:
+///   1. reads the ledger's *active* quorum members (`state.quorum_members`),
+///   2. for each member m:
+///      - if m is already in `state.next_quorum_members` with
+///        `membership_until ≥ current_block + --threshold-blocks` →
+///        nothing to do, m is already refreshed,
+///      - otherwise, kicks off a `quorum_add` daemon RPC for m with a
+///        new `--membership-until`. The RPC dispatches the request to
+///        m's daemon and writes a `QuorumAddMember` op when m's
+///        `QuorumJoin` reply arrives. On timeout (m offline) the call
+///        fails; we log and move on.
+///   3. After the loop, if every active member is now refreshed in
+///      `next_quorum_members`, fires `quorum begin` to rotate the
+///      reserves UTXO with the freshly-extended membership.
+///
+/// Designed to be invoked from cron / a systemd timer / a watchdog. The
+/// command itself doesn't block waiting for offline members — each run
+/// makes whatever forward progress it can and exits. Re-running picks up
+/// where the previous run stopped.
+async fn quorum_refresh(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut ledger_id_arg: Option<String> = None;
+    let mut explicit_membership_until: Option<u32> = None;
+    let mut threshold_blocks: u32 = 144; // ~1 day; below this counts as "stale"
+    let mut extension_blocks: u32 = 1000; // default new membership_until = current + 1000
+    let mut config_args: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--membership-until" if i + 1 < args.len() => {
+                explicit_membership_until = Some(
+                    args[i + 1]
+                        .parse()
+                        .map_err(|e| format!("--membership-until: {}", e))?,
+                );
+                i += 2;
+            }
+            "--threshold-blocks" if i + 1 < args.len() => {
+                threshold_blocks = args[i + 1]
+                    .parse()
+                    .map_err(|e| format!("--threshold-blocks: {}", e))?;
+                i += 2;
+            }
+            "--extension-blocks" if i + 1 < args.len() => {
+                extension_blocks = args[i + 1]
+                    .parse()
+                    .map_err(|e| format!("--extension-blocks: {}", e))?;
+                i += 2;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id_arg.is_none() {
+                    ledger_id_arg = Some(args[i].clone());
+                }
+                i += 1;
+            }
+        }
+    }
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config.clone()).await?;
+
+    let ledger_id = match ledger_id_arg {
+        Some(id) => super::resolve_to_ledger_id(&node, &id)?,
+        None => match node.get_primary_ledger() {
+            Some((lid, _)) => lid,
+            None => return Err("No ledger found. Pass <ledger_id> or open one first.".into()),
+        },
+    };
+
+    // Snapshot the state we need before dropping the Node — quorum
+    // members, pending entries, and the chain tip for staleness math.
+    let (active_members, pending_members, current_block) = {
+        let ledgers = node.handler.ledgers.lock().unwrap();
+        let arc = ledgers
+            .get(&ledger_id)
+            .ok_or_else(|| format!("Ledger {} not found", &ledger_id[..16.min(ledger_id.len())]))?;
+        let ledger = arc.read().unwrap();
+        let active = ledger.state.quorum_members.clone();
+        let pending = ledger.state.next_quorum_members.clone();
+        let height = node.wallet.get_block_height().unwrap_or(0);
+        (active, pending, height)
+    };
+    drop(node);
+
+    let new_membership_until =
+        explicit_membership_until.unwrap_or(current_block.saturating_add(extension_blocks));
+
+    if active_members.is_empty() {
+        println!(
+            "Ledger {} has no active quorum members yet. \
+             Use `quorum add` first; refresh only re-extends an existing quorum.",
+            &ledger_id[..16.min(ledger_id.len())]
+        );
+        return Ok(());
+    }
+
+    println!("Quorum refresh");
+    println!("  Ledger:                {}...", &ledger_id[..16]);
+    println!("  Active members:        {}", active_members.len());
+    println!("  Current block:         {}", current_block);
+    println!("  New membership_until:  {}", new_membership_until);
+    println!("  Stale threshold:       current + {} blocks", threshold_blocks);
+    println!();
+
+    // Per-member state: is the active member already represented in
+    // `next_quorum_members` with a `membership_until` that's still far
+    // enough from expiring?
+    let staleness_floor = current_block.saturating_add(threshold_blocks);
+    let mut stale_members = Vec::new();
+    let mut fresh_count = 0;
+    for m in &active_members {
+        let pending_match = pending_members.iter().find(|p| p.pubkey == m.pubkey);
+        let fresh = pending_match
+            .and_then(|p| p.membership_until)
+            .map(|until| until >= staleness_floor)
+            .unwrap_or(false);
+        let prefix = &m.pubkey.to_string()[..16];
+        if fresh {
+            let until = pending_match.and_then(|p| p.membership_until).unwrap_or(0);
+            println!("  ✓ {}... fresh (pending until {})", prefix, until);
+            fresh_count += 1;
+        } else {
+            let why = match pending_match {
+                None => "not in pending".to_string(),
+                Some(p) => format!(
+                    "stale (pending until {})",
+                    p.membership_until.unwrap_or(0)
+                ),
+            };
+            println!("  ⟳ {}... needs refresh — {}", prefix, why);
+            stale_members.push(m.clone());
+        }
+    }
+    println!();
+
+    // Phase 1: kick off `quorum_add` for each stale member. We sequence
+    // these (rather than firing in parallel) because the daemon side
+    // serializes ledger writes and parallel quorum_adds against the same
+    // ledger would just queue anyway. Each call may block for the
+    // daemon-side cosign timeout if the member is offline; we catch
+    // failures and continue so one offline member doesn't block the rest.
+    let mut newly_added = 0;
+    for m in &stale_members {
+        let prefix = &m.pubkey.to_string()[..16];
+        println!("→ requesting refresh from {}...", prefix);
+
+        let mut params = serde_json::json!({
+            "member_pubkey": m.pubkey.to_string(),
+            "member_ledger_id": m.ledger_id.clone(),
+            "membership_until": new_membership_until,
+        });
+        if let Some(v) = m.min_fee_bps {
+            params["min_fee_bps"] = (v as u64).into();
+        }
+        if let Some(v) = m.min_fee_fixed {
+            params["min_fee_fixed"] = v.into();
+        }
+        if let Some(v) = m.max_fee_period {
+            params["max_fee_period"] = v.into();
+        }
+
+        match send_daemon_request(&config, &ledger_id, "quorum_add", params).await {
+            Ok(_) => {
+                println!("  ✓ {}... refreshed", prefix);
+                newly_added += 1;
+            }
+            Err(e) => {
+                println!("  ⏳ {}... not yet refreshed ({})", prefix, e);
+            }
+        }
+    }
+
+    // Phase 2: if EVERY active member is now in pending with a fresh
+    // membership_until, rotate. Re-read the state because Phase 1
+    // mutated it via the daemon RPC.
+    let total_fresh = fresh_count + newly_added;
+    println!();
+    println!(
+        "Refresh status: {}/{} active members refreshed in this run",
+        total_fresh,
+        active_members.len()
+    );
+
+    if total_fresh < active_members.len() {
+        println!();
+        println!(
+            "Not all members refreshed yet ({} pending). Re-run after they come online.",
+            active_members.len() - total_fresh
+        );
+        return Ok(());
+    }
+
+    println!();
+    println!("All members refreshed — running quorum begin to rotate the UTXO...");
+
+    let begin_params = serde_json::json!({});
+    let result = send_daemon_request(&config, &ledger_id, "quorum_begin", begin_params).await?;
+
+    println!();
+    println!("Quorum rotated!");
+    if let Some(txid) = result.get("txid").and_then(|v| v.as_str()) {
+        println!("  TXID: {}", txid);
+    }
+    if let Some(addr) = result.get("new_address").and_then(|v| v.as_str()) {
+        println!("  New address: {}", addr);
+    }
+    if let Some(expiry) = result.get("quorum_expiry").and_then(|v| v.as_u64()) {
+        println!("  New quorum_expiry: {}", expiry);
     }
 
     Ok(())
