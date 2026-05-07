@@ -720,4 +720,225 @@ impl Node {
             }
         }
     }
+
+    /// Auto-rotate the quorum when it's within
+    /// `rotate_before_expiry_days × 144` blocks of `quorum_expiry`.
+    ///
+    /// Per-ledger state machine (matches the manual `quorum refresh`
+    /// CLI semantics, just driven from the periodic loop):
+    ///
+    ///   1. Skip ledgers we don't operate or that have no active quorum.
+    ///   2. Skip if `current_block + threshold < quorum_expiry` —
+    ///      plenty of time, no work this cycle.
+    ///   3. For each active member m not represented in
+    ///      `next_quorum_members` with a fresh `membership_until`,
+    ///      synthesize a `quorum_add` request and run it through the
+    ///      handler. The handler waits for the member's `QuorumJoin`
+    ///      reply with its own timeout — offline members fail fast and
+    ///      we move on, picking them up next cycle.
+    ///   4. Once every active member is fresh in `next_quorum_members`,
+    ///      synthesize a `quorum_begin` request to rotate the on-chain
+    ///      UTXO with the extended membership.
+    ///
+    /// Idempotent and incremental: each tick advances whatever it can.
+    /// Safe to invoke at the same cadence as the other periodic tasks
+    /// (5s fast / 60s normal); the per-member RPC has its own
+    /// rate-limiting so this doesn't spam offline members.
+    pub async fn auto_quorum_refresh(&self) {
+        let threshold_blocks: u32 = self
+            .rotate_before_expiry_days
+            .saturating_mul(144);
+        if threshold_blocks == 0 {
+            return;
+        }
+        let current_block = match self.wallet.get_block_height() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+
+        // Snapshot owned ledgers + their quorum state. Drop the lock
+        // before issuing any daemon RPC so a slow handler doesn't
+        // hold up other periodic tasks.
+        struct LedgerSnapshot {
+            ledger_id: String,
+            quorum_expiry: u32,
+            active_members: Vec<deposits_core::types::QuorumMember>,
+            pending_members: Vec<deposits_core::types::QuorumMember>,
+        }
+        let ledgers_to_check: Vec<LedgerSnapshot> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter_map(|(id, arc)| {
+                    // Skip fork branches (compound key with extra suffix)
+                    // and ledgers we don't operate.
+                    if id.len() != 64 {
+                        return None;
+                    }
+                    let l = arc.read().unwrap();
+                    if l.operator_key() != self.node_id {
+                        return None;
+                    }
+                    let expiry = l.state.quorum_expiry?;
+                    if l.state.quorum_state
+                        != deposits_core::types::QuorumState::Active
+                    {
+                        return None;
+                    }
+                    Some(LedgerSnapshot {
+                        ledger_id: id.clone(),
+                        quorum_expiry: expiry,
+                        active_members: l.state.quorum_members.clone(),
+                        pending_members: l.state.next_quorum_members.clone(),
+                    })
+                })
+                .collect()
+        };
+
+        for snap in ledgers_to_check {
+            // Trigger condition: chain tip plus threshold reaches expiry.
+            if current_block.saturating_add(threshold_blocks) < snap.quorum_expiry {
+                continue;
+            }
+            tracing::info!(
+                "auto_quorum_refresh: ledger {}... quorum_expiry={} \
+                 within {}-block threshold of current {}, refreshing",
+                &snap.ledger_id[..16],
+                snap.quorum_expiry,
+                threshold_blocks,
+                current_block
+            );
+
+            // New membership_until: pick a value comfortably past the
+            // next refresh window. Default extension = 4 × threshold so
+            // the next auto-refresh will trigger at ~25% of the
+            // membership lifetime remaining.
+            let extension_blocks = threshold_blocks.saturating_mul(4).max(1000);
+            let new_membership_until = current_block.saturating_add(extension_blocks);
+            let staleness_floor = current_block.saturating_add(threshold_blocks);
+
+            let mut all_fresh = true;
+            for m in &snap.active_members {
+                let pending_match = snap
+                    .pending_members
+                    .iter()
+                    .find(|p| p.pubkey == m.pubkey);
+                let fresh = pending_match
+                    .and_then(|p| p.membership_until)
+                    .map(|until| until >= staleness_floor)
+                    .unwrap_or(false);
+                if fresh {
+                    continue;
+                }
+                all_fresh = false;
+
+                let prefix = &m.pubkey.to_string()[..16];
+                tracing::info!(
+                    "auto_quorum_refresh: requesting refresh from member {}...",
+                    prefix
+                );
+
+                let mut params = serde_json::json!({
+                    "member_pubkey": m.pubkey.to_string(),
+                    "member_ledger_id": m.ledger_id.clone(),
+                    "membership_until": new_membership_until,
+                });
+                if let Some(v) = m.min_fee_bps {
+                    params["min_fee_bps"] = (v as u64).into();
+                }
+                if let Some(v) = m.min_fee_fixed {
+                    params["min_fee_fixed"] = serde_json::Value::from(v);
+                }
+                if let Some(v) = m.max_fee_period {
+                    params["max_fee_period"] = serde_json::Value::from(v);
+                }
+
+                let req = crate::nostr::LedgerRequest {
+                    action: "quorum_add".into(),
+                    ledger_id: snap.ledger_id.clone(),
+                    params,
+                    event_id: String::new(),
+                    sender: String::new(),
+                    timestamp: 0,
+                    gift_wrap_sender: None,
+                    subkey_account: None,
+                    subkey_attestation: None,
+                };
+                let (success, _, error) = self.process_quorum_add_request(&req).await;
+                if success {
+                    tracing::info!(
+                        "auto_quorum_refresh: member {}... refreshed",
+                        prefix
+                    );
+                } else {
+                    tracing::warn!(
+                        "auto_quorum_refresh: member {}... not yet refreshed: {}",
+                        prefix,
+                        error.unwrap_or_default()
+                    );
+                }
+            }
+
+            // After the per-member loop, re-read pending_members and
+            // re-check freshness. Only rotate if every active member
+            // is now fresh (the `all_fresh` flag was a best-guess
+            // before the RPCs ran; refresh the snapshot to be certain).
+            let still_all_fresh = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let arc = match ledgers.get(&snap.ledger_id) {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let l = arc.read().unwrap();
+                l.state.quorum_members.iter().all(|m| {
+                    l.state
+                        .next_quorum_members
+                        .iter()
+                        .find(|p| p.pubkey == m.pubkey)
+                        .and_then(|p| p.membership_until)
+                        .map(|until| until >= staleness_floor)
+                        .unwrap_or(false)
+                })
+            };
+            let _ = all_fresh;
+
+            if !still_all_fresh {
+                tracing::info!(
+                    "auto_quorum_refresh: ledger {}... not all members fresh; \
+                     will retry next cycle",
+                    &snap.ledger_id[..16]
+                );
+                continue;
+            }
+
+            tracing::info!(
+                "auto_quorum_refresh: ledger {}... all members fresh, rotating",
+                &snap.ledger_id[..16]
+            );
+            let begin_req = crate::nostr::LedgerRequest {
+                action: "quorum_begin".into(),
+                ledger_id: snap.ledger_id.clone(),
+                params: serde_json::json!({}),
+                event_id: String::new(),
+                sender: String::new(),
+                timestamp: 0,
+                gift_wrap_sender: None,
+                subkey_account: None,
+                subkey_attestation: None,
+            };
+            let (success, _, error) = self.process_quorum_begin_request(&begin_req).await;
+            if success {
+                tracing::info!(
+                    "auto_quorum_refresh: ledger {}... rotated",
+                    &snap.ledger_id[..16]
+                );
+            } else {
+                tracing::warn!(
+                    "auto_quorum_refresh: ledger {}... rotate failed: {}",
+                    &snap.ledger_id[..16],
+                    error.unwrap_or_default()
+                );
+            }
+        }
+    }
 }

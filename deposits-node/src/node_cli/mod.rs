@@ -474,6 +474,7 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     let mut skip_nostr_verify = false;
     let mut signer_socket: Option<PathBuf> = None;
     let mut signer_pubkey: Option<bitcoin::secp256k1::PublicKey> = None;
+    let mut rotate_before_expiry_days: u32 = 3;
     let mut data_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".deposits-node");
@@ -594,6 +595,15 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
                         .map_err(|e| format!("--signer-pubkey: {}", e))?,
                 );
             }
+            "--rotate-before-expiry-days" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--rotate-before-expiry-days requires an integer".to_string());
+                }
+                rotate_before_expiry_days = args[i]
+                    .parse()
+                    .map_err(|e| format!("--rotate-before-expiry-days: {}", e))?;
+            }
             arg => {
                 return Err(format!("Unknown argument: {}", arg));
             }
@@ -669,6 +679,7 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
         fast_poll,
         skip_nostr_verify,
         signer,
+        rotate_before_expiry_days,
     })
 }
 

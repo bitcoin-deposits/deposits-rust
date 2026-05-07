@@ -318,6 +318,7 @@ impl Node {
             data_dir: config.data_dir,
             relay_url,
             fast_poll: config.fast_poll,
+            rotate_before_expiry_days: config.rotate_before_expiry_days,
             joined_ledger_cache: Mutex::new(None),
             joined_ledger_cache_versions: Mutex::new(HashMap::new()),
             imported_joined_ledgers: Mutex::new(std::collections::HashSet::new()),

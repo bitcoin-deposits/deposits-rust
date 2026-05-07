@@ -84,6 +84,19 @@ pub struct NodeConfig {
     /// The wallet (BDK) still derives from `seed` regardless — the
     /// watch-only descriptor split is its own follow-up.
     pub signer: Option<RemoteSignerConfig>,
+
+    /// How many days before `quorum_expiry` the daemon should auto-rotate
+    /// the quorum. The auto-refresh task triggers when
+    /// `current_block + rotate_before_expiry_days × 144 ≥ quorum_expiry`,
+    /// matching the same staleness check `quorum refresh` uses for its
+    /// `--threshold-blocks` flag (just expressed in days for ergonomics).
+    ///
+    /// Default: `3` days. Tuning: shorter = tighter on-chain protection
+    /// (less time spent in the post-expiry CLTV cascade window per the
+    /// new tier design); longer = more headroom for offline cosigners
+    /// to come back. Three days lets cosigners miss two cycles of a
+    /// 24-hour cron and still come back before the cascade opens.
+    pub rotate_before_expiry_days: u32,
 }
 
 /// Configuration for the daemon ↔ signer link.
@@ -439,6 +452,11 @@ pub struct Node {
 
     /// Use fast polling intervals (for regtest/testing)
     fast_poll: bool,
+
+    /// Auto-rotate threshold (days). The periodic `auto_quorum_refresh`
+    /// task triggers when `current_block + rotate_before_expiry_days × 144
+    /// ≥ quorum_expiry`. Mirror of `NodeConfig::rotate_before_expiry_days`.
+    pub rotate_before_expiry_days: u32,
 
     /// Cached joined ledger IDs (from QuorumJoin history scan).
     /// Self-validates by checking history lengths — only rescans when history grows.
