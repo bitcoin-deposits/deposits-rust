@@ -192,7 +192,7 @@ types:
   #
   # Deposits:
   #   18  = cosigner_sig (64 bytes, DepositOpen co-signer guarantee, optional)
-  #   24  = deposit_pubkey (33 bytes, DepositOpen)
+  #   24  = reserved (was deposit_pubkey — descriptor-based identity post-Wave-1)
   #   200 = deposit_id (16 bytes)
   #   202 = descriptor (string, miniscript)
   #   204 = witness (nested TLV)

@@ -40,7 +40,6 @@ export const FIELD_NAMES = {
   16: 'invoice',
   18: 'cosigner_sig',
   20: 'new_fees',
-  // 24 reserved (was deposit_pubkey — descriptor-based identity post-Wave-1)
   26: 'invoice_id',
   28: 'sequence_number',
   30: 'payment_id',
@@ -110,4 +109,7 @@ export const FIELD_NAMES = {
   272: 'target_ledger_id',
   274: 'target_operator',
   276: 'quorum_member_ledger_ids',
+  280: 'replacement_collateral_txid',
+  282: 'replacement_collateral_vout',
+  284: 'replacement_collateral_amount',
 };
