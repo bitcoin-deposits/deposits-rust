@@ -118,29 +118,25 @@ body.hide-amounts .amt { visibility: hidden; }
 <div id="app">
   <!-- Setup screen (shown when no seed) -->
   <div id="setup-panel" style="display:none; text-align:center; padding:40px 20px;">
-    <h1 style="margin-bottom: 8px;">Deposits Wallet</h1>
-    <p style="color: var(--muted); margin-bottom: 24px;">Nostr-native bitcoin custody</p>
+    <h1 style="margin-bottom: 8px;">Bitcoin Deposits Wallet</h1>
+    <p style="color: var(--muted); margin-bottom: 24px;">wallets, not users. nodes, not kings</p>
     <div class="card" style="max-width:440px; margin:0 auto; text-align:left;">
       <h3>Get Started</h3>
       <div class="form-group">
-        <label>Ledger relay</label>
-        <input id="setup-ledger-relay" type="text" placeholder="wss://relay.example.com" value="">
-      </div>
-      <div class="form-group">
-        <label>Operator relays (optional)</label>
-        <input id="setup-relay" type="text" placeholder="ws://host:7801,ws://host:7802,..." value="">
-      </div>
-      <div class="form-group">
         <label>Network</label>
         <select id="setup-network">
-          <option value="regtest">regtest</option>
-          <option value="signet">signet</option>
-          <option value="testnet">testnet</option>
           <option value="bitcoin" selected>bitcoin</option>
+          <option value="regtest">regtest</option>
         </select>
       </div>
+      <details style="margin-bottom:12px;">
+        <summary style="cursor:pointer; color:var(--muted); font-size:11px;">Advanced: relay</summary>
+        <div class="form-group" style="margin-top:8px;">
+          <label>Ledger relay</label>
+          <input id="setup-ledger-relay" type="text" placeholder="wss://relay.example.com" value="wss://relay.bitcoindeposits.net">
+        </div>
+      </details>
       <button class="primary" onclick="initWallet()" style="width:100%; margin-top:8px;">Create New Wallet</button>
-      <button id="setup-nip07-btn" onclick="initWalletNip07()" style="width:100%; margin-top:6px; display:none;">Use NIP-07 Extension</button>
       <label style="font-size:11px; color:var(--muted); margin-top:8px; cursor:pointer;">
         <input type="checkbox" id="setup-save-keychain" checked style="margin:0; vertical-align:middle;"> Save to browser password manager
       </label>
@@ -543,9 +539,6 @@ body.hide-amounts .amt { visibility: hidden; }
         <h3>Nostr Identity</h3>
         <div class="kv"><span class="k">Signing mode</span><span class="v" id="settings-signing-mode">Wallet key</span></div>
         <div class="kv"><span class="k">Nostr pubkey</span><span class="v" id="settings-npub">—</span></div>
-        <div id="settings-nip07-toggle" style="margin-top:6px;">
-          <button id="settings-nip07-btn" onclick="toggleNip07()" style="font-size:11px;">Switch to NIP-07 extension</button>
-        </div>
         <div class="kv" style="margin-top:6px;"><span class="k">Deposit key index</span><span class="v" id="settings-key-index">0</span></div>
         <div class="kv"><span class="k">Network</span><span class="v" id="settings-network">—</span></div>
         <div class="kv"><span class="k">Relays</span><span class="v" id="settings-relay">—</span></div>
@@ -615,18 +608,16 @@ body.hide-amounts .amt { visibility: hidden; }
           </div>
         </div>
       </div>
-      <div class="card">
-        <h3>Relays</h3>
-        <div class="form-group">
-          <label>Operator relays (comma-separated)</label>
-          <input id="settings-relay-input" type="text">
+      <details>
+        <summary style="cursor:pointer; padding:14px 16px; color:var(--muted); font-size:12px;">Advanced: relay</summary>
+        <div class="card" style="margin-top:0; border-top:0; border-top-left-radius:0; border-top-right-radius:0;">
+          <div class="form-group">
+            <label>Ledger relay</label>
+            <input id="settings-ledger-relay-input" type="text">
+          </div>
+          <button onclick="changeRelays()">Reconnect</button>
         </div>
-        <div class="form-group">
-          <label>Ledger relay (read-only, for advertisements)</label>
-          <input id="settings-ledger-relay-input" type="text">
-        </div>
-        <button onclick="changeRelays()">Reconnect</button>
-      </div>
+      </details>
       <div class="card">
         <div style="color:var(--muted); font-size:11px; margin-bottom:8px;">Back up your recovery phrase before resetting.</div>
         <button class="danger" onclick="resetWallet()">Reset Wallet</button>
@@ -684,7 +675,6 @@ body.hide-amounts .amt { visibility: hidden; }
         <input id="verify-address-input" type="text" placeholder="you@wallet.com" style="width:100%; box-sizing:border-box; margin-bottom:8px;" onkeydown="if(event.key==='Enter')verifySubmitAddress()">
         <div style="display:flex; gap:6px;">
           <button id="verify-address-btn" onclick="verifySubmitAddress()" style="flex:1;">Verify</button>
-          <button id="verify-nip07-btn" onclick="verifySwitchToNip07()" style="flex:1; display:none; font-size:11px;">Use NIP-07 identity</button>
         </div>
       </div>
 
@@ -1052,8 +1042,6 @@ function saveState() {
     keyIndex: state.keyIndex,
     backupVerified: state.backupVerified || false,
     evidence: state.evidence || [],
-    useNip07: state.useNip07 || false,
-    identityRelays: state.identityRelays || [],
   };
   localStorage.setItem(STATE_KEY, JSON.stringify(s));
 
@@ -1079,14 +1067,12 @@ function loadState() {
     state.deposits = s.deposits || [];
     state.keyIndex = s.keyIndex || 0;
     state.evidence = s.evidence || [];
-    state.useNip07 = s.useNip07 || false;
-    state.identityRelays = s.identityRelays || [];
     return true;
   } catch { return false; }
 }
 
 // ============================================================
-// NIP-04 encrypt/decrypt (for wallet key mode — NIP-07 mode uses extension)
+// NIP-04 encrypt/decrypt
 // ============================================================
 
 async function nip04Encrypt(secretKey, pubkeyHex, plaintext) {
@@ -1178,7 +1164,6 @@ function buildRemoteState() {
     ledgerRelay: state.ledgerRelay,
     deposits: state.deposits,
     keyIndex: state.keyIndex,
-    useNip07: state.useNip07 || false,
     evidence: state.evidence || [],
   });
 }
@@ -1189,7 +1174,6 @@ function applyRemoteState(s) {
   if (s.ledgerRelay) state.ledgerRelay = s.ledgerRelay;
   if (s.deposits) state.deposits = s.deposits;
   if (s.keyIndex) state.keyIndex = s.keyIndex;
-  if (s.useNip07 !== undefined) state.useNip07 = s.useNip07;
   if (s.evidence) state.evidence = s.evidence;
 }
 
@@ -1246,26 +1230,15 @@ async function saveStateRemote() {
   const nostrKey = deriveSecretKey(state.seed, 0);
   const pubkey = getPublicKeyHex(nostrKey);
 
-  let encrypted;
-  if (state.useNip07 && window.nostr?.nip04) {
-    try { encrypted = await window.nostr.nip04.encrypt(pubkey, plaintext); } catch {}
-  }
-  if (!encrypted) {
-    encrypted = await nip04Encrypt(nostrKey, pubkey, plaintext);
-  }
+  const encrypted = await nip04Encrypt(nostrKey, pubkey, plaintext);
 
   const tags = [['d', REMOTE_STATE_D_TAG]];
   const event = await createEvent(nostrKey, 30078, encrypted, tags);
 
-  // Publish to operator relays
   const payload = JSON.stringify(['EVENT', event]);
   for (const s of sockets) {
     if (s.ws && s.ws.readyState === WebSocket.OPEN) s.ws.send(payload);
   }
-
-  // Also publish to identity relays (NIP-07 user's relays)
-  const idRelays = (state.identityRelays || []).filter(u => !state.relays.includes(u) && u !== state.ledgerRelay);
-  if (idRelays.length > 0) sendToRelays(event, idRelays);
 
   _lastSavedRemoteHash = hash;
   console.log('State synced to relay');
@@ -1276,28 +1249,12 @@ async function loadStateRemote() {
   const pubkey = getPublicKeyHex(nostrKey);
 
   const filter = { kinds: [30078], authors: [pubkey], '#d': [REMOTE_STATE_D_TAG], limit: 1 };
-
-  // Fetch from both operator relays and identity relays
-  const [operatorEvents, idEvents] = await Promise.all([
-    fetchEvents(filter, 8000),
-    (state.identityRelays || []).length > 0
-      ? fetchFromRelays(filter, state.identityRelays, 8000)
-      : Promise.resolve([]),
-  ]);
-
-  // Use the most recent event
-  const all = [...operatorEvents, ...idEvents];
+  const all = await fetchEvents(filter, 8000);
   if (all.length === 0) return null;
   all.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
 
-  const content = all[0].content;
   let plaintext;
-  if (state.useNip07 && window.nostr?.nip04) {
-    try { plaintext = await window.nostr.nip04.decrypt(pubkey, content); } catch {}
-  }
-  if (!plaintext) {
-    try { plaintext = await nip04Decrypt(nostrKey, pubkey, content); } catch {}
-  }
+  try { plaintext = await nip04Decrypt(nostrKey, pubkey, all[0].content); } catch {}
   if (!plaintext) return null;
 
   try { return JSON.parse(plaintext); } catch { return null; }
@@ -2465,17 +2422,7 @@ function decodeBech32ToHex(str) {
   return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// Create and sign a nostr event via NIP-07 browser extension (window.nostr).
-// Returns null if the extension is unavailable or the user denies signing.
-async function createEventNip07(kind, content, tags) {
-  if (!window.nostr?.signEvent) return null;
-  const event = { kind, content, tags, created_at: Math.floor(Date.now() / 1000) };
-  const signed = await window.nostr.signEvent(event);
-  return signed || null;
-}
-
 // Send a kind 25500 event to the lightning-verify service and wait for kind 25501 response.
-// Uses NIP-07 (browser extension) if available, otherwise falls back to the wallet's derived key.
 async function sendVerifyRequest(verifierPubkey, params, timeoutMs = 30000) {
   const content = JSON.stringify(params);
   const pubkeyHex = decodeBech32ToHex(verifierPubkey);
@@ -2527,14 +2474,7 @@ async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, ke
     return;
   }
 
-  if (state.useNip07 && window.nostr) {
-    try {
-      const nip07pubkey = await window.nostr.getPublicKey();
-      if (nip07pubkey) log(`Signing with NIP-07 extension (${nip07pubkey.slice(0, 16)}...)`);
-    } catch {}
-  } else {
-    log('Signing with wallet key.');
-  }
+  log('Signing with wallet key.');
 
   const domainHint = allowedDomains.length > 0
     ? `Accepted domains: ${allowedDomains.join(', ')}`
@@ -2546,7 +2486,6 @@ async function showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, ke
   document.getElementById('verify-address-input').value = '';
   document.getElementById('verify-address-btn').disabled = false;
   document.getElementById('verify-address-btn').textContent = 'Verify';
-  document.getElementById('verify-nip07-btn').style.display = (!state.useNip07 && window.nostr) ? '' : 'none';
   showVerifyStep('address');
   document.getElementById('verify-modal').classList.add('visible');
   document.getElementById('verify-address-input').focus();
@@ -2633,23 +2572,6 @@ window.verifySubmitAddress = async function() {
     btn.disabled = false;
     btn.textContent = 'Verify';
     verifyShowResult(`Error: ${e.message}`, 'error', false);
-  }
-};
-
-window.verifySwitchToNip07 = async function() {
-  if (!window.nostr) return;
-  try {
-    const pk = await window.nostr.getPublicKey();
-    if (!pk) { log('NIP-07 extension denied access.', 'error'); return; }
-    state.useNip07 = true;
-    saveState();
-    log(`Switched to NIP-07 identity (${pk.slice(0, 16)}...)`);
-    document.getElementById('verify-nip07-btn').style.display = 'none';
-    // Update settings UI too
-    const nostrKey = deriveSecretKey(state.seed, 0);
-    updateSigningModeUI(getPublicKeyHex(nostrKey));
-  } catch (e) {
-    log(`NIP-07 error: ${e.message}`, 'error');
   }
 };
 
@@ -2781,15 +2703,8 @@ async function showAuthorizationRequired(ledgerId, operatorName, code) {
     return;
   }
 
-  // Show the pubkey that would be used for verification
-  let pubkey;
-  if (window.nostr) {
-    try { pubkey = await window.nostr.getPublicKey(); } catch {}
-  }
-  if (!pubkey) {
-    const nostrKey = deriveSecretKey(state.seed, 0);
-    pubkey = getPublicKeyHex(nostrKey);
-  }
+  const nostrKey = deriveSecretKey(state.seed, 0);
+  const pubkey = getPublicKeyHex(nostrKey);
 
   const msg = code === 'not_authorized'
     ? `${name} requires authorization to open deposits. `
@@ -5897,7 +5812,6 @@ function parseRelays(input) {
 
 function getSetupConfig() {
   return {
-    relayInput: document.getElementById('setup-relay').value || '',
     ledgerRelay: document.getElementById('setup-ledger-relay').value || 'wss://relay.bitcoindeposits.net',
     network: document.getElementById('setup-network').value,
     saveKeychain: document.getElementById('setup-save-keychain').checked,
@@ -5912,45 +5826,10 @@ window.initWallet = async function() {
   state.seed = await mnemonicToSeed(mnemonic);
   state.mnemonic = mnemonic;
   state.network = cfg.network;
-  state.relays = parseRelays(cfg.relayInput);
+  state.relays = [];
   state.ledgerRelay = cfg.ledgerRelay;
   state.deposits = [];
   state.keyIndex = 0;
-  state.useNip07 = false;
-  saveState();
-
-  if (cfg.saveKeychain) {
-    // Save to keychain immediately — on Safari this reloads the page,
-    // which is fine since state is already persisted to localStorage.
-    await saveToKeychain(true);
-  }
-
-  startMainUI();
-};
-
-window.initWalletNip07 = async function() {
-  if (!window.nostr) { log('No NIP-07 extension detected.', 'error'); return; }
-  try {
-    const pk = await window.nostr.getPublicKey();
-    if (!pk) { log('NIP-07 extension denied access.', 'error'); return; }
-  } catch (e) {
-    log(`NIP-07 error: ${e.message}`, 'error');
-    return;
-  }
-
-  const cfg = getSetupConfig();
-
-  // Still generate a wallet key for deposit signing — NIP-07 is for identity only
-  const mnemonic = generateMnemonic(12);
-  state.seed = await mnemonicToSeed(mnemonic);
-  state.mnemonic = mnemonic;
-  state.network = cfg.network;
-  state.relays = parseRelays(cfg.relayInput);
-  state.ledgerRelay = cfg.ledgerRelay;
-  state.deposits = [];
-  state.keyIndex = 0;
-  state.useNip07 = true;
-  state.identityRelays = await getNip07Relays();
   saveState();
 
   if (cfg.saveKeychain) {
@@ -5965,7 +5844,6 @@ window.importWallet = async function() {
   if (!input) { alert('Enter a recovery phrase or hex seed'); return; }
 
   const network = document.getElementById('setup-network').value;
-  const relayInput = document.getElementById('setup-relay').value || '';
   const ledgerRelay = document.getElementById('setup-ledger-relay').value || 'wss://relay.bitcoindeposits.net';
 
   if (isValidMnemonic(input)) {
@@ -5982,7 +5860,7 @@ window.importWallet = async function() {
   }
 
   state.network = network;
-  state.relays = parseRelays(relayInput);
+  state.relays = [];
   state.ledgerRelay = ledgerRelay;
   state.deposits = [];
   state.keyIndex = 0;
@@ -6173,72 +6051,19 @@ window.toggleBackupReveal = function() {
 };
 
 window.changeRelays = function() {
-  const input = document.getElementById('settings-relay-input').value;
-  if (!input) return;
-  state.relays = parseRelays(input);
-  state.ledgerRelay = document.getElementById('settings-ledger-relay-input').value || state.ledgerRelay;
+  const newRelay = document.getElementById('settings-ledger-relay-input').value;
+  if (!newRelay) return;
+  state.ledgerRelay = newRelay;
   saveState();
   connect();
-  document.getElementById('settings-relay').textContent = state.relays.join(', ');
+  document.getElementById('settings-relay').textContent = state.ledgerRelay;
 };
-
-// --- NIP-07 relay helper ---
-
-async function getNip07Relays() {
-  if (!window.nostr?.getRelays) return [];
-  try {
-    const relayMap = await window.nostr.getRelays();
-    if (relayMap && typeof relayMap === 'object') {
-      return Object.keys(relayMap).filter(u => u.startsWith('ws'));
-    }
-  } catch {}
-  return [];
-}
-
-// --- Signing mode (wallet key vs NIP-07) ---
 
 function updateSigningModeUI(walletPubkey) {
-  const isNip07 = state.useNip07;
-  document.getElementById('settings-signing-mode').textContent = isNip07 ? 'NIP-07 extension' : 'Wallet key';
-  document.getElementById('settings-npub').textContent = isNip07 ? '(from extension)' : walletPubkey;
-  document.getElementById('settings-nip07-btn').textContent = isNip07 ? 'Switch to wallet key' : 'Switch to NIP-07 extension';
-  document.getElementById('settings-attest-card').style.display = isNip07 ? 'none' : '';
-
-  if (isNip07 && window.nostr?.getPublicKey) {
-    window.nostr.getPublicKey().then(pk => {
-      if (pk) document.getElementById('settings-npub').textContent = pk;
-    }).catch(() => {});
-  }
+  document.getElementById('settings-signing-mode').textContent = 'Wallet key';
+  document.getElementById('settings-npub').textContent = walletPubkey;
+  document.getElementById('settings-attest-card').style.display = '';
 }
-
-window.toggleNip07 = async function() {
-  if (!state.useNip07) {
-    // Switching TO NIP-07
-    if (!window.nostr) {
-      log('No NIP-07 extension detected. Install nos2x or Alby.', 'error');
-      return;
-    }
-    try {
-      const pk = await window.nostr.getPublicKey();
-      if (!pk) { log('NIP-07 extension denied access.', 'error'); return; }
-      state.useNip07 = true;
-      state.identityRelays = await getNip07Relays();
-      saveState();
-      log(`Switched to NIP-07 extension (${pk.slice(0, 16)}...)`);
-    } catch (e) {
-      log(`NIP-07 extension error: ${e.message}`, 'error');
-      return;
-    }
-  } else {
-    // Switching BACK to wallet key
-    state.useNip07 = false;
-    state.identityRelays = [];
-    saveState();
-    log('Switched to wallet key.');
-  }
-  const nostrKey = deriveSecretKey(state.seed, 0);
-  updateSigningModeUI(getPublicKeyHex(nostrKey));
-};
 
 window.createSubkeyAttestation = function() {
   const input = document.getElementById('attest-subkey-input').value.trim().toLowerCase();
@@ -6280,7 +6105,7 @@ function startMainUI() {
   document.getElementById('settings-key-index').textContent = state.keyIndex;
   updateSigningModeUI(npub);
   document.getElementById('settings-network').textContent = state.network;
-  document.getElementById('settings-relay').textContent = state.relays.join(', ') + ' + ' + state.ledgerRelay;
+  document.getElementById('settings-relay').textContent = state.ledgerRelay;
   document.getElementById('settings-seed').value = bytesToHex(state.seed);
   const walletId = 'deposits-wallet:' + npub.slice(0, 8);
   document.getElementById('backup-wallet-id').textContent = walletId;
@@ -6290,7 +6115,6 @@ function startMainUI() {
   } else {
     document.getElementById('settings-mnemonic').style.display = 'none';
   }
-  document.getElementById('settings-relay-input').value = state.relays.join(', ');
   document.getElementById('settings-ledger-relay-input').value = state.ledgerRelay;
   updateCheckBtn();
 
@@ -6320,13 +6144,6 @@ if (loadState()) {
   setTimeout(restoreFromHash, 500);
 } else {
   document.getElementById('setup-panel').style.display = '';
-  // Show NIP-07 button if extension is available (check now + after delay for late injection)
-  function checkNip07() {
-    if (window.nostr) document.getElementById('setup-nip07-btn').style.display = '';
-  }
-  checkNip07();
-  setTimeout(checkNip07, 500);
-  setTimeout(checkNip07, 2000);
 }
 
 // Handle back/forward navigation
