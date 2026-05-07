@@ -306,6 +306,12 @@ impl LedgerWallet {
         ledger_hash: [u8; 32],
         amount_sats: u64,
         fee_rate_sat_per_vb: f32,
+        // Name of the protocol ruleset the new UTXO commits to. Same
+        // value that the QuorumBegin operation will record. Caller's
+        // policy decision: rotating an existing legacy ledger usually
+        // wants to flip to "cltv-offset-v2"; bootstrapping a new
+        // ledger picks whatever the deployer's default is.
+        ruleset_name: &str,
     ) -> Result<(TaprootReservesCreateResult, TaprootReservesInfo), Error> {
         use bdk_wallet::bitcoin::ecdsa::Signature as BtcEcdsaSignature;
         use bdk_wallet::bitcoin::hashes::Hash as _;
@@ -321,6 +327,10 @@ impl LedgerWallet {
         let first_expiry = *member_expiries.iter().min().unwrap_or(&0);
 
         let voter_set = VoterSet::new(self.operator_pubkey, quorum_members.clone());
+        // Look up the named ruleset and run its tier_config_factory.
+        // The factory takes `quorum_expiry` so cltv-offset-v2 can bake
+        // `quorum_expiry + offset` into the leaf scripts; legacy
+        // ignores it and returns plain literals.
         let config = if quorum_members.is_empty() {
             ThresholdConfig::custom(vec![ThresholdTier::new(
                 1,
@@ -329,13 +339,9 @@ impl LedgerWallet {
                 "Operator only (no quorum)",
             )])
         } else {
-            ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
+            let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(ruleset_name));
+            (ruleset.tier_config_factory)(quorum_members.len() + 1, first_expiry)
         };
-        // P0d will swap default_for_voter_count for an explicit
-        // ruleset lookup once protocol_version is on QuorumBegin. For
-        // now both this construction and the on-chain reserves' script
-        // are LEGACY-shaped, so they match.
-        let _ = first_expiry;
         let builder = TapscriptReservesBuilder::new(
             voter_set,
             config,
@@ -482,6 +488,7 @@ impl LedgerWallet {
             quorum_expiry: first_expiry,
             ledger_hash,
             taproot_output: taproot_output.clone(),
+            ruleset_name: ruleset_name.to_string(),
             confirmed: false,
         };
         tracing::info!(
@@ -631,10 +638,18 @@ impl LedgerWallet {
         ledger_hash.copy_from_slice(&ledger_hash_bytes);
 
         let voter_set = VoterSet::new(operator_pubkey, quorum_members.clone());
+        // Look up the persisted ruleset and run its tier_config_factory
+        // so the rebuilt script matches the on-chain UTXO. Pre-versioned
+        // files lack `ruleset_name`; serde defaults that to "legacy".
         let config = if quorum_members.is_empty() {
             ThresholdConfig::custom(vec![ThresholdTier::new(1, true, 0, "Operator only")])
         } else {
-            ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
+            let ruleset =
+                deposits_core::ruleset::resolve_or_legacy(Some(&serde_info.ruleset_name));
+            (ruleset.tier_config_factory)(
+                quorum_members.len() + 1,
+                serde_info.quorum_expiry,
+            )
         };
         let taproot_output = TapscriptReservesBuilder::new(
             voter_set,
@@ -653,6 +668,7 @@ impl LedgerWallet {
             quorum_expiry: serde_info.quorum_expiry,
             ledger_hash,
             taproot_output,
+            ruleset_name: serde_info.ruleset_name,
             confirmed: serde_info.confirmed,
         }))
     }
@@ -668,6 +684,7 @@ impl LedgerWallet {
             ledger_hash: hex::encode(info.ledger_hash),
             address: info.taproot_output.address.to_string(),
             confirmed: info.confirmed,
+            ruleset_name: info.ruleset_name.clone(),
         };
         let json = serde_json::to_string_pretty(&serde)
             .map_err(|e| Error::Wallet(format!("serialize taproot_reserves: {}", e)))?;
@@ -690,6 +707,15 @@ struct TaprootReservesInfoSerde {
     ledger_hash: String, // hex
     address: String,
     confirmed: bool,
+    /// Pre-existing files don't have this; serde default fills in
+    /// `"legacy"` so the reconstruction path stays consistent with
+    /// the on-chain UTXO that file describes.
+    #[serde(default = "default_ruleset_name")]
+    ruleset_name: String,
+}
+
+fn default_ruleset_name() -> String {
+    "legacy".to_string()
 }
 
 #[cfg(test)]

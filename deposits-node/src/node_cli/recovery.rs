@@ -2896,6 +2896,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     let mut ledger_hash: Option<[u8; 32]> = None;
     let mut original_operator: Option<PublicKey> = None;
     let mut quorum_expiry_at_qb: u32 = 0;
+    let mut ruleset_at_qb: Option<String> = None;
 
     for event in events.iter() {
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
@@ -2914,11 +2915,13 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
                             reserves_id,
                             ledger_hash: lh,
                             quorum_expiry,
+                            protocol_version,
                             ..
                         } => {
                             reserves_address = Some(reserves_id);
                             ledger_hash = Some(lh);
                             quorum_expiry_at_qb = quorum_expiry;
+                            ruleset_at_qb = protocol_version;
                         }
                         LedgerOperation::DisputeArmed {
                             commitment_hash,
@@ -3195,9 +3198,12 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     let ledger_hash_val = ledger_hash.ok_or("Could not find ledger_hash")?;
     let voter_set = VoterSet::new(original_operator, quorum_members.clone());
     let voter_count = voter_set.all_voters().len();
-    let threshold_config = ThresholdConfig::default_for_voter_count(voter_count);
+    // Reconstruct under the same ruleset the disputed UTXO was built
+    // with — read from the latest QuorumBegin's protocol_version.
+    let ruleset =
+        deposits_core::ruleset::resolve_or_legacy(ruleset_at_qb.as_deref());
+    let threshold_config = (ruleset.tier_config_factory)(voter_count, quorum_expiry_at_qb);
 
-    let _ = quorum_expiry_at_qb; // P0d will route through ruleset
     let taproot_builder = TapscriptReservesBuilder::new(
         voter_set.clone(),
         threshold_config.clone(),
@@ -4458,10 +4464,15 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
     let quorum_expiry = pre_rotation_height + 144;
 
-    // Build Taproot quorum address
+    // Build Taproot quorum address. `recovery rotate-to-quorum` is a
+    // standalone bring-up path (not the post-dispute one); it picks
+    // the ruleset for the new UTXO. Default to legacy for parity with
+    // existing chain. A `--protocol-version` flag is the natural
+    // extension when migrations to v2 are wanted from this CLI path.
     let voter_set = VoterSet::new(our_pubkey, quorum_members.clone());
     let voter_count = voter_set.all_voters().len();
-    let threshold_config = ThresholdConfig::default_for_voter_count(voter_count);
+    let new_ruleset = deposits_core::ruleset::resolve_or_legacy(Some("legacy"));
+    let threshold_config = (new_ruleset.tier_config_factory)(voter_count, quorum_expiry);
 
     let taproot_builder = TapscriptReservesBuilder::new(
         voter_set,
@@ -4585,7 +4596,10 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
             ))
             .collect(),
         collateral_amount: 0,
-        protocol_version: None, // recovery — collateral will be re-attested
+        // Post-win rotation pins to whichever ruleset the disputed
+        // ledger had — same scheme so wallets following the chain
+        // see continuous reconstruction.
+        protocol_version: Some(new_ruleset.name.to_string()), // recovery — collateral will be re-attested
     };
 
     let message_bytes = operation.tlv_encode();

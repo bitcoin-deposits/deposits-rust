@@ -1261,6 +1261,7 @@ impl Node {
             let mut original_operator: Option<PublicKey> = None;
             let mut latest_quorum_begin_seq: Option<u64> = None;
             let mut quorum_expiry_at_qb: u32 = 0;
+            let mut ruleset_at_qb: Option<String> = None;
 
             for event in events.iter() {
                 if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
@@ -1283,6 +1284,7 @@ impl Node {
                                     ledger_hash: lh,
                                     quorum_members: qm,
                                     quorum_expiry,
+                                    protocol_version,
                                     ..
                                 } => {
                                     // Keep the latest QuorumBegin (highest sequence) since
@@ -1299,6 +1301,7 @@ impl Node {
                                         // Taproot reconstruction; extract just the keys.
                                         quorum_members = qm.into_iter().map(|m| m.pubkey).collect();
                                         quorum_expiry_at_qb = quorum_expiry;
+                                        ruleset_at_qb = protocol_version;
                                     }
                                 }
                                 LedgerOperation::DisputeArmed {
@@ -1450,12 +1453,18 @@ impl Node {
                 }],
             };
 
-            // Build the Taproot reserves structure for signing
+            // Build the Taproot reserves structure for signing using
+            // the ruleset that the disputed ledger committed to in
+            // its latest QuorumBegin. Reconstructing under any other
+            // ruleset would produce the wrong scriptPubKey.
             let voter_set = VoterSet::new(original_operator, quorum_members.clone());
             let voter_count = voter_set.all_voters().len();
-            let threshold_config = ThresholdConfig::default_for_voter_count(voter_count);
+            let ruleset = deposits_core::ruleset::resolve_or_legacy(
+                ruleset_at_qb.as_deref(),
+            );
+            let threshold_config =
+                (ruleset.tier_config_factory)(voter_count, quorum_expiry_at_qb);
 
-            let _ = quorum_expiry_at_qb; // P0d will route through ruleset
             let taproot_builder = TapscriptReservesBuilder::new(
                 voter_set.clone(),
                 threshold_config.clone(),

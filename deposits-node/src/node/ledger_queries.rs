@@ -735,7 +735,14 @@ impl Node {
                 .clone()
         };
 
-        let (quorum_members, member_ledger_ids, quorum_expiries, ledger_hash, total_collateral) = {
+        let (
+            quorum_members,
+            member_ledger_ids,
+            quorum_expiries,
+            ledger_hash,
+            total_collateral,
+            new_ruleset_name,
+        ) = {
             let ledger = ledger_arc.read().unwrap();
 
             // QuorumBegin promotes next_quorum_members -> quorum_members, so at rotation
@@ -763,7 +770,14 @@ impl Node {
             let hash = ledger.hash();
             let collateral = ledger.state.total_collateral();
 
-            (members, lids, expiries, hash, collateral)
+            // Inherit the active ruleset by default — rotating an
+            // existing legacy ledger keeps it on legacy. Migrating
+            // to a different ruleset is an explicit operator action
+            // (currently via plumbing not yet exposed at this layer;
+            // defer to a follow-up `--protocol-version` flag).
+            let rs = ledger.state.active_ruleset_name.clone();
+
+            (members, lids, expiries, hash, collateral, rs)
         };
 
         if quorum_members.is_empty() {
@@ -864,6 +878,7 @@ impl Node {
                     ledger_hash,
                     chosen_amount,
                     5.0,
+                    &new_ruleset_name,
                 )?;
                 let txid = ledger_wallet.broadcast(&result.tx)?;
                 tracing::info!(
@@ -964,7 +979,11 @@ impl Node {
                 .map(|(pk, lid)| deposits_core::messages::QuorumMemberRef::new(*pk, lid.clone()))
                 .collect(),
             collateral_amount: collateral_msats,
-            protocol_version: None,
+            // Pin the ledger to the same ruleset the rotation TX
+            // built the on-chain UTXO under. Inherits the ledger's
+            // active ruleset (legacy by default) — migrations to a
+            // different ruleset are an explicit deployer action.
+            protocol_version: Some(new_ruleset_name.clone()),
         };
 
         // commit_operation runs the full stage → cosign → operator-sign →
