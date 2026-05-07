@@ -517,13 +517,80 @@ impl Node {
 
             match matching {
                 Some(p) if p.status == 1 => {
-                    // Succeeded — commit InvoiceFulfill
+                    // Succeeded — commit InvoiceFulfill.
+                    //
+                    // Pre-flight the preimage: LDK has occasionally
+                    // returned a preimage that doesn't hash to the
+                    // payment_hash we were tracking the lock by
+                    // (e.g. the `id` we matched on actually identifies
+                    // a payment attempt rather than the BOLT11). If we
+                    // commit a mismatch, the conformance check rejects
+                    // it with "preimage does not match payment hash"
+                    // and the operator gets no diagnostic context. Log
+                    // the inputs ourselves so the next time it
+                    // happens we have something to chase.
+                    let preimage_hex_opt = p.preimage.clone();
                     let mut preimage = [0u8; 32];
-                    if let Some(ref pre_hex) = p.preimage {
-                        if let Ok(pre_bytes) = hex::decode(pre_hex) {
-                            if pre_bytes.len() == 32 {
-                                preimage.copy_from_slice(&pre_bytes);
+                    let preimage_decoded = match preimage_hex_opt.as_ref() {
+                        Some(pre_hex) => match hex::decode(pre_hex) {
+                            Ok(b) if b.len() == 32 => {
+                                preimage.copy_from_slice(&b);
+                                true
                             }
+                            Ok(b) => {
+                                tracing::error!(
+                                    "auto_complete_outbound: payment {}: LDK preimage \
+                                     wrong length ({} bytes, expected 32) — skipping; \
+                                     LDK record: id={} preimage={:?}",
+                                    &payment_hex[..16],
+                                    b.len(),
+                                    p.id,
+                                    preimage_hex_opt
+                                );
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "auto_complete_outbound: payment {}: LDK preimage \
+                                     not valid hex ({}) — skipping; LDK record: id={} \
+                                     preimage={:?}",
+                                    &payment_hex[..16],
+                                    e,
+                                    p.id,
+                                    preimage_hex_opt
+                                );
+                                continue;
+                            }
+                        },
+                        None => {
+                            tracing::error!(
+                                "auto_complete_outbound: payment {}: LDK marked succeeded \
+                                 but returned no preimage — skipping; LDK record: id={} \
+                                 amount_msat={:?}",
+                                &payment_hex[..16],
+                                p.id,
+                                p.amount_msat
+                            );
+                            continue;
+                        }
+                    };
+                    if preimage_decoded {
+                        use bitcoin::hashes::{sha256, Hash};
+                        let computed: [u8; 32] = *sha256::Hash::hash(&preimage).as_byte_array();
+                        if computed != payment_id {
+                            tracing::error!(
+                                "auto_complete_outbound: payment {}: LDK preimage doesn't \
+                                 hash to payment_hash — refusing to commit a \
+                                 guaranteed-invalid Fulfill. \
+                                 payment_hash={} preimage={} sha256(preimage)={} \
+                                 LDK_record_id={}",
+                                &payment_hex[..16],
+                                payment_hex,
+                                preimage_hex_opt.as_deref().unwrap_or("(none)"),
+                                hex::encode(computed),
+                                p.id
+                            );
+                            continue;
                         }
                     }
 
@@ -535,13 +602,25 @@ impl Node {
                         }
                     };
 
-                    // The witness was cached on `OpenInvoiceLock` at
+                    // Witness was cached on `OpenInvoiceLock` at
                     // InvoiceLock-apply time so we can re-attach it
                     // here without round-tripping back to the wallet.
-                    // Conformance check: `verify_witness(descriptor,
-                    // witness, invoice_lock_signing_message(deposit_id,
-                    // payment_id, amount))` — same message the lock
-                    // signed, so the same witness validates.
+                    // Conformance: `verify_witness(descriptor, witness,
+                    // invoice_lock_signing_message(deposit_id,
+                    // payment_id, amount))` — same message Lock signed.
+                    if lock.witness.stack.is_empty() {
+                        tracing::error!(
+                            "auto_complete_outbound: payment {}: lock has no cached \
+                             witness (pre-fix InvoiceLock) — refusing to commit a \
+                             guaranteed-invalid Fulfill. lock_sequence={} \
+                             deposit_id={}",
+                            &payment_hex[..16],
+                            lock.lock_sequence,
+                            hex::encode(lock.deposit_id)
+                        );
+                        continue;
+                    }
+
                     let op = deposits_core::messages::LedgerOperation::InvoiceFulfill {
                         deposit_id: lock.deposit_id,
                         amount: lock.amount,
@@ -558,9 +637,13 @@ impl Node {
                             lock.amount
                         ),
                         Err(e) => tracing::error!(
-                            "auto_complete_outbound: failed to fulfill {}...: {}",
+                            "auto_complete_outbound: payment {}: commit failed: {} \
+                             (lock_sequence={} deposit_id={} preimage_hex={:?})",
                             &payment_hex[..16],
-                            e
+                            e,
+                            lock.lock_sequence,
+                            hex::encode(lock.deposit_id),
+                            preimage_hex_opt
                         ),
                     }
                 }
