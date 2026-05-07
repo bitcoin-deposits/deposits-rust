@@ -37,7 +37,6 @@ fn attack_nums_keypath_spend_attempt() {
         config,
         bitcoin::Network::Regtest,
         ledger_hash,
-        800_000,
     );
     let output = builder.build().unwrap();
 

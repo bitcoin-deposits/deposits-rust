@@ -41,7 +41,6 @@ fn tier2_1_nums_point_audit() {
         config,
         bitcoin::Network::Regtest,
         ledger_hash,
-        800_000,
     );
     let output = builder.build().unwrap();
 
@@ -68,7 +67,6 @@ fn tier2_1_nums_point_audit() {
         other_config,
         bitcoin::Network::Regtest,
         [0xCD; 32],
-        800_000,
     );
     let other_output = other_builder.build().unwrap();
 

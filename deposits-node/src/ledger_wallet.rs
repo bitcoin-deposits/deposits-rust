@@ -331,12 +331,16 @@ impl LedgerWallet {
         } else {
             ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
         };
+        // P0d will swap default_for_voter_count for an explicit
+        // ruleset lookup once protocol_version is on QuorumBegin. For
+        // now both this construction and the on-chain reserves' script
+        // are LEGACY-shaped, so they match.
+        let _ = first_expiry;
         let builder = TapscriptReservesBuilder::new(
             voter_set,
             config,
             self.network,
             ledger_hash,
-            first_expiry,
         );
         let taproot_output = builder
             .build()
@@ -637,7 +641,6 @@ impl LedgerWallet {
             config,
             network,
             ledger_hash,
-            serde_info.quorum_expiry,
         )
         .build()
         .map_err(|e| Error::Wallet(format!("rebuild taproot output: {:?}", e)))?;

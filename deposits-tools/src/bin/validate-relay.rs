@@ -467,25 +467,45 @@ async fn verify_onchain_anchors(
         {
             // Reconstruct the Taproot output the protocol's
             // `TapscriptReservesBuilder` would have produced from the
-            // QuorumBegin's recorded params. If `reserves_id` doesn't
-            // match this derivation, the operator put a fake address
-            // in the QuorumBegin (claimed reserves at an address they
-            // don't actually control via the quorum).
+            // QuorumBegin's recorded params under EACH known ruleset.
+            // The first ruleset whose derived address matches the
+            // recorded reserves_id wins; we use that ruleset's script
+            // for the on-chain comparison. If no ruleset matches, the
+            // QuorumBegin's reserves_id can't be reconstructed by any
+            // version this software knows — flagged as a mismatch.
             let voter_set = VoterSet::new(
                 original_operator,
                 quorum_members.iter().map(|m| m.pubkey).collect(),
             );
-            let (derived_script, derived_address) = TapscriptReservesBuilder::with_defaults(
-                voter_set,
-                network,
-                ledger_hash,
-                quorum_expiry,
-            )
-            .build()
-            .ok()
-            .map(|out| (out.script_pubkey(), out.address.to_string()))
-            .map(|(s, a)| (Some(s), Some(a)))
-            .unwrap_or((None, None));
+            let mut matched: Option<(bitcoin::ScriptBuf, String)> = None;
+            for rs_name in ["legacy", "cltv-offset-v2"] {
+                let rs = match deposits_core::ruleset::lookup(rs_name) {
+                    Some(r) => r,
+                    None => continue,
+                };
+                let cfg = (rs.tier_config_factory)(
+                    voter_set.total_count(),
+                    quorum_expiry,
+                );
+                let out = TapscriptReservesBuilder::new(
+                    voter_set.clone(),
+                    cfg,
+                    network,
+                    ledger_hash,
+                )
+                .build();
+                if let Ok(out) = out {
+                    let addr = out.address.to_string();
+                    if addr == reserves_id {
+                        matched = Some((out.script_pubkey(), addr));
+                        break;
+                    }
+                }
+            }
+            let (derived_script, derived_address) = match matched {
+                Some((s, a)) => (Some(s), Some(a)),
+                None => (None, None),
+            };
 
             let total_sat = (amount.saturating_add(collateral_amount)) / 1000;
             qbs.push(QbAnchor {

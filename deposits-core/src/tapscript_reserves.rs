@@ -566,10 +566,8 @@ pub fn build_taproot_reserves_script(
     voter_set: VoterSet,
     ledger_hash: [u8; 32],
     network: bitcoin::Network,
-    quorum_expiry: u32,
 ) -> DepositsResult<ScriptBuf> {
-    let builder =
-        TapscriptReservesBuilder::with_defaults(voter_set, network, ledger_hash, quorum_expiry);
+    let builder = TapscriptReservesBuilder::with_defaults(voter_set, network, ledger_hash);
     let output = builder.build()?;
     Ok(output.script_pubkey())
 }
@@ -1505,45 +1503,25 @@ mod tests {
     }
 
     #[test]
-    fn test_default_threshold_config() {
-        // 2-party: anytime both / single member +5d / operator solo +8w.
-        // Offsets are added to the ledger's `quorum_expiry` at script-build
-        // time — see DEP-03 §"Spending Tiers".
+    fn test_default_threshold_config_returns_legacy() {
+        // `default_for_voter_count` is a compat shim that delegates to
+        // the LEGACY ruleset (it doesn't know quorum_expiry). New
+        // call sites should look up the ledger's active ruleset
+        // directly — see `crate::ruleset`. This test pins the legacy
+        // shape so a regression here would break script reconstruction
+        // for every pre-`protocol_version` QuorumBegin on chain.
         let config_2 = ThresholdConfig::default_for_voter_count(2);
         assert_eq!(config_2.tiers.len(), 3);
-        // Tier 0: both members, anytime, no tie_breaker
-        assert_eq!(config_2.tiers[0].threshold, 2);
-        assert!(!config_2.tiers[0].requires_tie_breaker);
         assert_eq!(config_2.tiers[0].timelock_blocks, 0);
-        // Tier 1: single quorum member, expiry+5d, no tie_breaker
-        assert_eq!(config_2.tiers[1].threshold, 1);
-        assert!(!config_2.tiers[1].requires_tie_breaker);
-        assert_eq!(config_2.tiers[1].timelock_blocks, 720);
-        // Tier 2: operator solo, expiry+8w, tie_breaker required
-        assert_eq!(config_2.tiers[2].threshold, 1);
-        assert!(config_2.tiers[2].requires_tie_breaker);
-        assert_eq!(config_2.tiers[2].timelock_blocks, 8064);
+        assert_eq!(config_2.tiers[1].timelock_blocks, 2016);
+        assert_eq!(config_2.tiers[2].timelock_blocks, 4032);
 
-        // 5-party: anytime majority / minority +5d / single member +4w /
-        // operator +8w. Operator is now strictly last in the cascade.
         let config_5 = ThresholdConfig::default_for_voter_count(5);
         assert_eq!(config_5.tiers.len(), 4);
-        // Tier 0: majority (3-of-5) no operator, anytime
-        assert_eq!(config_5.tiers[0].threshold, 3);
-        assert!(!config_5.tiers[0].requires_tie_breaker);
         assert_eq!(config_5.tiers[0].timelock_blocks, 0);
-        // Tier 1: minority (1-of-5) no operator, expiry+5d
-        assert_eq!(config_5.tiers[1].threshold, 1);
-        assert!(!config_5.tiers[1].requires_tie_breaker);
-        assert_eq!(config_5.tiers[1].timelock_blocks, 720);
-        // Tier 2: single quorum member (1-of-5) no operator, expiry+4w
-        assert_eq!(config_5.tiers[2].threshold, 1);
-        assert!(!config_5.tiers[2].requires_tie_breaker);
-        assert_eq!(config_5.tiers[2].timelock_blocks, 4032);
-        // Tier 3: operator solo, expiry+8w
-        assert_eq!(config_5.tiers[3].threshold, 1);
-        assert!(config_5.tiers[3].requires_tie_breaker);
-        assert_eq!(config_5.tiers[3].timelock_blocks, 8064);
+        assert_eq!(config_5.tiers[1].timelock_blocks, 1008);
+        assert_eq!(config_5.tiers[2].timelock_blocks, 2016);
+        assert_eq!(config_5.tiers[3].timelock_blocks, 4032);
     }
 
     fn test_ledger_hash() -> [u8; 32] {
@@ -1560,7 +1538,6 @@ mod tests {
             voter_set,
             Network::Regtest,
             test_ledger_hash(),
-            800_000,
         );
         let output = builder.build().expect("Should build successfully");
 
@@ -1583,7 +1560,6 @@ mod tests {
             voter_set,
             Network::Regtest,
             test_ledger_hash(),
-            800_000,
         );
         let output = builder.build().expect("Should build successfully");
 
@@ -1604,10 +1580,8 @@ mod tests {
             voter_set.clone(),
             Network::Regtest,
             hash1,
-            800_000,
         );
-        let builder2 =
-            TapscriptReservesBuilder::with_defaults(voter_set, Network::Regtest, hash2, 800_000);
+        let builder2 = TapscriptReservesBuilder::with_defaults(voter_set, Network::Regtest, hash2);
 
         let output1 = builder1.build().expect("Should build");
         let output2 = builder2.build().expect("Should build");

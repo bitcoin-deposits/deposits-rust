@@ -101,7 +101,6 @@ pub async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Er
                 info.taproot_output.config.clone(),
                 lw.network(),
                 info.ledger_hash,
-                info.taproot_output.quorum_expiry,
             );
             if let Ok(script) = builder.build_threshold_leaf(tier) {
                 println!("    Leaf {}: {}", i, hex::encode(script.as_bytes()));
@@ -314,7 +313,6 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         reserves.taproot_output.config.clone(),
         config.network,
         reserves.ledger_hash,
-        reserves.taproot_output.quorum_expiry,
     );
     let leaf_script = builder
         .build_threshold_leaf(tier_info)
@@ -327,18 +325,12 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         .ok_or("Failed to get control block for tier")?;
 
     // Build unsigned transaction. nLockTime is `quorum_expiry +
-    // tier_offset` so the spending TX satisfies the chosen tier's
-    // OP_CLTV (per DEP-03 §"Spending Tiers"). Tier 0 has offset 0 →
-    // lock_time 0 → no constraint.
+    // `tier_info.timelock_blocks` IS the absolute CLTV target (the
+    // Ruleset's tier-config factory baked it in: legacy returns plain
+    // literals; cltv-offset-v2 returns `quorum_expiry + offset`).
+    // The spending TX's nLockTime just mirrors that target.
     let reserves_script_pubkey = reserves.taproot_output.script_pubkey();
-    let lock_time = if tier_info.timelock_blocks > 0 {
-        reserves
-            .taproot_output
-            .quorum_expiry
-            .saturating_add(tier_info.timelock_blocks)
-    } else {
-        0
-    };
+    let lock_time = tier_info.timelock_blocks;
     let params = deposits_core::tapscript_reserves::SpendTxParams {
         reserves_outpoint: outpoint,
         reserves_amount: amount,
@@ -350,8 +342,7 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "  Lock time:   {}{}",
         lock_time,
         if lock_time > 0 {
-            format!(" (= quorum_expiry {} + tier offset {})",
-                reserves.taproot_output.quorum_expiry, tier_info.timelock_blocks)
+            " (absolute CLTV target from tier config)".to_string()
         } else {
             String::new()
         }

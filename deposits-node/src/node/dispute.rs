@@ -1455,12 +1455,12 @@ impl Node {
             let voter_count = voter_set.all_voters().len();
             let threshold_config = ThresholdConfig::default_for_voter_count(voter_count);
 
+            let _ = quorum_expiry_at_qb; // P0d will route through ruleset
             let taproot_builder = TapscriptReservesBuilder::new(
                 voter_set.clone(),
                 threshold_config.clone(),
                 self.wallet.network(),
                 ledger_hash_val,
-                quorum_expiry_at_qb,
             );
 
             let taproot_output = match taproot_builder.build() {
