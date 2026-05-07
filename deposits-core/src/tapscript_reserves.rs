@@ -636,6 +636,12 @@ pub struct SpendTxParams {
     pub destination_script: ScriptBuf,
     /// Fee rate in sat/vbyte
     pub fee_rate_sat_vbyte: u64,
+    /// nLockTime value for the spending TX. Must be `≥ quorum_expiry +
+    /// tier_offset` for tiers gated by `OP_CLTV` to satisfy the script
+    /// (see DEP-03 §"Spending Tiers"). Tier 0 (anytime majority) uses
+    /// `0` since there's no CLTV — input sequence still opts into
+    /// CLTV enforcement (see `Sequence::ENABLE_RBF_NO_LOCKTIME`).
+    pub lock_time: u32,
 }
 
 /// A deterministic spend transaction builder for reserves outputs
@@ -669,7 +675,7 @@ impl ReservesSpendBuilder {
 
         let tx = Transaction {
             version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::absolute::LockTime::ZERO,
+            lock_time: bitcoin::absolute::LockTime::from_consensus(params.lock_time),
             input: vec![TxIn {
                 previous_output: params.reserves_outpoint,
                 script_sig: ScriptBuf::new(), // Empty for Taproot

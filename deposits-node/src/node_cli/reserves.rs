@@ -326,14 +326,36 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         .control_block_for_tier(tier)
         .ok_or("Failed to get control block for tier")?;
 
-    // Build unsigned transaction
+    // Build unsigned transaction. nLockTime is `quorum_expiry +
+    // tier_offset` so the spending TX satisfies the chosen tier's
+    // OP_CLTV (per DEP-03 §"Spending Tiers"). Tier 0 has offset 0 →
+    // lock_time 0 → no constraint.
     let reserves_script_pubkey = reserves.taproot_output.script_pubkey();
+    let lock_time = if tier_info.timelock_blocks > 0 {
+        reserves
+            .taproot_output
+            .quorum_expiry
+            .saturating_add(tier_info.timelock_blocks)
+    } else {
+        0
+    };
     let params = deposits_core::tapscript_reserves::SpendTxParams {
         reserves_outpoint: outpoint,
         reserves_amount: amount,
         destination_script: dest_script.clone(),
         fee_rate_sat_vbyte: fee_rate,
+        lock_time,
     };
+    println!(
+        "  Lock time:   {}{}",
+        lock_time,
+        if lock_time > 0 {
+            format!(" (= quorum_expiry {} + tier offset {})",
+                reserves.taproot_output.quorum_expiry, tier_info.timelock_blocks)
+        } else {
+            String::new()
+        }
+    );
     let mut tx = deposits_core::tapscript_reserves::ReservesSpendBuilder::build_spend_transaction(
         &params,
         &reserves_script_pubkey,

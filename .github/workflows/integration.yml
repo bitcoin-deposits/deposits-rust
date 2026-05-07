@@ -113,6 +113,30 @@ jobs:
         timeout-minutes: 20
 
       # =====================================================================
+      # Test 3: Reserves-UTXO post-expiry tier cascade
+      # Verifies the new CLTV-anchored-to-quorum_expiry tier structure
+      # (DEP-03 §"Spending Tiers"). Bootstraps a 2-op cluster with short
+      # membership_until, runs quorum begin, mines past quorum_expiry+720,
+      # and broadcasts a Tier-1 (single quorum member) spend.
+      # =====================================================================
+
+      - name: Test recovery cascade (post-expiry tiers)
+        working-directory: deposits-tools
+        run: |
+          # Fresh environment (test does its own 2-op bootstrap)
+          source bin/_common.sh
+          stop_all_nodes 2>/dev/null || true
+          rm -rf "$DATA_ROOT"
+
+          FAUCET=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+            -rpcwallet=faucet getnewaddress 2>/dev/null)
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+            generatetoaddress 110 "$FAUCET" 2>/dev/null
+
+          ./bin/test-recovery-cascade.sh
+        timeout-minutes: 10
+
+      # =====================================================================
       # Verify: on-chain UTXO history matches ledger claims
       # =====================================================================
 
