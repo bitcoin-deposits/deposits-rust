@@ -89,8 +89,6 @@ Each participating quorum member appends `DisputeArmed` to their fork with:
 
 Members must arm within `dispute_arm_blocks` after `DisputeEnter`. Late entries are excluded. `dispute_arm_blocks` is recorded in `QuorumAddMember` so all parties agree on the obligation at join time.
 
-A member that needs to amend their declaration (e.g., the originally pledged UTXO got spent) MAY append a fresh `DisputeArmed` before the arm window closes; the latest event from each disputant is the one cosigners verify against.
-
 The participant ordering (canonical, derived from sorted `quorum_pubkey`) and the committed hashes go into the lottery script that the confiscation transaction will lock funds into.
 
 #### Phase 2: Confiscation
