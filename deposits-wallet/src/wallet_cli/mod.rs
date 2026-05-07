@@ -387,7 +387,10 @@ pub fn deposit_record_identity(
     let descriptor = match deposit.get("descriptor").and_then(|v| v.as_str()) {
         Some(d) => d.to_string(),
         None => {
-            let pk = deposit.get("deposit_pubkey").and_then(|v| v.as_str())?;
+            let pk = deposit
+                .get("deposit_pubkey")
+                .or_else(|| deposit.get("pubkey"))
+                .and_then(|v| v.as_str())?;
             format!("pk({})", pk)
         }
     };
