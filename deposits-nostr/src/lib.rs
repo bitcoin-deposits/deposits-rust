@@ -3084,8 +3084,17 @@ impl NostrTransport {
         Ok(event_id)
     }
 
-    /// Publish a price oracle event (BTC/USD rate)
-    pub async fn publish_price(&self, price_usd: f64) -> Result<String, Error> {
+    /// Publish a price oracle event (BTC/USD rate).
+    ///
+    /// `block_height` is the operator's current chain tip; clients
+    /// piggyback on the price feed to learn the tip without polling
+    /// another source. `0` means "unknown" — wallets ignore the
+    /// height in that case.
+    pub async fn publish_price(
+        &self,
+        price_usd: f64,
+        block_height: u32,
+    ) -> Result<String, Error> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -3094,6 +3103,7 @@ impl NostrTransport {
         let content = serde_json::json!({
             "pair": "BTCUSD",
             "price": price_usd,
+            "block_height": block_height,
             "timestamp": now,
         })
         .to_string();
@@ -3515,6 +3525,69 @@ impl NostrTransport {
             }
         }
 
+        Ok(None)
+    }
+
+    /// Fetch the most recently published BTC/USD price-oracle event,
+    /// returning `(price_usd, block_height)`. The price feed
+    /// piggybacks the publishing operator's chain tip, so wallets can
+    /// learn the height without running a node. Block height of `0`
+    /// means the publishing operator didn't include one (older
+    /// publishers).
+    pub async fn fetch_price_and_tip(&self) -> Result<Option<(f64, u32)>, Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_PRICE_ORACLE))
+            .custom_tag(TAG_LEDGER_ID, ["btcusd"])
+            .limit(10);
+
+        let events = self
+            .client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch price: {}", e)))?;
+
+        // Pick the most recent event by created_at — the relay may
+        // hold several from different operators.
+        let newest = events.iter().max_by_key(|e| e.created_at.as_u64());
+        let Some(event) = newest else {
+            return Ok(None);
+        };
+        let val: serde_json::Value = match serde_json::from_str(&event.content) {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        let price = val.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let height = val
+            .get("block_height")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        if price <= 0.0 {
+            return Ok(None);
+        }
+        Ok(Some((price, height)))
+    }
+
+    /// Find the most recent `QuorumBegin` operation on `ledger_id` and
+    /// return its `quorum_expiry` block height. Used by wallets to
+    /// refuse opening a deposit on an operator whose quorum has
+    /// already lapsed without trusting the operator's own
+    /// advertisement.
+    pub async fn fetch_latest_quorum_expiry(
+        &self,
+        ledger_id: &str,
+    ) -> Result<Option<u32>, Error> {
+        use deposits_protocol::LedgerOperation;
+
+        let updates = self.fetch_ledger_updates(ledger_id).await?;
+        // updates is sorted asc by sequence_number; walk from the tail
+        // for the most recent QuorumBegin.
+        for update in updates.iter().rev() {
+            if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                if let LedgerOperation::QuorumBegin { quorum_expiry, .. } = op {
+                    return Ok(Some(quorum_expiry));
+                }
+            }
+        }
         Ok(None)
     }
 

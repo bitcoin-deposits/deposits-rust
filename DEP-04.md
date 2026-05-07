@@ -120,7 +120,7 @@ Operators publish NIP-33 replaceable events advertising their terms. The `d` tag
 - Deposit limits (min/max)
 - Access-control flags (whether `deposit_open` requires an attestation; allowed lightning-address domains)
 - Relay URL
-- Operator's observed Bitcoin chain tip at publish time
+- Operator's observed Bitcoin chain tip at publish time (informational; clients that need a fresh tip SHOULD prefer the Kind 39101 price-oracle stream — see §Price Oracle below)
 
 Earlier drafts also carried `total_obligations` and `available_headroom`. Both were dropped — the operator can trivially inflate them with self-paid Lightning invoices, so they're not reliable trust signals. Wallets that need capacity information should either discover a courier already holding funds on this ledger, or trust the protocol invariant `reserves ≥ obligations` enforced by the quorum's co-signers.
 
@@ -162,6 +162,52 @@ NIP-26 delegated event signing and the existing DEP-04 subkey-attestation patter
 ### Backwards compatibility
 
 Older wallets that don't read `delegate_pubkey` will treat the advertisement's event author as the operator's messaging identity. This works as long as the daemon's `self.keys` is the operator key (operator-key-for-everything mode). Once the daemon switches to delegate-key-for-Nostr (this commit's follow-up), the advertisement still authors as `operator_pubkey` (signed by signer), but Kind 9100 events author as `delegate_pubkey`. Older wallets filtering Kind 9100 by `author=operator_pubkey` will miss them and need to follow the delegation. Operators rolling forward should publish a transition advertisement with both keys' addresses available before flipping.
+
+## Price Oracle (Kind 39101)
+
+Operators publish a NIP-33 replaceable event (`d`=`btcusd`, kind `39101`) carrying the BTC/USD spot price and the publisher's observed chain tip:
+
+```json
+{
+  "pair": "BTCUSD",
+  "price": 67234.50,
+  "block_height": 901234,
+  "timestamp": 1746547200
+}
+```
+
+- `pair` — currency pair. Reserved for future expansion; only `BTCUSD` is currently published.
+- `price` — BTC/USD spot price the operator observed (operators MAY source this from any oracle of their choice; clients SHOULD aggregate across operators rather than trust a single publisher).
+- `block_height` — *(since 2026-05)* the publishing operator's observed Bitcoin chain tip at the moment of publication. `0` means the publisher didn't include one (older daemons). Wallets ignore `0` and pick the highest non-zero value across all observed publishers.
+- `timestamp` — the operator's wall clock at publish (UNIX seconds). Non-load-bearing — Nostr's `created_at` is the canonical event time.
+
+The chain-tip piggyback lets light clients (browser wallets, gateways, explorers) learn the current Bitcoin height without running a node or polling an external block explorer. It is *not* a consensus-critical feed — clients use it for liveness checks (quorum-freshness, lock-timeout sanity) where being a few blocks stale is harmless. Anything that needs a tamper-evident height (e.g. fraud-proof verification) MUST anchor against an actual block hash, not this field.
+
+Wallets sample multiple recent events (typical limit: 5–10) and use the highest `block_height` seen, breaking ties by `created_at`. A single bad publisher cannot drag the tip backwards because `block_height` only ratchets up.
+
+## Wallet Pre-Open Quorum-Freshness Check
+
+A deposit opened against an operator whose quorum has lapsed is unrecoverable through the normal cosign path — the operator can no longer assemble a majority cosignature, and the wallet has no protocol-level recourse short of dispute. Wallets MUST therefore refuse to open new deposits on an operator whose quorum has expired, and SHOULD warn when expiry is imminent.
+
+The check uses two pieces of data already on the wire — no new operator-published field is required:
+
+1. **Quorum expiry block** — the `quorum_expiry` field (TLV type 86, see DEP-02 §TLV Field Tags) of the most recent `QuorumBegin` (op discriminant 12, see DEP-02 §LedgerOperation discriminants) in the target ledger's Kind 9100 stream. If the ledger has no `QuorumBegin` on record, the operator hasn't activated a quorum yet and the wallet MUST refuse: there is no cosign path at all.
+
+2. **Chain tip** — the highest `block_height` observed on a recent Kind 39101 price-oracle event (see §Price Oracle above).
+
+Decision rule:
+
+| Condition | Wallet action |
+|---|---|
+| no `QuorumBegin` on the ledger | refuse to open |
+| `tip ≥ quorum_expiry` | refuse to open (operator's quorum is past the expiry block) |
+| `quorum_expiry - tip < 144` blocks | warn but allow (≈ 1 day of headroom remaining) |
+| `quorum_expiry - tip ≥ 144` blocks | proceed |
+| `tip == 0` (no price feed observed) | skip the chain-tip half of the check; the QuorumBegin presence check still applies |
+
+Both inputs are fetched independently of the operator's own Kind 39100 advertisement. The advertisement's `current_block` and `quorum_state` fields are operator-self-reported and replaceable — they remain in the ad for at-a-glance debugging but wallets MUST NOT use them for the freshness gate. The Kind 9100 `QuorumBegin` is co-signed by a quorum majority and the Kind 39101 tip is corroborated across the publishing operator set, so neither can be unilaterally forged stale-true by a single operator.
+
+Explorer UIs that surface "quorum status" badges SHOULD use the same derivation so the operator's self-reported `quorum_state` cannot mask an actually-expired quorum.
 
 ## Wallet Identity and NIP-07
 

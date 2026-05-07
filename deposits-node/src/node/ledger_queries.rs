@@ -1384,7 +1384,8 @@ impl Node {
         if price <= 0.0 {
             return;
         }
-        if let Err(e) = self.nostr.publish_price(price).await {
+        let tip = self.wallet.get_block_height().unwrap_or(0);
+        if let Err(e) = self.nostr.publish_price(price, tip).await {
             tracing::debug!("Failed to publish price: {}", e);
         }
     }

@@ -2801,18 +2801,24 @@ if (localStorage.getItem('deposits-balance-visible') === '0' && !localStorage.ge
 }
 let balanceVisible = balanceMode !== 'hidden';
 
-// Price oracle — fetch from Nostr Kind 39101 events published by operators
+// Price oracle — fetch from Nostr Kind 39101 events published by operators.
+// The same event also carries the publishing operator's chain tip so the
+// wallet can do quorum-freshness checks without polling another source.
 let btcPriceUsd = 0;
+let btcChainTip = 0;
 
 async function fetchPrice() {
   try {
     const filter = { kinds: [39101], '#d': ['btcusd'], limit: 10 };
     const events = await fetchEvents(filter, 5000);
     if (events.length === 0) return;
-    // Use the most recent price
+    // Use the most recent event by created_at.
     const newest = events.reduce((best, ev) => ev.created_at > best.created_at ? ev : best, events[0]);
     const data = JSON.parse(newest.content);
     if (data.price > 0) btcPriceUsd = data.price;
+    if (Number.isFinite(data.block_height) && data.block_height > 0) {
+      btcChainTip = data.block_height;
+    }
   } catch {}
 }
 

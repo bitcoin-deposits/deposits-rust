@@ -147,6 +147,62 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
         println!("  Alias: {}", a);
     }
 
+    // Quorum freshness check — refuse to open on an operator whose
+    // quorum has already lapsed. Both inputs come from messages the
+    // wallet already trusts (Kind 9100 ledger updates and Kind 39101
+    // price oracle), so we don't lean on the operator's own
+    // self-reported `current_block` in the advertisement.
+    let chain_tip = transport
+        .fetch_price_and_tip()
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, h)| h)
+        .unwrap_or(0);
+    let quorum_expiry = transport
+        .fetch_latest_quorum_expiry(&ledger_id)
+        .await
+        .unwrap_or(None);
+    if let (Some(expiry), tip) = (quorum_expiry, chain_tip) {
+        if tip > 0 {
+            if tip >= expiry {
+                let stale_for = tip - expiry;
+                return Err(format!(
+                    "Refusing to open deposit: operator's quorum has expired.\n\
+                     \x20  current block: {}\n\
+                     \x20  quorum expired at block: {} ({} block(s) ago, ~{:.1} day(s))\n\
+                     A new QuorumBegin must land before this operator can cosign \
+                     new deposits. Pick a different operator from `discover`.",
+                    tip,
+                    expiry,
+                    stale_for,
+                    stale_for as f64 / 144.0,
+                )
+                .into());
+            }
+            let blocks_remaining = expiry - tip;
+            if blocks_remaining < 144 {
+                eprintln!(
+                    "  ⚠ quorum expires in {} block(s) (~{:.1} hour(s)). \
+                     Operator must rotate soon — if they don't, your deposit will \
+                     be hard to recover via the normal cosign path.",
+                    blocks_remaining,
+                    blocks_remaining as f64 * 10.0 / 60.0,
+                );
+            }
+        }
+    } else if quorum_expiry.is_none() {
+        // No QuorumBegin on the ledger — operator hasn't activated a
+        // quorum yet. Refuse: there's no cosign path at all.
+        return Err(format!(
+            "Refusing to open deposit: ledger {}... has no QuorumBegin on record. \
+             The operator hasn't activated a quorum yet — try again once they've \
+             published one, or pick a different operator from `discover`.",
+            &ledger_id[..16.min(ledger_id.len())],
+        )
+        .into());
+    }
+
     // Get fee structure: CLI flags override, then advertisement, then defaults
     let (fee_fixed, fee_bps, fee_frequency) = if cli_fee_bps.is_some() || cli_fee_fixed.is_some() {
         let bps = cli_fee_bps.unwrap_or(0);
