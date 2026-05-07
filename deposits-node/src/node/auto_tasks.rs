@@ -529,14 +529,57 @@ impl Node {
                     // and the operator gets no diagnostic context. Log
                     // the inputs ourselves so the next time it
                     // happens we have something to chase.
-                    let preimage_hex_opt = p.preimage.clone();
+                    // Resolve the preimage. Two paths converge here:
+                    //
+                    //   - Lightning-routed pay: LDK's outbound record
+                    //     (`list-payments`) carries the preimage on
+                    //     status=succeeded.
+                    //   - Cross-node self-pay (two operators sharing
+                    //     one LDK node, A paying B's invoice): LDK
+                    //     shortcircuits internally — the outbound
+                    //     entry lands as status=succeeded but with
+                    //     `preimage: None` because no Lightning hop
+                    //     happened. The preimage lives on the
+                    //     receive-side BOLT11 record, surfaced by
+                    //     `get-payment-details`. Fall back to that
+                    //     when list-payments doesn't have one.
                     let mut preimage = [0u8; 32];
-                    let preimage_decoded = match preimage_hex_opt.as_ref() {
-                        Some(pre_hex) => match hex::decode(pre_hex) {
-                            Ok(b) if b.len() == 32 => {
-                                preimage.copy_from_slice(&b);
-                                true
+                    let mut preimage_source = "list-payments";
+                    let mut preimage_hex_opt = p.preimage.clone();
+                    if preimage_hex_opt.is_none() {
+                        match cli.get_payment_preimage(&payment_hex) {
+                            Ok(Some(p_inbound)) => {
+                                preimage = p_inbound;
+                                preimage_hex_opt = Some(hex::encode(p_inbound));
+                                preimage_source = "get-payment-details (inbound fallback)";
                             }
+                            Ok(None) => {
+                                tracing::error!(
+                                    "auto_complete_outbound: payment {}: LDK marked \
+                                     outbound succeeded but neither list-payments nor \
+                                     get-payment-details returned a preimage — skipping. \
+                                     LDK record: id={} amount_msat={:?}",
+                                    &payment_hex[..16],
+                                    p.id,
+                                    p.amount_msat
+                                );
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "auto_complete_outbound: payment {}: outbound has \
+                                     no preimage and get-payment-details failed: {} — \
+                                     skipping. LDK record: id={}",
+                                    &payment_hex[..16],
+                                    e,
+                                    p.id
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        match hex::decode(preimage_hex_opt.as_ref().unwrap()) {
+                            Ok(b) if b.len() == 32 => preimage.copy_from_slice(&b),
                             Ok(b) => {
                                 tracing::error!(
                                     "auto_complete_outbound: payment {}: LDK preimage \
@@ -561,30 +604,20 @@ impl Node {
                                 );
                                 continue;
                             }
-                        },
-                        None => {
-                            tracing::error!(
-                                "auto_complete_outbound: payment {}: LDK marked succeeded \
-                                 but returned no preimage — skipping; LDK record: id={} \
-                                 amount_msat={:?}",
-                                &payment_hex[..16],
-                                p.id,
-                                p.amount_msat
-                            );
-                            continue;
                         }
-                    };
-                    if preimage_decoded {
+                    }
+                    {
                         use bitcoin::hashes::{sha256, Hash};
                         let computed: [u8; 32] = *sha256::Hash::hash(&preimage).as_byte_array();
                         if computed != payment_id {
                             tracing::error!(
-                                "auto_complete_outbound: payment {}: LDK preimage doesn't \
-                                 hash to payment_hash — refusing to commit a \
+                                "auto_complete_outbound: payment {}: preimage from {} \
+                                 doesn't hash to payment_hash — refusing to commit a \
                                  guaranteed-invalid Fulfill. \
                                  payment_hash={} preimage={} sha256(preimage)={} \
                                  LDK_record_id={}",
                                 &payment_hex[..16],
+                                preimage_source,
                                 payment_hex,
                                 preimage_hex_opt.as_deref().unwrap_or("(none)"),
                                 hex::encode(computed),

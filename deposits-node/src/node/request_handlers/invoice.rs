@@ -721,12 +721,80 @@ impl Node {
 
         match resolution {
             Some(Ok(preimage_hex)) => {
+                // Resolve the preimage. The outbound `list-payments`
+                // entry has it on a normal Lightning hop. On
+                // cross-node self-pay (two operators sharing one LDK
+                // node, A paying B's invoice), LDK shortcircuits
+                // internally — outbound lands at status=succeeded but
+                // `preimage: None` because no hop happened. The
+                // preimage is on the receive-side BOLT11 record;
+                // `get_payment_preimage` (= `get-payment-details`)
+                // returns it.
                 let mut preimage = [0u8; 32];
-                if let Some(ref hex_str) = preimage_hex {
-                    if let Ok(bytes) = hex::decode(hex_str) {
-                        if bytes.len() == 32 {
+                let outbound_hex = preimage_hex.as_deref();
+                let resolved = match outbound_hex {
+                    Some(hex_str) => match hex::decode(hex_str) {
+                        Ok(bytes) if bytes.len() == 32 => {
                             preimage.copy_from_slice(&bytes);
+                            true
                         }
+                        _ => false,
+                    },
+                    None => false,
+                };
+                if !resolved {
+                    match cli.get_payment_preimage(&payment_hex) {
+                        Ok(Some(p)) => {
+                            preimage = p;
+                            tracing::info!(
+                                "pay_invoice {}: outbound had no preimage; \
+                                 fell back to get-payment-details (cross-node self-pay)",
+                                &payment_hex[..16]
+                            );
+                        }
+                        Ok(None) => {
+                            return (
+                                false,
+                                None,
+                                Some(format!(
+                                    "LDK reported succeeded but no preimage on either \
+                                     list-payments or get-payment-details for {}",
+                                    &payment_hex[..16]
+                                )),
+                            );
+                        }
+                        Err(e) => {
+                            return (
+                                false,
+                                None,
+                                Some(format!(
+                                    "LDK preimage lookup failed for {}: {}",
+                                    &payment_hex[..16],
+                                    e
+                                )),
+                            );
+                        }
+                    }
+                }
+
+                // Sanity: sha256(preimage) must equal payment_id.
+                // Cheap to compute, expensive to commit and roll back.
+                {
+                    use bitcoin::hashes::{sha256, Hash};
+                    let computed: [u8; 32] =
+                        *sha256::Hash::hash(&preimage).as_byte_array();
+                    if computed != payment_id {
+                        return (
+                            false,
+                            None,
+                            Some(format!(
+                                "LDK preimage doesn't hash to payment_hash for {}: \
+                                 sha256(preimage)={} != payment_hash={}",
+                                &payment_hex[..16],
+                                hex::encode(computed),
+                                payment_hex
+                            )),
+                        );
                     }
                 }
 
