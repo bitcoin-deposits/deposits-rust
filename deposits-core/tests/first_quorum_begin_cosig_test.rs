@@ -71,6 +71,7 @@ fn quorum_begin_op(staged_pks: &[PublicKey]) -> LedgerOperation {
             .map(deposits_core::messages::QuorumMemberRef::pubkey_only)
             .collect(),
         collateral_amount: 500_000_000,
+        protocol_version: None,
     }
 }
 

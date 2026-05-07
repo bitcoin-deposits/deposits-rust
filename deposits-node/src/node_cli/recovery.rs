@@ -4584,7 +4584,8 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
                 member_ledger_ids.get(pk).cloned().unwrap_or_default(),
             ))
             .collect(),
-        collateral_amount: 0, // recovery — collateral will be re-attested
+        collateral_amount: 0,
+        protocol_version: None, // recovery — collateral will be re-attested
     };
 
     let message_bytes = operation.tlv_encode();

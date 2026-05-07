@@ -111,6 +111,7 @@ fn quorum_begin() {
         ledger_hash: h32(),
         quorum_members: vec![deposits_protocol::messages::QuorumMemberRef::pubkey_only(pk())],
         collateral_amount: 50_000_000,
+        protocol_version: None,
     });
 }
 

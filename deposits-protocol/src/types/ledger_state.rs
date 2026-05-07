@@ -16,6 +16,14 @@ use super::conformance::{ConformanceViolation, WitnessVerifier};
 use super::core::*;
 use super::serde_helpers::*;
 
+/// Serde default for `LedgerState::active_ruleset_name`. Pins to
+/// `"legacy"` so existing on-disk ledgers (no `active_ruleset_name`
+/// in their persisted JSON) deserialize to the legacy ruleset —
+/// matches the on-chain shape they were built under.
+fn default_ruleset_name() -> String {
+    "legacy".to_string()
+}
+
 // ============================================================================
 // Ledger State
 // ============================================================================
@@ -65,6 +73,13 @@ pub struct LedgerState {
     /// Block height when the current quorum expires (from QuorumBegin).
     #[serde(default)]
     pub quorum_expiry: Option<u32>,
+    /// Protocol-ruleset name this ledger is currently governed by.
+    /// Set from `QuorumBegin.protocol_version`; missing field
+    /// (legacy QuorumBegins) resolves to `"legacy"` via
+    /// `crate::ruleset::resolve_or_legacy` — that's the on-chain
+    /// shape every pre-versioned ledger has.
+    #[serde(default = "default_ruleset_name")]
+    pub active_ruleset_name: String,
     /// Pending conditional transfers between deposits.
     /// Key is the transfer_id (hash of the signing message).
     #[serde(with = "serde_transfer_id_map", default)]
@@ -159,6 +174,7 @@ impl LedgerState {
             quorum_members: Vec::new(),
             next_quorum_members: Vec::new(),
             quorum_expiry: None,
+            active_ruleset_name: default_ruleset_name(),
             collateral_amount: 0,
             pending_transfers: HashMap::new(),
             open_invoice_locks: HashMap::new(),
@@ -220,12 +236,19 @@ impl LedgerState {
                 collateral_amount,
                 quorum_expiry,
                 quorum_members,
+                protocol_version,
                 ..
             } => {
                 next.reserves_key = reserves_id.clone();
                 next.reserves_amount = *amount;
                 next.collateral_amount = *collateral_amount;
                 next.quorum_expiry = Some(*quorum_expiry);
+                // Pin the ledger to the named ruleset for the next
+                // quorum's lifetime. Absent (legacy QuorumBegins) →
+                // "legacy" — matches on-chain shape.
+                next.active_ruleset_name = protocol_version
+                    .clone()
+                    .unwrap_or_else(default_ruleset_name);
                 // Promote the subset of staged members that the operation
                 // declared (validated upstream to be ⊆ next_quorum_members).
                 // Members in next_quorum_members that the operation

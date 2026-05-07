@@ -254,6 +254,15 @@ pub enum LedgerOperation {
         quorum_members: Vec<QuorumMemberRef>,
         /// Collateral amount in millisatoshis (security bond portion of UTXO).
         collateral_amount: u64,
+        /// Protocol ruleset name this quorum is committing to.
+        /// Receivers look this up via `deposits_core::ruleset::lookup`
+        /// to get the validators, tier-config factory, fraud-types
+        /// supported, etc. Absent on QuorumBegins predating the
+        /// versioned-ruleset rollout — those are governed by the
+        /// `legacy` ruleset (matches what's currently on chain).
+        /// New producers MUST populate this to opt into a specific
+        /// ruleset's behaviour.
+        protocol_version: Option<String>,
     },
 
     // ========== Deposit Operations (6) ==========
@@ -1001,6 +1010,7 @@ impl BinaryCodec for LedgerOperation {
                 ledger_hash,
                 quorum_members,
                 collateral_amount,
+                protocol_version: _,
             } => {
                 write_string(w, reserves_id)?;
                 write_32(w, spending_txid)?;
@@ -1016,8 +1026,8 @@ impl BinaryCodec for LedgerOperation {
                 // emit member identities (it only writes the count
                 // twice — historical bug). The TLV codec is the real
                 // wire format; this branch is only used by old test
-                // shims. The ledger_id pairing on each member rides
-                // exclusively on the TLV side.
+                // shims. The ledger_id pairing and protocol_version
+                // ride exclusively on the TLV side.
             }
             // Legacy encoding - deposit operations now use deposit_id/descriptor, but we encode
             // the deposit_id bytes as a placeholder for legacy compatibility
@@ -1433,6 +1443,10 @@ impl BinaryCodec for LedgerOperation {
                     ledger_hash,
                     quorum_members: Vec::new(),
                     collateral_amount,
+                    // Bytewise codec is legacy-only, never used for
+                    // protocol-version'd QuorumBegins. Always None;
+                    // resolves to legacy ruleset on apply.
+                    protocol_version: None,
                 })
             }
             // Deposit operations (20-25) - legacy decoding extracts deposit_id from embedded bytes

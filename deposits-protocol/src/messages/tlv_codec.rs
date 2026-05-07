@@ -70,6 +70,9 @@ mod ledger_op_tlv {
     pub const REPLACEMENT_COLLATERAL_TXID: u64 = 280; // [u8; 32]
     pub const REPLACEMENT_COLLATERAL_VOUT: u64 = 282; // u32
     pub const REPLACEMENT_COLLATERAL_AMOUNT: u64 = 284; // u64 sats
+    /// QuorumBegin protocol-ruleset name. Optional; absent →
+    /// `legacy` (matches every pre-versioned QuorumBegin on chain).
+    pub const PROTOCOL_VERSION: u64 = 286;
     // Quorum/Collateral ledger binding fields
     pub const MEMBER_LEDGER_ID: u64 = 114;
     // 124 was COLLATERAL_LEDGER_ID (removed with collateral-in-UTXO migration)
@@ -156,6 +159,7 @@ impl TlvEncode for LedgerOperation {
                 ledger_hash,
                 quorum_members,
                 collateral_amount,
+                protocol_version,
             } => {
                 // Pubkeys: concat of 33-byte compressed pubkeys (existing
                 // shape — kept for backwards compatibility).
@@ -187,6 +191,9 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(TOTAL_COLLATERAL, *collateral_amount);
                 if any_lids {
                     builder = builder.bytes_field(QUORUM_MEMBER_LEDGER_IDS, &lids_bytes);
+                }
+                if let Some(v) = protocol_version {
+                    builder = builder.string_field(PROTOCOL_VERSION, v);
                 }
             }
             Self::DepositOpen {
@@ -606,6 +613,7 @@ impl TlvDecode for LedgerOperation {
                     ledger_hash: reader.read_bytes(LEDGER_HASH)?,
                     quorum_members,
                     collateral_amount: reader.read_u64(TOTAL_COLLATERAL)?,
+                    protocol_version: reader.read_string_opt(PROTOCOL_VERSION)?,
                 })
             }
             20 => Ok(Self::DepositOpen {

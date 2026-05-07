@@ -312,6 +312,7 @@ impl Operator {
             ledger_hash: self.ledger.state.chain_tip_hash,
             quorum_members: members,
             collateral_amount: 50_000,
+            protocol_version: None,
         };
         self.ledger.append_operation(op).unwrap();
     }

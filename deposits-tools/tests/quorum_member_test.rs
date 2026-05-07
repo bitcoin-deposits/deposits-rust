@@ -266,6 +266,7 @@ mod tests {
                     .map(deposits_core::messages::QuorumMemberRef::pubkey_only)
                     .collect(),
                 collateral_amount: 50_000,
+                protocol_version: None,
             })
             .unwrap();
         let hash_after_begin = update.content_hash;

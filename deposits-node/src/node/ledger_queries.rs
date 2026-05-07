@@ -250,6 +250,7 @@ impl Node {
                 ))
                 .collect(),
             collateral_amount: collateral_msats,
+            protocol_version: None,
         };
 
         let message_bytes = operation.tlv_encode();
@@ -963,6 +964,7 @@ impl Node {
                 .map(|(pk, lid)| deposits_core::messages::QuorumMemberRef::new(*pk, lid.clone()))
                 .collect(),
             collateral_amount: collateral_msats,
+            protocol_version: None,
         };
 
         // commit_operation runs the full stage → cosign → operator-sign →

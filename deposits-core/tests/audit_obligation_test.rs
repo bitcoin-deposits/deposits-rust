@@ -65,6 +65,7 @@ fn quorum_begin_stores_quorum_expiry() {
             ledger_hash: [0u8; 32],
             quorum_members: vec![],
             collateral_amount: 500_000,
+            protocol_version: None,
         })
         .unwrap();
 
@@ -86,6 +87,7 @@ fn quorum_begin_updates_reserves_key_and_amount() {
             ledger_hash: [0u8; 32],
             quorum_members: vec![],
             collateral_amount: 500_000,
+            protocol_version: None,
         })
         .unwrap();
 
@@ -109,6 +111,7 @@ fn quorum_begin_overwrites_previous_values() {
             ledger_hash: [0u8; 32],
             quorum_members: vec![],
             collateral_amount: 500_000,
+            protocol_version: None,
         })
         .unwrap();
 
@@ -126,6 +129,7 @@ fn quorum_begin_overwrites_previous_values() {
             ledger_hash: [1u8; 32],
             quorum_members: vec![],
             collateral_amount: 750_000,
+            protocol_version: None,
         })
         .unwrap();
 

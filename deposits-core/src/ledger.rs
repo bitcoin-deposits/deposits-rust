@@ -2530,6 +2530,7 @@ mod tests {
                 .map(crate::messages::QuorumMemberRef::pubkey_only)
                 .collect(),
             collateral_amount: 0,
+            protocol_version: None,
         };
 
         // Q is the cosigner count, operator not counted. Each value in
