@@ -101,6 +101,7 @@ pub async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Er
                 info.taproot_output.config.clone(),
                 lw.network(),
                 info.ledger_hash,
+                info.taproot_output.quorum_expiry,
             );
             if let Ok(script) = builder.build_threshold_leaf(tier) {
                 println!("    Leaf {}: {}", i, hex::encode(script.as_bytes()));
@@ -313,6 +314,7 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         reserves.taproot_output.config.clone(),
         config.network,
         reserves.ledger_hash,
+        reserves.taproot_output.quorum_expiry,
     );
     let leaf_script = builder
         .build_threshold_leaf(tier_info)

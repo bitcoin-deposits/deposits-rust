@@ -2895,6 +2895,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     let mut reserves_address: Option<String> = None;
     let mut ledger_hash: Option<[u8; 32]> = None;
     let mut original_operator: Option<PublicKey> = None;
+    let mut quorum_expiry_at_qb: u32 = 0;
 
     for event in events.iter() {
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
@@ -2912,10 +2913,12 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
                         LedgerOperation::QuorumBegin {
                             reserves_id,
                             ledger_hash: lh,
+                            quorum_expiry,
                             ..
                         } => {
                             reserves_address = Some(reserves_id);
                             ledger_hash = Some(lh);
+                            quorum_expiry_at_qb = quorum_expiry;
                         }
                         LedgerOperation::DisputeArmed {
                             commitment_hash,
@@ -3199,6 +3202,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         threshold_config.clone(),
         config.network,
         ledger_hash_val,
+        quorum_expiry_at_qb,
     );
 
     let taproot_output = taproot_builder
@@ -4444,13 +4448,28 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     // Compute ledger hash for Taproot address derivation
     let ledger_hash: [u8; 32] = our_latest.content_hash;
 
+    // Compute quorum_expiry up front — it's baked into both the
+    // Tapscript CLTV targets (post-expiry recovery cascade) and the
+    // QuorumBegin operation written after the rotation TX confirms.
+    // Both must use the same value or the on-chain script and the
+    // ledger record diverge.
+    let pre_rotation_height = esplora
+        .get_height()
+        .map_err(|e| format!("Failed to get block height: {:?}", e))?;
+    let quorum_expiry = pre_rotation_height + 144;
+
     // Build Taproot quorum address
     let voter_set = VoterSet::new(our_pubkey, quorum_members.clone());
     let voter_count = voter_set.all_voters().len();
     let threshold_config = ThresholdConfig::default_for_voter_count(voter_count);
 
-    let taproot_builder =
-        TapscriptReservesBuilder::new(voter_set, threshold_config, config.network, ledger_hash);
+    let taproot_builder = TapscriptReservesBuilder::new(
+        voter_set,
+        threshold_config,
+        config.network,
+        ledger_hash,
+        quorum_expiry,
+    );
 
     let taproot_output = taproot_builder
         .build()
@@ -4548,7 +4567,8 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
 
     let quorum_size = (quorum_members.len() + 1) as u8;
     let _quorum_threshold = (quorum_size / 2) + 1;
-    let quorum_expiry = current_block_height + 144; // ~1 day for degraded spending
+    // quorum_expiry was already chosen pre-rotation so the on-chain
+    // script's CLTV targets and the QuorumBegin record agree; reuse it.
 
     let operation = LedgerOperation::QuorumBegin {
         reserves_id: new_reserves_address.to_string(),

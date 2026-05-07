@@ -1260,6 +1260,7 @@ impl Node {
             let mut ledger_hash: Option<[u8; 32]> = None;
             let mut original_operator: Option<PublicKey> = None;
             let mut latest_quorum_begin_seq: Option<u64> = None;
+            let mut quorum_expiry_at_qb: u32 = 0;
 
             for event in events.iter() {
                 if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
@@ -1281,6 +1282,7 @@ impl Node {
                                     reserves_id,
                                     ledger_hash: lh,
                                     quorum_members: qm,
+                                    quorum_expiry,
                                     ..
                                 } => {
                                     // Keep the latest QuorumBegin (highest sequence) since
@@ -1296,6 +1298,7 @@ impl Node {
                                         // Local var is Vec<PublicKey> for downstream
                                         // Taproot reconstruction; extract just the keys.
                                         quorum_members = qm.into_iter().map(|m| m.pubkey).collect();
+                                        quorum_expiry_at_qb = quorum_expiry;
                                     }
                                 }
                                 LedgerOperation::DisputeArmed {
@@ -1457,6 +1460,7 @@ impl Node {
                 threshold_config.clone(),
                 self.wallet.network(),
                 ledger_hash_val,
+                quorum_expiry_at_qb,
             );
 
             let taproot_output = match taproot_builder.build() {

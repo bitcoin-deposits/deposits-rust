@@ -129,7 +129,11 @@ pub struct ThresholdTier {
     pub threshold: usize,
     /// Whether tie-breaker signature is required
     pub requires_tie_breaker: bool,
-    /// Block height timelock (0 = no timelock)
+    /// Offset (in blocks) added to the ledger's `quorum_expiry` to form
+    /// the absolute `OP_CLTV` target for this tier. `0` means no
+    /// timelock — the tier is the immediate quorum-majority path that
+    /// routine rotations use. Non-zero values gate the post-expiry
+    /// recovery cascade (see DEP-03 §"Spending Tiers").
     pub timelock_blocks: u32,
     /// Human-readable description
     pub description: String,
@@ -193,41 +197,56 @@ pub struct ThresholdConfig {
 }
 
 impl ThresholdConfig {
-    /// Default configuration for n voters (quorum members, not counting operator):
-    /// - Tier 0: Majority of quorum, no operator (immediate) - normal co-signed operations
-    /// - Tier 1: Minority of quorum, no operator (1008 blocks) - degraded quorum recovery
-    /// - Tier 2: Operator only (2016 blocks) - operator solo after quorum timeout
-    /// - Tier 3: Any single party (4032 blocks) - emergency last resort
+    /// Default configuration for n voters (quorum members, not counting operator).
+    /// Per DEP-03 §"Spending Tiers", post-expiry tiers anchor to
+    /// `quorum_expiry + offset` via `OP_CLTV`. The offsets here are
+    /// added to the ledger's `quorum_expiry` at script-build time:
+    ///
+    /// - Tier 0: Majority of quorum, no operator — anytime (no timelock).
+    ///   Routine rotation flows through this tier.
+    /// - Tier 1: Minority of quorum, no operator — `expiry + 720`
+    ///   (~5 days). Degraded recovery when members disappear.
+    /// - Tier 2: Single quorum member, no operator — `expiry + 4032`
+    ///   (~4 weeks). Recovery when only one member is responsive.
+    /// - Tier 3: Operator only — `expiry + 8064` (~8 weeks). Last
+    ///   resort after every quorum-driven path has had time to act.
+    ///
+    /// For n ≤ 2 the minority and single-member tiers collapse, so the
+    /// shape is the 3-tier subset (anytime / +5d / +8w).
     pub fn default_for_voter_count(n: usize) -> Self {
         let tiers = if n <= 2 {
-            // Simple 2-party case
             vec![
                 ThresholdTier::new(2, false, 0, "Both quorum members required"),
-                ThresholdTier::new(1, true, 2016, "Operator only after 2016 blocks"),
-                ThresholdTier::emergency_recovery(4032),
+                ThresholdTier::new(1, false, 720, "Single quorum member after expiry+5d"),
+                ThresholdTier::new(1, true, 8064, "Operator only after expiry+8w"),
             ]
         } else {
             let majority = (n / 2) + 1;
             let minority = (n / 3).max(1);
             vec![
-                // Tier 0: majority of quorum (no operator) — immediate
+                // Tier 0: majority of quorum (no operator) — anytime
                 ThresholdTier::new(
                     majority,
                     false,
                     0,
-                    &format!("{}-of-{} quorum (immediate)", majority, n),
+                    &format!("{}-of-{} quorum (anytime)", majority, n),
                 ),
-                // Tier 1: minority of quorum (no operator) — after ~1 week
+                // Tier 1: minority of quorum (no operator) — expiry + 5 days
                 ThresholdTier::new(
                     minority,
                     false,
-                    1008,
-                    &format!("{}-of-{} quorum (after 1008 blocks)", minority, n),
+                    720,
+                    &format!("{}-of-{} quorum after expiry+5d", minority, n),
                 ),
-                // Tier 2: operator only — after ~2 weeks
-                ThresholdTier::new(1, true, 2016, "Operator only (after 2016 blocks)"),
-                // Tier 3: any single party — after ~4 weeks
-                ThresholdTier::emergency_recovery(4032),
+                // Tier 2: single quorum member (no operator) — expiry + 4 weeks
+                ThresholdTier::new(
+                    1,
+                    false,
+                    4032,
+                    "Single quorum member after expiry+4w",
+                ),
+                // Tier 3: operator only — expiry + 8 weeks (last resort)
+                ThresholdTier::new(1, true, 8064, "Operator only after expiry+8w"),
             ]
         };
         Self { tiers }
@@ -246,6 +265,10 @@ pub struct TapscriptReservesBuilder {
     network: Network,
     /// Ledger hash committed to in the Taproot tree
     ledger_hash: [u8; 32],
+    /// Quorum's declared expiry (absolute block height). All non-zero
+    /// `ThresholdTier::timelock_blocks` are added to this to form the
+    /// `OP_CLTV` target for that tier. See DEP-03 §"Spending Tiers".
+    quorum_expiry: u32,
 }
 
 impl TapscriptReservesBuilder {
@@ -254,19 +277,26 @@ impl TapscriptReservesBuilder {
         config: ThresholdConfig,
         network: Network,
         ledger_hash: [u8; 32],
+        quorum_expiry: u32,
     ) -> Self {
         Self {
             voter_set,
             config,
             network,
             ledger_hash,
+            quorum_expiry,
         }
     }
 
     /// Create with default threshold configuration
-    pub fn with_defaults(voter_set: VoterSet, network: Network, ledger_hash: [u8; 32]) -> Self {
+    pub fn with_defaults(
+        voter_set: VoterSet,
+        network: Network,
+        ledger_hash: [u8; 32],
+        quorum_expiry: u32,
+    ) -> Self {
         let config = ThresholdConfig::default_for_voter_count(voter_set.total_count());
-        Self::new(voter_set, config, network, ledger_hash)
+        Self::new(voter_set, config, network, ledger_hash, quorum_expiry)
     }
 
     /// Build an unspendable commitment leaf that embeds the ledger hash
@@ -284,10 +314,17 @@ impl TapscriptReservesBuilder {
     pub fn build_threshold_leaf(&self, tier: &ThresholdTier) -> DepositsResult<ScriptBuf> {
         let mut builder = Builder::new();
 
-        // Add timelock if specified
+        // Add timelock if specified. `timelock_blocks` is the offset
+        // from the ledger's `quorum_expiry`; the on-chain CLTV target is
+        // `quorum_expiry + offset` (absolute block height, BIP-65). A
+        // zero offset means no timelock — the immediate quorum-majority
+        // path used by routine rotations. See DEP-03 §"Spending Tiers".
         if tier.timelock_blocks > 0 {
+            let cltv_target = self
+                .quorum_expiry
+                .saturating_add(tier.timelock_blocks);
             builder = builder
-                .push_int(tier.timelock_blocks as i64)
+                .push_int(cltv_target as i64)
                 .push_opcode(OP_CLTV)
                 .push_opcode(OP_DROP);
         }
@@ -442,6 +479,7 @@ impl TapscriptReservesBuilder {
             config: self.config.clone(),
             network: self.network,
             ledger_hash: self.ledger_hash,
+            quorum_expiry: self.quorum_expiry,
         })
     }
 }
@@ -461,6 +499,9 @@ pub struct TaprootReservesOutput {
     pub network: Network,
     /// The ledger hash committed to in this output
     pub ledger_hash: [u8; 32],
+    /// Quorum expiry baked into the post-expiry tier CLTV targets.
+    /// Same value the ledger's `QuorumBegin` records.
+    pub quorum_expiry: u32,
 }
 
 impl TaprootReservesOutput {
@@ -502,6 +543,7 @@ impl TaprootReservesOutput {
             self.config.clone(),
             self.network,
             self.ledger_hash,
+            self.quorum_expiry,
         );
 
         let script = builder
@@ -542,9 +584,15 @@ pub fn verify_taproot_reserves(
     voter_set: VoterSet,
     network: bitcoin::Network,
     expected_ledger_hash: [u8; 32],
+    quorum_expiry: u32,
     on_chain_script: &ScriptBuf,
 ) -> bool {
-    let builder = TapscriptReservesBuilder::with_defaults(voter_set, network, expected_ledger_hash);
+    let builder = TapscriptReservesBuilder::with_defaults(
+        voter_set,
+        network,
+        expected_ledger_hash,
+        quorum_expiry,
+    );
     match builder.build() {
         Ok(output) => output.verify_script_pubkey(on_chain_script),
         Err(_) => false,
@@ -569,8 +617,10 @@ pub fn build_taproot_reserves_script(
     voter_set: VoterSet,
     ledger_hash: [u8; 32],
     network: bitcoin::Network,
+    quorum_expiry: u32,
 ) -> DepositsResult<ScriptBuf> {
-    let builder = TapscriptReservesBuilder::with_defaults(voter_set, network, ledger_hash);
+    let builder =
+        TapscriptReservesBuilder::with_defaults(voter_set, network, ledger_hash, quorum_expiry);
     let output = builder.build()?;
     Ok(output.script_pubkey())
 }
@@ -1501,31 +1551,44 @@ mod tests {
 
     #[test]
     fn test_default_threshold_config() {
-        // 2-party: both required, operator fallback, emergency
+        // 2-party: anytime both / single member +5d / operator solo +8w.
+        // Offsets are added to the ledger's `quorum_expiry` at script-build
+        // time — see DEP-03 §"Spending Tiers".
         let config_2 = ThresholdConfig::default_for_voter_count(2);
         assert_eq!(config_2.tiers.len(), 3);
+        // Tier 0: both members, anytime, no tie_breaker
         assert_eq!(config_2.tiers[0].threshold, 2);
         assert!(!config_2.tiers[0].requires_tie_breaker);
-        assert_eq!(config_2.tiers[1].timelock_blocks, 2016); // operator solo
-        assert!(config_2.tiers[1].requires_tie_breaker);
+        assert_eq!(config_2.tiers[0].timelock_blocks, 0);
+        // Tier 1: single quorum member, expiry+5d, no tie_breaker
+        assert_eq!(config_2.tiers[1].threshold, 1);
+        assert!(!config_2.tiers[1].requires_tie_breaker);
+        assert_eq!(config_2.tiers[1].timelock_blocks, 720);
+        // Tier 2: operator solo, expiry+8w, tie_breaker required
+        assert_eq!(config_2.tiers[2].threshold, 1);
+        assert!(config_2.tiers[2].requires_tie_breaker);
+        assert_eq!(config_2.tiers[2].timelock_blocks, 8064);
 
-        // 5-party: majority, minority, operator, emergency
+        // 5-party: anytime majority / minority +5d / single member +4w /
+        // operator +8w. Operator is now strictly last in the cascade.
         let config_5 = ThresholdConfig::default_for_voter_count(5);
         assert_eq!(config_5.tiers.len(), 4);
-        // Tier 0: majority (3-of-5) no operator, immediate
+        // Tier 0: majority (3-of-5) no operator, anytime
         assert_eq!(config_5.tiers[0].threshold, 3);
         assert!(!config_5.tiers[0].requires_tie_breaker);
         assert_eq!(config_5.tiers[0].timelock_blocks, 0);
-        // Tier 1: minority (1-of-5) no operator, 1008 blocks
+        // Tier 1: minority (1-of-5) no operator, expiry+5d
         assert_eq!(config_5.tiers[1].threshold, 1);
         assert!(!config_5.tiers[1].requires_tie_breaker);
-        assert_eq!(config_5.tiers[1].timelock_blocks, 1008);
-        // Tier 2: operator only, 2016 blocks
-        assert!(config_5.tiers[2].requires_tie_breaker);
-        assert_eq!(config_5.tiers[2].timelock_blocks, 2016);
-        // Tier 3: emergency recovery (1-of-n), 4032 blocks
+        assert_eq!(config_5.tiers[1].timelock_blocks, 720);
+        // Tier 2: single quorum member (1-of-5) no operator, expiry+4w
+        assert_eq!(config_5.tiers[2].threshold, 1);
+        assert!(!config_5.tiers[2].requires_tie_breaker);
+        assert_eq!(config_5.tiers[2].timelock_blocks, 4032);
+        // Tier 3: operator solo, expiry+8w
         assert_eq!(config_5.tiers[3].threshold, 1);
-        assert_eq!(config_5.tiers[3].timelock_blocks, 4032);
+        assert!(config_5.tiers[3].requires_tie_breaker);
+        assert_eq!(config_5.tiers[3].timelock_blocks, 8064);
     }
 
     fn test_ledger_hash() -> [u8; 32] {
@@ -1542,6 +1605,7 @@ mod tests {
             voter_set,
             Network::Regtest,
             test_ledger_hash(),
+            800_000,
         );
         let output = builder.build().expect("Should build successfully");
 
@@ -1564,6 +1628,7 @@ mod tests {
             voter_set,
             Network::Regtest,
             test_ledger_hash(),
+            800_000,
         );
         let output = builder.build().expect("Should build successfully");
 
@@ -1580,9 +1645,14 @@ mod tests {
         let hash1 = [0x11; 32];
         let hash2 = [0x22; 32];
 
-        let builder1 =
-            TapscriptReservesBuilder::with_defaults(voter_set.clone(), Network::Regtest, hash1);
-        let builder2 = TapscriptReservesBuilder::with_defaults(voter_set, Network::Regtest, hash2);
+        let builder1 = TapscriptReservesBuilder::with_defaults(
+            voter_set.clone(),
+            Network::Regtest,
+            hash1,
+            800_000,
+        );
+        let builder2 =
+            TapscriptReservesBuilder::with_defaults(voter_set, Network::Regtest, hash2, 800_000);
 
         let output1 = builder1.build().expect("Should build");
         let output2 = builder2.build().expect("Should build");

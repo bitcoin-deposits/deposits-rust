@@ -331,8 +331,13 @@ impl LedgerWallet {
         } else {
             ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
         };
-        let builder =
-            TapscriptReservesBuilder::new(voter_set, config, self.network, ledger_hash);
+        let builder = TapscriptReservesBuilder::new(
+            voter_set,
+            config,
+            self.network,
+            ledger_hash,
+            first_expiry,
+        );
         let taproot_output = builder
             .build()
             .map_err(|e| Error::Wallet(format!("build taproot reserves: {:?}", e)))?;
@@ -627,9 +632,15 @@ impl LedgerWallet {
         } else {
             ThresholdConfig::default_for_voter_count(quorum_members.len() + 1)
         };
-        let taproot_output = TapscriptReservesBuilder::new(voter_set, config, network, ledger_hash)
-            .build()
-            .map_err(|e| Error::Wallet(format!("rebuild taproot output: {:?}", e)))?;
+        let taproot_output = TapscriptReservesBuilder::new(
+            voter_set,
+            config,
+            network,
+            ledger_hash,
+            serde_info.quorum_expiry,
+        )
+        .build()
+        .map_err(|e| Error::Wallet(format!("rebuild taproot output: {:?}", e)))?;
 
         Ok(Some(TaprootReservesInfo {
             outpoint,

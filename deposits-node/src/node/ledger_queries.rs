@@ -132,9 +132,14 @@ impl Node {
         // Compute ledger hash
         let ledger_hash = our_latest.content_hash;
 
-        // Build Taproot reserves with default config
-        let tapscript_builder =
-            TapscriptReservesBuilder::with_defaults(voter_set, self.wallet.network(), ledger_hash);
+        // Build Taproot reserves with default config. CLTV targets in
+        // the post-expiry tiers anchor to `quorum_expiry`.
+        let tapscript_builder = TapscriptReservesBuilder::with_defaults(
+            voter_set,
+            self.wallet.network(),
+            ledger_hash,
+            quorum_expiry,
+        );
 
         let taproot_output = tapscript_builder
             .build()

@@ -14,24 +14,51 @@ The reserves UTXO uses a Taproot output with a tapscript tree containing tiered 
 
 ### Spending Tiers
 
+Each tier (other than the immediate quorum-majority path) is gated by an
+absolute `OP_CLTV` timelock anchored to the ledger's recorded
+`quorum_expiry`. The post-expiry cascade only opens once the quorum's
+declared lifetime has elapsed; during the active period the only
+on-chain spend path is the quorum-majority tier, which is what the
+routine rotation TX uses. This means:
+
+- The on-chain script's protection does **not** decay with UTXO age —
+  it decays with `quorum_expiry`. Refreshing `quorum_expiry` (via a
+  rotation that emits a new `QuorumBegin`) re-pins all post-expiry
+  tiers to the new deadline.
+- An operator who fails to rotate before `quorum_expiry` loses
+  exclusive spending control on a fixed schedule, with the quorum
+  members' recovery paths opening earlier than the operator's own.
+- The operator's solo path is the absolute last resort, opening only
+  after every quorum-driven path has had time to act.
+
 For a quorum of n members:
 
 | Tier | Signers | Timelock | Purpose |
 |---|---|---|---|
-| 0 | Majority of quorum (no operator) | Immediate | Normal operations: rotation, co-signed settlements |
-| 1 | Minority of quorum (no operator) | 1008 blocks (~1 week) | Degraded quorum recovery when members disappear |
-| 2 | Operator only | 2016 blocks (~2 weeks) | Operator solo when quorum is unresponsive |
-| 3 | Any single party | 4032 blocks (~4 weeks) | Emergency last resort recovery |
+| 0 | Majority of quorum (no operator) | None — anytime | Normal operations: rotation, co-signed settlements |
+| 1 | Minority of quorum (no operator) | `quorum_expiry + 720` blocks (~5 days) | Degraded quorum recovery when members disappear |
+| 2 | Single quorum member (no operator) | `quorum_expiry + 4032` blocks (~4 weeks) | Recovery when only one member remains active |
+| 3 | Operator only | `quorum_expiry + 8064` blocks (~8 weeks) | Operator solo, last resort after all quorum paths failed |
 
-The operator is deliberately excluded from Tier 0 and 1. The quorum can operate and recover reserves without operator participation. The operator's solo spending path (Tier 2) is only available after a significant timelock, ensuring the quorum has ample opportunity to act first.
+The operator is deliberately excluded from Tiers 0–2 and only gets
+Tier 3 after every quorum-driven path has been available for weeks.
+Routine rotation flows through Tier 0 and so has no timelock — the
+quorum-majority cosigns each rotation TX while the current quorum is
+still active.
 
-For the simple 2-party case (n ≤ 2):
+For the simple 2-party case (n ≤ 2), the minority and single-member
+tiers collapse (in a 2-of-2 quorum, one member IS both), so the
+cascade is:
 
 | Tier | Signers | Timelock |
 |---|---|---|
-| 0 | Both quorum members | Immediate |
-| 1 | Operator only | 2016 blocks |
-| 2 | Any single party | 4032 blocks |
+| 0 | Both quorum members | None — anytime |
+| 1 | Single quorum member | `quorum_expiry + 720` blocks (~5 days) |
+| 2 | Operator only | `quorum_expiry + 8064` blocks (~8 weeks) |
+
+Block heights are absolute, encoded as `OP_CLTV` (BIP-65) against
+`nLockTime`. Spending a non-zero-tier path requires the spending TX
+to set `nLockTime ≥ quorum_expiry + offset`.
 
 ## QuorumBegin (disc 12)
 

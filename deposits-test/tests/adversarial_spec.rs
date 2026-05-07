@@ -192,8 +192,13 @@ fn attack_non_nums_internal_key() {
     let config = ThresholdConfig::default_for_voter_count(4);
     let ledger_hash = [0xAB; 32];
 
-    let builder =
-        TapscriptReservesBuilder::new(voter_set, config, bitcoin::Network::Regtest, ledger_hash);
+    let builder = TapscriptReservesBuilder::new(
+        voter_set,
+        config,
+        bitcoin::Network::Regtest,
+        ledger_hash,
+        800_000,
+    );
 
     let output = builder.build().unwrap();
 
@@ -249,6 +254,7 @@ fn attack_taproot_tree_extra_leaf() {
         config.clone(),
         bitcoin::Network::Regtest,
         ledger_hash,
+        800_000,
     );
     let honest_output = honest_builder.build().unwrap();
 
@@ -261,6 +267,7 @@ fn attack_taproot_tree_extra_leaf() {
         attacker_config,
         bitcoin::Network::Regtest,
         ledger_hash,
+        800_000,
     );
     let attacker_output = attacker_builder.build().unwrap();
 

@@ -36,8 +36,13 @@ fn tier2_1_nums_point_audit() {
     let config = ThresholdConfig::default_for_voter_count(4);
     let ledger_hash = [0xAB; 32];
 
-    let builder =
-        TapscriptReservesBuilder::new(voter_set, config, bitcoin::Network::Regtest, ledger_hash);
+    let builder = TapscriptReservesBuilder::new(
+        voter_set,
+        config,
+        bitcoin::Network::Regtest,
+        ledger_hash,
+        800_000,
+    );
     let output = builder.build().unwrap();
 
     // The BIP-341 recommended NUMS point for the internal key is:
@@ -63,6 +68,7 @@ fn tier2_1_nums_point_audit() {
         other_config,
         bitcoin::Network::Regtest,
         [0xCD; 32],
+        800_000,
     );
     let other_output = other_builder.build().unwrap();
 
