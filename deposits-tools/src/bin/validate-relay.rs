@@ -19,6 +19,7 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use deposits_core::messages::LedgerOperation;
+use deposits_core::tapscript_reserves::{TapscriptReservesBuilder, VoterSet};
 use deposits_core::tlv::TlvDecode;
 use deposits_core::types::LedgerState;
 use deposits_core::SignedLedgerUpdate;
@@ -68,6 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut relay_url = DEFAULT_RELAY.to_string();
     let mut esplora_url = DEFAULT_ESPLORA.to_string();
     let mut skip_onchain = false;
+    let mut network = bitcoin::Network::Bitcoin; // default: mainnet (matches mempool.space)
     let mut prefix = String::new();
     let mut verbose = false;
     let mut limit: Option<usize> = None;
@@ -86,6 +88,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--skip-onchain" => {
                 skip_onchain = true;
                 i += 1;
+            }
+            "--network" if i + 1 < args.len() => {
+                network = match args[i + 1].as_str() {
+                    "bitcoin" | "mainnet" => bitcoin::Network::Bitcoin,
+                    "testnet" => bitcoin::Network::Testnet,
+                    "signet" => bitcoin::Network::Signet,
+                    "regtest" => bitcoin::Network::Regtest,
+                    n => return Err(format!("unknown network: {}", n).into()),
+                };
+                i += 2;
             }
             "--prefix" | "-p" if i + 1 < args.len() => {
                 prefix = args[i + 1].clone();
@@ -110,6 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      Options:\n\
                        --relay URL          Nostr relay (default: relay.bitcoindeposits.net)\n\
                        --esplora URL        Esplora HTTP API (default: mempool.space/api)\n\
+                       --network NAME       bitcoin|testnet|signet|regtest (default bitcoin)\n\
                        --skip-onchain       Skip the reserves-UTXO verification phase\n\
                        --prefix PFX         Only ledgers whose 16-hex `d` tag starts with PFX\n\
                        --limit N            Cap to first N ledgers\n\
@@ -126,6 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &relay_url,
         &esplora_url,
         skip_onchain,
+        network,
         &prefix,
         limit,
         verbose,
@@ -136,6 +150,7 @@ async fn run(
     relay_url: &str,
     esplora_url: &str,
     skip_onchain: bool,
+    network: bitcoin::Network,
     prefix: &str,
     limit: Option<usize>,
     verbose: bool,
@@ -182,7 +197,8 @@ async fn run(
         if !skip_onchain {
             if let LedgerVerdict::Pass { .. } = &verdict {
                 if let Some((seq, detail)) =
-                    verify_onchain_anchors(updates, esplora_url, &http, verbose).await
+                    verify_onchain_anchors(updates, esplora_url, &http, network, verbose)
+                        .await
                 {
                     verdict = LedgerVerdict::OnchainMismatch { seq, detail };
                 }
@@ -409,36 +425,108 @@ async fn verify_onchain_anchors(
     updates: &[SignedLedgerUpdate],
     esplora_url: &str,
     http: &reqwest::Client,
+    network: bitcoin::Network,
     verbose: bool,
 ) -> Option<(u64, String)> {
-    // Walk the chain (sorted) and collect QuorumBegin entries.
+    use std::str::FromStr;
+
+    // Walk the chain (sorted) and collect QuorumBegin entries plus the
+    // ledger's original operator (seq-0 LedgerOpen). The operator goes
+    // into `VoterSet::new` as the tie_breaker for script-derivation.
     let mut sorted: Vec<&SignedLedgerUpdate> = updates.iter().collect();
     sorted.sort_by_key(|u| u.sequence_number);
 
-    let mut qbs: Vec<(u64, u64, [u8; 32], u32)> = Vec::new();
+    let original_operator = match sorted.first() {
+        Some(u) => u.operator_id,
+        None => return None,
+    };
+
+    struct QbAnchor {
+        seq: u64,
+        expected_sat: u64,
+        txid: [u8; 32],
+        vout: u32,
+        reserves_id: String,
+        derived_script: Option<bitcoin::ScriptBuf>,
+        derived_address: Option<String>,
+    }
+
+    let mut qbs: Vec<QbAnchor> = Vec::new();
     for u in &sorted {
         if let Ok(LedgerOperation::QuorumBegin {
             amount,
             collateral_amount,
             new_outpoint_txid,
             new_outpoint_vout,
+            reserves_id,
+            ledger_hash,
+            quorum_members,
+            quorum_expiry,
             ..
         }) = LedgerOperation::tlv_decode(&u.message)
         {
-            // amount + collateral_amount are in msat — convert to sat
-            // for comparison with Esplora's `value` field.
+            // Reconstruct the Taproot output the protocol's
+            // `TapscriptReservesBuilder` would have produced from the
+            // QuorumBegin's recorded params. If `reserves_id` doesn't
+            // match this derivation, the operator put a fake address
+            // in the QuorumBegin (claimed reserves at an address they
+            // don't actually control via the quorum).
+            let voter_set = VoterSet::new(
+                original_operator,
+                quorum_members.iter().map(|m| m.pubkey).collect(),
+            );
+            let (derived_script, derived_address) = TapscriptReservesBuilder::with_defaults(
+                voter_set,
+                network,
+                ledger_hash,
+                quorum_expiry,
+            )
+            .build()
+            .ok()
+            .map(|out| (out.script_pubkey(), out.address.to_string()))
+            .map(|(s, a)| (Some(s), Some(a)))
+            .unwrap_or((None, None));
+
             let total_sat = (amount.saturating_add(collateral_amount)) / 1000;
-            qbs.push((u.sequence_number, total_sat, new_outpoint_txid, new_outpoint_vout));
+            qbs.push(QbAnchor {
+                seq: u.sequence_number,
+                expected_sat: total_sat,
+                txid: new_outpoint_txid,
+                vout: new_outpoint_vout,
+                reserves_id,
+                derived_script,
+                derived_address,
+            });
         }
     }
 
     if qbs.is_empty() {
-        // No QuorumBegin yet — pre-rotation ledger, nothing to verify.
         return None;
     }
 
     let last_idx = qbs.len() - 1;
-    for (i, (seq, expected_sat, txid, vout)) in qbs.iter().enumerate() {
+    for (i, qb) in qbs.iter().enumerate() {
+        let seq = &qb.seq;
+        let expected_sat = &qb.expected_sat;
+        let txid = &qb.txid;
+        let vout = &qb.vout;
+
+        // Layer 0: derived address (from quorum_members + ledger_hash +
+        // quorum_expiry) must equal the recorded reserves_id. Catches
+        // an operator who put a fake address in QuorumBegin.
+        if let Some(derived) = &qb.derived_address {
+            if derived != &qb.reserves_id {
+                return Some((
+                    *seq,
+                    format!(
+                        "QuorumBegin reserves_id mismatch: recorded {}, \
+                         derived from quorum_members+ledger_hash+quorum_expiry {}",
+                        &qb.reserves_id[..20.min(qb.reserves_id.len())],
+                        &derived[..20.min(derived.len())]
+                    ),
+                ));
+            }
+        }
         // Bitcoin txids on-chain are big-endian-display-order; the
         // protocol stores them as the raw 32-byte hash. Esplora's REST
         // API takes the display form (which is the byte-reversed hash).
@@ -478,12 +566,12 @@ async fn verify_onchain_anchors(
             Ok(v) => v,
             Err(e) => return Some((*seq, format!("esplora /tx parse: {}", e))),
         };
-        let actual_sat = tx_json
-            .get("vout")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.get(*vout as usize))
-            .and_then(|o| o.get("value"))
-            .and_then(|v| v.as_u64());
+        let vout_arr = tx_json.get("vout").and_then(|v| v.as_array());
+        let output = vout_arr.and_then(|arr| arr.get(*vout as usize));
+        let actual_sat = output.and_then(|o| o.get("value")).and_then(|v| v.as_u64());
+        let actual_script_hex = output
+            .and_then(|o| o.get("scriptpubkey"))
+            .and_then(|v| v.as_str());
         let actual_sat = match actual_sat {
             Some(s) => s,
             None => {
@@ -493,11 +581,7 @@ async fn verify_onchain_anchors(
                         "vout {} not present in tx {} (only {} outputs)",
                         vout,
                         &txid_display[..16],
-                        tx_json
-                            .get("vout")
-                            .and_then(|v| v.as_array())
-                            .map(|a| a.len())
-                            .unwrap_or(0)
+                        vout_arr.map(|a| a.len()).unwrap_or(0)
                     ),
                 ));
             }
@@ -510,6 +594,46 @@ async fn verify_onchain_anchors(
                     expected_sat, actual_sat
                 ),
             ));
+        }
+
+        // Layer 1: on-chain scriptPubKey must equal the script we
+        // derived from the recorded QuorumBegin params. This is the
+        // strong guarantee — the on-chain UTXO is locked by exactly
+        // the Taproot tree the protocol's reconstruction produces
+        // from quorum_members + ledger_hash + quorum_expiry.
+        if let (Some(actual_hex), Some(derived_script)) =
+            (actual_script_hex, qb.derived_script.as_ref())
+        {
+            let derived_hex = hex::encode(derived_script.as_bytes());
+            if !derived_hex.eq_ignore_ascii_case(actual_hex) {
+                // Try parsing reserves_id as an address; if it
+                // matches the on-chain scriptPubKey, the operator
+                // pointed correctly but the protocol-derived
+                // reconstruction differs (would mean a code bug
+                // here, since the address-derived check above
+                // already passed). Otherwise it's a genuine mismatch.
+                let recorded_addr_script = bitcoin::Address::from_str(&qb.reserves_id)
+                    .ok()
+                    .and_then(|a| a.require_network(network).ok())
+                    .map(|a| hex::encode(a.script_pubkey().as_bytes()));
+                let recorded_matches_actual = recorded_addr_script
+                    .as_deref()
+                    .map(|s| s.eq_ignore_ascii_case(actual_hex))
+                    .unwrap_or(false);
+                if !recorded_matches_actual {
+                    return Some((
+                        *seq,
+                        format!(
+                            "scriptPubKey mismatch at {}:{}: on-chain {}..., \
+                             recorded reserves_id derives to {}...",
+                            &txid_display[..16],
+                            vout,
+                            &actual_hex[..16.min(actual_hex.len())],
+                            &derived_hex[..16.min(derived_hex.len())]
+                        ),
+                    ));
+                }
+            }
         }
 
         // Step 2: spent vs unspent. The latest QB's UTXO must be
