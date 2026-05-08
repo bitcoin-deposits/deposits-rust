@@ -256,6 +256,8 @@
   </main>
 
 <script type="module">
+import { parseTlv, b64ToBytes } from './shared.js';
+
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
 function getParam(name) {
@@ -345,14 +347,54 @@ function escapeHtml(s) {
 function quorumBadge(state) {
   const cls = state === 'Active' ? 'active'
     : state === 'PreQuorum' ? 'pre'
-    : state === 'Expired' ? 'expired' : '';
+    : state === 'Expired' ? 'expired'
+    : state === 'Unknown' ? 'pre'  // neutral/muted — no chain tip to decide
+    : '';
   return `<span class="badge ${cls}">${escapeHtml(state || 'unknown')}</span>`;
 }
 
+// Decode `quorum_expiry` (TLV field 86, u32) from a Kind 9100
+// QuorumBegin event. Caller already filtered by `#t: ['12']`, so the
+// inner discriminant is known to be 12. Returns null on malformed
+// input (treated as unknown).
+function extractQuorumExpiry(eventContent) {
+  try {
+    const raw = b64ToBytes(eventContent);
+    const outer = parseTlv(raw);
+    const msg = outer.find(r => r.type === 8)?.value;
+    if (!msg) return null;
+    const inner = parseTlv(msg);
+    const rec = inner.find(r => r.type === 86);
+    if (!rec || rec.value.length < 4) return null;
+    const v = rec.value;
+    return (v[0] << 24) | (v[1] << 16) | (v[2] << 8) | v[3];
+  } catch { return null; }
+}
+
+// Derive quorum state from messages we trust independently of the
+// operator's advertisement: cosigned QuorumBegin gives `expiry`, the
+// cross-operator price oracle gives `tip`. Never falls back to the
+// ad's self-reported `quorum_state`.
+function deriveQuorumState(expiry, tip) {
+  if (!expiry) return 'PreQuorum';
+  if (!tip) return 'Unknown';
+  return tip >= expiry ? 'Expired' : 'Active';
+}
+
 async function main() {
-  // Kind 39100 is replaceable per (pubkey, d-tag); a wide-open query
-  // returns one event per ledger up to the limit.
-  const events = await nostrFetch(RELAY_URL, { kinds: [39100], limit: 500 });
+  // Three relay round-trips in parallel:
+  //   - Kind 39100: one ad per (pubkey, d-tag).
+  //   - Kind 9100 with #t='12': every QuorumBegin across the network.
+  //     `t` is the op-discriminant tag; QuorumBegin = 12. Filtering
+  //     server-side keeps this O(rotations) instead of O(updates).
+  //   - Kind 39101: BTC/USD price feed; we read the highest
+  //     `block_height` to derive Active/Expired without trusting the
+  //     operator's self-reported quorum_state on each ad.
+  const [events, qbEvents, priceEvents] = await Promise.all([
+    nostrFetch(RELAY_URL, { kinds: [39100], limit: 500 }),
+    nostrFetch(RELAY_URL, { kinds: [9100], '#t': ['12'], limit: 5000 }),
+    nostrFetch(RELAY_URL, { kinds: [39101], '#d': ['btcusd'], limit: 5 }),
+  ]);
 
   const ads = [];
   for (const e of events) {
@@ -361,6 +403,40 @@ async function main() {
       ad.signer_pubkey = e.pubkey;
       ads.push(ad);
     } catch {}
+  }
+
+  // ledger_tag (16-char prefix of ledger_id) → newest QuorumBegin's
+  // `quorum_expiry`. Multiple QuorumBegins per ledger are possible
+  // (rotations); keep the most recent by created_at.
+  const tagToExpiry = new Map();
+  for (const ev of qbEvents) {
+    const dTag = (ev.tags || []).find(t => t[0] === 'd')?.[1];
+    if (!dTag) continue;
+    const prev = tagToExpiry.get(dTag);
+    if (prev && prev.created_at >= ev.created_at) continue;
+    const expiry = extractQuorumExpiry(ev.content);
+    if (expiry == null) continue;
+    tagToExpiry.set(dTag, { expiry, created_at: ev.created_at });
+  }
+
+  // Chain tip = highest `block_height` across recent BTC/USD oracle
+  // events (DEP-04 §Price Oracle); a single bad publisher can't drag
+  // it backwards.
+  let chainTip = 0;
+  for (const ev of priceEvents) {
+    try {
+      const data = JSON.parse(ev.content);
+      if (Number.isFinite(data.block_height) && data.block_height > chainTip) {
+        chainTip = data.block_height;
+      }
+    } catch {}
+  }
+
+  // Annotate each ad with the derived state once.
+  for (const ad of ads) {
+    const tag = (ad.ledger_id || '').slice(0, 16);
+    const expiry = tagToExpiry.get(tag)?.expiry;
+    ad.derived_quorum_state = deriveQuorumState(expiry, chainTip);
   }
 
   const byOp = new Map();
@@ -381,7 +457,7 @@ async function main() {
   let totalReservesMsat = 0, totalActive = 0;
   for (const ad of ads) {
     totalReservesMsat += Number(ad.reserves_amount_msats || 0);
-    if (ad.quorum_state === 'Active') totalActive += 1;
+    if (ad.derived_quorum_state === 'Active') totalActive += 1;
   }
 
   document.getElementById('op-count').textContent = operators.length || '0';
@@ -416,7 +492,7 @@ async function main() {
             <a class="ledger-tile" href="${escapeHtml(ledgerLink(ad.ledger_id))}">
               <div class="lid">${escapeHtml(fmt.short(ad.ledger_id, 32))}</div>
               <div class="row">
-                <span>${quorumBadge(ad.quorum_state)} ${
+                <span>${quorumBadge(ad.derived_quorum_state)} ${
                   ad.quorum_members?.length ? `<span class="badge q">Q=${ad.quorum_members.length}</span>` : ''
                 } ${ad.access_control ? '<span class="badge gated">gated</span>' : ''}</span>
                 <span class="muted">${escapeHtml(ad.network || '')}</span>
