@@ -625,6 +625,15 @@ pub struct QuorumMember {
     /// Defaults to `DEFAULT_COMPENSATION_FREQUENCY_BLOCKS` (2016 ≈ 2 weeks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compensation_frequency_blocks: Option<u32>,
+    /// Rulesets this member declared support for in their signed
+    /// `QuorumMemberResponse`. Operators read this at `quorum begin` to
+    /// confirm every pending member can validate under the chosen
+    /// `protocol_version`. Empty when populated from a legacy
+    /// `QuorumAddMember` that lacks a member-response blob — callers
+    /// treat empty as "unknown" and fall back to assuming `legacy`-only
+    /// support.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_rulesets: Vec<String>,
 }
 
 /// Default compensation rate for a quorum member: 3% (300 bips) of collected

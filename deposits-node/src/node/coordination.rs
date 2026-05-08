@@ -1,5 +1,17 @@
 use super::*;
 
+/// Terms the operator proposes to a candidate member as part of `quorum_add`.
+/// The member echoes any accepted terms back inside its signed
+/// `QuorumMemberResponse` blob (see `process_consent_request`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ConsentProposedTerms<'a> {
+    pub chosen_ruleset: &'a str,
+    pub min_fee_bps: Option<u16>,
+    pub min_fee_fixed: Option<u64>,
+    pub max_fee_period: Option<u32>,
+    pub membership_until: Option<u32>,
+}
+
 impl Node {
     /// Find the ledger_id for a specific deposit offer
     pub(crate) fn find_ledger_for_offer(&self, offer_id: &[u8; 32]) -> Option<String> {
@@ -234,6 +246,23 @@ impl Node {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as u32;
 
+                    // Q1 fields: optional, present when member runs the new wire.
+                    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+                    let member_response = result_obj
+                        .get("member_response")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| BASE64.decode(s).ok());
+                    let member_signature = result_obj
+                        .get("member_signature")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| hex::decode(s).ok())
+                        .filter(|v| v.len() == 64)
+                        .map(|v| {
+                            let mut a = [0u8; 64];
+                            a.copy_from_slice(&v);
+                            a
+                        });
+
                     if let Some(sig_hex) = sig_hex {
                         if let Ok(sig_vec) = hex::decode(sig_hex) {
                             if sig_vec.len() == 64 {
@@ -242,6 +271,8 @@ impl Node {
                                 let consent_result = ConsentResult {
                                     consent_signature: sig,
                                     membership_expires: expires,
+                                    member_response,
+                                    member_signature,
                                 };
                                 let _ = tx.send(consent_result);
                                 tracing::info!(
@@ -460,6 +491,7 @@ impl Node {
         &self,
         member_ledger_id: &str,
         our_ledger_id: &str,
+        proposed_terms: ConsentProposedTerms<'_>,
     ) -> Result<ConsentResult, Error> {
         // Piggyback our full ledger history so the member can validate the
         // chain end-to-end (LedgerOpen → tip) and import the ledger before
@@ -483,11 +515,24 @@ impl Node {
                 .collect()
         };
 
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "operator_pubkey": self.node_id_hex,
             "operator_ledger_id": our_ledger_id,
             "ledger_history": history_b64,
+            "chosen_ruleset": proposed_terms.chosen_ruleset,
         });
+        if let Some(v) = proposed_terms.min_fee_bps {
+            params["min_fee_bps"] = v.into();
+        }
+        if let Some(v) = proposed_terms.min_fee_fixed {
+            params["min_fee_fixed"] = v.into();
+        }
+        if let Some(v) = proposed_terms.max_fee_period {
+            params["max_fee_period"] = v.into();
+        }
+        if let Some(v) = proposed_terms.membership_until {
+            params["membership_until"] = v.into();
+        }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
 

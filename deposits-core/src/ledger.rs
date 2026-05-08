@@ -732,6 +732,7 @@ impl Ledger {
                 compensation_bps: None,
                 compensation_deposit_id: None,
                 compensation_frequency_blocks: None,
+                supported_rulesets: Vec::new(),
             });
         Ok(())
     }
@@ -2647,6 +2648,7 @@ mod tests {
                 compensation_bps: None,
                 compensation_deposit_id: None,
                 compensation_frequency_blocks: None,
+                supported_rulesets: Vec::new(),
             },
         ];
 

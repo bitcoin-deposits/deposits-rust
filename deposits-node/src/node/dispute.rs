@@ -146,6 +146,8 @@ impl Node {
                         compensation_bps: None,
                         compensation_deposit_id: None,
                         compensation_frequency_blocks: None,
+                        member_response: None,
+                        member_signature: None,
                     };
 
                     if let Err(e) =

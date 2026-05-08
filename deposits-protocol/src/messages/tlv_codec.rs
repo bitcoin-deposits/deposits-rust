@@ -126,6 +126,13 @@ mod ledger_op_tlv {
     pub const REQUEST_HASH: u64 = 270; // [u8; 32]
     pub const TARGET_LEDGER_ID: u64 = 272; // [u8; 32]
     pub const TARGET_OPERATOR: u64 = 274; // pubkey (33 bytes)
+
+    /// QuorumAddMember: canonical TLV-encoded QuorumMemberResponse blob
+    /// returned by the member during consent. Absent on legacy events.
+    pub const MEMBER_RESPONSE: u64 = 288; // var-length bytes
+    /// QuorumAddMember: BIP-340 signature by the member over the
+    /// QuorumMemberResponse digest.
+    pub const MEMBER_SIGNATURE: u64 = 290; // [u8; 64]
 }
 
 impl TlvEncode for LedgerOperation {
@@ -427,6 +434,8 @@ impl TlvEncode for LedgerOperation {
                 compensation_bps,
                 compensation_deposit_id,
                 compensation_frequency_blocks,
+                member_response,
+                member_signature,
             } => {
                 builder = builder
                     .pubkey_field(QUORUM_MEMBER, quorum_member)
@@ -467,6 +476,12 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(v) = compensation_frequency_blocks {
                     builder = builder.u32_field(COMPENSATION_FREQUENCY_BLOCKS, *v);
+                }
+                if let Some(v) = member_response {
+                    builder = builder.bytes_field(MEMBER_RESPONSE, v);
+                }
+                if let Some(v) = member_signature {
+                    builder = builder.bytes_field(MEMBER_SIGNATURE, v);
                 }
             }
             Self::QuorumRemoveMember {
@@ -732,6 +747,8 @@ impl TlvDecode for LedgerOperation {
                 compensation_bps: reader.read_u16_opt(COMPENSATION_BPS)?,
                 compensation_deposit_id: reader.read_deposit_id_opt(COMPENSATION_DEPOSIT_ID)?,
                 compensation_frequency_blocks: reader.read_u32_opt(COMPENSATION_FREQUENCY_BLOCKS)?,
+                member_response: reader.read_raw_opt(MEMBER_RESPONSE).map(|b| b.to_vec()),
+                member_signature: reader.read_bytes_opt(MEMBER_SIGNATURE)?,
             }),
             44 => Ok(Self::QuorumRemoveMember {
                 quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,

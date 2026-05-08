@@ -506,6 +506,8 @@ fn invariant_s1_dispute_state_gate() {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
+            member_response: None,
+            member_signature: None,
         })
         .is_ok();
 

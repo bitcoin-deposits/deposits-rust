@@ -1214,6 +1214,138 @@ pub fn validate_transfer_timeout(
     Ok(())
 }
 
+// ============================================================================
+// QuorumAddMember signed-response validation (Q1)
+// ============================================================================
+
+/// Validate the optional `member_response` blob carried in `QuorumAddMember`.
+///
+/// When `response` is `None`, this is a legacy event — accept it (the operator
+/// is still recording terms, just without a member-attested blob). When
+/// `response` is `Some`, decode it and check:
+///
+/// 1. `signature` is `Some` (paired field).
+/// 2. `signature` is a valid BIP-340 signature by `member_pubkey` (decoded
+///    from the blob) over `quorum_member_response_digest(response)`.
+/// 3. The decoded `member_pubkey` matches the loose `quorum_member` field.
+/// 4. Every loose field on `QuorumAddMember` matches the corresponding
+///    decoded field exactly. This is the rule that makes the blob
+///    authoritative: an operator cannot rewrite the terms after the member
+///    signed them.
+pub fn validate_quorum_add_member_blob(
+    quorum_member: &PublicKey,
+    member_ledger_id: &str,
+    response: Option<&[u8]>,
+    signature: Option<&[u8; 64]>,
+    loose_min_fee_bps: Option<u16>,
+    loose_min_fee_fixed: Option<u64>,
+    loose_max_fee_period: Option<u32>,
+    loose_membership_until: Option<u32>,
+    loose_dispute_response_blocks: Option<u32>,
+    loose_dispute_arm_blocks: Option<u32>,
+    loose_service_response_blocks: Option<u32>,
+    loose_max_transfer_timeout_blocks: Option<u32>,
+    loose_max_descriptor_bytes: Option<u32>,
+    loose_compensation_bps: Option<u16>,
+    loose_compensation_deposit_id: Option<crate::types::DepositId>,
+    loose_compensation_frequency_blocks: Option<u32>,
+) -> ValidationResult {
+    let response_bytes = match response {
+        None => return Ok(()),
+        Some(b) => b,
+    };
+    let signature = signature.ok_or_else(|| {
+        "QuorumAddMember.member_response is set but member_signature is missing".to_string()
+    })?;
+
+    use crate::types::{quorum_member_response_digest, QuorumMemberResponse};
+    use crate::TlvDecode;
+
+    let decoded = QuorumMemberResponse::tlv_decode(response_bytes)
+        .map_err(|e| format!("QuorumAddMember.member_response failed to decode: {:?}", e))?;
+
+    if decoded.member_pubkey != *quorum_member {
+        return Err(format!(
+            "QuorumAddMember.member_response.member_pubkey {} does not match outer quorum_member {}",
+            decoded.member_pubkey, quorum_member
+        ));
+    }
+    if decoded.member_ledger_id != member_ledger_id {
+        return Err(format!(
+            "QuorumAddMember.member_response.member_ledger_id {} does not match outer member_ledger_id {}",
+            decoded.member_ledger_id, member_ledger_id
+        ));
+    }
+
+    let digest = quorum_member_response_digest(response_bytes);
+    use bitcoin::secp256k1::schnorr::Signature;
+    use bitcoin::secp256k1::{Message, Secp256k1};
+    let sig = Signature::from_slice(signature)
+        .map_err(|_| "QuorumAddMember.member_signature: invalid 64-byte schnorr signature".to_string())?;
+    let msg = Message::from_digest(digest);
+    let secp = Secp256k1::verification_only();
+    let (xonly, _) = decoded.member_pubkey.x_only_public_key();
+    secp.verify_schnorr(&sig, &msg, &xonly).map_err(|_| {
+        "QuorumAddMember.member_signature: BIP-340 verify failed against member_pubkey".to_string()
+    })?;
+
+    fn check<T: PartialEq + std::fmt::Debug>(name: &str, loose: T, blob: T) -> ValidationResult {
+        if loose != blob {
+            return Err(format!(
+                "QuorumAddMember.{} mismatch: loose={:?}, signed-blob={:?}",
+                name, loose, blob
+            ));
+        }
+        Ok(())
+    }
+    check("min_fee_bps", loose_min_fee_bps, decoded.min_fee_bps)?;
+    check("min_fee_fixed", loose_min_fee_fixed, decoded.min_fee_fixed)?;
+    check("max_fee_period", loose_max_fee_period, decoded.max_fee_period)?;
+    check(
+        "membership_until",
+        loose_membership_until,
+        decoded.membership_until,
+    )?;
+    check(
+        "dispute_response_blocks",
+        loose_dispute_response_blocks,
+        decoded.dispute_response_blocks,
+    )?;
+    check(
+        "dispute_arm_blocks",
+        loose_dispute_arm_blocks,
+        decoded.dispute_arm_blocks,
+    )?;
+    check(
+        "service_response_blocks",
+        loose_service_response_blocks,
+        decoded.service_response_blocks,
+    )?;
+    check(
+        "max_transfer_timeout_blocks",
+        loose_max_transfer_timeout_blocks,
+        decoded.max_transfer_timeout_blocks,
+    )?;
+    check(
+        "max_descriptor_bytes",
+        loose_max_descriptor_bytes,
+        decoded.max_descriptor_bytes,
+    )?;
+    check("compensation_bps", loose_compensation_bps, decoded.compensation_bps)?;
+    check(
+        "compensation_deposit_id",
+        loose_compensation_deposit_id,
+        decoded.compensation_deposit_id,
+    )?;
+    check(
+        "compensation_frequency_blocks",
+        loose_compensation_frequency_blocks,
+        decoded.compensation_frequency_blocks,
+    )?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1252,6 +1384,176 @@ mod tests {
 
         // Too large
         assert!(validate_reserves_add(1_000_000_000_000).is_err());
+    }
+
+    mod quorum_member_response_validation {
+        use super::*;
+        use crate::types::{
+            quorum_member_response_digest, QuorumMemberResponse, QUORUM_MEMBER_RESPONSE_VERSION,
+        };
+        use crate::TlvEncode;
+        use bitcoin::hashes::Hash;
+        use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
+
+        fn build(
+            secp: &Secp256k1<bitcoin::secp256k1::All>,
+            member_sk: &[u8; 32],
+        ) -> (Vec<u8>, [u8; 64], PublicKey) {
+            let kp = Keypair::from_seckey_slice(secp, member_sk).unwrap();
+            let member_pk = PublicKey::from_keypair(&kp);
+            let op_pk = PublicKey::from_secret_key(
+                secp,
+                &SecretKey::from_slice(&[7u8; 32]).unwrap(),
+            );
+            let r = QuorumMemberResponse {
+                response_version: QUORUM_MEMBER_RESPONSE_VERSION,
+                member_pubkey: member_pk,
+                operator_pubkey: op_pk,
+                operator_ledger_id: "ab".repeat(32),
+                chosen_ruleset: "legacy".to_string(),
+                supported_rulesets: vec!["legacy".to_string()],
+                member_ledger_id: "cd".repeat(32),
+                min_fee_bps: Some(100),
+                min_fee_fixed: None,
+                max_fee_period: Some(2016),
+                membership_until: Some(900_000),
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
+                compensation_bps: Some(300),
+                compensation_deposit_id: None,
+                compensation_frequency_blocks: None,
+            };
+            let bytes = r.tlv_encode();
+            let digest = quorum_member_response_digest(&bytes);
+            let msg = bitcoin::secp256k1::Message::from_digest(digest);
+            let sig = secp.sign_schnorr_no_aux_rand(&msg, &kp);
+            let mut sigb = [0u8; 64];
+            sigb.copy_from_slice(sig.as_ref());
+            (bytes, sigb, member_pk)
+        }
+
+        #[test]
+        fn legacy_event_with_no_blob_is_ok() {
+            assert!(validate_quorum_add_member_blob(
+                &test_pubkey(),
+                "ab".repeat(32).as_str(),
+                None,
+                None,
+                None, None, None, None, None, None, None, None, None, None, None, None,
+            )
+            .is_ok());
+        }
+
+        #[test]
+        fn missing_signature_when_blob_present_rejects() {
+            let secp = Secp256k1::new();
+            let (bytes, _sig, member_pk) = build(&secp, &[1u8; 32]);
+            let err = validate_quorum_add_member_blob(
+                &member_pk,
+                "cd".repeat(32).as_str(),
+                Some(&bytes),
+                None,
+                Some(100), None, Some(2016), Some(900_000),
+                None, None, None, None, None, Some(300), None, None,
+            )
+            .unwrap_err();
+            assert!(err.contains("member_signature is missing"), "{}", err);
+        }
+
+        #[test]
+        fn matching_blob_and_loose_fields_accepts() {
+            let secp = Secp256k1::new();
+            let (bytes, sig, member_pk) = build(&secp, &[1u8; 32]);
+            let r = validate_quorum_add_member_blob(
+                &member_pk,
+                "cd".repeat(32).as_str(),
+                Some(&bytes),
+                Some(&sig),
+                Some(100), None, Some(2016), Some(900_000),
+                None, None, None, None, None, Some(300), None, None,
+            );
+            assert!(r.is_ok(), "{:?}", r);
+        }
+
+        #[test]
+        fn mismatched_loose_field_rejects() {
+            let secp = Secp256k1::new();
+            let (bytes, sig, member_pk) = build(&secp, &[1u8; 32]);
+            let err = validate_quorum_add_member_blob(
+                &member_pk,
+                "cd".repeat(32).as_str(),
+                Some(&bytes),
+                Some(&sig),
+                Some(101), // operator-rewritten
+                None, Some(2016), Some(900_000),
+                None, None, None, None, None, Some(300), None, None,
+            )
+            .unwrap_err();
+            assert!(err.contains("min_fee_bps mismatch"), "{}", err);
+        }
+
+        #[test]
+        fn signature_under_wrong_key_rejects() {
+            let secp = Secp256k1::new();
+            let (bytes, _good_sig, member_pk) = build(&secp, &[1u8; 32]);
+            // Sign with a different key.
+            let (_bytes2, bad_sig, _other_pk) = build(&secp, &[2u8; 32]);
+            let err = validate_quorum_add_member_blob(
+                &member_pk,
+                "cd".repeat(32).as_str(),
+                Some(&bytes),
+                Some(&bad_sig),
+                Some(100), None, Some(2016), Some(900_000),
+                None, None, None, None, None, Some(300), None, None,
+            )
+            .unwrap_err();
+            assert!(err.contains("BIP-340 verify failed"), "{}", err);
+        }
+
+        #[test]
+        fn pubkey_in_blob_must_match_outer_quorum_member() {
+            let secp = Secp256k1::new();
+            let (bytes, sig, _member_pk) = build(&secp, &[1u8; 32]);
+            let other =
+                PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[9u8; 32]).unwrap());
+            let err = validate_quorum_add_member_blob(
+                &other,
+                "cd".repeat(32).as_str(),
+                Some(&bytes),
+                Some(&sig),
+                Some(100), None, Some(2016), Some(900_000),
+                None, None, None, None, None, Some(300), None, None,
+            )
+            .unwrap_err();
+            assert!(err.contains("does not match outer quorum_member"), "{}", err);
+        }
+
+        #[test]
+        fn member_ledger_id_in_blob_must_match_outer() {
+            let secp = Secp256k1::new();
+            let (bytes, sig, member_pk) = build(&secp, &[1u8; 32]);
+            let err = validate_quorum_add_member_blob(
+                &member_pk,
+                "ee".repeat(32).as_str(), // different ledger
+                Some(&bytes),
+                Some(&sig),
+                Some(100), None, Some(2016), Some(900_000),
+                None, None, None, None, None, Some(300), None, None,
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("does not match outer member_ledger_id"),
+                "{}",
+                err
+            );
+
+            // Reference Hash to silence unused-import warning under all
+            // feature combos.
+            let _ = bitcoin::hashes::sha256::Hash::hash(b"x").to_byte_array();
+        }
     }
 
     #[test]

@@ -573,6 +573,8 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 compensation_bps: None,
                 compensation_deposit_id: None,
                 compensation_frequency_blocks: None,
+                member_response: None,
+                member_signature: None,
             },
         ),
         (

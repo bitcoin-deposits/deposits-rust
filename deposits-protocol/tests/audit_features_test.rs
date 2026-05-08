@@ -104,6 +104,8 @@ fn quorum_add_member_with_timing_params_tlv_roundtrip() {
         compensation_bps: Some(300),
         compensation_deposit_id: Some([0x11; 16]),
         compensation_frequency_blocks: Some(2016),
+        member_response: None,
+        member_signature: None,
     };
 
     let encoded = original.tlv_encode();
@@ -126,6 +128,8 @@ fn quorum_add_member_with_timing_params_tlv_roundtrip() {
             compensation_bps,
             compensation_deposit_id,
             compensation_frequency_blocks,
+            member_response: _,
+            member_signature: _,
         } => {
             assert_eq!(quorum_member, test_pubkey());
             assert_eq!(quorum_member_signature, [0xAA; 64]);
@@ -172,6 +176,8 @@ fn quorum_add_member_none_timing_params_tlv_roundtrip() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
+        member_response: None,
+        member_signature: None,
     };
 
     let encoded = original.tlv_encode();
@@ -194,6 +200,8 @@ fn quorum_add_member_none_timing_params_tlv_roundtrip() {
             compensation_bps,
             compensation_deposit_id,
             compensation_frequency_blocks,
+            member_response: _,
+            member_signature: _,
         } => {
             assert_eq!(quorum_member, test_pubkey_2());
             assert_eq!(quorum_member_signature, [0xBB; 64]);
@@ -245,6 +253,8 @@ fn quorum_add_member_binary_roundtrip_with_timing_params() {
         compensation_bps: Some(300),
         compensation_deposit_id: Some([0x22; 16]),
         compensation_frequency_blocks: Some(2016),
+        member_response: None,
+        member_signature: None,
     };
 
     let mut bytes = Vec::new();
@@ -268,6 +278,8 @@ fn quorum_add_member_binary_roundtrip_with_timing_params() {
             compensation_bps,
             compensation_deposit_id,
             compensation_frequency_blocks,
+            member_response: _,
+            member_signature: _,
         } => {
             // Core fields survive the binary roundtrip
             assert_eq!(quorum_member, test_pubkey());

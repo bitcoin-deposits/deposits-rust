@@ -357,6 +357,8 @@ impl Node {
         min_fee_fixed: Option<u64>,
         max_fee_period: Option<u32>,
         membership_until: Option<u32>,
+        member_response: Option<Vec<u8>>,
+        member_signature: Option<[u8; 64]>,
     ) -> Result<String, Error> {
         // Pre-validate
         {
@@ -401,6 +403,8 @@ impl Node {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
+            member_response,
+            member_signature,
         };
 
         self.commit_operation(ledger_id, operation).await

@@ -522,6 +522,7 @@ impl LedgerState {
                 compensation_bps,
                 compensation_deposit_id,
                 compensation_frequency_blocks,
+                member_response,
                 ..
             } => {
                 let already_active = next
@@ -533,6 +534,23 @@ impl LedgerState {
                     .iter()
                     .any(|m| m.pubkey == *quorum_member);
                 if !already_active && !already_pending {
+                    let supported_rulesets = match member_response.as_deref() {
+                        Some(blob) => {
+                            // Trust the decoded list verbatim. Signature +
+                            // loose-vs-blob equality were already checked by
+                            // `validate_quorum_add_member_blob` upstream;
+                            // by the time we apply here, the blob is
+                            // authoritative.
+                            use crate::tlv::TlvDecode;
+                            crate::types::QuorumMemberResponse::tlv_decode(blob)
+                                .map(|r| r.supported_rulesets)
+                                .unwrap_or_default()
+                        }
+                        // Legacy QuorumAddMember without a blob: leave
+                        // empty. `quorum begin` treats empty as "unknown"
+                        // and assumes legacy-only support.
+                        None => Vec::new(),
+                    };
                     next.next_quorum_members.push(QuorumMember {
                         pubkey: *quorum_member,
                         ledger_id: member_ledger_id.clone(),
@@ -548,6 +566,7 @@ impl LedgerState {
                         compensation_bps: *compensation_bps,
                         compensation_deposit_id: *compensation_deposit_id,
                         compensation_frequency_blocks: *compensation_frequency_blocks,
+                        supported_rulesets,
                     });
                 }
             }

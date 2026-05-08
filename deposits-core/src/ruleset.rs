@@ -73,6 +73,59 @@ pub fn resolve_or_legacy(name: Option<&str>) -> &'static Ruleset {
     }
 }
 
+/// All ruleset names this binary knows how to enforce. Order is the
+/// registry order. Quorum members publish this in their signed
+/// `QuorumMemberResponse` so an operator can pick a `protocol_version`
+/// at `quorum begin` time that every member can validate.
+pub fn all_supported_names() -> Vec<&'static str> {
+    vec![LEGACY.name, CLTV_OFFSET_V2.name]
+}
+
+/// Decide whether a candidate member's declared `supported_rulesets`
+/// covers `target`. Treats an empty list as "supports legacy only" —
+/// the only ruleset that existed for pre-Q2 `QuorumAddMember` records
+/// that lack a signed response blob.
+///
+/// Used by `quorum begin` to refuse rotating into a ruleset some
+/// pending member can't validate under, since that would silently
+/// break their ability to cosign for the rest of the quorum's life.
+pub fn member_supports(declared: &[String], target: &str) -> bool {
+    if declared.is_empty() {
+        return target == LEGACY.name;
+    }
+    declared.iter().any(|s| s == target)
+}
+
+#[cfg(test)]
+mod gating_tests {
+    use super::*;
+
+    #[test]
+    fn empty_list_means_legacy_only() {
+        assert!(member_supports(&[], "legacy"));
+        assert!(!member_supports(&[], "cltv-offset-v2"));
+        assert!(!member_supports(&[], "future-version"));
+    }
+
+    #[test]
+    fn explicit_list_is_authoritative() {
+        let v2 = vec!["cltv-offset-v2".to_string()];
+        assert!(member_supports(&v2, "cltv-offset-v2"));
+        // Even though "legacy" is the catch-all default, an explicit
+        // list that omits it is honored verbatim — the member is opting
+        // out of legacy.
+        assert!(!member_supports(&v2, "legacy"));
+    }
+
+    #[test]
+    fn list_with_multiple_entries() {
+        let both = vec!["legacy".to_string(), "cltv-offset-v2".to_string()];
+        assert!(member_supports(&both, "legacy"));
+        assert!(member_supports(&both, "cltv-offset-v2"));
+        assert!(!member_supports(&both, "unknown"));
+    }
+}
+
 // ============================================================================
 // Registry entries
 // ============================================================================

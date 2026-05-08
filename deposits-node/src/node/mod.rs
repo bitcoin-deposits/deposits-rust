@@ -204,6 +204,14 @@ pub struct ConsentResult {
     pub consent_signature: [u8; 64],
     /// Block height when the member's commitment expires
     pub membership_expires: u32,
+    /// Canonical TLV-encoded `QuorumMemberResponse` returned by the
+    /// member. Populated when the member supports the Q1 wire (current
+    /// node releases). `None` from legacy members.
+    pub member_response: Option<Vec<u8>>,
+    /// BIP-340 signature by the member over
+    /// `quorum_member_response_digest(member_response)`. Always `Some`
+    /// when `member_response` is `Some`.
+    pub member_signature: Option<[u8; 64]>,
 }
 
 /// Result of a deposit offer co-sign request from a quorum member

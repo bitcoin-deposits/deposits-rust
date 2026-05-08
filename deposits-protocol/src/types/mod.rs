@@ -12,11 +12,13 @@
 mod conformance;
 mod core;
 mod ledger_state;
+mod quorum_member_response;
 mod serde_helpers;
 mod updates;
 
 pub use self::core::*;
 pub use conformance::*;
 pub use ledger_state::*;
+pub use quorum_member_response::*;
 pub use serde_helpers::*;
 pub use updates::*;

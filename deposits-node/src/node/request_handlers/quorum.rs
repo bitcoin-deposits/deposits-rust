@@ -72,15 +72,6 @@ impl Node {
             }
         };
 
-        // Request consent from the member — they sign and record QuorumJoin
-        let consent_signature = match self.request_consent(&member_ledger_id, &ledger_id).await {
-            Ok(result) => result.consent_signature,
-            Err(e) => {
-                tracing::error!("Consent request failed: {}", e);
-                return (false, None, Some(format!("Member consent failed: {}", e)));
-            }
-        };
-
         // Extract fee limits the member is imposing (from their advertisement)
         let min_fee_bps = request
             .params
@@ -101,16 +92,50 @@ impl Node {
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
 
+        // Resolve the ruleset this quorum will be locked into. For an initial
+        // QuorumAdd before any QuorumBegin, our ledger's `active_ruleset_name`
+        // may still be the default — that's fine, the member just signs the
+        // value we propose, and a later QuorumBegin reaffirms it.
+        let chosen_ruleset = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            match ledgers.get(&ledger_id) {
+                Some(arc) => arc.read().unwrap().state.active_ruleset_name.clone(),
+                None => "legacy".to_string(),
+            }
+        };
+
+        let proposed_terms = crate::node::coordination::ConsentProposedTerms {
+            chosen_ruleset: &chosen_ruleset,
+            min_fee_bps,
+            min_fee_fixed,
+            max_fee_period,
+            membership_until,
+        };
+
+        // Request consent from the member — they sign and record QuorumJoin
+        let consent_result = match self
+            .request_consent(&member_ledger_id, &ledger_id, proposed_terms)
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!("Consent request failed: {}", e);
+                return (false, None, Some(format!("Member consent failed: {}", e)));
+            }
+        };
+
         match self
             .add_quorum_member(
                 &ledger_id,
                 quorum_member,
                 &member_ledger_id,
-                consent_signature,
+                consent_result.consent_signature,
                 min_fee_bps,
                 min_fee_fixed,
                 max_fee_period,
                 membership_until,
+                consent_result.member_response,
+                consent_result.member_signature,
             )
             .await
         {
@@ -570,6 +595,104 @@ impl Node {
             }
         };
 
+        // Q1: build + sign the canonical QuorumMemberResponse blob carrying
+        // chosen ruleset and member terms. Operator-proposed terms are echoed
+        // straight back; future Q2 work lets the member negotiate them.
+        let chosen_ruleset = request
+            .params
+            .get("chosen_ruleset")
+            .and_then(|v| v.as_str())
+            .unwrap_or("legacy")
+            .to_string();
+
+        // Refuse to attest to a ruleset this binary can't enforce. Without
+        // this gate a member could silently sign a blob promising semantics
+        // it has no implementation for, and the resulting QuorumBegin would
+        // be invalid against this peer at every later validation step.
+        if deposits_core::ruleset::lookup(&chosen_ruleset).is_none() {
+            return (
+                false,
+                None,
+                Some(format!(
+                    "Refusing consent: operator proposed ruleset '{}' which this node does not support (supports: {:?})",
+                    chosen_ruleset,
+                    deposits_core::ruleset::all_supported_names()
+                )),
+            );
+        }
+        let proposed_min_fee_bps = request
+            .params
+            .get("min_fee_bps")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u16);
+        let proposed_min_fee_fixed = request.params.get("min_fee_fixed").and_then(|v| v.as_u64());
+        let proposed_max_fee_period = request
+            .params
+            .get("max_fee_period")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let proposed_membership_until = request
+            .params
+            .get("membership_until")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        let our_pubkey = match PublicKey::from_str(&self.node_id_hex) {
+            Ok(pk) => pk,
+            Err(e) => return (false, None, Some(format!("our pubkey: {}", e))),
+        };
+        let response_blob = {
+            use deposits_core::types::{
+                QuorumMemberResponse, QUORUM_MEMBER_RESPONSE_VERSION,
+            };
+            use deposits_core::TlvEncode as _;
+            let supported_rulesets: Vec<String> =
+                deposits_core::ruleset::all_supported_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+            let r = QuorumMemberResponse {
+                response_version: QUORUM_MEMBER_RESPONSE_VERSION,
+                member_pubkey: our_pubkey,
+                operator_pubkey,
+                operator_ledger_id: operator_ledger_id.clone(),
+                chosen_ruleset,
+                supported_rulesets,
+                member_ledger_id: request.ledger_id.clone(),
+                min_fee_bps: proposed_min_fee_bps,
+                min_fee_fixed: proposed_min_fee_fixed,
+                max_fee_period: proposed_max_fee_period,
+                membership_until: proposed_membership_until,
+                dispute_response_blocks: None,
+                dispute_arm_blocks: None,
+                service_response_blocks: None,
+                max_transfer_timeout_blocks: None,
+                max_descriptor_bytes: None,
+                compensation_bps: None,
+                compensation_deposit_id: None,
+                compensation_frequency_blocks: None,
+            };
+            r.tlv_encode()
+        };
+        let response_signature = {
+            use deposits_core::types::quorum_member_response_digest;
+            use deposits_signer_api::{SigPurpose, SignContext};
+            let digest = quorum_member_response_digest(&response_blob);
+            match self.handler.signer.bip340_sign(
+                &SignContext::no_ledger(SigPurpose::Bip340Untagged),
+                &digest,
+            ) {
+                Ok(sig) => sig,
+                Err(e) => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("member response sign: {}", e)),
+                    )
+                }
+            }
+        };
+
         // Record QuorumJoin on our own ledger
         let our_ledger_id = request.ledger_id.clone();
         let current_block = self.wallet.get_block_height().unwrap_or(0);
@@ -595,10 +718,13 @@ impl Node {
                     &operator_pubkey_hex[..16.min(operator_pubkey_hex.len())],
                     &our_ledger_id[..16]
                 );
+                use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
                 let result = serde_json::json!({
                     "status": "CONSENT_GRANTED",
                     "consent_signature": hex::encode(signature),
                     "membership_expires": membership_expires,
+                    "member_response": BASE64.encode(&response_blob),
+                    "member_signature": hex::encode(response_signature),
                 });
                 (true, Some(result.to_string()), None)
             }

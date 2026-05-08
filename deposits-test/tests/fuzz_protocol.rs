@@ -191,6 +191,8 @@ impl ProtocolSim {
                         compensation_bps: None,
                         compensation_deposit_id: None,
                         compensation_frequency_blocks: None,
+                        member_response: None,
+                        member_signature: None,
                     })
                     .unwrap();
             }
@@ -212,6 +214,7 @@ impl ProtocolSim {
                         .map(deposits_core::messages::QuorumMemberRef::pubkey_only)
                         .collect(),
                     collateral_amount: 600_000,
+                    protocol_version: None,
                 })
                 .unwrap();
         }

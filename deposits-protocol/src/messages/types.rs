@@ -443,6 +443,18 @@ pub enum LedgerOperation {
         compensation_deposit_id: Option<DepositId>,
         /// Payout cadence in blocks. See `DEFAULT_COMPENSATION_FREQUENCY_BLOCKS`.
         compensation_frequency_blocks: Option<u32>,
+        /// Canonical TLV-encoded `QuorumMemberResponse` returned by the
+        /// member during consent. When present, validators decode it,
+        /// verify `member_signature` against
+        /// `quorum_member_response_digest(member_response)` under the
+        /// `member_pubkey` recorded inside the blob, and require every
+        /// loose field on this operation to match the blob exactly.
+        /// Absent on legacy events (pre-Q1 wire).
+        member_response: Option<Vec<u8>>,
+        /// BIP-340 signature by the member over
+        /// `quorum_member_response_digest(member_response)`. Always
+        /// `Some` whenever `member_response` is `Some`.
+        member_signature: Option<[u8; 64]>,
     },
     /// Remove a quorum member from the VoterSet
     QuorumRemoveMember {
@@ -1683,6 +1695,8 @@ impl BinaryCodec for LedgerOperation {
                 compensation_bps: None,
                 compensation_deposit_id: None,
                 compensation_frequency_blocks: None,
+                member_response: None,
+                member_signature: None,
             }),
             44 => Ok(Self::QuorumRemoveMember {
                 quorum_member: read_pubkey(r)?,

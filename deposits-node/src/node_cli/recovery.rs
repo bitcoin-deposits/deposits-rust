@@ -1739,6 +1739,8 @@ pub async fn recovery_rebuild_quorum_add(
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
+        member_response: None,
+        member_signature: None,
     };
 
     let message_bytes = operation.tlv_encode();
