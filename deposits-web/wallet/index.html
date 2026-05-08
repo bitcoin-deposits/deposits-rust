@@ -2948,6 +2948,7 @@ window.showWalletOpen = async function() {
   const singleGroup = groupEntries.length === 1;
   let html = '';
   let groupIdx = 0;
+  window._adGroups = window._adGroups || {};
 
   for (const groupAds of groupEntries) {
     const s = groupAds[0];
@@ -2958,14 +2959,12 @@ window.showWalletOpen = async function() {
     const tfRate = s.transfer_fee_rate_bps || 0;
     const totalReserves = groupAds.reduce((sum, a) => sum + (a.reserves_amount_msats || 0), 0);
 
-    // Pick the ledger with the most reserves (rough proxy for "newest /
-    // least full") — headroom would be the right metric but it's
-    // operator-synthesizable and no longer advertised.
+    // Sort by reserves only for the disclosure list ("All ledgers ▼"),
+    // most-stocked-first. The primary "Open" button picks at click time
+    // (random, blacklist-aware) — see openFromGroup / pickRandomFromGroup.
     const sorted = groupAds.sort((a, b) => (b.reserves_amount_msats || 0) - (a.reserves_amount_msats || 0));
-    const best = sorted[0];
-    const lid = best.ledger_id;
-    const relay = best.relay_url || '';
     const gid = 'open-group-' + groupIdx;
+    window._adGroups[gid] = groupAds;
 
     html += `<div style="padding:8px 0;${singleGroup ? '' : ' border-bottom:1px solid var(--border);'}">
       <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -2973,7 +2972,7 @@ window.showWalletOpen = async function() {
           <div style="font-size:12px;">${(annualBps/100).toFixed(2)}%/yr + ₿${Math.floor(minFee * 52560 / feePeriod).toLocaleString()}/yr, xfer ₿${tfFixed}+${(tfRate/100).toFixed(2)}%</div>
           <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ₿${Math.floor(totalReserves/1000).toLocaleString()} reserves</div>
         </div>
-        <button class="primary" style="margin-left:10px;" onclick="doWalletQuickOpen('${lid}','${esc(relay)}')">Open</button>
+        <button class="primary" style="margin-left:10px;" onclick="openFromGroup('${gid}')">Open</button>
       </div>`;
 
     if (groupAds.length > 1) {
@@ -2995,6 +2994,44 @@ window.showWalletOpen = async function() {
     groupIdx++;
   }
   document.getElementById('wallet-open-list').innerHTML = html;
+};
+
+// In-memory blacklist of ledgers whose deposit_open recently failed.
+// `ledger_id → expiresAt_ms`. Cleared on page reload — short-lived so a
+// transient operator outage doesn't permanently steer us away.
+const _openBlacklist = {};
+const OPEN_BLACKLIST_MS = 60 * 60 * 1000;
+
+function isLedgerBlacklisted(lid) {
+  const t = _openBlacklist[lid];
+  if (!t) return false;
+  if (t > Date.now()) return true;
+  delete _openBlacklist[lid];
+  return false;
+}
+
+function blacklistLedger(lid) {
+  _openBlacklist[lid] = Date.now() + OPEN_BLACKLIST_MS;
+}
+
+// Pick a random ad from a group, skipping any ledger currently blacklisted.
+// Falls back to a random pick across the full group if every entry is
+// blacklisted (better to retry than silently fail; the user can always
+// pick manually from the disclosure).
+function pickRandomFromGroup(groupAds) {
+  const usable = groupAds.filter(a => !isLedgerBlacklisted(a.ledger_id));
+  const pool = usable.length > 0 ? usable : groupAds;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// Click handler for the per-fee-group primary "Open" button. Looks up the
+// group stashed at render time and picks a fresh random ledger each click,
+// so a retry after a failed open rolls onto a different ledger.
+window.openFromGroup = function(gid) {
+  const groupAds = (window._adGroups || {})[gid];
+  if (!groupAds || groupAds.length === 0) { log('No ledgers available', 'error'); return; }
+  const ad = pickRandomFromGroup(groupAds);
+  doWalletQuickOpen(ad.ledger_id, ad.relay_url || '');
 };
 
 window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
@@ -3047,11 +3084,13 @@ window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
     if (!resp.success && !(resp.error || '').includes('already')) {
       const code = resp.result?.code;
       if (code === 'attestation_required') {
+        // Don't blacklist — modal lets the user complete the verify flow.
         await showVerificationFlow(ledgerId, operatorName, alias, pubkeyHex, keyIndex,
           resp.result?.verifier_pubkey, resp.result?.allowed_domains || [], feeFixed, feeBps, feeFreq);
         return;
       }
       if (code === 'not_authorized' || code === 'denied') {
+        blacklistLedger(ledgerId);
         showAuthorizationRequired(ledgerId, operatorName, code);
         return;
       }
@@ -3065,6 +3104,7 @@ window.doWalletQuickOpen = async function(ledgerId, relayUrl) {
     resubscribeUpdates();
     log(`Deposit '${alias}' created.`, 'success');
   } catch (e) {
+    blacklistLedger(ledgerId);
     log(`Open failed: ${e.message}`, 'error');
   }
 };
@@ -3889,14 +3929,17 @@ window.toggleNewDeposit = async function() {
   const singleGroup = groupEntries.length === 1;
   let html = '';
   let gIdx = 0;
+  window._adGroups = window._adGroups || {};
   for (const groupAds of groupEntries) {
     const s = groupAds[0];
     const annualBps = s.annual_fee_bps||0, minFee = s.min_fee_sats||0, feePeriod = s.fee_period_blocks||2016;
     const tfFixed = s.transfer_fee_fixed_msats||0, tfRate = s.transfer_fee_rate_bps||0;
     const totalReserves = groupAds.reduce((sum, a) => sum + (a.reserves_amount_msats||0), 0);
+    // Sort by reserves only for the disclosure list — primary picks
+    // at click time (random, blacklist-aware) via openFromGroup.
     const sorted = groupAds.sort((a, b) => (b.reserves_amount_msats||0) - (a.reserves_amount_msats||0));
-    const best = sorted[0];
     const gid = 'newdep-group-' + gIdx;
+    window._adGroups[gid] = groupAds;
 
     html += `<div style="padding:8px 0;${singleGroup ? '' : ' border-bottom:1px solid var(--border);'}">
       <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -3904,7 +3947,7 @@ window.toggleNewDeposit = async function() {
           <div style="font-size:12px;">${(annualBps/100).toFixed(2)}%/yr + ₿${Math.floor(minFee*52560/feePeriod).toLocaleString()}/yr, xfer ₿${tfFixed}+${(tfRate/100).toFixed(2)}%</div>
           <div style="color:var(--muted); font-size:11px;">${groupAds.length} ledger(s), ₿${Math.floor(totalReserves/1000).toLocaleString()} reserves</div>
         </div>
-        <button class="primary" style="margin-left:10px;" onclick="doWalletQuickOpen('${best.ledger_id}','${esc(best.relay_url||'')}')">Open</button>
+        <button class="primary" style="margin-left:10px;" onclick="openFromGroup('${gid}')">Open</button>
       </div>`;
     if (groupAds.length > 1) {
       html += `<div style="margin-top:4px;">
