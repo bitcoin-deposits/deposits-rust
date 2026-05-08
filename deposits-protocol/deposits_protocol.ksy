@@ -12,6 +12,13 @@ doc: |
   All current field types are even. Odd types are reserved for future
   forward-compatible extensions that unknown implementations may safely ignore.
 
+  Each TLV layer (outer SignedLedgerUpdate, inner LedgerOperation, nested
+  FeeStructure / TransferFeeSchedule) has its own typed record (`outer_record`,
+  `op_record`, `fee_record`, `transfer_fee_record`) that switch-decodes `value`
+  bytes into the protocol type for that layer. The legacy untyped `tlv_record`
+  is retained for downstream consumers that want to walk records with raw
+  `value` bytes.
+
 types:
   varint:
     doc: BigEndian varint (1/3/5/9 byte encoding, Lightning-compatible)
@@ -35,8 +42,12 @@ types:
           first_byte == 0xfd ? value_2 :
           first_byte
 
+  # ============================================================
+  # Untyped TLV record (back-compat). Prefer the layer-specific
+  # typed records below for new code paths.
+  # ============================================================
   tlv_record:
-    doc: A single TLV record (type, length, value)
+    doc: A single TLV record (type, length, raw value bytes).
     seq:
       - id: type
         type: varint
@@ -46,12 +57,125 @@ types:
         size: length.value
 
   tlv_stream:
-    doc: A sequence of TLV records, ordered by type
+    doc: A sequence of TLV records, ordered by type.
     seq:
       - id: records
         type: tlv_record
         repeat: eos
 
+  # ============================================================
+  # Helper / nested types — referenced by the typed records.
+  # ============================================================
+  pubkey:
+    doc: 33-byte compressed secp256k1 public key.
+    seq:
+      - id: data
+        size: 33
+
+  hash32:
+    doc: 32-byte hash (SHA-256, txid, block hash, ledger id, …).
+    seq:
+      - id: data
+        size: 32
+
+  hash20:
+    doc: 20-byte hash (HASH160 commitment).
+    seq:
+      - id: data
+        size: 20
+
+  sig64:
+    doc: 64-byte BIP-340 Schnorr signature.
+    seq:
+      - id: data
+        size: 64
+
+  deposit_id_bytes:
+    doc: 16-byte deposit identifier (fingerprint of the descriptor).
+    seq:
+      - id: data
+        size: 16
+
+  pubkey_concat:
+    doc: |
+      Concatenated 33-byte compressed secp256k1 pubkeys (e.g. the
+      `quorum_members` field on QuorumBegin). Length is the field's
+      TLV length (a multiple of 33).
+    seq:
+      - id: members
+        type: pubkey
+        repeat: eos
+
+  cosignature_list:
+    doc: |
+      List of cosignature entries. Each entry encoded as
+      u16_be(129) || pubkey(33) || sig(64) || hash(32). Entries are
+      sorted by pubkey ascending. After QuorumBegin, floor(n/2)+1
+      entries are required to validate.
+    seq:
+      - id: entries
+        type: cosignature_entry
+        repeat: eos
+
+  cosignature_entry:
+    seq:
+      - id: entry_len
+        type: u2
+        doc: Always 129 (= 33 + 64 + 32). On the wire for forward compat.
+      - id: pubkey
+        size: 33
+      - id: signature
+        size: 64
+      - id: member_ledger_hash
+        size: 32
+
+  descriptor_witness:
+    doc: |
+      Witness encoding (TLV types 204 and 224).
+      Layout: varint(count) || (varint(len) || element)*
+      `element` is a raw script/sig push (max 520 bytes per Bitcoin's
+      MAX_SCRIPT_ELEMENT_SIZE; max 1000 elements per stack).
+    seq:
+      - id: count
+        type: varint
+      - id: stack
+        type: descriptor_witness_element
+        repeat: expr
+        repeat-expr: count.value
+
+  descriptor_witness_element:
+    seq:
+      - id: len
+        type: varint
+      - id: data
+        size: len.value
+
+  quorum_member_ledger_id_list:
+    doc: |
+      Parallel array to QuorumBegin.quorum_members (TLV type 276).
+      Each entry: u8 length || ledger_id_bytes (ASCII hex). Entries
+      align positionally with the pubkey list. Optional — older
+      QuorumBegin events omit it; decoders MUST treat the per-member
+      ledger_id as empty in that case and may fall back to deriving
+      the mapping from prior QuorumAddMember operations on the same
+      ledger.
+    seq:
+      - id: entries
+        type: quorum_member_ledger_id_entry
+        repeat: eos
+
+  quorum_member_ledger_id_entry:
+    seq:
+      - id: len
+        type: u1
+      - id: ledger_id
+        size: len
+        type: str
+        encoding: ASCII
+
+  # ============================================================
+  # Outer SignedLedgerUpdate
+  # ============================================================
   signed_ledger_update:
     doc: |
       A signed ledger update, broadcast as Kind 9100 Nostr events.
@@ -89,46 +213,37 @@ types:
       Each quorum member signs independently with their own member_ledger_hash.
     seq:
       - id: records
-        type: tlv_record
+        type: outer_record
         repeat: eos
-    instances:
-      operator_id:
-        doc: "Operator's 33-byte compressed secp256k1 pubkey (type 0)"
-        value: "records[0].value"
-      ledger_id:
-        doc: "32-byte ledger identifier hash (type 2)"
-        value: "records[1].value"
-      sequence_number:
-        doc: "Monotonically increasing sequence number (type 4, u64)"
-        value: "records[2].value"
-      previous_hash:
-        doc: "32-byte chain hash of the previous update (type 6)"
-        value: "records[3].value"
-      message:
-        doc: "Inner LedgerOperation TLV bytes (type 8)"
-        value: "records[4].value"
-      block_height:
-        doc: "Block height when update was created (type 10, u32, optional)"
-        value: "records[5].value"
-      block_hash:
-        doc: "32-byte block hash at time of creation (type 12, optional)"
-        value: "records[6].value"
-      cosigner_pubkey:
-        doc: "DEPRECATED: 33-byte pubkey of single co-signer (type 14). Use cosignatures (type 22) for majority cosig."
-        value: "records[7].value"
-      member_ledger_hash:
-        doc: "DEPRECATED: 32-byte tip hash of single co-signer's ledger (type 16). Use cosignatures (type 22)."
-        value: "records[8].value"
-      cosign_signature:
-        doc: "DEPRECATED: 64-byte single co-signature (type 18). Use cosignatures (type 22)."
-        value: "records[9].value"
-      operator_signature:
-        doc: "64-byte Schnorr signature from operator (type 20)"
-        value: "records[10].value"
-      cosignatures:
-        doc: "Majority cosignature list (type 22). N entries: u16_be(129) || pubkey(33) || sig(64) || hash(32), sorted by pubkey."
-        value: "records[11].value"
 
+  outer_record:
+    doc: A typed TLV record inside signed_ledger_update.
+    seq:
+      - id: type
+        type: varint
+      - id: length
+        type: varint
+      - id: value
+        size: length.value
+        type:
+          switch-on: type.value
+          cases:
+            0:  pubkey            # operator_id
+            2:  hash32            # ledger_id
+            4:  u8be              # sequence_number
+            6:  hash32            # previous_hash
+            8:  ledger_operation  # message (nested)
+            10: u4be              # block_height
+            12: hash32            # block_hash
+            14: pubkey            # cosigner_pubkey (deprecated)
+            16: hash32            # member_ledger_hash (deprecated)
+            18: sig64             # cosign_signature (deprecated)
+            20: sig64             # operator_signature
+            22: cosignature_list
+
+  # ============================================================
+  # Inner LedgerOperation
+  # ============================================================
   ledger_operation:
     doc: |
       A ledger operation -- the inner message of a SignedLedgerUpdate.
@@ -164,16 +279,115 @@ types:
         80 = DeliveryEmbed
     seq:
       - id: records
-        type: tlv_record
+        type: op_record
         repeat: eos
-    instances:
-      discriminant:
-        doc: "Operation type (type 0, 1 byte)"
-        value: "records[0].value[0]"
+
+  op_record:
+    doc: |
+      A typed TLV record inside ledger_operation. The switch-decode
+      below mirrors the field-type catalog comment block in this file
+      (kept for backwards compatibility with `gen-tlv-catalog.sh` and
+      human reference). Unknown / odd field types fall through to raw
+      bytes — implementations MUST ignore them per forward-compat
+      convention.
+    seq:
+      - id: type
+        type: varint
+      - id: length
+        type: varint
+      - id: value
+        size: length.value
+        type:
+          switch-on: type.value
+          cases:
+            0:   u1                            # discriminant
+            2:   u8be                          # amount (msats)
+            6:   pubkey_concat                 # quorum_members
+            12:  fee_structure                 # fees (nested)
+            14:  hash32                        # payment_hash
+            16:  str                           # invoice (BOLT11)
+            18:  sig64                         # cosigner_sig (DepositOpen)
+            20:  fee_structure                 # new_fees (nested)
+            26:  str                           # invoice_id
+            28:  u8be                          # sequence_number
+            30:  hash32                        # payment_id
+            34:  hash32                        # preimage
+            36:  u4be                          # block_height
+            42:  hash32                        # ledger_hash
+            44:  pubkey                        # quorum_member
+            46:  sig64                         # quorum_member_sig
+            48:  sig64                         # operator_sig
+            56:  pubkey                        # operator_id
+            58:  str                           # reserves_id
+            62:  u8be                          # reserves_amount (msats)
+            66:  hash32                        # txid
+            68:  u4be                          # vout
+            70:  str                           # destination_address
+            72:  hash32                        # withdrawal_id
+            74:  str                           # funding_address
+            82:  u4be                          # membership_expires
+            84:  hash32                        # new_outpoint_txid
+            86:  u4be                          # quorum_expiry
+            88:  u8be                          # collateral_amount_msats
+            90:  hash32                        # spending_txid
+            92:  u4be                          # new_outpoint_vout
+            96:  u4be                          # genesis_block
+            100: str                           # reason
+            102: u8be                          # last_valid_sequence
+            108: pubkey                        # new_custodian
+            110: hash32                        # claim_txid
+            112: hash20                        # commitment_hash (HASH160)
+            114: str                           # member_ledger_id
+            118: u4be                          # armed_block
+            120: str                           # new_reserves_address
+            122: str                           # target_reserves
+            200: deposit_id_bytes              # deposit_id
+            202: str                           # descriptor (miniscript)
+            204: descriptor_witness            # witness (nested)
+            208: str                           # new_descriptor
+            210: hash32                        # nonce
+            212: deposit_id_bytes              # source_deposit_id
+            214: deposit_id_bytes              # destination_deposit_id
+            216: str                           # completion_script (miniscript)
+            218: u4be                          # timeout_height
+            220: hash32                        # transfer_id
+            222: hash32                        # block_hash (TransferFail)
+            224: descriptor_witness            # script_witness (nested)
+            226: transfer_fee_schedule         # transfer_fees (nested)
+            228: u1                            # fail_reason
+            232: u1                            # receive_requires_sig
+            234: u2be                          # min_fee_bps
+            236: u8be                          # min_fee_fixed
+            238: u4be                          # max_fee_period
+            242: u4be                          # membership_until
+            244: u4be                          # fee_change_after_blocks
+            246: u4be                          # fee_change_notice_blocks
+            248: u2be                          # fee_change_limit_bps
+            250: u4be                          # effective_block
+            252: u4be                          # dispute_response_blocks
+            254: u4be                          # dispute_arm_blocks
+            256: u4be                          # service_response_blocks
+            258: u4be                          # max_transfer_timeout_blocks
+            262: u4be                          # max_descriptor_bytes
+            264: u2be                          # compensation_bps
+            266: deposit_id_bytes              # compensation_deposit_id
+            268: u4be                          # compensation_frequency_blocks
+            270: hash32                        # request_hash
+            272: hash32                        # target_ledger_id
+            274: pubkey                        # target_operator
+            276: quorum_member_ledger_id_list  # quorum_member_ledger_ids
+            280: hash32                        # replacement_collateral_txid
+            282: u4be                          # replacement_collateral_vout
+            284: u8be                          # replacement_collateral_amount
 
   # ================================================================
   # TLV field type reference for LedgerOperation
   # ================================================================
+  #
+  # Mirrored by the `op_record.value` switch-on above; this comment
+  # block remains the human-facing source of truth and is consumed by
+  # `deposits-tools/bin/gen-tlv-catalog.sh` to populate the wallet's
+  # `tlv-catalog.js`.
   #
   # Common:
   #   0   = discriminant (u8)
@@ -302,6 +516,9 @@ types:
   # Note: 106 and 116 (entropy_block_hash, entropy_block_height) were
   # used by the pre-lottery DisputeAcquire shape and are now retired.
 
+  # ============================================================
+  # Nested fee structures
+  # ============================================================
   fee_structure:
     doc: |
       Nested TLV for fee structure (annualized).
@@ -311,8 +528,23 @@ types:
         4 = frequency_blocks (u32, collection period)
     seq:
       - id: records
-        type: tlv_record
+        type: fee_record
         repeat: eos
+
+  fee_record:
+    seq:
+      - id: type
+        type: varint
+      - id: length
+        type: varint
+      - id: value
+        size: length.value
+        type:
+          switch-on: type.value
+          cases:
+            0: u8be   # annualized_msats
+            2: u2be   # annualized_bps
+            4: u4be   # frequency_blocks
 
   transfer_fee_schedule:
     doc: |
@@ -322,8 +554,22 @@ types:
         2 = rate_bps (u16)
     seq:
       - id: records
-        type: tlv_record
+        type: transfer_fee_record
         repeat: eos
+
+  transfer_fee_record:
+    seq:
+      - id: type
+        type: varint
+      - id: length
+        type: varint
+      - id: value
+        size: length.value
+        type:
+          switch-on: type.value
+          cases:
+            0: u8be   # fixed_msats
+            2: u2be   # rate_bps
 
 seq:
   - id: body

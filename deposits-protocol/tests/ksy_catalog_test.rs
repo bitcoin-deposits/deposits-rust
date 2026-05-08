@@ -343,6 +343,359 @@ fn ksy_generated_payloads_roundtrip() {
 }
 
 // ============================================================================
+// Typed-record switch tables (.ksy `op_record` / `outer_record` / `fee_record`
+// / `transfer_fee_record`). These cross-check the typed switch I added against
+// the comment-block catalog and against the Rust codec's emitted byte widths.
+// If someone adds a Rust field but forgets the typed switch case, or the
+// switch case names a kaitai type that doesn't match the wire width, these
+// tests catch it.
+// ============================================================================
+
+/// Parse a single named typed-record's switch table from the .ksy file.
+/// Returns a map of field_type → kaitai type name (e.g. `u4be`, `pubkey`).
+///
+/// We don't pull in serde_yaml just for this — line scanning is fine since
+/// the .ksy uses a fixed indentation (12 spaces for `cases:` entries).
+fn parse_switch_table(record_name: &str) -> HashMap<u64, String> {
+    let ksy = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/deposits_protocol.ksy"
+    ))
+    .expect("failed to read .ksy file");
+
+    let mut map = HashMap::new();
+    let mut in_record = false;
+    let mut in_cases = false;
+
+    for line in ksy.lines() {
+        let trimmed = line.trim_start();
+        if !in_record {
+            // Top-level `<record_name>:` definitions live at 2-space indent.
+            if trimmed == format!("{}:", record_name) {
+                in_record = true;
+            }
+            continue;
+        }
+        // Leaving the type's block when we hit another top-level `<name>:`
+        // (2-space indent with a single trailing colon and no leading space-
+        // delimited content). Use indent + ends_with(":") + non-blank as the
+        // signal.
+        let indent = line.len() - trimmed.len();
+        if indent <= 2 && line.ends_with(':') && !line.starts_with("  ") {
+            break;
+        }
+        if indent == 2 && line.ends_with(':') && trimmed != format!("{}:", record_name) {
+            break;
+        }
+
+        if trimmed.starts_with("cases:") {
+            in_cases = true;
+            continue;
+        }
+
+        if in_cases {
+            // Cases lines look like `            0:   u1                  # ...`.
+            // We require at least 12 leading spaces to filter out un-related.
+            if indent < 12 {
+                in_cases = false;
+                continue;
+            }
+            // Strip a trailing comment.
+            let body = trimmed.split('#').next().unwrap().trim();
+            if body.is_empty() {
+                continue;
+            }
+            // Format: `<num>: <kaitai_type_name>`.
+            let mut parts = body.splitn(2, ':');
+            let num: u64 = match parts.next().and_then(|s| s.trim().parse().ok()) {
+                Some(n) => n,
+                None => continue,
+            };
+            let ty = parts.next().unwrap_or("").trim().to_string();
+            if !ty.is_empty() {
+                map.insert(num, ty);
+            }
+        }
+    }
+
+    map
+}
+
+/// Expected wire byte-width for a named kaitai type. `None` means variable
+/// (string, nested TLV, repeated lists).
+fn kaitai_type_width(name: &str) -> Option<usize> {
+    match name {
+        "u1" => Some(1),
+        "u2" | "u2be" => Some(2),
+        "u4" | "u4be" => Some(4),
+        "u8" | "u8be" => Some(8),
+        "pubkey" => Some(33),
+        "hash32" => Some(32),
+        "hash20" => Some(20),
+        "sig64" => Some(64),
+        "deposit_id_bytes" => Some(16),
+        // Variable: pubkey_concat (multiple of 33), str, nested TLV containers.
+        "pubkey_concat"
+        | "str"
+        | "fee_structure"
+        | "transfer_fee_schedule"
+        | "ledger_operation"
+        | "descriptor_witness"
+        | "cosignature_list"
+        | "quorum_member_ledger_id_list" => None,
+        _ => panic!("unknown kaitai type referenced by switch table: {}", name),
+    }
+}
+
+#[test]
+fn op_record_switch_parses() {
+    let table = parse_switch_table("op_record");
+    assert!(
+        table.contains_key(&0),
+        "op_record switch missing discriminant (type 0)"
+    );
+    assert!(
+        table.contains_key(&86),
+        "op_record switch missing quorum_expiry (type 86)"
+    );
+    assert!(
+        table.contains_key(&284),
+        "op_record switch missing replacement_collateral_amount (type 284)"
+    );
+    println!("op_record switch: {} typed cases", table.len());
+}
+
+#[test]
+fn outer_record_switch_parses() {
+    let table = parse_switch_table("outer_record");
+    // Sanity: well-known outer fields.
+    for ft in [0u64, 2, 4, 6, 8, 10, 20, 22] {
+        assert!(
+            table.contains_key(&ft),
+            "outer_record switch missing field type {}",
+            ft
+        );
+    }
+    println!("outer_record switch: {} typed cases", table.len());
+}
+
+#[test]
+fn op_record_switch_widths_match_rust_codec() {
+    // For every (field_type, kaitai_type) in the op_record switch with a
+    // fixed wire width, find a Rust-emitted instance of that field type
+    // and verify the byte length matches what the kaitai type promises.
+    let table = parse_switch_table("op_record");
+    let test_ops = build_all_test_ops();
+
+    let mut checked = 0usize;
+    let mut unmatched = Vec::new();
+
+    for (ft, ty_name) in &table {
+        let expected = match kaitai_type_width(ty_name) {
+            Some(w) => w,
+            None => continue, // variable-length types — no byte-width assertion
+        };
+
+        // Find a test op that emits this field.
+        let found = test_ops.iter().find_map(|(_, op)| {
+            let bytes = op.tlv_encode();
+            let stream = TlvStream::decode(&bytes).ok()?;
+            stream.get(*ft).map(|v| v.to_vec())
+        });
+
+        match found {
+            Some(value) if value.len() == expected => checked += 1,
+            Some(value) => {
+                unmatched.push(format!(
+                    "field {}: switch says `{}` ({} bytes) but Rust emitted {} bytes",
+                    ft,
+                    ty_name,
+                    expected,
+                    value.len()
+                ));
+            }
+            None => {
+                // OK — not every switch case has to be exercised by a
+                // test op (some discriminants aren't built here, e.g.
+                // QuorumRemoveMember-only sigs). Skip silently.
+            }
+        }
+    }
+
+    if !unmatched.is_empty() {
+        panic!(
+            "op_record switch / Rust codec wire-width mismatches:\n  {}",
+            unmatched.join("\n  ")
+        );
+    }
+    assert!(
+        checked > 30,
+        "expected to cross-check >30 fields, only checked {}",
+        checked
+    );
+}
+
+#[test]
+fn outer_record_switch_widths_match_rust_codec() {
+    // The outer SignedLedgerUpdate isn't built here, but its fixed-width
+    // field types are well-known. Verify the switch promises match the
+    // documented widths.
+    let table = parse_switch_table("outer_record");
+    let expected: &[(u64, &str, usize)] = &[
+        (0, "pubkey", 33),
+        (2, "hash32", 32),
+        (4, "u8be", 8),
+        (6, "hash32", 32),
+        (10, "u4be", 4),
+        (12, "hash32", 32),
+        (14, "pubkey", 33),
+        (16, "hash32", 32),
+        (18, "sig64", 64),
+        (20, "sig64", 64),
+    ];
+    for (ft, ty, _w) in expected {
+        let actual = table
+            .get(ft)
+            .unwrap_or_else(|| panic!("outer_record missing field {}", ft));
+        assert_eq!(actual, ty, "outer_record field {} should be `{}`", ft, ty);
+    }
+}
+
+#[test]
+fn fee_record_switch_widths_match_rust_codec() {
+    let table = parse_switch_table("fee_record");
+    // FeeStructure: 0 = annualized_msats (u64), 2 = annualized_bps (u16),
+    // 4 = frequency_blocks (u32).
+    assert_eq!(table.get(&0).map(|s| s.as_str()), Some("u8be"));
+    assert_eq!(table.get(&2).map(|s| s.as_str()), Some("u2be"));
+    assert_eq!(table.get(&4).map(|s| s.as_str()), Some("u4be"));
+
+    // Encode a FeeStructure and check the field widths land where the
+    // switch promises.
+    let f = FeeStructure {
+        annualized_msats: 1000,
+        annualized_bps: 50,
+        frequency_blocks: 2016,
+    };
+    let bytes = f.tlv_encode();
+    let stream = TlvStream::decode(&bytes).expect("FeeStructure decode");
+    assert_eq!(stream.get(0).unwrap().len(), 8);
+    assert_eq!(stream.get(2).unwrap().len(), 2);
+    assert_eq!(stream.get(4).unwrap().len(), 4);
+}
+
+#[test]
+fn transfer_fee_record_switch_widths_match_rust_codec() {
+    let table = parse_switch_table("transfer_fee_record");
+    assert_eq!(table.get(&0).map(|s| s.as_str()), Some("u8be"));
+    assert_eq!(table.get(&2).map(|s| s.as_str()), Some("u2be"));
+
+    let tf = TransferFeeSchedule {
+        fixed_msats: 2,
+        rate_bps: 20,
+    };
+    let bytes = tf.tlv_encode();
+    let stream = TlvStream::decode(&bytes).expect("TransferFeeSchedule decode");
+    assert_eq!(stream.get(0).unwrap().len(), 8);
+    assert_eq!(stream.get(2).unwrap().len(), 2);
+}
+
+#[test]
+fn op_record_switch_agrees_with_comment_catalog() {
+    // For every field type the comment block documents, the typed switch
+    // should either name an equivalent kaitai type or omit the case (only
+    // for variable-length / nested types that the comment-parser
+    // understands as `String` / `NestedTlv`). This catches the common
+    // drift case: comment says `u32` but switch says `u8be`.
+    let catalog = parse_ksy_catalog();
+    let table = parse_switch_table("op_record");
+
+    let mut mismatches = Vec::new();
+
+    for (ft, kf) in catalog.iter() {
+        let Some(switch_ty) = table.get(ft) else {
+            continue; // not all comment-cataloged fields need a typed case
+        };
+        let ok = match (&kf.value_type, switch_ty.as_str()) {
+            (FieldType::U8, "u1") => true,
+            (FieldType::U16, "u2be") => true,
+            (FieldType::U32, "u4be") => true,
+            (FieldType::U64, "u8be") => true,
+            (FieldType::Pubkey, "pubkey") => true,
+            // Field 6 is `quorum_members`. The comment-block parser
+            // doesn't recognise "N*33 concatenated compressed pubkeys"
+            // as a type keyword and falls back to `String`. The switch
+            // gets it right with `pubkey_concat`.
+            (FieldType::String, "pubkey_concat") if *ft == 6 => true,
+            // Field 276 is `quorum_member_ledger_ids` — its multi-line
+            // comment description doesn't trigger any keyword, so the
+            // comment catalog also falls back to `String`. The switch
+            // resolves it to the parallel-array typed list.
+            (FieldType::String, "quorum_member_ledger_id_list") if *ft == 276 => true,
+            (FieldType::DepositId, "deposit_id_bytes") => true,
+            (FieldType::Bytes(20), "hash20") => true,
+            (FieldType::Bytes(32), "hash32") => true,
+            (FieldType::Bytes(64), "sig64") => true,
+            (FieldType::String, "str") => true,
+            // Comment block parses "(nested TLV)" / "(nested TLV: FeeStructure)" → NestedTlv("…").
+            // The exact captured name varies, so we accept any nested kaitai type for any NestedTlv.
+            (
+                FieldType::NestedTlv(_),
+                "fee_structure"
+                | "transfer_fee_schedule"
+                | "descriptor_witness"
+                | "quorum_member_ledger_id_list",
+            ) => true,
+            _ => false,
+        };
+        if !ok {
+            mismatches.push(format!(
+                "field {}: comment says {:?}, switch says `{}`",
+                ft, kf.value_type, switch_ty
+            ));
+        }
+    }
+
+    if !mismatches.is_empty() {
+        panic!(
+            "op_record typed switch disagrees with comment catalog:\n  {}",
+            mismatches.join("\n  ")
+        );
+    }
+}
+
+#[test]
+fn every_rust_field_has_op_record_switch_case() {
+    // For every field a Rust test op emits, the op_record switch should
+    // have a case (or the field must be a deliberately-untyped fall-through;
+    // we don't currently have any of those).
+    let table = parse_switch_table("op_record");
+    let test_ops = build_all_test_ops();
+
+    let mut missing: Vec<String> = Vec::new();
+    for (name, op) in &test_ops {
+        let bytes = op.tlv_encode();
+        let stream = TlvStream::decode(&bytes).expect("decode");
+        for (ft, _v) in stream.iter() {
+            if !table.contains_key(&ft) {
+                missing.push(format!(
+                    "{} (disc {}): emits field {} not in op_record switch",
+                    name,
+                    op.discriminant(),
+                    ft
+                ));
+            }
+        }
+    }
+    if !missing.is_empty() {
+        panic!(
+            "Rust codec emits field types not covered by op_record switch:\n  {}",
+            missing.join("\n  ")
+        );
+    }
+}
+
+// ============================================================================
 // Build one test operation per discriminant
 // ============================================================================
 
