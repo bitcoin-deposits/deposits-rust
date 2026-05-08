@@ -474,7 +474,9 @@ function escapeHtml(s) {
 function quorumBadge(state) {
   const cls = state === 'Active' ? 'active'
     : state === 'PreQuorum' ? 'pre'
-    : state === 'Expired' ? 'expired' : '';
+    : state === 'Expired' ? 'expired'
+    : state === 'Unknown' ? 'pre'  // neutral/muted — no chain tip to decide
+    : '';
   return `<span class="badge ${cls}">${escapeHtml(state || 'unknown')}</span>`;
 }
 
@@ -516,14 +518,20 @@ function renderOverview(ad, cosignerLedgers, quorumExpiry, chainTip) {
     return;
   }
 
-  // Prefer the chain-derived quorum state when we have both an
-  // expiry and a tip — the operator's self-reported `quorum_state`
-  // can be stale. Falls back to the ad's value otherwise.
-  let derivedState = ad.quorum_state;
-  if (quorumExpiry && chainTip) {
-    derivedState = chainTip >= quorumExpiry ? 'Expired' : 'Active';
-  } else if (!quorumExpiry) {
+  // Quorum state derived strictly from messages we trust independently
+  // of the operator's advertisement: the cosigned QuorumBegin (op 12)
+  // gives `quorum_expiry`; the cross-operator Kind 39101 oracle stream
+  // gives `chainTip`. Never fall back to `ad.quorum_state` — it's
+  // operator-self-reported and the entire point of this card is to
+  // catch operators whose actual quorum has lapsed but whose ad still
+  // says Active.
+  let derivedState;
+  if (!quorumExpiry) {
     derivedState = 'PreQuorum';
+  } else if (chainTip) {
+    derivedState = chainTip >= quorumExpiry ? 'Expired' : 'Active';
+  } else {
+    derivedState = 'Unknown';
   }
   document.getElementById('hero-meta').innerHTML = `
     ${quorumBadge(derivedState)}
@@ -1046,13 +1054,15 @@ async function main() {
     }
   }
 
-  // Chain tip from the most recent BTC/USD price oracle event.
+  // Chain tip = highest `block_height` across recent BTC/USD oracle
+  // events (DEP-04 §Price Oracle). Older publishers omit it; sampling
+  // multiple events keeps a single bad publisher from dragging the
+  // tip backwards and tolerates a fresh-but-stripped publisher.
   let chainTip = 0;
-  if (priceEvents.length) {
-    priceEvents.sort((a, b) => b.created_at - a.created_at);
+  for (const ev of priceEvents) {
     try {
-      const data = JSON.parse(priceEvents[0].content);
-      if (Number.isFinite(data.block_height) && data.block_height > 0) {
+      const data = JSON.parse(ev.content);
+      if (Number.isFinite(data.block_height) && data.block_height > chainTip) {
         chainTip = data.block_height;
       }
     } catch {}
