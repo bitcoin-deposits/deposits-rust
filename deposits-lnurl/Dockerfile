@@ -18,11 +18,10 @@ COPY deposits-nostr ./deposits-nostr
 # deposits-protocol is a real path-dep of deposits-nostr.
 COPY deposits-protocol ./deposits-protocol
 
-# Per-ledger explorer page baked into the binary at compile time via
-# `include_str!`. Lives outside the crate so the wallet can share the
-# same vendor / TLV-catalog tree later, but the build needs it present
-# at the path the source references.
-COPY deposits-web ./deposits-web
+# NOTE: deposits-web is NOT pulled into the builder. The binary loads
+# its HTML/JS assets at runtime from $DEPOSITS_WEB_DIR (set in the
+# final stage), which means HTML edits do not invalidate this build
+# layer.
 
 # Stub out other workspace members so the workspace manifest resolves
 # without pulling their source trees.
@@ -48,6 +47,13 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/deposits-lnurl /usr/local/bin/
+
+# Static UI assets served alongside the LNURL endpoints. Loaded once
+# at startup; serving paths match the on-disk layout under wallet/
+# and explorer/. Editing HTML/JS only invalidates this layer (and any
+# downstream), not the cargo build.
+COPY deposits-web /usr/share/deposits-web
+ENV DEPOSITS_WEB_DIR=/usr/share/deposits-web
 
 EXPOSE 3000
 

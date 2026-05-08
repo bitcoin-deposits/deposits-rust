@@ -286,15 +286,15 @@ async fn root_index(
 ) -> Html<&'static str> {
     let host_no_port = host.split(':').next().unwrap_or(&host);
     if host_no_port.starts_with("wallet.") {
-        return Html(WALLET_HTML);
+        return Html(assets().wallet_index);
     }
     if host_no_port.starts_with("explorer.") {
-        return Html(EXPLORER_OVERVIEW_HTML);
+        return Html(assets().explorer_overview);
     }
     if extract_ledger_from_host(&host, &state.domain).is_some() {
-        return Html(EXPLORER_LEDGER_HTML);
+        return Html(assets().explorer_ledger);
     }
-    Html(EXPLORER_OVERVIEW_HTML)
+    Html(assets().explorer_overview)
 }
 
 /// GET /ledger
@@ -304,7 +304,7 @@ async fn root_index(
 /// without spinning up the canonical subdomain — pass
 /// `#ledger=<hex>&relay=<url>` in the URL.
 async fn explorer_ledger() -> Html<&'static str> {
-    Html(EXPLORER_LEDGER_HTML)
+    Html(assets().explorer_ledger)
 }
 
 /// GET /explorer
@@ -312,7 +312,7 @@ async fn explorer_ledger() -> Html<&'static str> {
 /// Always serves the operators-and-ledgers overview regardless of
 /// Host. Symmetric with `/ledger` for dev URLs.
 async fn explorer_overview() -> Html<&'static str> {
-    Html(EXPLORER_OVERVIEW_HTML)
+    Html(assets().explorer_overview)
 }
 
 /// GET /update
@@ -321,7 +321,7 @@ async fn explorer_overview() -> Html<&'static str> {
 /// SignedLedgerUpdate fields, inner operation TLV, and hex dump.
 /// Reads `#event=<64-hex-event-id>` from the URL.
 async fn explorer_update() -> Html<&'static str> {
-    Html(EXPLORER_UPDATE_HTML)
+    Html(assets().explorer_update)
 }
 
 /// GET /wallet
@@ -329,7 +329,7 @@ async fn explorer_update() -> Html<&'static str> {
 /// Always serves the web wallet regardless of Host. Symmetric with
 /// `/explorer` and `/ledger` for dev URLs.
 async fn wallet_index() -> Html<&'static str> {
-    Html(WALLET_HTML)
+    Html(assets().wallet_index)
 }
 
 /// GET /sw.js
@@ -339,34 +339,34 @@ async fn wallet_index() -> Html<&'static str> {
 /// shell + vendor scripts for offline-tolerant page loads. Served
 /// with the JS MIME type so the browser will accept it as a SW.
 async fn wallet_sw_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(WALLET_SW_JS)
+    js_response(assets().wallet_sw)
 }
 
 // Vendor scripts pulled by the wallet at module import time. All are
 // `include_str!`-bundled so a single binary ships the whole UI.
 async fn vendor_noble_hashes_hmac() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(NOBLE_HASHES_HMAC_JS)
+    js_response(assets().noble_hashes_hmac)
 }
 async fn vendor_noble_hashes_sha256() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(NOBLE_HASHES_SHA256_JS)
+    js_response(assets().noble_hashes_sha256)
 }
 async fn vendor_noble_hashes_sha512() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(NOBLE_HASHES_SHA512_JS)
+    js_response(assets().noble_hashes_sha512)
 }
 async fn vendor_noble_hashes_utils() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(NOBLE_HASHES_UTILS_JS)
+    js_response(assets().noble_hashes_utils)
 }
 async fn vendor_noble_secp256k1() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(NOBLE_SECP256K1_JS)
+    js_response(assets().noble_secp256k1)
 }
 async fn vendor_qrcode_generator() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(QRCODE_GENERATOR_JS)
+    js_response(assets().qrcode_generator)
 }
 async fn vendor_jsqr() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(JSQR_JS)
+    js_response(assets().jsqr)
 }
 async fn vendor_bip39_english() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(BIP39_ENGLISH_JS)
+    js_response(assets().bip39_english)
 }
 
 /// Common JS-MIME response shape for the asset handlers above.
@@ -387,7 +387,7 @@ fn js_response(body: &'static str) -> ([(axum::http::HeaderName, &'static str); 
 /// explorer pages and the web wallet import `OP_NAMES` / `FIELD_NAMES`
 /// from it to render operation names instead of raw discriminants.
 async fn tlv_catalog_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(TLV_CATALOG_JS)
+    js_response(assets().tlv_catalog)
 }
 
 /// GET /vendor/noble-curves-secp256k1.js
@@ -396,7 +396,7 @@ async fn tlv_catalog_js() -> ([(axum::http::HeaderName, &'static str); 1], &'sta
 /// update page (Nostr sig verify) and the web wallet (deposit
 /// witnessing). ~70KB minified; browser caches across loads.
 async fn noble_curves_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(NOBLE_CURVES_JS)
+    js_response(assets().noble_curves)
 }
 
 /// GET /shared.js
@@ -405,47 +405,75 @@ async fn noble_curves_js() -> ([(axum::http::HeaderName, &'static str); 1], &'st
 /// decoder, QuorumBegin/QuorumAddMember derivers, content_hash search.
 /// Bundled at compile time alongside the HTML.
 async fn shared_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(SHARED_JS)
+    js_response(assets().shared)
 }
 
-const EXPLORER_LEDGER_HTML: &str =
-    include_str!("../../../deposits-web/explorer/ledger.html");
-const EXPLORER_OVERVIEW_HTML: &str =
-    include_str!("../../../deposits-web/explorer/explorer.html");
-const EXPLORER_UPDATE_HTML: &str =
-    include_str!("../../../deposits-web/explorer/update.html");
-const TLV_CATALOG_JS: &str =
-    include_str!("../../../deposits-web/wallet/tlv-catalog.js");
-const SHARED_JS: &str =
-    include_str!("../../../deposits-web/explorer/shared.js");
+/// Static UI assets the gateway serves alongside the LNURL endpoints.
+///
+/// These were `include_str!`-bundled into the binary, which made every
+/// HTML/JS edit trigger a full Rust rebuild. Loading them at startup
+/// from `DEPOSITS_WEB_DIR` (default `./deposits-web`, set to
+/// `/usr/share/deposits-web` in the container) decouples the asset
+/// layer from the cargo build cache: HTML edits only re-COPY the
+/// runtime image.
+///
+/// Files are read once and `Box::leak`ed into `&'static str` so the
+/// existing handler signatures (`Html<&'static str>`, etc.) stay
+/// identical and the per-request hot path is a pointer dereference.
+struct StaticAssets {
+    explorer_ledger: &'static str,
+    explorer_overview: &'static str,
+    explorer_update: &'static str,
+    wallet_index: &'static str,
+    wallet_sw: &'static str,
+    tlv_catalog: &'static str,
+    shared: &'static str,
+    noble_curves: &'static str,
+    bip39_english: &'static str,
+    jsqr: &'static str,
+    noble_hashes_hmac: &'static str,
+    noble_hashes_sha256: &'static str,
+    noble_hashes_sha512: &'static str,
+    noble_hashes_utils: &'static str,
+    noble_secp256k1: &'static str,
+    qrcode_generator: &'static str,
+}
 
-// Web wallet — single-file SPA + service worker + vendor scripts.
-// Bundled at build time; rebuild the binary to ship updated assets.
-const WALLET_HTML: &str = include_str!("../../../deposits-web/wallet/index.html");
-const WALLET_SW_JS: &str = include_str!("../../../deposits-web/wallet/sw.js");
+impl StaticAssets {
+    fn load(dir: &std::path::Path) -> Self {
+        let load = |sub: &str| -> &'static str {
+            let p = dir.join(sub);
+            let s = std::fs::read_to_string(&p).unwrap_or_else(|e| {
+                panic!("failed to read static asset {}: {}", p.display(), e)
+            });
+            Box::leak(s.into_boxed_str())
+        };
+        Self {
+            explorer_ledger:     load("explorer/ledger.html"),
+            explorer_overview:   load("explorer/explorer.html"),
+            explorer_update:     load("explorer/update.html"),
+            wallet_index:        load("wallet/index.html"),
+            wallet_sw:           load("wallet/sw.js"),
+            tlv_catalog:         load("wallet/tlv-catalog.js"),
+            shared:              load("explorer/shared.js"),
+            noble_curves:        load("wallet/vendor/noble-curves-secp256k1.js"),
+            bip39_english:       load("wallet/vendor/bip39-english.js"),
+            jsqr:                load("wallet/vendor/jsqr.js"),
+            noble_hashes_hmac:   load("wallet/vendor/noble-hashes-hmac.js"),
+            noble_hashes_sha256: load("wallet/vendor/noble-hashes-sha256.js"),
+            noble_hashes_sha512: load("wallet/vendor/noble-hashes-sha512.js"),
+            noble_hashes_utils:  load("wallet/vendor/noble-hashes-utils.js"),
+            noble_secp256k1:     load("wallet/vendor/noble-secp256k1.js"),
+            qrcode_generator:    load("wallet/vendor/qrcode-generator.js"),
+        }
+    }
+}
 
-// Shared between the wallet and explorer (the per-update page imports
-// noble-curves to BIP-340-verify Nostr event sigs). Same constant; two
-// route handlers point at it.
-const NOBLE_CURVES_JS: &str =
-    include_str!("../../../deposits-web/wallet/vendor/noble-curves-secp256k1.js");
+static ASSETS: std::sync::OnceLock<StaticAssets> = std::sync::OnceLock::new();
 
-// Wallet-only vendor — listed alphabetically.
-const BIP39_ENGLISH_JS: &str =
-    include_str!("../../../deposits-web/wallet/vendor/bip39-english.js");
-const JSQR_JS: &str = include_str!("../../../deposits-web/wallet/vendor/jsqr.js");
-const NOBLE_HASHES_HMAC_JS: &str =
-    include_str!("../../../deposits-web/wallet/vendor/noble-hashes-hmac.js");
-const NOBLE_HASHES_SHA256_JS: &str =
-    include_str!("../../../deposits-web/wallet/vendor/noble-hashes-sha256.js");
-const NOBLE_HASHES_SHA512_JS: &str =
-    include_str!("../../../deposits-web/wallet/vendor/noble-hashes-sha512.js");
-const NOBLE_HASHES_UTILS_JS: &str =
-    include_str!("../../../deposits-web/wallet/vendor/noble-hashes-utils.js");
-const NOBLE_SECP256K1_JS: &str =
-    include_str!("../../../deposits-web/wallet/vendor/noble-secp256k1.js");
-const QRCODE_GENERATOR_JS: &str =
-    include_str!("../../../deposits-web/wallet/vendor/qrcode-generator.js");
+fn assets() -> &'static StaticAssets {
+    ASSETS.get().expect("ASSETS not initialized — call StaticAssets::load + ASSETS.set in main")
+}
 
 /// GET /.well-known/lnurlp/<deposit_id>
 ///
@@ -1067,6 +1095,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     deposits_nostr::install_default_crypto_provider();
 
     env_logger::init();
+
+    // Static UI assets — load once at startup so the binary stays
+    // unchanged across HTML/JS edits (see StaticAssets docs).
+    let asset_dir = std::env::var("DEPOSITS_WEB_DIR")
+        .unwrap_or_else(|_| "./deposits-web".to_string());
+    ASSETS
+        .set(StaticAssets::load(std::path::Path::new(&asset_dir)))
+        .map_err(|_| "ASSETS already initialized")?;
+    log::info!("Loaded static UI assets from {}", asset_dir);
 
     // Parse config
     let nsec_str =
