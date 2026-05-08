@@ -1010,11 +1010,12 @@ async function main() {
   document.getElementById('ledger-id').textContent = ledgerId;
 
   const adFilter = { kinds: [39100], '#d': [ledgerId], limit: 1 };
-  // Newest 1000 ledger updates is plenty to find the most recent
-  // QuorumBegin in practice — quorum rotations are infrequent and
-  // the filter is relay-side. If we miss it (super-active ledger),
-  // the card simply renders "no QuorumBegin observed yet".
-  const ledgerUpdatesFilter = { kinds: [9100], '#d': [ledgerId], limit: 1000 };
+  // Kind 9100 events tag the 16-char `ledger_tag` (deposits-nostr
+  // `ledger_tag()`), not the full hex id; and the operation type
+  // is exposed as the single-letter `t` tag (12 = QuorumBegin) so
+  // the relay can return only that op-class. Cost is O(rotations),
+  // not O(updates) — fine on ledgers with millions of entries.
+  const ledgerUpdatesFilter = { kinds: [9100], '#d': [ledgerId.slice(0, 16)], '#t': ['12'], limit: 5 };
   const priceFilter = { kinds: [39101], '#d': ['btcusd'], limit: 5 };
 
   const [adEvents, cosignerLedgers, ledgerUpdateEvents, priceEvents] = await Promise.all([
