@@ -239,16 +239,10 @@ impl LedgerState {
                 protocol_version,
                 ..
             } => {
-                next.reserves_key = reserves_id.clone();
-                next.reserves_amount = *amount;
-                next.collateral_amount = *collateral_amount;
-                next.quorum_expiry = Some(*quorum_expiry);
-                // Pin the ledger to the named ruleset for the next
-                // quorum's lifetime. Absent (legacy QuorumBegins) →
-                // "legacy" — matches on-chain shape.
-                next.active_ruleset_name = protocol_version
+                let chosen_ruleset = protocol_version
                     .clone()
                     .unwrap_or_else(default_ruleset_name);
+
                 // Promote the subset of staged members that the operation
                 // declared (validated upstream to be ⊆ next_quorum_members).
                 // Members in next_quorum_members that the operation
@@ -256,10 +250,47 @@ impl LedgerState {
                 let declared: std::collections::HashSet<_> =
                     quorum_members.iter().map(|m| m.pubkey).collect();
                 let staged = std::mem::take(&mut next.next_quorum_members);
-                next.quorum_members = staged
+                let promoted: Vec<QuorumMember> = staged
                     .into_iter()
                     .filter(|m| declared.contains(&m.pubkey))
                     .collect();
+
+                // Ruleset attestation gate. Skipped for "legacy" so
+                // pre-Q1 chains (every QuorumAddMember has empty
+                // `supported_rulesets`) still validate; for any other
+                // ruleset, every promoted member must have signed a
+                // `QuorumMemberResponse` declaring support, otherwise
+                // we have no proof this member can validate the rules
+                // we're about to commit to. Caught here in `apply` so
+                // every node that replays the chain enforces it, not
+                // just the rotating operator.
+                if chosen_ruleset != default_ruleset_name() {
+                    let unsupported: Vec<String> = promoted
+                        .iter()
+                        .filter(|m| {
+                            !m.supported_rulesets.iter().any(|s| s == &chosen_ruleset)
+                        })
+                        .map(|m| hex::encode(m.pubkey.serialize()))
+                        .collect();
+                    if !unsupported.is_empty() {
+                        return Err(crate::DepositsError::ProtocolViolation {
+                            violation_type: "ruleset_unsupported_by_member".to_string(),
+                            details: format!(
+                                "QuorumBegin pinned to ruleset '{}' but {} member(s) did not declare support: {}",
+                                chosen_ruleset,
+                                unsupported.len(),
+                                unsupported.join(", ")
+                            ),
+                        });
+                    }
+                }
+
+                next.reserves_key = reserves_id.clone();
+                next.reserves_amount = *amount;
+                next.collateral_amount = *collateral_amount;
+                next.quorum_expiry = Some(*quorum_expiry);
+                next.active_ruleset_name = chosen_ruleset;
+                next.quorum_members = promoted;
                 next.quorum_state = QuorumState::Active;
             }
             LedgerOperation::DepositOpen {
