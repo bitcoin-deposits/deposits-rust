@@ -725,6 +725,7 @@ impl Node {
         ledger_id: &str,
         collateral_bps: Option<u16>,
         amount_sats: Option<u64>,
+        requested_ruleset: Option<&str>,
     ) -> Result<RotateReservesResult, Error> {
         // --- Phase 1: snapshot membership + ledger state ---
         let ledger_arc = {
@@ -771,10 +772,9 @@ impl Node {
             let collateral = ledger.state.total_collateral();
 
             // Inherit the active ruleset by default — rotating an
-            // existing legacy ledger keeps it on legacy. Migrating
-            // to a different ruleset is an explicit operator action
-            // (currently via plumbing not yet exposed at this layer;
-            // defer to a follow-up `--protocol-version` flag).
+            // existing legacy ledger keeps it on legacy. Operator
+            // overrides via `--protocol-version`; we still verify
+            // every pending member supports it before proceeding.
             let rs = ledger.state.active_ruleset_name.clone();
 
             (members, lids, expiries, hash, collateral, rs)
@@ -784,6 +784,64 @@ impl Node {
             return Err(Error::Protocol(
                 "No quorum members to rotate to. Add quorum members first.".to_string(),
             ));
+        }
+
+        // Resolve which ruleset this rotation will commit to and check
+        // that this binary can actually enforce it. Migrating to an
+        // unknown ruleset would produce a UTXO whose tapscript we can't
+        // reconstruct.
+        let new_ruleset_name = match requested_ruleset {
+            Some(name) => {
+                if deposits_core::ruleset::lookup(name).is_none() {
+                    return Err(Error::Protocol(format!(
+                        "Unknown protocol_version '{}' (this node supports: {:?})",
+                        name,
+                        deposits_core::ruleset::all_supported_names()
+                    )));
+                }
+                name.to_string()
+            }
+            None => new_ruleset_name,
+        };
+
+        // Cross-check the chosen ruleset against every pending member's
+        // signed support list. A member that didn't declare support
+        // cannot validate operations under that ruleset, so committing
+        // a QuorumBegin pinned to it would silently break their
+        // ability to cosign — refuse here with a clear error.
+        {
+            let ledger = ledger_arc.read().unwrap();
+            let source = if !ledger.state.next_quorum_members.is_empty() {
+                &ledger.state.next_quorum_members
+            } else {
+                &ledger.state.quorum_members
+            };
+            let mut unsupported: Vec<String> = Vec::new();
+            for m in source {
+                if !deposits_core::ruleset::member_supports(
+                    &m.supported_rulesets,
+                    &new_ruleset_name,
+                ) {
+                    let declared: Vec<&str> = if m.supported_rulesets.is_empty() {
+                        vec!["legacy"]
+                    } else {
+                        m.supported_rulesets.iter().map(|s| s.as_str()).collect()
+                    };
+                    unsupported.push(format!(
+                        "{} (supports: {:?})",
+                        hex::encode(m.pubkey.serialize()),
+                        declared
+                    ));
+                }
+            }
+            if !unsupported.is_empty() {
+                return Err(Error::Protocol(format!(
+                    "Cannot start quorum under ruleset '{}': {} member(s) did not declare support: {}",
+                    new_ruleset_name,
+                    unsupported.len(),
+                    unsupported.join(", ")
+                )));
+            }
         }
 
         use crate::wallet::{TaprootReservesCreateResult, TaprootReservesInfo};

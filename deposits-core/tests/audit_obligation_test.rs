@@ -224,6 +224,7 @@ fn quorum_member_timing_fields_roundtrip() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
+        supported_rulesets: Vec::new(),
     };
 
     let json = serde_json::to_string(&member).unwrap();
@@ -259,6 +260,7 @@ fn quorum_member_timing_fields_default_to_none() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
+        supported_rulesets: Vec::new(),
     };
 
     let json = serde_json::to_string(&member).unwrap();
@@ -325,6 +327,7 @@ fn quorum_member_missing_timing_fields_deserialize_as_none() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
+        supported_rulesets: Vec::new(),
     };
 
     // Serialize to JSON (skip_serializing_if removes None fields)

@@ -789,8 +789,21 @@ impl Node {
             .get("amount_sats")
             .and_then(|v| v.as_u64());
 
+        // Optional protocol_version override. Falls back to the
+        // ledger's currently-active ruleset if absent.
+        let protocol_version = request
+            .params
+            .get("protocol_version")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         match self
-            .rotate_reserves_to_quorum(&ledger_id, collateral_bps, amount_sats)
+            .rotate_reserves_to_quorum(
+                &ledger_id,
+                collateral_bps,
+                amount_sats,
+                protocol_version.as_deref(),
+            )
             .await
         {
             Ok(result) => {

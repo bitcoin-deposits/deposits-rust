@@ -43,6 +43,7 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let mut reserves_id: Option<String> = None;
     let mut collateral_bps: Option<u32> = None;
     let mut amount_sats: Option<u64> = None;
+    let mut protocol_version: Option<String> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -70,6 +71,10 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                         format!("Invalid --amount-sats value: {} (expected positive integer)", raw)
                     })?;
                     amount_sats = Some(v);
+                    i += 1;
+                }
+                "--protocol-version" if i + 1 < args.len() => {
+                    protocol_version = Some(args[i + 1].clone());
                     i += 1;
                 }
                 _ => {
@@ -116,6 +121,10 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     }
     if let Some(amt) = amount_sats {
         params.insert("amount_sats".to_string(), serde_json::json!(amt));
+    }
+    if let Some(ref pv) = protocol_version {
+        println!("  Protocol version: {}", pv);
+        params.insert("protocol_version".to_string(), serde_json::json!(pv));
     }
     let result = send_daemon_request(
         &config,

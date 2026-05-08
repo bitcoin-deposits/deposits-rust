@@ -38,6 +38,7 @@ fn staged_member(pk: PublicKey) -> QuorumMember {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
+        supported_rulesets: Vec::new(),
     }
 }
 
