@@ -115,6 +115,7 @@ These are layer 3 because the Bitcoin Deposits design uses them as *fraud eviden
 | `DisputeAcquire.claim_txid` non-zero (proof of lottery spend) | 4 | `ledger.rs:557-561` | `custody_acquire_missing_claim`. |
 | `DisputeYield` signer must NOT be the entropy-selected lottery winner | 4 | `ledger.rs:583-599` (`validate_custody_yield`) | `custody_yield_is_winner`. The winner is supposed to `DisputeAcquire`, not `DisputeYield`. |
 | Quorum membership cannot be changed in Disputed/Armed/Tombstoned states | 2 | dispute state allows-list | Hard reject. |
+| Confiscation tx output shape matches the fraud proof type | 2 | `request_handlers/custody.rs::verify_proposed_confiscation_tx` | Cosigner re-derives the expected outputs via `dispute::build_expected_confiscation_outputs` and compares to the operator's proposed `unsigned_tx` byte-for-byte (output count, values, scripts) before signing the sighash. **Punitive** = 1 output to lottery for full UTXO − fee. **Respectful** (currently only `QuorumExpired`) = 2 outputs: lottery for `max(obligations_sats, P2WSH_DUST_LIMIT_SATS)` and operator P2WPKH change for the rest − fee. Cosigner also re-derives the sighash from the proposed tx + reconstructed prevout and refuses if it doesn't match the request's `sighash`. Pre-this-rule cosigners blind-signed whatever sighash arrived. |
 
 ---
 

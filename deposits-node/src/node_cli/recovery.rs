@@ -134,6 +134,7 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         "status" => recovery_status(&args[1..]).await,
         // Lottery protocol commands
         "confiscate" => recovery_confiscate(&args[1..]).await,
+        "confiscate-plan" => recovery_confiscate_plan(&args[1..]).await,
         "reveal" => recovery_reveal(&args[1..]).await,
         "lottery-claim" => recovery_lottery_claim(&args[1..]).await,
         "rotate-to-quorum" => recovery_rotate_to_quorum(&args[1..]).await,
@@ -4855,5 +4856,407 @@ pub async fn recovery_publish_fraud_broadcast(
         "  accused:  {}",
         &broadcast.proof.accused[..16.min(broadcast.proof.accused.len())]
     );
+    Ok(())
+}
+
+/// Dry-run a confiscation: print the structured plan the daemon would
+/// build for this ledger, then self-run the cosigner-side verifier
+/// against it. No tx is broadcast, no signatures are collected.
+///
+/// Use before triggering a real confiscation to verify (a) the fraud
+/// proof we'd consume is the right one, (b) the lottery output and
+/// operator change derive correctly, and (c) the cosigner verifier
+/// would accept the operator-built tx — catching any drift between
+/// `build_expected_confiscation_outputs` (operator) and
+/// `verify_proposed_confiscation_tx` (cosigner) before a real round.
+///
+/// Args:
+///   <ledger_id>           — 64-char hex ledger id (or short prefix).
+///   --last-valid-sequence N
+///                         — fork-point sequence. Required: the same
+///                           value DisputeEnter committed to.
+pub async fn recovery_confiscate_plan(
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::nostr::KIND_LEDGER_UPDATE;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use bitcoin::sighash::{SighashCache, TapSighashType};
+    use bitcoin::taproot::{LeafVersion, TapLeafHash};
+    use bitcoin::{Amount, Transaction, TxIn, TxOut, Witness};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tapscript_reserves::{LotteryParticipant, LotteryScriptBuilder};
+    use deposits_core::types::LedgerState;
+    use deposits_core::{
+        SignedLedgerUpdate, TapscriptReservesBuilder, TlvDecode, VoterSet,
+    };
+    use nostr_sdk::prelude::*;
+
+    let mut ledger_id: Option<String> = None;
+    let mut last_valid_sequence: Option<u64> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--last-valid-sequence" if i + 1 < args.len() => {
+                last_valid_sequence = Some(args[i + 1].parse().map_err(|_| {
+                    format!("Invalid --last-valid-sequence: {}", args[i + 1])
+                })?);
+                i += 1;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id.is_none() {
+                    ledger_id = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id
+        .ok_or("Usage: deposits-node recovery confiscate-plan <ledger_id> --last-valid-sequence <N>")?
+        .trim()
+        .to_string();
+    let last_valid_sequence = last_valid_sequence
+        .ok_or("--last-valid-sequence <N> is required (the fork-point seq from DisputeEnter)")?;
+    let config = parse_config(&config_args)?;
+
+    let node = crate::Node::new(config).await?;
+    let ledger_id = super::resolve_to_ledger_id(&node, &ledger_id)?;
+
+    println!("=== Confiscation plan: dry run ===");
+    println!("ledger_id:           {}", ledger_id);
+    println!("last_valid_sequence: {}", last_valid_sequence);
+
+    // ── 1. Discover the fraud proof ──
+    println!("\n── 1. Fraud proof on relay (kind:9101) ──");
+    let proof_type = node.fetch_fraud_proof_type_for_ledger(&ledger_id).await;
+    let is_respectful = match &proof_type {
+        Some(pt) => {
+            println!("  type:           {:?}", pt);
+            println!(
+                "  classification: {} (is_respectful={})",
+                if pt.is_respectful() {
+                    "RESPECTFUL"
+                } else {
+                    "PUNITIVE"
+                },
+                pt.is_respectful()
+            );
+            pt.is_respectful()
+        }
+        None => {
+            println!("  ⚠ no kind:9101 broadcast on relay for this ledger");
+            println!("    → would fall back to PUNITIVE (single-output) shape");
+            println!("    → cosigner verifier WOULD REFUSE: a confiscation");
+            println!("      without a published fraud proof is unverifiable");
+            false
+        }
+    };
+
+    // ── 2. Walk ledger history at fork point ──
+    println!("\n── 2. Ledger state at last_valid_sequence ──");
+    let client = node.nostr.fetch_client();
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
+        .limit(500);
+    let events = client
+        .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+        .await
+        .map_err(|e| format!("fetch ledger updates: {}", e))?;
+
+    let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+    for ev in events.iter() {
+        if let Ok(b) = BASE64.decode(&ev.content) {
+            if let Ok(u) = SignedLedgerUpdate::tlv_decode(&b) {
+                updates.push(u);
+            }
+        }
+    }
+    updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
+
+    let original_operator = updates
+        .iter()
+        .find(|u| u.sequence_number == 0)
+        .map(|u| u.operator_id)
+        .ok_or("no LedgerOpen at seq 0")?;
+
+    let mut state = LedgerState::new(original_operator, String::new(), 0);
+    let mut latest_qb: Option<(
+        String,
+        [u8; 32],
+        Vec<bitcoin::secp256k1::PublicKey>,
+        u32,
+        Option<String>,
+        u64,
+    )> = None;
+    for u in &updates {
+        if u.operator_id != original_operator {
+            continue;
+        }
+        if u.sequence_number > last_valid_sequence {
+            break;
+        }
+        let op = LedgerOperation::tlv_decode(&u.message)
+            .map_err(|e| format!("decode at seq {}: {}", u.sequence_number, e))?;
+        if let LedgerOperation::QuorumBegin {
+            reserves_id,
+            ledger_hash,
+            quorum_members,
+            quorum_expiry,
+            protocol_version,
+            ..
+        } = &op
+        {
+            latest_qb = Some((
+                reserves_id.clone(),
+                *ledger_hash,
+                quorum_members.iter().map(|m| m.pubkey).collect(),
+                *quorum_expiry,
+                protocol_version.clone(),
+                u.sequence_number,
+            ));
+        }
+        state = state.apply(&op).map_err(|e| {
+            format!("replay seq {}: {:?}", u.sequence_number, e)
+        })?;
+    }
+    let (qb_reserves_id, qb_ledger_hash, qb_members, qb_expiry, qb_ruleset, qb_seq) =
+        latest_qb.ok_or("no QuorumBegin observed at or before last_valid_sequence")?;
+    let obligations_msat = state.total_deposit_balance();
+    let obligations_sats = obligations_msat / 1000;
+
+    println!("  original_operator:   {}", hex::encode(original_operator.serialize()));
+    println!("  latest QuorumBegin:");
+    println!("    seq:               {}", qb_seq);
+    println!("    reserves_id:       {}", qb_reserves_id);
+    println!("    ledger_hash:       {}", hex::encode(qb_ledger_hash));
+    println!("    ruleset:           {:?}", qb_ruleset.as_deref().unwrap_or("legacy"));
+    println!("    quorum_expiry:     {}", qb_expiry);
+    println!("    members:           {}", qb_members.len());
+    for m in &qb_members {
+        println!("      - {}", hex::encode(m.serialize()));
+    }
+    println!("  obligations:         {} msat ({} sats)", obligations_msat, obligations_sats);
+
+    // ── 3. Fork-branch DisputeArmed participants ──
+    println!("\n── 3. DisputeArmed participants ──");
+    let mut participants: Vec<LotteryParticipant> = Vec::new();
+    for u in &updates {
+        if u.sequence_number <= last_valid_sequence {
+            continue;
+        }
+        if let Ok(LedgerOperation::DisputeArmed {
+            commitment_hash,
+            target_reserves,
+            ..
+        }) = LedgerOperation::tlv_decode(&u.message)
+        {
+            let xonly = u.operator_id.x_only_public_key().0;
+            if !participants.iter().any(|p| p.pubkey == xonly) {
+                participants.push(LotteryParticipant::new(
+                    xonly,
+                    commitment_hash,
+                    target_reserves,
+                ));
+            }
+        }
+    }
+    if participants.len() < 2 {
+        println!(
+            "  ⚠ only {} participant(s) — confiscation requires ≥ 2",
+            participants.len()
+        );
+    }
+    participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+    for p in &participants {
+        println!(
+            "  - {} target={}",
+            hex::encode(p.pubkey.serialize()),
+            p.target_reserves
+        );
+    }
+
+    // ── 4. Lottery script + reserves UTXO lookup ──
+    println!("\n── 4. Derived lottery output + reserves UTXO ──");
+    let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = qb_members
+        .iter()
+        .filter(|pk| **pk != original_operator)
+        .map(|pk| pk.x_only_public_key().0)
+        .collect();
+    let recovery_threshold = (recovery_voters.len() / 2) + 1;
+    let lottery_builder = LotteryScriptBuilder::new(
+        participants.clone(),
+        recovery_voters,
+        recovery_threshold,
+        node.wallet.network(),
+    );
+    let lottery_output = lottery_builder
+        .build()
+        .map_err(|e| format!("build lottery output: {:?}", e))?;
+    println!("  lottery address:    {}", lottery_output.address);
+    println!("  recovery threshold: {}", recovery_threshold);
+
+    let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+        qb_reserves_id.parse().map_err(|e| format!("parse reserves_id: {}", e))?;
+    let reserves_addr = reserves_addr
+        .require_network(node.wallet.network())
+        .map_err(|e| format!("network mismatch: {}", e))?;
+    let reserves_script = reserves_addr.script_pubkey();
+    let reserves_utxo = node
+        .wallet
+        .find_utxo_for_script(&reserves_script)
+        .map_err(|e| format!("esplora reserves lookup: {}", e))?;
+    let (reserves_outpoint, reserves_amount) = match reserves_utxo {
+        Some(u) => u,
+        None => {
+            println!("  ⚠ reserves UTXO not found on-chain at {}", reserves_addr);
+            println!("    → already spent? confiscation cannot proceed");
+            return Ok(());
+        }
+    };
+    println!(
+        "  reserves UTXO:      {}:{} ({} sats)",
+        reserves_outpoint.txid, reserves_outpoint.vout, reserves_amount
+    );
+
+    // ── 5. Confiscation TX plan ──
+    println!("\n── 5. Confiscation TX plan ──");
+    let fee_rate = 2u64;
+    let estimated_vsize = 200u64;
+    let fee = fee_rate * estimated_vsize;
+    let outputs = crate::node::dispute::build_expected_confiscation_outputs(
+        lottery_output.script_pubkey(),
+        original_operator,
+        node.wallet.network(),
+        reserves_amount,
+        fee,
+        is_respectful,
+        obligations_sats,
+    )
+    .map_err(|e| format!("build expected outputs: {}", e))?;
+
+    println!("  shape:              {}", if outputs.len() == 2 { "BIFURCATED (respectful)" } else { "SINGLE (punitive)" });
+    println!("  input:              {}:{} ({} sats)",
+        reserves_outpoint.txid, reserves_outpoint.vout, reserves_amount);
+    for (i, o) in outputs.iter().enumerate() {
+        let label = if outputs.len() == 2 {
+            if i == 0 { "lottery" } else { "operator change (P2WPKH)" }
+        } else {
+            "lottery (full UTXO − fee)"
+        };
+        println!("  output[{}] {}: {} sats", i, label, o.value.to_sat());
+        println!("           script: {}", hex::encode(o.script_pubkey.as_bytes()));
+    }
+    println!("  fee:                {} sats ({} sat/vb × ~{} vb)", fee, fee_rate, estimated_vsize);
+    if is_respectful && outputs.len() == 2 {
+        println!("  rationale:          obligations={} sats → lottery=max({}, dust=330)={}; change={} − {} − {} = {}",
+            obligations_sats, obligations_sats, outputs[0].value.to_sat(),
+            reserves_amount, outputs[0].value.to_sat(), fee, outputs[1].value.to_sat());
+    }
+
+    // Build the actual TX so we can compute the sighash and run the verifier.
+    let confiscation_tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: reserves_outpoint,
+            script_sig: bitcoin::ScriptBuf::new(),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::default(),
+        }],
+        output: outputs,
+    };
+
+    // ── 6. Sighash ──
+    let voter_set = VoterSet::new(original_operator, qb_members.clone());
+    let voter_count = voter_set.all_voters().len();
+    let ruleset =
+        deposits_core::ruleset::resolve_or_legacy(qb_ruleset.as_deref());
+    let threshold_config = (ruleset.tier_config_factory)(voter_count, qb_expiry);
+    let taproot_builder = TapscriptReservesBuilder::new(
+        voter_set,
+        threshold_config.clone(),
+        node.wallet.network(),
+        qb_ledger_hash,
+    );
+    let _taproot_output = taproot_builder
+        .build()
+        .map_err(|e| format!("rebuild taproot: {:?}", e))?;
+    let tier = threshold_config
+        .tiers
+        .iter()
+        .find(|t| !t.requires_tie_breaker && t.threshold > 1)
+        .ok_or("no quorum-override tier")?;
+    let leaf_script = taproot_builder
+        .build_threshold_leaf(tier)
+        .map_err(|e| format!("rebuild leaf script: {:?}", e))?;
+    let leaf_hash = TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript);
+    let prevouts = vec![TxOut {
+        value: Amount::from_sat(reserves_amount),
+        script_pubkey: reserves_script,
+    }];
+    let mut sighash_cache = SighashCache::new(&confiscation_tx);
+    let sighash = sighash_cache
+        .taproot_script_spend_signature_hash(
+            0,
+            &bitcoin::sighash::Prevouts::All(&prevouts),
+            leaf_hash,
+            TapSighashType::Default,
+        )
+        .map_err(|e| format!("compute sighash: {}", e))?;
+    let sighash_bytes: [u8; 32] = sighash.to_byte_array();
+    println!("\n── 6. Tap-leaf sighash ──");
+    println!("  tier:               threshold={}, timelock={}", tier.threshold, tier.timelock_blocks);
+    println!("  sighash:            {}", hex::encode(sighash_bytes));
+    println!("  required cosigs:    {}", tier.threshold);
+
+    // ── 7. Self-run the cosigner-side verifier ──
+    println!("\n── 7. Cosigner-perspective self-check ──");
+    let unsigned_tx_hex = hex::encode(bitcoin::consensus::encode::serialize(&confiscation_tx));
+    let mock_request = crate::nostr::LedgerRequest {
+        action: "confiscation_sign".to_string(),
+        ledger_id: ledger_id.clone(),
+        params: serde_json::json!({
+            "sighash": hex::encode(sighash_bytes),
+            "unsigned_tx": unsigned_tx_hex,
+            "lottery_address": lottery_output.address.to_string(),
+            "last_valid_sequence": last_valid_sequence,
+        }),
+        event_id: String::new(),
+        sender: String::new(),
+        timestamp: 0,
+        gift_wrap_sender: None,
+        subkey_account: None,
+        subkey_attestation: None,
+    };
+    match node
+        .verify_proposed_confiscation_tx(&mock_request, &sighash_bytes)
+        .await
+    {
+        Ok(()) => {
+            println!("  ✓ verifier accepts this plan");
+        }
+        Err(e) => {
+            println!("  ✗ verifier WOULD REFUSE: {}", e);
+            println!();
+            println!("  This is a bug — the operator-side builder and the cosigner-side");
+            println!("  verifier disagree. Do not proceed with the real confiscation.");
+            return Err(format!("dry-run verifier mismatch: {}", e).into());
+        }
+    }
+
+    println!("\n=== plan OK — would broadcast on real `recovery confiscate` ===");
     Ok(())
 }

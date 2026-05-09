@@ -188,8 +188,75 @@ fn fraud_proof_quorum_expired_triggers_respectful_confiscation() {
         &accused_ledger[..16]
     );
 
-    // TODO (gated on confiscation tx bifurcation commit): assert the
-    // on-chain tx has the respectful shape — 2 outputs, lottery output
-    // value == obligations, change output to operator's pubkey,
-    // total_value_out == reserves + collateral - fee.
+    // ── 7. Assert the on-chain confiscation tx is bifurcated ──
+    // Read the txid the operator wrote into the marker file, fetch the
+    // tx from esplora, and verify the output shape:
+    //   • exactly 2 outputs (single output = punitive, would be wrong here)
+    //   • output[0].value ≥ P2WSH_DUST_LIMIT_SATS (lottery output)
+    //   • output[1].script_pubkey is the original operator's P2WPKH (change)
+    // For QuorumExpired with no deposits in the cluster, obligations = 0
+    // so the lottery output should equal the dust floor (330 sats).
+    let marker_path = op_data_dir(op_idx).join(format!(
+        "confiscated_{}.marker",
+        &accused_ledger[..16]
+    ));
+    let txid_str = std::fs::read_to_string(&marker_path)
+        .expect("read marker")
+        .trim()
+        .to_string();
+    eprintln!("[onchain]  fetching confiscation tx {}", &txid_str);
+
+    let tx_url = format!("{}/tx/{}", ELECTRS_URL, txid_str);
+    let tx_json: serde_json::Value = reqwest::blocking::get(&tx_url)
+        .expect("esplora /tx fetch")
+        .json()
+        .expect("parse tx json");
+    let outputs = tx_json["vout"]
+        .as_array()
+        .expect("tx.vout is an array")
+        .clone();
+
+    assert_eq!(
+        outputs.len(),
+        2,
+        "expected 2 outputs (bifurcated respectful shape), got {} — this is the \
+         pre-bifurcation single-output punitive shape",
+        outputs.len()
+    );
+
+    let lottery_value = outputs[0]["value"].as_u64().expect("output[0].value");
+    let change_value = outputs[1]["value"].as_u64().expect("output[1].value");
+    assert!(
+        lottery_value >= 330,
+        "lottery output value {} below P2WSH_DUST_LIMIT_SATS",
+        lottery_value
+    );
+    assert_eq!(
+        lottery_value, 330,
+        "with no deposits in cluster the lottery output should equal the dust floor"
+    );
+
+    // Verify the change goes to the original operator's P2WPKH. Original
+    // operator pubkey is the LedgerOpen seq-0 operator_id we already have
+    // in `history[0].operator_id`.
+    let original_op_pk = history[0].operator_id;
+    let pubkey_bytes: [u8; 33] = original_op_pk.serialize();
+    let compressed = bitcoin::CompressedPublicKey::from_slice(&pubkey_bytes).unwrap();
+    let expected_change_addr =
+        bitcoin::Address::p2wpkh(&compressed, bitcoin::Network::Regtest).to_string();
+    let change_addr = outputs[1]["scriptpubkey_address"]
+        .as_str()
+        .expect("output[1].scriptpubkey_address");
+    assert_eq!(
+        change_addr, expected_change_addr,
+        "change output address {} ≠ original operator P2WPKH {}",
+        change_addr, expected_change_addr
+    );
+
+    eprintln!(
+        "[bifurcated] lottery={} sats, operator change={} sats, total_out={} sats",
+        lottery_value,
+        change_value,
+        lottery_value + change_value
+    );
 }

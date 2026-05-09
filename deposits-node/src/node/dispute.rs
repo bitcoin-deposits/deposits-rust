@@ -1,5 +1,193 @@
 use super::*;
 
+/// Compute the expected outputs of a confiscation transaction.
+///
+/// Used by the operator (`initiate_confiscations`) to build the tx and by
+/// cosigners (`process_confiscation_sign_request`) to verify the operator's
+/// proposed tx before signing. Both sides feeding the same inputs into this
+/// function and comparing the result is what makes the bifurcation
+/// cryptographically enforceable — a malicious operator can't get cosigners
+/// to sign a tx that this function wouldn't have produced.
+///
+/// Outputs:
+/// - **Punitive** proof OR dust-fallback: 1 output, full UTXO minus fee
+///   to the lottery script.
+/// - **Respectful** proof with sufficient funds: 2 outputs — lottery for
+///   `max(obligations, P2WSH_DUST_LIMIT_SATS)`, original-operator P2WPKH
+///   for the rest minus fee. (Lottery winner inherits obligations; the
+///   operator gets back the excess collateral they posted.)
+///
+/// The dust-fallback bridge: when `obligations + fee` would leave under
+/// `P2WPKH_DUST_LIMIT_SATS` for the operator, we collapse to a single
+/// lottery output rather than emit unspendable change.
+pub fn build_expected_confiscation_outputs(
+    lottery_script: bitcoin::ScriptBuf,
+    original_operator: bitcoin::secp256k1::PublicKey,
+    network: bitcoin::Network,
+    reserves_amount: u64,
+    fee: u64,
+    is_respectful: bool,
+    obligations_sats: u64,
+) -> Result<Vec<bitcoin::TxOut>, String> {
+    use bitcoin::{Amount, TxOut};
+    use deposits_core::constants::{P2WPKH_DUST_LIMIT_SATS, P2WSH_DUST_LIMIT_SATS};
+
+    let punitive_value = reserves_amount.saturating_sub(fee);
+
+    if !is_respectful {
+        return Ok(vec![TxOut {
+            value: Amount::from_sat(punitive_value),
+            script_pubkey: lottery_script,
+        }]);
+    }
+
+    let lottery_value = obligations_sats.max(P2WSH_DUST_LIMIT_SATS);
+    let operator_change = reserves_amount
+        .saturating_sub(lottery_value)
+        .saturating_sub(fee);
+
+    if operator_change < P2WPKH_DUST_LIMIT_SATS {
+        // Bifurcation would emit dust to the operator; collapse to
+        // single-output punitive shape.
+        return Ok(vec![TxOut {
+            value: Amount::from_sat(punitive_value),
+            script_pubkey: lottery_script,
+        }]);
+    }
+
+    let pubkey_bytes: [u8; 33] = original_operator.serialize();
+    let compressed = bitcoin::CompressedPublicKey::from_slice(&pubkey_bytes)
+        .map_err(|e| format!("original_operator pubkey doesn't compress: {}", e))?;
+    let operator_addr = bitcoin::Address::p2wpkh(&compressed, network);
+
+    Ok(vec![
+        TxOut {
+            value: Amount::from_sat(lottery_value),
+            script_pubkey: lottery_script,
+        },
+        TxOut {
+            value: Amount::from_sat(operator_change),
+            script_pubkey: operator_addr.script_pubkey(),
+        },
+    ])
+}
+
+#[cfg(test)]
+mod confiscation_outputs_tests {
+    use super::*;
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use bitcoin::{Amount, Network, ScriptBuf};
+
+    fn pk(seed: u8) -> PublicKey {
+        let secp = Secp256k1::new();
+        PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[seed; 32]).unwrap())
+    }
+
+    fn lottery_script() -> ScriptBuf {
+        // Any 34-byte witness-V1 script — the function doesn't introspect.
+        let bytes = vec![0x51, 0x20] // OP_1 OP_PUSHBYTES_32
+            .into_iter()
+            .chain(std::iter::repeat(0xAB).take(32))
+            .collect::<Vec<u8>>();
+        ScriptBuf::from(bytes)
+    }
+
+    #[test]
+    fn punitive_emits_single_lottery_output() {
+        let outs = build_expected_confiscation_outputs(
+            lottery_script(),
+            pk(1),
+            Network::Regtest,
+            10_000,
+            400,
+            false,
+            0,
+        )
+        .unwrap();
+        assert_eq!(outs.len(), 1);
+        assert_eq!(outs[0].value, Amount::from_sat(9_600));
+        assert_eq!(outs[0].script_pubkey, lottery_script());
+    }
+
+    #[test]
+    fn respectful_with_zero_obligations_uses_dust_floor() {
+        // No deposits → obligations = 0. Lottery output gets dust floor
+        // (P2WSH_DUST_LIMIT_SATS = 330), operator gets the rest minus fee.
+        let outs = build_expected_confiscation_outputs(
+            lottery_script(),
+            pk(1),
+            Network::Regtest,
+            10_000,
+            400,
+            true,
+            0,
+        )
+        .unwrap();
+        assert_eq!(outs.len(), 2);
+        assert_eq!(outs[0].value, Amount::from_sat(330)); // P2WSH_DUST_LIMIT_SATS
+        assert_eq!(outs[1].value, Amount::from_sat(10_000 - 330 - 400));
+    }
+
+    #[test]
+    fn respectful_with_obligations_routes_obligations_to_lottery() {
+        // 4000 sats of obligations → lottery gets 4000, operator gets the rest.
+        let outs = build_expected_confiscation_outputs(
+            lottery_script(),
+            pk(1),
+            Network::Regtest,
+            10_000,
+            400,
+            true,
+            4_000,
+        )
+        .unwrap();
+        assert_eq!(outs.len(), 2);
+        assert_eq!(outs[0].value, Amount::from_sat(4_000));
+        assert_eq!(outs[1].value, Amount::from_sat(10_000 - 4_000 - 400));
+    }
+
+    #[test]
+    fn respectful_falls_back_to_punitive_when_change_would_be_dust() {
+        // Reserves barely covers obligations + fee → operator change would
+        // be below P2WPKH_DUST_LIMIT_SATS = 294. Helper collapses to the
+        // single punitive output rather than emit dust.
+        let outs = build_expected_confiscation_outputs(
+            lottery_script(),
+            pk(1),
+            Network::Regtest,
+            5_000,
+            400,
+            true,
+            4_500, // 5000 - 4500 - 400 = 100 < 294 → fallback
+        )
+        .unwrap();
+        assert_eq!(outs.len(), 1);
+        assert_eq!(outs[0].value, Amount::from_sat(4_600)); // 5000 - 400 fee
+    }
+
+    #[test]
+    fn respectful_change_destination_is_p2wpkh_of_original_operator() {
+        // The change output's script_pubkey must be the original operator's
+        // P2WPKH. Reconstruct it independently and compare.
+        let op = pk(7);
+        let outs = build_expected_confiscation_outputs(
+            lottery_script(),
+            op,
+            Network::Regtest,
+            10_000,
+            400,
+            true,
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(outs.len(), 2);
+        let pubkey_bytes: [u8; 33] = op.serialize();
+        let compressed = bitcoin::CompressedPublicKey::from_slice(&pubkey_bytes).unwrap();
+        let expected_addr = bitcoin::Address::p2wpkh(&compressed, Network::Regtest);
+        assert_eq!(outs[1].script_pubkey, expected_addr.script_pubkey());
+    }
+}
+
 impl Node {
     /// Auto-arm for a dispute by creating a fork of the disputed ledger,
     /// then publishing DisputeEnter and DisputeArmed on the fork.
@@ -952,6 +1140,47 @@ impl Node {
         Ok(())
     }
 
+    /// Fetch the most recent kind:9101 fraud broadcast for `ledger_id`
+    /// from the relay and return its `proof_type`. Used by
+    /// `initiate_confiscations` and the cosigner-side verifier to
+    /// decide whether the confiscation should bifurcate (respectful
+    /// proofs) or send the full UTXO to the lottery (punitive).
+    ///
+    /// Returns `None` if no broadcast is on the relay or none decode
+    /// cleanly. Callers fall back to punitive shape in that case.
+    pub(crate) async fn fetch_fraud_proof_type_for_ledger(
+        &self,
+        ledger_id: &str,
+    ) -> Option<deposits_core::fraud::FraudProofType> {
+        use deposits_core::fraud::FraudBroadcast;
+        use nostr_sdk::{Filter, Kind};
+
+        let client = self.nostr.fetch_client();
+        let filter = Filter::new()
+            .kind(Kind::Custom(deposits_nostr::KIND_FRAUD_PROOF))
+            .custom_tag(
+                deposits_nostr::TAG_LEDGER_ID,
+                [deposits_nostr::ledger_tag(ledger_id)],
+            )
+            .limit(50);
+        let events = client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+            .await
+            .ok()?;
+
+        // Pick the most recent broadcast that decodes cleanly.
+        let mut latest: Option<(u64, deposits_core::fraud::FraudProofType)> = None;
+        for event in events.iter() {
+            if let Ok(broadcast) = serde_json::from_str::<FraudBroadcast>(&event.content) {
+                let ts = event.created_at.as_u64();
+                if latest.as_ref().map(|(t, _)| ts > *t).unwrap_or(true) {
+                    latest = Some((ts, broadcast.proof.proof_type));
+                }
+            }
+        }
+        latest.map(|(_, pt)| pt)
+    }
+
     /// Auto-initiate confiscation when all participants are armed
     ///
     /// For each ledger where we're armed but confiscation hasn't happened yet,
@@ -1434,11 +1663,76 @@ impl Node {
                 reserves_outpoint
             );
 
-            // Build confiscation transaction
+            // Build confiscation transaction.
+            //
+            // Shape depends on the fraud proof type:
+            //
+            // - **Punitive** (default; e.g. UncreditedLightning): full UTXO →
+            //   single lottery output. Cosigners split the proceeds via the
+            //   recovery threshold, operator forfeits everything.
+            // - **Respectful** (currently only `QuorumExpired`): bifurcated.
+            //   Lottery output gets `max(obligations, P2WSH_DUST)` — enough
+            //   for the lottery winner to inherit deposit obligations — and
+            //   the rest returns to the original operator's P2WPKH (DEP-03
+            //   §"Respectful confiscation tx"). Falls back to punitive shape
+            //   if the change side would be dust.
+            //
+            // The proof type comes from the kind:9101 fraud broadcast on the
+            // relay. If we can't find one (legacy disputes that arrived via
+            // kind:9103 only), fall back to punitive — that's the strict
+            // default and matches pre-bifurcation behavior.
             let fee_rate = 2u64;
             let estimated_vsize = 200u64;
             let fee = fee_rate * estimated_vsize;
-            let output_amount = reserves_amount.saturating_sub(fee);
+            let is_respectful = self
+                .fetch_fraud_proof_type_for_ledger(&ledger_id)
+                .await
+                .map(|pt| pt.is_respectful())
+                .unwrap_or(false);
+
+            let obligations_sats = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(&ledger_key)
+                    .map(|arc| {
+                        // total_deposit_balance is in msats; round down to sats.
+                        arc.read().unwrap().state.total_deposit_balance() / 1000
+                    })
+                    .unwrap_or(0)
+            };
+
+            let outputs: Vec<TxOut> = match build_expected_confiscation_outputs(
+                lottery_output.script_pubkey(),
+                original_operator,
+                self.wallet.network(),
+                reserves_amount,
+                fee,
+                is_respectful,
+                obligations_sats,
+            ) {
+                Ok(o) => {
+                    if o.len() == 2 {
+                        tracing::info!(
+                            "  Bifurcated confiscation: lottery={} sats, operator change={} sats \
+                             (obligations={} sats, fee={} sats, total={} sats)",
+                            o[0].value.to_sat(),
+                            o[1].value.to_sat(),
+                            obligations_sats,
+                            fee,
+                            reserves_amount
+                        );
+                    }
+                    o
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to build confiscation outputs for {}: {}",
+                        ledger_prefix,
+                        e
+                    );
+                    continue;
+                }
+            };
 
             let confiscation_tx = Transaction {
                 version: bitcoin::transaction::Version::TWO,
@@ -1449,10 +1743,7 @@ impl Node {
                     sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
                     witness: Witness::default(),
                 }],
-                output: vec![TxOut {
-                    value: Amount::from_sat(output_amount),
-                    script_pubkey: lottery_output.script_pubkey(),
-                }],
+                output: outputs,
             };
 
             // Build the Taproot reserves structure for signing using
