@@ -579,8 +579,17 @@ pub struct SpendTxParams {
     pub reserves_outpoint: bitcoin::OutPoint,
     /// The amount in the reserves UTXO (satoshis)
     pub reserves_amount: u64,
-    /// Destination script for the spend
+    /// Destination script for the *change* (remainder after `splits` and fee).
+    /// When `splits` is empty, this is the only output and receives
+    /// `reserves_amount − fee`.
     pub destination_script: ScriptBuf,
+    /// Additional fixed-amount outputs that come *before* the change output.
+    /// Each entry is `(script_pubkey, amount_sats)`. The change output to
+    /// `destination_script` is computed as
+    /// `reserves_amount − sum(splits) − fee`. Empty by default for
+    /// backward-compatible single-output behavior.
+    #[doc(alias = "multi-output")]
+    pub splits: Vec<(ScriptBuf, u64)>,
     /// Fee rate in sat/vbyte
     pub fee_rate_sat_vbyte: u64,
     /// nLockTime value for the spending TX. Must be `≥ quorum_expiry +
@@ -605,20 +614,38 @@ impl ReservesSpendBuilder {
     ) -> DepositsResult<bitcoin::Transaction> {
         use bitcoin::{Sequence, Transaction, TxIn, TxOut, Witness};
 
-        // Estimate tx size for fee calculation
-        // Taproot script-path spend: ~input overhead + ~65 witness bytes per signature + control block
-        // Conservative estimate: 150 vbytes for input + 43 vbytes for output
-        let estimated_vbytes = 200u64;
+        // Estimate tx size: Taproot script-path spend input (~135 vb) +
+        // one ~43 vb output per emitted output (change + every split).
+        // 135 vb is conservative for tier-0 majority of 3 (witness =
+        // 2 sigs + 1 empty stack + ~104 byte script + ~97 byte control
+        // block ≈ 333 wbytes / 4 ≈ 84 vbytes; plus 41 byte base input +
+        // ~10 byte tx overhead).
+        let output_count = (params.splits.len() + 1) as u64;
+        let estimated_vbytes = 135 + 43 * output_count;
         let fee = estimated_vbytes * params.fee_rate_sat_vbyte;
 
-        if fee >= params.reserves_amount {
+        let splits_total: u64 = params.splits.iter().map(|(_, n)| *n).sum();
+        let consumed = splits_total.saturating_add(fee);
+        if consumed >= params.reserves_amount {
             return Err(DepositsError::InvalidState(format!(
-                "Fee {} exceeds reserves amount {}",
-                fee, params.reserves_amount
+                "splits ({} sats) + fee ({} sats) exceeds reserves ({} sats)",
+                splits_total, fee, params.reserves_amount
             )));
         }
+        let change_amount = params.reserves_amount - consumed;
 
-        let output_amount = params.reserves_amount - fee;
+        let mut outputs: Vec<TxOut> = params
+            .splits
+            .iter()
+            .map(|(script, amount)| TxOut {
+                value: Amount::from_sat(*amount),
+                script_pubkey: script.clone(),
+            })
+            .collect();
+        outputs.push(TxOut {
+            value: Amount::from_sat(change_amount),
+            script_pubkey: params.destination_script.clone(),
+        });
 
         let tx = Transaction {
             version: bitcoin::transaction::Version::TWO,
@@ -629,10 +656,7 @@ impl ReservesSpendBuilder {
                 sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
                 witness: Witness::new(), // Filled in later with signatures
             }],
-            output: vec![TxOut {
-                value: Amount::from_sat(output_amount),
-                script_pubkey: params.destination_script.clone(),
-            }],
+            output: outputs,
         };
 
         Ok(tx)

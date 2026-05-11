@@ -132,6 +132,12 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let mut ledger_id_arg: Option<String> = None;
     let mut tier: usize = 0;
     let mut fee_rate: u64 = 2; // sat/vb default
+    // `--split <addr>:<sats>` fixed-amount outputs that come before the
+    // change output (positional `dest_address`). With one or more `--split`
+    // entries, the positional dest receives `reserves − Σsplits − fee` as
+    // change rather than the whole UTXO. Single-positional callers without
+    // any `--split` get the original 1-output behavior unchanged.
+    let mut splits_raw: Vec<String> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -156,6 +162,10 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 fee_rate = args[i + 1].parse().map_err(|_| "Invalid --fee-rate")?;
                 i += 2;
             }
+            "--split" if i + 1 < args.len() => {
+                splits_raw.push(args[i + 1].clone());
+                i += 2;
+            }
             s if s.starts_with("--") => {
                 config_args.push(args[i].clone());
                 if i + 1 < args.len() && !args[i + 1].starts_with("--") {
@@ -174,7 +184,10 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 
     let destination = destination.ok_or(
-        "Usage: reserves spend <dest_address> --ledger <ledger_id> --seed-dir <path> [--key <hex>] [--tier N] [--fee-rate N]"
+        "Usage: reserves spend <dest_address> --ledger <ledger_id> --seed-dir <path> \
+         [--key <hex>] [--tier N] [--fee-rate N] [--split <addr>:<sats> [--split ...]]\n\n\
+         With one or more `--split <addr>:<sats>`, each split is a separate output and \
+         `dest_address` becomes the change output receiving `reserves − Σsplits − fee`."
     )?;
 
     if keys.is_empty() && seed_dir.is_none() {
@@ -331,10 +344,45 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     // The spending TX's nLockTime just mirrors that target.
     let reserves_script_pubkey = reserves.taproot_output.script_pubkey();
     let lock_time = tier_info.timelock_blocks;
+
+    // Parse `--split <addr>:<sats>` into (ScriptBuf, u64) outputs.
+    let mut splits: Vec<(bitcoin::ScriptBuf, u64)> = Vec::with_capacity(splits_raw.len());
+    for raw in &splits_raw {
+        let (addr_s, amt_s) = raw.split_once(':').ok_or_else(|| {
+            format!("Invalid --split {:?}: expected <addr>:<sats>", raw)
+        })?;
+        let addr = addr_s
+            .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+            .map_err(|e| format!("Invalid split address {:?}: {}", addr_s, e))?
+            .require_network(config.network)
+            .map_err(|e| format!("Split address {:?} network mismatch: {}", addr_s, e))?;
+        let amt: u64 = amt_s
+            .parse()
+            .map_err(|_| format!("Invalid split amount {:?}", amt_s))?;
+        splits.push((addr.script_pubkey(), amt));
+    }
+    if !splits.is_empty() {
+        println!("  Splits:      {} extra output(s) before change", splits.len());
+        for (i, (script, amt)) in splits.iter().enumerate() {
+            println!(
+                "    [{}] {} sats → {}",
+                i,
+                amt,
+                bitcoin::Address::from_script(script, config.network)
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|_| hex::encode(script.as_bytes()))
+            );
+        }
+        let total_splits: u64 = splits.iter().map(|(_, n)| *n).sum();
+        println!("    Σ splits:    {} sats", total_splits);
+        println!("    change to:   {} (gets reserves − Σsplits − fee)", destination);
+    }
+
     let params = deposits_core::tapscript_reserves::SpendTxParams {
         reserves_outpoint: outpoint,
         reserves_amount: amount,
         destination_script: dest_script.clone(),
+        splits,
         fee_rate_sat_vbyte: fee_rate,
         lock_time,
     };
