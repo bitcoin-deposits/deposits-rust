@@ -4893,6 +4893,7 @@ pub async fn recovery_confiscate_plan(
 
     let mut ledger_id: Option<String> = None;
     let mut last_valid_sequence: Option<u64> = None;
+    let mut proof_type_override: Option<deposits_core::fraud::FraudProofType> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -4902,6 +4903,28 @@ pub async fn recovery_confiscate_plan(
                 last_valid_sequence = Some(args[i + 1].parse().map_err(|_| {
                     format!("Invalid --last-valid-sequence: {}", args[i + 1])
                 })?);
+                i += 1;
+            }
+            "--proof-type" if i + 1 < args.len() => {
+                use deposits_core::fraud::FraudProofType;
+                proof_type_override = Some(match args[i + 1].as_str() {
+                    "quorum-expired" => FraudProofType::QuorumExpired,
+                    "uncredited-onchain" => FraudProofType::UncreditedOnchainPayment,
+                    "uncredited-lightning" => FraudProofType::UncreditedLightningPayment,
+                    "stale-cosignature" => FraudProofType::StaleCosignature,
+                    "dispute-dereliction" => FraudProofType::DisputeDereliction,
+                    "non-conforming" => FraudProofType::NonConformingUpdate,
+                    "winner-collateral-deviation" => FraudProofType::WinnerCollateralDeviation,
+                    other => {
+                        return Err(format!(
+                            "Unknown --proof-type {:?}. Valid: quorum-expired, \
+                             uncredited-onchain, uncredited-lightning, stale-cosignature, \
+                             dispute-dereliction, non-conforming, winner-collateral-deviation",
+                            other
+                        )
+                        .into());
+                    }
+                });
                 i += 1;
             }
             s if s.starts_with("--") => {
@@ -4938,30 +4961,44 @@ pub async fn recovery_confiscate_plan(
     }
 
     // ── 1. Discover the fraud proof ──
-    println!("\n── 1. Fraud proof on relay (kind:9101) ──");
-    let proof_type = node.fetch_fraud_proof_type_for_ledger(&ledger_id).await;
-    let is_respectful = match &proof_type {
-        Some(pt) => {
-            println!("  type:           {:?}", pt);
-            println!(
-                "  classification: {} (is_respectful={})",
-                if pt.is_respectful() {
-                    "RESPECTFUL"
-                } else {
-                    "PUNITIVE"
-                },
-                pt.is_respectful()
-            );
-            pt.is_respectful()
+    println!("\n── 1. Fraud proof ──");
+    let on_relay = node.fetch_fraud_proof_type_for_ledger(&ledger_id).await;
+    let proof_type: Option<deposits_core::fraud::FraudProofType> = match (proof_type_override, on_relay) {
+        (Some(ovr), Some(rly)) => {
+            println!("  on-relay type:    {:?}", rly);
+            println!("  --proof-type:     {:?} (override; planning AS IF this were published)", ovr);
+            Some(ovr)
         }
-        None => {
-            println!("  ⚠ no kind:9101 broadcast on relay for this ledger");
-            println!("    → would fall back to PUNITIVE (single-output) shape");
-            println!("    → cosigner verifier WOULD REFUSE: a confiscation");
-            println!("      without a published fraud proof is unverifiable");
-            false
+        (Some(ovr), None) => {
+            println!("  on relay:         (none published yet)");
+            println!("  --proof-type:     {:?} (planning AS IF this were published)", ovr);
+            Some(ovr)
+        }
+        (None, Some(rly)) => {
+            println!("  type (on relay):  {:?}", rly);
+            Some(rly)
+        }
+        (None, None) => {
+            println!("  ⚠ no kind:9101 broadcast on relay AND no --proof-type override");
+            println!("    → falling back to PUNITIVE (single-output) shape");
+            println!("    → cosigner verifier WOULD REFUSE at sign-time:");
+            println!("      a confiscation without a published fraud proof is unverifiable");
+            println!("    Tip: pass --proof-type <name> to dry-run a specific scenario.");
+            None
         }
     };
+    let is_respectful = proof_type.as_ref().map(|pt| pt.is_respectful()).unwrap_or(false);
+    if let Some(pt) = proof_type.as_ref() {
+        println!(
+            "  classification:   {} (is_respectful={})",
+            if pt.is_respectful() {
+                "RESPECTFUL"
+            } else {
+                "PUNITIVE"
+            },
+            pt.is_respectful()
+        );
+    }
 
     // Step (no header): fetch ledger updates. Used by section 2 + 3 below.
     let client = node.nostr.fetch_client();
