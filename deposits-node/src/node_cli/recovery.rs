@@ -4963,8 +4963,7 @@ pub async fn recovery_confiscate_plan(
         }
     };
 
-    // ── 2. Walk ledger history at fork point ──
-    println!("\n── 2. Ledger state at last_valid_sequence ──");
+    // Step (no header): fetch ledger updates. Used by section 2 + 3 below.
     let client = node.nostr.fetch_client();
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
@@ -4994,32 +4993,116 @@ pub async fn recovery_confiscate_plan(
         .map(|u| u.operator_id)
         .ok_or("no LedgerOpen at seq 0")?;
 
-    // Resolve last_valid_sequence: explicit --override wins, else read it
-    // from the lowest fork-branch DisputeEnter's `last_valid_sequence`
-    // field. Fork-branch = signed by someone other than original_operator.
-    // Lowest wins because that's the earliest divergence point — the most
-    // conservative replay frontier (matches how cosigners pick the fork).
-    let last_valid_sequence = match override_last_valid_sequence {
-        Some(n) => n,
-        None => {
-            let mut auto: Option<u64> = None;
-            for u in &updates {
-                if u.operator_id == original_operator {
-                    continue;
-                }
-                if let Ok(LedgerOperation::DisputeEnter {
-                    last_valid_sequence: lvs,
-                    ..
-                }) = LedgerOperation::tlv_decode(&u.message)
-                {
-                    auto = Some(auto.map(|cur| cur.min(lvs)).unwrap_or(lvs));
-                }
-            }
-            let resolved = auto
-                .ok_or("no fork-branch DisputeEnter observed — cannot auto-detect last_valid_sequence; pass --last-valid-sequence <N> explicitly")?;
-            println!("  (auto-detected last_valid_sequence = {})", resolved);
-            resolved
+    let main_chain_tip_seq = updates
+        .iter()
+        .filter(|u| u.operator_id == original_operator)
+        .map(|u| u.sequence_number)
+        .max()
+        .unwrap_or(0);
+    let our_pubkey = hex::encode(node.node_id.serialize());
+
+    // ── 2. DisputeEnter — existing fork branches + what we'd do ──
+    //
+    // Someone has to be first. If no fork-branch DisputeEnter exists yet,
+    // this dry-run is for the "first to dispute" path: we'd fork at the
+    // current main-chain tip and publish DisputeEnter ourselves. If
+    // others have already disputed, we'd join their fork (or extend our
+    // own already-published one).
+    //
+    // Fork-branch = signed by someone other than `original_operator`.
+    // Across branches, the lowest `last_valid_sequence` wins — earliest
+    // divergence point, most conservative replay frontier.
+    println!("\n── 2. DisputeEnter ──");
+    let mut existing_enters: Vec<(bitcoin::secp256k1::PublicKey, u64, String, u64)> = Vec::new();
+    for u in &updates {
+        if u.operator_id == original_operator {
+            continue;
         }
+        if let Ok(LedgerOperation::DisputeEnter {
+            last_valid_sequence: lvs,
+            reason,
+        }) = LedgerOperation::tlv_decode(&u.message)
+        {
+            existing_enters.push((u.operator_id, u.sequence_number, reason, lvs));
+        }
+    }
+    existing_enters.sort_by_key(|(_, _, _, lvs)| *lvs);
+
+    let we_already_disputed = existing_enters
+        .iter()
+        .any(|(pk, _, _, _)| hex::encode(pk.serialize()) == our_pubkey);
+
+    let last_valid_sequence = if let Some(n) = override_last_valid_sequence {
+        println!("  --last-valid-sequence override = {}", n);
+        if !existing_enters.is_empty() {
+            println!("  (existing fork-branch DisputeEnters observed:)");
+            for (pk, seq, reason, lvs) in &existing_enters {
+                println!(
+                    "    - {} at seq {} reason={:?} last_valid={}",
+                    hex::encode(pk.serialize()),
+                    seq,
+                    reason,
+                    lvs
+                );
+            }
+        }
+        n
+    } else if existing_enters.is_empty() {
+        // We'd be first. The fork point is the current main-chain tip:
+        // every operator update so far is valid, the quorum just timed
+        // out (for QuorumExpired) or the offending update is yet to be
+        // produced (other proof types — but they should have a fraud
+        // broadcast first, which we already noted in section 1).
+        println!("  no fork-branch DisputeEnter on relay — we would be FIRST");
+        println!("  proposed DisputeEnter from {}:", our_pubkey);
+        println!("    last_valid_sequence: {} (main-chain tip)", main_chain_tip_seq);
+        let proposed_reason = match &proof_type {
+            Some(deposits_core::fraud::FraudProofType::QuorumExpired) => "quorum_expired",
+            Some(pt) => {
+                // Best-effort label; auto_arm_for_dispute uses "auto_dispute".
+                println!("    reason:              auto_dispute (proof_type={:?})", pt);
+                ""
+            }
+            None => {
+                println!("    reason:              (none — no fraud broadcast on relay yet)");
+                ""
+            }
+        };
+        if !proposed_reason.is_empty() {
+            println!("    reason:              {}", proposed_reason);
+        }
+        main_chain_tip_seq
+    } else {
+        // Joining an existing dispute. Use the lowest last_valid_sequence
+        // among observed DisputeEnters (matches cosigner consensus).
+        let resolved = existing_enters[0].3;
+        println!("  existing fork-branch DisputeEnter(s):");
+        for (pk, seq, reason, lvs) in &existing_enters {
+            let marker = if hex::encode(pk.serialize()) == our_pubkey {
+                " (us)"
+            } else {
+                ""
+            };
+            println!(
+                "    - {}{} at seq {} reason={:?} last_valid={}",
+                hex::encode(pk.serialize()),
+                marker,
+                seq,
+                reason,
+                lvs
+            );
+        }
+        println!(
+            "  → auto-resolved last_valid_sequence = {} (lowest)",
+            resolved
+        );
+        if !we_already_disputed {
+            println!(
+                "  we are NOT among the disputers — would publish our own DisputeEnter"
+            );
+            println!("    last_valid_sequence: {}", resolved);
+        }
+        resolved
     };
 
     let mut state = LedgerState::new(original_operator, String::new(), 0);
@@ -5067,6 +5150,7 @@ pub async fn recovery_confiscate_plan(
     let obligations_msat = state.total_deposit_balance();
     let obligations_sats = obligations_msat / 1000;
 
+    println!("\n── 3. Ledger state at last_valid_sequence ──");
     println!("  original_operator:   {}", hex::encode(original_operator.serialize()));
     println!("  latest QuorumBegin:");
     println!("    seq:               {}", qb_seq);
@@ -5080,8 +5164,8 @@ pub async fn recovery_confiscate_plan(
     }
     println!("  obligations:         {} msat ({} sats)", obligations_msat, obligations_sats);
 
-    // ── 3. Fork-branch DisputeArmed participants ──
-    println!("\n── 3. DisputeArmed participants ──");
+    // ── 4. Fork-branch DisputeArmed participants ──
+    println!("\n── 4. DisputeArmed participants ──");
     let mut participants: Vec<LotteryParticipant> = Vec::new();
     for u in &updates {
         if u.sequence_number <= last_valid_sequence {
@@ -5103,12 +5187,6 @@ pub async fn recovery_confiscate_plan(
             }
         }
     }
-    if participants.len() < 2 {
-        println!(
-            "  ⚠ only {} participant(s) — confiscation requires ≥ 2",
-            participants.len()
-        );
-    }
     participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
     for p in &participants {
         println!(
@@ -5117,9 +5195,21 @@ pub async fn recovery_confiscate_plan(
             p.target_reserves
         );
     }
+    if participants.len() < 2 {
+        println!(
+            "  ⚠ only {} participant(s) — confiscation requires ≥ 2",
+            participants.len()
+        );
+        println!();
+        println!("Plan ends here: sections 5–8 (lottery / confiscation tx / sighash /");
+        println!("cosigner self-check) need at least 2 armed participants. After more");
+        println!("members arm (auto-arm fires on kind:9103 dispute notifications),");
+        println!("re-run this dry-run to see the full plan.");
+        return Ok(());
+    }
 
-    // ── 4. Lottery script + reserves UTXO lookup ──
-    println!("\n── 4. Derived lottery output + reserves UTXO ──");
+    // ── 5. Lottery script + reserves UTXO lookup ──
+    println!("\n── 5. Derived lottery output + reserves UTXO ──");
     let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = qb_members
         .iter()
         .filter(|pk| **pk != original_operator)
@@ -5161,8 +5251,8 @@ pub async fn recovery_confiscate_plan(
         reserves_outpoint.txid, reserves_outpoint.vout, reserves_amount
     );
 
-    // ── 5. Confiscation TX plan ──
-    println!("\n── 5. Confiscation TX plan ──");
+    // ── 6. Confiscation TX plan ──
+    println!("\n── 6. Confiscation TX plan ──");
     let fee_rate = 2u64;
     let estimated_vsize = 200u64;
     let fee = fee_rate * estimated_vsize;
@@ -5209,7 +5299,7 @@ pub async fn recovery_confiscate_plan(
         output: outputs,
     };
 
-    // ── 6. Sighash ──
+    // ── 7. Sighash ──
     let voter_set = VoterSet::new(original_operator, qb_members.clone());
     let voter_count = voter_set.all_voters().len();
     let ruleset =
@@ -5247,13 +5337,13 @@ pub async fn recovery_confiscate_plan(
         )
         .map_err(|e| format!("compute sighash: {}", e))?;
     let sighash_bytes: [u8; 32] = sighash.to_byte_array();
-    println!("\n── 6. Tap-leaf sighash ──");
+    println!("\n── 7. Tap-leaf sighash ──");
     println!("  tier:               threshold={}, timelock={}", tier.threshold, tier.timelock_blocks);
     println!("  sighash:            {}", hex::encode(sighash_bytes));
     println!("  required cosigs:    {}", tier.threshold);
 
-    // ── 7. Self-run the cosigner-side verifier ──
-    println!("\n── 7. Cosigner-perspective self-check ──");
+    // ── 8. Self-run the cosigner-side verifier ──
+    println!("\n── 8. Cosigner-perspective self-check ──");
     let unsigned_tx_hex = hex::encode(bitcoin::consensus::encode::serialize(&confiscation_tx));
     let mock_request = crate::nostr::LedgerRequest {
         action: "confiscation_sign".to_string(),
