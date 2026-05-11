@@ -30,6 +30,41 @@
 //!
 //! Run after `./bin/setup.sh 3` on a fresh cluster. Tier-3, ignored by
 //! default per the project convention.
+//!
+//! ## Precondition: cosigners need op-key P2WPKH UTXOs
+//!
+//! `auto_arm_for_dispute` (`deposits-node/src/node/dispute.rs`) computes
+//! the required replacement collateral as
+//! `obligations × (collateral / reserves) + fee_estimate`, then looks
+//! for a UTXO at the cosigner's *operator-key* P2WPKH address (NOT the
+//! per-ledger BDK wallet address). If no such UTXO is found, the
+//! `DisputeArmed` operation declares `replacement_collateral = None`,
+//! which makes cosigners refuse to sign the confiscation tx (per
+//! `verify_disputants_replacement_collateral`).
+//!
+//! `setup.sh` funds operators' BDK-derived receive addresses (used for
+//! ledger activation txs), but does *not* fund the op-key P2WPKH that
+//! auto-arm queries. For this test to pass, each cosigner of the
+//! disputed ledger needs at least
+//! `obligations × (collateral / reserves) + ~500 sat fee` at the
+//! address derived as:
+//!
+//! ```text
+//! P2WPKH(node_id_compressed_pubkey)
+//! ```
+//!
+//! where `node_id` comes from `deposits-node info --seed <seed> ...`.
+//! With Q=3 + a 50/50 collateral split, ~1000 sats is sufficient for
+//! the test-cluster's small obligations; 10k sats covers any realistic
+//! production case.
+//!
+//! ## Re-runs against the same cluster
+//!
+//! The test isn't idempotent: a re-run picks the same already-disputed
+//! ledger via `discover_op0_ledger`, where the existing fork files have
+//! stale `replacement_collateral=None` from before funding. Set
+//! `FORK_SHAPE_LEDGER_ID=<another-op0-ledger>` to target a fresh
+//! ledger without resetting the cluster.
 
 use deposits_core::messages::LedgerOperation;
 use deposits_core::tlv::TlvDecode;
@@ -46,7 +81,17 @@ fn dispute_creates_well_formed_fork_branches() {
     }
 
     let node = build_node_with_danger();
-    let ledger = discover_op0_ledger();
+    // Tier-3 isn't idempotent: a re-run on the same cluster picks the
+    // same already-disputed ledger via `discover_op0_ledger`. Allow
+    // overriding via `FORK_SHAPE_LEDGER_ID` so subsequent runs can
+    // target a fresh op0 ledger without resetting the cluster.
+    let ledger = match std::env::var("FORK_SHAPE_LEDGER_ID") {
+        Ok(v) if !v.is_empty() => {
+            eprintln!("[setup] using FORK_SHAPE_LEDGER_ID override: {}…", &v[..16]);
+            v
+        }
+        _ => discover_op0_ledger(),
+    };
     eprintln!("[setup] op0 ledger: {}…", &ledger[..16]);
 
     // ── 1. Inject invalid update via op0 ──
