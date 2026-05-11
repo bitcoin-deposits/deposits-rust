@@ -11,10 +11,15 @@
 //! each cosigner's data dir and asserts on each fork's shape:
 //!
 //!   (a) A fork compound-key JSONL exists at
-//!       `{data_dir}/wallet/ledgers/{ledger_id}_{lvs:06}_{op_prefix:16}.jsonl`.
-//!   (b) The fork's tail is `..., DisputeEnter, DisputeArmed` —
-//!       DisputeArmed must follow DisputeEnter immediately, both signed
-//!       by the same forking pubkey, both above `last_valid_sequence`.
+//!       `{data_dir}/wallet/ledgers/{ledger_id}_{lvs:06}_{op_prefix:16}.jsonl`
+//!       for each cosigner. We deliberately *exclude* a fork whose
+//!       op_prefix matches the disputed ledger's original operator —
+//!       those are spurious (the operator is structurally barred from
+//!       disputing their own ledger by `validate_update_signer`).
+//!   (b) Each fork's history contains `DisputeEnter` followed eventually
+//!       by `DisputeArmed`, both signed by the same forking pubkey, with
+//!       nothing but `QuorumAddMember` ops between them (auto-arm syncs
+//!       the fork's member set between Enter and Armed).
 //!   (c) Across all cosigners' forks, the DisputeEnter `last_valid_sequence`
 //!       agrees — they're all forking at the same point.
 //!   (d) Each DisputeArmed declares `replacement_collateral = Some(_)`.
@@ -123,6 +128,45 @@ fn dispute_creates_well_formed_fork_branches() {
         forks_by_op.len()
     );
 
+    // Identify the disputed ledger's original operator so we can filter
+    // out spurious self-forks: `handle_dispute`'s membership check
+    // returns true for the operator (`inbound.rs:1076`), so the operator
+    // ends up auto-arming its own ledger. Other nodes reject those forks
+    // (operator-barred-from-disputing-own-ledger), but the operator
+    // wastes the local work. Filter them out here and check the
+    // cosigner-only forks.
+    let original_operator_prefix: String = {
+        let any_history = read_ledger_history(&op0_data_dir(), &ledger);
+        let original_op = any_history
+            .iter()
+            .find(|u| u.sequence_number == 0)
+            .map(|u| u.operator_id)
+            .expect("no LedgerOpen at seq 0 on op0's copy of the disputed ledger");
+        hex::encode(original_op.serialize())[..16].to_string()
+    };
+    eprintln!(
+        "[setup]  disputed ledger original operator prefix: {}",
+        original_operator_prefix
+    );
+    let total_before_filter = forks_by_op.len();
+    forks_by_op.retain(|(_, path)| {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let prefix = stem.rsplitn(2, '_').next().unwrap_or("");
+        prefix != original_operator_prefix
+    });
+    if forks_by_op.len() != total_before_filter {
+        eprintln!(
+            "[filter] dropped {} spurious operator-self fork(s); keeping {} cosigner fork(s)",
+            total_before_filter - forks_by_op.len(),
+            forks_by_op.len()
+        );
+    }
+    assert!(
+        !forks_by_op.is_empty(),
+        "no cosigner forks (only operator-self forks were found) — auto-arm \
+         membership check is misfiring on the operator side"
+    );
+
     // ── 4. For each fork: read history, find DisputeEnter + DisputeArmed,
     //       extract last_valid_sequence, sanity-check the tail shape ──
     let mut all_lvs: Vec<u64> = Vec::new();
@@ -192,16 +236,34 @@ fn dispute_creates_well_formed_fork_branches() {
         let (armed_idx, armed_has_rc) = dispute_armed
             .unwrap_or_else(|| panic!("op{} fork is missing DisputeArmed", op_idx));
 
-        // (b) Shape: DisputeArmed must follow DisputeEnter immediately.
-        assert_eq!(
-            armed_idx,
-            enter_idx + 1,
-            "op{} fork: DisputeArmed at idx {} not immediately after DisputeEnter \
-             at idx {} — fork tail is malformed",
+        // (b) Shape: DisputeArmed comes after DisputeEnter, with nothing
+        //     but QuorumAddMember ops in between (auto-arm syncs the
+        //     fork's quorum-member set between Enter and Armed).
+        assert!(
+            armed_idx > enter_idx,
+            "op{} fork: DisputeArmed at idx {} not after DisputeEnter at idx {}",
             op_idx,
             armed_idx,
             enter_idx
         );
+        for between_idx in (enter_idx + 1)..armed_idx {
+            let between = &history[between_idx];
+            let op = LedgerOperation::tlv_decode(&between.message).unwrap_or_else(|e| {
+                panic!(
+                    "op{} fork: idx {} (between Enter@{} and Armed@{}) decode error: {}",
+                    op_idx, between_idx, enter_idx, armed_idx, e
+                )
+            });
+            assert!(
+                matches!(op, LedgerOperation::QuorumAddMember { .. }),
+                "op{} fork: unexpected op {:?} between DisputeEnter@{} and DisputeArmed@{} — \
+                 only QuorumAddMember is permitted here",
+                op_idx,
+                std::mem::discriminant(&op),
+                enter_idx,
+                armed_idx
+            );
+        }
 
         // Both fork updates must be signed by the same cosigner.
         let forker = history[enter_idx].operator_id;
