@@ -4921,11 +4921,10 @@ pub async fn recovery_confiscate_plan(
     }
 
     let ledger_id = ledger_id
-        .ok_or("Usage: deposits-node recovery confiscate-plan <ledger_id> --last-valid-sequence <N>")?
+        .ok_or("Usage: deposits-node recovery confiscate-plan <ledger_id> [--last-valid-sequence <N>]")?
         .trim()
         .to_string();
-    let last_valid_sequence = last_valid_sequence
-        .ok_or("--last-valid-sequence <N> is required (the fork-point seq from DisputeEnter)")?;
+    let override_last_valid_sequence = last_valid_sequence;
     let config = parse_config(&config_args)?;
 
     let node = crate::Node::new(config).await?;
@@ -4933,7 +4932,10 @@ pub async fn recovery_confiscate_plan(
 
     println!("=== Confiscation plan: dry run ===");
     println!("ledger_id:           {}", ledger_id);
-    println!("last_valid_sequence: {}", last_valid_sequence);
+    match override_last_valid_sequence {
+        Some(n) => println!("last_valid_sequence: {} (--last-valid-sequence override)", n),
+        None => println!("last_valid_sequence: auto (will read from first fork-branch DisputeEnter)"),
+    }
 
     // ── 1. Discover the fraud proof ──
     println!("\n── 1. Fraud proof on relay (kind:9101) ──");
@@ -4991,6 +4993,34 @@ pub async fn recovery_confiscate_plan(
         .find(|u| u.sequence_number == 0)
         .map(|u| u.operator_id)
         .ok_or("no LedgerOpen at seq 0")?;
+
+    // Resolve last_valid_sequence: explicit --override wins, else read it
+    // from the lowest fork-branch DisputeEnter's `last_valid_sequence`
+    // field. Fork-branch = signed by someone other than original_operator.
+    // Lowest wins because that's the earliest divergence point — the most
+    // conservative replay frontier (matches how cosigners pick the fork).
+    let last_valid_sequence = match override_last_valid_sequence {
+        Some(n) => n,
+        None => {
+            let mut auto: Option<u64> = None;
+            for u in &updates {
+                if u.operator_id == original_operator {
+                    continue;
+                }
+                if let Ok(LedgerOperation::DisputeEnter {
+                    last_valid_sequence: lvs,
+                    ..
+                }) = LedgerOperation::tlv_decode(&u.message)
+                {
+                    auto = Some(auto.map(|cur| cur.min(lvs)).unwrap_or(lvs));
+                }
+            }
+            let resolved = auto
+                .ok_or("no fork-branch DisputeEnter observed — cannot auto-detect last_valid_sequence; pass --last-valid-sequence <N> explicitly")?;
+            println!("  (auto-detected last_valid_sequence = {})", resolved);
+            resolved
+        }
+    };
 
     let mut state = LedgerState::new(original_operator, String::new(), 0);
     let mut latest_qb: Option<(
