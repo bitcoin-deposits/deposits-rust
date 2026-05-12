@@ -11,21 +11,28 @@ use bitcoin::Network;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-/// Print the P2WPKH address corresponding to a given compressed-secp256k1
+/// Print the P2WPKH address corresponding to a compressed-secp256k1
 /// public key. This is the *operator-key* address — the one
 /// `auto_arm_for_dispute` queries for replacement-collateral UTXOs, the one
 /// `reserves spend` change-and-splits go to, and the one a recovery sweep
 /// returns funds to.
+///
+/// With no positional pubkey, defaults to *this node's own pubkey* — the
+/// same one `info` prints — derived from `--seed`/`--seed-file` via
+/// `m/86'/0'/0'/0/0`. So under the typical `./docker/node-cli.sh <op>`
+/// wrapper that pre-supplies the seed, plain `pubkey-to-p2wpkh` prints
+/// that operator's own funding address.
 ///
 /// We derive the address the same way the daemon does
 /// (`bitcoin::Address::p2wpkh(CompressedPublicKey, network)`), so what's
 /// printed here exactly matches what the daemon searches on-chain.
 ///
 /// Usage:
-///   deposits-node pubkey-to-p2wpkh <33-byte hex pubkey> [--network <name>]
+///   deposits-node pubkey-to-p2wpkh [<66-char-hex-pubkey>] [--network <name>]
 pub fn pubkey_to_p2wpkh(args: &[String]) -> Result<(), String> {
     let mut pubkey_hex: Option<String> = None;
     let mut network = Network::Bitcoin;
+    let mut seed: Option<[u8; 32]> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -40,8 +47,42 @@ pub fn pubkey_to_p2wpkh(args: &[String]) -> Result<(), String> {
                 };
                 i += 2;
             }
+            "--seed" if i + 1 < args.len() => {
+                let bytes = hex::decode(args[i + 1].trim())
+                    .map_err(|e| format!("Invalid --seed hex: {}", e))?;
+                if bytes.len() != 32 {
+                    return Err("--seed must be 64 hex chars".to_string());
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                seed = Some(arr);
+                i += 2;
+            }
+            "--seed-file" if i + 1 < args.len() => {
+                let path = &args[i + 1];
+                let raw = std::fs::read_to_string(path)
+                    .map_err(|e| format!("Read --seed-file {}: {}", path, e))?;
+                let hex_str = raw.trim();
+                let bytes = hex::decode(hex_str)
+                    .map_err(|e| format!("Invalid hex in --seed-file: {}", e))?;
+                if bytes.len() != 32 {
+                    return Err("Seed in --seed-file must be 64 hex chars".to_string());
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                seed = Some(arr);
+                i += 2;
+            }
+            // Tolerate other flags that the wrapper script may forward
+            // (e.g. --name, --data-dir, --network, --relay, --esplora) so
+            // `./docker/node-cli.sh <op> pubkey-to-p2wpkh` works without
+            // any extra args.
             s if s.starts_with("--") => {
-                return Err(format!("Unknown flag {:?}", s));
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
             }
             _ => {
                 if pubkey_hex.is_none() {
@@ -52,19 +93,32 @@ pub fn pubkey_to_p2wpkh(args: &[String]) -> Result<(), String> {
         }
     }
 
-    let pubkey_hex = pubkey_hex.ok_or(
-        "Usage: deposits-node pubkey-to-p2wpkh <66-char-hex-pubkey> [--network <name>]",
-    )?;
-    let bytes = hex::decode(pubkey_hex.trim())
-        .map_err(|e| format!("Invalid hex: {}", e))?;
-    if bytes.len() != 33 {
-        return Err(format!(
-            "Pubkey must be 33 bytes compressed (66 hex chars); got {}",
-            bytes.len()
-        ));
-    }
-    let mut arr = [0u8; 33];
-    arr.copy_from_slice(&bytes);
+    // Resolve the pubkey: explicit positional wins, else derive from seed.
+    let arr: [u8; 33] = match pubkey_hex {
+        Some(hex_str) => {
+            let bytes = hex::decode(hex_str.trim())
+                .map_err(|e| format!("Invalid hex: {}", e))?;
+            if bytes.len() != 33 {
+                return Err(format!(
+                    "Pubkey must be 33 bytes compressed (66 hex chars); got {}",
+                    bytes.len()
+                ));
+            }
+            let mut a = [0u8; 33];
+            a.copy_from_slice(&bytes);
+            a
+        }
+        None => {
+            let seed = seed.ok_or(
+                "No pubkey provided and no --seed/--seed-file given to derive our own. \
+                 Pass a pubkey positionally OR supply a seed.",
+            )?;
+            let sk = super::derive_operator_secret(&seed, network)?;
+            let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk);
+            pk.serialize()
+        }
+    };
+
     let compressed = bitcoin::CompressedPublicKey::from_slice(&arr)
         .map_err(|e| format!("Invalid compressed pubkey: {}", e))?;
     let addr = bitcoin::Address::p2wpkh(&compressed, network);
