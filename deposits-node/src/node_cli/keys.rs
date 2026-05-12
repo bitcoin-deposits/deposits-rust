@@ -11,6 +11,67 @@ use bitcoin::Network;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+/// Print the P2WPKH address corresponding to a given compressed-secp256k1
+/// public key. This is the *operator-key* address — the one
+/// `auto_arm_for_dispute` queries for replacement-collateral UTXOs, the one
+/// `reserves spend` change-and-splits go to, and the one a recovery sweep
+/// returns funds to.
+///
+/// We derive the address the same way the daemon does
+/// (`bitcoin::Address::p2wpkh(CompressedPublicKey, network)`), so what's
+/// printed here exactly matches what the daemon searches on-chain.
+///
+/// Usage:
+///   deposits-node pubkey-to-p2wpkh <33-byte hex pubkey> [--network <name>]
+pub fn pubkey_to_p2wpkh(args: &[String]) -> Result<(), String> {
+    let mut pubkey_hex: Option<String> = None;
+    let mut network = Network::Bitcoin;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--network" if i + 1 < args.len() => {
+                network = match args[i + 1].as_str() {
+                    "mainnet" | "bitcoin" => Network::Bitcoin,
+                    "testnet" | "testnet3" => Network::Testnet,
+                    "signet" => Network::Signet,
+                    "regtest" => Network::Regtest,
+                    other => return Err(format!("Unknown --network {:?}", other)),
+                };
+                i += 2;
+            }
+            s if s.starts_with("--") => {
+                return Err(format!("Unknown flag {:?}", s));
+            }
+            _ => {
+                if pubkey_hex.is_none() {
+                    pubkey_hex = Some(args[i].clone());
+                }
+                i += 1;
+            }
+        }
+    }
+
+    let pubkey_hex = pubkey_hex.ok_or(
+        "Usage: deposits-node pubkey-to-p2wpkh <66-char-hex-pubkey> [--network <name>]",
+    )?;
+    let bytes = hex::decode(pubkey_hex.trim())
+        .map_err(|e| format!("Invalid hex: {}", e))?;
+    if bytes.len() != 33 {
+        return Err(format!(
+            "Pubkey must be 33 bytes compressed (66 hex chars); got {}",
+            bytes.len()
+        ));
+    }
+    let mut arr = [0u8; 33];
+    arr.copy_from_slice(&bytes);
+    let compressed = bitcoin::CompressedPublicKey::from_slice(&arr)
+        .map_err(|e| format!("Invalid compressed pubkey: {}", e))?;
+    let addr = bitcoin::Address::p2wpkh(&compressed, network);
+    println!("{}", addr);
+    Ok(())
+}
+
 pub fn keygen() {
     use bitcoin::secp256k1::rand::rngs::OsRng;
 

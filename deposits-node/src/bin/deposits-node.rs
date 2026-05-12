@@ -119,6 +119,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "derive-deposit-key" => node_cli::keys::derive_deposit_key(&args[2..])?,
         "transport-pubkey" => node_cli::keys::transport_pubkey(&args[2..])?,
         "delegate-pubkey" => node_cli::keys::delegate_pubkey(&args[2..])?,
+        "pubkey-to-p2wpkh" => node_cli::keys::pubkey_to_p2wpkh(&args[2..])?,
         #[cfg(feature = "dangerous-testing")]
         "danger" => node_cli::danger::danger_command(&args[2..]).await?,
         "help" | "--help" | "-h" => node_cli::print_usage(&args[0]),
