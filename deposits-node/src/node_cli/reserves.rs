@@ -236,7 +236,10 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     let path = entry.path();
                     if path.is_dir() {
                         find_seed_files(&path, results);
-                    } else if path.file_name().and_then(|n| n.to_str()) == Some("seed") {
+                    } else if matches!(
+                        path.file_name().and_then(|n| n.to_str()),
+                        Some("seed") | Some("seed.hex")
+                    ) {
                         results.push(path);
                     }
                 }
@@ -286,14 +289,155 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let ledger_id = ledger_id_arg.ok_or(
         "Pass --ledger <id> to identify which ledger's reserves to spend (use `reserves list` to enumerate).",
     )?;
-    let lw = node
-        .ledger_wallet(&ledger_id)
-        .ok_or_else(|| format!("No ledger wallet for {}", ledger_id))?;
-    let reserves = lw
-        .taproot_reserves()
-        .ok_or_else(|| format!("Ledger {} has no taproot reserves", ledger_id))?;
-    let outpoint = reserves.outpoint;
-    let amount = reserves.amount;
+    // Try the per-ledger BDK wallet first (fast path — the daemon wrote
+    // it when this node opened/operated the ledger). If absent (e.g. the
+    // CLI is running with a `--data-dir` that doesn't match the daemon's,
+    // or this ledger was migrated in from a peer), reconstruct the same
+    // info from the ledger's history + an esplora UTXO lookup.
+    let (outpoint, amount, taproot_output, ledger_hash, ruleset_at_qb): (
+        bitcoin::OutPoint,
+        u64,
+        deposits_core::tapscript_reserves::TaprootReservesOutput,
+        [u8; 32],
+        Option<String>,
+    ) = if let Some(lw) = node.ledger_wallet(&ledger_id) {
+        let r = lw
+            .taproot_reserves()
+            .ok_or_else(|| format!("Ledger {} has no taproot reserves", ledger_id))?;
+        (
+            r.outpoint,
+            r.amount,
+            r.taproot_output.clone(),
+            r.ledger_hash,
+            Some(r.ruleset_name.clone()),
+        )
+    } else {
+        // Reconstruction path. Walk the ledger's history → latest QuorumBegin,
+        // extract reserves_id / ledger_hash / quorum_members / quorum_expiry /
+        // protocol_version. Look up the UTXO on-chain.
+        eprintln!(
+            "  (no per-ledger wallet on disk for {}; reconstructing from history + esplora)",
+            &ledger_id[..16]
+        );
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tapscript_reserves::{TapscriptReservesBuilder, VoterSet};
+        use deposits_core::TlvDecode;
+
+        let arc = {
+            let map = node.handler.ledgers.lock().unwrap();
+            map.get(&ledger_id)
+                .cloned()
+                .ok_or_else(|| format!("Ledger {} not loaded; check --data-dir", ledger_id))?
+        };
+        let ledger = arc.read().unwrap();
+        let original_operator = ledger.state.parent_pubkey;
+
+        let mut qb_reserves_id: Option<String> = None;
+        let mut qb_ledger_hash: Option<[u8; 32]> = None;
+        let mut qb_members: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
+        let mut qb_expiry: u32 = 0;
+        let mut qb_ruleset: Option<String> = None;
+        for u in &ledger.history {
+            if let Ok(LedgerOperation::QuorumBegin {
+                reserves_id,
+                ledger_hash,
+                quorum_members,
+                quorum_expiry,
+                protocol_version,
+                ..
+            }) = LedgerOperation::tlv_decode(&u.message)
+            {
+                qb_reserves_id = Some(reserves_id);
+                qb_ledger_hash = Some(ledger_hash);
+                qb_members = quorum_members.into_iter().map(|m| m.pubkey).collect();
+                qb_expiry = quorum_expiry;
+                qb_ruleset = protocol_version;
+            }
+        }
+        let reserves_id = qb_reserves_id
+            .ok_or_else(|| format!("Ledger {} has no QuorumBegin yet", ledger_id))?;
+        let ledger_hash = qb_ledger_hash.expect("ledger_hash set alongside reserves_id");
+
+        // Look up the actual UTXO on-chain.
+        let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = reserves_id
+            .parse()
+            .map_err(|e| format!("parse reserves_id: {}", e))?;
+        let reserves_addr = reserves_addr
+            .require_network(config.network)
+            .map_err(|e| format!("network mismatch: {}", e))?;
+        let reserves_script = reserves_addr.script_pubkey();
+        let utxo = node
+            .wallet
+            .find_utxo_for_script(&reserves_script)
+            .map_err(|e| format!("esplora reserves lookup: {}", e))?
+            .ok_or_else(|| {
+                format!("reserves UTXO not found at {} (already spent?)", reserves_id)
+            })?;
+        let (outpoint, amount) = utxo;
+
+        // Reconstruct the taproot reserves under the ledger's pinned ruleset.
+        let voter_set = VoterSet::new(original_operator, qb_members.clone());
+        let voter_count = voter_set.all_voters().len();
+        let ruleset =
+            deposits_core::ruleset::resolve_or_legacy(qb_ruleset.as_deref());
+        let threshold_config = (ruleset.tier_config_factory)(voter_count, qb_expiry);
+        let taproot_builder = TapscriptReservesBuilder::new(
+            voter_set,
+            threshold_config,
+            config.network,
+            ledger_hash,
+        );
+        let taproot_output = taproot_builder
+            .build()
+            .map_err(|e| format!("rebuild taproot: {:?}", e))?;
+        // Sanity-check: reconstructed script_pubkey must equal the on-chain
+        // reserves address. A mismatch here is the same "wrong ruleset"
+        // failure mode `validate-relay` flagged for production legacy
+        // ledgers — fail loudly rather than sign a bogus spend.
+        if taproot_output.script_pubkey() != reserves_script {
+            return Err(format!(
+                "reconstructed taproot script_pubkey doesn't match on-chain \
+                 reserves address for {} — ruleset mismatch?",
+                &ledger_id[..16]
+            )
+            .into());
+        }
+
+        (outpoint, amount, taproot_output, ledger_hash, qb_ruleset)
+    };
+
+    // Bridge: downstream code reads `reserves.taproot_output` / `.outpoint`
+    // / `.amount`. Re-wrap into the same shape so the existing logic below
+    // works unchanged. The fields not needed for spending (operator,
+    // quorum_members, quorum_expiry, confirmed) are filled with defaults
+    // / placeholders that downstream code doesn't read.
+    let operator_pk = taproot_output
+        .voter_set
+        .tie_breaker()
+        .map(|v| v.pubkey)
+        .unwrap_or_else(|| {
+            // No tie-breaker would only happen for a synthetic VoterSet.
+            // Use the all_voters first entry as a safe fallback for the
+            // info field downstream code doesn't actually consume.
+            taproot_output.voter_set.all_voters()[0]
+        });
+    let member_pks: Vec<bitcoin::secp256k1::PublicKey> = taproot_output
+        .voter_set
+        .primary_voters()
+        .iter()
+        .map(|v| v.pubkey)
+        .collect();
+    let reserves = crate::wallet::TaprootReservesInfo {
+        outpoint,
+        amount,
+        operator: operator_pk,
+        quorum_members: member_pks,
+        quorum_expiry: 0,
+        ledger_hash,
+        taproot_output,
+        ruleset_name: ruleset_at_qb.unwrap_or_else(|| "legacy".to_string()),
+        confirmed: true,
+    };
 
     println!("Emergency Reserves Spend");
     println!("========================");
