@@ -138,6 +138,7 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     // change rather than the whole UTXO. Single-positional callers without
     // any `--split` get the original 1-output behavior unchanged.
     let mut splits_raw: Vec<String> = Vec::new();
+    let mut dry_run = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -166,6 +167,10 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 splits_raw.push(args[i + 1].clone());
                 i += 2;
             }
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
+            }
             s if s.starts_with("--") => {
                 config_args.push(args[i].clone());
                 if i + 1 < args.len() && !args[i + 1].starts_with("--") {
@@ -185,9 +190,11 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     let destination = destination.ok_or(
         "Usage: reserves spend <dest_address> --ledger <ledger_id> --seed-dir <path> \
-         [--key <hex>] [--tier N] [--fee-rate N] [--split <addr>:<sats> [--split ...]]\n\n\
+         [--key <hex>] [--tier N] [--fee-rate N] [--split <addr>:<sats> [--split ...]] \
+         [--dry-run]\n\n\
          With one or more `--split <addr>:<sats>`, each split is a separate output and \
-         `dest_address` becomes the change output receiving `reserves − Σsplits − fee`."
+         `dest_address` becomes the change output receiving `reserves − Σsplits − fee`. \
+         Pass `--dry-run` to print the decoded tx + hex without broadcasting."
     )?;
 
     if keys.is_empty() && seed_dir.is_none() {
@@ -466,6 +473,42 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let tx_hex = bitcoin::consensus::encode::serialize_hex(&tx);
     println!("\n  TxID:   {}", tx.compute_txid());
     println!("  Size:   {} vbytes", tx.vsize());
+
+    // Always show the decoded outputs so the operator can eyeball the
+    // shape before committing. Useful both on dry-run and on the real
+    // path (the broadcast error path also prints raw hex below).
+    println!("  Outputs ({}):", tx.output.len());
+    for (idx, out) in tx.output.iter().enumerate() {
+        let addr_str = bitcoin::Address::from_script(&out.script_pubkey, config.network)
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| hex::encode(out.script_pubkey.as_bytes()));
+        println!(
+            "    [{}] {:>10} sats → {}",
+            idx,
+            out.value.to_sat(),
+            addr_str
+        );
+    }
+    let total_out: u64 = tx.output.iter().map(|o| o.value.to_sat()).sum();
+    let actual_fee = amount.saturating_sub(total_out);
+    println!(
+        "  Fee:    {} sats ({} sat/vb effective)",
+        actual_fee,
+        if tx.vsize() > 0 {
+            actual_fee as f64 / tx.vsize() as f64
+        } else {
+            0.0
+        }
+    );
+
+    if dry_run {
+        println!();
+        println!("=== DRY RUN — not broadcasting ===");
+        println!("Full tx hex (broadcast manually with `bitcoin-cli sendrawtransaction`):");
+        println!("{}", tx_hex);
+        return Ok(());
+    }
+
     println!("  Hex:    {}", &tx_hex[..80.min(tx_hex.len())]);
     println!("          (full hex: {} chars)", tx_hex.len());
 
