@@ -454,6 +454,60 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 }
             }
         }
+
+        // Diagnostic: when nothing matches, dump what we tried so the
+        // operator can compare addresses and figure out which dimension
+        // diverges (tier shape vs internal key vs voter ordering vs
+        // ledger_hash vs network).
+        if taproot_output.is_none() {
+            eprintln!();
+            eprintln!("=== Reconstruction diagnostic — nothing matched ===");
+            eprintln!("  on-chain reserves_id: {}", reserves_id);
+            eprintln!("  network:              {:?}", config.network);
+            eprintln!("  ledger_hash:          {}", hex::encode(ledger_hash));
+            eprintln!("  quorum_expiry:        {}", qb_expiry);
+            eprintln!("  original_operator:    {}", hex::encode(original_operator.serialize()));
+            eprintln!("  quorum_members ({}):", qb_members.len());
+            for m in &qb_members {
+                eprintln!("    - {}", hex::encode(m.serialize()));
+            }
+            eprintln!("  voter_set total:      {}", voter_count);
+            eprintln!();
+            eprintln!("  Reconstructions tried (ruleset × internal_key):");
+            for name in &search_order {
+                if let Some(rs) = deposits_core::ruleset::lookup(name) {
+                    let cfg = (rs.tier_config_factory)(voter_count, qb_expiry);
+                    for (desc, key) in [
+                        ("NUMS", None::<bitcoin::secp256k1::XOnlyPublicKey>),
+                        ("tie-breaker", tie_breaker_xonly),
+                    ] {
+                        if desc == "tie-breaker" && key.is_none() {
+                            continue;
+                        }
+                        let built = TapscriptReservesBuilder::new(
+                            voter_set.clone(),
+                            cfg.clone(),
+                            config.network,
+                            ledger_hash,
+                        )
+                        .build_with_internal_key(key);
+                        match built {
+                            Ok(out) => eprintln!(
+                                "    {:>14} × {:>11}  → {}",
+                                name,
+                                desc,
+                                out.address
+                            ),
+                            Err(e) => eprintln!(
+                                "    {:>14} × {:>11}  → BUILD ERROR: {:?}",
+                                name, desc, e
+                            ),
+                        }
+                    }
+                }
+            }
+            eprintln!();
+        }
         let taproot_output = taproot_output.ok_or_else(|| {
             format!(
                 "no known ruleset reconstructs the on-chain reserves \
