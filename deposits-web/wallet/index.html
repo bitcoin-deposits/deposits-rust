@@ -3399,16 +3399,21 @@ function renderHistory() {
   for (const ev of historyEvents) {
     const depositIds = (ev.tags || []).filter(t => t[0] === 'i').map(t => t[1]);
     const tags = Object.fromEntries((ev.tags || []).map(t => [t[0], t[1]]));
-    const ledgerId = tags.d || tags.l || '';
 
-    let opName = '?', amount = 0, seq = 0;
+    // Decode the TLV to recover the FULL 64-char ledger_id. The
+    // outer `d` tag carries only the 16-char ledger_tag prefix
+    // (per deposits-nostr `ledger_tag()`); using it for navigation
+    // produces a truncated bech32 subdomain.
+    let opName = '?', amount = 0, seq = 0, ledgerId = '';
     try {
       const u = decodeUpdate(ev.content);
       opName = u.opName;
       seq = u.seq;
+      ledgerId = u.ledgerIdHex || '';
       const amtField = u.opFields.find(f => f.type === 2);
       if (amtField && amtField.u64 !== null) amount = amtField.u64;
     } catch {}
+    if (!ledgerId) ledgerId = tags.d || '';
 
     // Determine sign and color
     let sign = '', color = 'var(--text)';
@@ -5378,6 +5383,7 @@ function decodeUpdate(base64Content) {
   const prevHash = getHex(6);  // PREVIOUS_HASH (tag 6)
   const blockHeight = getU32(10); // BLOCK_HEIGHT (tag 10)
   const operatorHex = getHex(0);  // OPERATOR_ID (tag 0)
+  const ledgerIdHex = getHex(2);  // LEDGER_ID (tag 2) — full 64-char hex
 
   // Decode inner operation
   const msgBytes = get(8); // MESSAGE (tag 8)
@@ -5444,7 +5450,7 @@ function decodeUpdate(base64Content) {
   for (const p of hashParts) { hashInput.set(p, hOff); hOff += p.length; }
   const curHash = bytesToHex(sha256(hashInput));
 
-  return { seq, prevHash, curHash, blockHeight, operatorHex, opName, opDisc, opFields };
+  return { seq, prevHash, curHash, blockHeight, operatorHex, ledgerIdHex, opName, opDisc, opFields };
 }
 
 async function populateLedgerQuickLinks() {
