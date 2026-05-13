@@ -386,7 +386,19 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         let voter_set = VoterSet::new(original_operator, qb_members.clone());
         let voter_count = voter_set.all_voters().len();
 
-        let mut try_ruleset = |name: &str| -> Option<deposits_core::tapscript_reserves::TaprootReservesOutput> {
+        // Try each (ruleset, internal_key) combination. Pre-NUMS-fix
+        // legacy UTXOs (built before commit b3d38ac) commit the
+        // tie-breaker's x-only pubkey as the internal key instead of
+        // NUMS — necessary for any production ledger whose
+        // QuorumBegin tx predates that fix.
+        let tie_breaker_xonly = voter_set
+            .tie_breaker()
+            .map(|v| v.x_only());
+        let try_ruleset_and_key = |name: &str,
+                                   internal_key: Option<
+            bitcoin::secp256k1::XOnlyPublicKey,
+        >|
+         -> Option<deposits_core::tapscript_reserves::TaprootReservesOutput> {
             let rs = deposits_core::ruleset::lookup(name)?;
             let cfg = (rs.tier_config_factory)(voter_count, qb_expiry);
             let out = TapscriptReservesBuilder::new(
@@ -395,7 +407,7 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 config.network,
                 ledger_hash,
             )
-            .build()
+            .build_with_internal_key(internal_key)
             .ok()?;
             if out.script_pubkey() == reserves_script {
                 Some(out)
@@ -405,27 +417,40 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         };
 
         let mut matched_name: Option<String> = None;
+        let mut matched_key_desc: Option<&'static str> = None;
         let mut taproot_output: Option<deposits_core::tapscript_reserves::TaprootReservesOutput> =
             None;
 
-        // 1. Recorded ruleset (if any)
+        // Search order: each known ruleset under (1) NUMS, then (2)
+        // tie-breaker. We start with the ledger's recorded ruleset
+        // when present so the happy path is fastest.
+        let mut search_order: Vec<String> = Vec::new();
         if let Some(name) = qb_ruleset.as_deref() {
-            if let Some(out) = try_ruleset(name) {
-                matched_name = Some(name.to_string());
-                taproot_output = Some(out);
+            search_order.push(name.to_string());
+        }
+        for n in deposits_core::ruleset::all_supported_names() {
+            if !search_order.iter().any(|s| s == n) {
+                search_order.push(n.to_string());
             }
         }
-        // 2. Every known ruleset
-        if taproot_output.is_none() {
-            for name in deposits_core::ruleset::all_supported_names() {
-                if let Some(out) = try_ruleset(name) {
-                    matched_name = Some(name.to_string());
+        'outer: for name in &search_order {
+            for (desc, key) in [
+                ("NUMS", None::<bitcoin::secp256k1::XOnlyPublicKey>),
+                ("tie-breaker", tie_breaker_xonly),
+            ] {
+                if desc == "tie-breaker" && key.is_none() {
+                    continue;
+                }
+                if let Some(out) = try_ruleset_and_key(name, key) {
+                    matched_name = Some(name.clone());
+                    matched_key_desc = Some(desc);
                     taproot_output = Some(out);
                     eprintln!(
-                        "  matched on-chain script under ruleset {:?} (QuorumBegin recorded {:?})",
-                        name, qb_ruleset
+                        "  matched on-chain script under ruleset={:?} internal_key={} \
+                         (QuorumBegin recorded ruleset={:?})",
+                        name, desc, qb_ruleset
                     );
-                    break;
+                    break 'outer;
                 }
             }
         }

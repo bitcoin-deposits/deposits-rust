@@ -358,6 +358,21 @@ impl TapscriptReservesBuilder {
 
     /// Build the complete Taproot output
     pub fn build(&self) -> DepositsResult<TaprootReservesOutput> {
+        self.build_with_internal_key(None)
+    }
+
+    /// Build the Taproot output forcing a specific internal key.
+    ///
+    /// Defaults (`internal_key_override = None`) to the BIP-341 NUMS point.
+    /// Use the tie-breaker's x-only pubkey when reconstructing a pre-NUMS-fix
+    /// reserves UTXO (pre-`b3d38ac`) whose on-chain shape committed the
+    /// operator's pubkey as the internal key. Production legacy ledgers that
+    /// don't reconstruct under NUMS need this — see `validate-relay`'s
+    /// scanning strategy.
+    pub fn build_with_internal_key(
+        &self,
+        internal_key_override: Option<XOnlyPublicKey>,
+    ) -> DepositsResult<TaprootReservesOutput> {
         let secp = Secp256k1::new();
 
         // Build script leaves for each tier
@@ -376,16 +391,20 @@ impl TapscriptReservesBuilder {
         // Add the commitment leaf (embeds ledger hash, unspendable)
         let commitment_leaf = self.build_commitment_leaf();
 
-        // Use BIP-341 NUMS point as internal key (provably unspendable key path).
-        // This prevents any party from key-path spending reserves — all spends
-        // must go through the Tapscript leaves (quorum threshold, timelocks).
-        // NUMS = lift_x(SHA256("TapTweak")) — no known discrete log.
-        let internal_key = XOnlyPublicKey::from_slice(&[
-            0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9,
-            0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a,
-            0xce, 0x80, 0x3a, 0xc0,
-        ])
-        .map_err(|_| DepositsError::InvalidState("Invalid NUMS point".to_string()))?;
+        // Default: BIP-341 NUMS point — provably unspendable key path so
+        // every spend must go through the Tapscript leaves (per b3d38ac).
+        // Override: the tie-breaker x-only pubkey for reconstructing
+        // legacy pre-NUMS-fix UTXOs that committed the operator's key as
+        // the internal key.
+        let internal_key = match internal_key_override {
+            Some(k) => k,
+            None => XOnlyPublicKey::from_slice(&[
+                0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35,
+                0xe9, 0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf,
+                0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
+            ])
+            .map_err(|_| DepositsError::InvalidState("Invalid NUMS point".to_string()))?,
+        };
 
         // Build Taproot tree
         // Structure: spending tiers at shallow depths, commitment leaf at deepest
