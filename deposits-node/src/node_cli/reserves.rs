@@ -375,35 +375,71 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
             })?;
         let (outpoint, amount) = utxo;
 
-        // Reconstruct the taproot reserves under the ledger's pinned ruleset.
+        // Reconstruct the taproot reserves under the ledger's recorded
+        // ruleset *first* — if that matches the on-chain script, we're
+        // done. Otherwise fall back to scanning every known ruleset
+        // (same pattern validate-relay uses to handle pre-Q1 production
+        // ledgers whose `protocol_version` field was absent but whose
+        // on-chain shape happens to match one of the registered
+        // factories). Fail only if no ruleset reconstructs to the
+        // observed address.
         let voter_set = VoterSet::new(original_operator, qb_members.clone());
         let voter_count = voter_set.all_voters().len();
-        let ruleset =
-            deposits_core::ruleset::resolve_or_legacy(qb_ruleset.as_deref());
-        let threshold_config = (ruleset.tier_config_factory)(voter_count, qb_expiry);
-        let taproot_builder = TapscriptReservesBuilder::new(
-            voter_set,
-            threshold_config,
-            config.network,
-            ledger_hash,
-        );
-        let taproot_output = taproot_builder
+
+        let mut try_ruleset = |name: &str| -> Option<deposits_core::tapscript_reserves::TaprootReservesOutput> {
+            let rs = deposits_core::ruleset::lookup(name)?;
+            let cfg = (rs.tier_config_factory)(voter_count, qb_expiry);
+            let out = TapscriptReservesBuilder::new(
+                voter_set.clone(),
+                cfg,
+                config.network,
+                ledger_hash,
+            )
             .build()
-            .map_err(|e| format!("rebuild taproot: {:?}", e))?;
-        // Sanity-check: reconstructed script_pubkey must equal the on-chain
-        // reserves address. A mismatch here is the same "wrong ruleset"
-        // failure mode `validate-relay` flagged for production legacy
-        // ledgers — fail loudly rather than sign a bogus spend.
-        if taproot_output.script_pubkey() != reserves_script {
-            return Err(format!(
-                "reconstructed taproot script_pubkey doesn't match on-chain \
-                 reserves address for {} — ruleset mismatch?",
+            .ok()?;
+            if out.script_pubkey() == reserves_script {
+                Some(out)
+            } else {
+                None
+            }
+        };
+
+        let mut matched_name: Option<String> = None;
+        let mut taproot_output: Option<deposits_core::tapscript_reserves::TaprootReservesOutput> =
+            None;
+
+        // 1. Recorded ruleset (if any)
+        if let Some(name) = qb_ruleset.as_deref() {
+            if let Some(out) = try_ruleset(name) {
+                matched_name = Some(name.to_string());
+                taproot_output = Some(out);
+            }
+        }
+        // 2. Every known ruleset
+        if taproot_output.is_none() {
+            for name in deposits_core::ruleset::all_supported_names() {
+                if let Some(out) = try_ruleset(name) {
+                    matched_name = Some(name.to_string());
+                    taproot_output = Some(out);
+                    eprintln!(
+                        "  matched on-chain script under ruleset {:?} (QuorumBegin recorded {:?})",
+                        name, qb_ruleset
+                    );
+                    break;
+                }
+            }
+        }
+        let taproot_output = taproot_output.ok_or_else(|| {
+            format!(
+                "no known ruleset reconstructs the on-chain reserves \
+                 address for ledger {} — this build is too old or the \
+                 chain state has diverged",
                 &ledger_id[..16]
             )
-            .into());
-        }
+        })?;
+        let resolved_ruleset = matched_name.unwrap_or_else(|| "legacy".to_string());
 
-        (outpoint, amount, taproot_output, ledger_hash, qb_ruleset)
+        (outpoint, amount, taproot_output, ledger_hash, Some(resolved_ruleset))
     };
 
     // Bridge: downstream code reads `reserves.taproot_output` / `.outpoint`
