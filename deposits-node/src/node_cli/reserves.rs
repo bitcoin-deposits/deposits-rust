@@ -356,7 +356,63 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         }
         let reserves_id = qb_reserves_id
             .ok_or_else(|| format!("Ledger {} has no QuorumBegin yet", ledger_id))?;
-        let ledger_hash = qb_ledger_hash.expect("ledger_hash set alongside reserves_id");
+        let qb_recorded_hash = qb_ledger_hash.expect("ledger_hash set alongside reserves_id");
+
+        // Prefer the legacy `wallet/taproot_reserves.json` snapshot if it
+        // exists and lists this reserves address. The JSON records the
+        // exact build inputs the daemon used at rotation time; the
+        // QuorumBegin op's `ledger_hash` field is a separate snapshot
+        // (apparently the ledger state hash, not the commitment value)
+        // and at least one production rotation has them diverge.
+        let ledger_hash = {
+            let json_path = std::path::Path::new(&config.data_dir)
+                .join("wallet/taproot_reserves.json");
+            let mut found: Option<[u8; 32]> = None;
+            if json_path.exists() {
+                if let Ok(raw) = std::fs::read_to_string(&json_path) {
+                    if let Ok(arr) =
+                        serde_json::from_str::<serde_json::Value>(&raw)
+                    {
+                        if let Some(entries) = arr.as_array() {
+                            for entry in entries {
+                                let addr = entry
+                                    .get("address")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("");
+                                if addr == reserves_id {
+                                    if let Some(h) = entry
+                                        .get("ledger_hash")
+                                        .and_then(|x| x.as_str())
+                                        .and_then(|s| hex::decode(s).ok())
+                                    {
+                                        if h.len() == 32 {
+                                            let mut a = [0u8; 32];
+                                            a.copy_from_slice(&h);
+                                            found = Some(a);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            match found {
+                Some(h) if h != qb_recorded_hash => {
+                    eprintln!(
+                        "  prefer wallet/taproot_reserves.json ledger_hash={}",
+                        hex::encode(h)
+                    );
+                    eprintln!(
+                        "  (QuorumBegin op records {}; they diverge)",
+                        hex::encode(qb_recorded_hash)
+                    );
+                    h
+                }
+                Some(h) => h,
+                None => qb_recorded_hash,
+            }
+        };
 
         // Look up the actual UTXO on-chain.
         let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = reserves_id
