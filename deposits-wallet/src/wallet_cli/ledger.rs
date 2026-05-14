@@ -735,6 +735,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 LedgerOperation::DisputeEnter {
                     last_valid_sequence,
                     reason,
+                ..
                 } => {
                     in_dispute = true;
                     // Check if signer was a quorum member

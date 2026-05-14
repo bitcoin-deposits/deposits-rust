@@ -245,6 +245,8 @@ impl Node {
                 let dispute_op = LedgerOperation::DisputeEnter {
                     last_valid_sequence: last_valid_seq,
                     reason: "auto_dispute".to_string(),
+                anchor_block_hash: None,
+                anchor_block_height: None,
                 };
 
                 fork_ledger

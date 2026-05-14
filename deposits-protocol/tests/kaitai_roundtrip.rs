@@ -346,6 +346,8 @@ fn custody_dispute() {
     test_roundtrip(&LedgerOperation::DisputeEnter {
         last_valid_sequence: 10,
         reason: "hash_chain_broken".into(),
+    anchor_block_hash: None,
+    anchor_block_height: None,
     });
 }
 

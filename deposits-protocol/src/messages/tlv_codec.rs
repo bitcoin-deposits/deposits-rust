@@ -133,6 +133,13 @@ mod ledger_op_tlv {
     /// QuorumAddMember: BIP-340 signature by the member over the
     /// QuorumMemberResponse digest.
     pub const MEMBER_SIGNATURE: u64 = 290; // [u8; 64]
+
+    /// DisputeEnter QuorumExpired evidence: a confirmed block whose
+    /// height exceeds the disputed ledger's `quorum_expiry`. Receivers
+    /// verify both fields against a block oracle before accepting the
+    /// dispute. Both Some or both None.
+    pub const DISPUTE_ANCHOR_BLOCK_HASH: u64 = 292; // [u8; 32]
+    pub const DISPUTE_ANCHOR_BLOCK_HEIGHT: u64 = 294; // u32
 }
 
 impl TlvEncode for LedgerOperation {
@@ -517,10 +524,18 @@ impl TlvEncode for LedgerOperation {
             Self::DisputeEnter {
                 last_valid_sequence,
                 reason,
+                anchor_block_hash,
+                anchor_block_height,
             } => {
                 builder = builder
                     .u64_field(LAST_VALID_SEQUENCE, *last_valid_sequence)
                     .string_field(REASON, reason);
+                if let Some(h) = anchor_block_hash {
+                    builder = builder.bytes_field(DISPUTE_ANCHOR_BLOCK_HASH, h);
+                }
+                if let Some(h) = anchor_block_height {
+                    builder = builder.u32_field(DISPUTE_ANCHOR_BLOCK_HEIGHT, *h);
+                }
             }
             Self::DisputeArmed {
                 armed_block,
@@ -768,6 +783,8 @@ impl TlvDecode for LedgerOperation {
             54 => Ok(Self::DisputeEnter {
                 last_valid_sequence: reader.read_u64(LAST_VALID_SEQUENCE)?,
                 reason: reader.read_string(REASON)?,
+                anchor_block_hash: reader.read_bytes_opt(DISPUTE_ANCHOR_BLOCK_HASH)?,
+                anchor_block_height: reader.read_u32_opt(DISPUTE_ANCHOR_BLOCK_HEIGHT)?,
             }),
             55 => Ok(Self::DisputeAcquire {
                 new_custodian: reader.read_pubkey(NEW_CUSTODIAN)?,

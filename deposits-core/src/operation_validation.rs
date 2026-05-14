@@ -1346,6 +1346,85 @@ pub fn validate_quorum_add_member_blob(
     Ok(())
 }
 
+// ============================================================================
+// Fork-branch DisputeEnter verifier (QuorumExpired path)
+// ============================================================================
+
+/// Validate a fork-branch `DisputeEnter` operation that cites QuorumExpired
+/// evidence inline (`anchor_block_hash` + `anchor_block_height`).
+///
+/// A member daemon calls this on every fork-branch `DisputeEnter` it sees
+/// before auto-arming. The verifier:
+///
+/// 1. **Anchor block exists.** `oracle.confirms(anchor_block_hash)` returns
+///    `Some(observed_height)`; that height must equal `anchor_block_height`.
+///    Together these prove the cited block is in the verifier's canonical
+///    chain at the asserted height.
+/// 2. **Anchor exceeds expiry.** `anchor_block_height > ledger.quorum_expiry`.
+///    This is the "deadline missed" predicate — the disputer is asserting
+///    the chain has progressed past the rotation deadline.
+/// 3. **Fork point is the current tip.** `last_valid_sequence ==
+///    main_chain_tip_seq`. A majority of members cosigned every update
+///    on the main chain, so a majority knows the tip's sequence number.
+///    Forking from an earlier point is provably forking from stale state
+///    — a majority of receivers will reject it.
+///
+/// Returns `Ok(())` only when all three pass. Per-check error messages
+/// distinguish the failure mode so the rejecting daemon's log makes
+/// clear which invariant was broken.
+///
+/// **What this is NOT.** This verifier is QuorumExpired-specific: it
+/// assumes the `DisputeEnter` is justified by deadline-miss evidence.
+/// Other dispute paths (e.g., bad witness, uncredited payment) carry
+/// their evidence via the kind:9101 fraud-broadcast pipeline and don't
+/// populate `anchor_block_hash` / `anchor_block_height`. Callers should
+/// route to this verifier only when both anchor fields are `Some`.
+pub fn validate_dispute_enter_quorum_expired<O: deposits_protocol::fraud::BlockOracle>(
+    anchor_block_hash: &[u8; 32],
+    anchor_block_height: u32,
+    last_valid_sequence: u64,
+    ledger_quorum_expiry: u32,
+    main_chain_tip_seq: u64,
+    oracle: &O,
+) -> ValidationResult {
+    // 1. Oracle check
+    let observed = oracle.confirms(anchor_block_hash).ok_or_else(|| {
+        format!(
+            "anchor_block_hash {} not in canonical chain (oracle unknown / not best chain)",
+            hex::encode(anchor_block_hash)
+        )
+    })?;
+    if observed != anchor_block_height {
+        return Err(format!(
+            "anchor_block_hash {} is at oracle height {}, not the asserted {}",
+            hex::encode(anchor_block_hash),
+            observed,
+            anchor_block_height
+        ));
+    }
+
+    // 2. Past expiry
+    if anchor_block_height <= ledger_quorum_expiry {
+        return Err(format!(
+            "anchor_block_height {} does not exceed ledger quorum_expiry {} \
+             (deadline-miss predicate not satisfied)",
+            anchor_block_height, ledger_quorum_expiry
+        ));
+    }
+
+    // 3. Fork point matches main-chain tip
+    if last_valid_sequence != main_chain_tip_seq {
+        return Err(format!(
+            "last_valid_sequence {} does not equal main-chain tip {}: fork \
+             attempted from stale state (the disputer's local chain has lagged \
+             behind the cosigned canonical chain)",
+            last_valid_sequence, main_chain_tip_seq
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1868,5 +1947,101 @@ mod tests {
         // annualized 100_000 msats / 26 = 3_846 — below floor.
         let result = validate_fee_minimum(&fee(100_000, 50, 2016), 50, 96_153, 2016);
         assert!(result.unwrap_err().contains("fixed fee"));
+    }
+
+    mod dispute_enter_quorum_expired {
+        use super::*;
+        use std::collections::HashMap;
+
+        /// Mock oracle backed by a hash → height map.
+        struct MockOracle(HashMap<[u8; 32], u32>);
+        impl deposits_protocol::fraud::BlockOracle for MockOracle {
+            fn confirms(&self, h: &[u8; 32]) -> Option<u32> {
+                self.0.get(h).copied()
+            }
+        }
+
+        fn oracle_with(entries: &[([u8; 32], u32)]) -> MockOracle {
+            MockOracle(entries.iter().copied().collect())
+        }
+
+        const HASH_A: [u8; 32] = [0xAA; 32];
+        const HASH_B: [u8; 32] = [0xBB; 32];
+
+        #[test]
+        fn happy_path_passes() {
+            let oracle = oracle_with(&[(HASH_A, 949_000)]);
+            assert!(validate_dispute_enter_quorum_expired(
+                &HASH_A, 949_000, 146, 948_254, 146, &oracle
+            )
+            .is_ok());
+        }
+
+        #[test]
+        fn oracle_doesnt_know_the_hash() {
+            let oracle = oracle_with(&[(HASH_A, 949_000)]);
+            let err = validate_dispute_enter_quorum_expired(
+                &HASH_B, 949_000, 146, 948_254, 146, &oracle,
+            )
+            .unwrap_err();
+            assert!(err.contains("not in canonical chain"), "{}", err);
+        }
+
+        #[test]
+        fn oracle_disagrees_with_asserted_height() {
+            let oracle = oracle_with(&[(HASH_A, 949_000)]);
+            let err = validate_dispute_enter_quorum_expired(
+                &HASH_A, 949_999, 146, 948_254, 146, &oracle,
+            )
+            .unwrap_err();
+            assert!(err.contains("oracle height 949000"), "{}", err);
+            assert!(err.contains("asserted 949999"), "{}", err);
+        }
+
+        #[test]
+        fn anchor_at_expiry_is_not_yet_past_deadline() {
+            // anchor_block_height must STRICTLY exceed quorum_expiry.
+            let oracle = oracle_with(&[(HASH_A, 948_254)]);
+            let err = validate_dispute_enter_quorum_expired(
+                &HASH_A, 948_254, 146, 948_254, 146, &oracle,
+            )
+            .unwrap_err();
+            assert!(err.contains("does not exceed"), "{}", err);
+        }
+
+        #[test]
+        fn anchor_before_expiry_rejected() {
+            let oracle = oracle_with(&[(HASH_A, 948_000)]);
+            let err = validate_dispute_enter_quorum_expired(
+                &HASH_A, 948_000, 146, 948_254, 146, &oracle,
+            )
+            .unwrap_err();
+            assert!(err.contains("does not exceed"), "{}", err);
+        }
+
+        #[test]
+        fn stale_fork_point_rejected() {
+            // last_valid_sequence < tip → forking from stale state.
+            let oracle = oracle_with(&[(HASH_A, 949_000)]);
+            let err = validate_dispute_enter_quorum_expired(
+                &HASH_A, 949_000, 145, 948_254, 146, &oracle,
+            )
+            .unwrap_err();
+            assert!(err.contains("stale state"), "{}", err);
+            assert!(err.contains("145"), "{}", err);
+            assert!(err.contains("146"), "{}", err);
+        }
+
+        #[test]
+        fn future_fork_point_rejected_too() {
+            // last_valid_sequence > tip is also nonsensical (can't fork
+            // from an update we haven't seen).
+            let oracle = oracle_with(&[(HASH_A, 949_000)]);
+            let err = validate_dispute_enter_quorum_expired(
+                &HASH_A, 949_000, 200, 948_254, 146, &oracle,
+            )
+            .unwrap_err();
+            assert!(err.contains("stale state"), "{}", err);
+        }
     }
 }

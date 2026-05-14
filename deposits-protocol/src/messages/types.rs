@@ -500,6 +500,17 @@ pub enum LedgerOperation {
         last_valid_sequence: u64,
         /// Human-readable description of why the dispute was opened.
         reason: String,
+        /// QuorumExpired evidence: a confirmed block whose height proves
+        /// the operator missed `quorum_expiry`. Receivers verify via a
+        /// block oracle that `anchor_block_hash` lives at
+        /// `anchor_block_height` in the canonical chain, and that
+        /// `anchor_block_height > ledger.quorum_expiry`. Absent on
+        /// legacy DisputeEnter ops and on disputes triggered by other
+        /// fraud types (those carry their evidence elsewhere — kind:9101
+        /// FraudBroadcast — though those still need to land too).
+        anchor_block_hash: Option<[u8; 32]>,
+        /// Companion to `anchor_block_hash`. Both Some or both None.
+        anchor_block_height: Option<u32>,
     },
 
     /// Signal readiness for custody competition. This is a PRE-COMMITMENT that
@@ -1361,7 +1372,12 @@ impl BinaryCodec for LedgerOperation {
             Self::DisputeEnter {
                 last_valid_sequence,
                 reason,
+                anchor_block_hash: _,
+                anchor_block_height: _,
             } => {
+                // Legacy binary format doesn't encode the optional
+                // anchor fields — they're TLV-only. Replays through the
+                // binary path lose them; the on-relay TLV form keeps them.
                 write_u64(w, *last_valid_sequence)?;
                 write_string(w, reason)?;
             }
@@ -1722,6 +1738,8 @@ impl BinaryCodec for LedgerOperation {
             54 => Ok(Self::DisputeEnter {
                 last_valid_sequence: read_u64(r)?,
                 reason: read_string(r)?,
+                anchor_block_hash: None,
+                anchor_block_height: None,
             }),
             // DisputeAcquire (55)
             55 => Ok(Self::DisputeAcquire {

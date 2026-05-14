@@ -2764,6 +2764,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::DisputeEnter {
                     last_valid_sequence,
                     reason,
+                ..
                 } => (
                     "DisputeEnter",
                     format!("last_valid_seq:{}  reason:{}", last_valid_sequence, reason),

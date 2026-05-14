@@ -1085,6 +1085,8 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     let custody_dispute = LedgerOperation::DisputeEnter {
         last_valid_sequence,
         reason: violation_details.clone(),
+    anchor_block_hash: None,
+    anchor_block_height: None,
     };
 
     let message_bytes = custody_dispute.tlv_encode();
@@ -1520,6 +1522,8 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
     let custody_dispute = LedgerOperation::DisputeEnter {
         last_valid_sequence: last_valid_sequence_u64,
         reason: dispute_reason,
+    anchor_block_hash: None,
+    anchor_block_height: None,
     };
 
     let message_bytes = custody_dispute.tlv_encode();
@@ -5058,6 +5062,7 @@ pub async fn recovery_confiscate_plan(
         if let Ok(LedgerOperation::DisputeEnter {
             last_valid_sequence: lvs,
             reason,
+        ..
         }) = LedgerOperation::tlv_decode(&u.message)
         {
             existing_enters.push((u.operator_id, u.sequence_number, reason, lvs));
