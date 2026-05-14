@@ -56,6 +56,7 @@ pub struct Ruleset {
 pub fn lookup(name: &str) -> Option<&'static Ruleset> {
     match name {
         "legacy" => Some(&LEGACY),
+        "cltv-offset-literal" => Some(&CLTV_OFFSET_LITERAL),
         "cltv-offset-v2" => Some(&CLTV_OFFSET_V2),
         _ => None,
     }
@@ -78,7 +79,7 @@ pub fn resolve_or_legacy(name: Option<&str>) -> &'static Ruleset {
 /// `QuorumMemberResponse` so an operator can pick a `protocol_version`
 /// at `quorum begin` time that every member can validate.
 pub fn all_supported_names() -> Vec<&'static str> {
-    vec![LEGACY.name, CLTV_OFFSET_V2.name]
+    vec![LEGACY.name, CLTV_OFFSET_LITERAL.name, CLTV_OFFSET_V2.name]
 }
 
 /// Decide whether a candidate member's declared `supported_rulesets`
@@ -143,6 +144,23 @@ pub static LEGACY: Ruleset = Ruleset {
     tier_config_factory: legacy_tier_config,
 };
 
+/// Intermediate cascade: same 4-tier shape as `cltv-offset-v2`
+/// (majority / minority / single / operator) but `OP_CLTV` targets are
+/// **literal** 720 / 4032 / 8064 — *not* anchored to `quorum_expiry +
+/// offset`. Used by code between commits `c075cc0` (May 7 2026, when
+/// the tier redesign landed) and `8ae1c3a` (May 11 2026, when the
+/// ruleset registry switched the literals to absolute offsets). UTXOs
+/// built in that ~5-day window need this ruleset to reconstruct.
+///
+/// On mainnet the literal targets 720/4032/8064 are below `chain_tip`
+/// the moment the cascade was deployed, so every post-expiry tier is
+/// effectively no-op-CLTV — same security hole as `legacy`. Rotating
+/// off this ruleset closes it the same way as rotating off legacy.
+pub static CLTV_OFFSET_LITERAL: Ruleset = Ruleset {
+    name: "cltv-offset-literal",
+    tier_config_factory: cltv_offset_literal_tier_config,
+};
+
 /// Post-redesign cascade: `OP_CLTV <quorum_expiry + offset>`. The
 /// post-expiry tiers re-pin to the new deadline on every rotation, so
 /// the security model survives long-lived UTXOs. Operator demoted to
@@ -184,6 +202,46 @@ fn legacy_tier_config(n: usize, _quorum_expiry: u32) -> ThresholdConfig {
             ),
             ThresholdTier::new(1, true, 2016, "Operator only (after 2016 blocks)"),
             ThresholdTier::emergency_recovery(4032),
+        ]
+    };
+    ThresholdConfig { tiers }
+}
+
+/// Pre-anchor variant of the v2 cascade. Mirrors `c075cc0` exactly:
+/// 4 tiers (or 3 for n≤2) with the timelocks expressed as **literal**
+/// block heights — `720 / 4032 / 8064` for the post-expiry tiers
+/// instead of `quorum_expiry + offset`. Used by reconstruction to
+/// match UTXOs built between commits `c075cc0` and `8ae1c3a`.
+fn cltv_offset_literal_tier_config(n: usize, _quorum_expiry: u32) -> ThresholdConfig {
+    let tiers = if n <= 2 {
+        vec![
+            ThresholdTier::new(2, false, 0, "Both quorum members required"),
+            ThresholdTier::new(1, false, 720, "Single quorum member after expiry+5d"),
+            ThresholdTier::new(1, true, 8064, "Operator only after expiry+8w"),
+        ]
+    } else {
+        let majority = (n / 2) + 1;
+        let minority = (n / 3).max(1);
+        vec![
+            ThresholdTier::new(
+                majority,
+                false,
+                0,
+                &format!("{}-of-{} quorum (anytime)", majority, n),
+            ),
+            ThresholdTier::new(
+                minority,
+                false,
+                720,
+                &format!("{}-of-{} quorum after expiry+5d", minority, n),
+            ),
+            ThresholdTier::new(
+                1,
+                false,
+                4032,
+                "Single quorum member after expiry+4w",
+            ),
+            ThresholdTier::new(1, true, 8064, "Operator only after expiry+8w"),
         ]
     };
     ThresholdConfig { tiers }
