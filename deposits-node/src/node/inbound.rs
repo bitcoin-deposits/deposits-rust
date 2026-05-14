@@ -521,14 +521,35 @@ impl Node {
 
         if !is_from_operator {
             if is_from_active_member && is_dispute_enter {
-                // Member starting a fork branch. The dispute resolves on the
-                // member's fork (kind:9103 + lottery), not on this main
-                // chain. Acknowledge and move on without applying.
-                tracing::info!(
-                    "Fork DisputeEnter received on ledger {}... from quorum member {}... — not applying to main chain",
-                    &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
-                    hex::encode(&inbound.update.operator_id.serialize()[..8]),
-                );
+                // Member starting a fork branch. Don't apply to the
+                // main chain. But — if the DisputeEnter carries
+                // QuorumExpired anchor evidence and we're a quorum
+                // member of this ledger, verify the evidence and
+                // (if valid) auto-arm on our own fork.
+                use deposits_core::tlv::TlvDecode;
+                if let Ok(deposits_core::messages::LedgerOperation::DisputeEnter {
+                    last_valid_sequence,
+                    anchor_block_hash: Some(anchor_hash),
+                    anchor_block_height: Some(anchor_height),
+                    ..
+                }) = deposits_core::messages::LedgerOperation::tlv_decode(
+                    &inbound.update.message,
+                ) {
+                    self.handle_fork_dispute_enter(
+                        &inbound.ledger_id,
+                        last_valid_sequence,
+                        anchor_hash,
+                        anchor_height,
+                        inbound.update.operator_id,
+                    )
+                    .await;
+                } else {
+                    tracing::info!(
+                        "Fork DisputeEnter (no anchor evidence) on ledger {}... from {}... — not applying",
+                        &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                        hex::encode(&inbound.update.operator_id.serialize()[..8]),
+                    );
+                }
                 return;
             }
 
@@ -752,6 +773,146 @@ impl Node {
                     }
                 }
             }
+        }
+    }
+
+    /// Handle a fork-branch `DisputeEnter` carrying QuorumExpired
+    /// anchor evidence (received via kind:9100). Runs the verifier in
+    /// `deposits-core/src/operation_validation.rs` against our own
+    /// block oracle + ledger state; only auto-arms if all three checks
+    /// pass (oracle confirms hash at asserted height, height exceeds
+    /// our recorded `quorum_expiry`, fork point equals our main-chain
+    /// tip).
+    ///
+    /// Refusal logs the structured reason. The peer's DisputeEnter
+    /// still exists on the relay — they just won't have our arm
+    /// participating, which (alongside other honest members' refusals)
+    /// means their fork can't reach majority for confiscation.
+    pub(crate) async fn handle_fork_dispute_enter(
+        &self,
+        ledger_id: &str,
+        last_valid_sequence: u64,
+        anchor_block_hash: [u8; 32],
+        anchor_block_height: u32,
+        disputer_pubkey: bitcoin::secp256k1::PublicKey,
+    ) {
+        let ledger_prefix = &ledger_id[..16.min(ledger_id.len())];
+
+        // Snapshot ledger state (operator, quorum_expiry, tip sequence,
+        // is-this-our-ledger, are-we-a-member) under the lock. Drop
+        // the guard before any await.
+        let snapshot = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = match ledgers.get(ledger_id) {
+                Some(a) => a.clone(),
+                None => {
+                    tracing::debug!(
+                        "fork DisputeEnter for unknown ledger {}; ignoring",
+                        ledger_prefix
+                    );
+                    return;
+                }
+            };
+            drop(ledgers);
+            let l = arc.read().unwrap();
+            let we_are_operator = l.operator_key() == self.node_id;
+            let we_are_member = l
+                .state
+                .quorum_members
+                .iter()
+                .any(|m| m.pubkey == self.node_id);
+            let quorum_expiry = l.state.quorum_expiry;
+            let tip_seq = l.state.sequence;
+            (we_are_operator, we_are_member, quorum_expiry, tip_seq)
+        };
+        let (we_are_operator, we_are_member, quorum_expiry, tip_seq) = snapshot;
+
+        // Operator of own ledger doesn't auto-arm (we can't dispute
+        // our own ledger). Non-members don't auto-arm (we have no
+        // standing).
+        if we_are_operator {
+            tracing::debug!(
+                "fork DisputeEnter on our own ledger {} from {}... — skipping (operator doesn't auto-arm)",
+                ledger_prefix,
+                hex::encode(&disputer_pubkey.serialize()[..8])
+            );
+            return;
+        }
+        if !we_are_member {
+            tracing::debug!(
+                "fork DisputeEnter on {} from {}... — we're not a quorum member; skipping",
+                ledger_prefix,
+                hex::encode(&disputer_pubkey.serialize()[..8])
+            );
+            return;
+        }
+
+        let quorum_expiry = match quorum_expiry {
+            Some(e) => e,
+            None => {
+                tracing::warn!(
+                    "fork DisputeEnter on {} but ledger has no quorum_expiry; cannot verify",
+                    ledger_prefix
+                );
+                return;
+            }
+        };
+
+        // Verify the cited anchor evidence. The oracle uses our wallet's
+        // esplora client (same one `verify_fraud_broadcast` uses).
+        struct WalletOracle<'a> {
+            wallet: &'a crate::wallet::Wallet,
+        }
+        impl<'a> deposits_core::fraud::BlockOracle for WalletOracle<'a> {
+            fn confirms(&self, h: &[u8; 32]) -> Option<u32> {
+                self.wallet.confirms_block(h)
+            }
+        }
+        let oracle = WalletOracle {
+            wallet: &self.wallet,
+        };
+        if let Err(reason) =
+            deposits_core::operation_validation::validate_dispute_enter_quorum_expired(
+                &anchor_block_hash,
+                anchor_block_height,
+                last_valid_sequence,
+                quorum_expiry,
+                tip_seq,
+                &oracle,
+            )
+        {
+            tracing::warn!(
+                "Refusing to arm on fork DisputeEnter for {} (from {}...): {}",
+                ledger_prefix,
+                hex::encode(&disputer_pubkey.serialize()[..8]),
+                reason
+            );
+            return;
+        }
+
+        tracing::info!(
+            "Fork DisputeEnter for {} verified (anchor height {} > quorum_expiry {}, fork at tip seq {}); auto-arming with our own anchor",
+            ledger_prefix, anchor_block_height, quorum_expiry, tip_seq,
+        );
+
+        // Auto-arm with FRESH anchor evidence from our own block oracle
+        // — don't echo the disputer's; commit to what we observe.
+        let our_height = self.wallet.get_block_height().unwrap_or(0);
+        let our_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+        match self
+            .auto_arm_for_dispute_with_anchor(
+                ledger_id,
+                last_valid_sequence,
+                Some((our_hash, our_height)),
+            )
+            .await
+        {
+            Ok(()) => tracing::info!("Armed on verified fork DisputeEnter for {}", ledger_prefix),
+            Err(e) => tracing::warn!(
+                "Failed to auto-arm after verifying fork DisputeEnter for {}: {}",
+                ledger_prefix,
+                e
+            ),
         }
     }
 
