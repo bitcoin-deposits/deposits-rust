@@ -1156,6 +1156,10 @@ impl Node {
 
                         // Dispute-related periodic tasks
                         timed_periodic!(
+                            "auto_dispute_expired_quorums",
+                            node.auto_dispute_expired_quorums()
+                        );
+                        timed_periodic!(
                             "auto_lottery_claim_or_yield",
                             node.auto_lottery_claim_or_yield()
                         );

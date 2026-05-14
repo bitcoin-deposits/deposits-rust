@@ -752,10 +752,17 @@ impl Node {
             .cloned()
             .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
 
-        let ledger = ledger_arc.read().unwrap();
+        // Snapshot the history under the lock, then drop the guard before
+        // awaiting. The RwLockReadGuard is !Send so it can't be held
+        // across an await in a `tokio::spawn`-ed future (which is exactly
+        // how the periodic task hub runs us).
+        let history = {
+            let ledger = ledger_arc.read().unwrap();
+            ledger.history.clone()
+        };
 
         let mut count = 0;
-        for update in &ledger.history {
+        for update in &history {
             match self.nostr.broadcast_ledger_update(update).await {
                 Ok(event_id) => {
                     tracing::debug!(

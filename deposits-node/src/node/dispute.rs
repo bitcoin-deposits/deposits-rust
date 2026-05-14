@@ -200,6 +200,121 @@ impl Node {
         ledger_id: &str,
         last_valid_seq: u64,
     ) -> Result<(), Error> {
+        // Back-compat shim: callers that don't carry anchor evidence
+        // (kind:9103 notification path, legacy invalid-update path)
+        // produce a `DisputeEnter` without QuorumExpired evidence.
+        // Receivers running the new verifier reject those; the legacy
+        // kind:9103 receivers still rubber-stamp them (until the
+        // receipt-verification commit lands).
+        self.auto_arm_for_dispute_with_anchor(ledger_id, last_valid_seq, None)
+            .await
+    }
+
+    /// Periodic: scan ledgers we cosign for, fire QuorumExpired
+    /// auto-disputes on any whose `quorum_expiry` has been passed by
+    /// the current chain tip.
+    ///
+    /// "We cosign for" = the ledger has an active quorum and our pubkey
+    /// is in `state.quorum_members`. Operator-of-this-ledger ledgers are
+    /// excluded (operators can't dispute their own ledger).
+    ///
+    /// Idempotent via the existing `custody_armed_<prefix>.marker` file:
+    /// `auto_arm_for_dispute` writes that marker on success, and the
+    /// fork-creation step short-circuits if the marker (or fork ledger)
+    /// already exists.
+    pub(crate) async fn auto_dispute_expired_quorums(&self) {
+        let current_height = match self.wallet.get_block_height() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let current_hash = match self.wallet.get_block_hash() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+
+        // Snapshot: which ledgers are we a quorum member of that have
+        // passed expiry? Take a copy under the lock so we can release
+        // before doing async work.
+        let candidates: Vec<(String, u64)> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let mut out = Vec::new();
+            for (key, arc) in ledgers.iter() {
+                // Skip fork compound keys (they end with `_NNNNNN_HEX16`).
+                if key.len() != 64 {
+                    continue;
+                }
+                let l = arc.read().unwrap();
+                let expiry = match l.state.quorum_expiry {
+                    Some(e) => e,
+                    None => continue,
+                };
+                if current_height <= expiry {
+                    continue;
+                }
+                // Operator of own ledger doesn't auto-dispute.
+                if l.operator_key() == self.node_id {
+                    continue;
+                }
+                // Are we a quorum member?
+                let in_quorum = l
+                    .state
+                    .quorum_members
+                    .iter()
+                    .any(|m| m.pubkey == self.node_id);
+                if !in_quorum {
+                    continue;
+                }
+                let tip_seq = l.state.sequence;
+                out.push((key.clone(), tip_seq));
+            }
+            out
+        };
+
+        for (ledger_id, tip_seq) in candidates {
+            // Skip if we've already armed (marker file present).
+            let ledger_prefix = &ledger_id[..16.min(ledger_id.len())];
+            let armed_marker = self
+                .data_dir
+                .join(format!("custody_armed_{}.marker", ledger_prefix));
+            if armed_marker.exists() {
+                continue;
+            }
+            tracing::warn!(
+                "Auto-dispute: ledger {} is past quorum_expiry (current block {}), firing fork-branch DisputeEnter",
+                ledger_prefix,
+                current_height
+            );
+            match self
+                .auto_arm_for_dispute_with_anchor(
+                    &ledger_id,
+                    tip_seq,
+                    Some((current_hash, current_height)),
+                )
+                .await
+            {
+                Ok(()) => tracing::info!(
+                    "Auto-dispute fired for expired ledger {}",
+                    ledger_prefix
+                ),
+                Err(e) => tracing::warn!(
+                    "Auto-dispute for {} failed: {}",
+                    ledger_prefix,
+                    e
+                ),
+            }
+        }
+    }
+
+    /// Auto-arm carrying the QuorumExpired anchor evidence inline on
+    /// the fork-branch `DisputeEnter`. Called by the periodic task that
+    /// detects `current_block > quorum_expiry` on ledgers this node
+    /// cosigns for, and by future callers that have block info handy.
+    pub(crate) async fn auto_arm_for_dispute_with_anchor(
+        &self,
+        ledger_id: &str,
+        last_valid_seq: u64,
+        anchor: Option<([u8; 32], u32)>,
+    ) -> Result<(), Error> {
         use bitcoin::hashes::{hash160, Hash};
         use bitcoin::secp256k1::rand::rngs::OsRng;
         use bitcoin::secp256k1::rand::Rng;
@@ -242,11 +357,19 @@ impl Node {
             if already_disputed {
                 tracing::info!("Already have DisputeEnter on fork");
             } else {
+                let (anchor_block_hash, anchor_block_height) = match anchor {
+                    Some((h, n)) => (Some(h), Some(n)),
+                    None => (None, None),
+                };
                 let dispute_op = LedgerOperation::DisputeEnter {
                     last_valid_sequence: last_valid_seq,
-                    reason: "auto_dispute".to_string(),
-                anchor_block_hash: None,
-                anchor_block_height: None,
+                    reason: if anchor.is_some() {
+                        "quorum_expired".to_string()
+                    } else {
+                        "auto_dispute".to_string()
+                    },
+                    anchor_block_hash,
+                    anchor_block_height,
                 };
 
                 fork_ledger
