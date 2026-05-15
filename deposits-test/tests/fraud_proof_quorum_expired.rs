@@ -66,6 +66,19 @@ fn fraud_proof_quorum_expired_triggers_respectful_confiscation() {
 
     let node = build_node_with_danger();
 
+    // ── 0. Fund every operator's op-key P2WPKH address ──
+    // auto-arm for QuorumExpired declares `replacement_collateral`
+    // from a UTXO at the cosigner's operator-key P2WPKH. setup.sh
+    // funds per-ledger BDK addresses, not these — without funding,
+    // every auto-armed disputant declares None, and the cosigners'
+    // confiscation verifier refuses every confiscation_sign with
+    // "disputant declared no replacement_collateral". Pre-fund here
+    // so the verifier accepts each disputant's declaration. Same
+    // precondition `auto_dispute_on_expiry` documents.
+    for op_idx in 0..16 {
+        let _ = fund_operator_key_address(op_idx, 10_000);
+    }
+
     // ── 1. Pick op1's L3 ledger — accused = op1, ledger = ledger_1_3 ──
     let accused_op_idx: usize = 1;
     let accused_ledger = read_setup_state("ledger_1_3");
@@ -92,24 +105,32 @@ fn fraud_proof_quorum_expired_triggers_respectful_confiscation() {
         quorum_expiry.expect("accused ledger has no QuorumBegin — quorum was never active");
 
     // ── 3. Pick a confirmed anchor block past the expiry ──
-    // The verifier requires `anchor_height > quorum_expiry`. Find the
-    // latest-anchored block in the ledger and fail loudly if it isn't
-    // past expiry — that's the test precondition not being met.
-    let latest_anchor = history
-        .iter()
-        .rev()
-        .find(|u| u.block_hash != [0u8; 32])
-        .expect("accused ledger has no anchored block_hash");
-    if latest_anchor.block_height <= quorum_expiry {
-        panic!(
-            "TEST PRECONDITION not met: latest anchor at block {}, but quorum_expiry is {}. \
-             This test requires the cluster's quorum to have expired — either set up the \
-             cluster with a short --quorum-expiry override or mine enough regtest blocks \
-             past the QuorumBegin to push the chain past expiry. See module docs.",
-            latest_anchor.block_height, quorum_expiry
-        );
-    }
-    let anchor_block_hash = latest_anchor.block_hash;
+    // The verifier requires `anchor_height > quorum_expiry`. Prefer the
+    // latest-anchored block already in the operator's history (cheapest
+    // — no RPC) if it's past expiry. Otherwise mine forward and pull a
+    // fresh block hash directly from bitcoind: an operator that
+    // genuinely misses the rotation window doesn't have to commit
+    // anything post-expiry for the verifier to accept the proof, so
+    // we shouldn't make the test gate on operator activity either.
+    let latest_anchor = history.iter().rev().find(|u| u.block_hash != [0u8; 32]);
+    let (anchor_block_height, anchor_block_hash) = match latest_anchor {
+        Some(u) if u.block_height > quorum_expiry => (u.block_height, u.block_hash),
+        _ => {
+            let target = quorum_expiry + 1;
+            if current_block_height() < target {
+                mine_blocks(target.saturating_sub(current_block_height()) + 10);
+            }
+            let height = current_block_height();
+            let hash = get_block_hash(height);
+            (height, hash)
+        }
+    };
+    assert!(
+        anchor_block_height > quorum_expiry,
+        "anchor_block_height {} must exceed quorum_expiry {}",
+        anchor_block_height,
+        quorum_expiry
+    );
     eprintln!(
         "[setup]    accused=op{}  ledger={}…  peer=op{}",
         accused_op_idx,
@@ -119,7 +140,7 @@ fn fraud_proof_quorum_expired_triggers_respectful_confiscation() {
     eprintln!(
         "[anchors]  anchor_block_hash={}…  anchor_height={}  quorum_expiry={}",
         &hex::encode(anchor_block_hash)[..16],
-        latest_anchor.block_height,
+        anchor_block_height,
         quorum_expiry
     );
 

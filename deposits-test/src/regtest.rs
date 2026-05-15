@@ -629,6 +629,38 @@ pub fn current_block_height() -> u32 {
         .expect("parse blockcount")
 }
 
+/// Fetch the block hash at `height` from bitcoind. Used by tests that
+/// need a confirmed anchor at a specific height without having to wait
+/// for any operator to commit something that gets anchored there.
+pub fn get_block_hash(height: u32) -> [u8; 32] {
+    let out = Command::new("docker")
+        .args([
+            "exec",
+            "bitcoind",
+            "bitcoin-cli",
+            "-regtest",
+            "-rpcuser=user",
+            "-rpcpassword=pass",
+            "getblockhash",
+            &height.to_string(),
+        ])
+        .output()
+        .expect("docker exec bitcoin-cli getblockhash");
+    assert!(
+        out.status.success(),
+        "getblockhash {} failed:\n{}",
+        height,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let hex_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let bytes = hex::decode(&hex_str).expect("parse blockhash hex");
+    // bitcoind prints block hashes in big-endian display form. Reverse to
+    // get the internal byte order used everywhere in our protocol.
+    let mut h: [u8; 32] = bytes.try_into().expect("blockhash is 32 bytes");
+    h.reverse();
+    h
+}
+
 pub fn mine_blocks(n: u32) {
     // Two things made test mining absurdly slow until we caught them:
     //
@@ -652,7 +684,9 @@ pub fn mine_blocks(n: u32) {
     // vs. 437 sec.
     let _ = Command::new("docker").args(["stop", "miner"]).output();
 
-    const THROWAWAY: &str = "bcrt1qq8adjz4u6enf0cgqz09rkjyz6m7s38txrn3kg6";
+    // Bech32-valid regtest P2WPKH address, not in any cluster wallet.
+    // Derived from a fixed test pubkey so the constant is stable.
+    const THROWAWAY: &str = "bcrt1qrxv9d5gkdz6xmsqav6sl6su24jjs4qafn2yk4a";
     let out = Command::new("docker")
         .args([
             "exec",
