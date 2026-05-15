@@ -1629,25 +1629,34 @@ impl Node {
         // Broadcast
         tracing::info!("  Broadcasting confiscation transaction...");
 
-        match self.wallet.broadcast(&confiscation_tx) {
-            Ok(_) => {
-                let confiscation_txid = confiscation_tx.compute_txid();
-                tracing::info!(
-                    "Confiscation transaction broadcast! Txid: {}",
-                    confiscation_txid
-                );
-                tracing::info!("  Lottery address: {}", pc.lottery_address);
-
-                // Write confiscated marker
-                if let Err(e) =
-                    std::fs::write(&pc.confiscated_marker, confiscation_txid.to_string())
-                {
-                    tracing::warn!("Failed to write confiscated marker: {}", e);
-                }
-            }
+        // "Transaction already in block chain" or "already in mempool"
+        // from bitcoind means another disputant got there first — the
+        // tx is in fact confirmed/queued, so treat it as the same
+        // happy-path as a fresh broadcast (write the marker, log).
+        let broadcast_result = self.wallet.broadcast(&confiscation_tx);
+        let confiscation_txid = confiscation_tx.compute_txid();
+        let broadcast_succeeded = match &broadcast_result {
+            Ok(_) => true,
             Err(e) => {
-                tracing::error!("Failed to broadcast confiscation TX: {}", e);
+                let msg = e.to_string();
+                msg.contains("Transaction already in block chain")
+                    || msg.contains("txn-already-in-mempool")
+                    || msg.contains("Transaction already in mempool")
             }
+        };
+        if broadcast_succeeded {
+            tracing::info!(
+                "Confiscation transaction in chain! Txid: {}",
+                confiscation_txid
+            );
+            tracing::info!("  Lottery address: {}", pc.lottery_address);
+            if let Err(e) =
+                std::fs::write(&pc.confiscated_marker, confiscation_txid.to_string())
+            {
+                tracing::warn!("Failed to write confiscated marker: {}", e);
+            }
+        } else if let Err(e) = broadcast_result {
+            tracing::error!("Failed to broadcast confiscation TX: {}", e);
         }
     }
 
@@ -2189,15 +2198,27 @@ impl Node {
                 confiscation_tx.input[0].witness = witness;
 
                 tracing::info!("  Broadcasting confiscation transaction (enough sigs locally)...");
-                match self.wallet.broadcast(&confiscation_tx) {
-                    Ok(_) => {
-                        let txid = confiscation_tx.compute_txid();
-                        tracing::info!("Confiscation transaction broadcast! Txid: {}", txid);
-                        if let Err(e) = std::fs::write(&confiscated_marker, txid.to_string()) {
-                            tracing::warn!("Failed to write confiscated marker: {}", e);
-                        }
+                // See note at finalize_confiscation: an "already in
+                // block chain / mempool" error means another disputant
+                // beat us to the broadcast — still a success outcome.
+                let broadcast_result = self.wallet.broadcast(&confiscation_tx);
+                let txid = confiscation_tx.compute_txid();
+                let broadcast_succeeded = match &broadcast_result {
+                    Ok(_) => true,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        msg.contains("Transaction already in block chain")
+                            || msg.contains("txn-already-in-mempool")
+                            || msg.contains("Transaction already in mempool")
                     }
-                    Err(e) => tracing::error!("Failed to broadcast confiscation TX: {}", e),
+                };
+                if broadcast_succeeded {
+                    tracing::info!("Confiscation transaction in chain! Txid: {}", txid);
+                    if let Err(e) = std::fs::write(&confiscated_marker, txid.to_string()) {
+                        tracing::warn!("Failed to write confiscated marker: {}", e);
+                    }
+                } else if let Err(e) = broadcast_result {
+                    tracing::error!("Failed to broadcast confiscation TX: {}", e);
                 }
                 continue;
             }

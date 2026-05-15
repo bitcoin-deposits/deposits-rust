@@ -38,7 +38,7 @@ log_warn() { echo -e "${RED}[WARN]${NC} $*"; }
 # different value.
 Q="${Q:-${1:-5}}"
 NODE_COUNT=$((3 * Q + 1))
-LEDGERS_PER_OP=3
+LEDGERS_PER_OP="${LEDGERS_PER_OP:-3}"
 
 LEDGER_RELAY_PORT="${RELAY_LEDGERS_PORT:-17779}"
 MSG_RELAY_PORT="${RELAY_MESSAGING_PORT:-17780}"

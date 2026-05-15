@@ -41,7 +41,7 @@ log_warn() { echo -e "${RED}[WARN]${NC} $*"; }
 
 Q="${1:-5}"
 NODE_COUNT=$((3 * Q + 1))
-LEDGERS_PER_OP=3
+LEDGERS_PER_OP="${LEDGERS_PER_OP:-3}"
 RESERVES_SATS=40000000     # 0.4 BTC per ledger (40%)
 COLLATERAL_SATS=60000000   # 0.6 BTC per ledger (60%)
 
