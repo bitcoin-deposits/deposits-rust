@@ -74,8 +74,11 @@ fn equivocation_chain_continuity_keeps_quorum_consistent() {
     assert_eq!(
         cosigner_seeds.len(),
         quorum_pubkeys.len(),
-        "couldn't map every quorum member to a cluster operator seed; \
-         expected all members to be op0..op9"
+        "couldn't map every quorum member to a cluster operator seed — \
+         this test scans cluster ops up to the `op_idx_for_pubkey` ceiling, \
+         which is sized for the largest cluster setup.sh emits (Q=7 ⇒ 22 ops). \
+         If you're seeing this fail with members on a fresh cluster, the \
+         scan limit needs to be bumped."
     );
 
     // Note the pre-broadcast tip — we'll look for the next seq.
@@ -189,8 +192,9 @@ fn quorum_members_from_history(
     None
 }
 
-/// Return the cluster operator index (0..10) whose seed derives to the
-/// given x-only-or-compressed pubkey hex, or None if none match.
+/// Return the cluster operator index whose seed derives to the given
+/// x-only-or-compressed pubkey hex, or None if none match. Scans up to
+/// the largest cluster `setup.sh` emits (Q=7 ⇒ NODE_COUNT=22).
 fn op_idx_for_pubkey(pubkey_hex: &str) -> Option<usize> {
     use bitcoin::bip32::{DerivationPath, Xpriv};
     use bitcoin::secp256k1::{Keypair, Secp256k1};
@@ -198,7 +202,7 @@ fn op_idx_for_pubkey(pubkey_hex: &str) -> Option<usize> {
     use std::str::FromStr;
 
     let secp = Secp256k1::new();
-    for i in 0..10 {
+    for i in 0..22 {
         let seed_hex = op_seed(i);
         let bytes: [u8; 32] = match hex::decode(&seed_hex)
             .ok()
