@@ -1306,6 +1306,149 @@ impl Node {
         latest.map(|(_, pt)| pt)
     }
 
+    /// Fallback evidence path for the QuorumExpired-in-DisputeEnter
+    /// scheme: a deadline-miss dispute is not embedded into a kind:9101
+    /// `FraudBroadcast` (the embedding step needs cosigning, which an
+    /// expired quorum can't provide). Instead the disputant publishes a
+    /// fork-branch `DisputeEnter` carrying `anchor_block_hash` +
+    /// `anchor_block_height` inline.
+    ///
+    /// This function looks for such a fork-branch DisputeEnter for
+    /// `ledger_id`, validates the anchor against our local block oracle
+    /// using the same predicate the receiver enforces (oracle confirms
+    /// hash at the asserted height, height > the ledger's
+    /// `quorum_expiry`), and on success returns
+    /// `FraudProofType::QuorumExpired` so the cosigner's confiscation
+    /// verifier can treat it as authoritative evidence — equivalent to
+    /// finding a kind:9101 of the same proof type.
+    ///
+    /// Returns `None` if no fork-branch DisputeEnter is observed, the
+    /// anchor fields are missing, or the oracle/expiry checks fail.
+    pub(crate) async fn fetch_quorum_expired_inline_evidence(
+        &self,
+        ledger_id: &str,
+    ) -> Option<deposits_core::fraud::FraudProofType> {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use deposits_core::fraud::FraudProofType;
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tlv::TlvDecode;
+        use deposits_core::SignedLedgerUpdate;
+        use nostr_sdk::{Filter, Kind};
+
+        // 1. Fetch all kind:LEDGER_UPDATE events for this ledger —
+        //    both main-chain (operator-authored) and fork-branch
+        //    (disputant-authored). Same filter shape the confiscation
+        //    verifier uses upstream.
+        let client = self.nostr.fetch_client();
+        let filter = Filter::new()
+            .kind(Kind::Custom(deposits_nostr::KIND_LEDGER_UPDATE))
+            .custom_tag(
+                deposits_nostr::TAG_LEDGER_ID,
+                [deposits_nostr::ledger_tag(ledger_id)],
+            )
+            .limit(500);
+        let events = client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+            .await
+            .ok()?;
+
+        let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+        for event in events.iter() {
+            if let Ok(tlv) = BASE64.decode(&event.content) {
+                if let Ok(u) = SignedLedgerUpdate::tlv_decode(&tlv) {
+                    updates.push(u);
+                }
+            }
+        }
+        if updates.is_empty() {
+            return None;
+        }
+        updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
+
+        // 2. The original operator owns sequence 0. Their main-chain
+        //    QuorumBegin tells us the ledger's recorded quorum_expiry.
+        let original_operator = updates
+            .iter()
+            .find(|u| u.sequence_number == 0)
+            .map(|u| u.operator_id)?;
+        let mut ledger_quorum_expiry: Option<u32> = None;
+        for u in &updates {
+            if u.operator_id != original_operator {
+                continue;
+            }
+            if let Ok(LedgerOperation::QuorumBegin {
+                quorum_expiry: e, ..
+            }) = LedgerOperation::tlv_decode(&u.message)
+            {
+                // Latest QuorumBegin wins (rotation extends expiry).
+                ledger_quorum_expiry = Some(e);
+            }
+        }
+        let ledger_quorum_expiry = ledger_quorum_expiry?;
+
+        // 3. Build a block oracle that consults our own wallet's
+        //    chain view — same pattern as the inbound DisputeEnter
+        //    receiver verification.
+        struct WalletOracle<'a> {
+            wallet: &'a crate::wallet::Wallet,
+        }
+        impl<'a> deposits_core::fraud::BlockOracle for WalletOracle<'a> {
+            fn confirms(&self, h: &[u8; 32]) -> Option<u32> {
+                self.wallet.confirms_block(h)
+            }
+        }
+        let oracle = WalletOracle {
+            wallet: &self.wallet,
+        };
+
+        // 4. Walk fork-branch updates and check each DisputeEnter that
+        //    carries inline anchor evidence + reason=quorum_expired.
+        //    One valid candidate is enough.
+        for u in &updates {
+            if u.operator_id == original_operator {
+                continue;
+            }
+            let Ok(op) = LedgerOperation::tlv_decode(&u.message) else {
+                continue;
+            };
+            let LedgerOperation::DisputeEnter {
+                anchor_block_hash: Some(hash),
+                anchor_block_height: Some(height),
+                last_valid_sequence,
+                reason,
+                ..
+            } = op
+            else {
+                continue;
+            };
+            if reason != "quorum_expired" {
+                continue;
+            }
+            // Find the main-chain tip sequence (highest seq from the
+            // original operator) to satisfy validate_*'s fork-point
+            // predicate.
+            let main_tip_seq = updates
+                .iter()
+                .filter(|u| u.operator_id == original_operator)
+                .map(|u| u.sequence_number)
+                .max()
+                .unwrap_or(0);
+            if deposits_core::operation_validation::validate_dispute_enter_quorum_expired(
+                &hash,
+                height,
+                last_valid_sequence,
+                ledger_quorum_expiry,
+                main_tip_seq,
+                &oracle,
+            )
+            .is_ok()
+            {
+                return Some(FraudProofType::QuorumExpired);
+            }
+        }
+        None
+    }
+
     /// Auto-initiate confiscation when all participants are armed
     ///
     /// For each ledger where we're armed but confiscation hasn't happened yet,
@@ -1802,18 +1945,23 @@ impl Node {
             //   §"Respectful confiscation tx"). Falls back to punitive shape
             //   if the change side would be dust.
             //
-            // The proof type comes from the kind:9101 fraud broadcast on the
-            // relay. If we can't find one (legacy disputes that arrived via
-            // kind:9103 only), fall back to punitive — that's the strict
-            // default and matches pre-bifurcation behavior.
+            // The proof type comes from either:
+            //   1. a kind:9101 fraud broadcast on the relay, or
+            //   2. (deadline-miss only) a fork-branch DisputeEnter with
+            //      reason="quorum_expired" + inline anchor evidence.
+            // We must agree with the cosigner's verifier on which shape
+            // to build — they consult both paths in the same order. If
+            // we built a punitive (1-output) tx but the cosigner read
+            // the inline evidence as QuorumExpired (respectful → 2
+            // outputs), the cosign refuses on tx-shape mismatch.
             let fee_rate = 2u64;
             let estimated_vsize = 200u64;
             let fee = fee_rate * estimated_vsize;
-            let is_respectful = self
-                .fetch_fraud_proof_type_for_ledger(&ledger_id)
-                .await
-                .map(|pt| pt.is_respectful())
-                .unwrap_or(false);
+            let proof_type = match self.fetch_fraud_proof_type_for_ledger(&ledger_id).await {
+                Some(pt) => Some(pt),
+                None => self.fetch_quorum_expired_inline_evidence(&ledger_id).await,
+            };
+            let is_respectful = proof_type.map(|pt| pt.is_respectful()).unwrap_or(false);
 
             let obligations_sats = {
                 let ledgers = self.handler.ledgers.lock().unwrap();

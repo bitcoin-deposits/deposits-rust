@@ -690,14 +690,29 @@ impl Node {
             ));
         }
 
-        // 2. is_respectful from kind:9101 — refuse if no broadcast on relay
-        //    (a confiscation without a published fraud proof is unverifiable)
-        let proof_type = self
-            .fetch_fraud_proof_type_for_ledger(&request.ledger_id)
-            .await
-            .ok_or_else(|| {
-                "no kind:9101 fraud broadcast on relay for this ledger".to_string()
-            })?;
+        // 2. is_respectful from authoritative deadline evidence. Two
+        //    paths are accepted:
+        //      a) A kind:9101 `FraudBroadcast` on the relay — used for
+        //         every fraud type whose embedding-via-cosign is
+        //         feasible.
+        //      b) A fork-branch `DisputeEnter` with inline anchor
+        //         evidence + reason="quorum_expired" — used for the
+        //         deadline-miss case, where embedding-via-cosign is
+        //         impossible (cosigners refuse on an expired quorum).
+        //    Either is sufficient for the verifier to know the
+        //    confiscation is grounded; we refuse only if neither is
+        //    on the relay.
+        let proof_type = match self.fetch_fraud_proof_type_for_ledger(&request.ledger_id).await {
+            Some(pt) => pt,
+            None => self
+                .fetch_quorum_expired_inline_evidence(&request.ledger_id)
+                .await
+                .ok_or_else(|| {
+                    "no kind:9101 fraud broadcast or fork-branch \
+                     QuorumExpired evidence on relay for this ledger"
+                        .to_string()
+                })?,
+        };
         let is_respectful = proof_type.is_respectful();
 
         // 3. last_valid_sequence — the fork point we replay to

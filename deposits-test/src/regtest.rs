@@ -595,7 +595,17 @@ pub fn fund_operator_key_address(op_idx: usize, amount_sats: u64) -> bitcoin::Tx
 /// Mine `n` blocks to a throwaway address (regtest). Used to confirm the
 /// funding tx from `fund_operator_key_address` so the cosigner's Esplora
 /// check sees it as ≥ 1 confirmation.
-pub fn mine_blocks(n: u32) {
+///
+/// Mines in chunks of 50 with a short pause between calls. A single
+/// large `-generate N` call saturates bitcoind for the duration —
+/// when other components (electrs, ~10 deposits-node daemons) are
+/// subscribed to chaintip notifications, the RPC client can time out
+/// before the mining completes. Chunking keeps individual RPC calls
+/// short and gives subscribers time to drain between batches.
+/// Query bitcoind for the current best-chain block height. Useful for
+/// tests that want to mine a relative number of blocks ("100 past the
+/// quorum's expiry") without over-mining on a re-used cluster.
+pub fn current_block_height() -> u32 {
     let out = Command::new("docker")
         .args([
             "exec",
@@ -604,6 +614,38 @@ pub fn mine_blocks(n: u32) {
             "-regtest",
             "-rpcuser=user",
             "-rpcpassword=pass",
+            "getblockcount",
+        ])
+        .output()
+        .expect("docker exec bitcoin-cli getblockcount");
+    assert!(
+        out.status.success(),
+        "getblockcount failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .expect("parse blockcount")
+}
+
+pub fn mine_blocks(n: u32) {
+    // Single `-generate N` call. Each block fires fan-out notifications
+    // to electrs + every running daemon, so the per-block cost is well
+    // above bare regtest mining; for large N (the 1100 the
+    // auto_dispute_on_expiry test mines), the default `bitcoin-cli`
+    // 15-min RPC client timeout fires before bitcoind responds. Set
+    // `-rpcclienttimeout=3600` so the client waits up to an hour.
+    let out = Command::new("docker")
+        .args([
+            "exec",
+            "bitcoind",
+            "bitcoin-cli",
+            "-regtest",
+            "-rpcuser=user",
+            "-rpcpassword=pass",
+            "-rpcclienttimeout=3600",
+            "-rpcwallet=faucet",
             "-generate",
             &n.to_string(),
         ])
@@ -611,7 +653,8 @@ pub fn mine_blocks(n: u32) {
         .expect("docker exec bitcoin-cli -generate");
     assert!(
         out.status.success(),
-        "mine_blocks failed:\n{}\n{}",
+        "mine_blocks({}) failed:\n{}\n{}",
+        n,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -850,7 +893,15 @@ pub fn spawn_op0(extra_env: &[(&str, &str)]) {
 }
 
 /// Discover op0's ledger id via `deposits-wallet discover --json`.
+/// Returns the first op0-owned ledger whose on-disk history actually
+/// contains a committed `QuorumBegin` — i.e., the quorum is active.
+/// Phase 4 of `setup.sh` is racy and may leave 1-3 of op0's ledgers
+/// stuck in the staged state; picking one of those would panic the
+/// caller looking for `quorum_expiry`.
 pub fn discover_op0_ledger() -> String {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tlv::TlvDecode;
+
     let scratch = tempdir();
     let out = Command::new(wallet_bin())
         .args(["discover", "--json"])
@@ -860,22 +911,41 @@ pub fn discover_op0_ledger() -> String {
         .output()
         .expect("discover failed");
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let op0_data_dir = op0_data_dir();
+    let mut fallback: Option<String> = None;
     for line in stdout.lines() {
         let v: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if v.get("type").and_then(|x| x.as_str()) == Some("ledger")
-            && v.get("operator_name").and_then(|x| x.as_str()) == Some("op0")
+        if v.get("type").and_then(|x| x.as_str()) != Some("ledger")
+            || v.get("operator_name").and_then(|x| x.as_str()) != Some("op0")
         {
-            return v
-                .get("ledger_id")
-                .and_then(|x| x.as_str())
-                .unwrap()
-                .to_string();
+            continue;
+        }
+        let ledger_id = v
+            .get("ledger_id")
+            .and_then(|x| x.as_str())
+            .unwrap()
+            .to_string();
+        if fallback.is_none() {
+            fallback = Some(ledger_id.clone());
+        }
+        // Inspect the local jsonl for a QuorumBegin operation. If
+        // present, this ledger is activated and usable; otherwise
+        // it's still staged and would fail downstream.
+        let history = read_ledger_history(&op0_data_dir, &ledger_id);
+        let has_quorum_begin = history.iter().any(|u| {
+            matches!(
+                LedgerOperation::tlv_decode(&u.message),
+                Ok(LedgerOperation::QuorumBegin { .. })
+            )
+        });
+        if has_quorum_begin {
+            return ledger_id;
         }
     }
-    panic!("couldn't find a ledger owned by op0");
+    fallback.expect("couldn't find a ledger owned by op0")
 }
 
 /// Run `deposits-wallet open` with the given args. Returns combined

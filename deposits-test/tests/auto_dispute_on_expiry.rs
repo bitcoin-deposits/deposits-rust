@@ -64,14 +64,38 @@ fn auto_dispute_fires_when_quorum_expires() {
     let quorum_expiry = quorum_expiry.expect("op0's ledger has no QuorumBegin");
     eprintln!("[setup] quorum_expiry = {}", quorum_expiry);
 
-    // ── 2. Mine past expiry ──
-    // bitcoind -regtest doesn't give us current_block cheaply via the
-    // regtest helpers, but `mine_blocks` is generous — over-mining is
-    // harmless. Target: current_height + 1100 to be safely past expiry
-    // even on a stale cluster. With `quorum_expiry = current_height +
-    // 1000` from setup.sh, ~1100 blocks lands us 100 blocks past.
-    eprintln!("[mine]  mining 1100 blocks to push chain past quorum_expiry");
-    mine_blocks(1100);
+    // ── 2a. Fund every operator's op-key P2WPKH address ──
+    // auto_arm_for_dispute looks for a UTXO at the operator-key P2WPKH
+    // (not the per-ledger BDK address) to declare as replacement
+    // collateral. setup.sh doesn't fund these; without funding,
+    // cosigners refuse to sign the confiscation tx. 10k sats per op is
+    // well above the obligations × collateral/reserves floor for this
+    // cluster. See `dispute_fork_shape.rs` precondition doc.
+    eprintln!("[fund]  funding 10 operators' op-key P2WPKH addresses (10k sats each)");
+    for op_idx in 0..10 {
+        let _txid = fund_operator_key_address(op_idx, 10_000);
+    }
+
+    // ── 2b. Mine past expiry ──
+    // Mine just enough to land ~100 blocks past `quorum_expiry`. On a
+    // freshly-set-up cluster that's ~1100 blocks; on a re-used cluster
+    // where the chain is already at or near expiry, it can be a handful
+    // — bitcoind under load with 10 daemon subscribers mines ~30
+    // blocks/min, so over-mining adds real wall-clock cost. Floor of
+    // 100 blocks ensures we always trigger at least one fresh esplora
+    // poll on every daemon, so they see the new tip.
+    let current_height = current_block_height();
+    let target = quorum_expiry + 100;
+    let to_mine = if current_height >= target {
+        100
+    } else {
+        (target - current_height).max(100)
+    };
+    eprintln!(
+        "[mine]  current={} expiry={} target={} → mining {} blocks",
+        current_height, quorum_expiry, target, to_mine
+    );
+    mine_blocks(to_mine);
     // Give the daemons a beat to sync the new blocks via esplora.
     std::thread::sleep(Duration::from_secs(5));
 
