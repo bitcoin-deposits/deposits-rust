@@ -738,8 +738,17 @@ impl DisputeState {
                 matches!(operation_discriminant, 43 | 57) // QuorumAddMember, DisputeArmed
             }
             DisputeState::Armed => {
-                // Only DisputeAcquire or DisputeYield allowed
-                matches!(operation_discriminant, 55 | 56) // DisputeAcquire, DisputeYield
+                // DisputeAcquire (55), DisputeYield (56) — terminal
+                // transitions. DisputeArmed (57) is also allowed as a
+                // collateral-upgrade re-arm — `validate_operation`
+                // enforces that the upgrade is `None → Some`, that
+                // `commitment_hash` is unchanged from the prior arm,
+                // and that `replacement_collateral` is now non-None.
+                // Together those rules prevent (a) downgrading away an
+                // existing UTXO commitment and (b) grinding for a
+                // winning `commitment_hash` after the entropy block
+                // lands.
+                matches!(operation_discriminant, 55 | 56 | 57)
             }
             DisputeState::Tombstoned => {
                 // No operations allowed

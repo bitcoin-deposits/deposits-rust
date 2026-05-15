@@ -1409,13 +1409,75 @@ impl Ledger {
                     }
                 }
             }
-            LedgerOperation::DisputeArmed { .. } => {
+            LedgerOperation::DisputeArmed {
+                commitment_hash,
+                replacement_collateral,
+                ..
+            } => {
                 // Must be in active quorum to arm
                 if self.state.quorum_state != QuorumState::Active {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "custody_armed_no_quorum".to_string(),
                         details: "Cannot arm without any quorum members".to_string(),
                     });
+                }
+
+                // Re-arm rules. `dispute_state == Armed` means there
+                // is already a DisputeArmed on this chain; the
+                // discriminant allow-list in
+                // `DisputeState::allows_operation` permits it as a
+                // collateral-upgrade re-arm, but two adversarial
+                // shapes still need rejecting at this layer:
+                //  - changing `commitment_hash` would let a disputant
+                //    grind for a winning lottery commit after seeing
+                //    the entropy block,
+                //  - re-arming when the prior arm already declared a
+                //    `replacement_collateral` (i.e., not the
+                //    None-fallback) gains nothing and would let a
+                //    disputant swap UTXOs after the cosigners have
+                //    already verified one.
+                if self.state.dispute_state == deposits_protocol::DisputeState::Armed {
+                    use crate::tlv::TlvDecode;
+                    let prior: Option<([u8; 20], Option<crate::messages::ReplacementCollateral>)> =
+                        self.history.iter().rev().find_map(|u| {
+                            match crate::messages::LedgerOperation::tlv_decode(&u.message) {
+                                Ok(crate::messages::LedgerOperation::DisputeArmed {
+                                    commitment_hash,
+                                    replacement_collateral,
+                                    ..
+                                }) => Some((commitment_hash, replacement_collateral)),
+                                _ => None,
+                            }
+                        });
+                    if let Some((prior_commit, prior_rc)) = prior {
+                        if *commitment_hash != prior_commit {
+                            return Err(DepositsError::ProtocolViolation {
+                                violation_type: "dispute_armed_commitment_changed".to_string(),
+                                details:
+                                    "Re-arm commitment_hash must match the prior arm; \
+                                     the lottery commitment is immutable once arming begins"
+                                        .to_string(),
+                            });
+                        }
+                        if prior_rc.is_some() {
+                            return Err(DepositsError::ProtocolViolation {
+                                violation_type: "dispute_armed_already_collateralized".to_string(),
+                                details:
+                                    "Re-arm rejected: prior arm already declared \
+                                     replacement_collateral. Only None→Some upgrade is allowed."
+                                        .to_string(),
+                            });
+                        }
+                        if replacement_collateral.is_none() {
+                            return Err(DepositsError::ProtocolViolation {
+                                violation_type: "dispute_armed_no_upgrade".to_string(),
+                                details:
+                                    "Re-arm rejected: new arm must declare \
+                                     replacement_collateral. None→None is a no-op."
+                                        .to_string(),
+                            });
+                        }
+                    }
                 }
             }
             LedgerOperation::DisputeAcquire { claim_txid, .. } => {

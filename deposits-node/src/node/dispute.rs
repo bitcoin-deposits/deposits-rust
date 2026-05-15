@@ -488,35 +488,69 @@ impl Node {
         {
             let mut fork_ledger = fork_arc.write().unwrap();
 
-            let already_armed = fork_ledger.history.iter().any(|u| {
-                if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
-                    matches!(op, LedgerOperation::DisputeArmed { .. })
-                } else {
-                    false
-                }
-            });
+            // Find the most recent DisputeArmed on this fork (if any). We
+            // re-arm only when the prior arm was published with
+            // `replacement_collateral: None` (the "fell back to a path
+            // strict cosigners refuse" branch in this function) — typical
+            // when the operator-key P2WPKH was unfunded at first-arm
+            // time and got funded afterwards. The re-arm must reuse the
+            // same `commitment_hash` so the lottery commitment is
+            // immutable (otherwise a disputant could grind for a
+            // winning commit after observing the entropy block).
+            let prior_arm: Option<deposits_core::messages::LedgerOperation> = fork_ledger
+                .history
+                .iter()
+                .rev()
+                .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+                    Ok(op @ LedgerOperation::DisputeArmed { .. }) => Some(op),
+                    _ => None,
+                });
 
-            if already_armed {
-                tracing::info!("Already have DisputeArmed on fork");
+            let prior_collateral_was_none = matches!(
+                &prior_arm,
+                Some(LedgerOperation::DisputeArmed {
+                    replacement_collateral: None,
+                    ..
+                })
+            );
+
+            let already_armed = prior_arm.is_some();
+
+            if already_armed && !prior_collateral_was_none {
+                tracing::info!("Already have DisputeArmed on fork (with replacement_collateral)");
             } else {
-                // Generate random preimage (32 bytes for lottery entropy)
-                let mut rng = OsRng;
-                let mut preimage = vec![0u8; 32];
-                rng.fill(&mut preimage[..]);
+                let (commitment_hash, preimage_was_persisted): ([u8; 20], bool) =
+                    if let Some(LedgerOperation::DisputeArmed { commitment_hash, .. }) =
+                        &prior_arm
+                    {
+                        // Re-arm: reuse the prior commitment_hash to
+                        // keep the lottery commitment immutable.
+                        tracing::info!(
+                            "Re-arming with prior commitment_hash {} (collateral upgrade)",
+                            hex::encode(commitment_hash)
+                        );
+                        (*commitment_hash, true)
+                    } else {
+                        // First arm: generate a fresh preimage and
+                        // persist it for the eventual reveal.
+                        let mut rng = OsRng;
+                        let mut preimage = vec![0u8; 32];
+                        rng.fill(&mut preimage[..]);
+                        let h: [u8; 20] = *hash160::Hash::hash(&preimage).as_byte_array();
 
-                // Compute commitment_hash = HASH160(preimage)
-                let commitment_hash: [u8; 20] = *hash160::Hash::hash(&preimage).as_byte_array();
-
-                // Store preimage for later reveal (keyed by disputed ledger_id prefix)
-                let preimage_file = self.data_dir.join(format!(
-                    "lottery_preimage_{}.hex",
-                    &ledger_id[..16.min(ledger_id.len())]
-                ));
-                if let Err(e) = std::fs::write(&preimage_file, hex::encode(&preimage)) {
-                    tracing::warn!("Failed to store preimage: {}", e);
-                } else {
-                    tracing::info!("Stored lottery preimage in: {:?}", preimage_file);
-                }
+                        let preimage_file = self.data_dir.join(format!(
+                            "lottery_preimage_{}.hex",
+                            &ledger_id[..16.min(ledger_id.len())]
+                        ));
+                        if let Err(e) = std::fs::write(&preimage_file, hex::encode(&preimage)) {
+                            tracing::warn!("Failed to store preimage: {}", e);
+                            (h, false)
+                        } else {
+                            tracing::info!("Stored lottery preimage in: {:?}", preimage_file);
+                            (h, true)
+                        }
+                    };
+                let _ = preimage_was_persisted;
 
                 // Use P2WPKH address derived from our operator pubkey for target_reserves
                 let pubkey_bytes: [u8; 33] = our_pubkey.serialize();
@@ -591,6 +625,19 @@ impl Node {
                         }
                     }
                 };
+
+                // For a re-arm (prior arm had collateral=None), abort if
+                // we still don't have a funded UTXO — publishing
+                // another `None` DisputeArmed gains nothing and just
+                // grows the fork.
+                if prior_collateral_was_none && replacement_collateral.is_none() {
+                    tracing::info!(
+                        "Re-arm skipped: still no funded UTXO at operator-key P2WPKH; \
+                         will retry next periodic"
+                    );
+                    drop(fork_ledger);
+                    return Ok(());
+                }
 
                 let armed_op = LedgerOperation::DisputeArmed {
                     armed_block: current_block,
