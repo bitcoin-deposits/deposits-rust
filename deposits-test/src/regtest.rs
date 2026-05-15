@@ -630,12 +630,29 @@ pub fn current_block_height() -> u32 {
 }
 
 pub fn mine_blocks(n: u32) {
-    // Single `-generate N` call. Each block fires fan-out notifications
-    // to electrs + every running daemon, so the per-block cost is well
-    // above bare regtest mining; for large N (the 1100 the
-    // auto_dispute_on_expiry test mines), the default `bitcoin-cli`
-    // 15-min RPC client timeout fires before bitcoind responds. Set
-    // `-rpcclienttimeout=3600` so the client waits up to an hour.
+    // Two things made test mining absurdly slow until we caught them:
+    //
+    // 1. The `miner` Docker container in `deposits-tools/docker-compose.yml`
+    //    runs `generatetoaddress 1 <faucet_addr>` in a loop, sleep 1s — a
+    //    deliberate "feel like mainnet" throttle for casual dev. While
+    //    it's running, every test-driven `generate` call serializes
+    //    behind it in bitcoind's RPC queue and effectively inherits the
+    //    1-block/sec cadence. For a test that mines 1100 blocks that's
+    //    ~18 minutes of dead time.
+    //
+    // 2. `-generate N` mines through the `-rpcwallet=faucet` wallet so
+    //    every coinbase reward gets `AddToWallet`'d. After 8+ days of
+    //    miner-container blocks the wallet's UTXO set is huge and each
+    //    additional add is non-trivial. `generatetoaddress N <addr>`
+    //    with an address bitcoind doesn't index avoids the wallet path
+    //    entirely.
+    //
+    // So: pause the miner container, mine into a fixed throwaway
+    // address, restart the miner. Empirically: 100 blocks in 1 sec
+    // vs. 437 sec.
+    let _ = Command::new("docker").args(["stop", "miner"]).output();
+
+    const THROWAWAY: &str = "bcrt1qq8adjz4u6enf0cgqz09rkjyz6m7s38txrn3kg6";
     let out = Command::new("docker")
         .args([
             "exec",
@@ -645,12 +662,17 @@ pub fn mine_blocks(n: u32) {
             "-rpcuser=user",
             "-rpcpassword=pass",
             "-rpcclienttimeout=3600",
-            "-rpcwallet=faucet",
-            "-generate",
+            "generatetoaddress",
             &n.to_string(),
+            THROWAWAY,
         ])
         .output()
-        .expect("docker exec bitcoin-cli -generate");
+        .expect("docker exec bitcoin-cli generatetoaddress");
+
+    // Always try to bring the miner back up — even if the mine itself
+    // failed — so subsequent test runs don't inherit a paused miner.
+    let _ = Command::new("docker").args(["start", "miner"]).output();
+
     assert!(
         out.status.success(),
         "mine_blocks({}) failed:\n{}\n{}",
