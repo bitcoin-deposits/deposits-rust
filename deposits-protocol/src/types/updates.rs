@@ -1464,12 +1464,12 @@ mod tests {
         assert!(!DisputeState::Disputed.allows_operation(10)); // Random op blocked
         assert!(!DisputeState::Disputed.allows_operation(55)); // DisputeAcquire
 
-        // Armed state - DisputeAcquire(55), DisputeYield(56), or DisputeArmed(57) re-arm
+        // Armed state - QuorumAddMember(43), DisputeAcquire(55), DisputeYield(56), DisputeArmed(57) re-arm
         assert!(DisputeState::Armed.allows_operations());
+        assert!(DisputeState::Armed.allows_operation(43)); // QuorumAddMember (late participants)
         assert!(DisputeState::Armed.allows_operation(55)); // DisputeAcquire
         assert!(DisputeState::Armed.allows_operation(56)); // DisputeYield
         assert!(DisputeState::Armed.allows_operation(57)); // DisputeArmed collateral-upgrade re-arm
-        assert!(!DisputeState::Armed.allows_operation(43)); // QuorumAddMember blocked
         assert!(!DisputeState::Armed.allows_operation(10)); // Random op blocked
 
         // Tombstoned - nothing allowed

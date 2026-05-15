@@ -748,7 +748,13 @@ impl DisputeState {
                 // existing UTXO commitment and (b) grinding for a
                 // winning `commitment_hash` after the entropy block
                 // lands.
-                matches!(operation_discriminant, 55 | 56 | 57)
+                //
+                // QuorumAddMember (43) is allowed so a disputant who
+                // armed before they had discovered every quorum member
+                // can keep adding them. The fork is the disputant's
+                // own; adding a useless member is self-harm at worst,
+                // never a hazard to other parties.
+                matches!(operation_discriminant, 43 | 55 | 56 | 57)
             }
             DisputeState::Tombstoned => {
                 // No operations allowed
