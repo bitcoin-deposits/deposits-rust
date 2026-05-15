@@ -432,6 +432,8 @@ fn invariant_s1_dispute_state_gate() {
         .apply_operation(&LedgerOperation::DisputeEnter {
             last_valid_sequence: seq,
             reason: "test".into(),
+            anchor_block_hash: None,
+            anchor_block_height: None,
         })
         .unwrap();
 
@@ -800,6 +802,8 @@ fn invariant_l2_lottery_liveness() {
         .apply_operation(&LedgerOperation::DisputeEnter {
             last_valid_sequence: seq,
             reason: "test".into(),
+            anchor_block_hash: None,
+            anchor_block_height: None,
         })
         .unwrap();
     net.op_mut("alice").add_quorum_member(&bob_snap, "lid");

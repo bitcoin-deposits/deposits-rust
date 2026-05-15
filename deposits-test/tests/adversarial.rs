@@ -223,6 +223,8 @@ fn attack_operate_during_dispute() {
     let dispute = LedgerOperation::DisputeEnter {
         last_valid_sequence: net.op("alice").ledger.state.sequence,
         reason: "non-conforming".to_string(),
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
     net.op_mut("alice")
         .ledger
@@ -277,6 +279,8 @@ fn attack_false_custody_claim() {
     let dispute = LedgerOperation::DisputeEnter {
         last_valid_sequence: net.op("alice").ledger.state.sequence,
         reason: "test".to_string(),
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
     net.op_mut("alice")
         .ledger

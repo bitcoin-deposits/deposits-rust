@@ -829,6 +829,8 @@ impl ProtocolSim {
         let op = LedgerOperation::DisputeEnter {
             last_valid_sequence: last_valid,
             reason: format!("op_{}_vs_op_{}", disputer, victim),
+            anchor_block_hash: None,
+            anchor_block_height: None,
         };
         let replica = match self.operators[disputer].replicas.get(&victim) {
             Some(r) => r.clone(),
@@ -1835,6 +1837,8 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             0 => LedgerOperation::DisputeEnter {
                 last_valid_sequence: op.ledger.state.sequence,
                 reason: format!("bogus_{}", rng.next()),
+                anchor_block_hash: None,
+                anchor_block_height: None,
             },
             1 => LedgerOperation::DisputeArmed {
                 armed_block: sim.block_height,
@@ -2362,6 +2366,8 @@ fn adv_majority_quorum_can_take_over_honest_ledger() {
     let enter = LedgerOperation::DisputeEnter {
         last_valid_sequence: last_valid,
         reason: "fabricated".to_string(),
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
     assert_eq!(
         sim.adversary_propose_on_victim(victim, attacker, enter),

@@ -525,6 +525,8 @@ fn tier3_3_lottery_griefing() {
         .apply_operation(&LedgerOperation::DisputeEnter {
             last_valid_sequence: seq,
             reason: "test".into(),
+            anchor_block_hash: None,
+            anchor_block_height: None,
         })
         .unwrap();
 

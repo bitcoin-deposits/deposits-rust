@@ -42,6 +42,8 @@ fn dispute_enter_changes_state() {
     let dispute_op = deposits_protocol::LedgerOperation::DisputeEnter {
         last_valid_sequence: net.op("alice").ledger.state.sequence,
         reason: "test dispute".to_string(),
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
     net.op_mut("alice")
         .ledger
@@ -80,6 +82,8 @@ fn dispute_arm_after_enter_succeeds() {
     let dispute_op = deposits_protocol::LedgerOperation::DisputeEnter {
         last_valid_sequence: net.op("alice").ledger.state.sequence,
         reason: "test".to_string(),
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
     net.op_mut("alice")
         .ledger
@@ -124,6 +128,8 @@ fn dispute_acquire_returns_to_normal() {
     let dispute_op = deposits_protocol::LedgerOperation::DisputeEnter {
         last_valid_sequence: net.op("alice").ledger.state.sequence,
         reason: "test".to_string(),
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
     net.op_mut("alice")
         .ledger
@@ -173,6 +179,8 @@ fn dispute_yield_tombstones_ledger() {
     let dispute_op = deposits_protocol::LedgerOperation::DisputeEnter {
         last_valid_sequence: net.op("alice").ledger.state.sequence,
         reason: "test".to_string(),
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
     net.op_mut("alice")
         .ledger
@@ -218,6 +226,8 @@ fn normal_operations_rejected_during_dispute() {
     let dispute_op = deposits_protocol::LedgerOperation::DisputeEnter {
         last_valid_sequence: net.op("alice").ledger.state.sequence,
         reason: "test".to_string(),
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
     net.op_mut("alice")
         .ledger

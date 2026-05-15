@@ -48,6 +48,8 @@ fn dispute_armed_with_replacement_collateral_applies_cleanly() {
     let dispute_op = LedgerOperation::DisputeEnter {
         last_valid_sequence: net.op("alice").ledger.state.sequence,
         reason: "test".to_string(),
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
     net.op_mut("alice")
         .ledger
@@ -113,6 +115,8 @@ fn dispute_armed_legacy_none_still_applies() {
     let dispute_op = LedgerOperation::DisputeEnter {
         last_valid_sequence: net.op("alice").ledger.state.sequence,
         reason: "test".to_string(),
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
     net.op_mut("alice")
         .ledger
@@ -150,6 +154,8 @@ fn dispute_armed_replacement_collateral_survives_fork_rebuild() {
     let dispute_op = LedgerOperation::DisputeEnter {
         last_valid_sequence: net.op("alice").ledger.state.sequence,
         reason: "test".to_string(),
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
     net.op_mut("alice")
         .ledger
@@ -222,6 +228,8 @@ fn dispute_armed_partial_amount_is_distinct() {
     let dispute_op = LedgerOperation::DisputeEnter {
         last_valid_sequence: net.op("alice").ledger.state.sequence,
         reason: "test".to_string(),
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
     net.op_mut("alice")
         .ledger

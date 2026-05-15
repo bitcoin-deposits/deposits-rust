@@ -393,6 +393,8 @@ fn double_dispute_enter_rejected() {
         .apply_operation(&LedgerOperation::DisputeEnter {
             last_valid_sequence: seq,
             reason: "first".into(),
+            anchor_block_hash: None,
+            anchor_block_height: None,
         })
         .unwrap();
 
@@ -403,6 +405,8 @@ fn double_dispute_enter_rejected() {
         .apply_operation(&LedgerOperation::DisputeEnter {
             last_valid_sequence: seq,
             reason: "second".into(),
+            anchor_block_hash: None,
+            anchor_block_height: None,
         });
     assert!(result.is_err(), "Double DisputeEnter must be rejected");
 }
