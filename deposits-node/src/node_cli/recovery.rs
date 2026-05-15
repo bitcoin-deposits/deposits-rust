@@ -4846,8 +4846,25 @@ pub async fn recovery_publish_fraud_broadcast(
 
     // Re-serialize through our own serializer (no extra fields, etc.).
     let content = serde_json::to_string(&broadcast)?;
-    // KIND_FRAUD_PROOF = 9101
-    let event = EventBuilder::new(Kind::Custom(9101), &content).build(keys.public_key()).sign_with_keys(&keys)?;
+    // KIND_FRAUD_PROOF = 9101.
+    //
+    // The event MUST carry a `d` tag with the truncated accused ledger
+    // id. Cosigners' `fetch_fraud_proof_type_for_ledger` (and the
+    // confiscation-tx-shape verifier downstream of it) filter relay
+    // events by `kind=9101 AND #d=<ledger_tag>`. Without the tag the
+    // subscription still delivers the event (kind-only route), but
+    // `fetch_events` on the same relay returns empty and downstream
+    // refuses every confiscation_sign with "no kind:9101 fraud
+    // broadcast on relay" even though the broadcast is right there.
+    let ledger_tag_value = deposits_nostr::ledger_tag(&broadcast.proof.ledger_id).to_string();
+    let tag = nostr_sdk::Tag::custom(
+        nostr_sdk::TagKind::SingleLetter(deposits_nostr::TAG_LEDGER_ID),
+        [ledger_tag_value],
+    );
+    let event = EventBuilder::new(Kind::Custom(9101), &content)
+        .tag(tag)
+        .build(keys.public_key())
+        .sign_with_keys(&keys)?;
     let event_id = event.id;
     client.send_event(event).await?;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;

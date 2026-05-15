@@ -974,6 +974,50 @@ impl Node {
             &ledger_id[..16.min(ledger_id.len())]
         );
 
+        // 0. Gap-fill any referenced ledgers we don't already have.
+        //    `verify_fraud_broadcast` queries the LedgerProvider for the
+        //    embedding ledger AND every causal-chain link's ledger.
+        //    Missing → reject. Cosigners only hold replicas of ledgers
+        //    they joined, so e.g. a `StaleCosignature` whose causal
+        //    chain references a peer member's collateral ledger will
+        //    fail to verify on every cosigner who isn't a member of
+        //    THAT ledger — i.e. almost every cosigner — even though
+        //    the broadcast itself is well-formed and the relay has
+        //    every link's history. Pre-fetch from the durable relay
+        //    before verifying so the verifier sees a complete view.
+        //
+        //    `reimport_joined_ledger` is the standard gap-fill path;
+        //    it skips ledgers we already own/operate, paginates back
+        //    through Nostr to fetch missing updates, and inserts them
+        //    into `handler.ledgers` under the plain ledger_id key —
+        //    exactly what the LedgerProvider below reads from.
+        let mut needed: std::collections::HashSet<String> =
+            std::iter::once(broadcast.embedding.ledger_id.clone()).collect();
+        for link in &broadcast.causal_chain {
+            needed.insert(link.ledger_id.clone());
+        }
+        for lid in &needed {
+            let have = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers.contains_key(lid)
+            };
+            if have {
+                continue;
+            }
+            tracing::info!(
+                "Fraud-proof gap-fill: fetching missing ledger {}... from relay",
+                &lid[..16.min(lid.len())]
+            );
+            if let Err(e) = self.reimport_joined_ledger(lid).await {
+                tracing::warn!(
+                    "Fraud-proof gap-fill failed for ledger {}: {} \
+                     (verification will likely refuse if this ledger is referenced)",
+                    &lid[..16.min(lid.len())],
+                    e
+                );
+            }
+        }
+
         // 1-3. Structural sanity, embedding, causal chain, AND per-type
         // evidence verification — all live in
         // `deposits_protocol::fraud::verify_fraud_broadcast` so unit tests
