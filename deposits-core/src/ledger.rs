@@ -1048,6 +1048,26 @@ impl Ledger {
             ));
         }
 
+        // Author-side role guards. These check whether THIS NODE is
+        // entitled to author the operation onto THIS ledger — a check
+        // that's only meaningful from the author's perspective. They
+        // deliberately do NOT live in `validate_operation`, which is
+        // also called from `validate_for_cosign` (cosigner perspective,
+        // role = Partner) and would otherwise refuse every legitimate
+        // cosign request for ops with author-role semantics.
+        match &operation {
+            LedgerOperation::QuorumJoin { .. } => {
+                if !self.is_operator() {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "quorum_join_wrong_role".to_string(),
+                        details: "QuorumJoin can only be added to operator's own ledger"
+                            .to_string(),
+                    });
+                }
+            }
+            _ => {}
+        }
+
         self.validate_operation(&operation)?;
 
         if let LedgerOperation::FeeChange {
@@ -1354,17 +1374,24 @@ impl Ledger {
                 ledger_id,
                 membership_expires,
             } => {
-                // 1. Must be on operator's own ledger (we are the operator)
-                if !self.is_operator() {
-                    return Err(DepositsError::ProtocolViolation {
-                        violation_type: "quorum_join_wrong_role".to_string(),
-                        details: "QuorumJoin can only be added to operator's own ledger"
-                            .to_string(),
-                    });
-                }
-                // Note: Signature verification should be done at the message handler level
-                // where the signing key is available. Here we just validate the operation structure.
-                // 2. Ratchet check: if renewing, new expiration must be >= existing
+                // Note: the "must be authored by the operator of this
+                // ledger" check used to live here as `is_operator()`,
+                // but that's a property of the AUTHOR's role, not the
+                // operation itself. This validator runs from both the
+                // operator's stage path and from every cosigner's
+                // validate_for_cosign — on a cosigner the role is
+                // `Partner` and the check would refuse every legitimate
+                // QuorumJoin cosign request, leaving the operator
+                // unable to record any new quorum-memberships once
+                // their own quorum is Active. Author-side enforcement
+                // now lives in `stage_operation` (which only the
+                // operator runs); signature verification at the
+                // message-handler layer is the security boundary that
+                // actually prevents a non-operator from forging the
+                // update onto someone else's chain.
+                //
+                // Ratchet check: if renewing, new expiration must be
+                // >= existing. Perspective-invariant, so it stays here.
                 if let Some(existing) = self
                     .state
                     .joined_quorums
@@ -2682,6 +2709,111 @@ mod tests {
                 violation_type, ..
             } => assert_eq!(violation_type, "post_expiry_cosign_refused"),
             other => panic!("expected ProtocolViolation, got {:?}", other),
+        }
+    }
+
+    /// `QuorumJoin` author-role guard must NOT fire from the cosigner's
+    /// perspective.
+    ///
+    /// Regression: the operator records "I joined someone else's
+    /// quorum" by committing a `QuorumJoin` to their own chain. Once
+    /// the operator's own quorum is Active every commit needs majority
+    /// cosigs. Cosigners run the same validator on their replica of
+    /// the operator's ledger — but their role there is `Partner`, not
+    /// `Operator`, so an author-role check that lives inside
+    /// `validate_operation` (which `validate_for_cosign` calls)
+    /// guarantees every cosign refuses with `quorum_join_wrong_role`,
+    /// stalling joins forever. The role check belongs in
+    /// `stage_operation` (author-only); `validate_for_cosign` only
+    /// runs the perspective-invariant pieces.
+    #[test]
+    fn quorum_join_validates_on_cosigner_with_partner_role() {
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+
+        fn pk(seed: u8) -> PublicKey {
+            let secp = Secp256k1::new();
+            let mut bytes = [0u8; 32];
+            bytes[31] = seed;
+            let sk = SecretKey::from_slice(&bytes).unwrap();
+            PublicKey::from_secret_key(&secp, &sk)
+        }
+
+        let operator = pk(1);
+        let target_op = pk(2);
+        // Build the operator's own ledger as a *partner* replica — i.e.
+        // exactly the perspective a cosigner has when validating an
+        // incoming QuorumJoin cosign request.
+        let mut cosigner_view = Ledger::new(
+            operator,
+            "rid".to_string(),
+            LedgerRole::Partner,
+            Vec::new(),
+            100,
+        );
+        cosigner_view.state.parent_pubkey = operator;
+        // Skip the PreQuorum gate so we're exercising the
+        // post-activation cosign path (where this bug manifests).
+
+        let op = LedgerOperation::QuorumJoin {
+            operator_id: target_op,
+            ledger_id: "target".to_string(),
+            membership_expires: 1_000_000,
+        };
+
+        // Used to fail with `quorum_join_wrong_role` because
+        // `validate_operation` rejected on `!is_operator()`. Must now
+        // pass: the cosigner's role is irrelevant to whether the
+        // operation is well-formed against the replica's state.
+        cosigner_view
+            .validate_for_cosign(&op, 200)
+            .expect("cosigner with Partner role must be able to validate QuorumJoin");
+
+        // Ratchet check still fires (perspective-invariant). Pre-seed
+        // an existing membership with a longer expiry and verify a
+        // shorter one is rejected.
+        cosigner_view
+            .state
+            .joined_quorums
+            .push(deposits_protocol::types::QuorumMembership {
+                operator_id: target_op,
+                ledger_id: "target".to_string(),
+                membership_expires: 2_000_000,
+                joined_at_sequence: 1,
+            });
+        let shorter = LedgerOperation::QuorumJoin {
+            operator_id: target_op,
+            ledger_id: "target".to_string(),
+            membership_expires: 1_000_000,
+        };
+        let err = cosigner_view
+            .validate_for_cosign(&shorter, 200)
+            .expect_err("ratchet must still refuse a reduced membership_expires");
+        match err {
+            DepositsError::ProtocolViolation {
+                violation_type, ..
+            } => assert_eq!(violation_type, "quorum_join_ratchet"),
+            other => panic!("expected ProtocolViolation::quorum_join_ratchet, got {:?}", other),
+        }
+
+        // Author-side guard still fires when a Partner tries to author
+        // (stage) the same op — only the Operator may add QuorumJoin
+        // to their own chain.
+        let err = cosigner_view
+            .stage_operation(
+                LedgerOperation::QuorumJoin {
+                    operator_id: target_op,
+                    ledger_id: "target".to_string(),
+                    membership_expires: 3_000_000,
+                },
+                100,
+                [0u8; 32],
+            )
+            .expect_err("partner staging QuorumJoin must refuse");
+        match err {
+            DepositsError::ProtocolViolation {
+                violation_type, ..
+            } => assert_eq!(violation_type, "quorum_join_wrong_role"),
+            other => panic!("expected ProtocolViolation::quorum_join_wrong_role, got {:?}", other),
         }
     }
 }
