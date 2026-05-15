@@ -250,20 +250,42 @@ impl Node {
         };
 
         // Find the operator's ledger where we are a quorum member (for sequence validation)
-        // Get the target ledger and extract operator/reserves for matching
+        // Get the target ledger and extract operator/reserves for matching.
+        //
+        // If we don't have a local replica of the disputed ledger we
+        // refuse outright: validate_for_cosign, the chain-continuity
+        // check, and the sequence-matches-our-tip check all depend on a
+        // replica. Signing blind — as the code used to do whenever the
+        // replica was absent — means rubber-stamping whatever sighash
+        // arrives.
         let (operator_ledger_arc, target_operator_id, _target_reserves_key) = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(arc) = ledgers.get(&request.ledger_id) {
                 let ledger = arc.read().unwrap();
                 (
-                    Some(arc.clone()),
-                    Some(ledger.operator_key()),
-                    Some(ledger.reserves_key().to_string()),
+                    arc.clone(),
+                    ledger.operator_key(),
+                    ledger.reserves_key().to_string(),
                 )
             } else {
-                (None, None, None)
+                tracing::warn!(
+                    "Cosign REFUSED: no local replica for ledger {} — \
+                     can't validate without state",
+                    &request.ledger_id[..16.min(request.ledger_id.len())]
+                );
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "No local replica for ledger {}; \
+                         cosign requires a synced view to validate",
+                        &request.ledger_id[..16.min(request.ledger_id.len())]
+                    )),
+                );
             }
         };
+        let target_operator_id = Some(target_operator_id);
+        let operator_ledger_arc = Some(operator_ledger_arc);
 
         // If we don't have the ledger locally, get the operator from the request sender
         // The sender of a cosign_update request IS the operator who needs the co-signature
