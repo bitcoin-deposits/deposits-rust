@@ -549,10 +549,39 @@ impl Node {
                                 Some(format!("Cosign refused: {}", e)),
                             );
                         }
-                        // State-machine apply test: ensures the operation
-                        // applies cleanly to the current state (separate
-                        // from validate_for_cosign's policy checks).
-                        match ledger.state.apply(&operation) {
+                        // State-machine apply + conformance check.
+                        // `apply_with_verifier` runs the state transition
+                        // AND the conformance verifier (reserve
+                        // sufficiency on Credit/Complete ops, witness
+                        // verification on Lock/Fulfill ops, etc.).
+                        // Cosigners that only run bare `state.apply`
+                        // accept operations that pass the state machine
+                        // but violate ledger invariants — e.g. an
+                        // InvoiceCredit that pushes total_deposits past
+                        // reserves, or an InvoiceLock whose witness
+                        // doesn't satisfy the deposit's descriptor.
+                        // That's exactly what cosigning is supposed to
+                        // prevent.
+                        match ledger.state.apply_with_verifier(
+                            &operation,
+                            &deposits_core::descriptor::CoreWitnessVerifier,
+                        ) {
+                            Ok((_, violations)) if !violations.is_empty() => {
+                                tracing::warn!(
+                                    "Cosign validation FAILED (conformance): seq={} op={} violations={:?}",
+                                    sequence_number,
+                                    Self::format_op_short(&operation),
+                                    violations
+                                );
+                                return (
+                                    false,
+                                    None,
+                                    Some(format!(
+                                        "Cosign refused: conformance violations {:?}",
+                                        violations
+                                    )),
+                                );
+                            }
                             Ok(_) => {
                                 tracing::debug!(
                                     "Cosign validation passed: seq={} op={}",
