@@ -491,6 +491,14 @@ impl DepositsHandler {
         // poisoned subsequent reimports with `wrong previous_hash`
         // errors. Heal at load time by dropping them; the next
         // persist_ledger_to_disk rewrites the file without them.
+        //
+        // Fork-branch jsonls (compound key `<ledger_id>_<seq>_<peer>`,
+        // length > 64) legitimately contain TWO operators: the
+        // original operator up to last_valid_sequence, then the
+        // disputant from there on. The filter would mis-fire there and
+        // strip every disputant update, so it's disabled for the
+        // fork-branch file format.
+        let is_fork_file = ledger_id.len() > 64;
         let mut main_operator: Option<bitcoin::secp256k1::PublicKey> = None;
 
         for line in contents.lines() {
@@ -506,21 +514,23 @@ impl DepositsHandler {
                     state = Some(s);
                 }
                 Ok(LedgerLogRow::Update(u)) => {
-                    if main_operator.is_none() {
-                        main_operator = Some(u.operator_id);
-                    }
-                    if Some(u.operator_id) != main_operator {
-                        tracing::warn!(
-                            "Ledger {} seq {}: dropping foreign-operator update \
-                             {} (main operator {}). Likely fork-branch artifact \
-                             from an older binary; the main jsonl should only \
-                             contain main-chain updates.",
-                            ledger_id,
-                            u.sequence_number,
-                            hex::encode(&u.operator_id.serialize()[..8]),
-                            hex::encode(&main_operator.unwrap().serialize()[..8]),
-                        );
-                        continue;
+                    if !is_fork_file {
+                        if main_operator.is_none() {
+                            main_operator = Some(u.operator_id);
+                        }
+                        if Some(u.operator_id) != main_operator {
+                            tracing::warn!(
+                                "Ledger {} seq {}: dropping foreign-operator update \
+                                 {} (main operator {}). Likely fork-branch artifact \
+                                 from an older binary; the main jsonl should only \
+                                 contain main-chain updates.",
+                                ledger_id,
+                                u.sequence_number,
+                                hex::encode(&u.operator_id.serialize()[..8]),
+                                hex::encode(&main_operator.unwrap().serialize()[..8]),
+                            );
+                            continue;
+                        }
                     }
                     if seen_sequences.insert(u.sequence_number) {
                         updates.push(u);
