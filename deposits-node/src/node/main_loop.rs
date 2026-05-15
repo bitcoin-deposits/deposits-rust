@@ -569,15 +569,32 @@ impl Node {
 
         if let Some(ledger_arc) = existing {
             // --- Fast path: existing ledger, incremental update ---
-            let (local_tip_hash, local_next_seq) = {
+            let (local_tip_hash, local_next_seq, main_chain_operator) = {
                 let ledger = ledger_arc.read().unwrap();
-                (ledger.tail_hash(), ledger.next_sequence())
+                // The main chain's operator is whoever signed
+                // LedgerOpen — that's `state.operator_key`. Fork-branch
+                // updates carry a different operator_id (the disputant)
+                // but the same ledger_id tag on the relay, so we must
+                // filter them out here — otherwise dedup_by_key(seq)
+                // below can pick a fork-branch update at a contested
+                // sequence, whose previous_hash chains off the fork's
+                // parent (not the main chain's tail), producing the
+                // spurious `Update N has wrong previous_hash` we see
+                // when a disputed ledger is being re-imported.
+                (
+                    ledger.tail_hash(),
+                    ledger.next_sequence(),
+                    ledger.state.operator_key,
+                )
             };
 
             // Filter, sort, dedup relay events to those beyond our tip
             let mut new_updates: Vec<_> = all_fetched
                 .iter()
-                .filter(|u| u.sequence_number >= local_next_seq)
+                .filter(|u| {
+                    u.sequence_number >= local_next_seq
+                        && u.operator_id == main_chain_operator
+                })
                 .cloned()
                 .collect();
             new_updates.sort_by_key(|u| u.sequence_number);

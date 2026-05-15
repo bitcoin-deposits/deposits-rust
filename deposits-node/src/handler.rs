@@ -484,6 +484,14 @@ impl DepositsHandler {
         let mut state: Option<LedgerState> = None;
         let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
         let mut seen_sequences = std::collections::HashSet::new();
+        // Main-chain operator pubkey. Established from the first update
+        // (or seq 0's LedgerOpen if present). Updates from a different
+        // operator_id are fork-branch artifacts — earlier daemon
+        // versions sometimes persisted them into the main jsonl, which
+        // poisoned subsequent reimports with `wrong previous_hash`
+        // errors. Heal at load time by dropping them; the next
+        // persist_ledger_to_disk rewrites the file without them.
+        let mut main_operator: Option<bitcoin::secp256k1::PublicKey> = None;
 
         for line in contents.lines() {
             if line.trim().is_empty() {
@@ -498,6 +506,22 @@ impl DepositsHandler {
                     state = Some(s);
                 }
                 Ok(LedgerLogRow::Update(u)) => {
+                    if main_operator.is_none() {
+                        main_operator = Some(u.operator_id);
+                    }
+                    if Some(u.operator_id) != main_operator {
+                        tracing::warn!(
+                            "Ledger {} seq {}: dropping foreign-operator update \
+                             {} (main operator {}). Likely fork-branch artifact \
+                             from an older binary; the main jsonl should only \
+                             contain main-chain updates.",
+                            ledger_id,
+                            u.sequence_number,
+                            hex::encode(&u.operator_id.serialize()[..8]),
+                            hex::encode(&main_operator.unwrap().serialize()[..8]),
+                        );
+                        continue;
+                    }
                     if seen_sequences.insert(u.sequence_number) {
                         updates.push(u);
                     }
@@ -516,16 +540,61 @@ impl DepositsHandler {
             LedgerRole::Partner
         });
 
-        let mut ledger_state = match state {
-            Some(s) => s,
-            None => {
-                tracing::warn!("Ledger {} missing state", ledger_id);
-                return None;
+        updates.sort_by_key(|u| u.sequence_number);
+
+        // Trusting the persisted `State` row was the source of a real
+        // bug: persist runs on every in-memory append, and an early
+        // snapshot can be written *before* a late-arriving update at an
+        // earlier sequence has been applied (e.g. op7's own
+        // `QuorumAddMember` at seq 3 arriving after the snapshot was
+        // written at seq 6). On load we'd then trust the stale snapshot
+        // and only replay seq>state_sequence, which misses the late
+        // update entirely and leaves quorum_members short — auto-dispute
+        // and confiscation downstream silently exclude that member.
+        //
+        // Reconstruct from LedgerOpen (seq 0) instead. The State row is
+        // informational only.
+        use deposits_core::tlv::TlvDecode;
+        let mut ledger_state = if let Some(seq0) = updates.iter().find(|u| u.sequence_number == 0) {
+            match deposits_core::messages::LedgerOperation::tlv_decode(&seq0.message) {
+                Ok(deposits_core::messages::LedgerOperation::LedgerOpen {
+                    operator_id,
+                    reserves_id,
+                    genesis_block,
+                    ..
+                }) => LedgerState::new(operator_id, reserves_id, genesis_block),
+                _ => {
+                    tracing::warn!(
+                        "Ledger {} seq 0 is not LedgerOpen — falling back to persisted State row",
+                        ledger_id
+                    );
+                    match state {
+                        Some(s) => s,
+                        None => return None,
+                    }
+                }
+            }
+        } else {
+            // No seq 0 in history (truncated). Fall back to the
+            // persisted State row, with the same stale-snapshot caveat.
+            match state {
+                Some(s) => s,
+                None => {
+                    tracing::warn!("Ledger {} missing state and no LedgerOpen", ledger_id);
+                    return None;
+                }
             }
         };
 
-        updates.sort_by_key(|u| u.sequence_number);
-        let state_sequence = ledger_state.sequence;
+        // Replay every update we have. For ledgers where seq 0 is
+        // present we start with a fresh state and apply all updates;
+        // for truncated histories we start from the persisted snapshot
+        // and apply updates strictly past its sequence.
+        let replay_after_seq: i64 = if updates.iter().any(|u| u.sequence_number == 0) {
+            -1
+        } else {
+            ledger_state.sequence as i64
+        };
 
         if let Some(last_update) = updates.last() {
             ledger_state.sequence = last_update.sequence_number;
@@ -541,12 +610,10 @@ impl DepositsHandler {
             history: updates,
         };
 
-        // Replay operations that came after the State line.
-        use deposits_core::tlv::TlvDecode;
         let ops_to_replay: Vec<_> = ledger
             .history
             .iter()
-            .filter(|u| u.sequence_number > state_sequence)
+            .filter(|u| (u.sequence_number as i64) > replay_after_seq)
             .filter_map(|u| {
                 match deposits_core::messages::LedgerOperation::tlv_decode(&u.message) {
                     Ok(op) => Some((u.sequence_number, op)),
