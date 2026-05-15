@@ -800,6 +800,25 @@ impl Node {
             if current_block.saturating_add(threshold_blocks) < snap.quorum_expiry {
                 continue;
             }
+            // But: never retry past expiry. Cosigners refuse every op
+            // on an Active quorum past `quorum_expiry`
+            // (`post_expiry_cosign_refused` in `validate_for_cosign`).
+            // The refresh sends QuorumAddMember consent requests + a
+            // rotation QuorumBegin, both of which need cosigs, so the
+            // whole thing 0/N-times-out every periodic cycle until the
+            // operator yields or migrates to a new genesis. Bail
+            // quietly instead of spamming the logs.
+            if current_block > snap.quorum_expiry {
+                tracing::debug!(
+                    "auto_quorum_refresh: ledger {}... already past \
+                     quorum_expiry={} (current {}), skipping — \
+                     cosigners refuse all post-expiry ops",
+                    &snap.ledger_id[..16],
+                    snap.quorum_expiry,
+                    current_block
+                );
+                continue;
+            }
             tracing::info!(
                 "auto_quorum_refresh: ledger {}... quorum_expiry={} \
                  within {}-block threshold of current {}, refreshing",
