@@ -271,14 +271,11 @@ impl Node {
         };
 
         for (ledger_id, tip_seq) in candidates {
-            // Skip if we've already armed (marker file present).
+            // Always invoke `auto_arm_for_dispute_with_anchor`; it is
+            // idempotent (skips when a prior DisputeArmed already
+            // declares replacement_collateral) and handles the re-arm
+            // case (prior arm had None, now we have a funded UTXO).
             let ledger_prefix = &ledger_id[..16.min(ledger_id.len())];
-            let armed_marker = self
-                .data_dir
-                .join(format!("custody_armed_{}.marker", ledger_prefix));
-            if armed_marker.exists() {
-                continue;
-            }
             tracing::warn!(
                 "Auto-dispute: ledger {} is past quorum_expiry (current block {}), firing fork-branch DisputeEnter",
                 ledger_prefix,
