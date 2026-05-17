@@ -201,6 +201,16 @@ pub enum SignOp {
     PubkeyAt {
         key_path: crate::KeyPath,
     },
+    /// Deterministically derive a dispute's lottery preimage. The
+    /// daemon needs the same 32 bytes at arm time (to compute the
+    /// commitment) and at reveal time (to publish the preimage); the
+    /// signer issues both invocations from the same HMAC keyed by the
+    /// identity secret + `(ledger_id, last_valid_sequence)`. Replaces
+    /// the prior on-disk `lottery_preimage_<prefix>.hex`.
+    DeriveLotteryPreimage {
+        ledger_id: String,
+        last_valid_sequence: u64,
+    },
 }
 
 /// Server response to a [`SignRequest`]. Sent inside an AEAD-sealed frame.
@@ -244,6 +254,12 @@ pub enum SignResult {
     IssuedSecret {
         #[serde(with = "hexarray")]
         sk: [u8; 32],
+    },
+    /// Result of `DeriveLotteryPreimage`: 32-byte preimage. Caller
+    /// computes `HASH160(preimage)` as the dispute commitment.
+    LotteryPreimage {
+        #[serde(with = "hexarray")]
+        preimage: [u8; 32],
     },
     /// Result of `WalletAccountXpub`. The serialized xpub (Base58Check
     /// encoded). Daemon parses with `bitcoin::bip32::Xpub::from_str`.
@@ -367,6 +383,10 @@ mod tests {
             SignOp::Nip04SharedKey { peer: pk },
             SignOp::PubkeyQuery,
             SignOp::IssueNostrSecret,
+            SignOp::DeriveLotteryPreimage {
+                ledger_id: "abc123".to_string(),
+                last_valid_sequence: 42,
+            },
         ];
         for op in cases {
             let req = SignRequest {
@@ -393,6 +413,9 @@ mod tests {
             SignResult::Nip04SharedKey { key: [0xa5u8; 32] },
             SignResult::Pubkey { pubkey: pk, xonly },
             SignResult::IssuedSecret { sk: [8u8; 32] },
+            SignResult::LotteryPreimage {
+                preimage: [9u8; 32],
+            },
             SignResult::Error {
                 kind: SignErrorKind::PolicyRefused,
                 message: "seq regression".to_string(),

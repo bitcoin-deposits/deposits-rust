@@ -364,6 +364,26 @@ impl Signer for RemoteSigner {
         }
     }
 
+    fn derive_dispute_lottery_preimage(
+        &self,
+        ledger_id: &str,
+        last_valid_sequence: u64,
+    ) -> Result<[u8; 32], SignerError> {
+        let ctx = SignContext::no_ledger(SigPurpose::Bip340Untagged);
+        let op = SignOp::DeriveLotteryPreimage {
+            ledger_id: ledger_id.to_string(),
+            last_valid_sequence,
+        };
+        match self.rpc(&ctx, op)? {
+            SignResult::LotteryPreimage { preimage } => Ok(preimage),
+            SignResult::Error { kind, message } => Err(map_sign_result_to_error(kind, message)),
+            other => Err(SignerError::Transport(format!(
+                "DeriveLotteryPreimage returned unexpected variant: {:?}",
+                other
+            ))),
+        }
+    }
+
     fn bip340_sign(
         &self,
         ctx: &SignContext,

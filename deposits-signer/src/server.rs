@@ -291,6 +291,13 @@ fn handle_request(
             Ok(pubkey) => SignResult::PubkeyAt { pubkey },
             Err(e) => signer_error_to_result(e),
         },
+        SignOp::DeriveLotteryPreimage {
+            ledger_id,
+            last_valid_sequence,
+        } => match signer.derive_dispute_lottery_preimage(&ledger_id, last_valid_sequence) {
+            Ok(preimage) => SignResult::LotteryPreimage { preimage },
+            Err(e) => signer_error_to_result(e),
+        },
     };
     SignResponse { id: req.id, result }
 }
