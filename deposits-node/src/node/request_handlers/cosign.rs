@@ -53,46 +53,46 @@ impl Node {
             }
         };
 
-        // Apply piggybacked updates before freshness check.
-        // The requester includes the previous signed update (seq N-1) so we can
-        // catch up inline without waiting for relay delivery.
+        // Forward piggybacked updates to the actor before freshness
+        // check. The requester includes the previous signed update
+        // (seq N-1) so we can catch up inline without waiting for
+        // relay delivery. Each update is inserted into the event
+        // store and dispatched to the ledger's actor; the actor's
+        // `Inbound` handler enforces chain continuity and persists.
         if let Some(prev_arr) = request
             .params
             .get("previous_updates")
             .and_then(|v| v.as_array())
         {
             use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-            let mut applied = 0usize;
+            let mut forwarded = 0usize;
             for item in prev_arr {
                 if let Some(b64) = item.as_str() {
                     if let Ok(tlv) = BASE64.decode(b64) {
                         if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv) {
                             self.handler.insert_event(&update);
-                            let ledgers = self.handler.ledgers.lock().unwrap();
-                            if let Some(arc) = ledgers.get(&request.ledger_id) {
-                                let mut ledger = arc.write().unwrap();
-                                if update.sequence_number == ledger.next_sequence()
-                                    && update.previous_hash == ledger.tail_hash()
-                                {
-                                    // Apply state changes so our state stays current with history
-                                    if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                                        let _ = ledger.apply_state_changes(&op);
-                                    }
-                                    ledger.state.sequence = update.sequence_number;
-                                    ledger.state.chain_tip_hash = update.chain_hash();
-                                    ledger.history.push(update);
-                                    applied += 1;
-                                }
+                            if let Some(handle) = self
+                                .ledger_actors
+                                .lock()
+                                .unwrap()
+                                .get(&request.ledger_id)
+                            {
+                                handle.try_send(
+                                    super::super::ledger_actor::LedgerEvent::Inbound(Box::new(
+                                        update,
+                                    )),
+                                );
+                                forwarded += 1;
                             }
                         }
                     }
                 }
             }
-            if applied > 0 {
+            if forwarded > 0 {
                 self.catch_up_ledger_from_event_store(&request.ledger_id);
                 tracing::debug!(
-                    "Applied {} piggybacked updates for {}...",
-                    applied,
+                    "Forwarded {} piggybacked updates to actor for {}...",
+                    forwarded,
                     &request.ledger_id[..16.min(request.ledger_id.len())]
                 );
             }
