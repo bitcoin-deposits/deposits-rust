@@ -227,23 +227,11 @@ impl Node {
                 let (tx, rx) = tokio::sync::mpsc::channel::<
                     super::ledger_actor::LedgerEvent,
                 >(64);
-                // Extension is `.actor.log`, not `.jsonl` — the
-                // handler's ledger-loader globs `*.jsonl` and would
-                // otherwise treat this file as another ledger to
-                // load.
-                let ledgers_dir = config.data_dir.join("wallet/ledgers");
-                let persistence_path = ledgers_dir.join(format!("{}.actor.log", lid));
                 let actor = super::ledger_actor::LedgerActor {
                     inbox: rx,
                     outbox: actor_outbox_tx.clone(),
                     ledger: shared_ledger,
                     ledger_id: lid.clone(),
-                    persistence_path,
-                    // Per-disputer fork files share the ledgers dir;
-                    // the `.actor.log` extension keeps them out of
-                    // the handler's `*.jsonl` glob.
-                    forks_dir: ledgers_dir,
-                    fork_observations: std::collections::HashMap::new(),
                     signer: handler_arc.signer.clone(),
                     handler: handler_arc.clone(),
                 };
@@ -256,7 +244,6 @@ impl Node {
         }
         drop(actor_pool_span);
         let actor_outbox_tx_for_node = actor_outbox_tx;
-        let actor_ledgers_dir = config.data_dir.join("wallet/ledgers");
         // Park the outbox receiver on `Self` for `run()` to pick up.
         // The drainer needs `Arc<Node>` for `request_cosign` /
         // `broadcast_ledger_update` callbacks that don't exist
@@ -307,7 +294,6 @@ impl Node {
             ledger_actors: Mutex::new(ledger_actors),
             actor_outbox_tx: actor_outbox_tx_for_node,
             actor_outbox_rx: actor_outbox_rx_parked,
-            actor_ledgers_dir,
             deposit_access_control: std::env::var("DEPOSIT_ACCESS_CONTROL")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
@@ -605,17 +591,11 @@ impl Node {
         let (tx, rx) = tokio::sync::mpsc::channel::<
             super::ledger_actor::LedgerEvent,
         >(64);
-        let persistence_path = self
-            .actor_ledgers_dir
-            .join(format!("{}.actor.log", ledger_id));
         let actor = super::ledger_actor::LedgerActor {
             inbox: rx,
             outbox: self.actor_outbox_tx.clone(),
             ledger: shared_ledger,
             ledger_id: ledger_id.to_string(),
-            persistence_path,
-            forks_dir: self.actor_ledgers_dir.clone(),
-            fork_observations: std::collections::HashMap::new(),
             signer: self.handler.signer.clone(),
             handler: self.handler.clone(),
         };

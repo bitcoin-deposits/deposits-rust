@@ -425,10 +425,6 @@ pub struct Node {
         )>,
     >>,
 
-    /// Directory the actor pool persists `*.actor.log` files to. Captured
-    /// once at startup so lazy-spawn paths don't need to recompute it.
-    pub(crate) actor_ledgers_dir: std::path::PathBuf,
-
     /// Whether deposit access control is enabled (DEPOSIT_ACCESS_CONTROL=true).
     /// When false, all deposit opens are allowed (denylist still checked).
     deposit_access_control: bool,
