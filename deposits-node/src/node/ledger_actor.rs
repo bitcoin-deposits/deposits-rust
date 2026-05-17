@@ -154,6 +154,14 @@ pub struct LedgerActor {
     /// committed update; the underlying secret never lives on the
     /// actor's stack.
     pub signer: std::sync::Arc<dyn deposits_signer_api::Signer>,
+    /// Shared handler reference. The actor calls
+    /// `handler.persist_ledger_to_disk` after each accepted apply so
+    /// the authoritative `<id>.jsonl` matches the in-memory tip.
+    /// Without this, the handler-side direct apply path was doing the
+    /// persistence and the actor was a no-op observer; routing
+    /// inbound through the actor means the actor now owns the disk
+    /// write too.
+    pub handler: std::sync::Arc<crate::handler::DepositsHandler>,
 }
 
 /// Per-disputer fork-branch observation state.
@@ -189,6 +197,16 @@ impl LedgerActor {
         // inside this function) so the checks and the mutation see a
         // consistent view.
         let mut ledger = self.ledger.write().unwrap();
+
+        // A ledger already in dispute doesn't accept further main-chain
+        // updates — recovery flows on the fork branch (different
+        // operator_id) own the chain from here. The fork-branch filter
+        // below routes those correctly; this guard catches the rare
+        // case of a same-operator update arriving after dispute_state
+        // moved.
+        if ledger.state.dispute_state != deposits_core::types::DisputeState::Normal {
+            return;
+        }
 
         // Operator-key filter: only accept updates whose operator_id
         // matches our current `parent_pubkey`. Fork-branch updates
@@ -260,31 +278,47 @@ impl LedgerActor {
                 return;
             }
         };
-        if let Err(e) = ledger.state.apply(&op) {
-            tracing::warn!(
-                "LedgerActor[{}…] apply failed at seq {}: {}",
-                &self.ledger_id[..16.min(self.ledger_id.len())],
-                update.sequence_number,
-                e
-            );
-            return;
+        // `apply_and_check` runs the state-machine + conformance
+        // verifier (witness, reserve sufficiency, preimage match for
+        // OnchainFulfill, etc.). Conformance violations are logged
+        // and reported but don't abort the apply — they're the
+        // dispute-trigger signal the watcher path needs to see.
+        match ledger
+            .apply_and_check(&op, &deposits_core::descriptor::CoreWitnessVerifier)
+        {
+            Ok(violations) if !violations.is_empty() => {
+                tracing::warn!(
+                    ledger_id = %self.ledger_id,
+                    seq = update.sequence_number,
+                    "Conformance violations on inbound apply: {:?}",
+                    violations
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "LedgerActor[{}…] apply_and_check failed at seq {}: {}",
+                    &self.ledger_id[..16.min(self.ledger_id.len())],
+                    update.sequence_number,
+                    e
+                );
+                return;
+            }
+            _ => {}
         }
         ledger.state.sequence = update.sequence_number;
         ledger.state.chain_tip_hash = update.chain_hash();
         ledger.history.push(update.clone());
-        // Drop the write lock before doing disk I/O: persistence is a
-        // sanity-check side channel, not on the critical path, and
-        // the handler's persist_ledger_to_disk path can take its own
-        // read lock at any time.
+        // Drop the write lock before doing disk I/O: persist_ledger_to_disk
+        // takes its own read lock through the same Arc.
         drop(ledger);
 
-        // Append to the parallel `<id>.actor.log`. Failure to persist
-        // is logged but doesn't unwind the in-memory apply — the
-        // shadow file is for sanity-checking, and a missed line is
-        // recoverable from the authoritative `<id>.jsonl`.
-        if let Err(e) = self.append_update_row(&update) {
+        // Persist the authoritative `<id>.jsonl` to disk. This is what
+        // the handler's load_ledgers_from_jsonl reads on next start;
+        // missing the write would leave the on-disk view behind the
+        // in-memory chain.
+        if let Err(e) = self.handler.persist_ledger_to_disk(&self.ledger_id) {
             tracing::warn!(
-                "LedgerActor[{}…] persist seq {} failed: {}",
+                "LedgerActor[{}…] persist_ledger_to_disk seq {} failed: {}",
                 &self.ledger_id[..16.min(self.ledger_id.len())],
                 update.sequence_number,
                 e
@@ -591,10 +625,10 @@ impl LedgerActor {
                 .map_err(|e| format!("commit_staged failed: {}", e))?;
         }
 
-        // 5. Persist to .actor.log so the on-disk shadow stays in
-        //    sync with the in-memory tip even if the daemon dies
-        //    before broadcast.
-        if let Err(e) = self.append_update_row(&update_for_return) {
+        // 5. Persist the authoritative `<id>.jsonl` so the on-disk
+        //    view matches the in-memory tip even if the daemon dies
+        //    before broadcast completes.
+        if let Err(e) = self.handler.persist_ledger_to_disk(&self.ledger_id) {
             tracing::warn!(
                 "LedgerActor[{}…] handle_commit persist seq {} failed: {}",
                 &self.ledger_id[..16.min(self.ledger_id.len())],

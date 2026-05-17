@@ -715,65 +715,12 @@ impl Node {
                     tracing::error!("Failed to auto-arm for dispute: {}", e);
                 }
             }
-        } else {
-            // Validation passed — append the update to our local copy so it stays
-            // in sync for cosign sequence validation.  Only append if this is the
-            // exact next entry (no gaps) AND chains from our tip hash.
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            if let Some(ledger_arc) = ledgers.get(&inbound.ledger_id) {
-                let mut ledger = ledger_arc.write().unwrap();
-                let expected_seq = ledger.next_sequence();
-                let tip_hash = ledger.tail_hash();
-                if inbound.update.sequence_number == expected_seq
-                    && inbound.update.previous_hash == tip_hash
-                {
-                    // Apply state changes with conformance checking
-                    if let Ok(op) = LedgerOperation::tlv_decode(&inbound.update.message) {
-                        match ledger
-                            .apply_and_check(&op, &deposits_core::descriptor::CoreWitnessVerifier)
-                        {
-                            Ok(violations) if !violations.is_empty() => {
-                                tracing::warn!(
-                                    ledger_id = %inbound.ledger_id,
-                                    seq = inbound.update.sequence_number,
-                                    "Conformance violations on watched ledger: {:?}",
-                                    violations
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    ledger_id = %inbound.ledger_id,
-                                    seq = inbound.update.sequence_number,
-                                    "Failed to apply state change on watched ledger: {}",
-                                    e
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
-                    ledger.state.sequence = inbound.update.sequence_number;
-                    ledger.state.chain_tip_hash = inbound.update.chain_hash();
-                    ledger.history.push(inbound.update.clone());
-                    drop(ledger);
-                    drop(ledgers);
-                    // Persist so disk state matches the in-memory append.
-                    // Without this, restarts and on-disk readers (test
-                    // harnesses, manual inspection) see a stale chain
-                    // even though the daemon has already accepted the
-                    // update.
-                    if let Err(e) = self
-                        .handler
-                        .persist_ledger_to_disk(&inbound.ledger_id)
-                    {
-                        tracing::warn!(
-                            "Persist after inbound apply failed for {}: {}",
-                            &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
-                            e
-                        );
-                    }
-                }
-            }
         }
+        // Validated update apply + persist happens in the LedgerActor
+        // (forwarded via `try_send(LedgerEvent::Inbound)` earlier in
+        // this function). The previous duplicate apply here raced
+        // against the actor on the write lock; consolidating to the
+        // actor keeps the apply path single-writer.
     }
 
     /// Handle a fork-branch `DisputeEnter` carrying QuorumExpired
