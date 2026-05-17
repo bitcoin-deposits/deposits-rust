@@ -722,6 +722,61 @@ impl Node {
         Some(derived.to_vec())
     }
 
+    /// Idempotency check for "have we published our lottery reveal for
+    /// this ledger". The durable signal is a `kind:9100` request we
+    /// previously sent with action `lottery_reveal`; this method
+    /// consults an in-memory cache first, then falls back to a
+    /// per-ledger Nostr fetch (populating the cache on hit). The cache
+    /// is populated by `auto_reveal_preimage` after a successful
+    /// publish, so the steady-state hot path doesn't query the relay.
+    pub(crate) async fn have_revealed_lottery(&self, ledger_id: &str) -> bool {
+        {
+            let cache = self.revealed_ledgers.lock().unwrap();
+            if cache.contains(ledger_id) {
+                return true;
+            }
+        }
+        use nostr_sdk::{Filter, Kind, TagKind};
+        let delegate = match self.nostr.delegate_pubkey() {
+            Some(pk) => pk.x_only_public_key().0,
+            None => return false,
+        };
+        let nostr_xonly = match nostr_sdk::PublicKey::from_slice(&delegate.serialize()) {
+            Ok(k) => k,
+            Err(_) => return false,
+        };
+        let filter = Filter::new()
+            .kind(Kind::Custom(crate::nostr::KIND_LEDGER_REQUEST))
+            .author(nostr_xonly)
+            .custom_tag(
+                crate::nostr::TAG_LEDGER_REQ,
+                [ledger_id],
+            )
+            .limit(50);
+        let events = match self
+            .nostr
+            .fetch_client()
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+            .await
+        {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        let found = events.iter().any(|e| {
+            e.tags.iter().any(|tag| {
+                tag.kind() == TagKind::custom("action")
+                    && tag.content().map(|c| c == "lottery_reveal").unwrap_or(false)
+            })
+        });
+        if found {
+            self.revealed_ledgers
+                .lock()
+                .unwrap()
+                .insert(ledger_id.to_string());
+        }
+        found
+    }
+
     /// Auto-reveal our lottery preimage when we see another participant's reveal
     pub(crate) async fn auto_reveal_preimage(&self, ledger_id: &str) {
         // Check if we're a quorum member of this ledger
@@ -738,12 +793,7 @@ impl Node {
         };
         let preimage_hex = hex::encode(&preimage);
 
-        // Check if we already revealed (marker file)
-        let revealed_marker = self.data_dir.join(format!(
-            "lottery_revealed_{}.marker",
-            &ledger_id[..16.min(ledger_id.len())]
-        ));
-        if revealed_marker.exists() {
+        if self.have_revealed_lottery(ledger_id).await {
             tracing::debug!("Already revealed preimage for ledger {}", &ledger_id[..16]);
             return;
         }
@@ -775,11 +825,10 @@ impl Node {
                     "Lottery preimage revealed! Request ID: {}...",
                     &request_id[..16.min(request_id.len())]
                 );
-
-                // Create marker file to prevent double-reveal
-                if let Err(e) = std::fs::write(&revealed_marker, "revealed") {
-                    tracing::warn!("Failed to write revealed marker: {}", e);
-                }
+                self.revealed_ledgers
+                    .lock()
+                    .unwrap()
+                    .insert(ledger_id.to_string());
             }
             Err(e) => {
                 tracing::error!("Failed to send reveal: {:?}", e);
@@ -795,60 +844,41 @@ impl Node {
     /// 3. Winner: claim lottery output + publish DisputeAcquire
     /// 4. Loser: publish DisputeYield
     pub(crate) async fn auto_lottery_claim_or_yield(&self) {
-        // Find revealed marker files in data_dir
-        let entries = match std::fs::read_dir(&self.data_dir) {
-            Ok(e) => e,
-            Err(_) => return,
+        // Enumerate disputes-in-progress by fork-branch state: every
+        // armed fork where we're the disputant is a candidate.
+        // `try_lottery_claim_or_yield` gracefully reports "not ready"
+        // when reveals haven't all landed yet, so we don't need an
+        // explicit "have I revealed" gate here.
+        let armed_ledger_ids: Vec<String> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter_map(|(key, arc)| {
+                    if key.len() <= 64 {
+                        return None;
+                    }
+                    let l = arc.read().unwrap();
+                    if l.operator_key() != self.node_id {
+                        return None;
+                    }
+                    if l.state.dispute_state != deposits_core::types::DisputeState::Armed {
+                        return None;
+                    }
+                    Some(key[..64].to_string())
+                })
+                .collect()
         };
 
-        let revealed_markers: Vec<_> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("lottery_revealed_")
-                    && e.file_name().to_string_lossy().ends_with(".marker")
-            })
-            .collect();
-
-        for entry in revealed_markers {
-            let marker_path = entry.path();
-            // Extract ledger_id prefix from filename
-            let filename = match marker_path.file_name().and_then(|f| f.to_str()) {
-                Some(f) => f,
-                None => continue,
-            };
-
-            // lottery_revealed_<prefix>.marker
-            let ledger_prefix = filename
-                .strip_prefix("lottery_revealed_")
-                .and_then(|s| s.strip_suffix(".marker"))
-                .unwrap_or("");
-
-            if ledger_prefix.is_empty() {
-                continue;
-            }
+        for ledger_id in armed_ledger_ids {
+            let ledger_prefix = ledger_id[..16.min(ledger_id.len())].to_string();
 
             // Check if we've already claimed/yielded (completed marker)
             let completed_marker = self
                 .data_dir
-                .join(format!("lottery_completed_{}.marker", ledger_prefix));
+                .join(format!("lottery_completed_{}.marker", &ledger_prefix));
             if completed_marker.exists() {
                 continue;
             }
-
-            // Find the fork or original ledger key (prefer fork for dispute operations)
-            let ledger_key = match self.find_fork_or_original_by_prefix(ledger_prefix) {
-                Some(key) => key,
-                None => continue,
-            };
-
-            // Extract the base ledger_id (first 64 chars) for Nostr queries
-            let ledger_id = if ledger_key.len() > 64 {
-                ledger_key[..64].to_string()
-            } else {
-                ledger_key.clone()
-            };
 
             // Try to claim or yield
             match self.try_lottery_claim_or_yield(&ledger_id).await {
@@ -1705,11 +1735,6 @@ impl Node {
                 confiscation_txid
             );
             tracing::info!("  Lottery address: {}", pc.lottery_address);
-            if let Err(e) =
-                std::fs::write(&pc.confiscated_marker, confiscation_txid.to_string())
-            {
-                tracing::warn!("Failed to write confiscated marker: {}", e);
-            }
         } else if let Err(e) = broadcast_result {
             tracing::error!("Failed to broadcast confiscation TX: {}", e);
         }
@@ -1759,14 +1784,14 @@ impl Node {
         for ledger_id in armed_ledger_ids {
             let ledger_prefix = &ledger_id[..16.min(ledger_id.len())];
 
-            // Skip if already confiscated or revealed
-            let confiscated_marker = self
-                .data_dir
-                .join(format!("confiscated_{}.marker", ledger_prefix));
-            let revealed_marker = self
-                .data_dir
-                .join(format!("lottery_revealed_{}.marker", ledger_prefix));
-            if confiscated_marker.exists() || revealed_marker.exists() {
+            // Skip if we've already revealed (cache or relay query) —
+            // reveal happens after confiscation, so this implies the
+            // chain side is already past us. We do *not* short-circuit
+            // on a separate "confiscated" signal here: the reserves
+            // UTXO lookup at `find_utxo_for_script` below returns None
+            // when the confiscation TX has already spent it, which is
+            // the authoritative chain-side fallback.
+            if self.have_revealed_lottery(&ledger_id).await {
                 continue;
             }
 
@@ -2273,9 +2298,6 @@ impl Node {
                 };
                 if broadcast_succeeded {
                     tracing::info!("Confiscation transaction in chain! Txid: {}", txid);
-                    if let Err(e) = std::fs::write(&confiscated_marker, txid.to_string()) {
-                        tracing::warn!("Failed to write confiscated marker: {}", e);
-                    }
                 } else if let Err(e) = broadcast_result {
                     tracing::error!("Failed to broadcast confiscation TX: {}", e);
                 }
@@ -2336,7 +2358,6 @@ impl Node {
                 tier_index,
                 leaf_script,
                 taproot_output,
-                confiscated_marker,
                 lottery_address: lottery_output.address.to_string(),
                 ledger_prefix: ledger_prefix.to_string(),
                 created_at: std::time::Instant::now(),
@@ -2380,13 +2401,11 @@ impl Node {
         };
 
         for ledger_id in armed_ledger_ids {
-            let ledger_prefix = &ledger_id[..16.min(ledger_id.len())];
-
-            // Skip if already revealed
-            let revealed_marker = self
-                .data_dir
-                .join(format!("lottery_revealed_{}.marker", ledger_prefix));
-            if revealed_marker.exists() {
+            // Skip if already revealed. `auto_reveal_preimage` would
+            // also short-circuit, but checking here saves a (~slow)
+            // confirmation-depth Esplora query for already-resolved
+            // disputes.
+            if self.have_revealed_lottery(&ledger_id).await {
                 continue;
             }
 

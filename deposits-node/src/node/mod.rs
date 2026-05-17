@@ -280,8 +280,6 @@ struct PendingConfiscation {
     leaf_script: bitcoin::ScriptBuf,
     /// The TaprootReservesOutput (for control block)
     taproot_output: deposits_core::TaprootReservesOutput,
-    /// Confiscated marker path
-    confiscated_marker: PathBuf,
     /// Lottery address (for logging)
     lottery_address: String,
     /// Ledger prefix (for logging)
@@ -364,6 +362,16 @@ pub struct Node {
     /// Two-generation design (same as processed_requests): current + prev.
     sent_events: Mutex<std::collections::HashSet<String>>,
     sent_events_prev: Mutex<std::collections::HashSet<String>>,
+
+    /// Ledger IDs for which we've published (or observed on the relay
+    /// that we previously published) a lottery_reveal request. Used as
+    /// the publish-idempotency gate for `auto_reveal_preimage` and as
+    /// the "ready to claim/yield" signal for `auto_lottery_claim_or_yield`.
+    ///
+    /// Replaces the on-disk `lottery_revealed_<prefix>.marker` files;
+    /// the durable backing store is the kind:9100 reveal request on
+    /// the relay, queried on first access per ledger after restart.
+    pub(crate) revealed_ledgers: Mutex<std::collections::HashSet<String>>,
 
     /// Active per-ledger request processing tasks.
     /// Only one task runs per ledger at a time to maintain hash-chain serialization.

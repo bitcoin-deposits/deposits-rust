@@ -2845,6 +2845,14 @@ impl NostrTransport {
         }
     }
 
+    /// Read the daemon's delegate Nostr pubkey, if one has been set.
+    /// Callers that need it for relay filters (authors=[delegate]) get
+    /// it from here rather than threading the pubkey through every
+    /// constructor.
+    pub fn delegate_pubkey(&self) -> Option<PublicKey> {
+        self.delegate_pubkey.lock().ok().and_then(|g| *g)
+    }
+
     /// Set the operator's protocol-level pubkey. Used for advertisement
     /// signing (which stays operator-authored) and for the fallback
     /// NIP-04 decrypt path (operator-encrypted DMs from wallets that

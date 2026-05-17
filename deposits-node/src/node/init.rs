@@ -299,6 +299,7 @@ impl Node {
             processed_requests_prev: Mutex::new(std::collections::HashSet::new()),
             sent_events: Mutex::new(std::collections::HashSet::new()),
             sent_events_prev: Mutex::new(std::collections::HashSet::new()),
+            revealed_ledgers: Mutex::new(std::collections::HashSet::new()),
             active_ledger_tasks: Mutex::new(HashMap::new()),
             ledger_workers: Mutex::new(HashMap::new()),
             cosign_workers: Mutex::new(HashMap::new()),
