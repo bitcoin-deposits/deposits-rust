@@ -444,12 +444,12 @@ impl Node {
 
     /// Spawn a `LedgerActor` for `ledger_id` if one doesn't already exist.
     ///
-    /// At `Node::new` time we spawn one actor per ledger present on disk
-    /// — but ledgers can also appear at runtime (operator opens a new
-    /// ledger via admin, member imports via QuorumJoin, daemon receives
-    /// inbound for an unknown id). Without a corresponding actor, those
-    /// ledgers' inbound + commit events fall on the floor and the
-    /// `<id>.actor.log` shadow file never gets written.
+    /// At `Node::new` time we spawn one actor per ledger present on
+    /// disk — but ledgers can also appear at runtime (operator opens
+    /// a new ledger via admin, member imports via QuorumJoin, daemon
+    /// receives inbound for an unknown id). Without a corresponding
+    /// actor, that ledger's inbound + commit events have nowhere to
+    /// route, since the actor is the single writer.
     ///
     /// Idempotent: returns immediately if an actor is already registered.
     /// Load (or generate) the daemon's *delegate Nostr key*. This is the

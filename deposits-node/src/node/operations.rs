@@ -166,13 +166,8 @@ impl Node {
             .map_err(|_| Error::Protocol("Actor dropped Commit reply".to_string()))?
             .map_err(Error::Protocol)?;
 
-        // Persist the now-applied tip to `<id>.jsonl`. The actor
-        // already appended the same row to `.actor.log`; the
-        // handler-side write is what the rest of the daemon (and
-        // restart-time loaders) read.
-        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-            tracing::warn!("persist_ledger_to_disk failed after commit: {}", e);
-        }
+        // Persistence happens inside the actor's `handle_commit` —
+        // no second write here.
 
         tracing::info!(
             "Committed seq={} for ledger {}... (event={})",

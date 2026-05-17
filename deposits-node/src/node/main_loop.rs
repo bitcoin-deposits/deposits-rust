@@ -417,8 +417,9 @@ impl Node {
                         &ledger_id[..16],
                         filtered.len()
                     );
-                    // Lazy-spawn an actor for this newly-imported ledger
-                    // so its inbound stream gets shadowed to `.actor.log`.
+                    // Lazy-spawn an actor for this newly-imported
+                    // ledger so its inbound stream gets routed through
+                    // the actor's single-writer apply path.
                     self.ensure_actor_for(&ledger_id);
                 }
                 Err(e) => {

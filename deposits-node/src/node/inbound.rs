@@ -139,19 +139,20 @@ impl Node {
             return;
         }
 
-        // For cosign requests: drain any buffered ledger updates into the event store
-        // BEFORE checking freshness.  Updates arrive through the same Nostr subscription
-        // but are queued in a separate channel — they may already be buffered but not yet
-        // processed because the run loop drains requests before updates.  This in-memory
-        // drain closes the race where a cosign request arrives microseconds before its
-        // prerequisite updates are drained from the channel.
+        // For cosign requests: drain any buffered ledger updates and
+        // forward them to the relevant ledger's actor BEFORE checking
+        // freshness. Updates arrive through the same Nostr
+        // subscription but are queued in a separate channel; they
+        // may already be buffered but not yet processed because the
+        // run loop drains requests before updates. Forwarding here
+        // closes the race where a cosign request arrives microseconds
+        // before its prerequisite updates are processed.
         if is_cosign_request {
             let mut drained = 0usize;
-            // Cap the drain to prevent unbounded sync work — this loop has no .await
-            // points, so tokio task cancellation (from JoinSet::abort_all) cannot take
-            // effect until the loop exits.  With thousands of queued updates this loop
-            // previously ran for seconds, holding handler.ledgers.lock() intermittently
-            // and preventing the main run loop from acquiring it.
+            // Cap the drain to prevent unbounded sync work — this
+            // loop has no .await points, so tokio task cancellation
+            // (from JoinSet::abort_all) cannot take effect until the
+            // loop exits.
             const MAX_PRE_COSIGN_DRAIN: usize = 50;
             while drained < MAX_PRE_COSIGN_DRAIN {
                 let update = match self.nostr.try_recv_ledger_update() {
@@ -159,50 +160,18 @@ impl Node {
                     None => break,
                 };
                 self.handler.insert_event(&update.update);
-                // Also append to ledger history if consecutive AND chains correctly
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                if let Some(ledger_arc) = ledgers.get(&update.ledger_id) {
-                    let mut ledger = ledger_arc.write().unwrap();
-                    let expected = ledger.next_sequence();
-                    let tip_hash = ledger.tail_hash();
-                    if update.update.sequence_number == expected
-                        && update.update.previous_hash == tip_hash
-                    {
-                        if let Ok(op) = LedgerOperation::tlv_decode(&update.update.message) {
-                            match ledger.apply_and_check(
-                                &op,
-                                &deposits_core::descriptor::CoreWitnessVerifier,
-                            ) {
-                                Ok(violations) if !violations.is_empty() => {
-                                    tracing::warn!(
-                                        ledger_id = %update.ledger_id,
-                                        seq = update.update.sequence_number,
-                                        "Conformance violations on joined ledger: {:?}",
-                                        violations
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        ledger_id = %update.ledger_id,
-                                        seq = update.update.sequence_number,
-                                        "Failed to apply state change on joined ledger: {}",
-                                        e
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
-                        ledger.state.sequence = update.update.sequence_number;
-                        ledger.state.chain_tip_hash = update.update.chain_hash();
-                        ledger.history.push(update.update);
-                    }
+                if let Some(handle) =
+                    self.ledger_actors.lock().unwrap().get(&update.ledger_id)
+                {
+                    handle.try_send(super::ledger_actor::LedgerEvent::Inbound(Box::new(
+                        update.update,
+                    )));
                 }
                 drained += 1;
             }
             if drained > 0 {
-                // Also try event store catch-up for this specific ledger
                 self.catch_up_ledger_from_event_store(&request.ledger_id);
-                tracing::debug!("Pre-cosign drain: processed {} buffered updates", drained,);
+                tracing::debug!("Pre-cosign drain: forwarded {} buffered updates", drained,);
             }
             metrics::record_pre_cosign_drain(drained, true);
         }

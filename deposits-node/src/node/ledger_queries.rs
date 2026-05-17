@@ -564,10 +564,11 @@ impl Node {
             );
         }
 
-        // Lazy-spawn an actor for this freshly-created ledger so future
-        // inbound + commit events are mirrored to its `.actor.log`. The
-        // initial actor pool was sized from `handler.ledgers` at
-        // `Node::new` time and won't pick up ledgers opened afterward.
+        // Lazy-spawn an actor for this freshly-created ledger so
+        // future inbound + commit events go through the single-writer
+        // apply path. The initial actor pool was sized from
+        // `handler.ledgers` at `Node::new` time and doesn't pick up
+        // ledgers opened afterward.
         self.ensure_actor_for(&ledger_id);
 
         // Create handshake message to send to partner (wire protocol)
@@ -607,8 +608,8 @@ impl Node {
         let (report, ledger_arc) = self.handler.import_ledger(export)?;
         let ledger = ledger_arc.read().unwrap().clone();
         // Lazy-spawn an actor for the imported ledger so subsequent
-        // inbound updates from the operator are mirrored to its shadow
-        // `.actor.log`. (See Node::ensure_actor_for for context.)
+        // inbound updates from the operator go through the single-writer
+        // apply path. (See Node::ensure_actor_for for context.)
         self.ensure_actor_for(&ledger.ledger_id_hex());
         Ok((report, ledger))
     }
