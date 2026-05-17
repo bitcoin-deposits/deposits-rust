@@ -789,9 +789,11 @@ impl Node {
 
     /// Catch up a joined ledger's history from the event store's validated chain.
     ///
-    /// Pure in-memory operation — no relay I/O. Returns the number of events
-    /// appended to the ledger history, or 0 if the event store doesn't have
-    /// anything beyond the ledger's current history.
+    /// Pure in-memory operation — no relay I/O. Returns the number of
+    /// events forwarded to the ledger's actor for apply. The apply is
+    /// async (actor processes off its own task) so the in-memory chain
+    /// may still trail this return value by a tick; callers using the
+    /// count for "did we make progress" decisions accept that lag.
     pub(crate) fn catch_up_ledger_from_event_store(&self, ledger_id: &str) -> usize {
         let ledger_arc = {
             let ledgers = self.handler.ledgers.lock().unwrap();
@@ -840,57 +842,34 @@ impl Node {
             return 0;
         }
 
-        let _count = to_append.len();
-        let mut ledger = ledger_arc.write().unwrap();
-
-        // Re-check after acquiring write lock (another thread may have caught up)
-        let next_seq = ledger.next_sequence();
-        let mut tip_hash = ledger.tail_hash();
-        let mut appended = 0u64;
-        for update in to_append {
-            if update.sequence_number == next_seq + appended && update.previous_hash == tip_hash {
-                // Apply state changes so our state stays current with history
-                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                    let _ = ledger.apply_state_changes(&op);
-                }
-                tip_hash = update.content_hash;
-                ledger.state.sequence = update.sequence_number;
-                ledger.state.chain_tip_hash = update.chain_hash();
-                ledger.history.push(update);
-                appended += 1;
-            } else {
-                break;
+        // Forward each update to the ledger's actor instead of applying
+        // directly. The actor enforces the same chain-continuity checks
+        // and is the single writer; routing through it eliminates the
+        // race with the inbound apply path.
+        let forwarded = to_append.len();
+        if let Some(handle) = self.ledger_actors.lock().unwrap().get(ledger_id) {
+            for update in to_append {
+                handle.try_send(super::ledger_actor::LedgerEvent::Inbound(Box::new(update)));
             }
+        } else {
+            tracing::debug!(
+                "catch_up_ledger_from_event_store: no actor for ledger {}; dropping {} updates",
+                &ledger_id[..16.min(ledger_id.len())],
+                forwarded
+            );
+            return 0;
         }
 
-        if appended > 0 {
-            // Update state sequence/hash from last appended
-            let last_seq = ledger.history.last().map(|u| u.sequence_number);
-            let last_hash = ledger.history.last().map(|u| u.chain_hash());
-            if let (Some(seq), Some(hash)) = (last_seq, last_hash) {
-                ledger.state.sequence = seq;
-                ledger.state.chain_tip_hash = hash;
-            }
-
-            // Truncate joined ledger history to prevent unbounded memory growth.
-            // Owned ledgers are truncated during persist_ledger_to_disk, but joined
-            // ledgers are never persisted by this operator, so truncate here.
-            const JOINED_HISTORY_RETAIN: usize = 2000;
-            let len = ledger.history.len();
-            if len > JOINED_HISTORY_RETAIN * 2 {
-                ledger.history.drain(..len - JOINED_HISTORY_RETAIN);
-            }
-
+        if forwarded > 0 {
             tracing::info!(
-                "Caught up ledger {}... from event store: seq {} -> {} (+{} entries)",
+                "Forwarded {} event-store entries to actor for ledger {}... (local next_seq={})",
+                forwarded,
                 &ledger_id[..16.min(ledger_id.len())],
-                next_seq,
-                next_seq + appended,
-                appended,
+                local_next_seq,
             );
         }
 
-        appended as usize
+        forwarded
     }
 
     /// Send a resync request to the operator of a joined ledger asking them
