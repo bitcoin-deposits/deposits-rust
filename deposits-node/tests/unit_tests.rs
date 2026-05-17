@@ -189,19 +189,27 @@ fn to_fee_structure_long_period_keeps_value() {
 // ============================================================================
 
 #[test]
-fn minimum_fees_passes_through_msats() {
+fn minimum_fees_converts_annualized_to_per_period() {
+    // `minimum_fees` returns annualized_fixed_msats divided by the
+    // periods-per-year derived from `fee_period_blocks`. Use a
+    // pretty-divisible annual amount so the per-period floor is
+    // checkable without integer truncation noise.
     let mut ad = LedgerAdvertisement::new(
         String::new(),
         String::new(),
         String::new(),
         "regtest".to_string(),
     );
-    ad.annual_fee_bps = 100; // 1%
-    ad.annualized_fixed_msats = 10_000;
+    ad.annual_fee_bps = 100; // 1% — passes through as-is
+    ad.annualized_fixed_msats = 52_560_000;
+
+    const BLOCKS_PER_YEAR: u64 = 52560;
+    let period = (ad.fee_period_blocks as u64).max(1);
+    let periods_per_year = (BLOCKS_PER_YEAR / period).max(1);
 
     let (bps, fixed_msats) = ad.minimum_fees();
     assert_eq!(bps, 100);
-    assert_eq!(fixed_msats, 10_000);
+    assert_eq!(fixed_msats, 52_560_000 / periods_per_year);
 }
 
 #[test]
@@ -219,7 +227,10 @@ fn minimum_fees_zero_values() {
 }
 
 #[test]
-fn minimum_fees_max_msats_unchanged() {
+fn minimum_fees_max_msats_divides_by_periods_per_year() {
+    // `minimum_fees` converts annualized → per-period; saturating
+    // arithmetic isn't used, so u64::MAX as the annualized input
+    // yields `u64::MAX / periods_per_year` for the per-period floor.
     let mut ad = LedgerAdvertisement::new(
         String::new(),
         String::new(),
@@ -228,8 +239,12 @@ fn minimum_fees_max_msats_unchanged() {
     );
     ad.annualized_fixed_msats = u64::MAX;
 
+    const BLOCKS_PER_YEAR: u64 = 52560;
+    let period = (ad.fee_period_blocks as u64).max(1);
+    let periods_per_year = (BLOCKS_PER_YEAR / period).max(1);
+
     let (_, fixed_msats) = ad.minimum_fees();
-    assert_eq!(fixed_msats, u64::MAX);
+    assert_eq!(fixed_msats, u64::MAX / periods_per_year);
 }
 
 #[test]
@@ -322,6 +337,7 @@ fn ledger_response_success_round_trip() {
         ledger_id: String::new(),
         event_id: String::new(),
         timestamp: 0,
+        responder_pubkey: None,
     };
     let json = serde_json::to_string(&resp).unwrap();
     let parsed: LedgerResponse = serde_json::from_str(&json).unwrap();
@@ -340,6 +356,7 @@ fn ledger_response_error_round_trip() {
         ledger_id: String::new(),
         event_id: String::new(),
         timestamp: 0,
+        responder_pubkey: None,
     };
     let json = serde_json::to_string(&resp).unwrap();
     let parsed: LedgerResponse = serde_json::from_str(&json).unwrap();

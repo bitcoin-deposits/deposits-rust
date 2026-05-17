@@ -46,6 +46,7 @@ async fn handshake_then_sign_and_verify() {
         transport: Keypair::from_secret_key(&secp, &signer_transport.secret),
         allowlist: vec![daemon_transport.public],
         signer: Arc::new(operator_signer),
+        seed: None,
         policy: Arc::new(SeqPolicy::load(tmp_policy_path()).unwrap()),
     });
 
@@ -63,6 +64,7 @@ async fn handshake_then_sign_and_verify() {
         version: [0u8; 16],
         node_pubkey: daemon_transport.public,
         nonce_a,
+        network: bitcoin::Network::Regtest,
     };
     write_frame(&mut client_side, &hello).await.unwrap();
 
@@ -163,6 +165,7 @@ async fn policy_refuses_seq_regression_over_wire() {
         transport: Keypair::from_secret_key(&secp, &signer_transport.secret),
         allowlist: vec![daemon_transport.public],
         signer: Arc::new(operator_signer),
+        seed: None,
         policy: Arc::new(SeqPolicy::load(tmp_policy_path()).unwrap()),
     });
 
@@ -180,6 +183,7 @@ async fn policy_refuses_seq_regression_over_wire() {
             version: [0u8; 16],
             node_pubkey: daemon_transport.public,
             nonce_a,
+            network: bitcoin::Network::Regtest,
         },
     )
     .await
@@ -253,6 +257,7 @@ async fn rejects_unallowlisted_node() {
         transport: Keypair::from_secret_key(&secp, &signer_transport.secret),
         allowlist: vec![],   // empty: nobody is allowed.
         signer: Arc::new(operator_signer),
+        seed: None,
         policy: Arc::new(SeqPolicy::load(tmp_policy_path()).unwrap()),
     });
 
@@ -267,6 +272,7 @@ async fn rejects_unallowlisted_node() {
         version: [0u8; 16],
         node_pubkey: intruder_transport.public,
         nonce_a: [0xFF; 32],
+        network: bitcoin::Network::Regtest,
     };
     write_frame(&mut client_side, &hello).await.unwrap();
 
