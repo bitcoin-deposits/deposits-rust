@@ -342,14 +342,14 @@ impl Node {
         {
             let mut fork_ledger = fork_arc.write().unwrap();
 
-            // Check if we've already published a DisputeEnter on this fork
-            let already_disputed = fork_ledger.history.iter().any(|u| {
-                if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
-                    matches!(op, LedgerOperation::DisputeEnter { .. })
-                } else {
-                    false
-                }
-            });
+            // The state machine is authoritative: if dispute_state has
+            // moved past Normal then DisputeEnter has already been
+            // applied (even if the history vector is missing the row —
+            // e.g. JSONL truncated by a disk-full mid-write).
+            // Re-publishing DisputeEnter on a Disputed/Armed fork would
+            // be rejected by `validate_operation` anyway.
+            let already_disputed = fork_ledger.state.dispute_state
+                != deposits_core::types::DisputeState::Normal;
 
             if already_disputed {
                 tracing::info!("Already have DisputeEnter on fork");
