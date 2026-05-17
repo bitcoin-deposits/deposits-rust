@@ -366,9 +366,9 @@ async fn bootstrap_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // short-lived Node, read the ledger id, drop it. `get_primary_ledger`
     // only reads from disk-backed state that the daemon also holds, but BDK
     // wallet locking is fine for a read-only Node instance.
-    let (ledger_id, our_pubkey_hex) = {
+    let (ledger_id, our_pubkey_hex, quorum_already_active) = {
         let node = Node::new(config.clone()).await?;
-        let (lid, _) = node
+        let (lid, ledger) = node
             .get_primary_ledger()
             .ok_or("bootstrap quorum: no ledger open (run `bootstrap reserves` first)")?;
         let pk = hex::encode(
@@ -378,16 +378,17 @@ async fn bootstrap_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Err
             )
             .serialize(),
         );
-        (lid, pk)
+        let active = ledger.state.quorum_state == deposits_core::types::QuorumState::Active;
+        (lid, pk, active)
     };
 
     println!("bootstrap quorum: ledger={}...", &ledger_id[..16]);
     println!("bootstrap quorum: own pubkey={}...", &our_pubkey_hex[..16]);
 
-    // Skip if quorum already formed. We use the presence of a quorum marker
-    // file written at the end of this phase.
-    let marker = config.data_dir.join("quorum_active.marker");
-    if marker.exists() {
+    // Skip if quorum already formed. Authoritative signal is the
+    // primary ledger's `quorum_state == Active` (set by the first
+    // applied QuorumBegin); no separate marker file is needed.
+    if quorum_already_active {
         eprintln!("bootstrap quorum: already active, skipping");
         return Ok(());
     }
@@ -550,8 +551,6 @@ async fn bootstrap_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    // Mark complete so a container restart doesn't re-try.
-    std::fs::write(&marker, "ok")?;
     Ok(())
 }
 

@@ -295,13 +295,24 @@ impl Node {
             _ => return (false, None, Some("Invalid sighash format".to_string())),
         };
 
-        // Check if we have an armed marker for this ledger (meaning we're participating in the dispute)
+        // Check that we have a fork in Armed state for this ledger
+        // (meaning we're participating in the dispute). The fork's
+        // `dispute_state == Armed` is the authoritative signal.
         let ledger_prefix = &request.ledger_id[..16.min(request.ledger_id.len())];
-        let armed_marker = self
-            .data_dir
-            .join(format!("custody_armed_{}.marker", ledger_prefix));
-
-        if !armed_marker.exists() {
+        let armed = match self.handler.find_our_fork(&request.ledger_id) {
+            Some(key) => {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(&key)
+                    .map(|arc| {
+                        arc.read().unwrap().state.dispute_state
+                            == deposits_core::types::DisputeState::Armed
+                    })
+                    .unwrap_or(false)
+            }
+            None => false,
+        };
+        if !armed {
             return (false, None, Some("Not armed for this dispute".to_string()));
         }
 

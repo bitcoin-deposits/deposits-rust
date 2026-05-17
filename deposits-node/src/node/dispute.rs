@@ -671,16 +671,10 @@ impl Node {
             tracing::error!("Failed to persist fork ledger: {}", e);
         }
 
-        // Create custody_armed marker (needed by auto_confiscate)
-        let armed_marker = self.data_dir.join(format!(
-            "custody_armed_{}.marker",
-            &ledger_id[..16.min(ledger_id.len())]
-        ));
-        if let Err(e) = std::fs::write(&armed_marker, "armed") {
-            tracing::warn!("Failed to write armed marker: {}", e);
-        } else {
-            tracing::info!("Created custody_armed marker: {:?}", armed_marker);
-        }
+        // No marker file: the fork-branch's `dispute_state == Armed`
+        // is the authoritative signal that we're armed for this
+        // dispute. Both `initiate_confiscations` and the
+        // `confiscation_sign` gate consult that directly.
 
         // Only broadcast if we actually added new operations to the fork.
         // Without this guard, incoming fork events re-trigger auto_arm_for_dispute,
@@ -1739,22 +1733,31 @@ impl Node {
         use deposits_signer_api::{SigPurpose, SignContext};
         let our_pubkey = self.node_id;
 
-        // Find armed markers (ledgers where we've armed)
-        let entries = match std::fs::read_dir(&self.data_dir) {
-            Ok(e) => e,
-            Err(_) => return,
+        // Enumerate disputes we're armed for by scanning fork-branch
+        // ledgers in `DisputeState::Armed`. The fork's state is the
+        // authoritative signal — no separate marker file needed.
+        let armed_ledger_ids: Vec<String> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter_map(|(key, arc)| {
+                    if key.len() <= 64 {
+                        return None;
+                    }
+                    let l = arc.read().unwrap();
+                    if l.operator_key() != our_pubkey {
+                        return None;
+                    }
+                    if l.state.dispute_state != deposits_core::types::DisputeState::Armed {
+                        return None;
+                    }
+                    Some(key[..64].to_string())
+                })
+                .collect()
         };
 
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with("custody_armed_") || !name.ends_with(".marker") {
-                continue;
-            }
-
-            // Extract ledger prefix from marker name
-            let ledger_prefix = name
-                .trim_start_matches("custody_armed_")
-                .trim_end_matches(".marker");
+        for ledger_id in armed_ledger_ids {
+            let ledger_prefix = &ledger_id[..16.min(ledger_id.len())];
 
             // Skip if already confiscated or revealed
             let confiscated_marker = self
@@ -1780,18 +1783,13 @@ impl Node {
                 ledger_prefix
             );
 
-            // Find the fork or original ledger key (prefer fork for dispute operations)
-            let ledger_key = match self.find_fork_or_original_by_prefix(ledger_prefix) {
-                Some(key) => key,
-                None => continue,
-            };
-
-            // Extract the base ledger_id (first 64 chars) for Nostr queries
-            let ledger_id = if ledger_key.len() > 64 {
-                ledger_key[..64].to_string()
-            } else {
-                ledger_key.clone()
-            };
+            // Resolve the fork-branch tracking key (or fall back to
+            // the original ledger key) for downstream `handler.ledgers`
+            // lookups that need the in-memory fork's chain hash etc.
+            let ledger_key = self
+                .handler
+                .find_our_fork(&ledger_id)
+                .unwrap_or_else(|| ledger_id.clone());
 
             // Use the slow relay client for historical fetch
             let client = self.nostr.fetch_client();
@@ -2527,38 +2525,23 @@ impl Node {
             lottery_output.address
         );
 
-        // Check if lottery address has a UTXO with enough confirmations
+        // Check if lottery address has a UTXO with enough confirmations.
+        // Ask Esplora directly for the tx's confirmation depth; no
+        // local cache file needed.
         let lottery_script = lottery_output.address.script_pubkey();
-
-        let utxo_result = self.wallet.find_utxo_for_script(&lottery_script)?;
-
-        if utxo_result.is_none() {
-            return Ok(false); // No UTXO at lottery address yet
-        }
-
-        // Check confirmations
-        let current_height = self.wallet.get_block_height().unwrap_or(0);
-
-        // Use armed height heuristic: if UTXO exists and 3+ blocks since we first saw it, confirmed
-        let armed_height_file = self.data_dir.join(format!(
-            "lottery_armed_height_{}.txt",
-            &ledger_id[..16.min(ledger_id.len())]
-        ));
-
-        if let Ok(height_str) = std::fs::read_to_string(&armed_height_file) {
-            if let Ok(armed_height) = height_str.trim().parse::<u32>() {
-                if current_height >= armed_height + min_confirmations {
-                    return Ok(true);
-                }
-            }
-        }
-
-        // If no armed height file, create one (first time seeing the UTXO)
-        if !armed_height_file.exists() {
-            let _ = std::fs::write(&armed_height_file, current_height.to_string());
-        }
-
-        Ok(false)
+        let outpoint = match self.wallet.find_utxo_for_script(&lottery_script)? {
+            Some((op, _value)) => op,
+            None => return Ok(false), // No UTXO at lottery address yet
+        };
+        let confs = match self
+            .wallet
+            .get_outpoint_value_and_confs(outpoint.txid, outpoint.vout)
+            .await?
+        {
+            Some((_value, c)) => c,
+            None => return Ok(false),
+        };
+        Ok(confs >= min_confirmations)
     }
 
     /// Auto-rotate to quorum and continue ledger after winning
