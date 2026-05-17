@@ -213,13 +213,14 @@ pub fn derive_deposit_key(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Print the daemon's *delegate Nostr pubkey* — the one used for Nostr-
-/// layer ops (event signing, NIP-04 ECDH for inbound DMs). Idempotent:
-/// generates a fresh delegate keypair under `<data-dir>/delegate_secret`
-/// + `<data-dir>/delegate_pubkey` if absent, otherwise reads the
-/// persisted one. Same code path the daemon takes at `Node::new`, so
-/// the pubkey printed here is exactly what subsequent Kind 39100
-/// advertisements will carry as `delegate_pubkey`.
+/// Print the daemon's *delegate Nostr pubkey* — the one used for
+/// Nostr-layer ops (event signing, NIP-04 ECDH for inbound DMs).
+/// Prefers a persisted `<data-dir>/delegate_secret` if one exists
+/// (pre-derivation operators); otherwise derives the key from
+/// `<data-dir>/seed.hex` at `m/85'/0'/0'/0/0`, matching the daemon's
+/// `Signer::issue_nostr_secret`. What's printed here is what
+/// subsequent Kind 39100 advertisements will carry as
+/// `delegate_pubkey`.
 ///
 /// Use case: admin tooling on the same host that needs to encrypt
 /// NIP-04 DMs to the daemon (e.g. setup.sh's `reserves create` /
@@ -227,6 +228,7 @@ pub fn derive_deposit_key(args: &[String]) -> Result<(), String> {
 /// published.
 pub fn delegate_pubkey(args: &[String]) -> Result<(), String> {
     let mut data_dir: Option<PathBuf> = None;
+    let mut network = Network::Bitcoin;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -237,6 +239,16 @@ pub fn delegate_pubkey(args: &[String]) -> Result<(), String> {
                 }
                 data_dir = Some(PathBuf::from(&args[i]));
             }
+            "--network" if i + 1 < args.len() => {
+                network = match args[i + 1].as_str() {
+                    "mainnet" | "bitcoin" => Network::Bitcoin,
+                    "testnet" | "testnet3" => Network::Testnet,
+                    "signet" => Network::Signet,
+                    "regtest" => Network::Regtest,
+                    other => return Err(format!("Unknown --network {:?}", other)),
+                };
+                i += 1;
+            }
             other => return Err(format!("unknown flag {:?}", other)),
         }
         i += 1;
@@ -246,9 +258,39 @@ pub fn delegate_pubkey(args: &[String]) -> Result<(), String> {
         std::fs::create_dir_all(&data_dir)
             .map_err(|e| format!("create_dir_all {}: {}", data_dir.display(), e))?;
     }
-    let secret = crate::Node::load_or_init_delegate_secret(&data_dir)
-        .map_err(|e| format!("load_or_init_delegate_secret: {}", e))?;
     let secp = Secp256k1::new();
+    let secret = match crate::Node::load_persisted_delegate_secret(&data_dir)
+        .map_err(|e| format!("load_persisted_delegate_secret: {}", e))?
+    {
+        Some(sk) => sk,
+        None => {
+            // Derive from seed at m/85'/0'/0'/0/0 (same path
+            // LocalSigner uses for `issue_nostr_secret`).
+            let seed_path = data_dir.join("seed.hex");
+            let raw = std::fs::read_to_string(&seed_path).map_err(|e| {
+                format!(
+                    "no persisted delegate_secret and seed.hex not readable at {}: {}",
+                    seed_path.display(),
+                    e
+                )
+            })?;
+            let bytes = hex::decode(raw.trim())
+                .map_err(|e| format!("seed.hex hex decode: {}", e))?;
+            if bytes.len() != 32 {
+                return Err("seed.hex must be 64 hex chars".to_string());
+            }
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(&bytes);
+            let xpriv = Xpriv::new_master(network, &seed)
+                .map_err(|e| format!("xpriv from seed: {}", e))?;
+            let path = DerivationPath::from_str("m/85'/0'/0'/0/0")
+                .map_err(|e| format!("delegate path: {}", e))?;
+            let derived = xpriv
+                .derive_priv(&secp, &path)
+                .map_err(|e| format!("derive delegate: {}", e))?;
+            derived.private_key
+        }
+    };
     let pubkey = PublicKey::from_secret_key(&secp, &secret);
     println!("{}", hex::encode(pubkey.serialize()));
     Ok(())

@@ -113,15 +113,36 @@ impl Node {
             (map, (max_seen + 1) as u32)
         };
 
-        // Generate (or load) the daemon's *delegate Nostr key* and use it
-        // as the daemon's Nostr identity (`self.keys` inside NostrTransport).
-        // Outbound DMs and gift-wraps from the daemon are now signed by the
-        // delegate; advertisements are still signed by the operator key via
-        // the Signer (see `publish_ledger_advertisement`). This matches the
-        // delegation pattern documented in DEP-04: wallets pin operator,
-        // address messages to delegate. The dual-decrypt path on inbound
+        // Resolve the daemon's *delegate Nostr key* — used as the
+        // daemon's Nostr identity (`self.keys` inside NostrTransport).
+        // Outbound DMs and gift-wraps from the daemon are signed by
+        // the delegate; advertisements are still signed by the
+        // operator key via the Signer. Matches the delegation pattern
+        // documented in DEP-04: wallets pin operator, address messages
+        // to delegate. The dual-decrypt path on inbound
         // (`nip04_decrypt_with_fallback`) keeps legacy wallets working.
-        let delegate_secret = Self::load_or_init_delegate_secret(&config.data_dir)?;
+        //
+        // Prefer a persisted `delegate_secret` if present (so the
+        // pubkey doesn't change for nodes set up before derivation was
+        // wired in); otherwise ask the signer to issue a deterministic
+        // sibling secret (`m/85'/0'/0'/0/0` for LocalSigner) — that
+        // form is recoverable from the seed alone, no on-disk
+        // persistence required.
+        let delegate_secret = match Self::load_persisted_delegate_secret(&config.data_dir)? {
+            Some(sk) => sk,
+            None => {
+                let bytes = signer.issue_nostr_secret().map_err(|e| {
+                    Error::Wallet(format!(
+                        "signer cannot issue a delegate Nostr secret: {} \
+                         (LocalSigner needs from_xpriv_with_nostr; \
+                         RemoteSigner needs a server that supports IssueNostrSecret)",
+                        e
+                    ))
+                })?;
+                bitcoin::secp256k1::SecretKey::from_slice(&bytes)
+                    .map_err(|e| Error::Wallet(format!("issued nostr secret invalid: {}", e)))?
+            }
+        };
         let delegate_pubkey =
             PublicKey::from_secret_key(&secp, &delegate_secret);
 
@@ -451,19 +472,28 @@ impl Node {
     /// events; the advertisement carries `delegate_pubkey` so wallets
     /// know to address subsequent traffic here.
     ///
-    /// Persisted at `<data-dir>/delegate_secret` (0600) and
-    /// `<data-dir>/delegate_pubkey` (0644 — useful for admin tooling on
-    /// the same host). Generated fresh on first run, stable thereafter
-    /// (rotating it would invalidate every active wallet's view of
-    /// "which npub is this operator").
-    pub fn load_or_init_delegate_secret(
+    /// Read a previously-persisted delegate Nostr secret from
+    /// `<data-dir>/delegate_secret` if present. Pre-derivation
+    /// daemons wrote a random secret here on first run; we keep
+    /// reading it so existing operators don't see their delegate
+    /// pubkey change (every wallet that has them pinned would break).
+    /// New deployments skip persistence entirely and derive the
+    /// secret from the seed via `Signer::issue_nostr_secret`.
+    pub fn load_persisted_delegate_secret(
         data_dir: &std::path::Path,
-    ) -> Result<bitcoin::secp256k1::SecretKey, Error> {
-        Self::load_or_init_persistent_secret(
-            data_dir,
-            "delegate_secret",
-            Some("delegate_pubkey"),
-        )
+    ) -> Result<Option<bitcoin::secp256k1::SecretKey>, Error> {
+        let path = data_dir.join("delegate_secret");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(&path).map_err(|e| {
+            Error::Wallet(format!("read delegate_secret {}: {}", path.display(), e))
+        })?;
+        let bytes = hex::decode(raw.trim())
+            .map_err(|e| Error::Wallet(format!("delegate_secret hex: {}", e)))?;
+        let sk = bitcoin::secp256k1::SecretKey::from_slice(&bytes)
+            .map_err(|e| Error::Wallet(format!("delegate_secret: {}", e)))?;
+        Ok(Some(sk))
     }
 
     /// Load (or generate) the daemon's transport keypair under
@@ -541,21 +571,14 @@ impl Node {
                 .map_err(|e| Error::Wallet(format!("chmod {}: {}", pubkey_name, e)))?;
         }
 
-        match name {
-            "transport_secret" => tracing::warn!(
+        if name == "transport_secret" {
+            tracing::warn!(
                 "Generated daemon transport keypair: pubkey={}. Add it to the \
                  signer's allowlist with `deposits-signer trust add --data-dir \
                  <signer-data-dir> {}` before the next handshake will succeed.",
                 hex::encode(pk.serialize()),
                 hex::encode(pk.serialize()),
-            ),
-            "delegate_secret" => tracing::info!(
-                "Generated daemon Nostr delegate keypair: pubkey={}. \
-                 Carried in Kind 39100 advertisement.delegate_pubkey; \
-                 wallets that follow the delegation address messages here.",
-                hex::encode(pk.serialize()),
-            ),
-            _ => {}
+            );
         }
         Ok(sk)
     }
