@@ -313,8 +313,6 @@ impl Node {
         anchor: Option<([u8; 32], u32)>,
     ) -> Result<(), Error> {
         use bitcoin::hashes::{hash160, Hash};
-        use bitcoin::secp256k1::rand::rngs::OsRng;
-        use bitcoin::secp256k1::rand::Rng;
 
         use deposits_core::messages::LedgerOperation;
 
@@ -534,24 +532,24 @@ impl Node {
                         );
                         (*commitment_hash, true)
                     } else {
-                        // First arm: generate a fresh preimage and
-                        // persist it for the eventual reveal.
-                        let mut rng = OsRng;
-                        let mut preimage = vec![0u8; 32];
-                        rng.fill(&mut preimage[..]);
-                        let h: [u8; 20] = *hash160::Hash::hash(&preimage).as_byte_array();
-
-                        let preimage_file = self.data_dir.join(format!(
-                            "lottery_preimage_{}.hex",
-                            &ledger_id[..16.min(ledger_id.len())]
-                        ));
-                        if let Err(e) = std::fs::write(&preimage_file, hex::encode(&preimage)) {
-                            tracing::warn!("Failed to store preimage: {}", e);
-                            (h, false)
-                        } else {
-                            tracing::info!("Stored lottery preimage in: {:?}", preimage_file);
-                            (h, true)
-                        }
+                        // First arm: derive the preimage from the
+                        // signer's identity secret. Same derivation at
+                        // reveal time reproduces the same 32 bytes,
+                        // so we never persist it to disk and a
+                        // disk-full event can't lose the dispute.
+                        let preimage = self
+                            .handler
+                            .signer
+                            .derive_dispute_lottery_preimage(ledger_id, last_valid_seq)
+                            .map_err(|e| {
+                                Error::Protocol(format!(
+                                    "derive lottery preimage: {}",
+                                    e
+                                ))
+                            })?;
+                        let h: [u8; 20] =
+                            *hash160::Hash::hash(&preimage).as_byte_array();
+                        (h, true)
                     };
                 let _ = preimage_was_persisted;
 
@@ -698,6 +696,38 @@ impl Node {
         Ok(())
     }
 
+    /// Look up our lottery preimage for `ledger_id`. Tries the legacy
+    /// on-disk file first (random preimages from pre-derivation arms
+    /// that still need to resolve), then falls back to deriving from
+    /// the signer using the fork's `last_valid_seq` parsed from the
+    /// fork tracking key. Returns `None` if we have no fork for this
+    /// ledger.
+    fn lottery_preimage(&self, ledger_id: &str) -> Option<Vec<u8>> {
+        let preimage_file = self.data_dir.join(format!(
+            "lottery_preimage_{}.hex",
+            &ledger_id[..16.min(ledger_id.len())]
+        ));
+        if preimage_file.exists() {
+            if let Ok(hex_str) = std::fs::read_to_string(&preimage_file) {
+                if let Ok(bytes) = hex::decode(hex_str.trim()) {
+                    return Some(bytes);
+                }
+            }
+        }
+        let fork_key = self.handler.find_our_fork(ledger_id)?;
+        // Fork key format: `<ledger_id>_<seq:06>_<pk_prefix_16hex>`.
+        // The ledger_id is fixed-length 64 hex; seq starts at 65.
+        let after_id = fork_key.get(65..)?;
+        let seq_end = after_id.find('_')?;
+        let last_valid_seq: u64 = after_id[..seq_end].parse().ok()?;
+        let derived = self
+            .handler
+            .signer
+            .derive_dispute_lottery_preimage(ledger_id, last_valid_seq)
+            .ok()?;
+        Some(derived.to_vec())
+    }
+
     /// Auto-reveal our lottery preimage when we see another participant's reveal
     pub(crate) async fn auto_reveal_preimage(&self, ledger_id: &str) {
         // Check if we're a quorum member of this ledger
@@ -705,16 +735,14 @@ impl Node {
             return;
         }
 
-        // Check if we have a preimage file for this ledger
-        let preimage_file = self.data_dir.join(format!(
-            "lottery_preimage_{}.hex",
-            &ledger_id[..16.min(ledger_id.len())]
-        ));
-
-        if !preimage_file.exists() {
-            tracing::debug!("No preimage file for ledger {}", &ledger_id[..16]);
-            return;
-        }
+        let preimage = match self.lottery_preimage(ledger_id) {
+            Some(p) => p,
+            None => {
+                tracing::debug!("No preimage available for ledger {}", &ledger_id[..16]);
+                return;
+            }
+        };
+        let preimage_hex = hex::encode(&preimage);
 
         // Check if we already revealed (marker file)
         let revealed_marker = self.data_dir.join(format!(
@@ -725,23 +753,6 @@ impl Node {
             tracing::debug!("Already revealed preimage for ledger {}", &ledger_id[..16]);
             return;
         }
-
-        // Load and reveal the preimage
-        let preimage_hex = match std::fs::read_to_string(&preimage_file) {
-            Ok(hex) => hex.trim().to_string(),
-            Err(e) => {
-                tracing::warn!("Failed to read preimage file: {}", e);
-                return;
-            }
-        };
-
-        let preimage = match hex::decode(&preimage_hex) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::warn!("Invalid preimage hex: {}", e);
-                return;
-            }
-        };
 
         tracing::info!(
             "Auto-revealing lottery preimage for ledger {}...",
@@ -2345,30 +2356,33 @@ impl Node {
     /// For each ledger where we're armed but haven't revealed yet,
     /// check if the lottery UTXO exists with 3+ confirmations.
     pub(crate) async fn auto_reveal_on_confiscation(&self) {
-        // Find armed marker files (preimage exists but not revealed)
-        let entries = match std::fs::read_dir(&self.data_dir) {
-            Ok(e) => e,
-            Err(_) => return,
+        // Enumerate disputes by scanning fork-branch ledgers in Armed
+        // state where we are the disputant. The fork's
+        // `state.dispute_state == Armed` is the authoritative signal
+        // that we have a preimage to reveal (derived deterministically
+        // on demand, or read from a legacy `.hex` if one exists).
+        let armed_ledger_ids: Vec<String> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter_map(|(key, arc)| {
+                    if key.len() <= 64 {
+                        return None;
+                    }
+                    let l = arc.read().unwrap();
+                    if l.operator_key() != self.node_id {
+                        return None;
+                    }
+                    if l.state.dispute_state != deposits_core::types::DisputeState::Armed {
+                        return None;
+                    }
+                    Some(key[..64].to_string())
+                })
+                .collect()
         };
 
-        let preimage_files: Vec<_> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                name.starts_with("lottery_preimage_") && name.ends_with(".hex")
-            })
-            .collect();
-
-        for entry in preimage_files {
-            let filename = entry.file_name().to_string_lossy().to_string();
-            let ledger_prefix = filename
-                .strip_prefix("lottery_preimage_")
-                .and_then(|s| s.strip_suffix(".hex"))
-                .unwrap_or("");
-
-            if ledger_prefix.is_empty() {
-                continue;
-            }
+        for ledger_id in armed_ledger_ids {
+            let ledger_prefix = &ledger_id[..16.min(ledger_id.len())];
 
             // Skip if already revealed
             let revealed_marker = self
@@ -2377,19 +2391,6 @@ impl Node {
             if revealed_marker.exists() {
                 continue;
             }
-
-            // Find the fork or original ledger key (prefer fork for dispute operations)
-            let ledger_key = match self.find_fork_or_original_by_prefix(ledger_prefix) {
-                Some(key) => key,
-                None => continue,
-            };
-
-            // Extract the base ledger_id (first 64 chars) for Nostr queries
-            let ledger_id = if ledger_key.len() > 64 {
-                ledger_key[..64].to_string()
-            } else {
-                ledger_key.clone()
-            };
 
             // Check if confiscation TX is confirmed with 3+ blocks
             match self.check_confiscation_confirmed(&ledger_id, 3).await {

@@ -311,6 +311,20 @@ impl Signer for LocalSigner {
         })?;
         Ok(bitcoin::bip32::Xpub::from_priv(&self.secp, xpriv))
     }
+
+    fn derive_dispute_lottery_preimage(
+        &self,
+        ledger_id: &str,
+        last_valid_sequence: u64,
+    ) -> Result<[u8; 32], SignerError> {
+        use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
+        let mut engine = HmacEngine::<sha256::Hash>::new(&self.secret.secret_bytes());
+        engine.input(b"deposits/lottery/v1\x00");
+        engine.input(ledger_id.as_bytes());
+        engine.input(b"\x00");
+        engine.input(&last_valid_sequence.to_le_bytes());
+        Ok(Hmac::<sha256::Hash>::from_engine(engine).to_byte_array())
+    }
 }
 
 #[cfg(test)]
@@ -409,6 +423,24 @@ mod tests {
         let from_signer = alice.nip04_shared_key(&bob.pubkey()).unwrap();
         let ssp = shared_secret_point(&bob.pubkey(), alice.secret_key_for_test());
         assert_eq!(&from_signer[..], &ssp[..32]);
+    }
+
+    #[test]
+    fn lottery_preimage_is_deterministic_and_distinct() {
+        let s = LocalSigner::random();
+        let p1 = s.derive_dispute_lottery_preimage("ledger-A", 7).unwrap();
+        let p2 = s.derive_dispute_lottery_preimage("ledger-A", 7).unwrap();
+        assert_eq!(p1, p2, "same inputs must yield the same preimage");
+
+        let diff_ledger = s.derive_dispute_lottery_preimage("ledger-B", 7).unwrap();
+        assert_ne!(p1, diff_ledger, "different ledger must yield different preimage");
+
+        let diff_seq = s.derive_dispute_lottery_preimage("ledger-A", 8).unwrap();
+        assert_ne!(p1, diff_seq, "different seq must yield different preimage");
+
+        let other = LocalSigner::random();
+        let other_p = other.derive_dispute_lottery_preimage("ledger-A", 7).unwrap();
+        assert_ne!(p1, other_p, "different signer must yield different preimage");
     }
 
     #[test]

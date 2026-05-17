@@ -371,6 +371,25 @@ pub trait Signer: Send + Sync {
             "this signer cannot issue a master xpub".to_string(),
         ))
     }
+
+    /// Deterministically derive the lottery preimage for a dispute. A
+    /// disputant arms by committing `HASH160(preimage)`; the preimage
+    /// must survive across restarts (so the eventual reveal matches
+    /// the commitment) but must not be predictable to other parties.
+    /// HMAC-SHA256 of the signer's identity secret keyed by
+    /// `(ledger_id, last_valid_sequence)` satisfies both: it's stable
+    /// per node-and-dispute, never persisted, and recoverable from
+    /// seed alone.
+    fn derive_dispute_lottery_preimage(
+        &self,
+        ledger_id: &str,
+        last_valid_sequence: u64,
+    ) -> Result<[u8; 32], SignerError> {
+        let _ = (ledger_id, last_valid_sequence);
+        Err(SignerError::Unsupported(
+            "this signer does not support derive_dispute_lottery_preimage".to_string(),
+        ))
+    }
 }
 
 /// Newtype around a 64-byte BIP-340 signature so callers don't accidentally
