@@ -431,12 +431,18 @@ impl Node {
                 for (member, member_ledger_id) in &quorum_members_to_add {
                     let mut fork_ledger = fork_arc.write().unwrap();
 
-                    if fork_ledger
+                    // QuorumAddMember on a fork stages into
+                    // `next_quorum_members`; the fork has no
+                    // QuorumBegin to promote them to the active set, so
+                    // skip-if-already must consult both lists or every
+                    // periodic re-appends the same member forever.
+                    let already_known = fork_ledger
                         .state
                         .quorum_members
                         .iter()
-                        .any(|m| m.pubkey == *member)
-                    {
+                        .chain(fork_ledger.state.next_quorum_members.iter())
+                        .any(|m| m.pubkey == *member);
+                    if already_known {
                         continue;
                     }
 
