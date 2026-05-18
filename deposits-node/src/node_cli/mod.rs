@@ -10,6 +10,7 @@
 pub mod admin;
 pub mod bootstrap;
 pub mod deposit;
+pub mod disputes;
 pub mod health;
 pub mod keys;
 pub mod ledger;
