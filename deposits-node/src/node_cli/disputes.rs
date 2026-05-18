@@ -53,9 +53,15 @@ struct ForkSummary {
     dispute_state: DisputeState,
 }
 
+/// Build a fork summary from the union of local fork history and
+/// any relay-fetched updates for the same fork. The caller is
+/// responsible for ensuring the iterator covers everything it can
+/// — a partial local JSONL (post disk-full) plus a relay fetch is
+/// the recommended source.
 fn summarize_fork(
     fork_key: &str,
     ledger: &deposits_core::ledger::Ledger,
+    extra_updates: &[deposits_core::types::SignedLedgerUpdate],
 ) -> Option<ForkSummary> {
     let mut s = ForkSummary {
         fork_key: fork_key.to_string(),
@@ -80,11 +86,31 @@ fn summarize_fork(
         return None;
     }
     s.last_valid_seq = parts[1].parse().ok()?;
+    let disputer_prefix = parts[2]; // 16 hex chars of disputer pubkey
 
-    for u in &ledger.history {
-        if u.sequence_number < s.last_valid_seq {
-            continue;
-        }
+    // Combine local fork history with extra (relay-fetched) updates,
+    // dedup by content_hash. The local JSONL may be truncated by a
+    // prior disk-full event; the relay fetch fills the gaps.
+    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let chain: Vec<&deposits_core::types::SignedLedgerUpdate> = ledger
+        .history
+        .iter()
+        .chain(extra_updates.iter())
+        .filter(|u| {
+            // Only updates on this disputer's fork branch.
+            let op_hex = hex::encode(u.operator_id.serialize());
+            if !op_hex.starts_with(disputer_prefix) {
+                return false;
+            }
+            // Strictly past the divergence seq.
+            if u.sequence_number < s.last_valid_seq {
+                return false;
+            }
+            seen.insert(u.content_hash)
+        })
+        .collect();
+
+    for u in chain {
         let Ok(op) = LedgerOperation::tlv_decode(&u.message) else {
             continue;
         };
@@ -119,6 +145,48 @@ fn summarize_fork(
         }
     }
     Some(s)
+}
+
+/// Fetch every kind:9100 event tagged with `ledger_id` from the
+/// relay pool and decode the inner TLV SignedLedgerUpdates. Used by
+/// the disputes CLI to backfill fork-branch history that's missing
+/// from the local JSONL (post disk-full, or for forks the local
+/// daemon never personally observed). Returns an empty vec on any
+/// relay error — the caller falls back to local-only history.
+async fn fetch_ledger_updates_from_relay(
+    node: &Node,
+    ledger_id: &str,
+) -> Vec<deposits_core::types::SignedLedgerUpdate> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use nostr_sdk::{Filter, Kind};
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id)],
+        )
+        .limit(500);
+    let events = match node
+        .nostr
+        .fetch_client()
+        .fetch_events(vec![filter], Some(std::time::Duration::from_secs(8)))
+        .await
+    {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut updates = Vec::with_capacity(events.len());
+    for event in events.iter() {
+        if let Ok(tlv) = BASE64.decode(&event.content) {
+            if let Ok(u) =
+                deposits_core::types::SignedLedgerUpdate::tlv_decode(&tlv)
+            {
+                updates.push(u);
+            }
+        }
+    }
+    updates
 }
 
 /// "What is the pipeline waiting on next?" derived from a fork
@@ -175,6 +243,8 @@ async fn disputes_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         std::collections::BTreeMap::new();
     let mut mains: std::collections::BTreeMap<String, deposits_core::ledger::Ledger> =
         std::collections::BTreeMap::new();
+    let mut fork_keys: std::collections::BTreeMap<String, Vec<(String, deposits_core::ledger::Ledger)>> =
+        std::collections::BTreeMap::new();
     for (key, ledger) in snapshot {
         if key.len() == 64 {
             // Main ledger.
@@ -182,8 +252,32 @@ async fn disputes_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         } else if key.len() > 64 {
             // Fork-branch. Key prefix == main ledger_id.
             let main_id = key[..64].to_string();
-            if let Some(s) = summarize_fork(&key, &ledger) {
-                by_ledger.entry(main_id).or_default().push((key, s));
+            fork_keys.entry(main_id).or_default().push((key, ledger));
+        }
+    }
+
+    // Backfill fork-branch history from the relay: a disk-full
+    // event can truncate the on-disk JSONL such that DisputeEnter /
+    // DisputeArmed are missing from history even though the fork's
+    // `state.dispute_state` reflects them. We re-fetch each
+    // affected ledger's kind:9100 events from the relay and pass
+    // them into `summarize_fork` as a parallel source.
+    let mut relay_updates: std::collections::HashMap<String, Vec<deposits_core::types::SignedLedgerUpdate>> =
+        std::collections::HashMap::new();
+    for main_id in fork_keys.keys() {
+        let fetched = fetch_ledger_updates_from_relay(&node, main_id).await;
+        relay_updates.insert(main_id.clone(), fetched);
+    }
+
+    for (main_id, forks) in &fork_keys {
+        let empty = Vec::new();
+        let extras = relay_updates.get(main_id).unwrap_or(&empty);
+        for (fork_key, fork_ledger) in forks {
+            if let Some(s) = summarize_fork(fork_key, fork_ledger, extras) {
+                by_ledger
+                    .entry(main_id.clone())
+                    .or_default()
+                    .push((fork_key.clone(), s));
             }
         }
     }
@@ -345,16 +439,20 @@ async fn disputes_show(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
     println!();
 
-    // Each fork by disputer.
+    // Each fork by disputer. Relay backfill: pull every kind:9100
+    // for this ledger and pass into `summarize_fork` so disk-full
+    // truncated history (DisputeEnter / DisputeArmed rows gone
+    // locally) still surfaces in the output.
     let forks: Vec<(String, deposits_core::ledger::Ledger)> = snapshot
         .into_iter()
         .filter(|(k, _)| k.starts_with(&main_id) && k.len() > 64)
         .collect();
+    let relay_extras = fetch_ledger_updates_from_relay(&node, &main_id).await;
     if forks.is_empty() {
         println!("(no fork branches)");
     }
     for (fork_key, fork_ledger) in &forks {
-        let s = match summarize_fork(fork_key, fork_ledger) {
+        let s = match summarize_fork(fork_key, fork_ledger, &relay_extras) {
             Some(s) => s,
             None => continue,
         };
