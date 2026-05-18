@@ -23,6 +23,39 @@ impl Node {
             from_seq,
         );
 
+        // Per-`(ledger, from_seq)` cooldown. The relay fans out a
+        // single broadcast to every subscriber, so if multiple peers
+        // ask us to resync the same range in a tight window, only
+        // the first request does the work; the rest short-circuit
+        // with a synthetic success. Without this guard, four peers
+        // coming back online at once make the operator re-publish
+        // every update in the range four times.
+        const RESYNC_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+        let key = (request.ledger_id.clone(), from_seq);
+        {
+            let mut last = self.resync_last_broadcast.lock().unwrap();
+            if let Some(prev) = last.get(&key) {
+                if prev.elapsed() < RESYNC_COOLDOWN {
+                    let response = serde_json::json!({
+                        "rebroadcast_count": 0,
+                        "from_seq": from_seq,
+                        "through_seq": from_seq,
+                        "total_available": 0,
+                        "has_more": false,
+                        "deduped": true,
+                    });
+                    tracing::info!(
+                        "Resync for {}/from_seq={} deduped against broadcast {:?} ago",
+                        &request.ledger_id[..16.min(request.ledger_id.len())],
+                        from_seq,
+                        prev.elapsed()
+                    );
+                    return (true, Some(response.to_string()), None);
+                }
+            }
+            last.insert(key, std::time::Instant::now());
+        }
+
         // Get the ledger history
         let updates: Vec<deposits_core::SignedLedgerUpdate> = {
             let ledgers = self.handler.ledgers.lock().unwrap();

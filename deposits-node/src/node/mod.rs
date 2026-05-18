@@ -373,6 +373,15 @@ pub struct Node {
     /// the relay, queried on first access per ledger after restart.
     pub(crate) revealed_ledgers: Mutex<std::collections::HashSet<String>>,
 
+    /// Last-broadcast timestamp per `(ledger_id, from_seq)` rolled-back
+    /// resync range. The relay's pub/sub fans a single broadcast out
+    /// to every subscribed peer, so if multiple peers ask us to
+    /// resync the same range within a few seconds (a common pattern
+    /// when several quorum members come back online at once), only
+    /// the first request needs to do work. Subsequent requests inside
+    /// the cooldown return success without re-broadcasting.
+    pub(crate) resync_last_broadcast: Mutex<HashMap<(String, u64), std::time::Instant>>,
+
     /// Active per-ledger request processing tasks.
     /// Only one task runs per ledger at a time to maintain hash-chain serialization.
     /// The main loop checks for completion and spawns new tasks without blocking.
