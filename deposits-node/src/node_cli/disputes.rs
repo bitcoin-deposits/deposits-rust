@@ -148,45 +148,93 @@ fn summarize_fork(
 }
 
 /// Fetch every kind:9100 event tagged with `ledger_id` from the
-/// relay pool and decode the inner TLV SignedLedgerUpdates. Used by
-/// the disputes CLI to backfill fork-branch history that's missing
-/// from the local JSONL (post disk-full, or for forks the local
-/// daemon never personally observed). Returns an empty vec on any
-/// relay error — the caller falls back to local-only history.
+/// relay pool and decode the inner TLV SignedLedgerUpdates. Used
+/// by the disputes CLI to backfill fork-branch history that's
+/// missing from the local JSONL (post disk-full, or for forks the
+/// local daemon never personally observed).
+///
+/// Paginates forward by `created_at` so forks with thousands of
+/// rows (e.g. a fork with hundreds of duplicate QuorumAddMember
+/// updates pre-dedup-fix) don't truncate to the first 500 events
+/// the relay returns — the relay serves newest-first, so a single
+/// 500-event fetch on a 1000-row fork misses the OLDEST entries
+/// (which is exactly where DisputeEnter lives).
+///
+/// Returns an empty vec on any relay error — the caller falls
+/// back to local-only history.
 async fn fetch_ledger_updates_from_relay(
     node: &Node,
     ledger_id: &str,
 ) -> Vec<deposits_core::types::SignedLedgerUpdate> {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-    use nostr_sdk::{Filter, Kind};
+    use nostr_sdk::{Filter, Kind, Timestamp};
 
-    let filter = Filter::new()
-        .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
-        .custom_tag(
-            crate::nostr::TAG_LEDGER_ID,
-            [crate::nostr::ledger_tag(ledger_id)],
-        )
-        .limit(500);
-    let events = match node
-        .nostr
-        .fetch_client()
-        .fetch_events(vec![filter], Some(std::time::Duration::from_secs(8)))
-        .await
-    {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-    let mut updates = Vec::with_capacity(events.len());
-    for event in events.iter() {
-        if let Ok(tlv) = BASE64.decode(&event.content) {
-            if let Ok(u) =
-                deposits_core::types::SignedLedgerUpdate::tlv_decode(&tlv)
-            {
-                updates.push(u);
+    const PAGE_LIMIT: usize = 500;
+    const MAX_PAGES: u32 = 20; // 20 × 500 = 10k events should cover any pathological fork
+    const PAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    let client = node.nostr.fetch_client();
+    let mut all_updates = Vec::new();
+    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut cursor_ts: u64 = 0;
+    let mut pages = 0u32;
+
+    loop {
+        let mut filter = Filter::new()
+            .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
+            .custom_tag(
+                crate::nostr::TAG_LEDGER_ID,
+                [crate::nostr::ledger_tag(ledger_id)],
+            )
+            .limit(PAGE_LIMIT);
+        if cursor_ts > 0 {
+            // Walk newer-than-cursor on each iteration — the relay
+            // still returns newest-first within the window, so we
+            // shift the floor up after every page and drain the
+            // whole timeline this way.
+            filter = filter.since(Timestamp::from(cursor_ts));
+        }
+
+        let events = match client.fetch_events(vec![filter], Some(PAGE_TIMEOUT)).await {
+            Ok(e) => e,
+            Err(_) => break,
+        };
+        if events.is_empty() {
+            break;
+        }
+
+        let mut page_max_ts = cursor_ts;
+        let mut page_added = 0usize;
+        for event in events.iter() {
+            let ts = event.created_at.as_u64();
+            if ts > page_max_ts {
+                page_max_ts = ts;
+            }
+            if let Ok(tlv) = BASE64.decode(&event.content) {
+                if let Ok(u) = deposits_core::types::SignedLedgerUpdate::tlv_decode(&tlv) {
+                    if seen.insert(u.content_hash) {
+                        all_updates.push(u);
+                        page_added += 1;
+                    }
+                }
             }
         }
+        let _ = page_added;
+        pages += 1;
+        // Stop when the page didn't push the cursor forward (no
+        // events newer than what we already saw) or we hit the
+        // page cap. The "page fewer than limit" check is the
+        // natural end-of-stream signal.
+        if page_max_ts <= cursor_ts
+            || events.len() < PAGE_LIMIT
+            || pages >= MAX_PAGES
+        {
+            break;
+        }
+        cursor_ts = page_max_ts;
     }
-    updates
+
+    all_updates
 }
 
 /// "What is the pipeline waiting on next?" derived from a fork
