@@ -339,6 +339,14 @@ impl Wallet {
         self.network
     }
 
+    /// Get the configured Esplora/Electrs URL. Exposed so CLI
+    /// helpers can issue ad-hoc chain queries against the same
+    /// endpoint the wallet uses (e.g. `disputes` checking the
+    /// reserves address's funded/spent stats).
+    pub fn electrum_url(&self) -> &str {
+        &self.electrum_url
+    }
+
     /// Get a new receiving address
     pub fn get_new_address(&self) -> Result<Address, Error> {
         let mut wallet = self.inner.lock().unwrap();

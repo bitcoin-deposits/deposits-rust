@@ -237,11 +237,36 @@ async fn fetch_ledger_updates_from_relay(
     all_updates
 }
 
+/// On-chain status of the ledger's reserves address.
+#[derive(Debug, Clone, Copy)]
+enum ReservesStatus {
+    /// Never funded — no txs to the address ever.
+    NeverFunded,
+    /// Has unspent funds (the live, pre-confiscation state).
+    Funded,
+    /// Was funded historically but has no unspent outputs left
+    /// (the post-confiscation state — input was consumed).
+    Confiscated,
+    /// Esplora query failed; status unknown.
+    Unknown,
+}
+
+impl ReservesStatus {
+    fn label(&self) -> &'static str {
+        match self {
+            ReservesStatus::NeverFunded => "never funded (quorum never activated on-chain)",
+            ReservesStatus::Funded => "unspent",
+            ReservesStatus::Confiscated => "SPENT — confiscation TX landed",
+            ReservesStatus::Unknown => "chain query failed",
+        }
+    }
+}
+
 /// "What is the pipeline waiting on next?" derived from a fork
-/// summary plus the on-chain reserves-UTXO spent status.
+/// summary plus the on-chain reserves-UTXO status.
 fn next_step_hint(
     fork: &ForkSummary,
-    reserves_spent: Option<bool>,
+    reserves: ReservesStatus,
     current_block: u32,
     quorum_expiry: Option<u32>,
 ) -> &'static str {
@@ -251,19 +276,30 @@ fn next_step_hint(
     if fork.has_dispute_yield {
         return "yielded — branch tombstoned";
     }
-    if !fork.has_dispute_enter {
+    // DisputeArmed implies DisputeEnter must have been applied
+    // (state machine doesn't allow Armed without Disputed first).
+    // If we observed Armed but not Enter, the Enter is on-chain
+    // but the relay evicted it from history.
+    let armed = fork.has_dispute_armed;
+    let entered = fork.has_dispute_enter || armed;
+    if !entered {
         return "fork created but DisputeEnter missing (auto-arm should retry)";
     }
-    if !fork.has_dispute_armed {
+    if !armed {
         return "DisputeEnter present, waiting for DisputeArmed";
     }
     if !fork.has_replacement_collateral {
         return "armed without replacement_collateral — fund operator P2WPKH then re-arm";
     }
-    match reserves_spent {
-        Some(true) => "confiscation TX landed — waiting for lottery reveal/claim",
-        Some(false) => "armed with collateral — waiting on quorum cosignatures for confiscation TX",
-        None => match quorum_expiry {
+    match reserves {
+        ReservesStatus::NeverFunded => {
+            "quorum never activated on-chain — no reserves to confiscate; dispute is moot"
+        }
+        ReservesStatus::Confiscated => "confiscation TX landed — waiting for lottery reveal/claim",
+        ReservesStatus::Funded => {
+            "armed with collateral — waiting on quorum cosignatures for confiscation TX"
+        }
+        ReservesStatus::Unknown => match quorum_expiry {
             Some(expiry) if current_block > expiry => {
                 "armed; chain query unavailable — confiscation pending"
             }
@@ -358,11 +394,12 @@ async fn disputes_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             .filter(|(_, f)| f.has_replacement_collateral)
             .count();
 
-        let reserves_spent = is_reserves_unspent(&node, main).await.map(|u| !u);
-        let spent_label = match reserves_spent {
-            Some(true) => "yes",
-            Some(false) => "no",
-            None => "?",
+        let reserves = reserves_status(&node, main).await;
+        let spent_label = match reserves {
+            ReservesStatus::NeverFunded => "none",
+            ReservesStatus::Funded => "no",
+            ReservesStatus::Confiscated => "yes",
+            ReservesStatus::Unknown => "?",
         };
         let expiry_label = main
             .state
@@ -390,7 +427,7 @@ async fn disputes_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                 )
             });
         let hint = match best {
-            Some((_, f)) => next_step_hint(f, reserves_spent, current_block, main.state.quorum_expiry),
+            Some((_, f)) => next_step_hint(f, reserves, current_block, main.state.quorum_expiry),
             None => {
                 if past_expiry {
                     "quorum expired — waiting for auto-arm"
@@ -478,13 +515,12 @@ async fn disputes_show(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     } else {
         println!("Quorum expiry: —");
     }
-    let reserves_unspent = is_reserves_unspent(&node, &main).await;
-    let reserves_spent = reserves_unspent.map(|u| !u);
-    match reserves_unspent {
-        Some(true) => println!("Reserves UTXO: unspent ({})", main.state.reserves_key),
-        Some(false) => println!("Reserves UTXO: SPENT — confiscation TX landed ({})", main.state.reserves_key),
-        None => println!("Reserves UTXO: chain query failed ({})", main.state.reserves_key),
-    }
+    let reserves = reserves_status(&node, &main).await;
+    println!(
+        "Reserves UTXO: {} ({})",
+        reserves.label(),
+        main.state.reserves_key
+    );
     println!();
 
     // Each fork by disputer. Relay backfill: pull every kind:9100
@@ -539,7 +575,7 @@ async fn disputes_show(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         }
         println!(
             "  next step:   {}",
-            next_step_hint(&s, reserves_spent, current_block, main.state.quorum_expiry)
+            next_step_hint(&s, reserves, current_block, main.state.quorum_expiry)
         );
         println!();
     }
@@ -554,22 +590,68 @@ fn yes_no(b: bool) -> &'static str {
     }
 }
 
-/// Esplora query: is the ledger's reserves UTXO still on the
-/// scripthash's unspent list? `Some(true)` if at least one unspent
-/// matches the script, `Some(false)` if the script has no unspent
-/// outputs (confiscation TX landed). `None` on transport/parse
-/// failure — caller should treat as "unknown".
-async fn is_reserves_unspent(
+/// Esplora query for the ledger's reserves address — distinguishes
+/// "never funded" (quorum never activated on-chain) from "funded
+/// then spent" (confiscation TX landed). `find_utxo_for_script`
+/// alone can't tell those apart since both return an empty UTXO
+/// list. We instead read the address's chain_stats from Esplora's
+/// `/scripthash/<hash>` endpoint, which carries `funded_txo_count`
+/// and `spent_txo_count` separately.
+async fn reserves_status(
     node: &Node,
     ledger: &deposits_core::ledger::Ledger,
-) -> Option<bool> {
+) -> ReservesStatus {
+    use bitcoin::hashes::{sha256, Hash};
+
     let addr_str = &ledger.state.reserves_key;
-    let address: bitcoin::Address<bitcoin::address::NetworkUnchecked> = addr_str.parse().ok()?;
-    let address = address.require_network(node.wallet.network()).ok()?;
-    let script_pubkey = address.script_pubkey();
-    match node.wallet.find_utxo_for_script(&script_pubkey) {
-        Ok(Some(_)) => Some(true),
-        Ok(None) => Some(false),
-        Err(_) => None,
+    let address: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+        match addr_str.parse() {
+            Ok(a) => a,
+            Err(_) => return ReservesStatus::Unknown,
+        };
+    let address = match address.require_network(node.wallet.network()) {
+        Ok(a) => a,
+        Err(_) => return ReservesStatus::Unknown,
+    };
+    let script_hash = sha256::Hash::hash(address.script_pubkey().as_bytes());
+    let url = format!(
+        "{}/scripthash/{}",
+        node.wallet.electrum_url(),
+        hex::encode(script_hash.to_byte_array())
+    );
+    let resp = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map(|c| c.get(&url).send())
+    {
+        Ok(fut) => match fut.await {
+            Ok(r) => r,
+            Err(_) => return ReservesStatus::Unknown,
+        },
+        Err(_) => return ReservesStatus::Unknown,
+    };
+    if !resp.status().is_success() {
+        return ReservesStatus::Unknown;
+    }
+    let stats: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return ReservesStatus::Unknown,
+    };
+    let funded = stats
+        .get("chain_stats")
+        .and_then(|c| c.get("funded_txo_count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let spent = stats
+        .get("chain_stats")
+        .and_then(|c| c.get("spent_txo_count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if funded == 0 {
+        ReservesStatus::NeverFunded
+    } else if spent >= funded {
+        ReservesStatus::Confiscated
+    } else {
+        ReservesStatus::Funded
     }
 }
