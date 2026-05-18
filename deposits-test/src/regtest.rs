@@ -679,26 +679,101 @@ pub fn mine_blocks(n: u32) {
     );
 }
 
-/// Poll all operator data dirs (op0..op9) for
-/// `confiscated_<ledger_id[..16]>.marker`. Returns the operator index
-/// whose dir produced the marker, or panics on timeout.
+/// Wait for the dispute pipeline's confiscation TX to land on chain
+/// by polling Esplora until the ledger's reserves UTXO is spent.
+///
+/// Previously this polled for a `confiscated_<prefix>.marker` file
+/// the daemon wrote after broadcasting confiscation. That marker
+/// went away in the on-disk-state cleanup; the authoritative
+/// equivalent is the chain itself — once the reserves UTXO is gone
+/// (spent by the confiscation TX, signed by the quorum threshold),
+/// the pipeline has run end-to-end.
+///
+/// Returns the operator index whose ledger JSONL we read to discover
+/// the reserves address (purely for logging compatibility with the
+/// prior helper signature). Panics on timeout.
 pub fn poll_confiscation_marker(ledger_id: &str, timeout: Duration) -> usize {
-    let prefix = &ledger_id[..16];
-    let marker_name = format!("confiscated_{}.marker", prefix);
+    use deposits_protocol::messages::LedgerOperation;
+    use deposits_protocol::tlv::TlvDecode;
+
+    // Find the LedgerOpen's `reserves_id` in any operator's view.
+    let (observed_op, reserves_addr): (usize, String) = (0..10)
+        .find_map(|op_idx| {
+            let path = op_data_dir(op_idx)
+                .join("wallet/ledgers")
+                .join(format!("{}.jsonl", ledger_id));
+            if !path.exists() {
+                return None;
+            }
+            let history = read_ledger_history(&op_data_dir(op_idx), ledger_id);
+            history.iter().find_map(|u| {
+                let op = LedgerOperation::tlv_decode(&u.message).ok()?;
+                if let LedgerOperation::LedgerOpen { reserves_id, .. } = op {
+                    Some((op_idx, reserves_id))
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_else(|| panic!(
+            "no LedgerOpen found anywhere for ledger {} — cannot derive reserves address",
+            &ledger_id[..16]
+        ));
+
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
-        for op_idx in 0..10 {
-            let path = op_data_dir(op_idx).join(&marker_name);
-            if path.exists() {
-                return op_idx;
-            }
+        if is_address_fully_spent(&reserves_addr) {
+            return observed_op;
         }
         std::thread::sleep(Duration::from_secs(2));
     }
     panic!(
-        "no confiscation marker `{}` on any operator data dir within {:?}",
-        marker_name, timeout
+        "reserves address {} for ledger {} still has an unspent output after {:?} — \
+         confiscation TX never landed",
+        reserves_addr, &ledger_id[..16], timeout
     );
+}
+
+/// One-shot Esplora query: true iff `address_str` has no unspent
+/// outputs at all (`/scripthash/<hash>/utxo` returns `[]`). On any
+/// connection / parse error, returns false so the caller keeps
+/// retrying within its own deadline.
+fn is_address_fully_spent(address_str: &str) -> bool {
+    use bitcoin::hashes::{sha256, Hash};
+
+    let address: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+        match address_str.parse() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+    let address = match address.require_network(bitcoin::Network::Regtest) {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let script_hash = sha256::Hash::hash(address.script_pubkey().as_bytes());
+    let url = format!(
+        "{}/scripthash/{}/utxo",
+        ELECTRS_URL,
+        hex::encode(script_hash.to_byte_array())
+    );
+    let resp = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .and_then(|c| c.get(&url).send())
+    {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    if !resp.status().is_success() {
+        return false;
+    }
+    let utxos: Vec<serde_json::Value> = match resp.json() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    // Fully spent = no unspent outputs at this address. Esplora
+    // returns an empty array when the scripthash has no UTXOs.
+    utxos.is_empty()
 }
 
 pub fn ledger_health(op_idx: usize, ledger_id: &str) -> String {

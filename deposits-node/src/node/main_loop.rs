@@ -848,6 +848,9 @@ impl Node {
         // and is the single writer; routing through it eliminates the
         // race with the inbound apply path.
         let forwarded = to_append.len();
+        // Lazy-spawn if needed (joined-ledger imports that haven't
+        // yet had ensure_actor_for called).
+        self.ensure_actor_for(ledger_id);
         if let Some(handle) = self.ledger_actors.lock().unwrap().get(ledger_id) {
             for update in to_append {
                 handle.try_send(super::ledger_actor::LedgerEvent::Inbound(Box::new(update)));

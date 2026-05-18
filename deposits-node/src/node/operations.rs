@@ -137,6 +137,12 @@ impl Node {
         let block_height = self.wallet.get_block_height().unwrap_or(0);
         let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
 
+        // Lazy-spawn the actor if it doesn't exist yet. Several
+        // request-handler paths (`QuorumJoin`, etc.) commit on a
+        // ledger that was just imported but hasn't yet had its
+        // ensure_actor_for called by the surrounding flow. Spawning
+        // here is idempotent and cheap.
+        self.ensure_actor_for(ledger_id);
         let inbox = {
             let map = self.ledger_actors.lock().unwrap();
             map.get(ledger_id)

@@ -71,6 +71,7 @@ impl Node {
                     if let Ok(tlv) = BASE64.decode(b64) {
                         if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv) {
                             self.handler.insert_event(&update);
+                            self.ensure_actor_for(&request.ledger_id);
                             if let Some(handle) = self
                                 .ledger_actors
                                 .lock()

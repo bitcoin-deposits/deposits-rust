@@ -11,10 +11,11 @@ bitcoin = { version = "0.32", features = ["serde"] }
 hex = "0.4"
 # JSON parsing for the docker-backed tests in `src/regtest.rs`.
 serde_json = "1"
+# HTTP client for Esplora queries from `regtest.rs` (the chain-side
+# confiscation-completion poll replaced the on-disk marker file).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 [dev-dependencies]
-# HTTP client for the lnurl "zap" integration test.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 # The challenge-flow attestation test drives the verifier directly
 # over Nostr, reusing the wallet's gift-wrap helpers on
 # `NostrTransport`.

@@ -57,6 +57,14 @@ impl LnurlServer {
             .env("LNURL_RELAYS", relays)
             .env("LNURL_DOMAIN", domain)
             .env("LNURL_LISTEN", format!("127.0.0.1:{}", port))
+            // `deposits-lnurl` loads static assets from this directory
+            // (default `./deposits-web` relative to cwd). The test
+            // process cwd is the test crate, not the repo root, so
+            // pass an absolute path computed from the repo layout.
+            .env(
+                "DEPOSITS_WEB_DIR",
+                deposits_test::regtest::repo_root().join("deposits-web"),
+            )
             .env("RUST_LOG", "warn")
             .spawn()
             .expect("spawn deposits-lnurl");

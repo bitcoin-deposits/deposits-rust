@@ -160,6 +160,7 @@ impl Node {
                     None => break,
                 };
                 self.handler.insert_event(&update.update);
+                self.ensure_actor_for(&update.ledger_id);
                 if let Some(handle) =
                     self.ledger_actors.lock().unwrap().get(&update.ledger_id)
                 {
@@ -415,6 +416,7 @@ impl Node {
         // handler is the authoritative read path — `handler.ledgers`
         // (which the rest of the daemon still queries synchronously)
         // sees the actor's writes through the shared `Arc<RwLock<Ledger>>`.
+        self.ensure_actor_for(&inbound.ledger_id);
         if let Some(handle) = self
             .ledger_actors
             .lock()

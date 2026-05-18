@@ -127,32 +127,16 @@ fn fraud_proof_triggers_dispute_state() {
         stdout
     );
 
-    // ── 4. Poll for confiscation completion ──────────────────────
+    // ── 4. Poll the chain for confiscation completion ────────────
     //
-    // Quorum members write `confiscated_<prefix>.marker` after their
-    // confiscation TX confirms on-chain. Any member's marker proves
-    // the dispute pipeline ran end-to-end: detection → fork →
-    // DisputeArmed → lottery → confiscation TX broadcast and
-    // accepted. Auto-arm + arm + confiscate take ~90s on regtest, so
-    // poll generously.
-    let prefix = &ledger[..16];
-    let marker_name = format!("confiscated_{}.marker", prefix);
-    let deadline = Instant::now() + Duration::from_secs(180);
-    while Instant::now() < deadline {
-        for op_idx in 0..10 {
-            let path = op_data_dir(op_idx).join(&marker_name);
-            if path.exists() {
-                eprintln!(
-                    "[ok] confiscation completed: marker at op{}/{}",
-                    op_idx, marker_name
-                );
-                return;
-            }
-        }
-        std::thread::sleep(Duration::from_secs(2));
-    }
-    panic!(
-        "no confiscation marker `{}` found on any operator data dir within 180s",
-        marker_name
+    // The dispute pipeline running end-to-end (detection → fork →
+    // DisputeArmed → lottery → confiscation TX broadcast) shows up
+    // chain-side as the ledger's reserves UTXO being spent by the
+    // confiscation TX. Auto-arm + arm + confiscate take ~90s on
+    // regtest; poll generously.
+    let op_idx = poll_confiscation_marker(&ledger, Duration::from_secs(180));
+    eprintln!(
+        "[ok] confiscation completed: reserves UTXO spent (observed via op{}'s ledger view)",
+        op_idx
     );
 }
