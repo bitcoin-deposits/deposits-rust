@@ -26,6 +26,19 @@ pub enum Validity {
 pub struct StoredEvent {
     pub update: SignedLedgerUpdate,
     pub validity: Validity,
+    /// The Nostr `created_at` (unix-seconds) of the kind:9100 event
+    /// that delivered this update — either the timestamp we minted at
+    /// first publish (recorded by the outbound broadcast path) or the
+    /// one we observed on the relay (recorded by the inbound handler).
+    /// Re-broadcasts (e.g. `process_resync_request`) reuse this value
+    /// so the resulting Nostr event has the same id every time and
+    /// strfry-class relays can dedupe on event id instead of fanning
+    /// out a fresh duplicate to every subscriber.
+    ///
+    /// `None` for entries inserted before this field existed, or for
+    /// entries that have never been wrapped in a Nostr event (e.g.
+    /// updates loaded from the on-disk JSONL at startup).
+    pub created_at: Option<u64>,
 }
 
 /// Composite key for secondary index: (ledger_id, operator_id compressed bytes, sequence).
@@ -127,7 +140,14 @@ impl EventStore {
             self.unknown_count += 1;
         }
 
-        self.events.insert(hash, StoredEvent { update, validity });
+        self.events.insert(
+            hash,
+            StoredEvent {
+                update,
+                validity,
+                created_at: None,
+            },
+        );
         self.by_seq.insert(seq_key, hash);
         self.by_parent.entry(parent_hash).or_default().push(hash);
         self.insertion_order.push_back(hash);
@@ -153,6 +173,21 @@ impl EventStore {
     /// Primary lookup by content_hash.
     pub fn get(&self, hash: &[u8; 32]) -> Option<&StoredEvent> {
         self.events.get(hash)
+    }
+
+    /// Record the Nostr `created_at` of the kind:9100 event that
+    /// carries this update. Idempotent — the first recorded value
+    /// wins, so a self-echo coming back from the relay can't
+    /// overwrite the outbound path's recorded timestamp. Returns
+    /// `true` if a value was newly recorded.
+    pub fn record_created_at(&mut self, content_hash: &[u8; 32], ts: u64) -> bool {
+        match self.events.get_mut(content_hash) {
+            Some(stored) if stored.created_at.is_none() => {
+                stored.created_at = Some(ts);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Secondary lookup by (ledger_id, operator_id, seq).

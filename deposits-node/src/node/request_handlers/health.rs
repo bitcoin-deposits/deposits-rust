@@ -100,8 +100,38 @@ impl Node {
 
         let mut rebroadcast_count = 0usize;
         for (i, update) in batch.iter().enumerate() {
-            match self.nostr.broadcast_ledger_update(update).await {
-                Ok(_) => rebroadcast_count += 1,
+            // Reuse the Nostr `created_at` we recorded the first
+            // time this update went over the wire (either when we
+            // minted it on commit, or when we observed it in our
+            // own inbound feed). With the same created_at the
+            // re-broadcast yields the same event id, and relays
+            // can dedupe it on event id alone. `None` means we
+            // never tracked it — fall through to a fresh now().
+            let pinned_ts = self
+                .handler
+                .event_store
+                .lock()
+                .unwrap()
+                .get(&update.content_hash)
+                .and_then(|stored| stored.created_at);
+            match self
+                .nostr
+                .broadcast_ledger_update_at(update, pinned_ts)
+                .await
+            {
+                Ok((_event_id, used_ts)) => {
+                    // Record the timestamp if we minted a fresh one
+                    // here so the next resync of the same range can
+                    // collapse to a no-op at the relay.
+                    if pinned_ts.is_none() {
+                        self.handler
+                            .event_store
+                            .lock()
+                            .unwrap()
+                            .record_created_at(&update.content_hash, used_ts);
+                    }
+                    rebroadcast_count += 1;
+                }
                 Err(e) => {
                     tracing::warn!(
                         "Resync broadcast failed at seq {}: {}",

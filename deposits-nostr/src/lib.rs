@@ -1554,6 +1554,22 @@ impl NostrTransport {
         &self,
         update: &SignedLedgerUpdate,
     ) -> Result<String, Error> {
+        self.broadcast_ledger_update_at(update, None).await.map(|(id, _ts)| id)
+    }
+
+    /// Like `broadcast_ledger_update` but lets the caller pin the
+    /// Nostr `created_at` (unix-seconds) — so a re-broadcast of the
+    /// same SignedLedgerUpdate produces the same event id and a
+    /// strfry-class relay will dedupe it instead of fanning out a
+    /// fresh duplicate to every subscriber. With `None`, behaves
+    /// exactly like `broadcast_ledger_update` and returns the
+    /// `now()`-derived timestamp the builder picked so the caller
+    /// can record it for future re-broadcasts.
+    pub async fn broadcast_ledger_update_at(
+        &self,
+        update: &SignedLedgerUpdate,
+        override_created_at: Option<u64>,
+    ) -> Result<(String, u64), Error> {
         // Use the hashed ledger_id as the identifier
         let ledger_id = update.ledger_id_hex();
 
@@ -1607,11 +1623,16 @@ impl NostrTransport {
             }
         }
 
+        if let Some(ts) = override_created_at {
+            builder = builder.custom_created_at(nostr_sdk::Timestamp::from(ts));
+        }
+
         let event = builder
             .sign_with_keys(&self.keys)
             .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))?;
 
         let event_id = event.id.to_hex();
+        let used_created_at = event.created_at.as_u64();
 
         // Broadcast to ALL relays (fast + slow) so quorum members on any relay see it
         {
@@ -1639,7 +1660,7 @@ impl NostrTransport {
             &hex::encode(update.content_hash)[..16]
         );
 
-        Ok(event_id)
+        Ok((event_id, used_created_at))
     }
 
     /// Subscribe to ledger updates for a specific ledger.

@@ -990,17 +990,35 @@ impl Node {
                             let node = Arc::clone(&node);
                             let lid = lid.clone();
                             tokio::spawn(async move {
+                                // Broadcast via the timestamp-aware
+                                // variant so we can record the
+                                // Nostr `created_at` the builder
+                                // picked. Any future re-broadcast
+                                // of the same SignedLedgerUpdate
+                                // (e.g. via a peer's resync request)
+                                // will pin to this timestamp and the
+                                // relay will dedupe on event id.
                                 let res = node
                                     .nostr
-                                    .broadcast_ledger_update(&update)
+                                    .broadcast_ledger_update_at(&update, None)
                                     .await;
-                                match (&res, &reply) {
-                                    (Ok(_), _) => tracing::trace!(
-                                        "actor_outbox[{}…] Broadcast seq={} ok",
-                                        &lid[..16.min(lid.len())],
-                                        update.sequence_number
-                                    ),
-                                    (Err(e), _) => tracing::warn!(
+                                match &res {
+                                    Ok((_event_id, used_ts)) => {
+                                        node.handler
+                                            .event_store
+                                            .lock()
+                                            .unwrap()
+                                            .record_created_at(
+                                                &update.content_hash,
+                                                *used_ts,
+                                            );
+                                        tracing::trace!(
+                                            "actor_outbox[{}…] Broadcast seq={} ok",
+                                            &lid[..16.min(lid.len())],
+                                            update.sequence_number
+                                        );
+                                    }
+                                    Err(e) => tracing::warn!(
                                         "actor_outbox[{}…] Broadcast seq={} failed: {}",
                                         &lid[..16.min(lid.len())],
                                         update.sequence_number,
@@ -1008,8 +1026,9 @@ impl Node {
                                     ),
                                 }
                                 if let Some(reply) = reply {
-                                    let _ = reply
-                                        .send(res.map_err(|e| e.to_string()));
+                                    let _ = reply.send(
+                                        res.map(|(id, _ts)| id).map_err(|e| e.to_string()),
+                                    );
                                 }
                             });
                         }

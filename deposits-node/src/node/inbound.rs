@@ -376,6 +376,16 @@ impl Node {
 
         // Index in event store (content-addressed, handles dedup + validation)
         let is_new = self.handler.insert_event(&inbound.update);
+        // Record the Nostr `created_at` we observed so any future
+        // resync re-broadcasts pin to the same timestamp and the
+        // relay can dedupe by event id. Idempotent at the event-store
+        // level — the first recorded value wins, so a same-content
+        // echo can't overwrite the outbound path's bookkeeping.
+        self.handler
+            .event_store
+            .lock()
+            .unwrap()
+            .record_created_at(&inbound.update.content_hash, inbound.timestamp);
         if is_new {
             // Check validity after insert
             let validity_str = {
