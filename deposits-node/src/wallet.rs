@@ -766,8 +766,12 @@ impl Wallet {
         Ok(None)
     }
 
-    /// Create a mock wallet for testing
-    #[cfg(test)]
+    /// Create a mock wallet for testing. Used by both in-crate unit
+    /// tests and the `actor_paths` integration test in
+    /// `deposits-node/tests/`, so the cfg gate spans `test` (cargo
+    /// test for the lib crate) and `not(test)` consumers must still
+    /// see it for the integration-test target — leave it
+    /// unconditionally-public; the body has no production callers.
     pub fn new_mock(data_dir: PathBuf) -> Self {
         let secp = Secp256k1::new();
         let operator_pubkey =
