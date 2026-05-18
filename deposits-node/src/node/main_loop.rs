@@ -434,6 +434,88 @@ impl Node {
         }
     }
 
+    /// Fetch every kind:9100 event tagged with `ledger_id` from the
+    /// relay pool and decode the inner TLV SignedLedgerUpdates,
+    /// paginating until exhaustion. Bounded by
+    /// `RELAY_FETCH_MAX_PAGES` × `RELAY_FETCH_PAGE_LIMIT`.
+    ///
+    /// Single-page fetches with `.limit(N)` are insufficient on
+    /// forks with thousands of rows (e.g. a fork with hundreds of
+    /// duplicate QuorumAddMember entries from a pre-2d3ae43
+    /// runaway loop) — the relay serves newest-first, so a 500-row
+    /// fetch on a 1000-row fork misses the oldest entries, which
+    /// is where DisputeEnter lives. Cosigners that need to see the
+    /// full chain (tx-shape verification, fraud-proof type lookup,
+    /// quorum-expired inline-evidence lookup) call this instead.
+    ///
+    /// Returns events deduped by content_hash. Empty Vec on relay
+    /// error — caller falls back to local state.
+    pub(crate) async fn fetch_all_ledger_updates_paginated(
+        &self,
+        ledger_id: &str,
+    ) -> Vec<deposits_core::types::SignedLedgerUpdate> {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use deposits_core::TlvDecode;
+        use nostr_sdk::{Filter, Kind, Timestamp};
+
+        let client = self.nostr.fetch_client();
+        let mut all = Vec::new();
+        let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        let mut cursor_ts: u64 = 0;
+        let mut pages = 0u32;
+
+        loop {
+            let mut filter = Filter::new()
+                .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
+                .custom_tag(
+                    crate::nostr::TAG_LEDGER_ID,
+                    [crate::nostr::ledger_tag(ledger_id)],
+                )
+                .limit(Self::RELAY_FETCH_PAGE_LIMIT);
+            if cursor_ts > 0 {
+                filter = filter.since(Timestamp::from(cursor_ts));
+            }
+
+            let events = match client
+                .fetch_events(vec![filter], Some(std::time::Duration::from_secs(15)))
+                .await
+            {
+                Ok(e) => e,
+                Err(_) => break,
+            };
+            if events.is_empty() {
+                break;
+            }
+
+            let page_count = events.len();
+            let mut page_max_ts = cursor_ts;
+            for event in events.iter() {
+                let ts = event.created_at.as_u64();
+                if ts > page_max_ts {
+                    page_max_ts = ts;
+                }
+                if let Ok(tlv) = BASE64.decode(&event.content) {
+                    if let Ok(u) =
+                        deposits_core::types::SignedLedgerUpdate::tlv_decode(&tlv)
+                    {
+                        if seen.insert(u.content_hash) {
+                            all.push(u);
+                        }
+                    }
+                }
+            }
+            pages += 1;
+            if page_max_ts <= cursor_ts
+                || page_count < Self::RELAY_FETCH_MIN_PAGE
+                || pages >= Self::RELAY_FETCH_MAX_PAGES
+            {
+                break;
+            }
+            cursor_ts = page_max_ts;
+        }
+        all
+    }
+
     /// Re-import a joined ledger from Nostr, replacing any stale local copy.
     ///
     /// Called when `handle_ledger_update` detects a gap between the local

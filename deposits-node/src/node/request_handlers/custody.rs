@@ -111,34 +111,21 @@ impl Node {
 
         tracing::info!("    Our key: {}...", &our_pubkey.to_string()[..16]);
 
-        // Use the slow relay client for historical fetch
-        let client = self.nostr.fetch_client();
-
-        let filter = Filter::new()
-            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(
-                crate::nostr::TAG_LEDGER_ID,
-                [crate::nostr::ledger_tag(ledger_id.as_str())],
-            )
-            .limit(500);
-
-        let events = match client.fetch_events(vec![filter], None).await {
-            Ok(e) => e,
-            Err(e) => {
-                return (false, None, Some(format!("Failed to fetch ledger: {}", e)));
-            }
-        };
-
-        // Decode and validate updates
-        let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
-        for event in events.iter() {
-            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
-                if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
-                    updates.push(update);
-                }
-            }
+        // Paginated relay fetch — bloated forks (thousands of
+        // duplicate QuorumAddMember rows from a pre-dedup-fix
+        // runaway loop) overflow a single 500-event window and
+        // would cause us to miss DisputeEnter / DisputeArmed at
+        // the tail.
+        let mut updates: Vec<SignedLedgerUpdate> = self
+            .fetch_all_ledger_updates_paginated(ledger_id.as_str())
+            .await;
+        if updates.is_empty() {
+            return (
+                false,
+                None,
+                Some("Failed to fetch ledger or relay empty".to_string()),
+            );
         }
-
         updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
         updates.dedup_by(|a, b| {
             a.sequence_number == b.sequence_number
@@ -436,35 +423,16 @@ impl Node {
 
         let ledger_id = &request.ledger_id;
 
-        // Fetch the ledger's full update history from the slow relay
-        // (mirrors the fetch pattern in custody_transfer_sign).
-        let client = self.nostr.fetch_client();
-        let filter = Filter::new()
-            .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
-            .custom_tag(
-                crate::nostr::TAG_LEDGER_ID,
-                [crate::nostr::ledger_tag(ledger_id.as_str())],
-            )
-            .limit(500);
-        let events = client
-            .fetch_events(vec![filter], None)
-            .await
-            .map_err(|e| format!("failed to fetch ledger updates: {}", e))?;
-
-        let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
-        for event in events.iter() {
-            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
-                if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
-                    updates.push(update);
-                }
-            }
+        // Paginated relay fetch — bloated forks overflow a single
+        // 500-event window. Without this, the DisputeArmed for
+        // each disputant lives in the tail and is missed entirely.
+        let mut updates: Vec<SignedLedgerUpdate> = self
+            .fetch_all_ledger_updates_paginated(ledger_id.as_str())
+            .await;
+        if updates.is_empty() {
+            return Err("failed to fetch ledger updates from relay".to_string());
         }
         updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
-        updates.dedup_by(|a, b| {
-            a.sequence_number == b.sequence_number
-                && a.operator_id == b.operator_id
-                && a.content_hash == b.content_hash
-        });
 
         // Identify the original operator (sequence 0). All operator-key
         // updates ≤ lvs come from them; updates with a different
@@ -735,27 +703,14 @@ impl Node {
 
         let ledger_id = &request.ledger_id;
 
-        // 4. Fetch the disputed ledger's full update history
-        let client = self.nostr.fetch_client();
-        let filter = Filter::new()
-            .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
-            .custom_tag(
-                crate::nostr::TAG_LEDGER_ID,
-                [crate::nostr::ledger_tag(ledger_id.as_str())],
-            )
-            .limit(500);
-        let events = client
-            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
-            .await
-            .map_err(|e| format!("fetch updates: {}", e))?;
-
-        let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
-        for ev in events.iter() {
-            if let Ok(b) = BASE64.decode(&ev.content) {
-                if let Ok(u) = SignedLedgerUpdate::tlv_decode(&b) {
-                    updates.push(u);
-                }
-            }
+        // 4. Fetch the disputed ledger's full update history.
+        // Paginated — a bloated fork would otherwise hide
+        // DisputeArmed at the tail beyond the 500-event window.
+        let mut updates: Vec<SignedLedgerUpdate> = self
+            .fetch_all_ledger_updates_paginated(ledger_id.as_str())
+            .await;
+        if updates.is_empty() {
+            return Err("fetch updates: relay returned no events".to_string());
         }
         updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
 

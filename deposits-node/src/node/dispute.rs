@@ -918,19 +918,17 @@ impl Node {
         // Use the slow relay client for historical fetch
         let client = self.nostr.fetch_client();
 
-        // Fetch ledger updates
-        let filter = Filter::new()
-            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(
-                crate::nostr::TAG_LEDGER_ID,
-                [crate::nostr::ledger_tag(ledger_id)],
-            )
-            .limit(500);
-
-        let update_events = client
-            .fetch_events(vec![filter], None)
-            .await
-            .map_err(|e| Error::Protocol(format!("Failed to fetch updates: {}", e)))?;
+        // Paginated fetch — bloated forks (thousands of duplicate
+        // QuorumAddMember rows pre-2d3ae43 dedup-fix) overflow a
+        // single 500-event window and would hide DisputeArmed at
+        // the tail.
+        let paginated_updates = self.fetch_all_ledger_updates_paginated(ledger_id).await;
+        // Build a fake `Events`-shaped iterable below by walking the
+        // already-decoded updates; the old code path encoded
+        // SignedLedgerUpdate inside an `Event.content`, but
+        // `fetch_all_ledger_updates_paginated` returns decoded
+        // SignedLedgerUpdates directly.
+        let _ = client; // pagination uses node.nostr.fetch_client internally
 
         // Fetch lottery reveals
         let reveal_filter = Filter::new()
@@ -947,25 +945,21 @@ impl Node {
         let mut participants: Vec<(PublicKey, LotteryParticipant)> = Vec::new();
         let mut our_armed: Option<SignedLedgerUpdate> = None;
 
-        for event in update_events.iter() {
-            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
-                if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
-                    if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        if let LedgerOperation::DisputeArmed {
-                            commitment_hash,
-                            target_reserves,
-                            ..
-                        } = op
-                        {
-                            let x_only = update.operator_id.x_only_public_key().0;
-                            participants.push((
-                                update.operator_id,
-                                LotteryParticipant::new(x_only, commitment_hash, target_reserves),
-                            ));
-                            if update.operator_id == our_pubkey {
-                                our_armed = Some(update);
-                            }
-                        }
+        for update in &paginated_updates {
+            if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                if let LedgerOperation::DisputeArmed {
+                    commitment_hash,
+                    target_reserves,
+                    ..
+                } = op
+                {
+                    let x_only = update.operator_id.x_only_public_key().0;
+                    participants.push((
+                        update.operator_id,
+                        LotteryParticipant::new(x_only, commitment_hash, target_reserves),
+                    ));
+                    if update.operator_id == our_pubkey {
+                        our_armed = Some(update.clone());
                     }
                 }
             }
@@ -1420,31 +1414,12 @@ impl Node {
         use deposits_core::SignedLedgerUpdate;
         use nostr_sdk::{Filter, Kind};
 
-        // 1. Fetch all kind:LEDGER_UPDATE events for this ledger —
-        //    both main-chain (operator-authored) and fork-branch
-        //    (disputant-authored). Same filter shape the confiscation
-        //    verifier uses upstream.
-        let client = self.nostr.fetch_client();
-        let filter = Filter::new()
-            .kind(Kind::Custom(deposits_nostr::KIND_LEDGER_UPDATE))
-            .custom_tag(
-                deposits_nostr::TAG_LEDGER_ID,
-                [deposits_nostr::ledger_tag(ledger_id)],
-            )
-            .limit(500);
-        let events = client
-            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
-            .await
-            .ok()?;
-
-        let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
-        for event in events.iter() {
-            if let Ok(tlv) = BASE64.decode(&event.content) {
-                if let Ok(u) = SignedLedgerUpdate::tlv_decode(&tlv) {
-                    updates.push(u);
-                }
-            }
-        }
+        // 1. Fetch all kind:LEDGER_UPDATE events for this ledger
+        //    — both main-chain (operator-authored) and fork-branch
+        //    (disputant-authored). Paginated; bloated forks
+        //    overflow a single 500-event window.
+        let mut updates: Vec<SignedLedgerUpdate> =
+            self.fetch_all_ledger_updates_paginated(ledger_id).await;
         if updates.is_empty() {
             return None;
         }
@@ -1817,23 +1792,15 @@ impl Node {
                 .unwrap_or_else(|| ledger_id.clone());
 
             // Use the slow relay client for historical fetch
-            let client = self.nostr.fetch_client();
-
-            let filter = Filter::new()
-                .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
-                .custom_tag(
-                    crate::nostr::TAG_LEDGER_ID,
-                    [crate::nostr::ledger_tag(ledger_id.as_str())],
-                )
-                .limit(500);
-
-            let events = match client
-                .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
-                .await
-            {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
+            // Paginated relay fetch — bloated forks would
+            // otherwise hide DisputeArmed at the tail beyond a
+            // single 500-event window.
+            let paginated_updates: Vec<SignedLedgerUpdate> = self
+                .fetch_all_ledger_updates_paginated(ledger_id.as_str())
+                .await;
+            if paginated_updates.is_empty() {
+                continue;
+            }
 
             // Extract DisputeArmed participants, quorum members, and reserves info.
             //
@@ -1855,65 +1822,61 @@ impl Node {
             let mut quorum_expiry_at_qb: u32 = 0;
             let mut ruleset_at_qb: Option<String> = None;
 
-            for event in events.iter() {
-                if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
-                    if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
-                        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                            match op {
-                                LedgerOperation::LedgerOpen {
-                                    operator_id,
-                                    reserves_id,
-                                    ..
-                                } => {
-                                    original_operator = Some(operator_id);
-                                    // Use LedgerOpen reserves_id as fallback if no QuorumBegin
-                                    if reserves_address.is_none() {
-                                        reserves_address = Some(reserves_id);
-                                    }
-                                }
-                                LedgerOperation::QuorumBegin {
-                                    reserves_id,
-                                    ledger_hash: lh,
-                                    quorum_members: qm,
-                                    quorum_expiry,
-                                    protocol_version,
-                                    ..
-                                } => {
-                                    // Keep the latest QuorumBegin (highest sequence) since
-                                    // multiple rotations may exist on the relay.
-                                    let seq = update.sequence_number;
-                                    if latest_quorum_begin_seq
-                                        .map(|cur| seq > cur)
-                                        .unwrap_or(true)
-                                    {
-                                        latest_quorum_begin_seq = Some(seq);
-                                        reserves_address = Some(reserves_id);
-                                        ledger_hash = Some(lh);
-                                        // Local var is Vec<PublicKey> for downstream
-                                        // Taproot reconstruction; extract just the keys.
-                                        quorum_members = qm.into_iter().map(|m| m.pubkey).collect();
-                                        quorum_expiry_at_qb = quorum_expiry;
-                                        ruleset_at_qb = protocol_version;
-                                    }
-                                }
-                                LedgerOperation::DisputeArmed {
-                                    commitment_hash,
-                                    target_reserves,
-                                    ..
-                                } => {
-                                    let x_only = update.operator_id.x_only_public_key().0;
-                                    // Check if we already have this participant
-                                    if !participants.iter().any(|p| p.pubkey == x_only) {
-                                        participants.push(LotteryParticipant::new(
-                                            x_only,
-                                            commitment_hash,
-                                            target_reserves,
-                                        ));
-                                    }
-                                }
-                                _ => {}
+            for update in &paginated_updates {
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    match op {
+                        LedgerOperation::LedgerOpen {
+                            operator_id,
+                            reserves_id,
+                            ..
+                        } => {
+                            original_operator = Some(operator_id);
+                            // Use LedgerOpen reserves_id as fallback if no QuorumBegin
+                            if reserves_address.is_none() {
+                                reserves_address = Some(reserves_id);
                             }
                         }
+                        LedgerOperation::QuorumBegin {
+                            reserves_id,
+                            ledger_hash: lh,
+                            quorum_members: qm,
+                            quorum_expiry,
+                            protocol_version,
+                            ..
+                        } => {
+                            // Keep the latest QuorumBegin (highest sequence) since
+                            // multiple rotations may exist on the relay.
+                            let seq = update.sequence_number;
+                            if latest_quorum_begin_seq
+                                .map(|cur| seq > cur)
+                                .unwrap_or(true)
+                            {
+                                latest_quorum_begin_seq = Some(seq);
+                                reserves_address = Some(reserves_id);
+                                ledger_hash = Some(lh);
+                                // Local var is Vec<PublicKey> for downstream
+                                // Taproot reconstruction; extract just the keys.
+                                quorum_members = qm.into_iter().map(|m| m.pubkey).collect();
+                                quorum_expiry_at_qb = quorum_expiry;
+                                ruleset_at_qb = protocol_version;
+                            }
+                        }
+                        LedgerOperation::DisputeArmed {
+                            commitment_hash,
+                            target_reserves,
+                            ..
+                        } => {
+                            let x_only = update.operator_id.x_only_public_key().0;
+                            // Check if we already have this participant
+                            if !participants.iter().any(|p| p.pubkey == x_only) {
+                                participants.push(LotteryParticipant::new(
+                                    x_only,
+                                    commitment_hash,
+                                    target_reserves,
+                                ));
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -2447,32 +2410,26 @@ impl Node {
 
         use nostr_sdk::{Filter, Kind};
 
-        // Use the slow relay client for historical fetch
-        let client = self.nostr.fetch_client();
-
-        let filter = Filter::new()
-            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(
-                crate::nostr::TAG_LEDGER_ID,
-                [crate::nostr::ledger_tag(ledger_id)],
-            )
-            .limit(500);
-
-        let events = client
-            .fetch_events(vec![filter], None)
-            .await
-            .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
+        // Paginated relay fetch — bloated forks would otherwise
+        // hide DisputeArmed at the tail beyond a single 500-event
+        // window.
+        let paginated_updates = self
+            .fetch_all_ledger_updates_paginated(ledger_id)
+            .await;
+        if paginated_updates.is_empty() {
+            return Err(Error::Protocol(
+                "Failed to fetch ledger updates from relay".to_string(),
+            ));
+        }
 
         // Extract DisputeArmed participants AND quorum members (must match auto_confiscate)
         let mut participants: Vec<LotteryParticipant> = Vec::new();
         let mut quorum_members: Vec<PublicKey> = Vec::new();
         let mut original_operator: Option<PublicKey> = None;
 
-        for event in events.iter() {
-            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
-                if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
-                    if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        match op {
+        for update in &paginated_updates {
+            if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                match op {
                             LedgerOperation::LedgerOpen { operator_id, .. } => {
                                 original_operator = Some(operator_id);
                             }
@@ -2503,8 +2460,6 @@ impl Node {
                             _ => {}
                         }
                     }
-                }
-            }
         }
 
         if participants.len() < 2 {
@@ -2659,32 +2614,16 @@ impl Node {
 
         let our_pubkey = self.node_id;
 
-        // Use the slow relay client for historical fetch
-        let client = self.nostr.fetch_client();
+        // Paginated relay fetch — bloated forks would otherwise
+        // hide DisputeAcquire at the tail beyond a single 500-event
+        // window.
+        let paginated_updates = self.fetch_all_ledger_updates_paginated(ledger_id).await;
 
-        let filter = Filter::new()
-            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-            .custom_tag(
-                crate::nostr::TAG_LEDGER_ID,
-                [crate::nostr::ledger_tag(ledger_id)],
-            )
-            .limit(500);
-
-        let events = client
-            .fetch_events(vec![filter], None)
-            .await
-            .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
-
-        // Check if we have a DisputeAcquire
-        for event in events.iter() {
-            if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
-                if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
-                    if update.operator_id == our_pubkey {
-                        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                            if matches!(op, LedgerOperation::DisputeAcquire { .. }) {
-                                return Ok(true);
-                            }
-                        }
+        for update in &paginated_updates {
+            if update.operator_id == our_pubkey {
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    if matches!(op, LedgerOperation::DisputeAcquire { .. }) {
+                        return Ok(true);
                     }
                 }
             }
