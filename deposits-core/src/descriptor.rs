@@ -79,27 +79,36 @@ fn try_verify_pk(
 
 /// Verify a witness against a general miniscript descriptor.
 ///
-/// Parses the descriptor, checks each signature in the witness stack
-/// against the message hash, and evaluates satisfaction. Each key may
-/// only be credited once, so duplicate signatures don't cumulate
-/// toward the threshold.
+/// The descriptor is parsed, lifted to its abstract `Semantic` policy,
+/// and then evaluated against a "did this key sign the message?"
+/// predicate. Going through the policy AST (rather than string-matching
+/// the descriptor) means every combinator the miniscript parser
+/// accepts — `and`, `or`, `thresh`, nested forms — is honored
+/// structurally, with no per-shape special cases.
+///
+/// Time/hashlocks present in the descriptor are evaluated as
+/// `false`: our message-signing model has no witness slot for
+/// preimages or sequence/locktime proofs, so any subterm gated on
+/// them is unsatisfiable here. A descriptor like
+/// `or(pk(A), and(pk(B), older(144)))` therefore reduces to "A
+/// must sign" — exactly what we want for off-chain authorization.
 fn verify_miniscript(
     descriptor: &str,
     witness: &DescriptorWitness,
     message_hash: &[u8; 32],
 ) -> Result<bool, DepositsError> {
+    use miniscript::policy::Liftable;
     use miniscript::{Descriptor, DescriptorPublicKey};
     use std::str::FromStr;
 
-    // Try to parse as a miniscript descriptor
-    // Deposits use raw key hex, so wrap in a bare wsh context for parsing
+    // Deposits use raw key hex; wrap in wsh() if no top-level
+    // context is present so miniscript will parse it.
     let desc_str = if descriptor.starts_with("wsh(")
         || descriptor.starts_with("sh(")
         || descriptor.starts_with("tr(")
     {
         descriptor.to_string()
     } else {
-        // Bare policy — wrap in wsh() for miniscript parsing
         format!("wsh({})", descriptor)
     };
 
@@ -110,135 +119,55 @@ fn verify_miniscript(
         }
     })?;
 
-    // For each key in the descriptor, check if the witness contains a valid
-    // Schnorr signature for that key over the message_hash
+    let policy = desc.lift().map_err(|e| DepositsError::ProtocolViolation {
+        violation_type: "invalid_descriptor".to_string(),
+        details: format!("Descriptor '{}' does not lift to a policy: {}", descriptor, e),
+    })?;
+
     let secp = Secp256k1::verification_only();
     let msg = Message::from_digest(*message_hash);
 
-    // Extract all pubkeys from the descriptor
-    let mut keys = Vec::new();
-    extract_keys(&desc, &mut keys);
-
-    // For each key, count it as "satisfied" iff at least one stack entry
-    // is a valid Schnorr signature by that key. Tallying per-key (rather
-    // than per-stack-entry) prevents a single signature from doubling up
-    // toward a threshold.
-    let mut satisfied = 0usize;
-    for key in &keys {
-        let x_only = key.x_only_public_key().0;
-        let mut hit = false;
-        for sig_bytes in &witness.stack {
+    let key_signed = |pk: &DescriptorPublicKey| -> bool {
+        let xonly = match pk {
+            DescriptorPublicKey::Single(single) => match &single.key {
+                miniscript::descriptor::SinglePubKey::FullKey(p) => p.inner.x_only_public_key().0,
+                miniscript::descriptor::SinglePubKey::XOnly(x) => *x,
+            },
+            // XPub variants aren't used in deposits descriptors — they'd
+            // require derivation paths that we don't carry here.
+            _ => return false,
+        };
+        witness.stack.iter().any(|sig_bytes| {
             if sig_bytes.len() != 64 {
-                continue;
+                return false;
             }
-            if let Ok(sig) = bitcoin::secp256k1::schnorr::Signature::from_slice(sig_bytes) {
-                if secp.verify_schnorr(&sig, &msg, &x_only).is_ok() {
-                    hit = true;
-                    break;
-                }
-            }
-        }
-        if hit {
-            satisfied += 1;
-        }
-    }
-
-    // Determine required signatures from the descriptor structure
-    let required = required_sigs(descriptor);
-
-    Ok(satisfied >= required)
-}
-
-/// Extract all public keys from a descriptor.
-fn extract_keys(
-    desc: &miniscript::Descriptor<miniscript::DescriptorPublicKey>,
-    keys: &mut Vec<bitcoin::secp256k1::PublicKey>,
-) {
-    use miniscript::ForEachKey;
-    desc.for_each_key(|key| {
-        if let miniscript::DescriptorPublicKey::Single(single) = key {
-            match &single.key {
-                miniscript::descriptor::SinglePubKey::FullKey(pk) => {
-                    keys.push(pk.inner);
-                }
-                miniscript::descriptor::SinglePubKey::XOnly(xonly) => {
-                    // Convert x-only to compressed (assume even y)
-                    let mut bytes = [0u8; 33];
-                    bytes[0] = 0x02;
-                    bytes[1..].copy_from_slice(&xonly.serialize());
-                    if let Ok(pk) = bitcoin::secp256k1::PublicKey::from_slice(&bytes) {
-                        keys.push(pk);
-                    }
-                }
-            }
-        }
-        true // continue iterating
-    });
-}
-
-/// Determine the minimum number of signatures required to satisfy a
-/// descriptor. We special-case the most common multi-key shapes —
-/// `multi(k, ...)` and `thresh(k, ...)` at the top of the descriptor
-/// (optionally wrapped in `wsh(...)` / `sh(...)`) — by parsing `k`
-/// directly from the descriptor string. Anything else is treated
-/// conservatively as N-of-N over the keys it references, mirroring
-/// the behavior before the threshold cases were special-cased.
-fn required_sigs(descriptor: &str) -> usize {
-    // Strip a single leading wrapper (wsh / sh / tr) so we see the
-    // payload shape directly.
-    let inner = strip_wrapper(descriptor.trim());
-    if let Some(k) = parse_threshold_k(inner) {
-        return k.max(1);
-    }
-
-    // Fallback: count distinct pubkey appearances. This is conservative
-    // (treats and(A,B) as 2-of-2, and over-rejects or() variants) but
-    // it preserves the pre-threshold behavior for anything we don't
-    // recognize structurally.
-    use miniscript::{Descriptor, DescriptorPublicKey, ForEachKey};
-    use std::str::FromStr;
-    let desc_str = if descriptor.starts_with("wsh(")
-        || descriptor.starts_with("sh(")
-        || descriptor.starts_with("tr(")
-    {
-        descriptor.to_string()
-    } else {
-        format!("wsh({})", descriptor)
+            bitcoin::secp256k1::schnorr::Signature::from_slice(sig_bytes)
+                .map(|sig| secp.verify_schnorr(&sig, &msg, &xonly).is_ok())
+                .unwrap_or(false)
+        })
     };
-    if let Ok(desc) = Descriptor::<DescriptorPublicKey>::from_str(&desc_str) {
-        let mut count = 0usize;
-        desc.for_each_key(|_| {
-            count += 1;
-            true
-        });
-        return count.max(1);
-    }
-    1
+
+    Ok(evaluate_policy(&policy, &key_signed))
 }
 
-/// Peel one layer of `wsh(...)`, `sh(...)`, or `tr(...)` if present.
-fn strip_wrapper(s: &str) -> &str {
-    for prefix in ["wsh(", "sh(", "tr("] {
-        if let Some(rest) = s.strip_prefix(prefix) {
-            if let Some(inner) = rest.strip_suffix(')') {
-                return inner;
-            }
-        }
+/// Recursively evaluate a lifted `Semantic` policy with a "is this key
+/// satisfied?" predicate. The predicate decides only at `Key(_)`
+/// leaves; combinators and threshold structure come straight from the
+/// policy AST so `and`/`or`/`thresh` compose correctly.
+fn evaluate_policy<F>(p: &miniscript::policy::Semantic<miniscript::DescriptorPublicKey>, signed: &F) -> bool
+where
+    F: Fn(&miniscript::DescriptorPublicKey) -> bool,
+{
+    use miniscript::policy::Semantic::*;
+    match p {
+        Trivial => true,
+        Unsatisfiable => false,
+        Key(pk) => signed(pk),
+        Thresh(t) => t.iter().filter(|sub| evaluate_policy(sub, signed)).count() >= t.k(),
+        // No witness slot carries preimages or locktime proofs in our
+        // off-chain signing model, so these are always unsatisfiable.
+        After(_) | Older(_) | Sha256(_) | Hash256(_) | Ripemd160(_) | Hash160(_) => false,
     }
-    s
-}
-
-/// Extract `k` from `multi(k, ...)` or `thresh(k, ...)` at the start
-/// of `s`. Returns `None` if `s` isn't shaped like that.
-fn parse_threshold_k(s: &str) -> Option<usize> {
-    for prefix in ["multi(", "thresh(", "multi_a(", "sortedmulti("] {
-        if let Some(rest) = s.strip_prefix(prefix) {
-            // First comma-delimited field is the threshold integer.
-            let k_str = rest.split(',').next()?.trim();
-            return k_str.parse::<usize>().ok();
-        }
-    }
-    None
 }
 
 /// Witness verifier implementation using real cryptographic verification.
@@ -430,6 +359,61 @@ mod tests {
         assert!(
             !verify_witness(&descriptor, &witness_ab_wrong, &other_hash).unwrap(),
             "2-of-3: sigs over wrong message must NOT satisfy"
+        );
+    }
+
+    /// Disjunctions used to be silently strengthened into conjunctions:
+    /// the pre-lift code counted both keys and required N-of-N, so
+    /// `or_d(pk(A), pk(B))` demanded *both* signatures. Under the
+    /// policy-lift evaluator, the lifted `Thresh(k=1, ...)` is honored
+    /// and a single signature suffices.
+    #[test]
+    fn or_d_one_sig_satisfies() {
+        let (sk_a, pk_a) = keypair_from_seed(1);
+        let (_, pk_b) = keypair_from_seed(2);
+
+        let descriptor = format!(
+            "wsh(or_d(pk({}),pk({})))",
+            hex::encode(pk_a.serialize()),
+            hex::encode(pk_b.serialize())
+        );
+        let msg_hash = [0xCD; 32];
+
+        let witness_a = DescriptorWitness {
+            stack: vec![sign_message(&sk_a, &msg_hash).to_vec()],
+        };
+        assert!(
+            verify_witness(&descriptor, &witness_a, &msg_hash).unwrap(),
+            "or_d: A alone must satisfy a disjunction"
+        );
+
+        // No signatures at all — must fail.
+        let witness_none = DescriptorWitness { stack: vec![] };
+        assert!(
+            !verify_witness(&descriptor, &witness_none, &msg_hash).unwrap(),
+            "or_d: empty witness must NOT satisfy"
+        );
+    }
+
+    /// Time/hashlock subterms are evaluated as unsatisfiable in our
+    /// off-chain signing context (no witness slot carries preimage or
+    /// locktime data). `and_v(v:pk(A), older(144))` therefore can't
+    /// be satisfied even with A's signature.
+    #[test]
+    fn timelock_branch_is_unsatisfiable() {
+        let (sk_a, pk_a) = keypair_from_seed(1);
+        let descriptor = format!(
+            "wsh(and_v(v:pk({}),older(144)))",
+            hex::encode(pk_a.serialize())
+        );
+        let msg_hash = [0xCD; 32];
+
+        let witness_a = DescriptorWitness {
+            stack: vec![sign_message(&sk_a, &msg_hash).to_vec()],
+        };
+        assert!(
+            !verify_witness(&descriptor, &witness_a, &msg_hash).unwrap(),
+            "timelock-gated branch must NOT satisfy in off-chain context"
         );
     }
 }
