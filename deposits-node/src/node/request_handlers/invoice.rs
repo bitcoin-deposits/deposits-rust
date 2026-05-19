@@ -82,8 +82,9 @@ impl Node {
                     .unwrap_or(false)
             };
             if needs_witness {
+                let tip = self.wallet.get_block_height().unwrap_or(0);
                 if let Err(msg) =
-                    super::deposits::verify_receive_witness(&descriptor, &deposit_id, request)
+                    super::deposits::verify_receive_witness(&descriptor, &deposit_id, request, tip)
                 {
                     return (false, None, Some(msg));
                 }
@@ -455,7 +456,8 @@ impl Node {
             &payment_id,
             amount_msat,
         );
-        match deposits_core::descriptor::verify_witness(&descriptor, &witness, &msg_hash) {
+        let tip = self.wallet.get_block_height().unwrap_or(0);
+        match deposits_core::descriptor::verify_witness(&descriptor, &witness, &msg_hash, tip) {
             Ok(true) => {}
             Ok(false) => {
                 return (

@@ -25,14 +25,18 @@ pub fn verify_witness(
     descriptor: &str,
     witness: &DescriptorWitness,
     message_hash: &[u8; 32],
+    chain_tip: u32,
 ) -> Result<bool, DepositsError> {
-    // Fast path: pk() descriptor — direct Schnorr verification
+    // Fast path: pk() descriptor — direct Schnorr verification. No
+    // timelock context applies to a single-key descriptor, so chain_tip
+    // is ignored here.
     if let Some(result) = try_verify_pk(descriptor, witness, message_hash)? {
         return Ok(result);
     }
 
-    // General path: parse as miniscript
-    verify_miniscript(descriptor, witness, message_hash)
+    // General path: parse as miniscript; chain_tip threads through to
+    // policy evaluation for `After(n)` checks.
+    verify_miniscript(descriptor, witness, message_hash, chain_tip)
 }
 
 /// Extract the pubkey from a `pk()` descriptor and verify a Schnorr signature.
@@ -96,6 +100,7 @@ fn verify_miniscript(
     descriptor: &str,
     witness: &DescriptorWitness,
     message_hash: &[u8; 32],
+    chain_tip: u32,
 ) -> Result<bool, DepositsError> {
     use miniscript::policy::Liftable;
     use miniscript::{Descriptor, DescriptorPublicKey};
@@ -147,14 +152,23 @@ fn verify_miniscript(
         })
     };
 
-    Ok(evaluate_policy(&policy, &key_signed))
+    Ok(evaluate_policy(&policy, &key_signed, chain_tip))
 }
 
 /// Recursively evaluate a lifted `Semantic` policy with a "is this key
 /// satisfied?" predicate. The predicate decides only at `Key(_)`
 /// leaves; combinators and threshold structure come straight from the
 /// policy AST so `and`/`or`/`thresh` compose correctly.
-fn evaluate_policy<F>(p: &miniscript::policy::Semantic<miniscript::DescriptorPublicKey>, signed: &F) -> bool
+///
+/// `chain_tip` is the daemon's view of the latest Bitcoin block height,
+/// used to evaluate `After(N)` block-height locks. We subtract
+/// `DESCRIPTOR_TIMELOCK_CONFIRMATIONS` before comparing to keep
+/// authorizations stable across short reorgs (see the constant's docs).
+fn evaluate_policy<F>(
+    p: &miniscript::policy::Semantic<miniscript::DescriptorPublicKey>,
+    signed: &F,
+    chain_tip: u32,
+) -> bool
 where
     F: Fn(&miniscript::DescriptorPublicKey) -> bool,
 {
@@ -163,10 +177,30 @@ where
         Trivial => true,
         Unsatisfiable => false,
         Key(pk) => signed(pk),
-        Thresh(t) => t.iter().filter(|sub| evaluate_policy(sub, signed)).count() >= t.k(),
-        // No witness slot carries preimages or locktime proofs in our
-        // off-chain signing model, so these are always unsatisfiable.
-        After(_) | Older(_) | Sha256(_) | Hash256(_) | Ripemd160(_) | Hash160(_) => false,
+        Thresh(t) => t
+            .iter()
+            .filter(|sub| evaluate_policy(sub, signed, chain_tip))
+            .count()
+            >= t.k(),
+        After(n) => {
+            // BIP-65: locktime values <500_000_000 are block heights;
+            // higher values are Unix timestamps. We support only the
+            // block-height flavor here — wall-clock evaluation would
+            // need a separate, equally-conservative time source.
+            let n = n.to_consensus_u32();
+            if n >= 500_000_000 {
+                return false;
+            }
+            let effective = chain_tip
+                .saturating_sub(deposits_protocol::constants::DESCRIPTOR_TIMELOCK_CONFIRMATIONS);
+            effective >= n
+        }
+        // `Older(_)` is relative; off-chain there's no canonical baseline
+        // (on-chain it's "input maturity"). Until we pin a referent for
+        // it, treat it as unsatisfiable so authorizations stay strict.
+        // Hash-preimage gates have no witness slot in our signing model
+        // and are likewise unsatisfiable.
+        Older(_) | Sha256(_) | Hash256(_) | Ripemd160(_) | Hash160(_) => false,
     }
 }
 
@@ -175,7 +209,22 @@ where
 /// This implements the `WitnessVerifier` trait from deposits-protocol,
 /// providing descriptor-based witness verification (Schnorr/miniscript)
 /// and ECDSA/Schnorr signature verification.
-pub struct CoreWitnessVerifier;
+///
+/// `chain_tip` is the operator's view of the Bitcoin chain tip at the
+/// moment this verifier is constructed; descriptor `after(N)` checks
+/// compare against `chain_tip - DESCRIPTOR_TIMELOCK_CONFIRMATIONS`. A
+/// freshly constructed verifier with `chain_tip = 0` will treat every
+/// timelock as unsatisfiable, which is the safe default for code paths
+/// that haven't yet plumbed a real height through.
+pub struct CoreWitnessVerifier {
+    pub chain_tip: u32,
+}
+
+impl CoreWitnessVerifier {
+    pub fn new(chain_tip: u32) -> Self {
+        Self { chain_tip }
+    }
+}
 
 impl deposits_protocol::WitnessVerifier for CoreWitnessVerifier {
     fn verify_witness(
@@ -184,7 +233,7 @@ impl deposits_protocol::WitnessVerifier for CoreWitnessVerifier {
         witness: &DescriptorWitness,
         message_hash: &[u8; 32],
     ) -> bool {
-        verify_witness(descriptor, witness, message_hash).unwrap_or(false)
+        verify_witness(descriptor, witness, message_hash, self.chain_tip).unwrap_or(false)
     }
 
     fn verify_signature(
@@ -244,7 +293,7 @@ mod tests {
             stack: vec![sig.to_vec()],
         };
 
-        assert!(verify_witness(&descriptor, &witness, &msg_hash).unwrap());
+        assert!(verify_witness(&descriptor, &witness, &msg_hash, 0).unwrap());
     }
 
     #[test]
@@ -256,7 +305,7 @@ mod tests {
             stack: vec![vec![0xBB; 64]],
         };
 
-        assert!(!verify_witness(&descriptor, &witness, &msg_hash).unwrap());
+        assert!(!verify_witness(&descriptor, &witness, &msg_hash, 0).unwrap());
     }
 
     #[test]
@@ -270,7 +319,7 @@ mod tests {
             stack: vec![sig.to_vec()],
         };
 
-        assert!(!verify_witness(&descriptor, &witness, &wrong_hash).unwrap());
+        assert!(!verify_witness(&descriptor, &witness, &wrong_hash, 0).unwrap());
     }
 
     #[test]
@@ -280,7 +329,7 @@ mod tests {
         let msg_hash = [0xAA; 32];
         let witness = DescriptorWitness { stack: vec![] };
 
-        assert!(!verify_witness(&descriptor, &witness, &msg_hash).unwrap());
+        assert!(!verify_witness(&descriptor, &witness, &msg_hash, 0).unwrap());
     }
 
     #[test]
@@ -290,7 +339,7 @@ mod tests {
             stack: vec![vec![0xBB; 64]],
         };
 
-        let result = verify_witness("not_a_descriptor", &witness, &msg_hash);
+        let result = verify_witness("not_a_descriptor", &witness, &msg_hash, 0);
         assert!(result.is_err());
     }
 
@@ -328,7 +377,7 @@ mod tests {
             stack: vec![sign_message(&sk_a, &msg_hash).to_vec(), sign_message(&sk_b, &msg_hash).to_vec()],
         };
         assert!(
-            verify_witness(&descriptor, &witness_ab, &msg_hash).unwrap(),
+            verify_witness(&descriptor, &witness_ab, &msg_hash, 0).unwrap(),
             "2-of-3: A+B sigs should satisfy"
         );
 
@@ -337,7 +386,7 @@ mod tests {
             stack: vec![sign_message(&sk_a, &msg_hash).to_vec()],
         };
         assert!(
-            !verify_witness(&descriptor, &witness_a, &msg_hash).unwrap(),
+            !verify_witness(&descriptor, &witness_a, &msg_hash, 0).unwrap(),
             "2-of-3: A alone must NOT satisfy"
         );
 
@@ -347,7 +396,7 @@ mod tests {
             stack: vec![sig_a.to_vec(), sig_a.to_vec()],
         };
         assert!(
-            !verify_witness(&descriptor, &witness_aa, &msg_hash).unwrap(),
+            !verify_witness(&descriptor, &witness_aa, &msg_hash, 0).unwrap(),
             "2-of-3: dup A sigs must NOT satisfy threshold"
         );
 
@@ -357,7 +406,7 @@ mod tests {
             stack: vec![sign_message(&sk_a, &msg_hash).to_vec(), sign_message(&sk_b, &msg_hash).to_vec()],
         };
         assert!(
-            !verify_witness(&descriptor, &witness_ab_wrong, &other_hash).unwrap(),
+            !verify_witness(&descriptor, &witness_ab_wrong, &other_hash, 0).unwrap(),
             "2-of-3: sigs over wrong message must NOT satisfy"
         );
     }
@@ -383,22 +432,22 @@ mod tests {
             stack: vec![sign_message(&sk_a, &msg_hash).to_vec()],
         };
         assert!(
-            verify_witness(&descriptor, &witness_a, &msg_hash).unwrap(),
+            verify_witness(&descriptor, &witness_a, &msg_hash, 0).unwrap(),
             "or_d: A alone must satisfy a disjunction"
         );
 
         // No signatures at all — must fail.
         let witness_none = DescriptorWitness { stack: vec![] };
         assert!(
-            !verify_witness(&descriptor, &witness_none, &msg_hash).unwrap(),
+            !verify_witness(&descriptor, &witness_none, &msg_hash, 0).unwrap(),
             "or_d: empty witness must NOT satisfy"
         );
     }
 
-    /// Time/hashlock subterms are evaluated as unsatisfiable in our
-    /// off-chain signing context (no witness slot carries preimage or
-    /// locktime data). `and_v(v:pk(A), older(144))` therefore can't
-    /// be satisfied even with A's signature.
+    /// Hash-preimage and `older(N)` (relative-time) sub-terms have no
+    /// witness slot in our off-chain signing model, so any branch
+    /// gated on them is unsatisfiable. `and_v(v:pk(A), older(144))`
+    /// can't be satisfied even with A's signature.
     #[test]
     fn timelock_branch_is_unsatisfiable() {
         let (sk_a, pk_a) = keypair_from_seed(1);
@@ -412,8 +461,55 @@ mod tests {
             stack: vec![sign_message(&sk_a, &msg_hash).to_vec()],
         };
         assert!(
-            !verify_witness(&descriptor, &witness_a, &msg_hash).unwrap(),
+            !verify_witness(&descriptor, &witness_a, &msg_hash, 0).unwrap(),
             "timelock-gated branch must NOT satisfy in off-chain context"
+        );
+    }
+
+    /// `after(N)` (absolute block-height lock) is satisfied iff the
+    /// chain tip has buried `N` by `DESCRIPTOR_TIMELOCK_CONFIRMATIONS`
+    /// blocks. Tests three points around the boundary at N=900_000:
+    ///   - tip exactly `N + 5`: 5 < 6 confs, still unsatisfiable
+    ///   - tip `N + 6`: hits the confirmation depth, satisfiable
+    ///   - tip well past: trivially satisfiable
+    /// And one without any signature (must fail regardless).
+    #[test]
+    fn after_block_height_uses_tip_minus_confirmations() {
+        use deposits_protocol::constants::DESCRIPTOR_TIMELOCK_CONFIRMATIONS;
+        assert_eq!(DESCRIPTOR_TIMELOCK_CONFIRMATIONS, 6, "test assumes 6-conf default");
+
+        let (sk_a, pk_a) = keypair_from_seed(1);
+        const LOCK: u32 = 900_000;
+        let descriptor = format!(
+            "wsh(and_v(v:pk({}),after({})))",
+            hex::encode(pk_a.serialize()),
+            LOCK,
+        );
+        let msg_hash = [0xCD; 32];
+        let signed = DescriptorWitness {
+            stack: vec![sign_message(&sk_a, &msg_hash).to_vec()],
+        };
+        let none = DescriptorWitness { stack: vec![] };
+
+        // tip is below lock + confs → unsatisfiable
+        assert!(
+            !verify_witness(&descriptor, &signed, &msg_hash, LOCK + 5).unwrap(),
+            "after(N): tip - confs < N must NOT satisfy"
+        );
+        // tip exactly at lock + confs → satisfiable
+        assert!(
+            verify_witness(&descriptor, &signed, &msg_hash, LOCK + 6).unwrap(),
+            "after(N): tip - confs == N must satisfy"
+        );
+        // tip well past → satisfiable
+        assert!(
+            verify_witness(&descriptor, &signed, &msg_hash, LOCK + 1000).unwrap(),
+            "after(N): tip far past N must satisfy"
+        );
+        // signature missing → never satisfies, regardless of tip
+        assert!(
+            !verify_witness(&descriptor, &none, &msg_hash, LOCK + 1000).unwrap(),
+            "after(N): no signature must NOT satisfy"
         );
     }
 }

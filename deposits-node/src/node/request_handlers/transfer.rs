@@ -82,8 +82,10 @@ impl Node {
             amount_sats,
             fee_sats,
         );
-        match deposits_core::descriptor::verify_witness(&descriptor, &depositor_witness, &msg_hash)
-        {
+        let tip = self.wallet.get_block_height().unwrap_or(0);
+        match deposits_core::descriptor::verify_witness(
+            &descriptor, &depositor_witness, &msg_hash, tip,
+        ) {
             Ok(true) => {}
             Ok(false) => {
                 return (
@@ -357,7 +359,8 @@ impl Node {
         let witness = DescriptorWitness {
             stack: vec![signature.serialize().to_vec()],
         };
-        match deposits_core::descriptor::verify_witness(&deposit_descriptor, &witness, &msg_hash) {
+        let tip = self.wallet.get_block_height().unwrap_or(0);
+        match deposits_core::descriptor::verify_witness(&deposit_descriptor, &witness, &msg_hash, tip) {
             Ok(true) => {}
             Ok(false) => return (false, None, Some("Invalid signature".to_string())),
             Err(e) => {
@@ -407,7 +410,8 @@ impl Node {
                         let recv_witness = DescriptorWitness {
                             stack: vec![recv_sig.serialize().to_vec()],
                         };
-                        match deposits_core::descriptor::verify_witness(&dest_deposit.descriptor, &recv_witness, &transfer_id) {
+                        let tip = self.wallet.get_block_height().unwrap_or(0);
+                        match deposits_core::descriptor::verify_witness(&dest_deposit.descriptor, &recv_witness, &transfer_id, tip) {
                             Ok(true) => {},
                             Ok(false) => return (false, None, Some("Invalid receive_signature: does not satisfy destination descriptor".to_string())),
                             Err(e) => return (false, None, Some(format!("Receive signature verification failed: {}", e))),

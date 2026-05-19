@@ -302,8 +302,11 @@ pub fn verify_withdrawal_witness(
         withdrawal.fee_sats,
     );
 
-    // Verify the witness satisfies the descriptor
-    crate::descriptor::verify_witness(descriptor, &withdrawal.depositor_witness, &message_hash)
+    // Verify the witness satisfies the descriptor.
+    // TODO: thread chain_tip through these helper callers. For now,
+    // 0 (timelock branches unsatisfiable) is conservative — matches
+    // pre-policy-lift behavior for these paths.
+    crate::descriptor::verify_witness(descriptor, &withdrawal.depositor_witness, &message_hash, 0)
 }
 
 /// Verify an invoice lock witness satisfies the deposit descriptor.
@@ -318,7 +321,8 @@ pub fn verify_invoice_lock_witness(
     witness: &crate::types::DescriptorWitness,
 ) -> Result<bool, DepositsError> {
     let message_hash = invoice_lock_signing_message(deposit_id, payment_hash, amount_with_fees);
-    crate::descriptor::verify_witness(descriptor, witness, &message_hash)
+    // TODO: thread chain_tip through these helper callers.
+    crate::descriptor::verify_witness(descriptor, witness, &message_hash, 0)
 }
 
 /// Verify a witness satisfies the source deposit's descriptor for a transfer lock.
@@ -345,7 +349,8 @@ pub fn verify_transfer_lock_witness(
         completion_script,
         timeout_height,
     );
-    crate::descriptor::verify_witness(source_descriptor, witness, &message_hash)
+    // TODO: thread chain_tip through these helper callers.
+    crate::descriptor::verify_witness(source_descriptor, witness, &message_hash, 0)
 }
 
 /// Verify a witness satisfies the completion_script for a transfer completion.
@@ -381,7 +386,8 @@ pub fn verify_transfer_complete_witness(
     }
 
     // Verify the witness satisfies the completion_script
-    crate::descriptor::verify_witness(completion_script, script_witness, &message_hash)
+    // TODO: thread chain_tip through these helper callers.
+    crate::descriptor::verify_witness(completion_script, script_witness, &message_hash, 0)
 }
 
 /// Create a withdrawal authorization signature.

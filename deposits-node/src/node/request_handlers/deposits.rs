@@ -62,6 +62,7 @@ pub(super) fn verify_receive_witness(
     descriptor: &str,
     deposit_id: &deposits_core::types::DepositId,
     request: &crate::nostr::LedgerRequest,
+    chain_tip: u32,
 ) -> Result<(), String> {
     let witness_value = request
         .params
@@ -72,7 +73,7 @@ pub(super) fn verify_receive_witness(
             .map_err(|e| format!("Invalid receive_witness shape: {}", e))?;
     let mut msg = [0u8; 32];
     msg[..16].copy_from_slice(deposit_id);
-    match deposits_core::descriptor::verify_witness(descriptor, &witness, &msg) {
+    match deposits_core::descriptor::verify_witness(descriptor, &witness, &msg, chain_tip) {
         Ok(true) => Ok(()),
         Ok(false) => Err("receive_witness does not satisfy deposit descriptor".to_string()),
         Err(e) => Err(format!("receive_witness verification error: {:?}", e)),
@@ -621,7 +622,8 @@ impl Node {
                     .unwrap_or(false)
             };
             if needs_witness {
-                if let Err(msg) = verify_receive_witness(&descriptor, &deposit_id, request) {
+                let tip = self.wallet.get_block_height().unwrap_or(0);
+                if let Err(msg) = verify_receive_witness(&descriptor, &deposit_id, request, tip) {
                     return (false, None, Some(msg));
                 }
             }

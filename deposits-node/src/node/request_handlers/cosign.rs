@@ -563,9 +563,15 @@ impl Node {
                         // doesn't satisfy the deposit's descriptor.
                         // That's exactly what cosigning is supposed to
                         // prevent.
+                        // `current_block_height` (from `self.wallet.get_block_height()`
+                        // above) is the cosigner's view of the tip; feed it to the
+                        // verifier so descriptor `after()` checks use the right
+                        // tip-minus-confs evaluation.
                         match ledger.state.apply_with_verifier(
                             &operation,
-                            &deposits_core::descriptor::CoreWitnessVerifier,
+                            &deposits_core::descriptor::CoreWitnessVerifier::new(
+                                current_block_height,
+                            ),
                         ) {
                             Ok((_, violations)) if !violations.is_empty() => {
                                 tracing::warn!(

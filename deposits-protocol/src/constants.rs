@@ -79,6 +79,23 @@ pub const MAX_QUORUM_SIZE_POLICY: usize = 7;
 /// `MAX_QUORUM_SIZE_POLICY`.
 pub const VALID_QUORUM_SIZES: [usize; 3] = [3, 5, 7];
 
+/// Confirmation depth applied when evaluating descriptor `after(N)`
+/// timelocks during off-chain authorization (see
+/// `deposits_core::descriptor::verify_witness`).
+///
+/// Without this cushion, a cosigner who signs at `tip == N` could see
+/// that signature retroactively invalidated by a reorg dropping the
+/// tip below `N` — and any party who recorded the signature could
+/// weaponize it as fraud-proof evidence ("you signed something that
+/// shouldn't have been allowed yet"). Treating `tip - 6` as the
+/// effective evaluation height keeps the off-chain authorization
+/// edge agreeing with the eventual on-chain spend.
+///
+/// 6 matches `required_confirmations` defaults in
+/// `fraud::FraudProofType::UncreditedOnchain` and the
+/// industry-standard "buried" assumption for Bitcoin payment finality.
+pub const DESCRIPTOR_TIMELOCK_CONFIRMATIONS: u32 = 6;
+
 /// CSV block delay for the very-final timeout-recovery leaf.
 ///
 /// After this many blocks (~8 weeks), a single quorum member can spend

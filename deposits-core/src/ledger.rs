@@ -1142,8 +1142,15 @@ impl Ledger {
             ));
         }
 
-        // Apply state changes with conformance check (operator must not produce non-conforming state)
-        self.checked_apply(&staged.operation, &crate::descriptor::CoreWitnessVerifier)?;
+        // Apply state changes with conformance check (operator must not
+        // produce non-conforming state). The staged update's
+        // `block_height` is the cosigned operator view of the tip;
+        // feed it to the verifier so descriptor `after()` checks
+        // evaluate against the right horizon.
+        self.checked_apply(
+            &staged.operation,
+            &crate::descriptor::CoreWitnessVerifier::new(staged.update.block_height),
+        )?;
 
         // Update chain state — chain_tip uses chain_hash() which folds in the operator signature
         self.state.chain_tip_hash = staged.update.chain_hash();

@@ -246,9 +246,14 @@ impl LedgerActor {
         // OnchainFulfill, etc.). Conformance violations are logged
         // and reported but don't abort the apply — they're the
         // dispute-trigger signal the watcher path needs to see.
-        match ledger
-            .apply_and_check(&op, &deposits_core::descriptor::CoreWitnessVerifier)
-        {
+        // The inbound update's `block_height` is the cosigned operator
+        // view at the moment it was committed; use it as the chain_tip
+        // for descriptor `after()` checks. Matches the on-chain
+        // perspective that `apply_and_check` is replaying.
+        match ledger.apply_and_check(
+            &op,
+            &deposits_core::descriptor::CoreWitnessVerifier::new(update.block_height),
+        ) {
             Ok(violations) if !violations.is_empty() => {
                 tracing::warn!(
                     ledger_id = %self.ledger_id,

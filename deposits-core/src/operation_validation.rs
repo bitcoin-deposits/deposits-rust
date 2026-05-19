@@ -788,7 +788,11 @@ pub fn validate_deposit_key_rotate(
     let message_hash =
         bitcoin::hashes::sha256::Hash::hash(new_descriptor.as_bytes()).to_byte_array();
 
-    match crate::descriptor::verify_witness(&deposit.descriptor, witness, &message_hash) {
+    // TODO: thread chain_tip in here once these `validate_*` functions
+    // grow a block_height parameter. With chain_tip = 0 any `after()`
+    // sub-policy is conservatively unsatisfiable, matching the
+    // pre-policy-lift behavior.
+    match crate::descriptor::verify_witness(&deposit.descriptor, witness, &message_hash, 0) {
         Ok(true) => {}
         Ok(false) => return Err("Witness does not satisfy current descriptor".to_string()),
         Err(e) => return Err(format!("Failed to verify witness: {:?}", e)),
@@ -912,7 +916,11 @@ pub fn validate_onchain_lock_by_id(
         fee_sats,
     );
 
-    match crate::descriptor::verify_witness(&deposit.descriptor, witness, &message_hash) {
+    // TODO: thread chain_tip in here once these `validate_*` functions
+    // grow a block_height parameter. With chain_tip = 0 any `after()`
+    // sub-policy is conservatively unsatisfiable, matching the
+    // pre-policy-lift behavior.
+    match crate::descriptor::verify_witness(&deposit.descriptor, witness, &message_hash, 0) {
         Ok(true) => {}
         Ok(false) => return Err("Witness does not satisfy deposit descriptor".to_string()),
         Err(e) => return Err(format!("Failed to verify witness: {:?}", e)),
