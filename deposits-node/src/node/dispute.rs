@@ -389,6 +389,21 @@ impl Node {
         // Sign the dispute update on the fork
         self.sign_last_update(&fork_key)?;
 
+        // Test/recovery hook: when `<data_dir>/.pause_auto_dispute_actions`
+        // exists, stop after publishing DisputeEnter and skip auto-arm.
+        // The cooperative-refund Tier-3 test uses this marker so it
+        // can drain reserves manually before each disputant arms with
+        // the received UTXO as replacement collateral. File-based so
+        // it works against already-running daemons.
+        if self.data_dir.join(".pause_auto_dispute_actions").exists() {
+            tracing::info!(
+                ".pause_auto_dispute_actions marker present — skipping \
+                 auto-arm (DisputeEnter published, manual orchestration \
+                 takes over)"
+            );
+            return Ok(());
+        }
+
         // 2. Copy our existing attestations from ALL of our operator ledger histories
         // (not from the fork - those prove we have collateral backing).
         // With multi-ledger operators, attestations may be spread across any of our
@@ -1515,6 +1530,13 @@ impl Node {
     /// check if all participants have armed. If so, build the confiscation TX,
     /// request signatures from quorum members, and broadcast.
     pub(crate) async fn auto_confiscate(&self) {
+        // Test/recovery hook: pair with the auto-arm pause so the
+        // cooperative-refund Tier-3 test can manually orchestrate the
+        // post-DisputeEnter flow without auto-confiscate racing it.
+        if self.data_dir.join(".pause_auto_dispute_actions").exists() {
+            return;
+        }
+
         // Phase 1: Check for pending confiscations that need signature collection
         self.collect_confiscation_signatures().await;
 

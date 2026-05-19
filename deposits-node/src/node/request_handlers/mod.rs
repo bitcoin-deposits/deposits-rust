@@ -6,6 +6,7 @@
 use super::*;
 
 pub mod admin;
+pub mod cooperative_refund;
 pub mod cosign;
 pub mod custody;
 pub mod deposits;

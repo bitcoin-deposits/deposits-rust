@@ -200,6 +200,9 @@ impl Node {
             "transfer_complete" => self.process_transfer_complete_request(&request).await,
             "custody_transfer_sign" => self.process_custody_transfer_sign_request(&request).await,
             "confiscation_sign" => self.process_confiscation_sign_request(&request).await,
+            "cooperative_refund_sign" => {
+                self.process_cooperative_refund_sign_request(&request).await
+            }
             "custodian_query" => self.process_custodian_query_request(&request).await,
             "lottery_reveal" => {
                 // When we see another participant's reveal, auto-reveal ours

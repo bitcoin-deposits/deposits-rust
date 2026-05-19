@@ -79,6 +79,27 @@ pub fn op_data_dir(i: usize) -> PathBuf {
     repo_root().join(format!("deposits-tools/data/op{}", i))
 }
 
+/// Derive operator `i`'s secret key (BIP-86 `m/86'/0'/0'/0/0` from seed).
+/// Mirrors `derive_operator_secret` in `deposits-node`.
+pub fn op_operator_secret(i: usize) -> bitcoin::secp256k1::SecretKey {
+    use std::str::FromStr;
+    let seed_bytes = hex::decode(op_seed(i)).expect("op seed hex");
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let xpriv = bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Regtest, &seed_bytes)
+        .expect("xpriv");
+    let path = bitcoin::bip32::DerivationPath::from_str("m/86'/0'/0'/0/0").unwrap();
+    xpriv.derive_priv(&secp, &path).expect("derive").private_key
+}
+
+/// Operator `i`'s P2WPKH address under the operator key.
+pub fn op_p2wpkh_address(i: usize) -> bitcoin::Address {
+    let sk = op_operator_secret(i);
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let pk = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk);
+    let compressed = bitcoin::CompressedPublicKey::from_slice(&pk.serialize()).unwrap();
+    bitcoin::Address::p2wpkh(&compressed, bitcoin::Network::Regtest)
+}
+
 /// Derive a wallet's per-deposit secret key at `key_index`, mirroring
 /// `deposits-wallet`'s `derive_secret_key_at_index` so tests can sign
 /// witnesses against the deposit's BIP-340 identity. Path matches the

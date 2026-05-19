@@ -89,6 +89,9 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         eprintln!("  confiscate <ledger_id>                 Build and broadcast confiscation TX to lottery");
         eprintln!("  reveal <ledger_id>                     Reveal lottery preimage via Nostr");
         eprintln!("  lottery-claim <ledger_id>              Claim lottery output if winner");
+        eprintln!("  refund <ledger_id> [--timeout <secs>]  Cooperative anchor TX for NeverFunded reserves");
+        eprintln!("                                         (pools disputants' replacement-collateral UTXOs");
+        eprintln!("                                         into a lottery output; manual last-resort only)");
         eprintln!();
         eprintln!("Stranded-state recovery:");
         eprintln!("  reconstruct-taproot [<ledger_id>] [--quorum-expiry <block>]");
@@ -137,6 +140,7 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         "confiscate-plan" => recovery_confiscate_plan(&args[1..]).await,
         "reveal" => recovery_reveal(&args[1..]).await,
         "lottery-claim" => recovery_lottery_claim(&args[1..]).await,
+        "refund" => recovery_refund(&args[1..]).await,
         "rotate-to-quorum" => recovery_rotate_to_quorum(&args[1..]).await,
         // Legacy commands (for backward compatibility)
         "start" => recovery_start(&args[1..]).await,
@@ -5437,5 +5441,548 @@ pub async fn recovery_confiscate_plan(
     }
 
     println!("\n=== plan OK — would broadcast on real `recovery confiscate` ===");
+    Ok(())
+}
+
+/// `recovery refund <ledger_id>` — cooperative anchor TX for a
+/// never-funded reserves UTXO.
+///
+/// Last-resort manual recovery: when the standard confiscation can't
+/// run because the reserves UTXO was never funded on-chain, armed
+/// disputants instead pool their declared replacement-collateral
+/// UTXOs into a single TX whose output is the same lottery script
+/// the standard confiscation would have produced. After confirmation,
+/// `recovery reveal` and `recovery lottery-claim` proceed unchanged
+/// — except the claim is single-input (lottery only), since the RC
+/// outpoints have already been consumed by this anchor TX.
+///
+/// Coordination uses kind 20101 / 20102 (ledger requests/responses)
+/// — not 9100. The TX is deterministic given the on-relay RC
+/// declarations: inputs sorted by (txid, vout), single lottery output,
+/// fee schedule `200 + 100 × inputs` sats. Every honest caller
+/// produces the same bytes.
+pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::nostr::{NostrTransportBuilder, KIND_LEDGER_RESPONSE, KIND_LEDGER_UPDATE};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use bitcoin::secp256k1::{PublicKey, Secp256k1};
+    use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+    use deposits_core::messages::{LedgerOperation, ReplacementCollateral};
+    use deposits_core::tapscript_reserves::{LotteryParticipant, LotteryScriptBuilder};
+    use deposits_core::{SignedLedgerUpdate, TlvDecode};
+    use deposits_signer_api::{SigPurpose, SignContext};
+    use nostr_sdk::prelude::*;
+
+    let mut ledger_id_arg: Option<String> = None;
+    let mut timeout_secs: u64 = 60;
+    let mut config_args = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--timeout" if i + 1 < args.len() => {
+                timeout_secs = args[i + 1].parse().map_err(|_| "invalid --timeout")?;
+                i += 1;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id_arg.is_none() {
+                    ledger_id_arg = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id_arg
+        .ok_or("Missing ledger_id")?
+        .trim()
+        .to_string();
+    let config = parse_config(&config_args)?;
+    let relay_url = config
+        .relays
+        .first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secp = Secp256k1::new();
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
+    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = keypair.public_key();
+    let signer = crate::node_cli::signer_from_config(&config)?;
+
+    println!(
+        "Cooperative refund for ledger {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
+
+    // Fetch ledger updates (single 500-event window; manual recovery is
+    // run after the fork stabilises, so the bloated-fork concern from
+    // the cosign path doesn't apply).
+    let client = get_or_create_client(&relay_url).await?;
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
+        .limit(2000);
+    let update_events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch updates: {}", e))?;
+
+    let mut updates: Vec<SignedLedgerUpdate> = update_events
+        .iter()
+        .filter_map(|e| {
+            BASE64
+                .decode(&e.content)
+                .ok()
+                .and_then(|b| SignedLedgerUpdate::tlv_decode(&b).ok())
+        })
+        .collect();
+    updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
+
+    let original_operator = updates
+        .iter()
+        .find(|u| u.sequence_number == 0)
+        .map(|u| u.operator_id)
+        .ok_or("No LedgerOpen at seq 0")?;
+
+    // Reserves address from latest QuorumBegin — used for NeverFunded gate.
+    let mut reserves_id: Option<String> = None;
+    let mut quorum_members: Vec<PublicKey> = Vec::new();
+    for u in &updates {
+        if u.operator_id != original_operator {
+            continue;
+        }
+        if let Ok(LedgerOperation::QuorumBegin {
+            reserves_id: rid,
+            quorum_members: qm,
+            ..
+        }) = LedgerOperation::tlv_decode(&u.message)
+        {
+            reserves_id = Some(rid);
+            quorum_members = qm.iter().map(|m| m.pubkey).collect();
+        }
+    }
+    let reserves_id = reserves_id.ok_or("No QuorumBegin observed")?;
+
+    // NeverFunded gate.
+    {
+        use bitcoin::hashes::{sha256, Hash};
+        let addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = reserves_id
+            .parse()
+            .map_err(|e| format!("parse reserves_id: {}", e))?;
+        let addr = addr
+            .require_network(config.network)
+            .map_err(|e| format!("network mismatch: {}", e))?;
+        let script_hash = sha256::Hash::hash(addr.script_pubkey().as_bytes());
+        let url = format!(
+            "{}/scripthash/{}",
+            config.electrum_url,
+            hex::encode(script_hash.to_byte_array())
+        );
+        let resp = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()?
+            .get(&url)
+            .send()
+            .await?;
+        let stats: serde_json::Value = resp.json().await?;
+        let funded = stats
+            .get("chain_stats")
+            .and_then(|c| c.get("funded_txo_count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let spent = stats
+            .get("chain_stats")
+            .and_then(|c| c.get("spent_txo_count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let unspent = funded.saturating_sub(spent);
+        if unspent > 0 {
+            return Err(format!(
+                "reserves UTXO has unspent funds ({} txos) — use standard \
+                 `recovery confiscate`, not refund",
+                unspent
+            )
+            .into());
+        }
+        println!(
+            "  Gate: OK (reserves funded={}, spent={}, unspent={})",
+            funded, spent, unspent
+        );
+    }
+
+    // Extract DisputeArmed participants + RCs.
+    let mut participants: Vec<(PublicKey, LotteryParticipant)> = Vec::new();
+    let mut rc_decls: std::collections::HashMap<PublicKey, ReplacementCollateral> =
+        std::collections::HashMap::new();
+    for u in &updates {
+        if let Ok(LedgerOperation::DisputeArmed {
+            commitment_hash,
+            target_reserves,
+            replacement_collateral,
+            ..
+        }) = LedgerOperation::tlv_decode(&u.message)
+        {
+            let xonly = u.operator_id.x_only_public_key().0;
+            if !participants.iter().any(|(_, p)| p.pubkey == xonly) {
+                participants.push((
+                    u.operator_id,
+                    LotteryParticipant::new(xonly, commitment_hash, target_reserves),
+                ));
+            }
+            if let Some(rc) = replacement_collateral {
+                rc_decls.insert(u.operator_id, rc);
+            }
+        }
+    }
+    if participants.len() < 2 {
+        return Err(format!(
+            "only {} DisputeArmed participants — need at least 2",
+            participants.len()
+        )
+        .into());
+    }
+    participants.sort_by(|a, b| a.1.pubkey.serialize().cmp(&b.1.pubkey.serialize()));
+    println!("  {} DisputeArmed participants", participants.len());
+    println!("  {} replacement-collateral declarations", rc_decls.len());
+
+    // All participants MUST have declared RCs — otherwise we have no
+    // input to spend for them.
+    let mut missing_rc: Vec<PublicKey> = Vec::new();
+    for (pk, _) in &participants {
+        if !rc_decls.contains_key(pk) {
+            missing_rc.push(*pk);
+        }
+    }
+    if !missing_rc.is_empty() {
+        return Err(format!(
+            "{} participant(s) lack replacement_collateral declarations — \
+             cannot fund cooperative refund without their pledged UTXO",
+            missing_rc.len()
+        )
+        .into());
+    }
+
+    // Build deterministic input set: each disputant's RC outpoint,
+    // sorted by (txid_bytes, vout). Track each input's owner pubkey
+    // and amount for sighashing.
+    #[derive(Clone)]
+    struct InputSpec {
+        outpoint: OutPoint,
+        amount: u64,
+        owner: PublicKey,
+        script: ScriptBuf,
+    }
+    let mut input_specs: Vec<InputSpec> = Vec::new();
+    for (pk, _) in &participants {
+        let rc = rc_decls[pk];
+        let txid =
+            bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(rc.txid));
+        let outpoint = OutPoint::new(txid, rc.vout);
+        let compressed = bitcoin::CompressedPublicKey::from_slice(&pk.serialize())
+            .map_err(|e| format!("compressed pubkey for {}: {}", &pk.to_string()[..16], e))?;
+        let script = bitcoin::Address::p2wpkh(&compressed, config.network).script_pubkey();
+        input_specs.push(InputSpec {
+            outpoint,
+            amount: rc.amount,
+            owner: *pk,
+            script,
+        });
+    }
+    input_specs.sort_by(|a, b| {
+        let at: [u8; 32] = *a.outpoint.txid.as_ref();
+        let bt: [u8; 32] = *b.outpoint.txid.as_ref();
+        at.cmp(&bt).then(a.outpoint.vout.cmp(&b.outpoint.vout))
+    });
+
+    let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = quorum_members
+        .iter()
+        .filter(|pk| **pk != original_operator)
+        .map(|pk| pk.x_only_public_key().0)
+        .collect();
+    let recovery_threshold = (recovery_voters.len() / 2) + 1;
+    let lottery_builder = LotteryScriptBuilder::new(
+        participants.iter().map(|(_, p)| p.clone()).collect(),
+        recovery_voters,
+        recovery_threshold,
+        config.network,
+    );
+    let lottery_output = lottery_builder
+        .build()
+        .map_err(|e| format!("build lottery output: {:?}", e))?;
+    let lottery_script = lottery_output.address.script_pubkey();
+
+    let total_in: u64 = input_specs.iter().map(|s| s.amount).sum();
+    let fee = crate::node::request_handlers::cooperative_refund::expected_cooperative_refund_fee(
+        input_specs.len(),
+    );
+    let output_value = total_in
+        .checked_sub(fee)
+        .ok_or("total RC inputs less than required fee")?;
+
+    let mut tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: input_specs
+            .iter()
+            .map(|s| TxIn {
+                previous_output: s.outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            })
+            .collect(),
+        output: vec![TxOut {
+            value: Amount::from_sat(output_value),
+            script_pubkey: lottery_script.clone(),
+        }],
+    };
+
+    println!("  Built cooperative refund TX:");
+    println!("    Inputs:  {} RC outpoints", input_specs.len());
+    println!("    Output:  {} sats → lottery script", output_value);
+    println!("    Fee:     {} sats", fee);
+
+    // Compute each input's BIP143 P2WPKH sighash, then sign locally
+    // (for inputs we own) or dispatch a cooperative_refund_sign
+    // request (for inputs owned by other disputants).
+    let mut witnesses: Vec<Option<Witness>> = vec![None; input_specs.len()];
+
+    let our_compressed = bitcoin::CompressedPublicKey::from_slice(&our_pubkey.serialize())
+        .map_err(|e| format!("our compressed pubkey: {}", e))?;
+    let _ = our_compressed;
+
+    // Pre-compute every sighash so we don't mutate the TX between
+    // signings (witness assignment doesn't affect BIP143 sighash but
+    // pre-computing keeps the per-loop math obvious).
+    let sighashes: Vec<[u8; 32]> = {
+        let mut cache = SighashCache::new(&tx);
+        let mut out = Vec::with_capacity(input_specs.len());
+        for (i, spec) in input_specs.iter().enumerate() {
+            let sh = cache
+                .p2wpkh_signature_hash(
+                    i,
+                    &spec.script,
+                    Amount::from_sat(spec.amount),
+                    EcdsaSighashType::All,
+                )
+                .map_err(|e| format!("sighash for input {}: {}", i, e))?;
+            let b: [u8; 32] = *sh.as_ref();
+            out.push(b);
+        }
+        out
+    };
+
+    // Pending remote-sign requests, indexed by Nostr event_id we sent.
+    let mut pending: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    for (i, spec) in input_specs.iter().enumerate() {
+        if spec.owner == our_pubkey {
+            // Sign locally.
+            let sig = signer
+                .ecdsa_sign_sighash(
+                    &SignContext::no_ledger(SigPurpose::OnchainSighash),
+                    &sighashes[i],
+                )
+                .map_err(|e| format!("local sign for input {}: {}", i, e))?;
+            let mut sig_bytes = sig.serialize_der().to_vec();
+            sig_bytes.push(EcdsaSighashType::All as u8);
+            let mut w = Witness::new();
+            w.push(&sig_bytes);
+            w.push(&our_pubkey.serialize());
+            witnesses[i] = Some(w);
+            println!("    Input {} signed locally (us)", i);
+        } else {
+            // Remote: send LedgerRequest.
+            let tx_hex = hex::encode(bitcoin::consensus::encode::serialize(&tx));
+            let params = serde_json::json!({
+                "unsigned_tx": tx_hex,
+                "input_index": i,
+                "sighash": hex::encode(sighashes[i]),
+            });
+            let event_id = transport
+                .send_ledger_request(&ledger_id, "cooperative_refund_sign", params)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "send cooperative_refund_sign for input {}: {:?}",
+                        i, e
+                    )
+                })?;
+            pending.insert(event_id, i);
+            println!(
+                "    Input {} requested from {}...",
+                i,
+                &spec.owner.to_string()[..16]
+            );
+        }
+    }
+
+    // Drain responses by consuming the relay client's notification
+    // stream directly. Every member daemon replies to every broadcast
+    // request, so we'd lose non-matching responses if we routed
+    // through `wait_for_response` (which drops queue entries that
+    // don't match its target request_id). Inline event parsing
+    // instead — kind 20102 events come back plaintext (the daemons'
+    // dispatcher gift-wraps only when the request was gift-wrapped).
+    if !pending.is_empty() {
+        println!(
+            "  Waiting up to {}s for {} remote signatures...",
+            timeout_secs,
+            pending.len()
+        );
+        let mut notification_rx = transport.client().notifications();
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        while !pending.is_empty() && std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let notification = match tokio::time::timeout(remaining, notification_rx.recv()).await
+            {
+                Ok(Ok(n)) => n,
+                _ => break,
+            };
+            let event = match notification {
+                nostr_sdk::RelayPoolNotification::Event { event, .. } => event,
+                _ => continue,
+            };
+            if event.kind.as_u16() != crate::nostr::KIND_LEDGER_RESPONSE {
+                continue;
+            }
+            // Plaintext response has #e tag with request_id.
+            let req_id = match event.tags.iter().find_map(|t| {
+                let v = t.clone().to_vec();
+                if v.len() >= 2 && v[0] == "e" {
+                    Some(v[1].clone())
+                } else {
+                    None
+                }
+            }) {
+                Some(s) => s,
+                None => continue,
+            };
+            let idx = match pending.get(&req_id).copied() {
+                Some(i) => i,
+                None => continue,
+            };
+            // Parse content as the LedgerResponse JSON.
+            let parsed: serde_json::Value = match serde_json::from_str(&event.content) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let success = parsed
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !success {
+                let err = parsed
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no error)");
+                if err.contains("not us") || err.contains("no fork-branch") {
+                    // Benign false positive — another quorum member
+                    // also picked up the broadcast.
+                    continue;
+                }
+                println!("    Input {} refused: {}", idx, err);
+                pending.remove(&req_id);
+                continue;
+            }
+            let result = parsed.get("result").cloned().unwrap_or_default();
+            let sig_hex = match result.get("signature_der").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => {
+                    println!("    Input {} response missing signature_der", idx);
+                    pending.remove(&req_id);
+                    continue;
+                }
+            };
+            let pubkey_hex = result
+                .get("pubkey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut sig_bytes = match hex::decode(&sig_hex) {
+                Ok(b) => b,
+                Err(_) => {
+                    pending.remove(&req_id);
+                    continue;
+                }
+            };
+            sig_bytes.push(EcdsaSighashType::All as u8);
+            let pk_bytes = match hex::decode(&pubkey_hex) {
+                Ok(b) => b,
+                Err(_) => input_specs[idx].owner.serialize().to_vec(),
+            };
+            let mut w = Witness::new();
+            w.push(&sig_bytes);
+            w.push(&pk_bytes);
+            witnesses[idx] = Some(w);
+            println!("    Input {} signed remotely", idx);
+            pending.remove(&req_id);
+        }
+
+        for (_, idx) in &pending {
+            println!("    Input {} timed out waiting for signature", idx);
+        }
+    }
+
+    let missing: Vec<usize> = witnesses
+        .iter()
+        .enumerate()
+        .filter_map(|(i, w)| if w.is_none() { Some(i) } else { None })
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "missing signatures for inputs: {:?} — cooperative refund aborted",
+            missing
+        )
+        .into());
+    }
+
+    // Attach witnesses, broadcast.
+    for (i, w) in witnesses.into_iter().enumerate() {
+        tx.input[i].witness = w.unwrap();
+    }
+    let txid = tx.compute_txid();
+    println!("  Broadcasting cooperative refund TX {}...", txid);
+
+    // Transient wallet for broadcast (same pattern as recovery_lottery_claim).
+    let xpriv_for_wallet =
+        bitcoin::bip32::Xpriv::new_master(config.network, &config.seed)
+            .map_err(|e| format!("xpriv from seed: {}", e))?;
+    let signer_for_wallet = deposits_signer_api::LocalSigner::from_xpriv(xpriv_for_wallet)
+        .map_err(|e| format!("LocalSigner from xpriv: {}", e))?;
+    let wallet = crate::wallet::Wallet::new(
+        &signer_for_wallet,
+        config.network,
+        config.data_dir.clone(),
+        config.electrum_url.clone(),
+    )?;
+    wallet.broadcast(&tx)?;
+
+    println!();
+    println!("Cooperative refund TX broadcast: {}", txid);
+    println!(
+        "Lottery output: {} sats at {}",
+        output_value, lottery_output.address
+    );
+    println!();
+    println!("Next steps:");
+    println!("  - Each disputant runs `recovery reveal <ledger_id>`");
+    println!("  - Winner runs `recovery lottery-claim <ledger_id>` once all preimages are revealed");
     Ok(())
 }
