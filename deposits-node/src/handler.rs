@@ -887,18 +887,12 @@ impl DepositsHandler {
         message: DepositsMessage,
         _sender: PublicKey,
     ) -> Result<(), Error> {
-        // Dispatch to core handlers based on message type
-        // The core handlers use the HandlerContext trait methods we implement below
-        match &message {
-            DepositsMessage::LedgerUpdate(msg) => {
-                let result = deposits_core::handle_ledger_update(self, msg)?;
-                tracing::info!("Ledger update result: {:?}", result);
-            }
-            // Add other message type handlers as needed
-            _ => {
-                tracing::debug!("Unhandled message type: {:?}", message.message_type());
-            }
-        }
+        // The legacy `DepositsMessage::LedgerUpdate(msg)` p2p dispatch
+        // path has been deleted — production senders publish ledger
+        // updates as Kind 9100 Nostr events, routed through
+        // `LedgerActor`. Any DepositsMessage variant arriving here is
+        // unhandled by design; log and drop.
+        tracing::debug!("Unhandled message type: {:?}", message.message_type());
         Ok(())
     }
 

@@ -284,111 +284,15 @@ pub fn verify_deposit_offer_signature(
     }
 }
 
-/// Verify a withdrawal authorization witness
-///
-/// Verifies that the witness satisfies the deposit descriptor for the withdrawal.
-/// This delegates to `crate::descriptor::verify_witness` for actual verification.
-pub fn verify_withdrawal_witness(
-    withdrawal: &crate::types::OnChainWithdrawal,
-    descriptor: &str,
-    _block_height: u32,
-) -> Result<bool, DepositsError> {
-    // Get the signing message hash
-    let message_hash = withdrawal_signing_message(
-        &withdrawal.nonce,
-        &withdrawal.deposit_id,
-        &withdrawal.destination_address,
-        withdrawal.amount_sats,
-        withdrawal.fee_sats,
-    );
-
-    // Verify the witness satisfies the descriptor.
-    // TODO: thread chain_tip through these helper callers. For now,
-    // 0 (timelock branches unsatisfiable) is conservative — matches
-    // pre-policy-lift behavior for these paths.
-    crate::descriptor::verify_witness(descriptor, &withdrawal.depositor_witness, &message_hash, 0)
-}
-
-/// Verify an invoice lock witness satisfies the deposit descriptor.
-///
-/// Verifies that the witness authorizes the Lightning payment by checking
-/// the signature against the descriptor and the invoice lock signing message.
-pub fn verify_invoice_lock_witness(
-    descriptor: &str,
-    deposit_id: &crate::types::DepositId,
-    payment_hash: &[u8; 32],
-    amount_with_fees: u64,
-    witness: &crate::types::DescriptorWitness,
-) -> Result<bool, DepositsError> {
-    let message_hash = invoice_lock_signing_message(deposit_id, payment_hash, amount_with_fees);
-    // TODO: thread chain_tip through these helper callers.
-    crate::descriptor::verify_witness(descriptor, witness, &message_hash, 0)
-}
-
-/// Verify a witness satisfies the source deposit's descriptor for a transfer lock.
-///
-/// This verifies that the witness authorizes locking funds from the source deposit
-/// for a conditional transfer.
-pub fn verify_transfer_lock_witness(
-    source_descriptor: &str,
-    source_deposit_id: &crate::types::DepositId,
-    destination_deposit_id: &crate::types::DepositId,
-    nonce: &[u8; 32],
-    amount: u64,
-    fee: u64,
-    completion_script: &str,
-    timeout_height: u32,
-    witness: &crate::types::DescriptorWitness,
-) -> Result<bool, DepositsError> {
-    let message_hash = transfer_lock_signing_message(
-        nonce,
-        source_deposit_id,
-        destination_deposit_id,
-        amount,
-        fee,
-        completion_script,
-        timeout_height,
-    );
-    // TODO: thread chain_tip through these helper callers.
-    crate::descriptor::verify_witness(source_descriptor, witness, &message_hash, 0)
-}
-
-/// Verify a witness satisfies the completion_script for a transfer completion.
-///
-/// This verifies that the witness satisfies the completion condition (e.g., revealing
-/// a preimage for sha256(H) or providing a valid signature for pk(X)).
-pub fn verify_transfer_complete_witness(
-    completion_script: &str,
-    transfer_id: &[u8; 32],
-    nonce: &[u8; 32],
-    source_deposit_id: &crate::types::DepositId,
-    destination_deposit_id: &crate::types::DepositId,
-    amount: u64,
-    fee: u64,
-    timeout_height: u32,
-    script_witness: &crate::types::DescriptorWitness,
-) -> Result<bool, DepositsError> {
-    // The signing message is the same as for the lock - both parties commit to same terms
-    let message_hash = transfer_lock_signing_message(
-        nonce,
-        source_deposit_id,
-        destination_deposit_id,
-        amount,
-        fee,
-        completion_script,
-        timeout_height,
-    );
-
-    // Verify the computed transfer_id matches
-    let computed_id = compute_transfer_id(&message_hash);
-    if computed_id != *transfer_id {
-        return Err(DepositsError::InvalidSignature);
-    }
-
-    // Verify the witness satisfies the completion_script
-    // TODO: thread chain_tip through these helper callers.
-    crate::descriptor::verify_witness(completion_script, script_witness, &message_hash, 0)
-}
+// verify_withdrawal_witness / verify_invoice_lock_witness /
+// verify_transfer_lock_witness / verify_transfer_complete_witness
+// deleted — these were per-operation wrappers that composed an
+// op-specific signing message with the generic descriptor
+// `verify_witness`. Conformance now runs the same check directly
+// at `LedgerState::check_conformance` time (see
+// `deposits_protocol::types::ledger_state::check_conformance` —
+// matches on each Lock/Fulfill op variant, builds the same
+// signing message, calls `verifier.verify_witness`).
 
 /// Create a withdrawal authorization signature.
 ///
@@ -666,111 +570,9 @@ mod tests {
         assert!(!valid, "Signature should be invalid for modified amount");
     }
 
-    #[test]
-    fn test_withdrawal_signature_roundtrip() {
-        use crate::types::{compute_deposit_id, DescriptorWitness, OnChainWithdrawal};
-
-        let (depositor_secret, deposit_pubkey) = create_test_keypair();
-        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
-        let deposit_id = compute_deposit_id(&descriptor);
-
-        let nonce = [42u8; 32];
-        let destination_address = "bc1qwithdrawal123456789";
-        let amount_sats = 500_000u64;
-        let fee_sats = 1_000u64;
-
-        // Create signature
-        let sig = create_withdrawal_signature(
-            &depositor_secret,
-            &nonce,
-            &deposit_pubkey,
-            destination_address,
-            amount_sats,
-            fee_sats,
-        )
-        .unwrap();
-
-        // Create the withdrawal struct
-        let signing_message = OnChainWithdrawal::signing_message(
-            &nonce,
-            &deposit_id,
-            destination_address,
-            amount_sats,
-            fee_sats,
-        );
-        let withdrawal_id = OnChainWithdrawal::compute_withdrawal_id(&signing_message);
-
-        let withdrawal = OnChainWithdrawal {
-            withdrawal_id,
-            nonce,
-            deposit_id,
-            destination_address: destination_address.to_string(),
-            amount_sats,
-            fee_sats,
-            requested_at_block: 800_000,
-            memo: Some("Test withdrawal".to_string()),
-            depositor_witness: DescriptorWitness::from_signature(&sig),
-        };
-
-        // Verify signature using verify_withdrawal_witness
-        let valid = verify_withdrawal_witness(&withdrawal, &descriptor, 800_000).unwrap();
-        assert!(valid, "Withdrawal signature should be valid");
-
-        // Verify OP_RETURN data
-        let op_return = withdrawal.op_return_data();
-        assert_eq!(&op_return[0..5], b"WDRL:");
-        assert_eq!(&op_return[5..33], &withdrawal_id[..28]);
-        assert!(withdrawal.verify_op_return(&op_return));
-    }
-
-    #[test]
-    fn test_withdrawal_signature_wrong_amount() {
-        use crate::types::{compute_deposit_id, DescriptorWitness, OnChainWithdrawal};
-
-        let (depositor_secret, deposit_pubkey) = create_test_keypair();
-        let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
-        let deposit_id = compute_deposit_id(&descriptor);
-
-        let nonce = [42u8; 32];
-        let destination_address = "bc1qwithdrawal123456789";
-        let amount_sats = 500_000u64;
-        let fee_sats = 1_000u64;
-
-        // Create signature with original amount
-        let sig = create_withdrawal_signature(
-            &depositor_secret,
-            &nonce,
-            &deposit_pubkey,
-            destination_address,
-            amount_sats,
-            fee_sats,
-        )
-        .unwrap();
-
-        // Create withdrawal with different amount
-        let signing_message = OnChainWithdrawal::signing_message(
-            &nonce,
-            &deposit_id,
-            destination_address,
-            amount_sats + 1000, // Different amount!
-            fee_sats,
-        );
-        let withdrawal_id = OnChainWithdrawal::compute_withdrawal_id(&signing_message);
-
-        let withdrawal = OnChainWithdrawal {
-            withdrawal_id,
-            nonce,
-            deposit_id,
-            destination_address: destination_address.to_string(),
-            amount_sats: amount_sats + 1000, // Different amount!
-            fee_sats,
-            requested_at_block: 800_000,
-            memo: None,
-            depositor_witness: DescriptorWitness::from_signature(&sig), // Signed with original amount
-        };
-
-        // Verify should fail - signature doesn't match modified amount
-        let valid = verify_withdrawal_witness(&withdrawal, &descriptor, 800_000).unwrap();
-        assert!(!valid, "Signature should be invalid for modified amount");
-    }
+    // test_withdrawal_signature_roundtrip / _wrong_amount deleted
+    // along with `verify_withdrawal_witness`. The withdrawal witness
+    // is now exercised by the OnchainLock conformance path; tests of
+    // the OP_RETURN encoding live in `types::core` where the methods
+    // do.
 }

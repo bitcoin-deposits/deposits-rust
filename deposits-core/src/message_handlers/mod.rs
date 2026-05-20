@@ -7,8 +7,6 @@
 
 //! Core message handler logic for the Bitcoin Deposits protocol.
 
-mod ledger;
 mod types;
 
-pub use ledger::*;
 pub use types::*;
