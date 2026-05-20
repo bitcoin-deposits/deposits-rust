@@ -12,6 +12,9 @@ WORKDIR /build
 
 # Workspace root + real sources for this crate AND its real path-deps.
 COPY Cargo.toml Cargo.lock ./
+# Vendored miniscript fork — referenced by `[patch.crates-io]` in
+# the workspace Cargo.toml.
+COPY third_party          ./third_party
 COPY deposits-attestation ./deposits-attestation
 COPY deposits-ringsig     ./deposits-ringsig
 # deposits-nostr is a path-dep of deposits-attestation

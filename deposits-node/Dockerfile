@@ -14,6 +14,11 @@ WORKDIR /build
 
 COPY Cargo.toml ./
 
+# Vendored miniscript fork — referenced by `[patch.crates-io]` in
+# the workspace Cargo.toml. Without this copy, `cargo build` fails
+# with "unable to update /build/third_party/rust-miniscript".
+COPY third_party/ third_party/
+
 # Crates we actually build (and their in-tree deps).
 COPY deposits-protocol/ deposits-protocol/
 COPY deposits-core/ deposits-core/

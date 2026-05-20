@@ -11,6 +11,9 @@ RUN apt-get update && \
 WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
+# Vendored miniscript fork — referenced by `[patch.crates-io]` in
+# the workspace Cargo.toml.
+COPY third_party ./third_party
 COPY deposits-lnurl ./deposits-lnurl
 # deposits-nostr is a real path-dep of deposits-lnurl
 # (`install_default_crypto_provider` + transport types).
