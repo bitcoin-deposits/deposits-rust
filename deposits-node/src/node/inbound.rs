@@ -222,6 +222,36 @@ impl Node {
                     return;
                 }
 
+                // FIXME: minimal wait-for-data shim — when the inbound order is
+                // (cosign request, then the ledger update it references), the
+                // cosigner sees state at seq N-1 missing prior staged ops and
+                // refuses with `quorum_member_unstaged` (or similar). Sleep up
+                // to ~500ms and re-check whether our local state has caught up
+                // to the requested sequence. Real fix: route cosign events
+                // through the per-ledger actor's queue (`LedgerEvent`) so
+                // Inbound updates and CosignDispatch are ordered together, and
+                // re-queue the cosign event with a deadline when its required
+                // data hasn't landed yet.
+                if let Some(req_seq) = request
+                    .params
+                    .get("sequence_number")
+                    .and_then(|v| v.as_u64())
+                {
+                    for _ in 0..5 {
+                        let local_next = {
+                            let ledgers = self.handler.ledgers.lock().unwrap();
+                            ledgers
+                                .get(&request.ledger_id)
+                                .map(|arc| arc.read().unwrap().next_sequence())
+                                .unwrap_or(0)
+                        };
+                        if local_next >= req_seq {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+
                 let result = self.process_cosign_request(&request).await;
                 if !result.0 {
                     tracing::info!(

@@ -427,10 +427,17 @@ impl Node {
         );
 
         // Wait until threshold cosignatures collected or timeout.
+        //
+        // Target: sub-1s in steady state. The 10s default is a safety net for
+        // bursts of concurrent cosign rounds (e.g. simultaneous auto_quorum_refresh
+        // rotations across many ledgers), where Nostr relay round-trips + the
+        // cosigners' inbound wait-for-data shim (see inbound.rs) can stack up
+        // beyond 5s under load. Override via `COSIGN_TIMEOUT_MS` env when
+        // benchmarking the steady-state path.
         let deadline_ms: u64 = std::env::var("COSIGN_TIMEOUT_MS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(5000);
+            .unwrap_or(10000);
         let deadline = Duration::from_millis(deadline_ms);
 
         tokio::select! {
@@ -559,7 +566,9 @@ impl Node {
             &member_ledger_id[..16],
         );
 
-        let deadline = std::time::Duration::from_secs(5);
+        // Aligned with cosign timeout above: sub-1s is the target, 10s is the
+        // safety net under burst load.
+        let deadline = std::time::Duration::from_secs(10);
 
         let result = tokio::select! {
             result = rx => {
@@ -576,7 +585,7 @@ impl Node {
             _ = tokio::time::sleep(deadline) => {
                 let mut pending = self.pending_consent_requests.lock().unwrap();
                 pending.remove(&request_id);
-                Err(Error::Protocol("Consent request timed out after 5s".to_string()))
+                Err(Error::Protocol("Consent request timed out after 10s".to_string()))
             }
         };
 
