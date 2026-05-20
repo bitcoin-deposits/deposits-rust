@@ -74,34 +74,11 @@ impl Node {
             Err(e) => return (false, None, Some(e)),
         };
 
-        // Verify witness against descriptor over withdrawal_signing_message.
-        let msg_hash = deposits_core::signature_utils::withdrawal_signing_message(
-            &nonce,
-            &deposit_id,
-            address,
-            amount_sats,
-            fee_sats,
-        );
-        let tip = self.wallet.get_block_height().unwrap_or(0);
-        match deposits_core::descriptor::verify_witness(
-            &descriptor, &depositor_witness, &msg_hash, tip,
-        ) {
-            Ok(true) => {}
-            Ok(false) => {
-                return (
-                    false,
-                    None,
-                    Some("Withdrawal witness does not satisfy descriptor".to_string()),
-                )
-            }
-            Err(e) => {
-                return (
-                    false,
-                    None,
-                    Some(format!("Withdrawal witness verification error: {:?}", e)),
-                )
-            }
-        }
+        // Witness crypto-verification used to live here as a preflight
+        // that called `descriptor::verify_witness`. It's now done by
+        // `check_conformance` when the operation is staged — the
+        // handler keeps the JSON parse above so requests with
+        // malformed witness shapes still fail fast.
 
         // Find the ledger
         let (reserves_id, _ledger) = match self
@@ -261,7 +238,11 @@ impl Node {
 
         // Get ledger and verify source deposit exists
         let ledger_id = &request.ledger_id;
-        let deposit_descriptor = {
+        // Block-scoped to keep the ledger lookup tight; we no longer
+        // need the descriptor (conformance does the witness check at
+        // stage time) but the block still does the deposit-exists
+        // and timeout-height preflight validations.
+        let _ = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = match ledgers.get(ledger_id) {
                 Some(l) => l.clone(),
@@ -331,7 +312,6 @@ impl Node {
                 );
             }
 
-            deposit.descriptor.clone()
         };
 
         // Check destination deposit balance limit
@@ -343,34 +323,12 @@ impl Node {
             return (false, None, Some(err));
         }
 
-        // Verify signature
-        let _secp = &self.secp;
-        let msg_hash = deposits_core::signature_utils::transfer_lock_signing_message(
-            &nonce,
-            &source_deposit_id,
-            &destination_deposit_id,
-            amount_msats,
-            fee_msats,
-            completion_script,
-            timeout_height,
-        );
-
-        // Verify signature against deposit descriptor (supports any miniscript)
+        // Build the witness from the request's signature; crypto
+        // verification against the source deposit's descriptor happens
+        // via `check_conformance` when this TransferLock is staged.
         let witness = DescriptorWitness {
             stack: vec![signature.serialize().to_vec()],
         };
-        let tip = self.wallet.get_block_height().unwrap_or(0);
-        match deposits_core::descriptor::verify_witness(&deposit_descriptor, &witness, &msg_hash, tip) {
-            Ok(true) => {}
-            Ok(false) => return (false, None, Some("Invalid signature".to_string())),
-            Err(e) => {
-                return (
-                    false,
-                    None,
-                    Some(format!("Descriptor verification failed: {}", e)),
-                )
-            }
-        }
 
         // Check if destination deposit requires a receive signature
         {

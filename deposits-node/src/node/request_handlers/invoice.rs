@@ -447,33 +447,9 @@ impl Node {
             );
         }
 
-        // Verify the witness against the descriptor. Message is the
-        // (deposit_id, payment_hash, amount_msat) lock binding — same
-        // as before, just dispatched through the descriptor verifier
-        // so multi() / or() / etc. work end-to-end.
-        let msg_hash = deposits_core::signature_utils::invoice_lock_signing_message(
-            &deposit_id,
-            &payment_id,
-            amount_msat,
-        );
-        let tip = self.wallet.get_block_height().unwrap_or(0);
-        match deposits_core::descriptor::verify_witness(&descriptor, &witness, &msg_hash, tip) {
-            Ok(true) => {}
-            Ok(false) => {
-                return (
-                    false,
-                    None,
-                    Some("Witness does not satisfy descriptor".to_string()),
-                )
-            }
-            Err(e) => {
-                return (
-                    false,
-                    None,
-                    Some(format!("Witness verification error: {:?}", e)),
-                )
-            }
-        }
+        // Witness crypto-verification against the descriptor used to
+        // live here as a preflight; it now runs in `check_conformance`
+        // when this InvoiceLock is staged.
 
         // Find the ledger and check deposit balance
         let ledger_id = &request.ledger_id;
