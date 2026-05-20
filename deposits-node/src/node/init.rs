@@ -280,6 +280,7 @@ impl Node {
             pending_cosign_requests: Arc::new(Mutex::new(HashMap::new())),
             pending_consent_requests: Arc::new(Mutex::new(HashMap::new())),
             staging_locks: Mutex::new(HashMap::new()),
+            rotating_ledgers: Arc::new(Mutex::new(std::collections::HashSet::new())),
             cosign_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
             dispute_wakeup,
             pending_invoices: Arc::new(Mutex::new(Self::load_pending_invoices(&config.data_dir))),

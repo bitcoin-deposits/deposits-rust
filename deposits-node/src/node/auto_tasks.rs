@@ -744,7 +744,7 @@ impl Node {
     /// Safe to invoke at the same cadence as the other periodic tasks
     /// (5s fast / 60s normal); the per-member RPC has its own
     /// rate-limiting so this doesn't spam offline members.
-    pub async fn auto_quorum_refresh(&self) {
+    pub async fn auto_quorum_refresh(self: &Arc<Self>) {
         let threshold_blocks: u32 = self
             .rotate_before_expiry_days
             .saturating_mul(144);
@@ -930,10 +930,29 @@ impl Node {
                 continue;
             }
 
+            // Detach the actual rotation as a background task. It can
+            // take minutes (cosign collection + on-chain confs +
+            // QuorumBegin op cosign), far longer than the 10s periodic
+            // task budget. The rotating_ledgers set prevents the next
+            // periodic cycle from double-launching while the prior
+            // rotation is still in flight.
+            {
+                let mut in_flight = self.rotating_ledgers.lock().unwrap();
+                if in_flight.contains(&snap.ledger_id) {
+                    tracing::debug!(
+                        "auto_quorum_refresh: ledger {}... rotation already in flight; skipping",
+                        &snap.ledger_id[..16]
+                    );
+                    continue;
+                }
+                in_flight.insert(snap.ledger_id.clone());
+            }
+
             tracing::info!(
-                "auto_quorum_refresh: ledger {}... all members fresh, rotating",
+                "auto_quorum_refresh: ledger {}... all members fresh, rotating (detached)",
                 &snap.ledger_id[..16]
             );
+
             let begin_req = crate::nostr::LedgerRequest {
                 action: "quorum_begin".into(),
                 ledger_id: snap.ledger_id.clone(),
@@ -945,19 +964,26 @@ impl Node {
                 subkey_account: None,
                 subkey_attestation: None,
             };
-            let (success, _, error) = self.process_quorum_begin_request(&begin_req).await;
-            if success {
-                tracing::info!(
-                    "auto_quorum_refresh: ledger {}... rotated",
-                    &snap.ledger_id[..16]
-                );
-            } else {
-                tracing::warn!(
-                    "auto_quorum_refresh: ledger {}... rotate failed: {}",
-                    &snap.ledger_id[..16],
-                    error.unwrap_or_default()
-                );
-            }
+            let node = Arc::clone(self);
+            let in_flight_set = Arc::clone(&self.rotating_ledgers);
+            let ledger_id_for_task = snap.ledger_id.clone();
+            tokio::spawn(async move {
+                let (success, _, error) =
+                    node.process_quorum_begin_request(&begin_req).await;
+                if success {
+                    tracing::info!(
+                        "auto_quorum_refresh: ledger {}... rotated",
+                        &ledger_id_for_task[..16]
+                    );
+                } else {
+                    tracing::warn!(
+                        "auto_quorum_refresh: ledger {}... rotate failed: {}",
+                        &ledger_id_for_task[..16],
+                        error.unwrap_or_default()
+                    );
+                }
+                in_flight_set.lock().unwrap().remove(&ledger_id_for_task);
+            });
         }
     }
 }

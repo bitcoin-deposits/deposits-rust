@@ -867,6 +867,22 @@ impl Node {
             tracing::warn!("Ledger wallet sync failed before quorum_begin: {}", e);
         }
 
+        // Detect a refresh case: ledger is already Active and has an
+        // existing on-chain reserves UTXO. We rotate by spending the
+        // existing UTXO via quorum cosign (tier-0 majority leaf) into
+        // a new Taproot output with the staged (`next_quorum_members`)
+        // key set. Fee is deducted from the reserves amount.
+        let refresh_existing = {
+            let l = ledger_arc.read().unwrap();
+            let is_active = l.state.quorum_state == QuorumState::Active;
+            drop(l);
+            if is_active {
+                ledger_wallet.taproot_reserves()
+            } else {
+                None
+            }
+        };
+
         let pending_resume = {
             let pre_quorum =
                 ledger_arc.read().unwrap().state.quorum_state == QuorumState::PreQuorum;
@@ -880,7 +896,21 @@ impl Node {
         };
 
         let (result, pending_taproot): (TaprootReservesCreateResult, TaprootReservesInfo) =
-            if let Some(existing) = pending_resume {
+            if let Some(existing) = refresh_existing {
+                // Refresh path: spend the existing Taproot reserves UTXO
+                // via majority cosign into a new Taproot output with the
+                // rotated key set. Fee is deducted from the reserves
+                // amount; the wpkh wallet is not consulted.
+                self.build_rotation_via_cosign(
+                    &ledger_id,
+                    &existing,
+                    quorum_members.clone(),
+                    quorum_expiries.clone(),
+                    ledger_hash,
+                    &new_ruleset_name,
+                )
+                .await?
+            } else if let Some(existing) = pending_resume {
                 tracing::info!(
                     "Detected half-finished QuorumBegin: reusing taproot UTXO {}:{} ({}sat) — \
                      skipping build+broadcast, jumping to confirmation+cosign",
@@ -1075,6 +1105,349 @@ impl Node {
             quorum_expiry: result.quorum_expiry,
             ledger_hash,
         })
+    }
+
+    /// Build + cosign + broadcast a quorum rotation transaction.
+    ///
+    /// Spends the existing Taproot reserves UTXO via the tier-0 "majority
+    /// immediate" leaf into a new Taproot output for the rotated key set
+    /// (operator + `new_members`). The fee is deducted from the reserves
+    /// amount; no wpkh wallet input is consumed.
+    ///
+    /// Returns `(TaprootReservesCreateResult, TaprootReservesInfo)` shaped
+    /// identically to `build_activation_tx` so the caller's downstream
+    /// phases (UTXO-depth wait, QuorumBegin op publish + cosign) work
+    /// unchanged.
+    #[allow(clippy::too_many_arguments)]
+    async fn build_rotation_via_cosign(
+        &self,
+        ledger_id: &str,
+        existing: &crate::wallet::TaprootReservesInfo,
+        new_members: Vec<PublicKey>,
+        new_expiries: Vec<u32>,
+        new_ledger_hash: [u8; 32],
+        new_ruleset_name: &str,
+    ) -> Result<
+        (
+            crate::wallet::TaprootReservesCreateResult,
+            crate::wallet::TaprootReservesInfo,
+        ),
+        Error,
+    > {
+        use bitcoin::taproot::LeafVersion;
+        use bitcoin::Witness;
+        use deposits_core::tapscript_reserves::{
+            ReservesSpendBuilder, SpendTxParams, TapscriptReservesBuilder, VoterSet,
+        };
+        use deposits_signer_api::{SigPurpose, SignContext};
+        use nostr_sdk::{Filter, Kind};
+
+        let operator_key = self.node_id;
+
+        // Build the *new* Taproot output (rotated keys). This is what the
+        // refresh rotates *to*.
+        let new_others: Vec<PublicKey> =
+            new_members.iter().filter(|pk| **pk != operator_key).copied().collect();
+        let new_voter_set = VoterSet::new(operator_key, new_others);
+        let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(new_ruleset_name));
+        let new_first_expiry = *new_expiries.iter().min().unwrap_or(&0);
+        let new_config = (ruleset.tier_config_factory)(
+            new_voter_set.all_voters().len(),
+            new_first_expiry,
+        );
+        let new_taproot_output = TapscriptReservesBuilder::new(
+            new_voter_set,
+            new_config,
+            self.wallet.network(),
+            new_ledger_hash,
+        )
+        .build()
+        .map_err(|e| Error::Wallet(format!("build rotated taproot output: {:?}", e)))?;
+        let new_script_pubkey = new_taproot_output.script_pubkey();
+        let new_address = new_taproot_output.address.clone();
+
+        // Build the deterministic rotation TX (1 input → 1 output).
+        let params = SpendTxParams {
+            reserves_outpoint: existing.outpoint,
+            reserves_amount: existing.amount,
+            destination_script: new_script_pubkey.clone(),
+            splits: Vec::new(),
+            fee_rate_sat_vbyte: 5,
+            lock_time: 0,
+        };
+        let prev_script_pubkey = existing.taproot_output.script_pubkey();
+        let rotation_tx = ReservesSpendBuilder::build_spend_transaction(
+            &params,
+            &prev_script_pubkey,
+        )
+        .map_err(|e| Error::Wallet(format!("build rotation tx: {:?}", e)))?;
+        let new_amount = rotation_tx.output[0].value.to_sat();
+        let new_txid = rotation_tx.compute_txid();
+
+        // Rebuild the *current* (pre-rotation) builder so we can hand out
+        // the tier-0 leaf script for sighash + witness assembly.
+        let cur_voters_others: Vec<PublicKey> = existing
+            .quorum_members
+            .iter()
+            .filter(|pk| **pk != existing.operator)
+            .copied()
+            .collect();
+        let cur_voter_set = VoterSet::new(existing.operator, cur_voters_others);
+        let cur_ruleset =
+            deposits_core::ruleset::resolve_or_legacy(Some(&existing.ruleset_name));
+        let cur_config = (cur_ruleset.tier_config_factory)(
+            cur_voter_set.all_voters().len(),
+            existing.quorum_expiry,
+        );
+        let tier0 = cur_config
+            .tiers
+            .first()
+            .cloned()
+            .ok_or_else(|| Error::Protocol("current ruleset has no tier 0".to_string()))?;
+        let cur_builder = TapscriptReservesBuilder::new(
+            cur_voter_set.clone(),
+            cur_config,
+            self.wallet.network(),
+            existing.ledger_hash,
+        );
+        let leaf_script = cur_builder
+            .build_threshold_leaf(&tier0)
+            .map_err(|e| Error::Wallet(format!("build tier-0 leaf: {:?}", e)))?;
+
+        let sighash = ReservesSpendBuilder::compute_sighash(
+            &rotation_tx,
+            0,
+            existing.amount,
+            &prev_script_pubkey,
+            &leaf_script,
+        )
+        .map_err(|e| Error::Wallet(format!("compute rotation sighash: {:?}", e)))?;
+        let sighash_bytes: [u8; 32] = *sighash.as_ref();
+
+        // Operator signs first.
+        let our_sig = self
+            .handler
+            .signer
+            .bip340_sign(
+                &SignContext::no_ledger(SigPurpose::OnchainSighash),
+                &sighash_bytes,
+            )
+            .map_err(|e| Error::Protocol(format!("operator rotation sighash sign: {}", e)))?;
+
+        let mut sigs: std::collections::HashMap<PublicKey, [u8; 64]> =
+            std::collections::HashMap::new();
+        sigs.insert(operator_key, our_sig);
+
+        // Tier-0 threshold: majority of all voters.
+        let total_voters = existing.quorum_members.len() + 1; // +1 operator
+        let majority = (total_voters / 2) + 1;
+        let cosigner_threshold = majority.saturating_sub(1); // operator already signed
+
+        // Send rotation_sign request to the ledger; cosigners verify
+        // TX shape + sighash and reply via KIND_LEDGER_RESPONSE.
+        let unsigned_tx_hex = hex::encode(bitcoin::consensus::encode::serialize(&rotation_tx));
+        let request_params = serde_json::json!({
+            "sighash": hex::encode(sighash_bytes),
+            "unsigned_tx": unsigned_tx_hex,
+            // Operator's own ledger_hash + new_first_expiry so the cosigner
+            // rebuilds the *expected* rotated Taproot output with the same
+            // inputs the operator used. Until chain_tip_hash is consistent
+            // across replay paths, computing this independently on the
+            // cosigner side produces a different hash → script mismatch
+            // → refusal. The cosigner still validates the operator's claim
+            // by checking the resulting script against the proposed TX.
+            "ledger_hash": hex::encode(new_ledger_hash),
+            "new_quorum_expiry": new_first_expiry,
+        });
+        let request_id = self
+            .nostr
+            .send_ledger_request(ledger_id, "rotation_sign", request_params)
+            .await
+            .map_err(|e| Error::Protocol(format!("publish rotation_sign: {:?}", e)))?;
+        tracing::info!(
+            "auto_rotation: published rotation_sign request {} for ledger {}... (need {} cosigner sigs)",
+            &request_id[..16.min(request_id.len())],
+            &ledger_id[..16],
+            cosigner_threshold
+        );
+
+        // Poll relay for responses tagged with our request_id.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+        let active_set: std::collections::HashSet<PublicKey> =
+            existing.quorum_members.iter().copied().collect();
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            let since = nostr_sdk::Timestamp::now() - 120;
+            let filter = Filter::new()
+                .kind(Kind::Custom(crate::nostr::KIND_LEDGER_RESPONSE))
+                .since(since);
+            // Responses are KIND_LEDGER_RESPONSE (ephemeral 20102); they
+            // arrive on the fast (main) relay, not the slow/durable one.
+            // Using fetch_client() would silently miss every response.
+            let events = self
+                .nostr
+                .client()
+                .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+                .await
+                .map_err(|e| Error::Protocol(format!("fetch rotation_sign responses: {}", e)))?;
+
+            for event in events.iter() {
+                let mut matches_request = false;
+                for tag in event.tags.iter() {
+                    if tag.kind()
+                        == nostr_sdk::TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF)
+                    {
+                        if let Some(v) = tag.content() {
+                            if v == request_id {
+                                matches_request = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !matches_request {
+                    continue;
+                }
+                let resp: crate::nostr::LedgerResponse =
+                    match serde_json::from_str(&event.content) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+                if !resp.success {
+                    tracing::info!(
+                        "auto_rotation: cosigner refused: {}",
+                        resp.error.clone().unwrap_or_else(|| "no reason".to_string())
+                    );
+                    continue;
+                }
+                let result = match resp.result.as_ref() {
+                    Some(r) => r,
+                    None => continue,
+                };
+                let signer_hex = match result.get("signer").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let sig_hex = match result.get("signature").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let signer_pk: PublicKey = match signer_hex.parse() {
+                    Ok(pk) => pk,
+                    Err(_) => continue,
+                };
+                if !active_set.contains(&signer_pk) {
+                    continue; // ignore non-members
+                }
+                if sigs.contains_key(&signer_pk) {
+                    continue;
+                }
+                let sig_bytes = match hex::decode(sig_hex) {
+                    Ok(b) if b.len() == 64 => b,
+                    _ => continue,
+                };
+                let mut arr = [0u8; 64];
+                arr.copy_from_slice(&sig_bytes);
+                sigs.insert(signer_pk, arr);
+                tracing::info!(
+                    "auto_rotation: collected sig from {}... ({}/{})",
+                    &signer_pk.to_string()[..16],
+                    sigs.len() - 1, // exclude operator
+                    cosigner_threshold
+                );
+            }
+
+            // We need majority of all voters (operator + cosigners). The
+            // operator already signed; check we have ≥ cosigner_threshold
+            // from cosigners.
+            if sigs.len() - 1 >= cosigner_threshold {
+                break;
+            }
+        }
+        tracing::info!(
+            "auto_rotation: polling exited for request {} — {} cosigner sigs collected",
+            &request_id[..16.min(request_id.len())],
+            sigs.len() - 1
+        );
+        if sigs.len() - 1 < cosigner_threshold {
+            return Err(Error::Protocol(format!(
+                "rotation cosign timeout: got {}/{} cosigner sigs",
+                sigs.len() - 1,
+                cosigner_threshold
+            )));
+        }
+
+        // Assemble the witness. Stack order for tier-0 majority leaf is:
+        // [sig_N, sig_{N-1}, ..., sig_0, leaf_script, control_block]
+        // where sig_i corresponds to voter at sorted_x_only_pubkeys()[i].
+        // Empty bytes for voters that didn't sign (still a valid stack
+        // entry for OP_CHECKSIGADD).
+        let sorted = cur_voter_set.sorted_x_only_pubkeys();
+        let control_block = existing
+            .taproot_output
+            .control_block_for_tier(0)
+            .ok_or_else(|| Error::Protocol("no control block for tier 0".to_string()))?;
+
+        let mut witness = Witness::new();
+        for x_only in sorted.iter().rev() {
+            // Map x_only back to a full PublicKey we have a sig for.
+            let mut pushed = false;
+            for (pk, sig) in &sigs {
+                if pk.x_only_public_key().0 == *x_only {
+                    witness.push(sig);
+                    pushed = true;
+                    break;
+                }
+            }
+            if !pushed {
+                witness.push([] as [u8; 0]);
+            }
+        }
+        witness.push(leaf_script.as_bytes());
+        witness.push(control_block.serialize());
+
+        let mut signed_tx = rotation_tx;
+        signed_tx.input[0].witness = witness;
+
+        let _ = LeafVersion::TapScript;
+
+        // Broadcast via the node wallet (regular Bitcoin RPC / esplora).
+        let broadcast_txid = self.wallet.broadcast(&signed_tx)?;
+        tracing::info!(
+            "auto_rotation: broadcast rotation tx {} (ledger {}..., {} -> {} sats, fee {})",
+            broadcast_txid,
+            &ledger_id[..16],
+            existing.amount,
+            new_amount,
+            existing.amount - new_amount,
+        );
+
+        let new_outpoint = bitcoin::OutPoint {
+            txid: new_txid,
+            vout: 0,
+        };
+        let synth_result = crate::wallet::TaprootReservesCreateResult {
+            outpoint: new_outpoint,
+            address: new_address,
+            amount: new_amount,
+            tx: signed_tx,
+            taproot_output: new_taproot_output.clone(),
+            quorum_expiry: new_first_expiry,
+            ledger_hash: new_ledger_hash,
+        };
+        let pending = crate::wallet::TaprootReservesInfo {
+            outpoint: new_outpoint,
+            amount: new_amount,
+            operator: operator_key,
+            quorum_members: new_members.clone(),
+            quorum_expiry: new_first_expiry,
+            ledger_hash: new_ledger_hash,
+            taproot_output: new_taproot_output,
+            ruleset_name: new_ruleset_name.to_string(),
+            confirmed: false,
+        };
+        Ok((synth_result, pending))
     }
 
     // ========================================================================

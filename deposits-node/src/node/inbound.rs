@@ -32,8 +32,9 @@ impl Node {
         // Check if this request is for a ledger we own or have joined
         let is_our_ledger = self.has_ledger(&request.ledger_id)
             || self.has_ledger_by_reserves_key(&request.ledger_id);
-        let is_cross_ledger_sign =
-            request.action == "custody_transfer_sign" || request.action == "confiscation_sign";
+        let is_cross_ledger_sign = request.action == "custody_transfer_sign"
+            || request.action == "confiscation_sign"
+            || request.action == "rotation_sign";
         // cosign requests can come from ledgers where we're a quorum member
         // (we may not have the full ledger locally, just a QuorumJoin record)
         let is_cosign_request = request.action == "cosign_update"
@@ -200,6 +201,7 @@ impl Node {
             "transfer_complete" => self.process_transfer_complete_request(&request).await,
             "custody_transfer_sign" => self.process_custody_transfer_sign_request(&request).await,
             "confiscation_sign" => self.process_confiscation_sign_request(&request).await,
+            "rotation_sign" => self.process_rotation_sign_request(&request).await,
             "cooperative_refund_sign" => {
                 self.process_cooperative_refund_sign_request(&request).await
             }

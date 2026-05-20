@@ -331,6 +331,14 @@ pub struct Node {
     /// Prevents concurrent state mutations and ensures cosign requests are serialized.
     staging_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 
+    /// Ledger ids whose `auto_quorum_refresh` is currently rotating. The
+    /// rotation flow can take ~1–10 minutes (cosign collection + wait
+    /// for confirmation + QuorumBegin cosign), which is much longer
+    /// than the 10s periodic-task timeout. We detach the work as a
+    /// background task and use this set to guard against re-launching
+    /// while the prior rotation is still in flight.
+    pub(crate) rotating_ledgers: Arc<Mutex<std::collections::HashSet<String>>>,
+
     /// Semaphore to limit concurrent request_cosign calls.
     /// Multiple concurrent mini loops compete for shared channels (response_rx,
     /// ledger_rx) and can deadlock when all operators are in batch-await simultaneously.

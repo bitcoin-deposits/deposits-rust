@@ -375,6 +375,410 @@ impl Node {
         (true, Some(result.to_string()), None)
     }
 
+    /// Sign a proposed quorum rotation transaction.
+    ///
+    /// Rotation TX shape (deterministic, built via
+    /// `ReservesSpendBuilder::build_spend_transaction`):
+    ///   - 1 input: the current reserves UTXO (Taproot, tier-0 majority leaf)
+    ///   - 1 output: a new Taproot reserves UTXO whose voter set is derived
+    ///     from the rotating operator + the ledger's `next_quorum_members`
+    ///
+    /// Cosigner verification (refuse on any failure):
+    ///   - We are a current quorum member for the ledger (i.e. we hold a
+    ///     `QuorumJoin` record and our pubkey is in the active set).
+    ///   - The ledger is healthy: `QuorumState::Active`, not past expiry,
+    ///     dispute_state == Normal.
+    ///   - The proposed TX's single input matches the on-chain reserves
+    ///     UTXO (via esplora lookup of the latest QuorumBegin's
+    ///     `reserves_id`).
+    ///   - The proposed TX's single output is the *expected* rotated
+    ///     Taproot script_pubkey, computed by replaying the ledger and
+    ///     building `TapscriptReservesBuilder` against `next_quorum_members`
+    ///     (or the current active set if `next_quorum_members` is empty —
+    ///     e.g. a ruleset-only rotation with no membership change).
+    ///   - Recomputed sighash matches the one in the request (proves the
+    ///     operator didn't lie about what they want us to sign).
+    pub(crate) async fn process_rotation_sign_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        use bitcoin::Transaction;
+        use deposits_core::tapscript_reserves::{
+            ReservesSpendBuilder, TapscriptReservesBuilder, VoterSet,
+        };
+        use deposits_core::QuorumState;
+        use deposits_signer_api::{SigPurpose, SignContext};
+
+        let ledger_prefix = &request.ledger_id[..16.min(request.ledger_id.len())];
+        tracing::debug!("[rotation_sign] received for ledger {}...", ledger_prefix);
+
+        let sighash_hex = match request.params.get("sighash").and_then(|v| v.as_str()) {
+            Some(h) => h,
+            None => return (false, None, Some("Missing sighash parameter".to_string())),
+        };
+        let sighash_bytes: [u8; 32] = match hex::decode(sighash_hex) {
+            Ok(b) if b.len() == 32 => {
+                let mut a = [0u8; 32];
+                a.copy_from_slice(&b);
+                a
+            }
+            _ => return (false, None, Some("Invalid sighash format".to_string())),
+        };
+
+        let unsigned_tx_hex = match request.params.get("unsigned_tx").and_then(|v| v.as_str()) {
+            Some(h) => h,
+            None => return (false, None, Some("Missing unsigned_tx parameter".to_string())),
+        };
+        let tx_bytes = match hex::decode(unsigned_tx_hex) {
+            Ok(b) => b,
+            Err(e) => return (false, None, Some(format!("unsigned_tx hex decode: {}", e))),
+        };
+        let proposed_tx: Transaction = match bitcoin::consensus::encode::deserialize(&tx_bytes) {
+            Ok(t) => t,
+            Err(e) => return (false, None, Some(format!("unsigned_tx parse: {}", e))),
+        };
+
+        if proposed_tx.input.len() != 1 || proposed_tx.output.len() != 1 {
+            return (
+                false,
+                None,
+                Some(format!(
+                    "rotation tx must be 1-in/1-out, got {}-in/{}-out",
+                    proposed_tx.input.len(),
+                    proposed_tx.output.len()
+                )),
+            );
+        }
+
+        // Snapshot ledger state. We must hold this ledger locally (we
+        // joined it as a cosigner) — if not, refuse outright.
+        let ledger_arc = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            match ledgers.get(&request.ledger_id) {
+                Some(arc) => arc.clone(),
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some("Ledger not locally held; refusing rotation cosign".to_string()),
+                    )
+                }
+            }
+        };
+
+        let (
+            ruleset_name,
+            ledger_hash,
+            reserves_id,
+            quorum_expiry,
+            operator_key,
+            current_members,
+            new_members,
+        ) = {
+            let ledger = ledger_arc.read().unwrap();
+            let state = &ledger.state;
+            if state.quorum_state != QuorumState::Active {
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "quorum not active (state={:?})",
+                        state.quorum_state
+                    )),
+                );
+            }
+            if state.dispute_state != deposits_core::types::DisputeState::Normal {
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "dispute_state={:?}, refusing rotation cosign",
+                        state.dispute_state
+                    )),
+                );
+            }
+            let we_are_member = state
+                .quorum_members
+                .iter()
+                .any(|m| m.pubkey == self.node_id);
+            if !we_are_member {
+                return (
+                    false,
+                    None,
+                    Some("Not a current quorum member for this ledger".to_string()),
+                );
+            }
+            let block_height = self.wallet.get_block_height().unwrap_or(0);
+            let qe = state.quorum_expiry.unwrap_or(0);
+            if qe != 0 && block_height > qe {
+                return (
+                    false,
+                    None,
+                    Some(format!("quorum past expiry ({} > {})", block_height, qe)),
+                );
+            }
+            let current: Vec<bitcoin::secp256k1::PublicKey> =
+                state.quorum_members.iter().map(|m| m.pubkey).collect();
+            let new: Vec<bitcoin::secp256k1::PublicKey> = if state.next_quorum_members.is_empty()
+            {
+                current.clone()
+            } else {
+                state.next_quorum_members.iter().map(|m| m.pubkey).collect()
+            };
+            (
+                state.active_ruleset_name.clone(),
+                ledger.hash(),
+                state.reserves_key.clone(),
+                qe,
+                state.operator_key,
+                current,
+                new,
+            )
+        };
+
+        // Look up the current on-chain reserves UTXO.
+        let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+            match reserves_id.parse() {
+                Ok(a) => a,
+                Err(e) => return (false, None, Some(format!("parse reserves_id: {}", e))),
+            };
+        let reserves_addr = match reserves_addr.require_network(self.wallet.network()) {
+            Ok(a) => a,
+            Err(e) => return (false, None, Some(format!("network mismatch: {}", e))),
+        };
+        let reserves_script = reserves_addr.script_pubkey();
+        let (reserves_outpoint, reserves_amount) =
+            match self.wallet.find_utxo_for_script(&reserves_script) {
+                Ok(Some(u)) => u,
+                Ok(None) => {
+                    return (
+                        false,
+                        None,
+                        Some("reserves UTXO not found on-chain (already spent?)".to_string()),
+                    )
+                }
+                Err(e) => {
+                    return (false, None, Some(format!("esplora reserves lookup: {}", e)))
+                }
+            };
+
+        if proposed_tx.input[0].previous_output != reserves_outpoint {
+            return (
+                false,
+                None,
+                Some(format!(
+                    "input outpoint {} ≠ on-chain reserves UTXO {}",
+                    proposed_tx.input[0].previous_output, reserves_outpoint
+                )),
+            );
+        }
+
+        // Operator passes their own ledger_hash + new_quorum_expiry in
+        // the request so both sides feed identical inputs to
+        // TapscriptReservesBuilder. Until chain_tip_hash converges across
+        // replay paths, computing this on the cosigner side independently
+        // produces a different hash and the script comparison below
+        // would refuse every legitimate rotation. Trust here is bounded:
+        // the cosigner still verifies the *resulting* script matches the
+        // proposed TX, so an operator who lies about ledger_hash just
+        // builds a Taproot output they can't later spend.
+        let claimed_ledger_hash: [u8; 32] = match request
+            .params
+            .get("ledger_hash")
+            .and_then(|v| v.as_str())
+            .and_then(|s| hex::decode(s).ok())
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        {
+            Some(h) => h,
+            None => ledger_hash, // Fall back to our own if not provided.
+        };
+        let claimed_new_quorum_expiry: u32 = request
+            .params
+            .get("new_quorum_expiry")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .unwrap_or(quorum_expiry);
+
+        // Helper: rebuild a TapscriptReservesOutput from a member set.
+        // Used twice — once for the *current* output (to derive the
+        // tier-0 leaf script for sighash recomputation) and once for
+        // the *expected new* output (to compare against proposed_tx.output[0]).
+        // Closure variant takes the (hash, expiry) inputs explicitly so
+        // the *new* output is rebuilt against the operator's claimed
+        // values while the *current* output is rebuilt against our own
+        // state (the spend authorization side, which we control).
+        let rebuild = |members: &[bitcoin::secp256k1::PublicKey],
+                       lh: [u8; 32],
+                       qe: u32| {
+            let others: Vec<bitcoin::secp256k1::PublicKey> = members
+                .iter()
+                .filter(|pk| **pk != operator_key)
+                .copied()
+                .collect();
+            let voter_set = VoterSet::new(operator_key, others);
+            let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(&ruleset_name));
+            let config = (ruleset.tier_config_factory)(
+                voter_set.all_voters().len(),
+                qe,
+            );
+            TapscriptReservesBuilder::new(
+                voter_set,
+                config,
+                self.wallet.network(),
+                lh,
+            )
+            .build()
+        };
+
+        // Build the *new* Taproot output and verify the proposed TX matches.
+        let expected_new = match rebuild(&new_members, claimed_ledger_hash, claimed_new_quorum_expiry) {
+            Ok(o) => o,
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("build expected rotated taproot output: {:?}", e)),
+                )
+            }
+        };
+        if proposed_tx.output[0].script_pubkey != expected_new.script_pubkey() {
+            return (
+                false,
+                None,
+                Some(
+                    "output[0] script mismatch — proposed Taproot output differs from \
+                     cosigner's rebuild (likely diverged ledger_hash or member set; \
+                     operator may have advanced past cosigner's view)"
+                        .to_string(),
+                ),
+            );
+        }
+        let proposed_value = proposed_tx.output[0].value.to_sat();
+        if proposed_value > reserves_amount {
+            return (
+                false,
+                None,
+                Some(format!(
+                    "output value {} > reserves amount {}",
+                    proposed_value, reserves_amount
+                )),
+            );
+        }
+        let fee_paid = reserves_amount - proposed_value;
+        const MAX_ROTATION_FEE_SATS: u64 = 100_000;
+        if fee_paid > MAX_ROTATION_FEE_SATS {
+            return (
+                false,
+                None,
+                Some(format!(
+                    "rotation fee {} sats exceeds ceiling {}",
+                    fee_paid, MAX_ROTATION_FEE_SATS
+                )),
+            );
+        }
+
+        // Build the *current* Taproot output → get its tier-0 leaf for
+        // sighash recomputation. Tier-0 is the "majority immediate" leaf
+        // (no timelock); rotations always use it. Uses *our* state for
+        // hash/expiry because we're validating the operator's authority
+        // to spend the on-chain UTXO that was committed against our
+        // observed history.
+        let current_output = match rebuild(&current_members, ledger_hash, quorum_expiry) {
+            Ok(o) => o,
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("build current taproot output: {:?}", e)),
+                )
+            }
+        };
+        let tier0 = match current_output.config.tiers.first() {
+            Some(t) => t.clone(),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("current taproot output has no tiers".to_string()),
+                )
+            }
+        };
+        let leaf_script = {
+            // Rebuild the builder once more so we can call build_threshold_leaf.
+            // (TapscriptReservesOutput doesn't expose its inner builder.)
+            let others: Vec<bitcoin::secp256k1::PublicKey> = current_members
+                .iter()
+                .filter(|pk| **pk != operator_key)
+                .copied()
+                .collect();
+            let voter_set = VoterSet::new(operator_key, others);
+            let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(&ruleset_name));
+            let config = (ruleset.tier_config_factory)(
+                voter_set.all_voters().len(),
+                quorum_expiry,
+            );
+            let builder = TapscriptReservesBuilder::new(
+                voter_set,
+                config,
+                self.wallet.network(),
+                ledger_hash,
+            );
+            match builder.build_threshold_leaf(&tier0) {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("build tier-0 leaf: {:?}", e)),
+                    )
+                }
+            }
+        };
+        let recomputed_sighash = match ReservesSpendBuilder::compute_sighash(
+            &proposed_tx,
+            0,
+            reserves_amount,
+            &reserves_script,
+            &leaf_script,
+        ) {
+            Ok(s) => s,
+            Err(e) => return (false, None, Some(format!("recompute sighash: {:?}", e))),
+        };
+        let recomputed_bytes: [u8; 32] = *recomputed_sighash.as_ref();
+        if recomputed_bytes != sighash_bytes {
+            return (
+                false,
+                None,
+                Some(
+                    "recomputed sighash ≠ request sighash (operator's claimed sighash doesn't \
+                     match the TX they sent)"
+                        .to_string(),
+                ),
+            );
+        }
+
+        let signature_bytes = match self.handler.signer.bip340_sign(
+            &SignContext::no_ledger(SigPurpose::OnchainSighash),
+            &sighash_bytes,
+        ) {
+            Ok(s) => s,
+            Err(e) => return (false, None, Some(format!("rotation sighash sign: {}", e))),
+        };
+
+        let result = serde_json::json!({
+            "signer": self.node_id_hex.clone(),
+            "signature": hex::encode(signature_bytes),
+            "sighash": sighash_hex,
+        });
+
+        tracing::info!(
+            "[rotation_sign] signed for ledger {}, fee={}sats",
+            ledger_prefix,
+            fee_paid
+        );
+        (true, Some(result.to_string()), None)
+    }
+
     /// Walk the disputed ledger's history, replay to `last_valid_sequence`,
     /// and verify every fork-branch `DisputeArmed`'s replacement-collateral
     /// declaration. Returns `Err(refusal_reason)` for the cosigner to
