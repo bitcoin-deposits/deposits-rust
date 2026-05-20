@@ -361,7 +361,11 @@ impl Node {
         member_response: Option<Vec<u8>>,
         member_signature: Option<[u8; 64]>,
     ) -> Result<String, Error> {
-        // Pre-validate
+        // Pre-validate. QuorumAddMember is a *stage* — it appends to (or
+        // updates an entry in) `next_quorum_members`, never touches the
+        // active set. Re-adding an active member is therefore legitimate:
+        // it's how `auto_quorum_refresh` extends an existing member's
+        // `membership_until` for the next `QuorumBegin`.
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
@@ -369,18 +373,15 @@ impl Node {
                 .ok_or_else(|| Error::Protocol("Ledger not found".to_string()))?;
             let ledger = ledger_arc.read().unwrap();
 
-            // Check if already a member
-            if ledger
+            // Bound the projected staged set. If this op would introduce a
+            // new pubkey, ensure next_quorum_members + 1 stays within the
+            // cap; re-stages of an existing pubkey are size-neutral.
+            let is_restage = ledger
                 .state
-                .quorum_members
+                .next_quorum_members
                 .iter()
-                .any(|m| m.pubkey == quorum_member)
-            {
-                return Err(Error::Protocol("Already a quorum member".to_string()));
-            }
-
-            // Check if we've reached the maximum quorum size
-            if ledger.state.quorum_members.len() >= MAX_QUORUM_MEMBERS {
+                .any(|m| m.pubkey == quorum_member);
+            if !is_restage && ledger.state.next_quorum_members.len() >= MAX_QUORUM_MEMBERS {
                 return Err(Error::Protocol(format!(
                     "Maximum quorum size reached ({} members)",
                     MAX_QUORUM_MEMBERS

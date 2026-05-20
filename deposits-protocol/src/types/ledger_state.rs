@@ -556,49 +556,53 @@ impl LedgerState {
                 member_response,
                 ..
             } => {
-                let already_active = next
-                    .quorum_members
-                    .iter()
-                    .any(|m| m.pubkey == *quorum_member);
-                let already_pending = next
+                let supported_rulesets = match member_response.as_deref() {
+                    Some(blob) => {
+                        // Trust the decoded list verbatim. Signature +
+                        // loose-vs-blob equality were already checked by
+                        // `validate_quorum_add_member_blob` upstream;
+                        // by the time we apply here, the blob is
+                        // authoritative.
+                        use crate::tlv::TlvDecode;
+                        crate::types::QuorumMemberResponse::tlv_decode(blob)
+                            .map(|r| r.supported_rulesets)
+                            .unwrap_or_default()
+                    }
+                    // Legacy QuorumAddMember without a blob: leave
+                    // empty. `quorum begin` treats empty as "unknown"
+                    // and assumes legacy-only support.
+                    None => Vec::new(),
+                };
+                let staged = QuorumMember {
+                    pubkey: *quorum_member,
+                    ledger_id: member_ledger_id.clone(),
+                    min_fee_bps: *min_fee_bps,
+                    min_fee_fixed: *min_fee_fixed,
+                    max_fee_period: *max_fee_period,
+                    membership_until: *membership_until,
+                    dispute_response_blocks: *dispute_response_blocks,
+                    dispute_arm_blocks: *dispute_arm_blocks,
+                    service_response_blocks: *service_response_blocks,
+                    max_transfer_timeout_blocks: *max_transfer_timeout_blocks,
+                    max_descriptor_bytes: *max_descriptor_bytes,
+                    compensation_bps: *compensation_bps,
+                    compensation_deposit_id: *compensation_deposit_id,
+                    compensation_frequency_blocks: *compensation_frequency_blocks,
+                    supported_rulesets,
+                };
+                // Upsert into next_quorum_members. Re-staging an existing
+                // entry (whether it's currently active or already pending)
+                // overwrites with the new terms — that's how refresh
+                // extends `membership_until`. The active set is never
+                // touched here; QuorumBegin promotes from next_quorum_members.
+                if let Some(existing) = next
                     .next_quorum_members
-                    .iter()
-                    .any(|m| m.pubkey == *quorum_member);
-                if !already_active && !already_pending {
-                    let supported_rulesets = match member_response.as_deref() {
-                        Some(blob) => {
-                            // Trust the decoded list verbatim. Signature +
-                            // loose-vs-blob equality were already checked by
-                            // `validate_quorum_add_member_blob` upstream;
-                            // by the time we apply here, the blob is
-                            // authoritative.
-                            use crate::tlv::TlvDecode;
-                            crate::types::QuorumMemberResponse::tlv_decode(blob)
-                                .map(|r| r.supported_rulesets)
-                                .unwrap_or_default()
-                        }
-                        // Legacy QuorumAddMember without a blob: leave
-                        // empty. `quorum begin` treats empty as "unknown"
-                        // and assumes legacy-only support.
-                        None => Vec::new(),
-                    };
-                    next.next_quorum_members.push(QuorumMember {
-                        pubkey: *quorum_member,
-                        ledger_id: member_ledger_id.clone(),
-                        min_fee_bps: *min_fee_bps,
-                        min_fee_fixed: *min_fee_fixed,
-                        max_fee_period: *max_fee_period,
-                        membership_until: *membership_until,
-                        dispute_response_blocks: *dispute_response_blocks,
-                        dispute_arm_blocks: *dispute_arm_blocks,
-                        service_response_blocks: *service_response_blocks,
-                        max_transfer_timeout_blocks: *max_transfer_timeout_blocks,
-                        max_descriptor_bytes: *max_descriptor_bytes,
-                        compensation_bps: *compensation_bps,
-                        compensation_deposit_id: *compensation_deposit_id,
-                        compensation_frequency_blocks: *compensation_frequency_blocks,
-                        supported_rulesets,
-                    });
+                    .iter_mut()
+                    .find(|m| m.pubkey == *quorum_member)
+                {
+                    *existing = staged;
+                } else {
+                    next.next_quorum_members.push(staged);
                 }
             }
             LedgerOperation::QuorumRemoveMember { quorum_member, .. } => {
