@@ -289,7 +289,7 @@ impl ProtocolSim {
         if !validate_per_op_as_cosigner(replica, op, block_height, armed_candidates) {
             return false;
         }
-        let verifier = CoreWitnessVerifier;
+        let verifier = CoreWitnessVerifier::new(0);
         match replica.apply_with_verifier(op, &verifier) {
             Ok((_, violations)) => violations.is_empty(),
             Err(_) => false,
@@ -303,7 +303,7 @@ impl ProtocolSim {
         //    Adversary skips this step (happy to publish non-conforming).
         if self.honest.contains(&proposer) {
             let state_clone = self.operators[proposer].ledger.state.clone();
-            let verifier = CoreWitnessVerifier;
+            let verifier = CoreWitnessVerifier::new(0);
             if state_clone.check_and_apply(&op, &verifier).is_err() {
                 return Outcome::RejectedLocal;
             }
@@ -706,12 +706,13 @@ fn validate_per_op_as_cosigner(
             block_height,
         )
         .is_ok(),
-        LedgerOperation::DepositKeyRotate {
-            deposit_id,
-            new_descriptor,
-            witness,
-        } => op_val::validate_deposit_key_rotate(&ledger, deposit_id, new_descriptor, witness)
-            .is_ok(),
+        // DepositKeyRotate / InvoiceLock / InvoiceFulfill preflights
+        // formerly called per-op validators that are gone now.
+        // The honest_would_cosign downstream runs `apply_with_verifier`
+        // (witness + descriptor parse + structural conformance), which
+        // is strictly stronger than what those validators checked, so
+        // these preflight arms are deliberately permissive.
+        LedgerOperation::DepositKeyRotate { .. } => true,
         LedgerOperation::InvoiceCredit {
             payment_hash,
             deposit_id,
@@ -726,25 +727,8 @@ fn validate_per_op_as_cosigner(
             invoice_id,
         )
         .is_ok(),
-        LedgerOperation::InvoiceLock {
-            deposit_id,
-            amount,
-            payment_id,
-            witness,
-            ..
-        } => op_val::validate_payment_lock_by_id(&ledger, deposit_id, *amount, payment_id, witness)
-            .is_ok(),
-        LedgerOperation::InvoiceFulfill {
-            deposit_id,
-            amount,
-            payment_id,
-            witness,
-            preimage,
-            ..
-        } => op_val::validate_payment_fulfill_by_id(
-            deposit_id, *amount, payment_id, witness, preimage,
-        )
-        .is_ok(),
+        LedgerOperation::InvoiceLock { .. } => true,
+        LedgerOperation::InvoiceFulfill { .. } => true,
         LedgerOperation::InvoiceFail { amount, .. } => {
             op_val::validate_payment_fail(*amount).is_ok()
         }

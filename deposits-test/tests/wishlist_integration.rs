@@ -356,7 +356,7 @@ fn tier5_2_timing_attacks() {
 
         let start = std::time::Instant::now();
         for _ in 0..1000 {
-            let _ = deposits_core::descriptor::verify_witness(&descriptor, &witness, &msg_hash);
+            let _ = deposits_core::descriptor::verify_witness(&descriptor, &witness, &msg_hash, 0);
         }
         let elapsed = start.elapsed();
         desc_verify_times.push(elapsed.as_nanos());

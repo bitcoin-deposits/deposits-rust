@@ -276,7 +276,7 @@ fn tier5_1_signature_malleability() {
     };
 
     // Canonical signature should verify
-    let valid = deposits_core::descriptor::verify_witness(&descriptor, &witness, &msg_hash)
+    let valid = deposits_core::descriptor::verify_witness(&descriptor, &witness, &msg_hash, 0)
         .unwrap_or(false);
     assert!(valid, "Canonical Schnorr signature must verify");
 
@@ -285,7 +285,7 @@ fn tier5_1_signature_malleability() {
         stack: vec![sig_bytes[..32].to_vec()], // only 32 bytes
     };
     let short_result =
-        deposits_core::descriptor::verify_witness(&descriptor, &short_witness, &msg_hash)
+        deposits_core::descriptor::verify_witness(&descriptor, &short_witness, &msg_hash, 0)
             .unwrap_or(false);
     assert!(!short_result, "Short signature must be rejected");
 
@@ -296,7 +296,7 @@ fn tier5_1_signature_malleability() {
         stack: vec![malleated.to_vec()],
     };
     let mal_result =
-        deposits_core::descriptor::verify_witness(&descriptor, &mal_witness, &msg_hash)
+        deposits_core::descriptor::verify_witness(&descriptor, &mal_witness, &msg_hash, 0)
             .unwrap_or(false);
     assert!(!mal_result, "Bit-flipped signature must be rejected");
 
@@ -305,13 +305,13 @@ fn tier5_1_signature_malleability() {
         stack: vec![vec![0u8; 64]],
     };
     let zero_result =
-        deposits_core::descriptor::verify_witness(&descriptor, &zero_witness, &msg_hash)
+        deposits_core::descriptor::verify_witness(&descriptor, &zero_witness, &msg_hash, 0)
             .unwrap_or(false);
     assert!(!zero_result, "All-zero signature must be rejected");
 
     // Test: signature for different message should be rejected
     let wrong_msg = [0xBB; 32];
-    let wrong_result = deposits_core::descriptor::verify_witness(&descriptor, &witness, &wrong_msg)
+    let wrong_result = deposits_core::descriptor::verify_witness(&descriptor, &witness, &wrong_msg, 0)
         .unwrap_or(false);
     assert!(
         !wrong_result,
@@ -352,6 +352,7 @@ fn tier5_5_descriptor_parsing_edge_cases() {
             stack: vec![vec![0xFF; 64]],
         },
         &msg_hash,
+        0,
     );
     let empty_safe = empty.is_err() || !empty.unwrap_or(true);
 
@@ -363,6 +364,7 @@ fn tier5_5_descriptor_parsing_edge_cases() {
             stack: vec![vec![0xFF; 64]],
         },
         &msg_hash,
+        0,
     );
     let long_safe = long.is_err() || !long.unwrap_or(true);
 
@@ -374,6 +376,7 @@ fn tier5_5_descriptor_parsing_edge_cases() {
             stack: vec![vec![0xFF; 64]],
         },
         &msg_hash,
+        0,
     );
     let nested_safe = nested_result.is_err() || !nested_result.unwrap_or(true);
 
@@ -385,6 +388,7 @@ fn tier5_5_descriptor_parsing_edge_cases() {
             stack: vec![vec![0xFF; 64]],
         },
         &msg_hash,
+        0,
     );
     let null_safe = null_result.is_err() || !null_result.unwrap_or(true);
 
@@ -396,6 +400,7 @@ fn tier5_5_descriptor_parsing_edge_cases() {
             stack: vec![vec![0xFF; 64]],
         },
         &msg_hash,
+        0,
     );
     let unicode_safe = unicode_result.is_err() || !unicode_result.unwrap_or(true);
 

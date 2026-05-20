@@ -200,7 +200,7 @@ fn attack_forged_invoice_witness() {
         .op("alice")
         .ledger
         .state
-        .check_and_apply(&op, &CoreWitnessVerifier);
+        .check_and_apply(&op, &CoreWitnessVerifier::new(0));
     assert!(
         result.is_err(),
         "Forged witness must be rejected by conformance check"

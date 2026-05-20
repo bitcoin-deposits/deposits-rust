@@ -251,12 +251,16 @@ fn fee_collect_is_conforming() {
         })
         .unwrap();
 
+    // Default `frequency_blocks` is 2016; `last_fee_assessment` is 0
+    // on a freshly opened deposit, so the earliest conforming
+    // FeeCollect lands at block 2016. Anything earlier emits a
+    // FeeWindowNotElapsed violation (separate test case).
     let (_next, violations) = state
         .apply_with_verifier(
             &LedgerOperation::FeeCollect {
                 deposit_id,
                 amount: 1_000,
-                block_height: 100,
+                block_height: 2016,
             },
             &NoVerify,
         )

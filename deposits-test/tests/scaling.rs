@@ -236,7 +236,7 @@ fn scaling_witness_verification() {
             .op(&names[0])
             .ledger
             .state
-            .apply_with_verifier(&bad_op, &CoreWitnessVerifier)
+            .apply_with_verifier(&bad_op, &CoreWitnessVerifier::new(0))
             .unwrap();
 
         let detected = !violations.is_empty();
