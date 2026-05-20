@@ -363,8 +363,17 @@ impl LedgerActor {
         //    any .await so the cosig round doesn't block readers.
         let (mut staged, quorum_active, members) = {
             let ledger = self.ledger.read().unwrap();
+            // Speculative-apply conformance during stage uses the same
+            // chain_tip the StagedUpdate carries — so descriptor
+            // `after(N)` checks on the operator side match what
+            // cosigners will see when they re-run conformance.
             let staged = ledger
-                .stage_operation(operation, block_height, block_hash)
+                .stage_operation(
+                    operation,
+                    block_height,
+                    block_hash,
+                    &deposits_core::descriptor::CoreWitnessVerifier::new(block_height),
+                )
                 .map_err(|e| format!("stage failed: {}", e))?;
             let quorum_active =
                 ledger.state.quorum_state == deposits_core::QuorumState::Active;

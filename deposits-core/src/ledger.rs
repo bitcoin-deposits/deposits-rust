@@ -1038,6 +1038,7 @@ impl Ledger {
         operation: LedgerOperation,
         block_height: u32,
         block_hash: [u8; 32],
+        verifier: &impl deposits_protocol::WitnessVerifier,
     ) -> DepositsResult<StagedUpdate> {
         use crate::tlv::TlvEncode;
         use bitcoin::hashes::{sha256, Hash};
@@ -1088,6 +1089,19 @@ impl Ledger {
                 details: e,
             })?;
         }
+
+        // Speculative apply + conformance against a clone of the
+        // post-validate state. This is the operator-side gate that
+        // refuses to broadcast a non-conforming update to cosigners
+        // (without it, the operator would only discover the violation
+        // after collecting cosignatures, wasting a round-trip and
+        // exposing the cosigners to a fraud-proof-grade signature on
+        // a request that never should have left their door).
+        //
+        // We must not mutate `self.state` here — stage_operation has
+        // always been &self, and other readers might be holding
+        // references — so check against a clone and discard.
+        self.state.clone().check_and_apply(&operation, verifier)?;
 
         let message_bytes = operation.tlv_encode();
         let prev_hash = self.state.chain_tip_hash;
@@ -2876,6 +2890,7 @@ mod tests {
                 },
                 100,
                 [0u8; 32],
+                &deposits_protocol::NoVerify,
             )
             .expect_err("partner staging QuorumJoin must refuse");
         match err {
