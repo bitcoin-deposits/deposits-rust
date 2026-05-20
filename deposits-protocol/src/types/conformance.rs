@@ -31,6 +31,53 @@ pub enum ConformanceViolation {
         detail: String,
     },
 
+    /// Lock-class operation (InvoiceLock/OnchainLock/TransferLock) had
+    /// `amount == 0`. Zero-amount locks have no semantic purpose and
+    /// would silently succeed against the state-machine apply, so
+    /// conformance treats them as a hard refusal.
+    ZeroAmount { operation: &'static str },
+
+    /// OnchainLock's `destination_address` was empty.
+    EmptyDestination,
+
+    /// TransferLock's declared `transfer_id` field disagrees with the
+    /// id derived from the operation's signing message. Without this
+    /// check, a writer could craft a transfer whose authoritative id
+    /// (used for later TransferComplete lookup) differs from the id
+    /// the depositor signed over.
+    MismatchedTransferId {
+        expected: [u8; 32],
+        actual: [u8; 32],
+    },
+
+    /// DepositKeyRotate's `new_descriptor` failed to parse as a
+    /// miniscript descriptor. Without rejecting at rotation time the
+    /// resulting deposit becomes unspendable through normal paths.
+    UnparseableDescriptor {
+        operation: &'static str,
+        detail: String,
+    },
+
+    /// Credit-class operation (InvoiceCredit/OnchainCredit/
+    /// TransferComplete) would push total credited balances above the
+    /// active quorum's collateral envelope. Separate from
+    /// InsufficientReserves: reserves cap absolute custody, collateral
+    /// caps the share an under-collateralised operator can route.
+    ExceedsCollateral { credit: u64, collateral: u64 },
+
+    /// FeeCollect fired before the deposit's fee window elapsed.
+    /// Operators can't accelerate fee assessment past the
+    /// `frequency_blocks` cadence the depositor accepted at open.
+    FeeWindowNotElapsed {
+        current_block: u32,
+        next_allowed_block: u32,
+    },
+
+    /// DepositOpen's `descriptor` exceeded the active quorum's
+    /// `max_descriptor_bytes` policy. Without this, an outsized
+    /// descriptor could bloat every cosigner's signing path.
+    DescriptorTooLarge { actual: usize, max: u32 },
+
     /// A protocol rule was violated.
     ProtocolRule { rule: &'static str, detail: String },
 }
@@ -45,6 +92,39 @@ impl std::fmt::Display for ConformanceViolation {
             Self::InvalidWitness { operation, detail } => {
                 write!(f, "invalid witness in {}: {}", operation, detail)
             }
+            Self::ZeroAmount { operation } => {
+                write!(f, "zero amount in {}", operation)
+            }
+            Self::EmptyDestination => write!(f, "empty destination address"),
+            Self::MismatchedTransferId { expected, actual } => write!(
+                f,
+                "transfer_id mismatch: declared {} but signing message yields {}",
+                hex::encode(actual),
+                hex::encode(expected),
+            ),
+            Self::UnparseableDescriptor { operation, detail } => write!(
+                f,
+                "unparseable descriptor in {}: {}",
+                operation, detail
+            ),
+            Self::ExceedsCollateral { credit, collateral } => write!(
+                f,
+                "credit ({}) would exceed quorum collateral ({})",
+                credit, collateral
+            ),
+            Self::FeeWindowNotElapsed {
+                current_block,
+                next_allowed_block,
+            } => write!(
+                f,
+                "fee_collect at block {} fires before next allowed assessment at block {}",
+                current_block, next_allowed_block,
+            ),
+            Self::DescriptorTooLarge { actual, max } => write!(
+                f,
+                "descriptor size {} bytes exceeds quorum max of {} bytes",
+                actual, max
+            ),
             Self::ProtocolRule { rule, detail } => {
                 write!(f, "protocol rule '{}' violated: {}", rule, detail)
             }
