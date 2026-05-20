@@ -236,6 +236,38 @@ impl deposits_protocol::WitnessVerifier for CoreWitnessVerifier {
         verify_witness(descriptor, witness, message_hash, self.chain_tip).unwrap_or(false)
     }
 
+    fn validate_descriptor(&self, descriptor: &str) -> Option<String> {
+        use miniscript::{Descriptor, DescriptorPublicKey};
+        use std::str::FromStr;
+
+        // pk(<hex>) — fast path matches verify_witness's try_verify_pk.
+        if descriptor.starts_with("pk(") && descriptor.ends_with(')') {
+            let pk_hex = &descriptor[3..descriptor.len() - 1];
+            return match bitcoin::secp256k1::PublicKey::from_slice(
+                &hex::decode(pk_hex).ok()?,
+            ) {
+                Ok(_) => None,
+                Err(e) => Some(format!("invalid pubkey in pk(): {}", e)),
+            };
+        }
+
+        // Bare-policy descriptors get wsh-wrapped to match the parsing
+        // path verify_miniscript uses; otherwise miniscript refuses
+        // raw-key forms.
+        let desc_str = if descriptor.starts_with("wsh(")
+            || descriptor.starts_with("sh(")
+            || descriptor.starts_with("tr(")
+        {
+            descriptor.to_string()
+        } else {
+            format!("wsh({})", descriptor)
+        };
+        match Descriptor::<DescriptorPublicKey>::from_str(&desc_str) {
+            Ok(_) => None,
+            Err(e) => Some(e.to_string()),
+        }
+    }
+
     fn verify_signature(
         &self,
         pubkey: &bitcoin::secp256k1::PublicKey,

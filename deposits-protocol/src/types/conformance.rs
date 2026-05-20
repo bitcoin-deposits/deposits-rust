@@ -152,6 +152,18 @@ pub trait WitnessVerifier {
         message: &[u8; 32],
         signature: &[u8; 64],
     ) -> bool;
+
+    /// Check that a descriptor string parses as miniscript. Returns
+    /// `None` if parseable; `Some(detail)` with a human-readable
+    /// error otherwise. Used by `check_conformance` to surface
+    /// `UnparseableDescriptor` on `DepositOpen`/`DepositKeyRotate`
+    /// without pulling the `miniscript` crate into `deposits-protocol`.
+    fn validate_descriptor(&self, descriptor: &str) -> Option<String> {
+        // Default: accept everything. The protocol-layer NoVerify
+        // ships this; deposits-core overrides with a real check.
+        let _ = descriptor;
+        None
+    }
 }
 
 /// No-op verifier that accepts all witnesses and signatures.

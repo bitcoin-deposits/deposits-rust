@@ -788,6 +788,8 @@ impl LedgerState {
         let mut violations = Vec::new();
 
         // Reserve sufficiency: after any credit, total deposits must not exceed reserves.
+        // Plus collateral ceiling: while a quorum is active, total deposits also
+        // can't push past the declared collateral envelope.
         match operation {
             LedgerOperation::InvoiceCredit { .. }
             | LedgerOperation::OnchainCredit { .. }
@@ -799,8 +801,144 @@ impl LedgerState {
                         obligations,
                     });
                 }
+                if self.quorum_state == crate::types::QuorumState::Active
+                    && obligations > self.collateral_amount
+                {
+                    violations.push(ConformanceViolation::ExceedsCollateral {
+                        credit: obligations,
+                        collateral: self.collateral_amount,
+                    });
+                }
             }
             _ => {}
+        }
+
+        // Lock-class operations must not be zero-amount. The state
+        // machine accepts `lock(0)` silently, so conformance is the
+        // gate that catches semantically empty locks.
+        match operation {
+            LedgerOperation::InvoiceLock { amount, .. } if *amount == 0 => {
+                violations.push(ConformanceViolation::ZeroAmount {
+                    operation: "InvoiceLock",
+                });
+            }
+            LedgerOperation::OnchainLock { amount, .. } if *amount == 0 => {
+                violations.push(ConformanceViolation::ZeroAmount {
+                    operation: "OnchainLock",
+                });
+            }
+            LedgerOperation::TransferLock { amount, .. } if *amount == 0 => {
+                violations.push(ConformanceViolation::ZeroAmount {
+                    operation: "TransferLock",
+                });
+            }
+            _ => {}
+        }
+
+        // OnchainLock: destination must be a non-empty string.
+        if let LedgerOperation::OnchainLock {
+            destination_address,
+            ..
+        } = operation
+        {
+            if destination_address.is_empty() {
+                violations.push(ConformanceViolation::EmptyDestination);
+            }
+        }
+
+        // TransferLock: the declared `transfer_id` must equal the id
+        // derived from the operation's signing message. Otherwise the
+        // depositor could authorize one set of terms while the
+        // committed pending-transfer entry routes by a different id.
+        if let LedgerOperation::TransferLock {
+            nonce,
+            source_deposit_id,
+            destination_deposit_id,
+            amount,
+            fee,
+            completion_script,
+            timeout_height,
+            transfer_id,
+            ..
+        } = operation
+        {
+            let signing_msg = crate::signature_utils::transfer_lock_signing_message(
+                nonce,
+                source_deposit_id,
+                destination_deposit_id,
+                *amount,
+                *fee,
+                completion_script,
+                *timeout_height,
+            );
+            let expected = crate::signature_utils::compute_transfer_id(&signing_msg);
+            if expected != *transfer_id {
+                violations.push(ConformanceViolation::MismatchedTransferId {
+                    expected,
+                    actual: *transfer_id,
+                });
+            }
+        }
+
+        // DepositKeyRotate: the new descriptor must parse — otherwise
+        // the post-rotation deposit becomes unspendable through the
+        // normal authorization path.
+        if let LedgerOperation::DepositKeyRotate { new_descriptor, .. } = operation {
+            if let Some(detail) = verifier.validate_descriptor(new_descriptor) {
+                violations.push(ConformanceViolation::UnparseableDescriptor {
+                    operation: "DepositKeyRotate",
+                    detail,
+                });
+            }
+        }
+
+        // DepositOpen: the descriptor must parse and (if a quorum is
+        // active) fit within the smallest member-declared size cap.
+        if let LedgerOperation::DepositOpen { descriptor, .. } = operation {
+            if let Some(detail) = verifier.validate_descriptor(descriptor) {
+                violations.push(ConformanceViolation::UnparseableDescriptor {
+                    operation: "DepositOpen",
+                    detail,
+                });
+            }
+            if let Some(max) = self
+                .quorum_members
+                .iter()
+                .filter_map(|m| m.max_descriptor_bytes)
+                .min()
+            {
+                if descriptor.len() as u32 > max {
+                    violations.push(ConformanceViolation::DescriptorTooLarge {
+                        actual: descriptor.len(),
+                        max,
+                    });
+                }
+            }
+        }
+
+        // FeeCollect: refuse if the operator is firing before the
+        // depositor's `frequency_blocks` cadence has elapsed. The
+        // op carries its own observed block_height, so no extra
+        // signature plumbing is needed.
+        if let LedgerOperation::FeeCollect {
+            deposit_id,
+            block_height,
+            ..
+        } = operation
+        {
+            if let Some(pre) = pre_state {
+                if let Some(deposit) = pre.deposits.get(deposit_id) {
+                    let next_allowed = deposit
+                        .last_fee_assessment
+                        .saturating_add(deposit.fees.frequency_blocks);
+                    if *block_height < next_allowed {
+                        violations.push(ConformanceViolation::FeeWindowNotElapsed {
+                            current_block: *block_height,
+                            next_allowed_block: next_allowed,
+                        });
+                    }
+                }
+            }
         }
 
         // Witness verification for operations that carry authorization proofs.
