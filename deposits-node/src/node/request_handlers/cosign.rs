@@ -550,66 +550,53 @@ impl Node {
                                 Some(format!("Cosign refused: {}", e)),
                             );
                         }
-                        // State-machine apply + conformance check.
-                        // `apply_with_verifier` runs the state transition
-                        // AND the conformance verifier (reserve
-                        // sufficiency on Credit/Complete ops, witness
-                        // verification on Lock/Fulfill ops, etc.).
-                        // Cosigners that only run bare `state.apply`
-                        // accept operations that pass the state machine
-                        // but violate ledger invariants — e.g. an
-                        // InvoiceCredit that pushes total_deposits past
-                        // reserves, or an InvoiceLock whose witness
-                        // doesn't satisfy the deposit's descriptor.
-                        // That's exactly what cosigning is supposed to
-                        // prevent.
-                        // `current_block_height` (from `self.wallet.get_block_height()`
-                        // above) is the cosigner's view of the tip; feed it to the
-                        // verifier so descriptor `after()` checks use the right
-                        // tip-minus-confs evaluation.
-                        match ledger.state.apply_with_verifier(
+                        // Cosigner's pre-sign gate. `check_speculative`
+                        // is the canonical "would this op be conforming
+                        // if I signed it?" check: it runs the state
+                        // transition speculatively and the conformance
+                        // verifier (reserve sufficiency on Credit/
+                        // Complete ops, witness verification on Lock/
+                        // Fulfill ops, etc.), folding any state-machine
+                        // rejection into a `ConformanceViolation::
+                        // StateMachineRejected` so we get a single
+                        // unified Vec back. By refusing to sign anything
+                        // that surfaces a violation here, we maintain
+                        // the invariant that every `SignedLedgerUpdate`
+                        // that advances `LedgerState` (via
+                        // `apply_signed`) has already been blessed for
+                        // conformance.
+                        //
+                        // `current_block_height` (from
+                        // `self.wallet.get_block_height()` above) is
+                        // the cosigner's view of the tip; the verifier
+                        // uses it for descriptor `after()` checks.
+                        let violations = ledger.state.check_speculative(
                             &operation,
                             &deposits_core::descriptor::CoreWitnessVerifier::new(
                                 current_block_height,
                             ),
-                        ) {
-                            Ok((_, violations)) if !violations.is_empty() => {
-                                tracing::warn!(
-                                    "Cosign validation FAILED (conformance): seq={} op={} violations={:?}",
-                                    sequence_number,
-                                    Self::format_op_short(&operation),
+                        );
+                        if !violations.is_empty() {
+                            tracing::warn!(
+                                "Cosign validation FAILED (conformance): seq={} op={} violations={:?}",
+                                sequence_number,
+                                Self::format_op_short(&operation),
+                                violations
+                            );
+                            return (
+                                false,
+                                None,
+                                Some(format!(
+                                    "Cosign refused: conformance violations {:?}",
                                     violations
-                                );
-                                return (
-                                    false,
-                                    None,
-                                    Some(format!(
-                                        "Cosign refused: conformance violations {:?}",
-                                        violations
-                                    )),
-                                );
-                            }
-                            Ok(_) => {
-                                tracing::debug!(
-                                    "Cosign validation passed: seq={} op={}",
-                                    sequence_number,
-                                    Self::format_op_short(&operation)
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Cosign validation FAILED: seq={} op={} error={}",
-                                    sequence_number,
-                                    Self::format_op_short(&operation),
-                                    e
-                                );
-                                return (
-                                    false,
-                                    None,
-                                    Some(format!("Operation validation failed: {}", e)),
-                                );
-                            }
+                                )),
+                            );
                         }
+                        tracing::debug!(
+                            "Cosign validation passed: seq={} op={}",
+                            sequence_number,
+                            Self::format_op_short(&operation)
+                        );
                     }
 
                     // For QuorumBegin, verify the referenced reserves outpoint
