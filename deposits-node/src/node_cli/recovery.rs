@@ -89,7 +89,7 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         eprintln!("  confiscate <ledger_id>                 Build and broadcast confiscation TX to lottery");
         eprintln!("  reveal <ledger_id>                     Reveal lottery preimage via Nostr");
         eprintln!("  lottery-claim <ledger_id>              Claim lottery output if winner");
-        eprintln!("  refund <ledger_id> [--timeout <secs>]  Cooperative anchor TX for NeverFunded reserves");
+        eprintln!("  refund <ledger_id> [--timeout <secs>] [--dry-run]  Cooperative anchor TX for NeverFunded reserves");
         eprintln!("                                         (pools disputants' replacement-collateral UTXOs");
         eprintln!("                                         into a lottery output; manual last-resort only)");
         eprintln!();
@@ -5475,6 +5475,7 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
 
     let mut ledger_id_arg: Option<String> = None;
     let mut timeout_secs: u64 = 60;
+    let mut dry_run = false;
     let mut config_args = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -5482,6 +5483,9 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
             "--timeout" if i + 1 < args.len() => {
                 timeout_secs = args[i + 1].parse().map_err(|_| "invalid --timeout")?;
                 i += 1;
+            }
+            "--dry-run" => {
+                dry_run = true;
             }
             s if s.starts_with("--") => {
                 config_args.push(args[i].clone());
@@ -5751,6 +5755,25 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
     println!("    Inputs:  {} RC outpoints", input_specs.len());
     println!("    Output:  {} sats → lottery script", output_value);
     println!("    Fee:     {} sats", fee);
+
+    if dry_run {
+        println!();
+        println!("=== Dry run — no signatures collected, no broadcast ===");
+        println!("  Lottery destination: {}", lottery_output.address);
+        println!("  Inputs ({}):", input_specs.len());
+        for (i, spec) in input_specs.iter().enumerate() {
+            println!(
+                "    [{}] {}:{}  ({} sats)",
+                i, spec.outpoint.txid, spec.outpoint.vout, spec.amount
+            );
+        }
+        println!("  Unsigned TX hex:");
+        println!(
+            "    {}",
+            hex::encode(bitcoin::consensus::encode::serialize(&tx))
+        );
+        return Ok(());
+    }
 
     // Compute each input's BIP143 P2WPKH sighash, then sign locally
     // (for inputs we own) or dispatch a cooperative_refund_sign
