@@ -280,19 +280,21 @@ fn validate_ledger(
         return LedgerVerdict::NoUpdates;
     }
 
-    // Find the genesis update (seq 0). Multiple seq-0 updates → fork
-    // at genesis (rare but possible if the ledger was ever forked at
-    // creation by an attacker).
+    // Find the genesis update (seq 0). Multiple seq-0 updates by *distinct*
+    // operators → fork at genesis (rare; an attacker forking creation).
+    // Multiple seq-0 updates by the *same* operator are just duplicate
+    // publishes (e.g. after a `ledger republish` with accumulated cosigs
+    // recomputing content_hash) — pick any one as the genesis reference.
     let genesis: Vec<&SignedLedgerUpdate> =
         updates.iter().filter(|u| u.sequence_number == 0).collect();
     if genesis.is_empty() {
         return LedgerVerdict::Gap { first_missing: 0 };
     }
-    if genesis.len() > 1 {
-        let operators: Vec<String> = genesis
-            .iter()
-            .map(|u| u.operator_id.to_string())
-            .collect();
+    let genesis_operators: std::collections::HashSet<_> =
+        genesis.iter().map(|u| u.operator_id).collect();
+    if genesis_operators.len() > 1 {
+        let operators: Vec<String> =
+            genesis_operators.iter().map(|pk| pk.to_string()).collect();
         return LedgerVerdict::Fork {
             seq: 0,
             operators,
@@ -300,26 +302,64 @@ fn validate_ledger(
     }
     let original_operator = genesis[0].operator_id;
 
-    // Filter to the original operator's chain, sort by sequence,
-    // dedup on (seq, content_hash). Detect gaps and forks along the way.
-    let mut canonical: Vec<&SignedLedgerUpdate> = updates
-        .iter()
-        .filter(|u| u.operator_id == original_operator)
-        .collect();
-    canonical.sort_by_key(|u| u.sequence_number);
-    canonical.dedup_by(|a, b| {
-        a.sequence_number == b.sequence_number && a.content_hash == b.content_hash
-    });
+    // Sort all updates by sequence. We don't pre-filter by operator_id
+    // anymore — after a successful DisputeAcquire, the chain continues
+    // under a new custodian with a different operator_id. Filtering to
+    // the original operator would silently drop the new custodian's
+    // updates and report a clean Pass for a chain that's actually under
+    // new custody.
+    //
+    // Dedup by `(seq, operator_id)`. The `(seq, content_hash)` form
+    // misses the republish edge case: when `ledger republish` re-emits
+    // history that's accumulated additional cosignatures since the
+    // original publish, content_hash changes but the canonical
+    // operator-signed claim at that seq is identical. Same (seq, op) →
+    // keep one and move on; cross-operator divergence at the same seq
+    // is fork-branch evidence, which the operator_id check below
+    // catches as a separate concern.
+    let mut sorted: Vec<&SignedLedgerUpdate> = updates.iter().collect();
+    sorted.sort_by_key(|u| (u.sequence_number, u.operator_id));
+    sorted.dedup_by_key(|u| (u.sequence_number, u.operator_id));
 
-    // Detect equivocation: same operator, same seq, different content_hash.
-    // Detect gaps: missing sequence numbers.
-    let mut prev_seq: Option<u64> = None;
-    for u in &canonical {
-        if let Some(prev) = prev_seq {
+    // Replay each update through `LedgerState::apply` — the same strict
+    // state-transition path the daemon's `inbound.rs` runs on every
+    // received update. Catches conformance violations (negative
+    // balance, InvoiceCredit-over-reserves, missing deposits, etc).
+    // We pre-seed an empty state with the original_operator so the
+    // first update (LedgerOpen) replays cleanly.
+    //
+    // For each update we check `operator_id == state.parent_pubkey`:
+    // updates that match are part of the canonical chain (the operator's
+    // updates plus, after DisputeAcquire, the new custodian's). Updates
+    // that don't match are fork-branch evidence — disputers publishing
+    // an alternate chain under the same `#d` tag. We don't apply those
+    // here; they belong to a separate Ledger storage unit on the daemon.
+    let mut state = LedgerState::new(original_operator, String::new(), 0);
+    let mut prev_canonical_seq: Option<u64> = None;
+    let mut canonical_count = 0usize;
+    let mut fork_branches: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
+
+    for u in &sorted {
+        // Skip fork-branch updates. Disputers publish under the same
+        // ledger_id with their own operator_id; the daemon stores those
+        // as a separate fork ledger. Record for reporting but don't apply.
+        if u.operator_id != state.parent_pubkey {
+            let op_hex = u.operator_id.to_string();
+            *fork_branches.entry(op_hex).or_insert(0) += 1;
+            continue;
+        }
+
+        // Detect equivocation: same canonical operator, same seq,
+        // different content_hash. (Same-content same-seq was deduped above.)
+        if let Some(prev) = prev_canonical_seq {
             if u.sequence_number == prev {
-                let conflicting: Vec<String> = canonical
+                let conflicting: Vec<String> = sorted
                     .iter()
-                    .filter(|x| x.sequence_number == u.sequence_number)
+                    .filter(|x| {
+                        x.sequence_number == u.sequence_number
+                            && x.operator_id == state.parent_pubkey
+                    })
                     .map(|x| x.operator_id.to_string())
                     .collect();
                 return LedgerVerdict::Fork {
@@ -333,18 +373,7 @@ fn validate_ledger(
                 };
             }
         }
-        prev_seq = Some(u.sequence_number);
-    }
 
-    // Replay each update through `LedgerState::apply` — the same strict
-    // state-transition path the daemon's `inbound.rs` runs on every
-    // received update. Catches conformance violations (negative
-    // balance, InvoiceCredit-over-reserves, missing deposits, etc).
-    // We pre-seed an empty state with the original_operator so the
-    // first update (LedgerOpen) replays cleanly.
-    let mut state = LedgerState::new(original_operator, String::new(), 0);
-
-    for u in &canonical {
         let op = match LedgerOperation::tlv_decode(&u.message) {
             Ok(op) => op,
             Err(e) => {
@@ -358,8 +387,15 @@ fn validate_ledger(
             Ok(next) => {
                 state = next;
                 if verbose {
-                    eprintln!("  seq {} OK ({})", u.sequence_number, op_name(&op));
+                    eprintln!(
+                        "  seq {} OK ({})  [op={}]",
+                        u.sequence_number,
+                        op_name(&op),
+                        &u.operator_id.to_string()[..16]
+                    );
                 }
+                prev_canonical_seq = Some(u.sequence_number);
+                canonical_count += 1;
             }
             Err(e) => {
                 return LedgerVerdict::Fail {
@@ -370,8 +406,18 @@ fn validate_ledger(
         }
     }
 
+    if verbose && !fork_branches.is_empty() {
+        for (op, count) in &fork_branches {
+            eprintln!(
+                "  fork-branch: {} updates from operator {}...",
+                count,
+                &op[..16.min(op.len())]
+            );
+        }
+    }
+
     LedgerVerdict::Pass {
-        seq_count: canonical.len(),
+        seq_count: canonical_count,
     }
 }
 
