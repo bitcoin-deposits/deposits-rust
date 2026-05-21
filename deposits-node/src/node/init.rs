@@ -421,14 +421,14 @@ impl Node {
         let ledger_id_bytes = ledger.ledger_id();
 
         if let Some(update) = ledger.history.last_mut() {
-            // Sign using operator_signing_data (cosign_data + all cosig_signatures)
-            let data = update.operator_signing_data();
-            let hash = sha256::Hash::hash(&data);
+            // v1: tagged BIP-340 hash with length-prefixed message field.
+            // See `SignedLedgerUpdate::operator_sign_digest_v1`.
+            let digest = update.operator_sign_digest_v1();
             let ctx = SignContext::operator_update(ledger_id_bytes, update.sequence_number);
             update.operator_signature = self
                 .handler
                 .signer
-                .bip340_sign(&ctx, hash.as_byte_array())
+                .bip340_sign(&ctx, &digest)
                 .map_err(|e| Error::Protocol(format!("operator sign failed: {}", e)))?;
             tracing::debug!(
                 "Signed update seq={} for ledger {}",

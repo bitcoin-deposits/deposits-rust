@@ -1415,22 +1415,19 @@ impl DepositsHandler {
 
     /// Sign the last update in a ledger with our operator key.
     ///
-    /// Signs `SHA256(update.operator_signing_data())` — the canonical
-    /// digest used by `SignedLedgerUpdate::verify_operator_signature()`
-    /// and `LedgerState::apply_signed`. Previously this path used a
-    /// distinct ad-hoc digest (`SHA256(seq || prev || content_hash ||
-    /// message)`) that diverged from the rest of the codebase, leaving
-    /// seq-0 LedgerOpens unverifiable by the canonical path. Aligned now.
+    /// Signs `update.operator_sign_digest_v1()` — tagged BIP-340 hash
+    /// with length-prefixed `message`. See `SignedLedgerUpdate::
+    /// operator_sign_digest_v1` for the layout and the rationale
+    /// (closes the `message ↔ cosignatures` boundary ambiguity and
+    /// adds domain separation against cross-protocol sig replay).
     fn sign_ledger_update(&self, ledger: &mut Ledger) {
-        use bitcoin::hashes::{sha256, Hash};
-
         let ledger_id = ledger.ledger_id();
         if let Some(update) = ledger.history.last_mut() {
-            let hash = sha256::Hash::hash(&update.operator_signing_data());
+            let digest = update.operator_sign_digest_v1();
             let ctx = SignContext::operator_update(ledger_id, update.sequence_number);
             let sig = self
                 .signer
-                .bip340_sign(&ctx, hash.as_byte_array())
+                .bip340_sign(&ctx, &digest)
                 .expect("LocalSigner cannot fail; RemoteSigner errors propagate when wired");
 
             update.operator_signature = sig;

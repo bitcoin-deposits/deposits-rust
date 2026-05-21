@@ -251,19 +251,92 @@ impl SignedLedgerUpdate {
             .map_err(|e| format!("Co-signer signature verification failed: {}", e))
     }
 
-    /// Verify the operator's signature over content + co-signer's signature.
+    /// The canonical digest the operator signs.
+    ///
+    /// Tagged BIP-340 hash with length-prefixed `message` field, so a
+    /// writer can't slide bytes across the `message ↔ cosignatures`
+    /// boundary to forge a colliding tuple. The tag versions the
+    /// scheme: bumping `v1 → v2` means the verifier should also try
+    /// the older tag for backward compat (see `verify_operator_signature`).
+    ///
+    /// Layout:
+    /// ```text
+    /// SHA256(SHA256(TAG) || SHA256(TAG)
+    ///   || seq_le8 || previous_hash[32]
+    ///   || message_len_le4 || message
+    ///   || cosig_count_le2 || cosig_sigs[64]…)
+    /// ```
+    /// where TAG = b"deposits/operator-update/v1".
+    pub fn operator_sign_digest_v1(&self) -> [u8; 32] {
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
+        const TAG: &[u8] = b"deposits/operator-update/v1";
+        let tag_hash = sha256::Hash::hash(TAG);
+        let mut e = sha256::HashEngine::default();
+        e.input(tag_hash.as_byte_array());
+        e.input(tag_hash.as_byte_array());
+        e.input(&self.sequence_number.to_le_bytes());
+        e.input(&self.previous_hash);
+        let msg_len: u32 = self.message.len() as u32;
+        e.input(&msg_len.to_le_bytes());
+        e.input(&self.message);
+        let cosigs = self.sorted_cosignatures();
+        let cosig_count: u16 = cosigs.len() as u16;
+        e.input(&cosig_count.to_le_bytes());
+        for c in cosigs {
+            e.input(&c.cosign_signature);
+        }
+        sha256::Hash::from_engine(e).to_byte_array()
+    }
+
+    /// Verify the operator's signature.
+    ///
+    /// Tries the v1 tagged + length-prefixed digest first (the canonical
+    /// scheme going forward). Falls back to two pre-v1 digests so existing
+    /// on-relay data still verifies:
+    ///   - `SHA256(operator_signing_data())` — raw, no tag, no length
+    ///     prefix. Used by `Node::sign_last_update` for every non-genesis
+    ///     update before the tagged-digest migration.
+    ///   - `SHA256(seq || previous_hash || content_hash || message)` — the
+    ///     even older `Handler::sign_ledger_update` digest used for seq-0
+    ///     LedgerOpens before they were aligned with the rest of the
+    ///     codebase.
+    ///
+    /// Both legacy digests are deprecated and slated for removal once
+    /// known live data has been re-signed under v1.
     pub fn verify_operator_signature(&self) -> Result<(), String> {
         use bitcoin::hashes::{sha256, Hash};
+
+        // v1: tagged + length-prefixed (canonical going forward).
+        let v1 = self.operator_sign_digest_v1();
+        if let Ok(()) = self.verify_operator_signature_against(&v1) {
+            return Ok(());
+        }
+
+        // Legacy A: raw SHA256(operator_signing_data()) — non-genesis
+        // updates signed before the tagged-digest migration.
+        let legacy_a = sha256::Hash::hash(&self.operator_signing_data()).to_byte_array();
+        if let Ok(()) = self.verify_operator_signature_against(&legacy_a) {
+            return Ok(());
+        }
+
+        // Legacy B: handler.rs's pre-c57d7e0d format for seq-0 LedgerOpen.
+        let legacy_b = {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&self.sequence_number.to_le_bytes());
+            buf.extend_from_slice(&self.previous_hash);
+            buf.extend_from_slice(&self.content_hash);
+            buf.extend_from_slice(&self.message);
+            sha256::Hash::hash(&buf).to_byte_array()
+        };
+        self.verify_operator_signature_against(&legacy_b)
+    }
+
+    fn verify_operator_signature_against(&self, digest: &[u8; 32]) -> Result<(), String> {
         use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
-
-        let secp = Secp256k1::new();
-        let data = self.operator_signing_data();
-        let hash = sha256::Hash::hash(&data);
-        let msg = Message::from_digest(hash.to_byte_array());
-
+        let secp = Secp256k1::verification_only();
         let sig = Signature::from_slice(&self.operator_signature)
             .map_err(|e| format!("Invalid operator signature format: {}", e))?;
-
+        let msg = Message::from_digest(*digest);
         let (xonly, _parity) = self.operator_id.x_only_public_key();
         secp.verify_schnorr(&sig, &msg, &xonly)
             .map_err(|e| format!("Operator signature verification failed: {}", e))
