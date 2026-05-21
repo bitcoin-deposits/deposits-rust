@@ -555,21 +555,29 @@ fn replay_chain(
                         cosigned
                     );
                 }
-                match state.apply(&op) {
+                // Use the canonical signed-update advance. apply_signed
+                // verifies operator BIP-340 sig, cosig threshold,
+                // ledger_id derivation (seq-0), chain continuity, and
+                // runs the state-machine + conformance pipeline before
+                // mutating. chain_tip=0 in the verifier is the strict
+                // reading for a replay tool with no chain view of its
+                // own — descriptor after(N) checks resolve unsatisfiable.
+                let verifier =
+                    deposits_core::descriptor::CoreWitnessVerifier::new(0);
+                match state.apply_signed(update, &verifier) {
                     Ok(next) => {
                         state = next;
-                        state.sequence = update.sequence_number;
-                        state.chain_tip_hash = update.chain_hash();
                     }
                     Err(e) => {
                         errors.push(format!(
-                            "seq={}: apply failed: {:?}",
+                            "seq={}: apply_signed failed: {:?}",
                             update.sequence_number, e
                         ));
                         state.sequence = update.sequence_number;
                         state.chain_tip_hash = update.chain_hash();
                     }
                 }
+                let _ = op;
             }
             Err(e) => {
                 errors.push(format!(

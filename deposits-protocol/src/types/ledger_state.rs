@@ -200,14 +200,31 @@ impl LedgerState {
     // Immutable State Transition
     // ========================================================================
 
-    /// Apply a ledger operation, returning a new state.
+    /// State-machine primitive: apply a ledger operation against this
+    /// state, returning the next state. **No cryptographic validation.**
+    /// The caller is responsible for ensuring the operation has been
+    /// blessed (operator signature + cosig threshold) — typically by
+    /// going through [`apply_signed`] or [`check_speculative`] instead.
     ///
-    /// This is a pure function: same state + same operation = same result.
-    /// The original state is never mutated — callers replace it atomically:
+    /// Pure: same state + same operation = same result. The original
+    /// state is never mutated — callers replace it atomically:
     ///
     /// ```ignore
     /// self.state = self.state.apply(&operation)?;
     /// ```
+    ///
+    /// Use this directly only for:
+    /// - load-time replay paths where the data is presumed-valid (e.g.
+    ///   re-hydrating from a trusted jsonl);
+    /// - speculative inspection ("what would the state look like if
+    ///   this op were applied?") with no intent to advance the canonical
+    ///   chain;
+    /// - test scaffolding that builds states bypassing the signing flow.
+    ///
+    /// Production write paths use [`apply_signed`].
+    ///
+    /// [`apply_signed`]: Self::apply_signed
+    /// [`check_speculative`]: Self::check_speculative
     pub fn apply(
         &self,
         operation: &crate::messages::LedgerOperation,
@@ -920,7 +937,13 @@ impl LedgerState {
                 details: format!("{:?}", e),
             }
         })?;
-        let mut next = self.check_and_apply(&op, verifier)?;
+        let (mut next, violations) = self.apply_with_verifier(&op, verifier)?;
+        if let Some(v) = violations.first() {
+            return Err(crate::DepositsError::ProtocolViolation {
+                violation_type: "conformance".to_string(),
+                details: v.to_string(),
+            });
+        }
 
         // The update has been fully blessed — bump sequence and transition
         // chain_tip_hash to `chain_hash()` (= SHA256(content_hash ||
@@ -959,25 +982,6 @@ impl LedgerState {
                 detail: format!("{:?}", e),
             }],
         }
-    }
-
-    /// Apply an operation, returning an error if the result is non-conforming.
-    ///
-    /// Use this for the operator's own operations — it refuses to produce
-    /// a non-conforming ledger state.
-    pub fn check_and_apply(
-        &self,
-        operation: &crate::messages::LedgerOperation,
-        verifier: &impl WitnessVerifier,
-    ) -> crate::DepositsResult<Self> {
-        let (next, violations) = self.apply_with_verifier(operation, verifier)?;
-        if let Some(v) = violations.first() {
-            return Err(crate::DepositsError::ProtocolViolation {
-                violation_type: "conformance".to_string(),
-                details: v.to_string(),
-            });
-        }
-        Ok(next)
     }
 
     /// Check the conformance of this state after an operation was applied.

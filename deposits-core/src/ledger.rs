@@ -1517,19 +1517,6 @@ impl Ledger {
         Ok(())
     }
 
-    /// Apply state changes with conformance checking (operator path).
-    ///
-    /// Returns `Err` if the operation would produce a non-conforming state.
-    /// Use this when the operator is creating their own updates.
-    pub fn checked_apply(
-        &mut self,
-        operation: &LedgerOperation,
-        verifier: &impl deposits_protocol::WitnessVerifier,
-    ) -> DepositsResult<()> {
-        self.state = self.state.check_and_apply(operation, verifier)?;
-        Ok(())
-    }
-
     /// Apply state changes and return any conformance violations (watcher path).
     ///
     /// Always applies the operation (even if non-conforming) so the watcher
