@@ -1142,33 +1142,23 @@ impl Ledger {
     ///
     /// Call this only after signing (and cosigning if needed).
     pub fn commit_staged(&mut self, staged: StagedUpdate) -> DepositsResult<()> {
-        // Verify the staged update matches our current chain tip
-        if staged.update.previous_hash != self.state.chain_tip_hash {
-            return Err(DepositsError::InvalidState(format!(
-                "Staged update previous_hash {} doesn't match chain tip {}",
-                hex::encode(&staged.update.previous_hash[..4]),
-                hex::encode(&self.state.chain_tip_hash[..4]),
-            )));
-        }
+        // `apply_signed` is the canonical state-advance path: it verifies
+        // sequence, chain continuity, custody, content_hash integrity,
+        // the operator BIP-340 signature, cosig threshold against the
+        // active quorum, ledger_id derivation for seq-0, then runs the
+        // state-machine + conformance pipeline. Any of these failing
+        // (missing/invalid signatures included) returns an error before
+        // any state mutation. The staged update's `block_height` is the
+        // operator's cosigned view of the tip; feeds the verifier so
+        // descriptor `after()` checks evaluate at the right horizon.
+        let verifier =
+            crate::descriptor::CoreWitnessVerifier::new(staged.update.block_height);
+        let new_state = self.state.apply_signed(&staged.update, &verifier)?;
+        self.state = new_state;
 
-        // Verify operator signature is present
-        if staged.update.operator_signature == [0u8; 64] {
-            return Err(DepositsError::InvalidState(
-                "Cannot commit unsigned update".to_string(),
-            ));
-        }
-
-        // Apply state changes with conformance check (operator must not
-        // produce non-conforming state). The staged update's
-        // `block_height` is the cosigned operator view of the tip;
-        // feed it to the verifier so descriptor `after()` checks
-        // evaluate against the right horizon.
-        self.checked_apply(
-            &staged.operation,
-            &crate::descriptor::CoreWitnessVerifier::new(staged.update.block_height),
-        )?;
-
-        // Update chain state — chain_tip uses chain_hash() which folds in the operator signature
+        // Now that the operator's signature is folded in, transition
+        // chain_tip_hash from content_hash → chain_hash. Subsequent
+        // updates' `previous_hash` field links against chain_hash.
         self.state.chain_tip_hash = staged.update.chain_hash();
         self.state.sequence = staged.update.sequence_number;
 
