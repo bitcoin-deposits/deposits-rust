@@ -36,10 +36,14 @@
 //! (or skipped cleanly). Errors per ledger are logged but don't abort
 //! the run — partial sweeps are still valuable.
 
-use bitcoin::bip32::{DerivationPath, Xpriv};
+use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv};
 use bitcoin::hashes::Hash;
-use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
-use bitcoin::{Address, Network, Witness};
+use bitcoin::secp256k1::{ecdsa, Keypair, Message, Secp256k1, SecretKey};
+use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+use bitcoin::{
+    Address, Amount, CompressedPublicKey, Network, OutPoint, ScriptBuf, Sequence,
+    Transaction, TxIn, TxOut, Witness,
+};
 use deposits_core::messages::LedgerOperation;
 use deposits_core::tapscript_reserves::{
     ReservesSpendBuilder, SpendTxParams, TapscriptReservesBuilder, VoterSet,
@@ -139,6 +143,212 @@ fn derive_operator_secret(seed: &[u8; 32], network: Network) -> Result<SecretKey
         .derive_priv(&secp, &path)
         .map_err(|e| format!("derive: {}", e))?;
     Ok(derived.private_key)
+}
+
+/// Derive a child secret key at `m/<change>/<index>` from the master seed.
+/// Matches the node-level wallet's `wpkh(master_xpub/{0,1}/*)` descriptor.
+fn derive_node_wallet_secret(
+    seed: &[u8; 32],
+    change: u32,
+    index: u32,
+    network: Network,
+) -> Result<SecretKey, String> {
+    let secp = Secp256k1::new();
+    let xpriv =
+        Xpriv::new_master(network, seed).map_err(|e| format!("master xpriv: {}", e))?;
+    let path = DerivationPath::from(vec![
+        ChildNumber::Normal { index: change },
+        ChildNumber::Normal { index },
+    ]);
+    let derived = xpriv
+        .derive_priv(&secp, &path)
+        .map_err(|e| format!("derive: {}", e))?;
+    Ok(derived.private_key)
+}
+
+/// Derive a child secret key at `m/86'/0'/<account>'/<change>/<index>` from
+/// the master seed. Matches the per-ledger BDK wallet's
+/// `wpkh(account_xpub/{0,1}/*)` descriptor (account_xpub is the
+/// hardened account-level xpub at `m/86'/0'/<account>'`).
+fn derive_ledger_wallet_secret(
+    seed: &[u8; 32],
+    account: u32,
+    change: u32,
+    index: u32,
+    network: Network,
+) -> Result<SecretKey, String> {
+    let secp = Secp256k1::new();
+    let xpriv =
+        Xpriv::new_master(network, seed).map_err(|e| format!("master xpriv: {}", e))?;
+    let path = DerivationPath::from(vec![
+        ChildNumber::Hardened { index: 86 },
+        ChildNumber::Hardened { index: 0 },
+        ChildNumber::Hardened { index: account },
+        ChildNumber::Normal { index: change },
+        ChildNumber::Normal { index },
+    ]);
+    let derived = xpriv
+        .derive_priv(&secp, &path)
+        .map_err(|e| format!("derive: {}", e))?;
+    Ok(derived.private_key)
+}
+
+/// Sweep a set of wpkh UTXOs (potentially multiple inputs) into a single
+/// output at `destination_script`. `inputs` carries the (outpoint,
+/// amount, secret_key) tuples; signing is local — no signer indirection.
+fn sweep_wpkh_inputs(
+    label: &str,
+    inputs: Vec<(OutPoint, u64, SecretKey)>,
+    destination_script: &ScriptBuf,
+    esplora: &str,
+    dry_run: bool,
+) -> Result<(), String> {
+    if inputs.is_empty() {
+        return Ok(());
+    }
+    let total_in: u64 = inputs.iter().map(|(_, a, _)| *a).sum();
+    // Rough fee: ~10 bytes overhead + ~68 vbytes/input (P2WPKH) + ~31 vbytes/output.
+    let vbytes = 10 + 68 * inputs.len() as u64 + 31;
+    let fee_rate: u64 = 2; // sat/vB; modest, mainnet/testnet appropriate
+    let fee = vbytes * fee_rate;
+    if fee >= total_in {
+        return Err(format!(
+            "fee {} ≥ total inputs {}; nothing to sweep",
+            fee, total_in
+        ));
+    }
+    let output_value = total_in - fee;
+
+    let mut tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: inputs
+            .iter()
+            .map(|(op, _, _)| TxIn {
+                previous_output: *op,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            })
+            .collect(),
+        output: vec![TxOut {
+            value: Amount::from_sat(output_value),
+            script_pubkey: destination_script.clone(),
+        }],
+    };
+
+    let secp = Secp256k1::new();
+    let unsigned_tx_clone = tx.clone();
+    let mut cache = SighashCache::new(&unsigned_tx_clone);
+    for (i, (_, amount, secret)) in inputs.iter().enumerate() {
+        let pubkey = secret.public_key(&secp);
+        let compressed = CompressedPublicKey::from_slice(&pubkey.serialize())
+            .map_err(|e| format!("compressed pubkey: {}", e))?;
+        let wpkh_script = ScriptBuf::new_p2wpkh(&compressed.wpubkey_hash());
+        let sighash = cache
+            .p2wpkh_signature_hash(
+                i,
+                &wpkh_script,
+                Amount::from_sat(*amount),
+                EcdsaSighashType::All,
+            )
+            .map_err(|e| format!("sighash input {}: {}", i, e))?;
+        let msg = Message::from_digest(*sighash.as_ref());
+        let sig: ecdsa::Signature = secp.sign_ecdsa(&msg, secret);
+        let mut sig_bytes = sig.serialize_der().to_vec();
+        sig_bytes.push(EcdsaSighashType::All as u8);
+        let mut witness = Witness::new();
+        witness.push(sig_bytes);
+        witness.push(compressed.to_bytes());
+        tx.input[i].witness = witness;
+    }
+
+    let txid = tx.compute_txid();
+    println!(
+        "  {}: sweep {} input(s), {} sats → dest (fee {} sats, txid {})",
+        label,
+        inputs.len(),
+        output_value,
+        fee,
+        txid
+    );
+    if dry_run {
+        return Ok(());
+    }
+    broadcast_tx(esplora, &tx)?;
+    Ok(())
+}
+
+/// Scan a single (xpub-rooted) wpkh wallet by deriving addresses up to
+/// `gap_limit` consecutive empties on each change keychain, and return
+/// every (outpoint, amount, secret) tuple found.
+///
+/// `derive_secret` is a closure (change, index) → SecretKey so the same
+/// scanner serves both the node-level wallet (m/{0,1}/N) and per-ledger
+/// wallets (m/86'/0'/<account>'/{0,1}/N) without duplicating logic.
+fn scan_wpkh_utxos<F>(
+    derive_secret: F,
+    network: Network,
+    esplora: &str,
+    gap_limit: u32,
+) -> Result<Vec<(OutPoint, u64, SecretKey)>, String>
+where
+    F: Fn(u32, u32) -> Result<SecretKey, String>,
+{
+    let secp = Secp256k1::new();
+    let mut found: Vec<(OutPoint, u64, SecretKey)> = Vec::new();
+    for change in 0..=1u32 {
+        let mut consecutive_empty = 0u32;
+        let mut index = 0u32;
+        while consecutive_empty < gap_limit {
+            let secret = derive_secret(change, index)?;
+            let pubkey = secret.public_key(&secp);
+            let compressed = CompressedPublicKey::from_slice(&pubkey.serialize())
+                .map_err(|e| format!("compressed pubkey: {}", e))?;
+            let address = Address::p2wpkh(&compressed, network);
+            match fetch_address_utxos(&address, esplora)? {
+                utxos if utxos.is_empty() => {
+                    consecutive_empty += 1;
+                }
+                utxos => {
+                    consecutive_empty = 0;
+                    for (op, amt) in utxos {
+                        found.push((op, amt, secret));
+                    }
+                }
+            }
+            index += 1;
+        }
+    }
+    Ok(found)
+}
+
+fn fetch_address_utxos(
+    address: &Address,
+    esplora: &str,
+) -> Result<Vec<(OutPoint, u64)>, String> {
+    let url = format!("{}/address/{}/utxo", esplora, address);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("http client: {}", e))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("GET {}: {}", url, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("esplora {}: status {}", url, resp.status()));
+    }
+    let utxos: Vec<serde_json::Value> = resp.json().map_err(|e| format!("json: {}", e))?;
+    let mut out = Vec::new();
+    for u in utxos {
+        let txid_str = u.get("txid").and_then(|v| v.as_str()).ok_or("txid")?;
+        let vout = u.get("vout").and_then(|v| v.as_u64()).ok_or("vout")? as u32;
+        let value = u.get("value").and_then(|v| v.as_u64()).ok_or("value")?;
+        let txid = bitcoin::Txid::from_str(txid_str).map_err(|e| format!("txid: {}", e))?;
+        out.push((OutPoint { txid, vout }, value));
+    }
+    Ok(out)
 }
 
 fn load_operators(root: &Path, network: Network) -> Result<Vec<OperatorSlot>, String> {
@@ -561,16 +771,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let destination_script = destination.script_pubkey();
 
     let mut swept_ledgers: HashSet<[u8; 32]> = HashSet::new();
-    let mut total_attempted = 0usize;
-    let mut total_errors = 0usize;
+    let mut reserves_attempted = 0usize;
+    let mut reserves_errors = 0usize;
+    let mut wpkh_attempted = 0usize;
+    let mut wpkh_errors = 0usize;
+
+    // BIP-44 gap-limit conventionally 20; we keep it generous to catch
+    // address-index drift on a busy node.
+    const WPKH_GAP_LIMIT: u32 = 50;
 
     for op in &operators {
+        // ===== 1. Reserves UTXOs for ledgers this operator owns =====
         let ledgers_dir = op.data_dir.join("wallet/ledgers");
         let entries = match std::fs::read_dir(&ledgers_dir) {
             Ok(e) => e,
             Err(_) => continue,
         };
-        for entry in entries.flatten() {
+        let entries: Vec<_> = entries.flatten().collect();
+        for entry in &entries {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
@@ -588,18 +806,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             if summary.operator_key != op.operator_pubkey {
-                continue; // we're a cosigner here, not the operator
+                continue;
             }
             if !swept_ledgers.insert(summary.ledger_id) {
                 continue;
             }
             println!(
-                "[{}] ledger {}… (operator={})",
+                "[{}] reserves: ledger {}…",
                 op.name,
                 hex::encode(&summary.ledger_id[..8]),
-                hex::encode(&summary.operator_key.serialize()[..8]),
             );
-            total_attempted += 1;
+            reserves_attempted += 1;
             if let Err(e) = sweep_ledger(
                 &summary,
                 &keyring,
@@ -609,17 +826,135 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.dry_run,
             ) {
                 println!("    ERROR: {}", e);
-                total_errors += 1;
+                reserves_errors += 1;
             }
+        }
+
+        // ===== 2. Node-level wpkh wallet (m/{0,1}/*) =====
+        let seed = op.seed;
+        let scan = scan_wpkh_utxos(
+            |change, index| derive_node_wallet_secret(&seed, change, index, args.network),
+            args.network,
+            &args.esplora,
+            WPKH_GAP_LIMIT,
+        );
+        match scan {
+            Ok(utxos) if !utxos.is_empty() => {
+                println!(
+                    "[{}] node wpkh: {} input(s) total {} sats",
+                    op.name,
+                    utxos.len(),
+                    utxos.iter().map(|(_, a, _)| *a).sum::<u64>()
+                );
+                wpkh_attempted += 1;
+                if let Err(e) = sweep_wpkh_inputs(
+                    &format!("{} node wpkh", op.name),
+                    utxos,
+                    &destination_script,
+                    &args.esplora,
+                    args.dry_run,
+                ) {
+                    println!("    ERROR: {}", e);
+                    wpkh_errors += 1;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                println!("[{}] node wpkh scan failed: {}", op.name, e);
+                wpkh_errors += 1;
+            }
+        }
+
+        // ===== 3. Per-ledger wpkh wallets (m/86'/0'/<account>'/{0,1}/*) =====
+        for entry in &entries {
+            let path = entry.path();
+            // The per-ledger BDK wallet dir lives at <ledger_id>/ alongside
+            // the <ledger_id>.jsonl history file. We only sweep wallets
+            // for ledgers WE'RE the operator of — otherwise the account
+            // belongs to that other operator.
+            if !path.is_dir() {
+                continue;
+            }
+            let ledger_id_str = match path.file_name().and_then(|n| n.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            // Only consider hex-looking 64-char ledger IDs.
+            if ledger_id_str.len() != 64
+                || !ledger_id_str.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                continue;
+            }
+            // Confirm operator ownership via the jsonl summary (cheap re-replay).
+            let jsonl = ledgers_dir.join(format!("{}.jsonl", ledger_id_str));
+            let summary = match summarize_ledger(&jsonl) {
+                Ok(Some(s)) if s.operator_key == op.operator_pubkey => s,
+                _ => continue,
+            };
+            let account_file = path.join("account_index.txt");
+            let account: u32 = match std::fs::read_to_string(&account_file) {
+                Ok(s) => match s.trim().parse() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                },
+                Err(_) => continue,
+            };
+            let scan = scan_wpkh_utxos(
+                |change, index| {
+                    derive_ledger_wallet_secret(&seed, account, change, index, args.network)
+                },
+                args.network,
+                &args.esplora,
+                WPKH_GAP_LIMIT,
+            );
+            match scan {
+                Ok(utxos) if !utxos.is_empty() => {
+                    println!(
+                        "[{}] ledger-wpkh {}… (account {}): {} input(s) total {} sats",
+                        op.name,
+                        &ledger_id_str[..16],
+                        account,
+                        utxos.len(),
+                        utxos.iter().map(|(_, a, _)| *a).sum::<u64>(),
+                    );
+                    wpkh_attempted += 1;
+                    if let Err(e) = sweep_wpkh_inputs(
+                        &format!("{} ledger-wpkh {}…", op.name, &ledger_id_str[..16]),
+                        utxos,
+                        &destination_script,
+                        &args.esplora,
+                        args.dry_run,
+                    ) {
+                        println!("    ERROR: {}", e);
+                        wpkh_errors += 1;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    println!(
+                        "[{}] ledger-wpkh {}… scan failed: {}",
+                        op.name,
+                        &ledger_id_str[..16],
+                        e
+                    );
+                    wpkh_errors += 1;
+                }
+            }
+            let _ = summary;
         }
     }
 
     println!();
     println!("=== Summary ===");
-    println!("  Ledgers attempted: {}", total_attempted);
-    println!("  Errors:            {}", total_errors);
-    println!("  Mode:              {}", if args.dry_run { "dry-run" } else { "live" });
-    if total_errors > 0 {
+    println!("  Reserves attempted: {}", reserves_attempted);
+    println!("  Reserves errors:    {}", reserves_errors);
+    println!("  WPKH attempted:     {}", wpkh_attempted);
+    println!("  WPKH errors:        {}", wpkh_errors);
+    println!(
+        "  Mode:               {}",
+        if args.dry_run { "dry-run" } else { "live" }
+    );
+    if reserves_errors + wpkh_errors > 0 {
         std::process::exit(1);
     }
     Ok(())
