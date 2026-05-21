@@ -755,6 +755,223 @@ impl LedgerState {
         Ok((next, violations))
     }
 
+    /// The canonical way to advance a `LedgerState`: verify that
+    /// `update` carries the threshold of cryptographic blessings the
+    /// protocol requires, then apply the embedded operation through
+    /// the state machine + conformance pipeline.
+    ///
+    /// Invariant: every `LedgerState` reachable through this method has
+    /// been blessed by (a) the current chain's signing key
+    /// (`parent_pubkey`) and (b) — once `quorum_members` is non-empty —
+    /// a majority of the active quorum. Callers may chain transitions
+    /// purely through this method and trust the resulting state without
+    /// re-checking sigs downstream.
+    ///
+    /// Checks (in order; first failure short-circuits):
+    /// 1. Sequence: `update.sequence_number == self.sequence + 1` for
+    ///    non-genesis; `== 0` for the LedgerOpen path (when invoked on
+    ///    a fresh state where `self.sequence == 0` and chain_tip_hash
+    ///    is all-zero).
+    /// 2. Chain continuity: `update.previous_hash == self.chain_tip_hash`.
+    /// 3. Custody: `update.operator_id == self.parent_pubkey`. After a
+    ///    `DisputeAcquire` apply mutates `parent_pubkey`, subsequent
+    ///    updates from the new custodian pass naturally.
+    /// 4. Content integrity: `update.content_hash == update.compute_hash()`.
+    /// 5. Operator BIP-340 Schnorr signature over `content_hash` by
+    ///    `operator_id` (routed via `verifier.verify_signature`).
+    /// 6. Cosig threshold: when `self.quorum_members` is non-empty (or
+    ///    `self.next_quorum_members` for the first `QuorumBegin`),
+    ///    `update.cosignatures` must hold valid sigs from a majority
+    ///    of distinct members of that set. (Legacy single-cosig form
+    ///    accepted when `cosignatures` is empty.)
+    /// 7. State machine apply + conformance (`check_and_apply`). For
+    ///    a seq-0 `LedgerOpen` the LedgerState's pre-apply identity
+    ///    fields (operator_key, reserves_key, genesis_block) are
+    ///    overwritten by the operation; we additionally check that
+    ///    `update.ledger_id == LedgerState::derive_id(...)` so a writer
+    ///    can't publish under a `#d` tag that doesn't match their
+    ///    declared operator+reserves+genesis_block tuple.
+    pub fn apply_signed(
+        &self,
+        update: &crate::types::SignedLedgerUpdate,
+        verifier: &impl WitnessVerifier,
+    ) -> crate::DepositsResult<Self> {
+        use crate::messages::LedgerOperation;
+        use crate::tlv::TlvDecode;
+
+        // 1. Sequence.
+        let expected_seq = if self.chain_tip_hash == [0u8; 32] && self.sequence == 0 {
+            0 // genesis
+        } else {
+            self.sequence + 1
+        };
+        if update.sequence_number != expected_seq {
+            return Err(crate::DepositsError::ProtocolViolation {
+                violation_type: "sequence_mismatch".to_string(),
+                details: format!(
+                    "update.sequence_number {} ≠ expected {}",
+                    update.sequence_number, expected_seq,
+                ),
+            });
+        }
+
+        // 2. Chain continuity.
+        if update.previous_hash != self.chain_tip_hash {
+            return Err(crate::DepositsError::ProtocolViolation {
+                violation_type: "previous_hash_mismatch".to_string(),
+                details: format!(
+                    "update.previous_hash {} ≠ chain_tip_hash {}",
+                    hex::encode(update.previous_hash),
+                    hex::encode(self.chain_tip_hash),
+                ),
+            });
+        }
+
+        // 3. Custody. Genesis exempted because `self.parent_pubkey`
+        //    isn't yet meaningful — the LedgerOpen establishes it.
+        if update.sequence_number != 0 && update.operator_id != self.parent_pubkey {
+            return Err(crate::DepositsError::ProtocolViolation {
+                violation_type: "operator_id_mismatch".to_string(),
+                details: format!(
+                    "update.operator_id {} ≠ chain's current signer {}",
+                    update.operator_id, self.parent_pubkey,
+                ),
+            });
+        }
+
+        // 4. Content integrity. Without this, a writer could publish a
+        //    SignedLedgerUpdate whose `content_hash` doesn't match its
+        //    `message` body — the operator_signature would verify but
+        //    the message we'd actually apply isn't what the operator
+        //    committed to.
+        if update.content_hash != update.compute_hash() {
+            return Err(crate::DepositsError::ProtocolViolation {
+                violation_type: "content_hash_mismatch".to_string(),
+                details: "content_hash doesn't match compute_hash(update)".to_string(),
+            });
+        }
+
+        // 5. Operator signature.
+        if !verifier.verify_signature(
+            &update.operator_id,
+            &update.content_hash,
+            &update.operator_signature,
+        ) {
+            return Err(crate::DepositsError::ProtocolViolation {
+                violation_type: "bad_operator_signature".to_string(),
+                details: "operator BIP-340 Schnorr sig invalid over content_hash".to_string(),
+            });
+        }
+
+        // 6. Cosig threshold. Empty active quorum → genesis or
+        //    pre-QuorumBegin updates; no cosigs required. For the
+        //    first QuorumBegin specifically, the quorum is staged in
+        //    `next_quorum_members` (not yet promoted) — accept cosigs
+        //    from that set.
+        let cosig_set: Vec<bitcoin::secp256k1::PublicKey> = if !self.quorum_members.is_empty() {
+            self.quorum_members.iter().map(|m| m.pubkey).collect()
+        } else if matches!(
+            LedgerOperation::tlv_decode(&update.message),
+            Ok(LedgerOperation::QuorumBegin { .. })
+        ) {
+            self.next_quorum_members.iter().map(|m| m.pubkey).collect()
+        } else {
+            Vec::new()
+        };
+
+        if !cosig_set.is_empty() {
+            let threshold = (cosig_set.len() / 2) + 1;
+            let mut valid_cosigs = 0usize;
+            let mut seen: std::collections::HashSet<bitcoin::secp256k1::PublicKey> =
+                std::collections::HashSet::new();
+            for entry in &update.cosignatures {
+                if !cosig_set.contains(&entry.cosigner_pubkey) {
+                    continue;
+                }
+                if !seen.insert(entry.cosigner_pubkey) {
+                    continue;
+                }
+                if verifier.verify_signature(
+                    &entry.cosigner_pubkey,
+                    &update.content_hash,
+                    &entry.cosign_signature,
+                ) {
+                    valid_cosigs += 1;
+                }
+            }
+            if valid_cosigs < threshold {
+                return Err(crate::DepositsError::ProtocolViolation {
+                    violation_type: "insufficient_cosignatures".to_string(),
+                    details: format!(
+                        "{} valid cosigs from active set; threshold is {}",
+                        valid_cosigs, threshold
+                    ),
+                });
+            }
+        }
+
+        // 7. ledger_id derivation for seq-0 LedgerOpen.
+        if update.sequence_number == 0 {
+            if let Ok(LedgerOperation::LedgerOpen {
+                reserves_id,
+                genesis_block,
+                ..
+            }) = LedgerOperation::tlv_decode(&update.message)
+            {
+                let derived = Self::compute_ledger_id(&update.operator_id, &reserves_id, genesis_block);
+                if derived != update.ledger_id {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "ledger_id_derivation".to_string(),
+                        details: format!(
+                            "ledger_id {} ≠ derived {} (op_pubkey, reserves_id, genesis_block)",
+                            hex::encode(update.ledger_id),
+                            hex::encode(derived),
+                        ),
+                    });
+                }
+            }
+        }
+
+        // 8. State machine + conformance.
+        let op = LedgerOperation::tlv_decode(&update.message).map_err(|e| {
+            crate::DepositsError::ProtocolViolation {
+                violation_type: "message_decode".to_string(),
+                details: format!("{:?}", e),
+            }
+        })?;
+        let next = self.check_and_apply(&op, verifier)?;
+        Ok(next)
+    }
+    ///
+    /// Returns the violations a cosigner would see, without mutating
+    /// state. This is the gate every signer (operator before staging,
+    /// cosigner before signing) runs against the operation before
+    /// committing cryptographic weight to it. If the cosigner refuses
+    /// to sign any operation that fails `check_speculative`, then by
+    /// induction every `SignedLedgerUpdate` that ever advances state
+    /// has already been blessed for conformance — which is what makes
+    /// the `LedgerState::apply(SignedLedgerUpdate, ...)` path safe to
+    /// apply unconditionally on the threshold-cosig invariant.
+    ///
+    /// Mechanically: apply the op speculatively, then run conformance
+    /// against the post-apply state with `Some(pre_state)` so
+    /// pre-state-dependent checks (e.g. `DepositKeyRotate` witness
+    /// against the OLD descriptor) work. Either step's failure surfaces
+    /// as a violation: state-machine errors (invalid transitions) get
+    /// wrapped into a `ConformanceViolation::StateMachineRejected`.
+    pub fn check_speculative(
+        &self,
+        operation: &crate::messages::LedgerOperation,
+        verifier: &impl WitnessVerifier,
+    ) -> Vec<ConformanceViolation> {
+        match self.apply(operation) {
+            Ok(next) => next.check_conformance(operation, Some(self), verifier),
+            Err(e) => vec![ConformanceViolation::StateMachineRejected {
+                detail: format!("{:?}", e),
+            }],
+        }
+    }
+
     /// Apply an operation, returning an error if the result is non-conforming.
     ///
     /// Use this for the operator's own operations — it refuses to produce

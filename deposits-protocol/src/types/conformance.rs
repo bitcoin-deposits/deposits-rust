@@ -80,6 +80,13 @@ pub enum ConformanceViolation {
 
     /// A protocol rule was violated.
     ProtocolRule { rule: &'static str, detail: String },
+
+    /// The state machine itself refused the transition (invariant
+    /// failure, unknown deposit id, etc.) — surfaced through the
+    /// conformance API by `check_speculative` so callers don't have
+    /// to branch on `apply` errors separately. Carries the inner
+    /// error's debug rendering.
+    StateMachineRejected { detail: String },
 }
 
 impl std::fmt::Display for ConformanceViolation {
@@ -127,6 +134,9 @@ impl std::fmt::Display for ConformanceViolation {
             ),
             Self::ProtocolRule { rule, detail } => {
                 write!(f, "protocol rule '{}' violated: {}", rule, detail)
+            }
+            Self::StateMachineRejected { detail } => {
+                write!(f, "state machine refused transition: {}", detail)
             }
         }
     }
