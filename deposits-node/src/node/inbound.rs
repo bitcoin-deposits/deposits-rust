@@ -222,33 +222,51 @@ impl Node {
                     return;
                 }
 
-                // FIXME: minimal wait-for-data shim — when the inbound order is
-                // (cosign request, then the ledger update it references), the
-                // cosigner sees state at seq N-1 missing prior staged ops and
-                // refuses with `quorum_member_unstaged` (or similar). Sleep up
-                // to ~500ms and re-check whether our local state has caught up
-                // to the requested sequence. Real fix: route cosign events
-                // through the per-ledger actor's queue (`LedgerEvent`) so
-                // Inbound updates and CosignDispatch are ordered together, and
-                // re-queue the cosign event with a deadline when its required
-                // data hasn't landed yet.
+                // Wait-for-data: when inbound dispatch sees a cosign_update
+                // before the SignedLedgerUpdate it references (a real race
+                // under Nostr's non-ordered delivery), the cosigner would
+                // otherwise validate against stale state and refuse with
+                // `quorum_member_unstaged` (or similar). Subscribe to the
+                // per-ledger actor's `apply_wakeup` Notify and re-check the
+                // local seq after each apply, up to a 500ms deadline.
+                // Event-driven — wakes the moment a prior Inbound lands,
+                // no busy-polling. If the data never arrives the wait
+                // expires and `process_cosign_request` produces the
+                // canonical stale-state refusal verdict.
                 if let Some(req_seq) = request
                     .params
                     .get("sequence_number")
                     .and_then(|v| v.as_u64())
                 {
-                    for _ in 0..5 {
-                        let local_next = {
-                            let ledgers = self.handler.ledgers.lock().unwrap();
-                            ledgers
-                                .get(&request.ledger_id)
-                                .map(|arc| arc.read().unwrap().next_sequence())
-                                .unwrap_or(0)
-                        };
-                        if local_next >= req_seq {
-                            break;
+                    let apply_wakeup = {
+                        let map = self.ledger_actors.lock().unwrap();
+                        map.get(&request.ledger_id)
+                            .map(|h| std::sync::Arc::clone(&h.apply_wakeup))
+                    };
+                    if let Some(wakeup) = apply_wakeup {
+                        let deadline = tokio::time::Instant::now()
+                            + std::time::Duration::from_millis(500);
+                        loop {
+                            let local_next = {
+                                let ledgers = self.handler.ledgers.lock().unwrap();
+                                ledgers
+                                    .get(&request.ledger_id)
+                                    .map(|arc| arc.read().unwrap().next_sequence())
+                                    .unwrap_or(0)
+                            };
+                            if local_next >= req_seq {
+                                break;
+                            }
+                            if tokio::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            // Wait for the next state advance OR the deadline.
+                            // tokio::select! short-circuits to whichever fires first.
+                            tokio::select! {
+                                _ = wakeup.notified() => {}
+                                _ = tokio::time::sleep_until(deadline) => break,
+                            }
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
                 }
 

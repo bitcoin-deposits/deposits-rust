@@ -227,6 +227,7 @@ impl Node {
                 let (tx, rx) = tokio::sync::mpsc::channel::<
                     super::ledger_actor::LedgerEvent,
                 >(64);
+                let apply_wakeup = Arc::new(tokio::sync::Notify::new());
                 let actor = super::ledger_actor::LedgerActor {
                     inbox: rx,
                     outbox: actor_outbox_tx.clone(),
@@ -234,11 +235,15 @@ impl Node {
                     ledger_id: lid.clone(),
                     signer: handler_arc.signer.clone(),
                     handler: handler_arc.clone(),
+                    apply_wakeup: Arc::clone(&apply_wakeup),
                 };
                 tokio::spawn(actor.run());
                 ledger_actors.insert(
                     lid.clone(),
-                    super::ledger_actor::LedgerActorHandle { inbox: tx },
+                    super::ledger_actor::LedgerActorHandle {
+                        inbox: tx,
+                        apply_wakeup,
+                    },
                 );
             }
         }
@@ -593,6 +598,7 @@ impl Node {
         let (tx, rx) = tokio::sync::mpsc::channel::<
             super::ledger_actor::LedgerEvent,
         >(64);
+        let apply_wakeup = Arc::new(tokio::sync::Notify::new());
         let actor = super::ledger_actor::LedgerActor {
             inbox: rx,
             outbox: self.actor_outbox_tx.clone(),
@@ -600,11 +606,15 @@ impl Node {
             ledger_id: ledger_id.to_string(),
             signer: self.handler.signer.clone(),
             handler: self.handler.clone(),
+            apply_wakeup: Arc::clone(&apply_wakeup),
         };
         tokio::spawn(actor.run());
         let mut map = self.ledger_actors.lock().unwrap();
         map.entry(ledger_id.to_string())
-            .or_insert(super::ledger_actor::LedgerActorHandle { inbox: tx });
+            .or_insert(super::ledger_actor::LedgerActorHandle {
+                inbox: tx,
+                apply_wakeup,
+            });
         tracing::debug!("ensure_actor_for: spawned actor for ledger {}", &ledger_id[..16.min(ledger_id.len())]);
     }
 

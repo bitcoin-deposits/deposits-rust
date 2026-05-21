@@ -95,6 +95,11 @@ pub enum LedgerOutbound {
 pub struct LedgerActorHandle {
     /// Coordinator pushes events here.
     pub inbox: mpsc::Sender<LedgerEvent>,
+    /// Notified whenever the actor advances `ledger.state.sequence`
+    /// (Inbound apply, Commit, or any future state-advancing event).
+    /// Inbound dispatchers can wait on this for cosign requests whose
+    /// referenced sequence hasn't landed yet — no busy-polling.
+    pub apply_wakeup: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl LedgerActorHandle {
@@ -137,6 +142,11 @@ pub struct LedgerActor {
     /// the in-memory tip. The actor is the single writer for this
     /// ledger; the handler's persist function is its disk path.
     pub handler: std::sync::Arc<crate::handler::DepositsHandler>,
+    /// Same `Notify` as in `LedgerActorHandle::apply_wakeup`. The actor
+    /// calls `notify_waiters()` on this after every successful state
+    /// advance, so external waiters (e.g. the inbound cosign dispatcher
+    /// waiting for a prior update to land) get woken event-driven.
+    pub apply_wakeup: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl LedgerActor {
@@ -279,6 +289,12 @@ impl LedgerActor {
         // Drop the write lock before doing disk I/O: persist_ledger_to_disk
         // takes its own read lock through the same Arc.
         drop(ledger);
+
+        // Wake any cosign dispatchers waiting for state to catch up to
+        // this seq. notify_waiters fires once for every pending waiter;
+        // newly-arrived waiters that missed this notification re-check
+        // the seq immediately on next entry to their wait loop.
+        self.apply_wakeup.notify_waiters();
 
         // Persist the authoritative `<id>.jsonl` to disk. This is what
         // the handler's load_ledgers_from_jsonl reads on next start;
@@ -454,6 +470,9 @@ impl LedgerActor {
                 .commit_staged(staged)
                 .map_err(|e| format!("commit_staged failed: {}", e))?;
         }
+        // Wake any cosign dispatchers waiting for this seq (symmetric
+        // with the inbound apply path above).
+        self.apply_wakeup.notify_waiters();
 
         // 5. Persist the authoritative `<id>.jsonl` so the on-disk
         //    view matches the in-memory tip even if the daemon dies
