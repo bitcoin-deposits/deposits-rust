@@ -424,13 +424,13 @@ impl LedgerActor {
             staged.update.content_hash = staged.update.compute_hash();
         }
 
-        // 3. Operator-sign. Data covers content + every cosignature
-        //    (see `operator_signing_data`). Routed through the Signer
-        //    so RemoteSigner / anti-equivocation policy can intercept.
+        // 3. Operator-sign. Uses the v1 tagged + length-prefixed digest
+        //    (see `SignedLedgerUpdate::operator_sign_digest_v1`). Routed
+        //    through the Signer so RemoteSigner / anti-equivocation
+        //    policy can intercept.
         {
             use deposits_signer_api::SignContext;
-            let data = staged.update.operator_signing_data();
-            let hash = sha256::Hash::hash(&data);
+            let digest = staged.update.operator_sign_digest_v1();
             let ledger_id_bytes = self.ledger.read().unwrap().ledger_id();
             let ctx = SignContext::operator_update(
                 ledger_id_bytes,
@@ -438,7 +438,7 @@ impl LedgerActor {
             );
             staged.update.operator_signature = self
                 .signer
-                .bip340_sign(&ctx, hash.as_byte_array())
+                .bip340_sign(&ctx, &digest)
                 .map_err(|e| format!("operator sign failed: {}", e))?;
         }
 
