@@ -703,19 +703,29 @@ impl Node {
             return (false, None, Some("cosign_data too short".to_string()));
         }
 
-        // Build tagged hash following BIP-340 convention:
-        // sha256(sha256(tag) || sha256(tag) || data)
-        // This provides domain separation and prevents cross-protocol attacks
-        let tag = b"deposits/cosign";
-        let tag_hash = sha256::Hash::hash(tag);
-
-        let mut tagged_input = Vec::new();
-        tagged_input.extend_from_slice(tag_hash.as_byte_array());
-        tagged_input.extend_from_slice(tag_hash.as_byte_array());
-        tagged_input.extend_from_slice(&cosign_data);
-        tagged_input.extend_from_slice(&member_ledger_hash);
-
-        let hash = sha256::Hash::hash(&tagged_input);
+        // v1 cosig digest: tagged + length-prefixed message field. See
+        // `SignedLedgerUpdate::cosign_sign_digest_v1`. Closes the
+        // `message ↔ member_ledger_hash` boundary ambiguity that
+        // existed in the legacy `deposits/cosign` tag's flat concat.
+        // cosign_data layout in the request is
+        //   seq_le8 || previous_hash[32] || message
+        // and `message` is everything after byte 40. We rebuild the
+        // tagged digest with a `message_len_le4` between previous_hash
+        // and message, matching the v1 helper byte-for-byte.
+        use bitcoin::hashes::HashEngine;
+        const TAG: &[u8] = b"deposits/cosign/v1";
+        let tag_hash = sha256::Hash::hash(TAG);
+        let mut e = sha256::HashEngine::default();
+        e.input(tag_hash.as_byte_array());
+        e.input(tag_hash.as_byte_array());
+        e.input(&cosign_data[..8]); // seq_le8
+        e.input(&cosign_data[8..40]); // previous_hash
+        let message_bytes = &cosign_data[40..];
+        let msg_len: u32 = message_bytes.len() as u32;
+        e.input(&msg_len.to_le_bytes());
+        e.input(message_bytes);
+        e.input(&member_ledger_hash);
+        let hash = sha256::Hash::from_engine(e);
 
         // Sign with Schnorr (BIP-340) via the Signer — anti-equivocation
         // policy keys off cosign_update(operator_ledger, seq, member_head).

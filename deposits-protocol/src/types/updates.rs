@@ -202,10 +202,57 @@ impl SignedLedgerUpdate {
         data
     }
 
+    /// The canonical digest a cosigner signs.
+    ///
+    /// Tagged BIP-340 hash with length-prefixed `message` field. Symmetric
+    /// with `operator_sign_digest_v1`: closes the `message ↔
+    /// member_ledger_hash` boundary ambiguity (without a length prefix
+    /// a writer could slide tail bytes of `message` into
+    /// `member_ledger_hash`) and adds tag-based domain separation.
+    ///
+    /// Layout:
+    /// ```text
+    /// SHA256(SHA256(TAG) || SHA256(TAG)
+    ///   || seq_le8 || previous_hash[32]
+    ///   || message_len_le4 || message
+    ///   || member_ledger_hash[32])
+    /// ```
+    /// where TAG = b"deposits/cosign/v1".
+    pub fn cosign_sign_digest_v1(&self, member_ledger_hash: &[u8; 32]) -> [u8; 32] {
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
+        const TAG: &[u8] = b"deposits/cosign/v1";
+        let tag_hash = sha256::Hash::hash(TAG);
+        let mut e = sha256::HashEngine::default();
+        e.input(tag_hash.as_byte_array());
+        e.input(tag_hash.as_byte_array());
+        e.input(&self.sequence_number.to_le_bytes());
+        e.input(&self.previous_hash);
+        let msg_len: u32 = self.message.len() as u32;
+        e.input(&msg_len.to_le_bytes());
+        e.input(&self.message);
+        e.input(member_ledger_hash);
+        sha256::Hash::from_engine(e).to_byte_array()
+    }
+
+    /// Pre-v1 tagged cosig digest (no length prefix on `message`).
+    /// Kept only so `verify_cosign_signature{,s}` can fall back to it
+    /// for legacy data on existing relays. Deprecated.
+    fn cosign_sign_digest_legacy(&self, member_ledger_hash: &[u8; 32]) -> [u8; 32] {
+        use bitcoin::hashes::{sha256, Hash};
+        let tag_hash = sha256::Hash::hash(b"deposits/cosign");
+        let mut tagged_input = Vec::new();
+        tagged_input.extend_from_slice(tag_hash.as_byte_array());
+        tagged_input.extend_from_slice(tag_hash.as_byte_array());
+        tagged_input.extend_from_slice(&self.cosign_data());
+        tagged_input.extend_from_slice(member_ledger_hash);
+        sha256::Hash::hash(&tagged_input).to_byte_array()
+    }
+
     /// Verify the co-signer's signature over the update content.
     ///
-    /// The co-signer uses BIP-340 tagged hashing:
-    /// `SHA256(SHA256("deposits/cosign") || SHA256("deposits/cosign") || cosign_data || member_ledger_hash)`
+    /// Tries the v1 tagged + length-prefixed digest first, then the
+    /// legacy non-length-prefixed digest so existing on-relay data
+    /// continues to validate during the migration.
     ///
     /// The co-signer pubkey must be provided by the caller (from the Ledger).
     /// For BDK ledgers without a co-signer, pass None and this returns Ok.
@@ -213,41 +260,32 @@ impl SignedLedgerUpdate {
         &self,
         partner_pubkey: Option<&PublicKey>,
     ) -> Result<(), String> {
-        use bitcoin::hashes::{sha256, Hash};
         use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
 
-        // If no co-signer pubkey provided (BDK ledger), skip verification
         let partner_pubkey = match partner_pubkey {
             Some(pk) => pk,
             None => return Ok(()),
         };
-
-        // If no co-signer signature, skip
         if self.cosign_signature == [0u8; 64] {
             return Ok(());
         }
 
-        let secp = Secp256k1::new();
-        let data = self.cosign_data();
+        let secp = Secp256k1::verification_only();
         let member_hash = self.member_ledger_hash.unwrap_or([0u8; 32]);
-
-        // BIP-340 tagged hash: SHA256(tag_hash || tag_hash || data || member_ledger_hash)
-        let tag = b"deposits/cosign";
-        let tag_hash = sha256::Hash::hash(tag);
-        let mut tagged_input = Vec::new();
-        tagged_input.extend_from_slice(tag_hash.as_byte_array());
-        tagged_input.extend_from_slice(tag_hash.as_byte_array());
-        tagged_input.extend_from_slice(&data);
-        tagged_input.extend_from_slice(&member_hash);
-
-        let hash = sha256::Hash::hash(&tagged_input);
-        let msg = Message::from_digest(hash.to_byte_array());
-
         let sig = Signature::from_slice(&self.cosign_signature)
             .map_err(|e| format!("Invalid co-signer signature format: {}", e))?;
-
         let (xonly, _parity) = partner_pubkey.x_only_public_key();
-        secp.verify_schnorr(&sig, &msg, &xonly)
+
+        let v1 = self.cosign_sign_digest_v1(&member_hash);
+        if secp
+            .verify_schnorr(&sig, &Message::from_digest(v1), &xonly)
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        let legacy = self.cosign_sign_digest_legacy(&member_hash);
+        secp.verify_schnorr(&sig, &Message::from_digest(legacy), &xonly)
             .map_err(|e| format!("Co-signer signature verification failed: {}", e))
     }
 
@@ -365,10 +403,7 @@ impl SignedLedgerUpdate {
             ));
         }
 
-        let secp = Secp256k1::new();
-        let cosign_data = self.cosign_data();
-        let tag = b"deposits/cosign";
-        let tag_hash = sha256::Hash::hash(tag);
+        let secp = Secp256k1::verification_only();
 
         let mut seen = std::collections::HashSet::new();
         for entry in &self.cosignatures {
@@ -389,16 +424,6 @@ impl SignedLedgerUpdate {
                 ));
             }
 
-            // Verify BIP-340 tagged hash signature
-            let mut tagged_input = Vec::new();
-            tagged_input.extend_from_slice(tag_hash.as_byte_array());
-            tagged_input.extend_from_slice(tag_hash.as_byte_array());
-            tagged_input.extend_from_slice(&cosign_data);
-            tagged_input.extend_from_slice(&entry.member_ledger_hash);
-
-            let hash = sha256::Hash::hash(&tagged_input);
-            let msg = Message::from_digest(hash.to_byte_array());
-
             let sig = Signature::from_slice(&entry.cosign_signature).map_err(|e| {
                 format!(
                     "Invalid cosig format from {}: {}",
@@ -406,15 +431,26 @@ impl SignedLedgerUpdate {
                     e
                 )
             })?;
-
             let (xonly, _) = entry.cosigner_pubkey.x_only_public_key();
-            secp.verify_schnorr(&sig, &msg, &xonly).map_err(|e| {
-                format!(
-                    "Cosig verification failed for {}: {}",
-                    hex::encode(&pk_bytes[..8]),
-                    e
-                )
-            })?;
+
+            // Try v1 first (canonical going forward), legacy fallback for
+            // on-relay data signed before the migration.
+            let v1 = self.cosign_sign_digest_v1(&entry.member_ledger_hash);
+            if secp
+                .verify_schnorr(&sig, &Message::from_digest(v1), &xonly)
+                .is_ok()
+            {
+                continue;
+            }
+            let legacy = self.cosign_sign_digest_legacy(&entry.member_ledger_hash);
+            secp.verify_schnorr(&sig, &Message::from_digest(legacy), &xonly)
+                .map_err(|e| {
+                    format!(
+                        "Cosig verification failed for {}: {}",
+                        hex::encode(&pk_bytes[..8]),
+                        e
+                    )
+                })?;
         }
 
         Ok(())
