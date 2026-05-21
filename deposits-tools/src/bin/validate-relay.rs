@@ -374,23 +374,26 @@ fn validate_ledger(
             }
         }
 
-        let op = match LedgerOperation::tlv_decode(&u.message) {
-            Ok(op) => op,
-            Err(e) => {
-                return LedgerVerdict::Fail {
-                    seq: u.sequence_number,
-                    reason: format!("decode: {}", e),
-                };
-            }
-        };
-        match state.apply(&op) {
+        // Decode for the verbose-mode label only. The actual verification
+        // path is `LedgerState::apply_signed`, which decodes the message
+        // internally and verifies the full set of cryptographic
+        // invariants (operator sig, cosig threshold, content_hash
+        // integrity, ledger_id derivation for seq-0) before applying.
+        // chain_tip=0 in the verifier is correct here: validate-relay is
+        // a read-only auditor with no chain view of its own, and
+        // descriptor `after(N)` checks that would otherwise reference
+        // the tip surface as "unsatisfiable" — which is the strict
+        // reading we want for an audit.
+        let op = LedgerOperation::tlv_decode(&u.message).ok();
+        let verifier = deposits_core::descriptor::CoreWitnessVerifier::new(0);
+        match state.apply_signed(u, &verifier) {
             Ok(next) => {
                 state = next;
                 if verbose {
                     eprintln!(
                         "  seq {} OK ({})  [op={}]",
                         u.sequence_number,
-                        op_name(&op),
+                        op.as_ref().map(op_name).unwrap_or("?"),
                         &u.operator_id.to_string()[..16]
                     );
                 }
@@ -400,7 +403,11 @@ fn validate_ledger(
             Err(e) => {
                 return LedgerVerdict::Fail {
                     seq: u.sequence_number,
-                    reason: format!("{} → {:?}", op_name(&op), e),
+                    reason: format!(
+                        "{} → {:?}",
+                        op.as_ref().map(op_name).unwrap_or("?"),
+                        e
+                    ),
                 };
             }
         }

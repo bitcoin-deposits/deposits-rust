@@ -1413,20 +1413,20 @@ impl DepositsHandler {
         }
     }
 
-    /// Sign the last update in a ledger with our operator key
+    /// Sign the last update in a ledger with our operator key.
+    ///
+    /// Signs `SHA256(update.operator_signing_data())` — the canonical
+    /// digest used by `SignedLedgerUpdate::verify_operator_signature()`
+    /// and `LedgerState::apply_signed`. Previously this path used a
+    /// distinct ad-hoc digest (`SHA256(seq || prev || content_hash ||
+    /// message)`) that diverged from the rest of the codebase, leaving
+    /// seq-0 LedgerOpens unverifiable by the canonical path. Aligned now.
     fn sign_ledger_update(&self, ledger: &mut Ledger) {
         use bitcoin::hashes::{sha256, Hash};
 
         let ledger_id = ledger.ledger_id();
         if let Some(update) = ledger.history.last_mut() {
-            // Compute signature over update content
-            let mut sig_input = Vec::new();
-            sig_input.extend_from_slice(&update.sequence_number.to_le_bytes());
-            sig_input.extend_from_slice(&update.previous_hash);
-            sig_input.extend_from_slice(&update.content_hash);
-            sig_input.extend_from_slice(&update.message);
-
-            let hash = sha256::Hash::hash(&sig_input);
+            let hash = sha256::Hash::hash(&update.operator_signing_data());
             let ctx = SignContext::operator_update(ledger_id, update.sequence_number);
             let sig = self
                 .signer

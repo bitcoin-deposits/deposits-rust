@@ -1156,12 +1156,6 @@ impl Ledger {
         let new_state = self.state.apply_signed(&staged.update, &verifier)?;
         self.state = new_state;
 
-        // Now that the operator's signature is folded in, transition
-        // chain_tip_hash from content_hash → chain_hash. Subsequent
-        // updates' `previous_hash` field links against chain_hash.
-        self.state.chain_tip_hash = staged.update.chain_hash();
-        self.state.sequence = staged.update.sequence_number;
-
         // Set opened_at_block and initial last_fee_assessment for new deposits
         if let LedgerOperation::DepositOpen { deposit_id, .. } = &staged.operation {
             if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {

@@ -851,15 +851,15 @@ impl LedgerState {
             });
         }
 
-        // 5. Operator signature.
-        if !verifier.verify_signature(
-            &update.operator_id,
-            &update.content_hash,
-            &update.operator_signature,
-        ) {
+        // 5. Operator signature. Delegated to `SignedLedgerUpdate::
+        //    verify_operator_signature()`, which encodes the canonical
+        //    digest (`SHA256(operator_signing_data())`) used by every
+        //    production signing path (`Node::sign_last_update` in
+        //    deposits-node/src/node/init.rs:406).
+        if let Err(e) = update.verify_operator_signature() {
             return Err(crate::DepositsError::ProtocolViolation {
                 violation_type: "bad_operator_signature".to_string(),
-                details: "operator BIP-340 Schnorr sig invalid over content_hash".to_string(),
+                details: e,
             });
         }
 
@@ -867,7 +867,10 @@ impl LedgerState {
         //    pre-QuorumBegin updates; no cosigs required. For the
         //    first QuorumBegin specifically, the quorum is staged in
         //    `next_quorum_members` (not yet promoted) — accept cosigs
-        //    from that set.
+        //    from that set. Delegates to `SignedLedgerUpdate::
+        //    verify_cosign_signatures`, which encodes the deposits
+        //    tagged-hash signing scheme + threshold rules used by the
+        //    `cosign_update` handler.
         let cosig_set: Vec<bitcoin::secp256k1::PublicKey> = if !self.quorum_members.is_empty() {
             self.quorum_members.iter().map(|m| m.pubkey).collect()
         } else if matches!(
@@ -878,34 +881,12 @@ impl LedgerState {
         } else {
             Vec::new()
         };
-
         if !cosig_set.is_empty() {
             let threshold = (cosig_set.len() / 2) + 1;
-            let mut valid_cosigs = 0usize;
-            let mut seen: std::collections::HashSet<bitcoin::secp256k1::PublicKey> =
-                std::collections::HashSet::new();
-            for entry in &update.cosignatures {
-                if !cosig_set.contains(&entry.cosigner_pubkey) {
-                    continue;
-                }
-                if !seen.insert(entry.cosigner_pubkey) {
-                    continue;
-                }
-                if verifier.verify_signature(
-                    &entry.cosigner_pubkey,
-                    &update.content_hash,
-                    &entry.cosign_signature,
-                ) {
-                    valid_cosigs += 1;
-                }
-            }
-            if valid_cosigs < threshold {
+            if let Err(e) = update.verify_cosign_signatures(&cosig_set, threshold) {
                 return Err(crate::DepositsError::ProtocolViolation {
                     violation_type: "insufficient_cosignatures".to_string(),
-                    details: format!(
-                        "{} valid cosigs from active set; threshold is {}",
-                        valid_cosigs, threshold
-                    ),
+                    details: e,
                 });
             }
         }
@@ -939,7 +920,15 @@ impl LedgerState {
                 details: format!("{:?}", e),
             }
         })?;
-        let next = self.check_and_apply(&op, verifier)?;
+        let mut next = self.check_and_apply(&op, verifier)?;
+
+        // The update has been fully blessed — bump sequence and transition
+        // chain_tip_hash to `chain_hash()` (= SHA256(content_hash ||
+        // operator_signature)), the value subsequent updates' `previous_hash`
+        // must link against. Callers that used to do this by hand after
+        // `apply_with_verifier` + finalize_chain_hash no longer need to.
+        next.sequence = update.sequence_number;
+        next.chain_tip_hash = update.chain_hash();
         Ok(next)
     }
     ///
