@@ -1090,18 +1090,20 @@ impl Ledger {
             })?;
         }
 
-        // Speculative apply + conformance against a clone of the
-        // post-validate state. This is the operator-side gate that
-        // refuses to broadcast a non-conforming update to cosigners
-        // (without it, the operator would only discover the violation
-        // after collecting cosignatures, wasting a round-trip and
-        // exposing the cosigners to a fraud-proof-grade signature on
-        // a request that never should have left their door).
-        //
-        // We must not mutate `self.state` here — stage_operation has
-        // always been &self, and other readers might be holding
-        // references — so check against a clone and discard.
-        self.state.clone().check_and_apply(&operation, verifier)?;
+        // Operator's pre-sign gate. `check_speculative` is the same
+        // method the cosigner runs before signing (see
+        // request_handlers/cosign.rs) — refusing to broadcast anything
+        // it flags means the operator and every cosigner agree on
+        // conformance before a single signature is collected, so a
+        // failed round is caught at the author's door rather than
+        // after a wasted Nostr round-trip.
+        let violations = self.state.check_speculative(&operation, verifier);
+        if let Some(v) = violations.first() {
+            return Err(DepositsError::ProtocolViolation {
+                violation_type: "conformance".to_string(),
+                details: v.to_string(),
+            });
+        }
 
         let message_bytes = operation.tlv_encode();
         let prev_hash = self.state.chain_tip_hash;
