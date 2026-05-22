@@ -36,6 +36,10 @@ path = "src/bin/sweep-all.rs"
 name = "audit-balances"
 path = "src/bin/audit-balances.rs"
 
+[[bin]]
+name = "seed-funds"
+path = "src/bin/seed-funds.rs"
+
 [features]
 # Tests gated on this feature predate the rename from "bitcoin-deposits" to "deposits".
 # Kept as an empty feature so those tests remain opt-in without breaking the build.
