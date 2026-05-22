@@ -23,21 +23,10 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use deposits_core::messages::LedgerOperation;
 use deposits_core::tlv::TlvDecode;
 use deposits_core::SignedLedgerUpdate;
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 const DEFAULT_RELAY: &str = "wss://relay.bitcoindeposits.net";
 const DEFAULT_ESPLORA: &str = "https://mempool.space/api";
-
-#[derive(Debug, Clone)]
-struct AddrSource {
-    /// "LedgerOpen" or "QuorumBegin"
-    op: &'static str,
-    /// 16-hex prefix of the ledger_id this address appeared in.
-    ledger_id_short: String,
-    /// Sequence number within that ledger.
-    sequence: u64,
-}
 
 #[derive(Debug, Default)]
 struct ChainStats {
@@ -123,12 +112,28 @@ async fn run(
     let events = fetch_all_9100(relay_url).await?;
     eprintln!("  {} event(s) collected", events.len());
 
-    // address → list of sources (op type, ledger_id, seq). Preserves
-    // first-seen insertion order via BTreeMap sorted by string key →
-    // not insertion-order; we want stable output anyway, so sort is
-    // fine. Multiple ops can name the same address (LedgerOpen +
-    // matching first QuorumBegin); we keep them all.
-    let mut by_addr: BTreeMap<String, Vec<AddrSource>> = BTreeMap::new();
+    // One row per LedgerOpen / QuorumBegin event — no filtering, no
+    // dedup. Republish duplicates and non-on-chain placeholders both
+    // show up as their own rows.
+    #[derive(Debug)]
+    struct Row {
+        op: &'static str,
+        ledger_id_short: String,
+        sequence: u64,
+        reserves_id: String,
+        /// `Some(stats)` when reserves_id parsed as an on-chain address on
+        /// the chosen network and Esplora returned chain_stats; `None`
+        /// otherwise (genesis placeholder, LDK partner pubkey, wrong-network
+        /// address, query error, etc.). Each unparseable form is annotated.
+        chain: Option<ChainStats>,
+        note: String,
+    }
+    let mut rows: Vec<Row> = Vec::new();
+
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
+
     for u in &events {
         let op = match LedgerOperation::tlv_decode(&u.message) {
             Ok(o) => o,
@@ -139,106 +144,119 @@ async fn run(
             LedgerOperation::QuorumBegin { reserves_id, .. } => ("QuorumBegin", reserves_id),
             _ => continue,
         };
-        // Filter for parseable on-chain addresses on the chosen network.
-        // Non-on-chain reserves (e.g. genesis placeholders, LDK partner
-        // pubkeys) wouldn't yield a balance and just noise the output.
-        let parsed: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
-            match reserves_id.parse() {
-                Ok(a) => a,
-                Err(_) => continue,
-            };
-        if parsed.clone().require_network(network).is_err() {
-            continue;
-        }
-        let entry = by_addr.entry(reserves_id.clone()).or_default();
-        let new_source = AddrSource {
-            op: label,
-            ledger_id_short: hex::encode(&u.ledger_id[..8]),
-            sequence: u.sequence_number,
-        };
-        // Republished updates show up multiple times with different
-        // content_hashes (cosig accumulation); dedup on (op, ledger, seq)
-        // so the source list stays clean.
-        if !entry.iter().any(|s| {
-            s.op == new_source.op
-                && s.ledger_id_short == new_source.ledger_id_short
-                && s.sequence == new_source.sequence
-        }) {
-            entry.push(new_source);
-        }
+        let ledger_id_short = hex::encode(&u.ledger_id[..8]);
         if verbose {
             eprintln!(
                 "  seq {} {} from ledger {}… → {}",
-                u.sequence_number,
-                label,
-                hex::encode(&u.ledger_id[..8]),
-                reserves_id
+                u.sequence_number, label, ledger_id_short, reserves_id
             );
         }
+        // Classify the reserves_id. Try to parse as an address; if it
+        // parses on `network`, look it up. Otherwise flag.
+        let (chain, note) = match reserves_id.parse::<bitcoin::Address<
+            bitcoin::address::NetworkUnchecked,
+        >>() {
+            Ok(parsed) => match parsed.clone().require_network(network) {
+                Ok(_) => match fetch_chain_stats(&http, esplora_url, reserves_id).await {
+                    Ok(stats) => (Some(stats), String::new()),
+                    Err(e) => (None, format!("query-failed: {}", e)),
+                },
+                Err(_) => (None, "wrong-network".to_string()),
+            },
+            Err(_) => {
+                // Heuristic tag for the unparseable forms we know about.
+                if reserves_id.starts_with("genesis:") {
+                    (None, "genesis-placeholder".to_string())
+                } else if reserves_id.len() == 66
+                    && reserves_id.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    (None, "pubkey-hex".to_string())
+                } else {
+                    (None, "unparseable".to_string())
+                }
+            }
+        };
+        rows.push(Row {
+            op: label,
+            ledger_id_short,
+            sequence: u.sequence_number,
+            reserves_id: reserves_id.clone(),
+            chain,
+            note,
+        });
     }
-    eprintln!("  {} distinct on-chain address(es)", by_addr.len());
-    eprintln!();
 
-    let total_addrs = by_addr.len();
-    let mut entries: Vec<(String, Vec<AddrSource>)> = by_addr.into_iter().collect();
+    // Stable sort: by ledger_id, then sequence, then op (LedgerOpen<QuorumBegin).
+    rows.sort_by(|a, b| {
+        a.ledger_id_short
+            .cmp(&b.ledger_id_short)
+            .then(a.sequence.cmp(&b.sequence))
+            .then(a.op.cmp(b.op))
+    });
     if let Some(n) = limit {
-        entries.truncate(n);
+        rows.truncate(n);
     }
 
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()?;
-
+    eprintln!();
     println!(
-        "{:<64} {:>14} {:>14} {:>14} {:>5}  source(s)",
-        "address", "funded_sats", "spent_sats", "balance_sats", "txs"
+        "{:<12} {:>4} {:<11} {:<64} {:>14} {:>14} {:>14} {:>5}  note",
+        "ledger", "seq", "op", "reserves_id", "funded_sats", "spent_sats", "balance", "txs"
     );
-    println!("{}", "─".repeat(64 + 1 + 14 + 1 + 14 + 1 + 14 + 1 + 5 + 2 + 16));
+    println!("{}", "─".repeat(150));
 
     let mut grand_balance: i64 = 0;
     let mut grand_funded: u64 = 0;
     let mut grand_spent: u64 = 0;
-    let mut error_count = 0usize;
-    let queried = entries.len();
-    for (addr, sources) in &entries {
-        match fetch_chain_stats(&http, esplora_url, addr).await {
-            Ok(stats) => {
+    let mut counts: std::collections::BTreeMap<&'static str, usize> = Default::default();
+    for r in &rows {
+        *counts.entry(r.op).or_insert(0) += 1;
+        match &r.chain {
+            Some(stats) => {
                 grand_funded += stats.funded_txo_sum;
                 grand_spent += stats.spent_txo_sum;
                 grand_balance += stats.balance();
-                let sources_str = sources
-                    .iter()
-                    .map(|s| {
-                        format!("{}@{}…:{}", s.op, s.ledger_id_short, s.sequence)
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
                 println!(
-                    "{:<64} {:>14} {:>14} {:>14} {:>5}  {}",
-                    addr,
+                    "{:<12} {:>4} {:<11} {:<64} {:>14} {:>14} {:>14} {:>5}  {}",
+                    r.ledger_id_short,
+                    r.sequence,
+                    r.op,
+                    r.reserves_id,
                     stats.funded_txo_sum,
                     stats.spent_txo_sum,
                     stats.balance(),
                     stats.funded_txo_count + stats.spent_txo_count,
-                    sources_str
+                    r.note
                 );
             }
-            Err(e) => {
-                error_count += 1;
-                println!("{:<64} ! query failed: {}", addr, e);
+            None => {
+                println!(
+                    "{:<12} {:>4} {:<11} {:<64} {:>14} {:>14} {:>14} {:>5}  {}",
+                    r.ledger_id_short,
+                    r.sequence,
+                    r.op,
+                    r.reserves_id,
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    r.note
+                );
             }
         }
     }
 
     println!();
     println!("=== Totals ===");
-    println!("  Addresses queried:  {} / {}", queried, total_addrs);
-    println!("  Total funded:       {} sats", grand_funded);
-    println!("  Total spent:        {} sats", grand_spent);
-    println!("  Net balance:        {} sats ({:.8} BTC)", grand_balance, grand_balance as f64 / 100_000_000.0);
-    if error_count > 0 {
-        println!("  Query errors:       {}", error_count);
-    }
+    println!("  Events scanned:    {}", events.len());
+    println!("  LedgerOpens:       {}", counts.get("LedgerOpen").copied().unwrap_or(0));
+    println!("  QuorumBegins:      {}", counts.get("QuorumBegin").copied().unwrap_or(0));
+    println!("  Total funded:      {} sats", grand_funded);
+    println!("  Total spent:       {} sats", grand_spent);
+    println!(
+        "  Net balance:       {} sats ({:.8} BTC)",
+        grand_balance,
+        grand_balance as f64 / 100_000_000.0
+    );
     Ok(())
 }
 
