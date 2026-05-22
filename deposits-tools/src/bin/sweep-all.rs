@@ -503,17 +503,79 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
         }
     }
 
-    let (reserves_id, quorum_members, ledger_hash, ruleset, quorum_expiry) = match latest_qb {
-        Some(tup) => tup,
-        None => return Ok(None), // ledger never reached an Active quorum
-    };
+    let (reserves_id, mut quorum_members, mut ledger_hash, ruleset, mut quorum_expiry) =
+        match latest_qb {
+            Some(tup) => tup,
+            None => return Ok(None), // ledger never reached an Active quorum
+        };
+    let mut ruleset_name = ruleset.unwrap_or_else(|| "legacy".to_string());
+
+    // Prefer the per-ledger `taproot_reserves.json` snapshot if it exists.
+    // The QuorumBegin op's `ledger_hash` field is a ledger-state hash and
+    // can diverge from the value the daemon actually committed in the
+    // Taproot tree at rotation time; only the json (written from
+    // `commit_taproot_reserves`) records the build-time inputs verbatim.
+    // Same hazard applies to (quorum_members, ruleset_name, quorum_expiry):
+    // if anything was rotated using a value that differs from what the
+    // history records, trust the json.
+    let ledger_id_hex = hex::encode(state.ledger_id);
+    let per_ledger_dir = jsonl
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(&ledger_id_hex);
+    let per_ledger_json = per_ledger_dir.join("taproot_reserves.json");
+    if per_ledger_json.exists() {
+        if let Ok(raw) = std::fs::read_to_string(&per_ledger_json) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(addr) = v.get("address").and_then(|x| x.as_str()) {
+                    // Only override when the json describes THIS reserves
+                    // address; otherwise it's stale from a prior rotation.
+                    if addr == reserves_id {
+                        if let Some(h) = v
+                            .get("ledger_hash")
+                            .and_then(|x| x.as_str())
+                            .and_then(|s| hex::decode(s).ok())
+                            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                        {
+                            ledger_hash = h;
+                        }
+                        if let Some(members_arr) =
+                            v.get("quorum_members").and_then(|x| x.as_array())
+                        {
+                            let parsed: Result<Vec<_>, _> = members_arr
+                                .iter()
+                                .filter_map(|m| m.as_str())
+                                .map(|s| s.parse::<bitcoin::secp256k1::PublicKey>())
+                                .collect();
+                            if let Ok(ms) = parsed {
+                                if !ms.is_empty() {
+                                    quorum_members = ms;
+                                }
+                            }
+                        }
+                        if let Some(qe) =
+                            v.get("quorum_expiry").and_then(|x| x.as_u64())
+                        {
+                            quorum_expiry = qe as u32;
+                        }
+                        if let Some(rs) =
+                            v.get("ruleset_name").and_then(|x| x.as_str())
+                        {
+                            ruleset_name = rs.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(Some(LedgerSummary {
         ledger_id: state.ledger_id,
         operator_key: state.operator_key,
         reserves_id,
         quorum_members,
         ledger_hash,
-        ruleset_name: ruleset.unwrap_or_else(|| "legacy".to_string()),
+        ruleset_name,
         quorum_expiry,
     }))
 }
