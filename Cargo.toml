@@ -43,8 +43,10 @@ debug = 1              # line tables only (minimal size increase, good flamegrap
 
 # Forked dependencies (see THIRD_PARTY.md for import details).
 #
-# `miniscript` is vendored under `third_party/rust-miniscript/` via
-# `git subtree`. Dependents keep their `miniscript = "12"` declarations
-# unchanged; Cargo redirects the version to our local copy.
+# `miniscript` lives under `third_party/rust-miniscript/` as a git
+# submodule of our fork (with the dep-16 calculus added on top of
+# upstream miniscript 12.3.6). Dependents keep their `miniscript = "12"`
+# declarations unchanged; Cargo redirects the version to the submodule
+# checkout.
 [patch.crates-io]
 miniscript = { path = "third_party/rust-miniscript" }
