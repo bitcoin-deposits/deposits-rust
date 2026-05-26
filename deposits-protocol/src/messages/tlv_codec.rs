@@ -73,6 +73,9 @@ mod ledger_op_tlv {
     /// QuorumBegin protocol-ruleset name. Optional; absent →
     /// `legacy` (matches every pre-versioned QuorumBegin on chain).
     pub const PROTOCOL_VERSION: u64 = 286;
+    // Per-deposit dep-16 replay-protection fields (phase 3 of PLAN-dep16-integration.md)
+    pub const NONCE: u64 = 288; // u64, per-deposit monotonic nonce
+    pub const EXPIRY: u64 = 290; // u32, block height after which the signature is invalid
     // Quorum/Collateral ledger binding fields
     pub const MEMBER_LEDGER_ID: u64 = 114;
     // 124 was COLLATERAL_LEDGER_ID (removed with collateral-in-UTXO migration)
@@ -84,7 +87,7 @@ mod ledger_op_tlv {
     pub const NEW_DESCRIPTOR: u64 = 208; // New descriptor for key rotation
 
     // Transfer operation fields
-    pub const NONCE: u64 = 210;
+    pub const TRANSFER_NONCE: u64 = 210; // [u8; 32], transfer-level identity (was NONCE pre-phase-3)
     pub const SOURCE_DEPOSIT_ID: u64 = 212;
     pub const DESTINATION_DEPOSIT_ID: u64 = 214;
     pub const COMPLETION_SCRIPT: u64 = 216;
@@ -270,11 +273,15 @@ impl TlvEncode for LedgerOperation {
             Self::DepositKeyRotate {
                 deposit_id,
                 new_descriptor,
+                nonce,
+                expiry,
                 witness,
             } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .string_field(NEW_DESCRIPTOR, new_descriptor)
+                    .u64_field(NONCE, *nonce)
+                    .u32_field(EXPIRY, *expiry)
                     .witness_field(WITNESS, witness);
             }
             Self::InvoiceCredit {
@@ -296,6 +303,8 @@ impl TlvEncode for LedgerOperation {
                 amount,
                 payment_id,
                 sequence_number,
+                nonce,
+                expiry,
                 witness,
             } => {
                 builder = builder
@@ -303,6 +312,8 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(AMOUNT, *amount)
                     .bytes_field(PAYMENT_ID, payment_id)
                     .u64_field(SEQUENCE_NUMBER, *sequence_number)
+                    .u64_field(NONCE, *nonce)
+                    .u32_field(EXPIRY, *expiry)
                     .witness_field(WITNESS, witness);
             }
             Self::InvoiceFail {
@@ -353,6 +364,8 @@ impl TlvEncode for LedgerOperation {
                 fee_sats,
                 destination_address,
                 withdrawal_id,
+                nonce,
+                expiry,
                 witness,
             } => {
                 builder = builder
@@ -361,6 +374,8 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(FEES, *fee_sats)
                     .string_field(DESTINATION_ADDRESS, destination_address)
                     .bytes_field(WITHDRAWAL_ID, withdrawal_id)
+                    .u64_field(NONCE, *nonce)
+                    .u32_field(EXPIRY, *expiry)
                     .witness_field(WITNESS, witness);
             }
             Self::OnchainFail {
@@ -386,7 +401,7 @@ impl TlvEncode for LedgerOperation {
                     .string_field(DESTINATION_ADDRESS, destination_address);
             }
             Self::TransferLock {
-                nonce,
+                transfer_nonce,
                 source_deposit_id,
                 destination_deposit_id,
                 amount,
@@ -394,10 +409,12 @@ impl TlvEncode for LedgerOperation {
                 completion_script,
                 timeout_height,
                 transfer_id,
+                nonce,
+                expiry,
                 witness,
             } => {
                 builder = builder
-                    .bytes_field(NONCE, nonce)
+                    .bytes_field(TRANSFER_NONCE, transfer_nonce)
                     .deposit_id_field(SOURCE_DEPOSIT_ID, source_deposit_id)
                     .deposit_id_field(DESTINATION_DEPOSIT_ID, destination_deposit_id)
                     .u64_field(AMOUNT, *amount)
@@ -405,6 +422,8 @@ impl TlvEncode for LedgerOperation {
                     .string_field(COMPLETION_SCRIPT, completion_script)
                     .u32_field(TIMEOUT_HEIGHT, *timeout_height)
                     .bytes_field(TRANSFER_ID, transfer_id)
+                    .u64_field(NONCE, *nonce)
+                    .u32_field(EXPIRY, *expiry)
                     .witness_field(WITNESS, witness);
             }
             Self::TransferComplete {
@@ -670,6 +689,8 @@ impl TlvDecode for LedgerOperation {
             23 => Ok(Self::DepositKeyRotate {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 new_descriptor: reader.read_string(NEW_DESCRIPTOR)?,
+                nonce: reader.read_u64(NONCE)?,
+                expiry: reader.read_u32(EXPIRY)?,
                 witness: reader.read_witness(WITNESS)?,
             }),
             30 => Ok(Self::InvoiceCredit {
@@ -684,6 +705,8 @@ impl TlvDecode for LedgerOperation {
                 amount: reader.read_u64(AMOUNT)?,
                 payment_id: reader.read_bytes(PAYMENT_ID)?,
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
+                nonce: reader.read_u64(NONCE)?,
+                expiry: reader.read_u32(EXPIRY)?,
                 witness: reader.read_witness(WITNESS)?,
             }),
             32 => Ok(Self::InvoiceFail {
@@ -713,6 +736,8 @@ impl TlvDecode for LedgerOperation {
                 fee_sats: reader.read_u64(FEES)?,
                 destination_address: reader.read_string(DESTINATION_ADDRESS)?,
                 withdrawal_id: reader.read_bytes(WITHDRAWAL_ID)?,
+                nonce: reader.read_u64(NONCE)?,
+                expiry: reader.read_u32(EXPIRY)?,
                 witness: reader.read_witness(WITNESS)?,
             }),
             37 => Ok(Self::OnchainFail {
@@ -727,7 +752,7 @@ impl TlvDecode for LedgerOperation {
                 destination_address: reader.read_string(DESTINATION_ADDRESS)?,
             }),
             70 => Ok(Self::TransferLock {
-                nonce: reader.read_bytes(NONCE)?,
+                transfer_nonce: reader.read_bytes(TRANSFER_NONCE)?,
                 source_deposit_id: reader.read_deposit_id(SOURCE_DEPOSIT_ID)?,
                 destination_deposit_id: reader.read_deposit_id(DESTINATION_DEPOSIT_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
@@ -735,6 +760,8 @@ impl TlvDecode for LedgerOperation {
                 completion_script: reader.read_string(COMPLETION_SCRIPT)?,
                 timeout_height: reader.read_u32(TIMEOUT_HEIGHT)?,
                 transfer_id: reader.read_bytes(TRANSFER_ID)?,
+                nonce: reader.read_u64(NONCE)?,
+                expiry: reader.read_u32(EXPIRY)?,
                 witness: reader.read_witness(WITNESS)?,
             }),
             71 => Ok(Self::TransferComplete {
@@ -2147,7 +2174,7 @@ mod tests {
         let dest_id = crate::types::compute_deposit_id("pk(bob)");
 
         let op = LedgerOperation::TransferLock {
-            nonce: [0x42u8; 32],
+            transfer_nonce: [0x42u8; 32],
             source_deposit_id: source_id,
             destination_deposit_id: dest_id,
             amount: 100_000,
@@ -2157,6 +2184,8 @@ mod tests {
                     .to_string(),
             timeout_height: 850_000,
             transfer_id: [0xABu8; 32],
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
@@ -2168,7 +2197,7 @@ mod tests {
 
         // Wire encoding preserves source and dest deposit IDs
         if let LedgerOperation::TransferLock {
-            nonce,
+            transfer_nonce: nonce,
             source_deposit_id,
             destination_deposit_id,
             amount,
@@ -2177,6 +2206,7 @@ mod tests {
             timeout_height,
             transfer_id,
             witness,
+            ..
         } = decoded
         {
             assert_eq!(nonce, [0x42u8; 32]);
@@ -2246,7 +2276,7 @@ mod tests {
         let dest_id = crate::types::compute_deposit_id("pk(dest_key)");
 
         let op = LedgerOperation::TransferLock {
-            nonce: [0x55u8; 32],
+            transfer_nonce: [0x55u8; 32],
             source_deposit_id: source_id,
             destination_deposit_id: dest_id,
             amount: 250_000,
@@ -2254,6 +2284,8 @@ mod tests {
             completion_script: "sha256(cafebabe)".to_string(),
             timeout_height: 900_000,
             transfer_id: [0x77u8; 32],
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![[0x88u8; 64].to_vec()],
             },
@@ -2263,7 +2295,7 @@ mod tests {
         let decoded = LedgerOperation::tlv_decode(&encoded).unwrap();
 
         if let LedgerOperation::TransferLock {
-            nonce,
+            transfer_nonce: nonce,
             source_deposit_id,
             destination_deposit_id,
             amount,
@@ -2272,6 +2304,7 @@ mod tests {
             timeout_height,
             transfer_id,
             witness,
+            ..
         } = decoded
         {
             assert_eq!(nonce, [0x55u8; 32]);
@@ -2337,7 +2370,7 @@ mod tests {
         let dest_id = crate::types::compute_deposit_id("pk(test2)");
 
         let lock = LedgerOperation::TransferLock {
-            nonce: [0u8; 32],
+            transfer_nonce: [0u8; 32],
             source_deposit_id: source_id,
             destination_deposit_id: dest_id,
             amount: 1000,
@@ -2345,6 +2378,8 @@ mod tests {
             completion_script: "sha256(00)".to_string(),
             timeout_height: 100,
             transfer_id: [0u8; 32],
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness { stack: vec![] },
         };
 

@@ -168,6 +168,7 @@ fn deposit_struct_receive_requires_sig_tlv_roundtrip() {
         fee_change_limit_bps: None,
         opened_at_block: 0,
         pending_fee_change: None,
+        last_op_nonce: 0,
     };
 
     let encoded = deposit.tlv_encode();
@@ -199,6 +200,7 @@ fn deposit_struct_without_flag_field_defaults_false() {
         fee_change_limit_bps: None,
         opened_at_block: 0,
         pending_fee_change: None,
+        last_op_nonce: 0,
     };
 
     let encoded = deposit.tlv_encode();
@@ -257,7 +259,7 @@ fn transfer_lock_to_guarded_deposit_applies_state() {
 
     ledger
         .apply_state_changes(&LedgerOperation::TransferLock {
-            nonce: [0x42; 32],
+            transfer_nonce: [0x42; 32],
             source_deposit_id: source,
             destination_deposit_id: dest,
             amount,
@@ -265,6 +267,8 @@ fn transfer_lock_to_guarded_deposit_applies_state() {
             completion_script: "sha256(deadbeef)".to_string(),
             timeout_height: 900_000,
             transfer_id,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },

@@ -1131,6 +1131,11 @@ impl TlvDecode for Deposit {
                 .read_u32_opt(deposit_fields::OPENED_AT_BLOCK)?
                 .unwrap_or(0),
             pending_fee_change: None, // transient state, not serialized in TLV
+            // phase 3: TLV doesn't yet carry last_op_nonce — decoded value defaults to 0,
+            // which means a freshly-decoded deposit accepts nonce=1 as its first signed op.
+            // Phase 3-followup may add a dedicated TLV field for this; for now, the protocol
+            // tracks last_op_nonce in-memory and persists it via the snapshot path.
+            last_op_nonce: 0,
         })
     }
 }
@@ -1534,6 +1539,7 @@ mod tests {
             fee_change_limit_bps: Some(1000),
             opened_at_block: 100,
             pending_fee_change: None,
+            last_op_nonce: 0,
         };
         let encoded = original.tlv_encode();
         let decoded = Deposit::tlv_decode(&encoded).unwrap();

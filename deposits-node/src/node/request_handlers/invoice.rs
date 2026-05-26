@@ -485,6 +485,9 @@ impl Node {
             amount: amount_msat,
             payment_id,
             sequence_number,
+            // phase 3 TODO: thread deposit.last_op_nonce + 1; mirror sequence_number until then.
+            nonce: sequence_number,
+            expiry: u32::MAX,
             witness: witness.clone(),
         };
 

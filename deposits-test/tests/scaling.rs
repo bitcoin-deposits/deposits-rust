@@ -227,6 +227,8 @@ fn scaling_witness_verification() {
             amount: 100_000,
             payment_id: [0x01; 32],
             sequence_number: net.op(&names[0]).ledger.state.sequence + 1,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![vec![0xFF; 64]],
             },

@@ -2410,6 +2410,7 @@ mod tests {
             fee_change_limit_bps: None,
             opened_at_block: 0,
             pending_fee_change: None,
+            last_op_nonce: 0,
         };
         let dest_deposit = Deposit {
             deposit_id: dest_id,
@@ -2426,6 +2427,7 @@ mod tests {
             fee_change_limit_bps: None,
             opened_at_block: 0,
             pending_fee_change: None,
+            last_op_nonce: 0,
         };
         ledger.state.deposits.insert(source_id, source_deposit);
         ledger.state.deposits.insert(dest_id, dest_deposit);
@@ -2437,7 +2439,7 @@ mod tests {
         let fee = 500u64;
 
         let lock_op = LedgerOperation::TransferLock {
-            nonce,
+            transfer_nonce: nonce,
             source_deposit_id: source_id,
             destination_deposit_id: dest_id,
             amount,
@@ -2445,6 +2447,8 @@ mod tests {
             completion_script: "sha256(deadbeef)".to_string(),
             timeout_height: 900_000,
             transfer_id,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
@@ -2517,6 +2521,7 @@ mod tests {
             fee_change_limit_bps: None,
             opened_at_block: 0,
             pending_fee_change: None,
+            last_op_nonce: 0,
         };
         ledger.state.deposits.insert(source_id, source_deposit);
 
@@ -2526,7 +2531,7 @@ mod tests {
         let fee = 250u64;
 
         let lock_op = LedgerOperation::TransferLock {
-            nonce: [0x11u8; 32],
+            transfer_nonce: [0x11u8; 32],
             source_deposit_id: source_id,
             destination_deposit_id: dest_id,
             amount,
@@ -2534,6 +2539,8 @@ mod tests {
             completion_script: "sha256(cafebabe)".to_string(),
             timeout_height: 850_000,
             transfer_id,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![[0x33u8; 64].to_vec()],
             },

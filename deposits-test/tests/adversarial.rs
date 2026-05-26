@@ -151,6 +151,8 @@ fn attack_withdraw_exceeds_balance() {
             fee_sats: 1_000,
             destination_address: "bcrt1qattacker".to_string(),
             withdrawal_id,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: deposits_protocol::DescriptorWitness {
                 stack: vec![sig.serialize().to_vec()],
             },
@@ -190,6 +192,8 @@ fn attack_forged_invoice_witness() {
         amount: 500_000,
         payment_id,
         sequence_number: net.op("alice").ledger.state.sequence + 1,
+        nonce: 0,
+        expiry: u32::MAX,
         witness: deposits_protocol::DescriptorWitness {
             stack: vec![bad_sig.serialize().to_vec()],
         },
@@ -367,6 +371,8 @@ fn attack_drain_via_overlapping_locks() {
             amount: 80_000,
             payment_id: payment_id2,
             sequence_number: next_seq,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: deposits_protocol::DescriptorWitness {
                 stack: vec![sig.serialize().to_vec()],
             },

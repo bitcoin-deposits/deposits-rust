@@ -81,7 +81,8 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
             deposit_id,
             amount,
             payment_id,
-            sequence_number,
+            nonce,
+            expiry,
             ..
         } => Some(OperationData {
             op_type: Symbol::new(op_type::SPEND),
@@ -93,8 +94,8 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
                 a
             },
             deposit_id: pad_deposit_id(deposit_id),
-            nonce: *sequence_number,
-            expiry: u32::MAX, // TODO phase 3: protocol-supplied expiry
+            nonce: *nonce,
+            expiry: *expiry,
         }),
 
         LedgerOperation::OnchainLock {
@@ -103,6 +104,8 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
             fee_sats,
             destination_address,
             withdrawal_id,
+            nonce,
+            expiry,
             ..
         } => Some(OperationData {
             op_type: Symbol::new(op_type::SPEND),
@@ -116,12 +119,12 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
                 a
             },
             deposit_id: pad_deposit_id(deposit_id),
-            nonce: 0, // TODO phase 3: uniform per-deposit nonce
-            expiry: u32::MAX,
+            nonce: *nonce,
+            expiry: *expiry,
         }),
 
         LedgerOperation::TransferLock {
-            nonce,
+            transfer_nonce,
             source_deposit_id,
             destination_deposit_id,
             amount,
@@ -129,6 +132,8 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
             completion_script,
             timeout_height,
             transfer_id,
+            nonce,
+            expiry,
             ..
         } => Some(OperationData {
             op_type: Symbol::new(op_type::SPEND),
@@ -139,23 +144,26 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
                 a.insert("destination_deposit_id".to_string(), Value::Bytes(destination_deposit_id.to_vec()));
                 a.insert("fee".to_string(), Value::Int(*fee as i128));
                 a.insert("kind".to_string(), Value::Symbol(Symbol::new(kind::TRANSFER)));
-                // The transfer-level nonce is distinct from a per-deposit dep-16 nonce; expose
-                // it as an arg so descriptors that care can match on it.
-                a.insert("transfer_nonce".to_string(), Value::Bytes(nonce.to_vec()));
+                // The transfer-level nonce is the 32-byte transfer-identity field, distinct
+                // from `nonce` above which is the per-deposit monotonic counter dep-16 binds
+                // into the operation preimage.
+                a.insert("transfer_nonce".to_string(), Value::Bytes(transfer_nonce.to_vec()));
                 a.insert("transfer_id".to_string(), Value::Bytes(transfer_id.to_vec()));
                 a.insert("timeout_height".to_string(), Value::Int(*timeout_height as i128));
                 // TODO phase 5: include `release_descriptor` here once TransferLock carries it
                 a
             },
             deposit_id: pad_deposit_id(source_deposit_id),
-            nonce: 0, // TODO phase 3: uniform per-deposit nonce (distinct from transfer nonce above)
-            expiry: u32::MAX,
+            nonce: *nonce,
+            expiry: *expiry,
         }),
 
         // ----- modification ----------------------------------------------------------------
         LedgerOperation::DepositKeyRotate {
             deposit_id,
             new_descriptor,
+            nonce,
+            expiry,
             ..
         } => Some(OperationData {
             op_type: Symbol::new(op_type::UPDATE),
@@ -172,8 +180,8 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
                 a
             },
             deposit_id: pad_deposit_id(deposit_id),
-            nonce: 0, // TODO phase 3
-            expiry: u32::MAX,
+            nonce: *nonce,
+            expiry: *expiry,
         }),
 
         // ----- no descriptor evaluation ----------------------------------------------------
@@ -232,20 +240,22 @@ mod tests {
     }
 
     /// `InvoiceLock` translates to a `spend` op with `kind=invoice` and the three args a
-    /// descriptor can match on. The `sequence_number` becomes the dep-16 nonce (per-deposit
-    /// monotonic).
+    /// descriptor can match on. The variant's `nonce` field (phase 3) becomes the dep-16 nonce.
     #[test]
     fn invoice_lock_maps_to_spend_with_kind_invoice() {
         let op = LedgerOperation::InvoiceLock {
             deposit_id: dummy_deposit_id(),
             amount: 50_000,
             payment_id: [0xab; 32],
-            sequence_number: 7,
+            sequence_number: 3, // ledger-position bookkeeping; distinct from nonce
+            nonce: 7,
+            expiry: 1_000_000,
             witness: DescriptorWitness::new(),
         };
         let d = to_dep16(&op).expect("descriptor-evaluated");
         assert_eq!(d.op_type.as_str(), op_type::SPEND);
         assert_eq!(d.nonce, 7);
+        assert_eq!(d.expiry, 1_000_000);
         assert_eq!(d.args["amount"], Value::Int(50_000));
         assert_eq!(d.args["kind"], Value::Symbol(Symbol::new(kind::INVOICE)));
         assert_eq!(d.args["payment_id"], Value::Bytes(vec![0xab; 32]));
@@ -262,10 +272,13 @@ mod tests {
             fee_sats: 500,
             destination_address: "bc1qexample".to_string(),
             withdrawal_id: [0xcd; 32],
+            nonce: 4,
+            expiry: u32::MAX,
             witness: DescriptorWitness::new(),
         };
         let d = to_dep16(&op).expect("descriptor-evaluated");
         assert_eq!(d.op_type.as_str(), op_type::SPEND);
+        assert_eq!(d.nonce, 4);
         assert_eq!(d.args["kind"], Value::Symbol(Symbol::new(kind::ONCHAIN)));
         assert_eq!(d.args["amount"], Value::Int(100_000));
         assert_eq!(d.args["fee"], Value::Int(500));
@@ -274,12 +287,12 @@ mod tests {
     }
 
     /// `TransferLock` translates to a `spend` op with `kind=transfer`. The transfer-level
-    /// `nonce: [u8;32]` is distinct from the per-deposit dep-16 nonce and is exposed as
-    /// `transfer_nonce` arg so descriptors can match on it.
+    /// `transfer_nonce: [u8;32]` is distinct from the per-deposit dep-16 `nonce: u64` and is
+    /// exposed as `transfer_nonce` arg so descriptors can match on it.
     #[test]
     fn transfer_lock_maps_to_spend_with_kind_transfer() {
         let op = LedgerOperation::TransferLock {
-            nonce: [0x01; 32],
+            transfer_nonce: [0x01; 32],
             source_deposit_id: dummy_deposit_id(),
             destination_deposit_id: [0xff; 16],
             amount: 25_000,
@@ -287,10 +300,13 @@ mod tests {
             completion_script: "tr(K)".to_string(),
             timeout_height: 900_000,
             transfer_id: [0x42; 32],
+            nonce: 11,
+            expiry: u32::MAX,
             witness: DescriptorWitness::new(),
         };
         let d = to_dep16(&op).expect("descriptor-evaluated");
         assert_eq!(d.op_type.as_str(), op_type::SPEND);
+        assert_eq!(d.nonce, 11);
         assert_eq!(d.args["kind"], Value::Symbol(Symbol::new(kind::TRANSFER)));
         assert_eq!(d.args["amount"], Value::Int(25_000));
         assert_eq!(d.args["fee"], Value::Int(100));
@@ -313,6 +329,8 @@ mod tests {
         let op = LedgerOperation::DepositKeyRotate {
             deposit_id: dummy_deposit_id(),
             new_descriptor: "wsh(prove(pk(02aa...)))".to_string(),
+            nonce: 1,
+            expiry: u32::MAX,
             witness: DescriptorWitness::new(),
         };
         let d = to_dep16(&op).expect("descriptor-evaluated");
@@ -336,6 +354,8 @@ mod tests {
             preimage: [0xff; 32],
             witness: DescriptorWitness::new(),
         };
+        // InvoiceFulfill doesn't carry nonce/expiry — fulfillment is preimage-driven, not
+        // signature-over-operation-preimage. The variant has no nonce/expiry fields to set.
         assert!(to_dep16(&invoice_fulfill).is_none());
 
         let onchain_fulfill = LedgerOperation::OnchainFulfill {
@@ -375,6 +395,8 @@ mod tests {
             amount: 50_000,
             payment_id: common.1,
             sequence_number: 1,
+            nonce: 1,
+            expiry: u32::MAX,
             witness: DescriptorWitness::new(),
         };
         let op_b = LedgerOperation::InvoiceLock {
@@ -382,6 +404,8 @@ mod tests {
             amount: 60_000, // changed
             payment_id: common.1,
             sequence_number: 1,
+            nonce: 1,
+            expiry: u32::MAX,
             witness: DescriptorWitness::new(),
         };
         let sh_a = operation_sighash(&op_a).expect("sighash");
@@ -389,9 +413,9 @@ mod tests {
         assert_ne!(sh_a, sh_b, "different amounts → different sighashes");
     }
 
-    /// Two operations differing only in `sequence_number` (the dep-16 nonce) produce distinct
-    /// sighashes — replay protection: an old signed operation can't be replayed with a future
-    /// nonce because the preimage embeds the nonce.
+    /// Two operations differing only in `nonce` produce distinct sighashes — replay protection:
+    /// an old signed operation can't be replayed with a future nonce because the preimage
+    /// embeds the nonce.
     #[test]
     fn distinct_nonces_produce_distinct_sighashes() {
         let common = (dummy_deposit_id(), [0xab; 32], 50_000u64);
@@ -400,17 +424,50 @@ mod tests {
             amount: common.2,
             payment_id: common.1,
             sequence_number: 1,
+            nonce: 1,
+            expiry: u32::MAX,
             witness: DescriptorWitness::new(),
         };
         let op_b = LedgerOperation::InvoiceLock {
             deposit_id: common.0,
             amount: common.2,
             payment_id: common.1,
-            sequence_number: 2,
+            sequence_number: 1,
+            nonce: 2,
+            expiry: u32::MAX,
             witness: DescriptorWitness::new(),
         };
         let sh_a = operation_sighash(&op_a).expect("sighash");
         let sh_b = operation_sighash(&op_b).expect("sighash");
         assert_ne!(sh_a, sh_b, "different nonces → different sighashes");
+    }
+
+    /// Two operations differing only in `expiry` produce distinct sighashes — protocol-level
+    /// expiry is part of the preimage, so an op signed with one expiry can't be replayed with
+    /// another.
+    #[test]
+    fn distinct_expiries_produce_distinct_sighashes() {
+        let common = (dummy_deposit_id(), [0xab; 32], 50_000u64);
+        let op_a = LedgerOperation::InvoiceLock {
+            deposit_id: common.0,
+            amount: common.2,
+            payment_id: common.1,
+            sequence_number: 1,
+            nonce: 1,
+            expiry: 1_000_000,
+            witness: DescriptorWitness::new(),
+        };
+        let op_b = LedgerOperation::InvoiceLock {
+            deposit_id: common.0,
+            amount: common.2,
+            payment_id: common.1,
+            sequence_number: 1,
+            nonce: 1,
+            expiry: 2_000_000,
+            witness: DescriptorWitness::new(),
+        };
+        let sh_a = operation_sighash(&op_a).expect("sighash");
+        let sh_b = operation_sighash(&op_b).expect("sighash");
+        assert_ne!(sh_a, sh_b, "different expiries → different sighashes");
     }
 }

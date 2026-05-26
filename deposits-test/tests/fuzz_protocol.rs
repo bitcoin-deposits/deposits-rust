@@ -998,6 +998,8 @@ fn build_onchain_lock(
         fee_sats,
         destination_address,
         withdrawal_id,
+        nonce: 0,
+        expiry: u32::MAX,
         witness,
     }
 }
@@ -1020,6 +1022,8 @@ fn build_invoice_lock(
         amount,
         payment_id,
         sequence_number,
+        nonce: 0,
+        expiry: u32::MAX,
         witness,
     };
     (op, payment_id)
@@ -1052,7 +1056,7 @@ fn build_transfer_lock(
     let witness = sign_pk_witness(source_sk, &signing_msg);
     let transfer_id = signature_utils::compute_transfer_id(&signing_msg);
     let op = LedgerOperation::TransferLock {
-        nonce,
+        transfer_nonce: nonce,
         source_deposit_id: source.0,
         destination_deposit_id: dest.0,
         amount,
@@ -1060,6 +1064,8 @@ fn build_transfer_lock(
         completion_script,
         timeout_height,
         transfer_id,
+        nonce: 0,
+        expiry: u32::MAX,
         witness,
     };
     (op, transfer_id)
@@ -1280,6 +1286,8 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             op: LedgerOperation::DepositKeyRotate {
                 deposit_id: did,
                 new_descriptor,
+                nonce: 0,
+                expiry: u32::MAX,
                 witness,
             },
             record_deposit: None,
@@ -1635,6 +1643,8 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             op: LedgerOperation::DepositKeyRotate {
                 deposit_id: did,
                 new_descriptor,
+                nonce: 0,
+                expiry: u32::MAX,
                 witness,
             },
             record_deposit: None,

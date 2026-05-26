@@ -306,6 +306,12 @@ pub enum LedgerOperation {
     DepositKeyRotate {
         deposit_id: DepositId,
         new_descriptor: String,
+        /// Per-deposit monotonic nonce — must be strictly greater than the deposit's
+        /// `last_op_nonce`. Plumbed into the dep-16 operation preimage. See
+        /// PLAN-dep16-integration.md phase 3.
+        nonce: u64,
+        /// Block height after which a signature over this operation is invalid.
+        expiry: u32,
         /// Witness satisfying the CURRENT descriptor (proves ownership)
         witness: DescriptorWitness,
     },
@@ -324,6 +330,14 @@ pub enum LedgerOperation {
         amount: u64,
         payment_id: [u8; 32],
         sequence_number: u64,
+        /// Per-deposit monotonic nonce — must be strictly greater than the deposit's
+        /// `last_op_nonce`. Plumbed into the dep-16 operation preimage; binds the witness
+        /// signature against replay across deposit operations. See PLAN-dep16-integration.md
+        /// phase 3.
+        nonce: u64,
+        /// Block height after which a signature over this operation is invalid. Plumbed into
+        /// the dep-16 operation preimage; protocol rejects on apply if `current_height > expiry`.
+        expiry: u32,
         /// Witness satisfying the deposit descriptor
         witness: DescriptorWitness,
     },
@@ -361,6 +375,12 @@ pub enum LedgerOperation {
         fee_sats: u64,
         destination_address: String,
         withdrawal_id: [u8; 32],
+        /// Per-deposit monotonic nonce — must be strictly greater than the deposit's
+        /// `last_op_nonce`. Plumbed into the dep-16 operation preimage. See
+        /// PLAN-dep16-integration.md phase 3.
+        nonce: u64,
+        /// Block height after which a signature over this operation is invalid.
+        expiry: u32,
         witness: DescriptorWitness,
     },
     /// Fail a pending on-chain withdrawal (returns funds to deposit)
@@ -381,7 +401,10 @@ pub enum LedgerOperation {
     /// Lock funds for a conditional transfer between deposits
     /// The transfer completes if completion_script is satisfied, or times out after timeout_height
     TransferLock {
-        nonce: [u8; 32],
+        /// 32-byte transfer-identity nonce (random, distinguishes transfers within the
+        /// destination's incoming flow). Distinct from `nonce` below, which is the per-deposit
+        /// monotonic counter dep-16 binds into the operation preimage.
+        transfer_nonce: [u8; 32],
         source_deposit_id: DepositId,
         destination_deposit_id: DepositId,
         amount: u64,
@@ -389,6 +412,12 @@ pub enum LedgerOperation {
         completion_script: String,
         timeout_height: u32,
         transfer_id: [u8; 32],
+        /// Per-deposit monotonic nonce — must be strictly greater than the source deposit's
+        /// `last_op_nonce`. Plumbed into the dep-16 operation preimage. See
+        /// PLAN-dep16-integration.md phase 3.
+        nonce: u64,
+        /// Block height after which a signature over this operation is invalid.
+        expiry: u32,
         witness: DescriptorWitness,
     },
     /// Complete a transfer by satisfying the completion_script
@@ -615,7 +644,7 @@ impl LedgerOperation {
     /// sources today.
     pub fn embedded_hash(&self) -> Option<&[u8; 32]> {
         match self {
-            Self::TransferLock { nonce, .. } => Some(nonce),
+            Self::TransferLock { transfer_nonce, .. } => Some(transfer_nonce),
             Self::DeliveryEmbed { request_hash, .. } => Some(request_hash),
             _ => None,
         }
@@ -1093,6 +1122,7 @@ impl BinaryCodec for LedgerOperation {
                 deposit_id,
                 new_descriptor,
                 witness,
+                ..
             } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
@@ -1135,6 +1165,7 @@ impl BinaryCodec for LedgerOperation {
                 payment_id,
                 sequence_number,
                 witness,
+                ..
             } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
@@ -1223,6 +1254,7 @@ impl BinaryCodec for LedgerOperation {
                 destination_address,
                 withdrawal_id,
                 witness,
+                ..
             } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
@@ -1273,7 +1305,7 @@ impl BinaryCodec for LedgerOperation {
                 write_string(w, destination_address)?;
             }
             Self::TransferLock {
-                nonce,
+                transfer_nonce,
                 source_deposit_id,
                 destination_deposit_id,
                 amount,
@@ -1282,8 +1314,11 @@ impl BinaryCodec for LedgerOperation {
                 timeout_height,
                 transfer_id,
                 witness,
+                // Per-deposit nonce / expiry aren't written by this legacy format; the
+                // wire-format-of-record is TLV (see tlv_codec.rs).
+                ..
             } => {
-                write_32(w, nonce)?;
+                write_32(w, transfer_nonce)?;
                 let mut src_bytes = [0u8; 33];
                 src_bytes[0] = 0x02;
                 src_bytes[1..17].copy_from_slice(source_deposit_id);
@@ -1524,6 +1559,11 @@ impl BinaryCodec for LedgerOperation {
                 Ok(Self::DepositKeyRotate {
                     deposit_id,
                     new_descriptor,
+                    // Legacy format doesn't carry nonce/expiry; populated with sentinels.
+                    // The wire-format-of-record is TLV (see tlv_codec.rs); this read_from is
+                    // a fallback for legacy bytes that predate the dep-16 fields.
+                    nonce: 0,
+                    expiry: u32::MAX,
                     witness,
                 })
             }
@@ -1554,6 +1594,8 @@ impl BinaryCodec for LedgerOperation {
                     amount,
                     payment_id,
                     sequence_number,
+                    nonce: 0,
+                    expiry: u32::MAX,
                     witness: crate::types::DescriptorWitness {
                         stack: vec![sig.to_vec()],
                     },
@@ -1620,6 +1662,8 @@ impl BinaryCodec for LedgerOperation {
                     fee_sats,
                     destination_address,
                     withdrawal_id,
+                    nonce: 0,
+                    expiry: u32::MAX,
                     witness: DescriptorWitness {
                         stack: vec![sig_bytes.to_vec()],
                     },
@@ -1648,7 +1692,7 @@ impl BinaryCodec for LedgerOperation {
             }
             // Transfer operations (70-72)
             70 => {
-                let nonce = read_32(r)?;
+                let transfer_nonce = read_32(r)?;
                 let src_bytes = read_33(r)?;
                 let mut source_deposit_id = [0u8; 16];
                 source_deposit_id.copy_from_slice(&src_bytes[1..17]);
@@ -1662,7 +1706,7 @@ impl BinaryCodec for LedgerOperation {
                 let transfer_id = read_32(r)?;
                 let sig_bytes = read_64(r)?;
                 Ok(Self::TransferLock {
-                    nonce,
+                    transfer_nonce,
                     source_deposit_id,
                     destination_deposit_id,
                     amount,
@@ -1670,6 +1714,8 @@ impl BinaryCodec for LedgerOperation {
                     completion_script,
                     timeout_height,
                     transfer_id,
+                    nonce: 0,
+                    expiry: u32::MAX,
                     witness: DescriptorWitness {
                         stack: vec![sig_bytes.to_vec()],
                     },

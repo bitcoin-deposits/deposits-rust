@@ -675,7 +675,7 @@ impl LedgerState {
                 next.dispute_state = DisputeState::Tombstoned;
             }
             LedgerOperation::TransferLock {
-                nonce,
+                transfer_nonce,
                 source_deposit_id,
                 destination_deposit_id,
                 amount,
@@ -704,7 +704,7 @@ impl LedgerState {
                     *transfer_id,
                     PendingTransfer {
                         transfer_id: *transfer_id,
-                        nonce: *nonce,
+                        nonce: *transfer_nonce,
                         source_deposit_id: *source_deposit_id,
                         destination_deposit_id: *destination_deposit_id,
                         amount: *amount,
@@ -1065,7 +1065,7 @@ impl LedgerState {
         // depositor could authorize one set of terms while the
         // committed pending-transfer entry routes by a different id.
         if let LedgerOperation::TransferLock {
-            nonce,
+            transfer_nonce,
             source_deposit_id,
             destination_deposit_id,
             amount,
@@ -1077,7 +1077,7 @@ impl LedgerState {
         } = operation
         {
             let signing_msg = crate::signature_utils::transfer_lock_signing_message(
-                nonce,
+                transfer_nonce,
                 source_deposit_id,
                 destination_deposit_id,
                 *amount,
@@ -1211,6 +1211,7 @@ impl LedgerState {
                 destination_address,
                 withdrawal_id,
                 witness,
+                ..
             } => {
                 if let Some(deposit) = self.deposits.get(deposit_id) {
                     let msg = crate::signature_utils::withdrawal_signing_message(
@@ -1229,7 +1230,7 @@ impl LedgerState {
                 }
             }
             LedgerOperation::TransferLock {
-                nonce,
+                transfer_nonce,
                 source_deposit_id,
                 destination_deposit_id,
                 amount,
@@ -1244,7 +1245,7 @@ impl LedgerState {
                 // where the deposit still exists.
                 if let Some(deposit) = self.deposits.get(source_deposit_id) {
                     let msg = crate::signature_utils::transfer_lock_signing_message(
-                        nonce,
+                        transfer_nonce,
                         source_deposit_id,
                         destination_deposit_id,
                         *amount,
@@ -1265,6 +1266,7 @@ impl LedgerState {
                 deposit_id,
                 new_descriptor,
                 witness,
+                ..
             } => {
                 // The witness must satisfy the OLD descriptor (proving authorization to rotate).
                 // apply() already updated the descriptor, so we use pre_state to get the old one.

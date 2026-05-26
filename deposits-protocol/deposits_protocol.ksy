@@ -379,6 +379,8 @@ types:
             280: hash32                        # replacement_collateral_txid
             282: u4be                          # replacement_collateral_vout
             284: u8be                          # replacement_collateral_amount
+            288: u8be                          # nonce (per-deposit dep-16 monotonic, u64)
+            290: u4be                          # expiry (block height, u32)
 
   # ================================================================
   # TLV field type reference for LedgerOperation
@@ -436,8 +438,14 @@ types:
   #   72  = withdrawal_id (32 bytes)
   #   74  = funding_address (string, OnchainCredit)
   #
+  # dep-16 per-deposit replay protection (phase 3 of PLAN-dep16-integration.md):
+  #   288 = nonce (u64, per-deposit monotonic counter; InvoiceLock / OnchainLock /
+  #         TransferLock / DepositKeyRotate)
+  #   290 = expiry (u32, block height after which the signature is invalid; same
+  #         four variants)
+  #
   # Transfers:
-  #   210 = nonce (32 bytes, TransferLock)
+  #   210 = transfer_nonce (32 bytes, TransferLock — was `nonce` pre-phase-3)
   #   212 = source_deposit_id (16 bytes)
   #   214 = destination_deposit_id (16 bytes)
   #   216 = completion_script (string, miniscript)

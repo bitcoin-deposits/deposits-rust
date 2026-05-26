@@ -39,7 +39,7 @@ fn transfer_lock_and_complete() {
     let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
 
     let lock_op = deposits_protocol::LedgerOperation::TransferLock {
-        nonce,
+        transfer_nonce: nonce,
         source_deposit_id: src_id,
         destination_deposit_id: dst_id,
         amount,
@@ -47,6 +47,8 @@ fn transfer_lock_and_complete() {
         completion_script: completion_script.to_string(),
         timeout_height,
         transfer_id,
+        nonce: 0,
+        expiry: u32::MAX,
         witness: deposits_protocol::DescriptorWitness {
             stack: vec![sig.serialize().to_vec()],
         },
@@ -128,7 +130,7 @@ fn transfer_fail_returns_funds_to_source() {
     let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
 
     let lock_op = deposits_protocol::LedgerOperation::TransferLock {
-        nonce,
+        transfer_nonce: nonce,
         source_deposit_id: src_id,
         destination_deposit_id: dst_id,
         amount,
@@ -136,6 +138,8 @@ fn transfer_fail_returns_funds_to_source() {
         completion_script: "sha256(aa)".to_string(),
         timeout_height: 900_000,
         transfer_id,
+        nonce: 0,
+        expiry: u32::MAX,
         witness: deposits_protocol::DescriptorWitness {
             stack: vec![sig.serialize().to_vec()],
         },
@@ -198,7 +202,7 @@ fn transfer_insufficient_balance_rejected() {
     let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
 
     let lock_op = deposits_protocol::LedgerOperation::TransferLock {
-        nonce,
+        transfer_nonce: nonce,
         source_deposit_id: src_id,
         destination_deposit_id: _dst_id,
         amount: 50_000,
@@ -206,6 +210,8 @@ fn transfer_insufficient_balance_rejected() {
         completion_script: "sha256(aa)".to_string(),
         timeout_height: 900_000,
         transfer_id,
+        nonce: 0,
+        expiry: u32::MAX,
         witness: deposits_protocol::DescriptorWitness {
             stack: vec![sig.serialize().to_vec()],
         },

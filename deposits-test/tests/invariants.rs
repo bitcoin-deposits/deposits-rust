@@ -260,6 +260,8 @@ fn invariant_c1_witness_validity() {
         amount: 100_000,
         payment_id,
         sequence_number: 2,
+        nonce: 0,
+        expiry: u32::MAX,
         witness: DescriptorWitness {
             stack: vec![good_sig.to_vec()],
         },
@@ -276,6 +278,8 @@ fn invariant_c1_witness_validity() {
         amount: 100_000,
         payment_id: [0x02; 32],
         sequence_number: 3,
+        nonce: 0,
+        expiry: u32::MAX,
         witness: DescriptorWitness {
             stack: vec![bad_sig.to_vec()],
         },
@@ -641,6 +645,8 @@ fn invariant_s3_balance_non_negative() {
             amount: 200_000, // more than 100k balance
             payment_id,
             sequence_number: 99,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![sig.to_vec()],
             },

@@ -384,7 +384,7 @@ impl Node {
             stack: vec![signature.serialize().to_vec()],
         };
         let operation = LedgerOperation::TransferLock {
-            nonce,
+            transfer_nonce: nonce,
             source_deposit_id,
             destination_deposit_id,
             amount: amount_msats,
@@ -392,6 +392,9 @@ impl Node {
             completion_script: completion_script.to_string(),
             timeout_height,
             transfer_id,
+            // phase 3 TODO: thread deposit.last_op_nonce + 1 and a real expiry.
+            nonce: 0,
+            expiry: u32::MAX,
             witness,
         };
 

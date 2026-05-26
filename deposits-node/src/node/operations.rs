@@ -672,6 +672,10 @@ impl Node {
             amount: amount_msats,
             payment_id,
             sequence_number,
+            // phase 3 TODO: thread deposit.last_op_nonce + 1; for now mirror sequence_number.
+            // The wallet/signer will eventually compute these from deposit state.
+            nonce: sequence_number,
+            expiry: u32::MAX,
             witness,
         };
 
@@ -907,6 +911,9 @@ impl Node {
             fee_sats,
             destination_address: destination_address.clone(),
             withdrawal_id,
+            // phase 3 TODO: thread deposit.last_op_nonce + 1 and a real expiry.
+            nonce: 0,
+            expiry: u32::MAX,
             witness: witness_for_lock,
         };
 

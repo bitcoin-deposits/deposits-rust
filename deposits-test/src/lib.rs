@@ -171,6 +171,11 @@ impl Operator {
             amount,
             payment_id,
             sequence_number: self.ledger.state.sequence + 1,
+            // phase 3: per-deposit replay protection. Test fixture uses placeholder values;
+            // real wallet code threads the deposit's last_op_nonce + 1 and a current_height + N
+            // expiry.
+            nonce: self.ledger.state.sequence + 1,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![sig.serialize().to_vec()],
             },

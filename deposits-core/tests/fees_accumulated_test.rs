@@ -123,7 +123,7 @@ fn transfer_complete_adds_fee_to_accumulator() {
 
     ledger
         .apply_state_changes(&LedgerOperation::TransferLock {
-            nonce: [0x42; 32],
+            transfer_nonce: [0x42; 32],
             source_deposit_id: source,
             destination_deposit_id: dest,
             amount,
@@ -131,6 +131,8 @@ fn transfer_complete_adds_fee_to_accumulator() {
             completion_script: "sha256(deadbeef)".to_string(),
             timeout_height: 900_000,
             transfer_id,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
@@ -162,7 +164,7 @@ fn transfer_fail_accumulates_fixed_fee() {
     let transfer_id = [0xCC; 32];
     ledger
         .apply_state_changes(&LedgerOperation::TransferLock {
-            nonce: [0x42; 32],
+            transfer_nonce: [0x42; 32],
             source_deposit_id: source,
             destination_deposit_id: dest,
             amount: 50_000,
@@ -171,6 +173,8 @@ fn transfer_fail_accumulates_fixed_fee() {
             completion_script: "sha256(deadbeef)".to_string(),
             timeout_height: 900_000,
             transfer_id,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
@@ -205,6 +209,8 @@ fn invoice_fail_accumulates_fixed_fee() {
             amount: 10_000,
             payment_id,
             sequence_number: 2,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
@@ -240,6 +246,8 @@ fn onchain_fail_accumulates_fixed_fee() {
             fee_sats: 2_000,
             destination_address: "bcrt1qsomewhere".to_string(),
             withdrawal_id,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
@@ -274,6 +282,8 @@ fn onchain_fulfill_does_not_accumulate() {
             fee_sats: 2_000,
             destination_address: "bcrt1qsomewhere".to_string(),
             withdrawal_id,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },

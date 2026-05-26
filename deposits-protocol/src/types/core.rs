@@ -390,6 +390,13 @@ pub struct Deposit {
     /// Pending fee change: new fees and the block at which they take effect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_fee_change: Option<(FeeStructure, u32)>,
+    /// Highest accepted dep-16 nonce on this deposit. Operations carrying a signature-bearing
+    /// `nonce` field (the four signature-bearing variants of `LedgerOperation`) are rejected
+    /// unless `nonce > last_op_nonce`; on acceptance, `last_op_nonce` is bumped to the op's
+    /// nonce. Replay protection enforced outside the descriptor evaluator. See
+    /// PLAN-dep16-integration.md phase 3.
+    #[serde(default)]
+    pub last_op_nonce: u64,
 }
 
 impl Deposit {
@@ -413,6 +420,7 @@ impl Deposit {
             fee_change_limit_bps: None,
             opened_at_block: 0,
             pending_fee_change: None,
+            last_op_nonce: 0,
         }
     }
 

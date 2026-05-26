@@ -170,6 +170,8 @@ fn deposit_key_rotate() {
     test_roundtrip(&LedgerOperation::DepositKeyRotate {
         deposit_id: did(),
         new_descriptor: "pk(03...)".into(),
+        nonce: 0,
+        expiry: u32::MAX,
         witness: wit(),
     });
 }
@@ -192,6 +194,8 @@ fn invoice_lock() {
         amount: 5_000_000,
         payment_id: h32(),
         sequence_number: 43,
+        nonce: 0,
+        expiry: u32::MAX,
         witness: wit(),
     });
 }
@@ -237,6 +241,8 @@ fn onchain_lock() {
         fee_sats: 500,
         destination_address: "bcrt1qdest".into(),
         withdrawal_id: h32(),
+        nonce: 0,
+        expiry: u32::MAX,
         witness: wit(),
     });
 }
@@ -263,7 +269,7 @@ fn onchain_fulfill() {
 #[test]
 fn transfer_lock() {
     test_roundtrip(&LedgerOperation::TransferLock {
-        nonce: h32(),
+        transfer_nonce: h32(),
         source_deposit_id: did(),
         destination_deposit_id: [2; 16],
         amount: 1_000_000,
@@ -271,6 +277,8 @@ fn transfer_lock() {
         completion_script: "sha256(abcd1234)".into(),
         timeout_height: 5000,
         transfer_id: h32(),
+        nonce: 0,
+        expiry: u32::MAX,
         witness: wit(),
     });
 }

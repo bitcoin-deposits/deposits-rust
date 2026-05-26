@@ -77,6 +77,8 @@ fn cosign_rejects_invoice_lock_insufficient_balance() {
         amount: 2000,
         payment_id: [1u8; 32],
         sequence_number: 0,
+        nonce: 0,
+        expiry: u32::MAX,
         witness: DescriptorWitness { stack: vec![] },
     });
     assert!(result.is_err(), "Should reject lock exceeding balance");
@@ -96,6 +98,8 @@ fn cosign_accepts_invoice_lock_within_balance() {
         amount: 3000,
         payment_id: [1u8; 32],
         sequence_number: 0,
+        nonce: 0,
+        expiry: u32::MAX,
         witness: DescriptorWitness { stack: vec![] },
     });
     assert!(result.is_ok(), "Should accept lock within balance");
@@ -117,6 +121,8 @@ fn cosign_rejects_double_lock_exceeding_available() {
             amount: 3000,
             payment_id: [1u8; 32],
             sequence_number: 0,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness { stack: vec![] },
         })
         .unwrap();
@@ -127,6 +133,8 @@ fn cosign_rejects_double_lock_exceeding_available() {
         amount: 3000,
         payment_id: [2u8; 32],
         sequence_number: 0,
+        nonce: 0,
+        expiry: u32::MAX,
         witness: DescriptorWitness { stack: vec![] },
     });
     assert!(
@@ -149,6 +157,8 @@ fn cosign_rejects_lock_on_nonexistent_deposit() {
         amount: 1000,
         payment_id: [1u8; 32],
         sequence_number: 0,
+        nonce: 0,
+        expiry: u32::MAX,
         witness: DescriptorWitness { stack: vec![] },
     });
     assert!(result.is_err(), "Should reject lock on nonexistent deposit");
@@ -213,7 +223,7 @@ fn cosign_rejects_transfer_lock_insufficient_balance() {
     credit_deposit(&mut ledger, src, 1000);
 
     let result = ledger.state.apply(&LedgerOperation::TransferLock {
-        nonce: [0u8; 32],
+        transfer_nonce: [0u8; 32],
         source_deposit_id: src,
         destination_deposit_id: dst,
         amount: 2000,
@@ -222,6 +232,8 @@ fn cosign_rejects_transfer_lock_insufficient_balance() {
             "sha256(0000000000000000000000000000000000000000000000000000000000000001)".to_string(),
         timeout_height: 900_000,
         transfer_id: [0u8; 32],
+        nonce: 0,
+        expiry: u32::MAX,
         witness: DescriptorWitness { stack: vec![] },
     });
     assert!(
@@ -278,6 +290,8 @@ fn open_invoice_locks_tracked_through_lifecycle() {
             amount: 5000,
             payment_id,
             sequence_number: 0,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness { stack: vec![] },
         })
         .unwrap();
@@ -324,6 +338,8 @@ fn open_invoice_lock_cleared_on_fail() {
             amount: 3000,
             payment_id,
             sequence_number: 0,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness { stack: vec![] },
         })
         .unwrap();
@@ -375,6 +391,8 @@ fn cosign_data_contains_decodable_operation() {
         amount: 5000,
         payment_id: [1u8; 32],
         sequence_number: 3,
+        nonce: 0,
+        expiry: u32::MAX,
         witness: DescriptorWitness { stack: vec![] },
     };
 
@@ -416,6 +434,8 @@ fn cosign_data_invalid_operation_rejected() {
         amount: 5000,
         payment_id: [1u8; 32],
         sequence_number: 0,
+        nonce: 0,
+        expiry: u32::MAX,
         witness: DescriptorWitness { stack: vec![] },
     };
 

@@ -55,6 +55,8 @@ fn onchain_credit_lock_fulfill() {
             fee_sats: 1_000,
             destination_address: "bcrt1qdest".into(),
             withdrawal_id,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![sig.serialize().to_vec()],
             },
@@ -128,6 +130,8 @@ fn onchain_fail_returns_funds() {
             fee_sats: 1_000,
             destination_address: "bcrt1qdest".into(),
             withdrawal_id,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![sig.serialize().to_vec()],
             },
@@ -292,6 +296,8 @@ fn deposit_key_rotate() {
         .apply_operation(&LedgerOperation::DepositKeyRotate {
             deposit_id: did,
             new_descriptor: new_descriptor.clone(),
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![sig.to_vec()],
             },
@@ -458,7 +464,7 @@ fn transfer_complete_on_already_completed_ignored() {
     net.op_mut("alice")
         .ledger
         .apply_operation(&LedgerOperation::TransferLock {
-            nonce,
+            transfer_nonce: nonce,
             source_deposit_id: src,
             destination_deposit_id: dst,
             amount: 30_000,
@@ -466,6 +472,8 @@ fn transfer_complete_on_already_completed_ignored() {
             completion_script: "sha256(aa)".into(),
             timeout_height: 900_000,
             transfer_id,
+            nonce: 0,
+            expiry: u32::MAX,
             witness: DescriptorWitness {
                 stack: vec![sig.serialize().to_vec()],
             },

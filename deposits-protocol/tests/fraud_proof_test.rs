@@ -743,7 +743,7 @@ mod dispatch {
 
     fn dummy_transfer_lock(nonce: [u8; 32]) -> LedgerOperation {
         LedgerOperation::TransferLock {
-            nonce,
+            transfer_nonce: nonce,
             source_deposit_id: deposits_protocol::DepositId::default(),
             destination_deposit_id: deposits_protocol::DepositId::default(),
             amount: 1,
@@ -751,6 +751,8 @@ mod dispatch {
             completion_script: String::new(),
             timeout_height: 0,
             transfer_id: [0u8; 32],
+            expiry: u32::MAX,
+            nonce: 0,
             witness: Default::default(),
         }
     }
@@ -1536,7 +1538,7 @@ mod uncredited_lightning {
     /// the test only cares about the seq (not the op contents).
     fn dummy_op() -> LedgerOperation {
         LedgerOperation::TransferLock {
-            nonce: [0u8; 32],
+            transfer_nonce: [0u8; 32],
             source_deposit_id: deposits_protocol::DepositId::default(),
             destination_deposit_id: deposits_protocol::DepositId::default(),
             amount: 1,
@@ -1544,6 +1546,8 @@ mod uncredited_lightning {
             completion_script: String::new(),
             timeout_height: 0,
             transfer_id: [0u8; 32],
+            nonce: 0,
+            expiry: u32::MAX,
             witness: Default::default(),
         }
     }
@@ -1987,7 +1991,7 @@ mod uncredited_onchain {
 
     fn dummy_op() -> LedgerOperation {
         LedgerOperation::TransferLock {
-            nonce: [0u8; 32],
+            transfer_nonce: [0u8; 32],
             source_deposit_id: deposits_protocol::DepositId::default(),
             destination_deposit_id: deposits_protocol::DepositId::default(),
             amount: 1,
@@ -1995,6 +1999,8 @@ mod uncredited_onchain {
             completion_script: String::new(),
             timeout_height: 0,
             transfer_id: [0u8; 32],
+            nonce: 0,
+            expiry: u32::MAX,
             witness: Default::default(),
         }
     }
@@ -2308,7 +2314,7 @@ mod embedding {
 
     fn transfer_lock(nonce: [u8; 32]) -> LedgerOperation {
         LedgerOperation::TransferLock {
-            nonce,
+            transfer_nonce: nonce,
             source_deposit_id: deposits_protocol::DepositId::default(),
             destination_deposit_id: deposits_protocol::DepositId::default(),
             amount: 1,
@@ -2316,6 +2322,8 @@ mod embedding {
             completion_script: String::new(),
             timeout_height: 0,
             transfer_id: [0u8; 32],
+            expiry: u32::MAX,
+            nonce: 0,
             witness: Default::default(),
         }
     }
