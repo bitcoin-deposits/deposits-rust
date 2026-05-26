@@ -458,7 +458,9 @@ impl Node {
             None => return (false, None, Some("Ledger not found".to_string())),
         };
 
-        let sequence_number = {
+        // Phase 3: ledger.next_sequence() is the invoice-flow position; deposit's
+        // last_op_nonce is the per-deposit dep-16 replay counter. Two distinct fields.
+        let (sequence_number, op_nonce) = {
             let ledger = ledger_arc.read().unwrap();
 
             let deposit = match ledger.state.deposits.get(&deposit_id) {
@@ -477,7 +479,7 @@ impl Node {
                 );
             }
 
-            ledger.next_sequence()
+            (ledger.next_sequence(), deposit.last_op_nonce.saturating_add(1))
         };
 
         let lock_operation = LedgerOperation::InvoiceLock {
@@ -485,8 +487,7 @@ impl Node {
             amount: amount_msat,
             payment_id,
             sequence_number,
-            // phase 3 TODO: thread deposit.last_op_nonce + 1; mirror sequence_number until then.
-            nonce: sequence_number,
+            nonce: op_nonce,
             expiry: u32::MAX,
             witness: witness.clone(),
         };

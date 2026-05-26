@@ -78,6 +78,29 @@ pub enum ConformanceViolation {
     /// descriptor could bloat every cosigner's signing path.
     DescriptorTooLarge { actual: usize, max: u32 },
 
+    /// A signature-bearing op (InvoiceLock / OnchainLock / TransferLock /
+    /// DepositKeyRotate) supplied a `nonce` that does not strictly increase
+    /// past the deposit's `last_op_nonce`. Replay protection for the dep-16
+    /// operation preimage; without this, a signed op could be replayed at
+    /// any later moment against the same deposit. See PLAN-dep16-integration.md
+    /// phase 3.
+    NonceNotIncreasing {
+        operation: &'static str,
+        last_op_nonce: u64,
+        actual: u64,
+    },
+
+    /// A signature-bearing op supplied an `expiry` block height that the
+    /// chain has already buried. Signatures over the dep-16 operation
+    /// preimage bind to a specific expiry; the protocol rejects after that
+    /// height regardless of any other signal. See PLAN-dep16-integration.md
+    /// phase 3.
+    ExpiryPassed {
+        operation: &'static str,
+        expiry: u32,
+        current_height: u32,
+    },
+
     /// A protocol rule was violated.
     ProtocolRule { rule: &'static str, detail: String },
 
@@ -131,6 +154,24 @@ impl std::fmt::Display for ConformanceViolation {
                 f,
                 "descriptor size {} bytes exceeds quorum max of {} bytes",
                 actual, max
+            ),
+            Self::NonceNotIncreasing {
+                operation,
+                last_op_nonce,
+                actual,
+            } => write!(
+                f,
+                "{}: nonce {} ≤ deposit.last_op_nonce {}",
+                operation, actual, last_op_nonce,
+            ),
+            Self::ExpiryPassed {
+                operation,
+                expiry,
+                current_height,
+            } => write!(
+                f,
+                "{}: expiry block {} ≤ current height {}",
+                operation, expiry, current_height,
             ),
             Self::ProtocolRule { rule, detail } => {
                 write!(f, "protocol rule '{}' violated: {}", rule, detail)

@@ -641,8 +641,11 @@ impl Node {
         payment_id: [u8; 32],
         witness: DescriptorWitness,
     ) -> Result<u64, Error> {
-        // Pre-validate and read sequence number
-        let sequence_number = {
+        // Pre-validate; read sequence number (ledger-position bookkeeping) and the
+        // deposit's per-deposit replay nonce. The two are distinct fields:
+        // sequence_number indexes the lock in the invoice flow; nonce satisfies the
+        // dep-16 monotonic-per-deposit replay check (phase 3).
+        let (sequence_number, op_nonce) = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
                 .get(ledger_id)
@@ -664,7 +667,7 @@ impl Node {
                 )));
             }
 
-            ledger.sequence() + 1
+            (ledger.sequence() + 1, deposit.last_op_nonce.saturating_add(1))
         };
 
         let operation = LedgerOperation::InvoiceLock {
@@ -672,9 +675,7 @@ impl Node {
             amount: amount_msats,
             payment_id,
             sequence_number,
-            // phase 3 TODO: thread deposit.last_op_nonce + 1; for now mirror sequence_number.
-            // The wallet/signer will eventually compute these from deposit state.
-            nonce: sequence_number,
+            nonce: op_nonce,
             expiry: u32::MAX,
             witness,
         };
@@ -879,8 +880,9 @@ impl Node {
         // ECDSA with a different message format, which doesn't match the Nostr request flow.
         // TODO: Unify signature formats between Nostr requests and lock_withdrawal
 
-        // Pre-validate
-        let previous_balance = {
+        // Pre-validate; also pick up the deposit's current replay nonce so we
+        // can sign a strictly-increasing one for this op (phase 3).
+        let (previous_balance, op_nonce) = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
                 .get(ledger_id)
@@ -902,7 +904,7 @@ impl Node {
                 )));
             }
 
-            deposit.balance
+            (deposit.balance, deposit.last_op_nonce.saturating_add(1))
         };
 
         let operation = LedgerOperation::OnchainLock {
@@ -911,8 +913,10 @@ impl Node {
             fee_sats,
             destination_address: destination_address.clone(),
             withdrawal_id,
-            // phase 3 TODO: thread deposit.last_op_nonce + 1 and a real expiry.
-            nonce: 0,
+            nonce: op_nonce,
+            // expiry: u32::MAX is the inert default — the protocol's check_conformance
+            // doesn't yet enforce expiry-vs-chain-tip (phase 3-followup), but the field
+            // is bound into the signature preimage so a future enforcer is sound.
             expiry: u32::MAX,
             witness: witness_for_lock,
         };

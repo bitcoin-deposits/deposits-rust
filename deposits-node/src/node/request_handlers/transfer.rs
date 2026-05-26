@@ -242,6 +242,9 @@ impl Node {
         // need the descriptor (conformance does the witness check at
         // stage time) but the block still does the deposit-exists
         // and timeout-height preflight validations.
+        // Phase 3: source deposit's per-deposit replay nonce; signed into the
+        // operation preimage as deposit.last_op_nonce + 1.
+        let source_op_nonce: u64;
         let _ = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = match ledgers.get(ledger_id) {
@@ -260,6 +263,7 @@ impl Node {
                 Some(d) => d,
                 None => return (false, None, Some("Source deposit not found".to_string())),
             };
+            source_op_nonce = deposit.last_op_nonce.saturating_add(1);
 
             // Validate timeout_height against max_transfer_timeout_blocks (strictest quorum member)
             let max_timeout = ledger
@@ -392,8 +396,7 @@ impl Node {
             completion_script: completion_script.to_string(),
             timeout_height,
             transfer_id,
-            // phase 3 TODO: thread deposit.last_op_nonce + 1 and a real expiry.
-            nonce: 0,
+            nonce: source_op_nonce,
             expiry: u32::MAX,
             witness,
         };

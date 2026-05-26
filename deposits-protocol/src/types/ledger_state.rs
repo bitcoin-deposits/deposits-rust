@@ -358,10 +358,15 @@ impl LedgerState {
             LedgerOperation::DepositKeyRotate {
                 deposit_id,
                 new_descriptor,
+                nonce,
                 ..
             } => {
                 if let Some(deposit) = next.deposits.get_mut(deposit_id) {
                     deposit.descriptor = new_descriptor.clone();
+                    // Bump per-deposit replay nonce. The conformance check in
+                    // check_conformance compares this against pre_state to refuse
+                    // ops whose nonce does not strictly increase.
+                    deposit.last_op_nonce = *nonce;
                 }
             }
             LedgerOperation::InvoiceCredit {
@@ -389,6 +394,7 @@ impl LedgerState {
                 amount,
                 payment_id,
                 sequence_number,
+                nonce,
                 witness,
                 ..
             } => {
@@ -397,6 +403,7 @@ impl LedgerState {
                     .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.lock(*amount)?;
+                deposit.last_op_nonce = *nonce;
                 // Cache the depositor's witness on the open lock so the
                 // eventual InvoiceFulfill (committed asynchronously by
                 // the background payment-completion task once LDK
@@ -466,6 +473,7 @@ impl LedgerState {
                 fee_sats,
                 destination_address,
                 withdrawal_id,
+                nonce,
                 ..
             } => {
                 let deposit = next
@@ -479,6 +487,7 @@ impl LedgerState {
                 // inputs from simulator paths.
                 let total = amount.saturating_add(*fee_sats);
                 deposit.lock(total)?;
+                deposit.last_op_nonce = *nonce;
                 next.pending_withdrawals.insert(
                     *withdrawal_id,
                     PendingWithdrawal {
@@ -683,6 +692,7 @@ impl LedgerState {
                 completion_script,
                 timeout_height,
                 transfer_id,
+                nonce,
                 ..
             } => {
                 let deposit = next
@@ -700,6 +710,7 @@ impl LedgerState {
                 // any locked portion). TransferLock just marks more of that
                 // balance as locked — it does NOT reduce the obligation.
                 deposit.locked_balance = deposit.locked_balance.saturating_add(total);
+                deposit.last_op_nonce = *nonce;
                 next.pending_transfers.insert(
                     *transfer_id,
                     PendingTransfer {
@@ -1094,6 +1105,48 @@ impl LedgerState {
             }
         }
 
+        // Per-deposit replay protection. Each signature-bearing op carries a
+        // `nonce: u64` that must strictly increase past the deposit's
+        // `last_op_nonce` before this op was applied; on accept, apply() bumps
+        // last_op_nonce to the op's nonce. Without pre_state we can't compare
+        // (the post-apply deposit already has the bumped nonce), so we only
+        // run the check when pre_state is available — which the standard
+        // apply_with_verifier / apply_signed path always provides.
+        // See PLAN-dep16-integration.md phase 3.
+        //
+        // TODO phase 3-followup: also enforce `expiry >= current_height`. Today
+        // the protocol's check_conformance doesn't receive a chain-tip height,
+        // and the expiry binds the signature for replay-window protection
+        // regardless of when the operator processes it.
+        if let Some(pre) = pre_state {
+            let (op_name, deposit_id, op_nonce) = match operation {
+                LedgerOperation::InvoiceLock { deposit_id, nonce, .. } => {
+                    ("InvoiceLock", Some(deposit_id), Some(*nonce))
+                }
+                LedgerOperation::OnchainLock { deposit_id, nonce, .. } => {
+                    ("OnchainLock", Some(deposit_id), Some(*nonce))
+                }
+                LedgerOperation::TransferLock { source_deposit_id, nonce, .. } => {
+                    ("TransferLock", Some(source_deposit_id), Some(*nonce))
+                }
+                LedgerOperation::DepositKeyRotate { deposit_id, nonce, .. } => {
+                    ("DepositKeyRotate", Some(deposit_id), Some(*nonce))
+                }
+                _ => ("", None, None),
+            };
+            if let (Some(deposit_id), Some(op_nonce)) = (deposit_id, op_nonce) {
+                if let Some(prev_deposit) = pre.deposits.get(deposit_id) {
+                    if op_nonce <= prev_deposit.last_op_nonce {
+                        violations.push(ConformanceViolation::NonceNotIncreasing {
+                            operation: op_name,
+                            last_op_nonce: prev_deposit.last_op_nonce,
+                            actual: op_nonce,
+                        });
+                    }
+                }
+            }
+        }
+
         // DepositKeyRotate: the new descriptor must parse — otherwise
         // the post-rotation deposit becomes unspendable through the
         // normal authorization path.
@@ -1325,5 +1378,150 @@ impl LedgerState {
             .iter()
             .filter(|m| m.membership_expires > current_block)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod replay_protection_tests {
+    //! Validator behavior for phase-3 per-deposit replay protection: a
+    //! signature-bearing op carrying `nonce <= deposit.last_op_nonce` produces
+    //! a `NonceNotIncreasing` conformance violation. `apply()` then bumps
+    //! `last_op_nonce` to the op's nonce, so the next op needs a higher one.
+    //! See PLAN-dep16-integration.md phase 3.
+
+    use super::*;
+    use crate::messages::LedgerOperation;
+    use crate::types::DescriptorWitness;
+    use crate::{Deposit, NoVerify};
+
+    fn state_with_one_deposit() -> (LedgerState, [u8; 16]) {
+        // Build a state with the deterministic-from-secret-key generator point as
+        // operator_key — gives a stable ledger_id for the test without needing a
+        // separate keypair setup.
+        let operator_key = bitcoin::secp256k1::PublicKey::from_slice(&[
+            0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce,
+            0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81,
+            0x5b, 0x16, 0xf8, 0x17, 0x98,
+        ])
+        .unwrap();
+        let mut state = LedgerState::new(operator_key, "test_reserves".to_string(), 0);
+        let descriptor = "pk(02000000000000000000000000000000000000000000000000000000000000\
+                          000000)"
+            .to_string();
+        let mut deposit = Deposit::new(descriptor, None);
+        deposit.balance = 1000;
+        let did = deposit.deposit_id;
+        state.deposits.insert(did, deposit);
+        (state, did)
+    }
+
+    fn invoice_lock(did: [u8; 16], amount: u64, payment_id: [u8; 32], nonce: u64) -> LedgerOperation {
+        LedgerOperation::InvoiceLock {
+            deposit_id: did,
+            amount,
+            payment_id,
+            sequence_number: nonce,
+            nonce,
+            expiry: u32::MAX,
+            witness: DescriptorWitness::new(),
+        }
+    }
+
+    /// First lock against a fresh deposit (last_op_nonce=0) with nonce=1 is
+    /// conformant. After accept, deposit.last_op_nonce is bumped to 1.
+    #[test]
+    fn first_op_with_nonce_one_is_accepted() {
+        let (state, did) = state_with_one_deposit();
+        let op = invoice_lock(did, 50, [0xab; 32], 1);
+        let (next, violations) = state.apply_with_verifier(&op, &NoVerify).unwrap();
+        assert!(
+            !violations.iter().any(|v| matches!(v, ConformanceViolation::NonceNotIncreasing { .. })),
+            "first op with nonce=1 must not raise NonceNotIncreasing: {:?}",
+            violations,
+        );
+        assert_eq!(next.deposits[&did].last_op_nonce, 1, "apply bumps last_op_nonce");
+    }
+
+    /// A second op with the same nonce as the first is rejected (replay).
+    #[test]
+    fn replayed_nonce_is_flagged_as_not_increasing() {
+        let (state, did) = state_with_one_deposit();
+        let (state, _) = state
+            .apply_with_verifier(&invoice_lock(did, 50, [0xab; 32], 1), &NoVerify)
+            .unwrap();
+
+        let replay = invoice_lock(did, 50, [0xcd; 32], 1); // same nonce
+        let (_, violations) = state.apply_with_verifier(&replay, &NoVerify).unwrap();
+        assert!(
+            violations.iter().any(|v| matches!(
+                v,
+                ConformanceViolation::NonceNotIncreasing { actual: 1, last_op_nonce: 1, .. }
+            )),
+            "replayed nonce must raise NonceNotIncreasing: got {:?}",
+            violations,
+        );
+    }
+
+    /// A nonce strictly below the deposit's last_op_nonce is also rejected.
+    /// The wallet might mis-pick a nonce; the validator catches it before the
+    /// signature can do damage.
+    #[test]
+    fn below_last_op_nonce_is_flagged() {
+        let (state, did) = state_with_one_deposit();
+        let (state, _) = state
+            .apply_with_verifier(&invoice_lock(did, 50, [0xab; 32], 5), &NoVerify)
+            .unwrap();
+        let stale = invoice_lock(did, 50, [0xcd; 32], 3);
+        let (_, violations) = state.apply_with_verifier(&stale, &NoVerify).unwrap();
+        assert!(
+            violations.iter().any(|v| matches!(
+                v,
+                ConformanceViolation::NonceNotIncreasing { actual: 3, last_op_nonce: 5, .. }
+            )),
+            "stale nonce must raise NonceNotIncreasing: got {:?}",
+            violations,
+        );
+    }
+
+    /// A strictly-increasing sequence is accepted; last_op_nonce tracks each.
+    #[test]
+    fn strictly_increasing_nonces_chain_cleanly() {
+        let (mut state, did) = state_with_one_deposit();
+        for (idx, nonce) in [1u64, 2, 5, 100].iter().enumerate() {
+            let op = invoice_lock(did, 10, [idx as u8; 32], *nonce);
+            let (next, violations) = state.apply_with_verifier(&op, &NoVerify).unwrap();
+            assert!(
+                !violations.iter().any(|v| matches!(v, ConformanceViolation::NonceNotIncreasing { .. })),
+                "monotonic op {} (nonce={}) raised NonceNotIncreasing: {:?}",
+                idx, nonce, violations,
+            );
+            assert_eq!(next.deposits[&did].last_op_nonce, *nonce);
+            state = next;
+        }
+    }
+
+    /// Fulfill variants don't carry a `nonce` field — they shouldn't be subject
+    /// to the per-deposit replay check at all. Confirms the validator's scope:
+    /// only signature-bearing ops trigger it.
+    #[test]
+    fn invoice_fulfill_is_not_subject_to_nonce_check() {
+        let (state, did) = state_with_one_deposit();
+        let (state, _) = state
+            .apply_with_verifier(&invoice_lock(did, 50, [0xab; 32], 1), &NoVerify)
+            .unwrap();
+        let fulfill = LedgerOperation::InvoiceFulfill {
+            deposit_id: did,
+            amount: 50,
+            payment_id: [0xab; 32],
+            sequence_number: 2,
+            preimage: [0xee; 32],
+            witness: DescriptorWitness::new(),
+        };
+        let (_, violations) = state.apply_with_verifier(&fulfill, &NoVerify).unwrap();
+        assert!(
+            !violations.iter().any(|v| matches!(v, ConformanceViolation::NonceNotIncreasing { .. })),
+            "fulfill ops must not run the nonce check: {:?}",
+            violations,
+        );
     }
 }
