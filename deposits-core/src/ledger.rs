@@ -1153,6 +1153,14 @@ impl Ledger {
         // descriptor `after()` checks evaluate at the right horizon.
         let verifier =
             crate::descriptor::CoreWitnessVerifier::new(staged.update.block_height);
+        // Phase 5b deferred: switching this to apply_signed_with_authorizer with a real
+        // Dep16Authorizer would close the production safety gap (signed ops authoritatively
+        // bind to the dep-17 operation preimage). It requires the wallet→Nostr→operator
+        // signing flow to be reworked so the wallet picks nonce/expiry and signs the
+        // dep-17 preimage with them — today the wallet doesn't know the deposit's
+        // last_op_nonce when it constructs the request. That's bigger than a single
+        // commit; tracked as Phase 5b-followup. For now the back-compat shim's AllowAll
+        // accepts under WitnessVerifier and lets the wallet keep its existing flow.
         let new_state = self.state.apply_signed(&staged.update, &verifier)?;
         self.state = new_state;
 
@@ -1526,6 +1534,11 @@ impl Ledger {
         operation: &LedgerOperation,
         verifier: &impl deposits_protocol::WitnessVerifier,
     ) -> DepositsResult<Vec<deposits_protocol::ConformanceViolation>> {
+        // Phase 5b deferred: see the apply_signed callsite above for the rationale —
+        // the wallet→operator signing protocol needs to plumb nonce/expiry through
+        // before we can flip this to apply_with_verifier_and_authorizer with a real
+        // Dep16Authorizer. AllowAll shim keeps the watcher path working under today's
+        // wallet flow.
         let (new_state, violations) = self.state.apply_with_verifier(operation, verifier)?;
         self.state = new_state;
         Ok(violations)

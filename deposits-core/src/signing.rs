@@ -342,6 +342,125 @@ pub fn create_withdrawal_signature(
     Ok(sig.serialize())
 }
 
+/// Sign a signature-bearing `LedgerOperation` against the dep-17 operation preimage and
+/// return the same operation with the signature inserted into its witness stack.
+///
+/// The input operation should be constructed with an empty (or placeholder) witness — the
+/// helper computes the dep-17 operation sighash from the rest of the op's fields, signs
+/// it with `secret_key`'s Schnorr key, and returns a new operation with
+/// `witness = DescriptorWitness { stack: vec![sig] }`. The sighash binds to op_type +
+/// args + nonce + expiry + deposit_id; signatures are not replayable across deposits,
+/// op types, nonces, or expiries.
+///
+/// Returns `None` for variants that don't go through dep-16 authorization (fulfills,
+/// administrative ops) — callers shouldn't try to sign these.
+///
+/// Phase 5b replaces the legacy per-variant signing-helper pattern
+/// (`invoice_lock_signing_message` + sign + insert) with this uniform helper. See
+/// PLAN-dep16-integration.md.
+pub fn sign_op(
+    op: deposits_protocol::messages::LedgerOperation,
+    secret_key: &SecretKey,
+) -> Option<deposits_protocol::messages::LedgerOperation> {
+    use deposits_protocol::messages::LedgerOperation;
+    use deposits_protocol::types::DescriptorWitness;
+
+    let sighash = crate::dep16::operations::operation_sighash(&op)?;
+    let secp = Secp256k1::new();
+    let keypair = Keypair::from_secret_key(&secp, secret_key);
+    let msg = Message::from_digest(sighash);
+    let sig: Signature = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+    let witness = DescriptorWitness {
+        stack: vec![sig.serialize().to_vec()],
+    };
+    Some(match op {
+        LedgerOperation::InvoiceLock {
+            deposit_id,
+            amount,
+            payment_id,
+            sequence_number,
+            nonce,
+            expiry,
+            witness: _,
+        } => LedgerOperation::InvoiceLock {
+            deposit_id,
+            amount,
+            payment_id,
+            sequence_number,
+            nonce,
+            expiry,
+            witness,
+        },
+        LedgerOperation::OnchainLock {
+            deposit_id,
+            amount,
+            fee_sats,
+            destination_address,
+            withdrawal_id,
+            nonce,
+            expiry,
+            witness: _,
+        } => LedgerOperation::OnchainLock {
+            deposit_id,
+            amount,
+            fee_sats,
+            destination_address,
+            withdrawal_id,
+            nonce,
+            expiry,
+            witness,
+        },
+        LedgerOperation::TransferLock {
+            transfer_nonce,
+            source_deposit_id,
+            destination_deposit_id,
+            amount,
+            fee,
+            completion_script,
+            timeout_height,
+            transfer_id,
+            nonce,
+            expiry,
+            witness: _,
+        } => LedgerOperation::TransferLock {
+            transfer_nonce,
+            source_deposit_id,
+            destination_deposit_id,
+            amount,
+            fee,
+            completion_script,
+            timeout_height,
+            transfer_id,
+            nonce,
+            expiry,
+            witness,
+        },
+        LedgerOperation::DepositKeyRotate {
+            deposit_id,
+            new_descriptor,
+            nonce,
+            expiry,
+            witness: _,
+        } => LedgerOperation::DepositKeyRotate {
+            deposit_id,
+            new_descriptor,
+            nonce,
+            expiry,
+            witness,
+        },
+        LedgerOperation::TransferComplete {
+            transfer_id,
+            script_witness: _,
+        } => LedgerOperation::TransferComplete {
+            transfer_id,
+            script_witness: witness,
+        },
+        // operation_sighash returned Some only for signature-bearing variants —
+        // unreachable for any other.
+        other => return Some(other),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,4 +694,59 @@ mod tests {
     // is now exercised by the OnchainLock conformance path; tests of
     // the OP_RETURN encoding live in `types::core` where the methods
     // do.
+
+    /// `sign_op` round-trips: given a partially-built InvoiceLock with empty witness,
+    /// the helper computes the dep-17 sighash, signs it, and returns the same op with
+    /// the signature inserted into the witness stack. The resulting witness signature,
+    /// when verified against the same dep-17 sighash, must validate under the
+    /// deposit key — confirming the helper signs the right bytes.
+    #[test]
+    fn sign_op_round_trip() {
+        use bitcoin::secp256k1::{schnorr::Signature as SchnorrSig, Keypair, XOnlyPublicKey};
+        use deposits_protocol::messages::LedgerOperation;
+        use deposits_protocol::types::DescriptorWitness;
+
+        let (sk, _) = create_test_keypair();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &sk);
+        let xonly = XOnlyPublicKey::from_keypair(&keypair).0;
+
+        let proto = LedgerOperation::InvoiceLock {
+            deposit_id: [0xde; 16],
+            amount: 50_000,
+            payment_id: [0xab; 32],
+            sequence_number: 1,
+            nonce: 1,
+            expiry: u32::MAX,
+            witness: DescriptorWitness::new(),
+        };
+        let signed = sign_op(proto.clone(), &sk).expect("InvoiceLock is signature-bearing");
+        let sighash = crate::dep16::operations::operation_sighash(&proto).unwrap();
+
+        // The witness now carries a single 64-byte Schnorr signature that verifies
+        // against the dep-17 sighash under the signing key.
+        let witness = match &signed {
+            LedgerOperation::InvoiceLock { witness, .. } => witness,
+            _ => panic!("variant changed"),
+        };
+        assert_eq!(witness.stack.len(), 1);
+        assert_eq!(witness.stack[0].len(), 64);
+        let sig = SchnorrSig::from_slice(&witness.stack[0]).unwrap();
+        let msg = Message::from_digest(sighash);
+        secp.verify_schnorr(&sig, &msg, &xonly)
+            .expect("signature must verify against the dep-17 sighash");
+    }
+
+    /// Non-signature-bearing variants (DepositOpen, fulfills, administrative ops)
+    /// return `None` — `sign_op` won't pretend to sign things that don't have a
+    /// witness slot in the dep-16 sense.
+    #[test]
+    fn sign_op_returns_none_for_unsignable_variants() {
+        use deposits_protocol::messages::LedgerOperation;
+        let (sk, _) = create_test_keypair();
+        let close = LedgerOperation::DepositClose {
+            deposit_id: [0xde; 16],
+        };
+        assert!(sign_op(close, &sk).is_none());
+    }
 }
