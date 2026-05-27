@@ -316,3 +316,133 @@ fn threshold_rotation_two_of_three() {
         violations_a,
     );
 }
+
+// =========================================================================
+// End-to-end via sign_op: the production wallet path
+//
+// The DepositKeyRotate tests above use a raw EcdsaVerifier::sign path that
+// confirms the authorizer accepts a well-formed dep-16 signature. The tests
+// below confirm the *production* wallet signing path (`sign_op`) produces a
+// witness shape `Dep16Authorizer` accepts for each lock-side variant. If the
+// signing algorithm ever drifts from what the authorizer verifies against
+// (e.g. Schnorr vs. ECDSA), these tests fail.
+// =========================================================================
+
+fn state_with_descriptor(seed: u8) -> (LedgerState, [u8; 16], bitcoin::secp256k1::SecretKey) {
+    let (sk, pk) = keypair(seed);
+    let descriptor = format!("wsh(prove(pk({})))", pk);
+    let operator_key = bitcoin::secp256k1::PublicKey::from_slice(&[
+        0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+        0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16,
+        0xf8, 0x17, 0x98,
+    ])
+    .unwrap();
+    let mut state = LedgerState::new(operator_key, "test_reserves".to_string(), 0);
+    state.reserves_amount = 10_000_000;
+    let deposit = Deposit::new(descriptor.clone(), None);
+    let did = deposit.deposit_id;
+    state.deposits.insert(did, deposit);
+    // Credit so locks have balance to work with.
+    state = state
+        .apply(&LedgerOperation::InvoiceCredit {
+            payment_hash: [0xee; 32],
+            deposit_id: did,
+            amount: 1_000_000,
+            invoice_id: "seed".into(),
+            sequence_number: 1,
+        })
+        .unwrap();
+    (state, did, sk)
+}
+
+fn assert_authorizer_accepts(state: &LedgerState, op: &LedgerOperation, op_label: &str) {
+    let authorizer = Dep16Authorizer::new();
+    let (_, violations) = state
+        .apply_with_verifier(op, &NoVerify, &authorizer, 0)
+        .expect("apply succeeds; failure would be in conformance");
+    let invalid_witness = violations.iter().any(|v| {
+        matches!(
+            v,
+            ConformanceViolation::InvalidWitness { .. }
+        )
+    });
+    assert!(
+        !invalid_witness,
+        "{} signed via sign_op must satisfy Dep16Authorizer; violations: {:?}",
+        op_label, violations,
+    );
+}
+
+#[test]
+fn sign_op_invoice_lock_authorized_by_dep16() {
+    let (state, did, sk) = state_with_descriptor(0x21);
+    let proto = LedgerOperation::InvoiceLock {
+        deposit_id: did,
+        amount: 100_000,
+        payment_id: [0xaa; 32],
+        sequence_number: 2,
+        nonce: deposits_core::signing::fresh_op_nonce(),
+        expiry: u32::MAX,
+        witness: DescriptorWitness::new(),
+    };
+    let op = deposits_core::signing::sign_op(proto, &sk).expect("InvoiceLock is signable");
+    assert_authorizer_accepts(&state, &op, "InvoiceLock");
+}
+
+#[test]
+fn sign_op_onchain_lock_authorized_by_dep16() {
+    let (state, did, sk) = state_with_descriptor(0x22);
+    let proto = LedgerOperation::OnchainLock {
+        deposit_id: did,
+        amount: 50_000,
+        fee_sats: 500,
+        destination_address: "bcrt1qsink".into(),
+        withdrawal_id: [0xbb; 32],
+        nonce: deposits_core::signing::fresh_op_nonce(),
+        expiry: u32::MAX,
+        witness: DescriptorWitness::new(),
+    };
+    let op = deposits_core::signing::sign_op(proto, &sk).expect("OnchainLock is signable");
+    assert_authorizer_accepts(&state, &op, "OnchainLock");
+}
+
+#[test]
+fn sign_op_transfer_lock_authorized_by_dep16() {
+    let (state, did, sk) = state_with_descriptor(0x23);
+    // Need a destination deposit for state-machine apply to succeed.
+    let dst_descriptor = format!("wsh(prove(pk({})))", keypair(0x24).1);
+    let dst = deposits_protocol::types::compute_deposit_id(&dst_descriptor);
+    let mut state = state;
+    state.deposits.insert(dst, Deposit::new(dst_descriptor, None));
+
+    let proto = LedgerOperation::TransferLock {
+        transfer_nonce: [0x77; 32],
+        source_deposit_id: did,
+        destination_deposit_id: dst,
+        amount: 30_000,
+        fee: 500,
+        completion_script: "sha256(cafe)".into(),
+        timeout_height: 900_000,
+        transfer_id: [0x88; 32],
+        nonce: deposits_core::signing::fresh_op_nonce(),
+        expiry: u32::MAX,
+        witness: DescriptorWitness::new(),
+    };
+    let op = deposits_core::signing::sign_op(proto, &sk).expect("TransferLock is signable");
+    assert_authorizer_accepts(&state, &op, "TransferLock");
+}
+
+#[test]
+fn sign_op_deposit_key_rotate_authorized_by_dep16() {
+    let (state, did, sk) = state_with_descriptor(0x25);
+    let new_desc = format!("wsh(prove(pk({})))", keypair(0x26).1);
+    let proto = LedgerOperation::DepositKeyRotate {
+        deposit_id: did,
+        new_descriptor: new_desc,
+        nonce: deposits_core::signing::fresh_op_nonce(),
+        expiry: u32::MAX,
+        witness: DescriptorWitness::new(),
+    };
+    let op = deposits_core::signing::sign_op(proto, &sk).expect("DepositKeyRotate is signable");
+    assert_authorizer_accepts(&state, &op, "DepositKeyRotate");
+}

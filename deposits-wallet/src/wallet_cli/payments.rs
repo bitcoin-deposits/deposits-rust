@@ -1322,7 +1322,8 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     // once the wallet wraps a sync source).
     //
     // The witness ends up being whatever satisfies the descriptor — for pk(...)
-    // it's a single Schnorr sig over the dep-17 sighash.
+    // it's a single 64-byte ECDSA compact signature over the dep-17 sighash
+    // (matching what Dep16Authorizer's EcdsaVerifier checks against).
     let op_nonce = deposits_core::signing::fresh_op_nonce();
     let op_expiry: u32 = u32::MAX; // TODO: chain_tip + margin
     let proto = deposits_core::messages::LedgerOperation::InvoiceLock {
