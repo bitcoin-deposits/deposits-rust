@@ -458,9 +458,20 @@ impl Node {
             None => return (false, None, Some("Ledger not found".to_string())),
         };
 
-        // Phase 3: ledger.next_sequence() is the invoice-flow position; deposit's
-        // last_op_nonce is the per-deposit dep-16 replay counter. Two distinct fields.
-        let (sequence_number, op_nonce) = {
+        // Phase 5d: the wallet picks `nonce` (random/timestamp) and `expiry` (chain-tip
+        // + margin) and signs the dep-17 operation preimage with them. The operator
+        // must construct the InvoiceLock with the wallet's nonce/expiry so the
+        // signature verifies. `sequence_number` is the invoice-flow ledger position
+        // and isn't bound by the dep-17 preimage — operator picks it freely.
+        let op_nonce = match request.params.get("nonce").and_then(|v| v.as_u64()) {
+            Some(n) => n,
+            None => return (false, None, Some("Missing nonce parameter".to_string())),
+        };
+        let op_expiry = match request.params.get("expiry").and_then(|v| v.as_u64()) {
+            Some(e) if e <= u32::MAX as u64 => e as u32,
+            _ => return (false, None, Some("Missing or out-of-range expiry parameter".to_string())),
+        };
+        let sequence_number = {
             let ledger = ledger_arc.read().unwrap();
 
             let deposit = match ledger.state.deposits.get(&deposit_id) {
@@ -479,7 +490,7 @@ impl Node {
                 );
             }
 
-            (ledger.next_sequence(), deposits_core::signing::fresh_op_nonce())
+            ledger.next_sequence()
         };
 
         let lock_operation = LedgerOperation::InvoiceLock {
@@ -488,7 +499,7 @@ impl Node {
             payment_id,
             sequence_number,
             nonce: op_nonce,
-            expiry: u32::MAX,
+            expiry: op_expiry,
             witness: witness.clone(),
         };
 

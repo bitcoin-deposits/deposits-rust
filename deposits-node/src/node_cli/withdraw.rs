@@ -90,22 +90,15 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let secp = Secp256k1::new();
     let deposit_pubkey = PublicKey::from_secret_key(&secp, &secret_key);
 
-    // Generate random nonce
+    // Phase 5d: pick a random withdrawal_id (32 bytes), op_nonce (u64 timestamp),
+    // op_expiry (u32). Build a proto OnchainLock with these and sign the dep-17
+    // operation preimage via sign_op.
     use bitcoin::secp256k1::rand::rngs::OsRng;
     use bitcoin::secp256k1::rand::RngCore;
-    let mut nonce = [0u8; 32];
-    OsRng.fill_bytes(&mut nonce);
-
-    // Create signature
-    let signature = deposits_core::create_withdrawal_signature(
-        &secret_key,
-        &nonce,
-        &deposit_pubkey,
-        &destination_address,
-        amount_sats,
-        fee_sats,
-    )
-    .map_err(|e| format!("Failed to create signature: {:?}", e))?;
+    let mut withdrawal_id = [0u8; 32];
+    OsRng.fill_bytes(&mut withdrawal_id);
+    let op_nonce = deposits_core::signing::fresh_op_nonce();
+    let op_expiry: u32 = u32::MAX; // TODO: chain_tip + margin
 
     let config = parse_config(&config_args)?;
     let mut node = Node::new(config).await?;
@@ -115,11 +108,24 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // Sync wallet
     node.sync_wallet()?;
 
-    // Compute deposit_id from pubkey and create witness
+    // Compute deposit_id from pubkey and create proto op for signing.
     let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
     let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
-    let depositor_witness = deposits_core::types::DescriptorWitness {
-        stack: vec![signature.to_vec()],
+    let proto = deposits_core::messages::LedgerOperation::OnchainLock {
+        deposit_id,
+        amount: amount_sats * 1000,
+        fee_sats,
+        destination_address: destination_address.clone(),
+        withdrawal_id,
+        nonce: op_nonce,
+        expiry: op_expiry,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    let signed = deposits_core::signing::sign_op(proto, &secret_key)
+        .ok_or("OnchainLock failed to sign")?;
+    let depositor_witness = match &signed {
+        deposits_core::messages::LedgerOperation::OnchainLock { witness, .. } => witness.clone(),
+        _ => unreachable!(),
     };
 
     println!("Requesting withdrawal...");
@@ -140,7 +146,9 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
             destination_address,
             amount_sats,
             fee_sats,
-            nonce,
+            withdrawal_id,
+            op_nonce,
+            op_expiry,
             depositor_witness,
             memo,
         )
@@ -256,7 +264,13 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         println!("  Memo: {}", m);
     }
 
-    // Lock the withdrawal with co-signing
+    // Phase 5d: the nonce arg (32 bytes) is reinterpreted as withdrawal_id;
+    // op_nonce/op_expiry are operator-picked locally (this CLI is the manual operator
+    // tool — depositor's signature was over the dep-17 preimage built with these
+    // values, so operator and depositor must coordinate them out-of-band before
+    // invoking this command).
+    let op_nonce = deposits_core::signing::fresh_op_nonce();
+    let op_expiry: u32 = u32::MAX;
     let result = node
         .lock_withdrawal(
             &ledger_id,
@@ -264,7 +278,9 @@ async fn withdraw_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             destination_address,
             amount_sats,
             fee_sats,
-            nonce,
+            nonce, // reused as withdrawal_id
+            op_nonce,
+            op_expiry,
             depositor_witness,
             memo,
         )

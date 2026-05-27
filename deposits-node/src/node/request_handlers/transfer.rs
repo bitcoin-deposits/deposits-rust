@@ -40,13 +40,14 @@ impl Node {
             Some(f) => f,
             None => return (false, None, Some("Missing fee_sats".to_string())),
         };
-        let nonce_hex = match request.params.get("nonce").and_then(|v| v.as_str()) {
+        // Phase 5d: wallet supplies withdrawal_id, op_nonce, op_expiry directly. The
+        // protocol's dep-17 operation preimage binds them; the operator uses what the
+        // wallet picked (no longer derives withdrawal_id from a signing message).
+        let withdrawal_id_hex = match request.params.get("withdrawal_id").and_then(|v| v.as_str()) {
             Some(n) => n,
-            None => return (false, None, Some("Missing nonce".to_string())),
+            None => return (false, None, Some("Missing withdrawal_id".to_string())),
         };
-
-        // Parse nonce
-        let nonce: [u8; 32] = match hex::decode(nonce_hex) {
+        let withdrawal_id: [u8; 32] = match hex::decode(withdrawal_id_hex) {
             Ok(bytes) if bytes.len() == 32 => {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&bytes);
@@ -56,9 +57,17 @@ impl Node {
                 return (
                     false,
                     None,
-                    Some("Invalid nonce (must be 32 bytes hex)".to_string()),
+                    Some("Invalid withdrawal_id (must be 32 bytes hex)".to_string()),
                 )
             }
+        };
+        let op_nonce = match request.params.get("nonce").and_then(|v| v.as_u64()) {
+            Some(n) => n,
+            None => return (false, None, Some("Missing nonce (u64)".to_string())),
+        };
+        let op_expiry = match request.params.get("expiry").and_then(|v| v.as_u64()) {
+            Some(e) if e <= u32::MAX as u64 => e as u32,
+            _ => return (false, None, Some("Missing or out-of-range expiry".to_string())),
         };
 
         // Witness authorizes the withdrawal under the descriptor.
@@ -97,7 +106,9 @@ impl Node {
                 address.to_string(),
                 amount_sats,
                 fee_sats,
-                nonce,
+                withdrawal_id,
+                op_nonce,
+                op_expiry,
                 depositor_witness,
                 None, // no memo
             )

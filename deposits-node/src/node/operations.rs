@@ -843,29 +843,26 @@ impl Node {
         destination_address: String,
         amount_sats: u64,
         fee_sats: u64,
-        nonce: [u8; 32],
+        withdrawal_id: [u8; 32],
+        op_nonce: u64,
+        op_expiry: u32,
         depositor_witness: DescriptorWitness,
         memo: Option<String>,
     ) -> Result<WithdrawalLockResult, Error> {
         let current_block = self.wallet.get_block_height()?;
 
-        // Compute withdrawal ID
-        let signing_message = OnChainWithdrawal::signing_message(
-            &nonce,
-            &deposit_id,
-            &destination_address,
-            amount_sats,
-            fee_sats,
-        );
-        let withdrawal_id = OnChainWithdrawal::compute_withdrawal_id(&signing_message);
+        // Phase 5d: withdrawal_id and op_nonce / op_expiry come from the wallet's
+        // signed request. The dep-17 operation preimage binds all three, so the
+        // operator uses what the wallet picked rather than deriving its own.
 
-        // Clone witness for use in OnchainLock operation
+        // The pre-Phase-5d `nonce` field on OnChainWithdrawal carried the wallet's
+        // 32-byte random nonce; under the new flow the wallet picks withdrawal_id
+        // directly, so we record the withdrawal_id there too for now (the field is
+        // not authoritative — withdrawal_id is the canonical identifier).
         let witness_for_lock = depositor_witness.clone();
-
-        // Create the withdrawal
         let withdrawal = OnChainWithdrawal {
             withdrawal_id,
-            nonce,
+            nonce: withdrawal_id,
             deposit_id,
             destination_address: destination_address.clone(),
             amount_sats,
@@ -875,14 +872,8 @@ impl Node {
             depositor_witness,
         };
 
-        // Note: Signature verification is skipped here because process_withdraw_request
-        // already verified the Schnorr signature. The deposits_core verification expects
-        // ECDSA with a different message format, which doesn't match the Nostr request flow.
-        // TODO: Unify signature formats between Nostr requests and lock_withdrawal
-
-        // Pre-validate; also pick up the deposit's current replay nonce so we
-        // can sign a strictly-increasing one for this op (phase 3).
-        let (previous_balance, op_nonce) = {
+        // Pre-validate balance.
+        let previous_balance = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
                 .get(ledger_id)
@@ -904,7 +895,7 @@ impl Node {
                 )));
             }
 
-            (deposit.balance, deposits_core::signing::fresh_op_nonce())
+            deposit.balance
         };
 
         let operation = LedgerOperation::OnchainLock {
@@ -914,10 +905,7 @@ impl Node {
             destination_address: destination_address.clone(),
             withdrawal_id,
             nonce: op_nonce,
-            // expiry: u32::MAX is the inert default — the protocol's check_conformance
-            // doesn't yet enforce expiry-vs-chain-tip (phase 3-followup), but the field
-            // is bound into the signature preimage so a future enforcer is sound.
-            expiry: u32::MAX,
+            expiry: op_expiry,
             witness: witness_for_lock,
         };
 

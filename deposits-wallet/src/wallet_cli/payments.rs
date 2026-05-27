@@ -104,25 +104,31 @@ pub async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let mut deposit_id = [0u8; 16];
     deposit_id.copy_from_slice(&deposit_id_bytes);
 
-    // Generate nonce (becomes withdrawal_id when hashed)
+    // Phase 5d: pick withdrawal_id directly (random); pick op_nonce / op_expiry for
+    // the dep-17 preimage; sign through sign_op. The withdrawal_id is part of the
+    // dep-17 args, so the wallet's choice flows into the signature — the operator
+    // uses what the wallet picks without re-deriving.
     let mut rng = OsRng;
-    let mut nonce = [0u8; 32];
-    rng.fill_bytes(&mut nonce);
+    let mut withdrawal_id = [0u8; 32];
+    rng.fill_bytes(&mut withdrawal_id);
+    let op_nonce = deposits_core::signing::fresh_op_nonce();
+    let op_expiry: u32 = u32::MAX; // TODO: chain_tip + margin
 
-    // Sign the WITHDRAWAL message (nonce, deposit_id, address, amount, fee).
-    // For pk(...) descriptors the witness is a single Schnorr sig; multi(...)
-    // would push N sigs in stack order.
-    let msg_hash = deposits_core::signature_utils::withdrawal_signing_message(
-        &nonce,
-        &deposit_id,
-        &destination,
-        amount_sats,
+    let proto = deposits_core::messages::LedgerOperation::OnchainLock {
+        deposit_id,
+        amount: amount_sats * 1000, // operator stores msats; preimage binds the msats value
         fee_sats,
-    );
-    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
-    let signature = secp.sign_schnorr(&msg, &keypair);
-    let witness = deposits_core::types::DescriptorWitness {
-        stack: vec![signature.serialize().to_vec()],
+        destination_address: destination.clone(),
+        withdrawal_id,
+        nonce: op_nonce,
+        expiry: op_expiry,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    let signed = deposits_core::signing::sign_op(proto, &keypair.secret_key())
+        .ok_or("OnchainLock failed to sign — translation returned None")?;
+    let witness = match &signed {
+        deposits_core::messages::LedgerOperation::OnchainLock { witness, .. } => witness.clone(),
+        _ => unreachable!("sign_op preserved the variant"),
     };
 
     println!("Withdrawal Request");
@@ -144,7 +150,9 @@ pub async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         "address": destination,
         "amount_sats": amount_sats,
         "fee_sats": fee_sats,
-        "nonce": hex::encode(nonce),
+        "withdrawal_id": hex::encode(withdrawal_id),
+        "nonce": op_nonce,
+        "expiry": op_expiry,
         "witness": witness,
     });
 
@@ -1275,18 +1283,31 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     let mut deposit_id = [0u8; 16];
     deposit_id.copy_from_slice(&deposit_id_bytes);
 
-    // Sign the INVOICE message (deposit_id, payment_hash, amount). The
-    // witness is whatever satisfies the descriptor — for pk(...) it's
-    // a single Schnorr sig on the message hash.
-    let msg_hash = deposits_core::signature_utils::invoice_lock_signing_message(
-        &deposit_id,
-        &payment_hash_bytes,
-        amount_msats,
-    );
-    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
-    let signature = secp.sign_schnorr(&msg, &keypair);
-    let witness = deposits_core::types::DescriptorWitness {
-        stack: vec![signature.serialize().to_vec()],
+    // Phase 5d: sign the dep-17 operation preimage (not the legacy
+    // invoice_lock_signing_message). The wallet picks `nonce` (timestamp-derived;
+    // any unique-within-window value works under the seen_nonces replay rule) and
+    // `expiry` (chain-tip + margin; sender currently picks a far-future placeholder
+    // since the wallet doesn't yet plumb chain-tip access — TODO: thread chain-tip
+    // and pick `tip + 144` once the wallet wraps a sync source).
+    //
+    // The witness ends up being whatever satisfies the descriptor — for pk(...)
+    // it's a single Schnorr sig over the dep-17 sighash.
+    let op_nonce = deposits_core::signing::fresh_op_nonce();
+    let op_expiry: u32 = u32::MAX; // TODO: chain_tip + margin
+    let proto = deposits_core::messages::LedgerOperation::InvoiceLock {
+        deposit_id,
+        amount: amount_msats,
+        payment_id: payment_hash_bytes,
+        sequence_number: 0, // operator picks; not bound by dep-17 preimage
+        nonce: op_nonce,
+        expiry: op_expiry,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    let signed = deposits_core::signing::sign_op(proto, &keypair.secret_key())
+        .ok_or("InvoiceLock failed to sign — translation returned None")?;
+    let witness = match &signed {
+        deposits_core::messages::LedgerOperation::InvoiceLock { witness, .. } => witness.clone(),
+        _ => unreachable!("sign_op preserved the variant"),
     };
 
     let transport = NostrTransportBuilder::new(nostr_key)
@@ -1299,6 +1320,8 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         "invoice": invoice,
         "payment_hash": hex::encode(payment_hash_bytes),
         "amount_msats": amount_msats,
+        "nonce": op_nonce,
+        "expiry": op_expiry,
         "witness": witness,
     });
 
