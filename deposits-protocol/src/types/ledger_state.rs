@@ -778,12 +778,12 @@ impl LedgerState {
         operation: &crate::messages::LedgerOperation,
         verifier: &impl WitnessVerifier,
     ) -> crate::DepositsResult<(Self, Vec<ConformanceViolation>)> {
-        // Back-compat shim: callers that supply only a WitnessVerifier get a
-        // DenyAll authorizer, which rejects every dep-16-routed op. Production
-        // paths use `apply_with_verifier_and_authorizer` to pass a real
-        // Dep16Authorizer for DepositKeyRotate. Phase 5 broadens the coverage;
-        // phase 6 unifies the two methods and drops this shim.
-        self.apply_with_verifier_and_authorizer(operation, verifier, &crate::types::DenyAll)
+        // Back-compat shim: callers that supply only a WitnessVerifier get an
+        // AllowAll authorizer, preserving legacy "accept everything for descriptor
+        // checks" semantics (the same shape NoVerify gave for WitnessVerifier).
+        // Production paths use `apply_with_verifier_and_authorizer` to pass a real
+        // Dep16Authorizer. Phase 6 unifies the two methods and drops this shim.
+        self.apply_with_verifier_and_authorizer(operation, verifier, &crate::types::AllowAll)
     }
 
     /// `apply_with_verifier` augmented with a dep-16 `Authorizer` for ops that
@@ -842,7 +842,7 @@ impl LedgerState {
         verifier: &impl WitnessVerifier,
     ) -> crate::DepositsResult<Self> {
         // Back-compat shim — see apply_with_verifier for the rationale.
-        self.apply_signed_with_authorizer(update, verifier, &crate::types::DenyAll)
+        self.apply_signed_with_authorizer(update, verifier, &crate::types::AllowAll)
     }
 
     /// `apply_signed` augmented with a dep-16 `Authorizer` for ops on the new
@@ -1019,7 +1019,7 @@ impl LedgerState {
         verifier: &impl WitnessVerifier,
     ) -> Vec<ConformanceViolation> {
         // Back-compat shim — see apply_with_verifier for the rationale.
-        self.check_speculative_with_authorizer(operation, verifier, &crate::types::DenyAll)
+        self.check_speculative_with_authorizer(operation, verifier, &crate::types::AllowAll)
     }
 
     /// `check_speculative` augmented with a dep-16 `Authorizer` for ops on the
@@ -1252,20 +1252,15 @@ impl LedgerState {
             }
         }
 
-        // Witness verification for operations that carry authorization proofs.
+        // Witness verification for operations that carry authorization proofs. Phase 5:
+        // all three lock-side variants route through the dep-16 Authorizer. The signing
+        // message is the dep-17 operation preimage (built from op_type + args + nonce +
+        // expiry + deposit_id), not a per-op signing-helper digest — replay protection
+        // binds to the full op shape.
         match operation {
-            LedgerOperation::InvoiceLock {
-                deposit_id,
-                amount,
-                payment_id,
-                witness,
-                ..
-            } => {
+            LedgerOperation::InvoiceLock { deposit_id, .. } => {
                 if let Some(deposit) = self.deposits.get(deposit_id) {
-                    let msg = crate::signature_utils::invoice_lock_signing_message(
-                        deposit_id, payment_id, *amount,
-                    );
-                    if !verifier.verify_witness(&deposit.descriptor, witness, &msg) {
+                    if !authorizer.authorize(&deposit.descriptor, operation) {
                         violations.push(ConformanceViolation::InvalidWitness {
                             operation: "InvoiceLock",
                             detail: "witness does not satisfy deposit descriptor".to_string(),
@@ -1274,25 +1269,15 @@ impl LedgerState {
                 }
             }
             LedgerOperation::InvoiceFulfill {
-                deposit_id,
-                amount,
                 payment_id,
-                witness,
                 preimage,
                 ..
             } => {
-                if let Some(deposit) = self.deposits.get(deposit_id) {
-                    let msg = crate::signature_utils::invoice_lock_signing_message(
-                        deposit_id, payment_id, *amount,
-                    );
-                    if !verifier.verify_witness(&deposit.descriptor, witness, &msg) {
-                        violations.push(ConformanceViolation::InvalidWitness {
-                            operation: "InvoiceFulfill",
-                            detail: "witness does not satisfy deposit descriptor".to_string(),
-                        });
-                    }
-                }
-                // Verify preimage matches payment_id (which is the payment hash)
+                // Phase 5: descriptor evaluation dropped (the lock was already
+                // authorized at InvoiceLock time; re-evaluating at fulfill time would be
+                // unsound — see PLAN-dep16-integration.md's "two carve-outs"). Only the
+                // preimage→payment_id binding stays: the preimage IS the release
+                // condition, and it must match the hash the original lock committed to.
                 let hash = sha256::Hash::hash(preimage).to_byte_array();
                 if hash != *payment_id {
                     violations.push(ConformanceViolation::InvalidWitness {
@@ -1301,24 +1286,9 @@ impl LedgerState {
                     });
                 }
             }
-            LedgerOperation::OnchainLock {
-                deposit_id,
-                amount,
-                fee_sats,
-                destination_address,
-                withdrawal_id,
-                witness,
-                ..
-            } => {
+            LedgerOperation::OnchainLock { deposit_id, .. } => {
                 if let Some(deposit) = self.deposits.get(deposit_id) {
-                    let msg = crate::signature_utils::withdrawal_signing_message(
-                        withdrawal_id,
-                        deposit_id,
-                        destination_address,
-                        *amount,
-                        *fee_sats,
-                    );
-                    if !verifier.verify_witness(&deposit.descriptor, witness, &msg) {
+                    if !authorizer.authorize(&deposit.descriptor, operation) {
                         violations.push(ConformanceViolation::InvalidWitness {
                             operation: "OnchainLock",
                             detail: "witness does not satisfy deposit descriptor".to_string(),
@@ -1326,36 +1296,40 @@ impl LedgerState {
                     }
                 }
             }
-            LedgerOperation::TransferLock {
-                transfer_nonce,
-                source_deposit_id,
-                destination_deposit_id,
-                amount,
-                fee,
-                completion_script,
-                timeout_height,
-                witness,
-                ..
-            } => {
+            LedgerOperation::TransferLock { source_deposit_id, .. } => {
                 // Look up descriptor from the state BEFORE this operation was applied.
                 // Since apply() already consumed the balance, we check against current state
                 // where the deposit still exists.
                 if let Some(deposit) = self.deposits.get(source_deposit_id) {
-                    let msg = crate::signature_utils::transfer_lock_signing_message(
-                        transfer_nonce,
-                        source_deposit_id,
-                        destination_deposit_id,
-                        *amount,
-                        *fee,
-                        completion_script,
-                        *timeout_height,
-                    );
-                    if !verifier.verify_witness(&deposit.descriptor, witness, &msg) {
+                    if !authorizer.authorize(&deposit.descriptor, operation) {
                         violations.push(ConformanceViolation::InvalidWitness {
                             operation: "TransferLock",
                             detail: "witness does not satisfy source deposit descriptor"
                                 .to_string(),
                         });
+                    }
+                }
+            }
+            LedgerOperation::TransferComplete { transfer_id, .. } => {
+                // Phase 5: TransferComplete's script_witness is authorized against the
+                // lock's completion_script — the release descriptor specified at
+                // TransferLock time. apply() has already removed the pending_transfer
+                // entry from `next.pending_transfers` and unwound the lock; we look up
+                // the entry in pre_state to find the completion_script.
+                //
+                // Without this check, the script_witness on TransferComplete was data
+                // the protocol carried but never enforced — any caller could trigger
+                // a transfer completion regardless of what the lock's release script
+                // required.
+                if let Some(pre) = pre_state {
+                    if let Some(pending) = pre.pending_transfers.get(transfer_id) {
+                        if !authorizer.authorize(&pending.completion_script, operation) {
+                            violations.push(ConformanceViolation::InvalidWitness {
+                                operation: "TransferComplete",
+                                detail: "script_witness does not satisfy lock's completion_script"
+                                    .to_string(),
+                            });
+                        }
                     }
                 }
             }

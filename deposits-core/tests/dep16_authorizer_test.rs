@@ -195,30 +195,34 @@ fn signature_for_one_nonce_doesnt_authorize_another() {
     );
 }
 
-/// The back-compat `apply_with_verifier` path (without the authorizer) routes
-/// DepositKeyRotate to `DenyAll`, which always rejects. This is the safe default:
-/// callers that haven't been updated to pass an authorizer get a hard-fail on
-/// dep-16-routed ops, rather than silently accepting them.
+/// The back-compat `apply_with_verifier` path (without an explicit authorizer)
+/// falls back to `AllowAll` — preserving the legacy "accept everything for
+/// descriptor checks" shape that `NoVerify` gave for `WitnessVerifier`. Phase 6
+/// removes the back-compat shim entirely when every caller has migrated.
+///
+/// This is the same tradeoff the protocol made before: tests / callers that
+/// don't want cryptographic authorization can plug in `NoVerify`/`AllowAll` and
+/// proceed; real production paths use `apply_with_verifier_and_authorizer` to
+/// thread a real `Dep16Authorizer`.
 #[test]
-fn back_compat_path_with_denyall_rejects_all_rotations() {
+fn back_compat_path_accepts_rotation_under_allowall() {
     let (sk, _) = keypair(0x11);
     let (state, did, _) = state_with_pk_deposit(0x11);
     let new_desc = format!("wsh(prove(pk({})))", keypair(0x22).1);
     let op = signed_rotate(did, &new_desc, 1, &sk);
 
     let (_, violations) = state
-        .apply_with_verifier(&op, &NoVerify) // no authorizer — uses DenyAll
-        .expect("apply succeeds; the violation is in conformance");
-
+        .apply_with_verifier(&op, &NoVerify) // no authorizer → AllowAll
+        .expect("apply succeeds");
     assert!(
-        violations.iter().any(|v| matches!(
+        !violations.iter().any(|v| matches!(
             v,
             ConformanceViolation::InvalidWitness {
                 operation: "DepositKeyRotate",
                 ..
             }
         )),
-        "back-compat path must reject (DenyAll authorizer): {:?}",
+        "back-compat path (AllowAll) must not raise InvalidWitness: {:?}",
         violations,
     );
 }

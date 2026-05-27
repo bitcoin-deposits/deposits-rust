@@ -184,19 +184,38 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
             expiry: *expiry,
         }),
 
+        // ----- transfer release -----------------------------------------------------------
+        // TransferComplete authorizes against the lock's completion_script (the release
+        // descriptor specified at TransferLock time), not the primary deposit descriptor.
+        // The dep-16 Operation here carries the transfer_id (so the lock's completion_script
+        // is the right thing to look up) plus the script_witness's own evidence. The
+        // conformance check in deposits-protocol pulls the completion_script from
+        // pre_state.pending_transfers and feeds (descriptor, this Operation) to the
+        // Authorizer. No nonce / expiry — TransferComplete is identified by transfer_id;
+        // replay is prevented by the lock being removed from pending_transfers on apply.
+        LedgerOperation::TransferComplete { transfer_id, .. } => Some(OperationData {
+            op_type: Symbol::new("transfer_release"),
+            args: {
+                let mut a = BTreeMap::new();
+                a.insert("transfer_id".to_string(), Value::Bytes(transfer_id.to_vec()));
+                a
+            },
+            // The deposit_id binding for TransferComplete is the transfer_id (which is what
+            // distinguishes this release across the operator's pending transfers); we put
+            // the transfer_id bytes into the deposit_id slot for replay-domain separation.
+            deposit_id: *transfer_id,
+            nonce: 0,
+            expiry: u32::MAX,
+        }),
+
         // ----- no descriptor evaluation ----------------------------------------------------
         // Operator-side fulfillment of locks. Authorization for the *lock* already ran (against
         // the source deposit's descriptor); the fulfill is just the operator confirming the
-        // lock's release condition was met (preimage for invoice, on-chain confirmation for
-        // onchain). Re-evaluating the deposit's descriptor at fulfill time is unsound — see
-        // PLAN's "two carve-outs" subsection.
+        // lock's release condition was met (preimage for invoice, chain-watcher confirmation
+        // for onchain). Re-evaluating the deposit's descriptor at fulfill time is unsound —
+        // see PLAN's "two carve-outs" subsection.
         LedgerOperation::InvoiceFulfill { .. } => None,
         LedgerOperation::OnchainFulfill { .. } => None,
-        // TODO phase 5: TransferComplete authorizes via the lock's release_descriptor, not the
-        // primary deposit descriptor. Once TransferLock carries that field, this variant gets
-        // its own evaluation path (similar shape to to_dep16 but reads the release descriptor
-        // from the lock record on the protocol side rather than from any one operation).
-        LedgerOperation::TransferComplete { .. } => None,
 
         // All other variants — ledger establishment, quorum management, fee bookkeeping,
         // disputes, credits, fails — don't go through descriptor evaluation in v1. They have
@@ -342,8 +361,10 @@ mod tests {
         ));
     }
 
-    /// Fulfill variants and TransferComplete don't go through descriptor evaluation. Mapping
-    /// returns `None`; the caller doesn't have an operation to evaluate against.
+    /// Fulfill variants (InvoiceFulfill, OnchainFulfill) don't go through descriptor
+    /// evaluation. Mapping returns `None`; the caller doesn't have an operation to
+    /// evaluate against. (`TransferComplete` maps differently — it has its own release
+    /// descriptor — and is covered by `transfer_complete_maps_to_transfer_release`.)
     #[test]
     fn fulfill_variants_skip_descriptor_evaluation() {
         let invoice_fulfill = LedgerOperation::InvoiceFulfill {
@@ -354,8 +375,6 @@ mod tests {
             preimage: [0xff; 32],
             witness: DescriptorWitness::new(),
         };
-        // InvoiceFulfill doesn't carry nonce/expiry — fulfillment is preimage-driven, not
-        // signature-over-operation-preimage. The variant has no nonce/expiry fields to set.
         assert!(to_dep16(&invoice_fulfill).is_none());
 
         let onchain_fulfill = LedgerOperation::OnchainFulfill {
@@ -366,12 +385,24 @@ mod tests {
             destination_address: "bc1qexample".to_string(),
         };
         assert!(to_dep16(&onchain_fulfill).is_none());
+    }
 
-        let transfer_complete = LedgerOperation::TransferComplete {
+    /// `TransferComplete` translates to a `transfer_release` op so the lock's
+    /// `completion_script` (the release descriptor specified at lock time) can be
+    /// evaluated against the operation. The deposit_id slot carries the transfer_id —
+    /// it's what distinguishes which release this is across pending transfers, and
+    /// gives the dep-17 preimage the domain separation `deposit_id` provides for the
+    /// other variants.
+    #[test]
+    fn transfer_complete_maps_to_transfer_release() {
+        let op = LedgerOperation::TransferComplete {
             transfer_id: [0x42; 32],
             script_witness: DescriptorWitness::new(),
         };
-        assert!(to_dep16(&transfer_complete).is_none());
+        let d = to_dep16(&op).expect("descriptor-evaluated");
+        assert_eq!(d.op_type.as_str(), "transfer_release");
+        assert_eq!(d.args["transfer_id"], Value::Bytes(vec![0x42; 32]));
+        assert_eq!(d.deposit_id, [0x42; 32]);
     }
 
     /// Administrative ops (no descriptor evaluation) translate to `None`. Spot-check
