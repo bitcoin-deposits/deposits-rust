@@ -769,28 +769,15 @@ impl LedgerState {
         Ok(next)
     }
 
-    /// Apply an operation and check conformance using the given verifier.
+    /// Apply an operation and check conformance.
     ///
     /// Returns the new state and any conformance violations. The state is
     /// always returned (even if non-conforming) so watchers can track
-    /// misbehaving operators.
+    /// misbehaving operators. `current_height` drives the expiry check
+    /// (`op.expiry < current_height` is rejected) and the seen_nonces GC
+    /// (entries whose `expiry < current_height` are dropped before the
+    /// uniqueness check).
     pub fn apply_with_verifier(
-        &self,
-        operation: &crate::messages::LedgerOperation,
-        verifier: &impl WitnessVerifier,
-    ) -> crate::DepositsResult<(Self, Vec<ConformanceViolation>)> {
-        // Back-compat shim. current_height = 0 means the expiry check trivially passes
-        // for any op whose expiry is ≥ 0 (always true for u32); seen_nonces GC keeps
-        // every entry. Callers that need real expiry / nonce-window enforcement use
-        // apply_with_verifier_and_authorizer with a chain-tip height.
-        self.apply_with_verifier_and_authorizer(operation, verifier, &crate::types::AllowAll, 0)
-    }
-
-    /// `apply_with_verifier` augmented with a dep-16 `Authorizer` and a chain-tip
-    /// height. The chain-tip drives the expiry check (`op.expiry < current_height`
-    /// is rejected) and the seen_nonces GC (entries whose `expiry < current_height`
-    /// are dropped before the uniqueness check).
-    pub fn apply_with_verifier_and_authorizer(
         &self,
         operation: &crate::messages::LedgerOperation,
         verifier: &impl WitnessVerifier,
@@ -840,18 +827,6 @@ impl LedgerState {
     ///    can't publish under a `#d` tag that doesn't match their
     ///    declared operator+reserves+genesis_block tuple.
     pub fn apply_signed(
-        &self,
-        update: &crate::types::SignedLedgerUpdate,
-        verifier: &impl WitnessVerifier,
-    ) -> crate::DepositsResult<Self> {
-        // Back-compat shim — see apply_with_verifier for the rationale.
-        self.apply_signed_with_authorizer(update, verifier, &crate::types::AllowAll)
-    }
-
-    /// `apply_signed` augmented with a dep-16 `Authorizer` for ops on the new
-    /// path. Production write paths in `deposits-node` use this directly so
-    /// `DepositKeyRotate` routes through the dep-16 authorization.
-    pub fn apply_signed_with_authorizer(
         &self,
         update: &crate::types::SignedLedgerUpdate,
         verifier: &impl WitnessVerifier,
@@ -981,12 +956,8 @@ impl LedgerState {
                 details: format!("{:?}", e),
             }
         })?;
-        let (mut next, violations) = self.apply_with_verifier_and_authorizer(
-            &op,
-            verifier,
-            authorizer,
-            update.block_height,
-        )?;
+        let (mut next, violations) =
+            self.apply_with_verifier(&op, verifier, authorizer, update.block_height)?;
         if let Some(v) = violations.first() {
             return Err(crate::DepositsError::ProtocolViolation {
                 violation_type: "conformance".to_string(),
@@ -1021,17 +992,6 @@ impl LedgerState {
     /// as a violation: state-machine errors (invalid transitions) get
     /// wrapped into a `ConformanceViolation::StateMachineRejected`.
     pub fn check_speculative(
-        &self,
-        operation: &crate::messages::LedgerOperation,
-        verifier: &impl WitnessVerifier,
-    ) -> Vec<ConformanceViolation> {
-        // Back-compat shim — see apply_with_verifier for the rationale.
-        self.check_speculative_with_authorizer(operation, verifier, &crate::types::AllowAll, 0)
-    }
-
-    /// `check_speculative` augmented with a dep-16 `Authorizer` and a chain-tip
-    /// height (for expiry / seen_nonces GC). See `apply_with_verifier_and_authorizer`.
-    pub fn check_speculative_with_authorizer(
         &self,
         operation: &crate::messages::LedgerOperation,
         verifier: &impl WitnessVerifier,
@@ -1499,7 +1459,7 @@ mod replay_protection_tests {
         current_height: u32,
     ) -> (LedgerState, Vec<ConformanceViolation>) {
         state
-            .apply_with_verifier_and_authorizer(op, &NoVerify, &AllowAuthorizer, current_height)
+            .apply_with_verifier(op, &NoVerify, &AllowAuthorizer, current_height)
             .expect("apply")
     }
 

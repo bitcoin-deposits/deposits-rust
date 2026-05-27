@@ -633,19 +633,21 @@ impl Node {
     }
 
     /// Lock funds for an outgoing Lightning invoice payment, with co-signing and broadcast.
+    ///
+    /// `op_nonce` / `op_expiry` are the dep-17 replay-protection fields the caller
+    /// has already signed over via `sign_op`. Callers must produce the witness over
+    /// the operation preimage that includes the same nonce/expiry.
     pub async fn lock_invoice_payment(
         &self,
         ledger_id: &str,
         deposit_id: DepositId,
         amount_msats: u64,
         payment_id: [u8; 32],
+        op_nonce: u64,
+        op_expiry: u32,
         witness: DescriptorWitness,
     ) -> Result<u64, Error> {
-        // Pre-validate; read sequence number (ledger-position bookkeeping) and the
-        // deposit's per-deposit replay nonce. The two are distinct fields:
-        // sequence_number indexes the lock in the invoice flow; nonce satisfies the
-        // dep-16 monotonic-per-deposit replay check (phase 3).
-        let (sequence_number, op_nonce) = {
+        let sequence_number = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = ledgers
                 .get(ledger_id)
@@ -667,7 +669,7 @@ impl Node {
                 )));
             }
 
-            (ledger.sequence() + 1, deposits_core::signing::fresh_op_nonce())
+            ledger.sequence() + 1
         };
 
         let operation = LedgerOperation::InvoiceLock {
@@ -676,7 +678,7 @@ impl Node {
             payment_id,
             sequence_number,
             nonce: op_nonce,
-            expiry: u32::MAX,
+            expiry: op_expiry,
             witness,
         };
 

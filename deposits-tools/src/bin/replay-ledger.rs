@@ -564,7 +564,8 @@ fn replay_chain(
                 // own — descriptor after(N) checks resolve unsatisfiable.
                 let verifier =
                     deposits_core::descriptor::CoreWitnessVerifier::new(0);
-                match state.apply_signed(update, &verifier) {
+                let authorizer = deposits_core::dep16::Dep16Authorizer::new();
+                match state.apply_signed(update, &verifier, &authorizer) {
                     Ok(next) => {
                         state = next;
                     }

@@ -255,47 +255,52 @@ impl Node {
         OsRng.fill_bytes(&mut preimage);
         let payment_id = sha256::Hash::hash(&preimage).to_byte_array();
 
-        // Sign the lock authorization against the protocol-level
-        // digest `SHA256("INVOICE:<deposit_id>:<payment_hash>:<amount>")`
-        // (see deposits_protocol::signature_utils::invoice_lock_signing_message).
-        // The deposits-core `create_payment_signature` helper signs a
-        // DIFFERENT shape (pubkey || payment_id || amount) that the
-        // validator rejects — don't use it here.
-        //
-        // Routes through the signer with KeyPath::Deposit { index } so
-        // RemoteSigner deployments don't need the master seed for these
-        // internal-deposit lock/fulfill flows. Daemon configured with
-        // LocalSigner::from_xpriv (signer-backed cluster bring-up) or
-        // a remote `deposits-signer` will both serve this path.
-        let msg_digest = deposits_core::signature_utils::invoice_lock_signing_message(
-            &deposit_id, &payment_id, amount_msats,
-        );
+        // Sign the dep-17 operation preimage for InvoiceLock. The signer
+        // path covers RemoteSigner deployments that don't have the seed
+        // locally; we hash the preimage here and ask the signer for a
+        // Schnorr sig over it.
+        let op_nonce = deposits_core::signing::fresh_op_nonce();
+        let op_expiry = u32::MAX;
+        let lock_proto = deposits_core::messages::LedgerOperation::InvoiceLock {
+            deposit_id,
+            amount: amount_msats,
+            payment_id,
+            sequence_number: 0,
+            nonce: op_nonce,
+            expiry: op_expiry,
+            witness: deposits_core::types::DescriptorWitness::new(),
+        };
+        let lock_preimage = match deposits_core::dep16::operations::operation_sighash(&lock_proto)
+        {
+            Some(h) => h,
+            None => return (false, None, Some("dep-16 lock sighash failed".into())),
+        };
         let lock_ctx = deposits_signer_api::SignContext::deposit(
             index as u32,
             deposits_signer_api::SigPurpose::PaymentAuthorization,
         );
-        let lock_sig = match self.handler.signer.bip340_sign(&lock_ctx, &msg_digest) {
+        let lock_sig = match self.handler.signer.bip340_sign(&lock_ctx, &lock_preimage) {
             Ok(s) => s,
             Err(e) => return (false, None, Some(format!("lock sign: {}", e))),
         };
         let lock_witness = deposits_core::types::DescriptorWitness {
             stack: vec![lock_sig.to_vec()],
         };
-        // Fulfill uses the same signing message (same deposit, payment_id, amount).
-        let fulfill_ctx = deposits_signer_api::SignContext::deposit(
-            index as u32,
-            deposits_signer_api::SigPurpose::Payment,
-        );
-        let fulfill_sig = match self.handler.signer.bip340_sign(&fulfill_ctx, &msg_digest) {
-            Ok(s) => s,
-            Err(e) => return (false, None, Some(format!("fulfill sign: {}", e))),
-        };
-        let fulfill_witness = deposits_core::types::DescriptorWitness {
-            stack: vec![fulfill_sig.to_vec()],
-        };
+        // Fulfill carries the same witness shape: signature over the lock's
+        // dep-17 preimage. Conformance re-verifies it on fulfill — no
+        // second signature needed.
+        let fulfill_witness = lock_witness.clone();
 
         if let Err(e) = self
-            .lock_invoice_payment(&entry.ledger_id, deposit_id, amount_msats, payment_id, lock_witness)
+            .lock_invoice_payment(
+                &entry.ledger_id,
+                deposit_id,
+                amount_msats,
+                payment_id,
+                op_nonce,
+                op_expiry,
+                lock_witness,
+            )
             .await
         {
             return (false, None, Some(format!("lock: {}", e)));

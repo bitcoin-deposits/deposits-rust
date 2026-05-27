@@ -70,27 +70,37 @@ async fn submit_transfer_lock(
     use bitcoin::secp256k1::rand::rngs::OsRng;
     use bitcoin::secp256k1::rand::RngCore;
 
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, source_sk);
+    let mut transfer_nonce = [0u8; 32];
+    OsRng.fill_bytes(&mut transfer_nonce);
+    let mut transfer_id = [0u8; 32];
+    OsRng.fill_bytes(&mut transfer_id);
 
-    let mut nonce = [0u8; 32];
-    OsRng.fill_bytes(&mut nonce);
-
-    let msg_hash = transfer_lock_signing_message(
-        &nonce,
-        &source_deposit_id,
-        &dest_deposit_id,
-        amount_msats,
-        operator_fee_msats,
-        completion_script,
+    let op_nonce = deposits_core::signing::fresh_op_nonce();
+    let op_expiry = u32::MAX; // TODO: tighter window via chain_tip + margin
+    let proto = deposits_core::messages::LedgerOperation::TransferLock {
+        transfer_nonce,
+        source_deposit_id,
+        destination_deposit_id: dest_deposit_id,
+        amount: amount_msats,
+        fee: operator_fee_msats,
+        completion_script: completion_script.to_string(),
         timeout_height,
-    );
-    let transfer_id = compute_transfer_id(&msg_hash);
-    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
-    let signature = secp.sign_schnorr(&msg, &keypair);
+        transfer_id,
+        nonce: op_nonce,
+        expiry: op_expiry,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    let signed = deposits_core::signing::sign_op(proto, source_sk)
+        .ok_or("sign_op failed: unsignable variant")?;
+    let signature_bytes = match &signed {
+        deposits_core::messages::LedgerOperation::TransferLock { witness, .. } => {
+            witness.stack[0].clone()
+        }
+        _ => unreachable!("sign_op preserves variant"),
+    };
 
     let params = serde_json::json!({
-        "nonce": hex::encode(nonce),
+        "transfer_nonce": hex::encode(transfer_nonce),
         "source_deposit_id": hex::encode(source_deposit_id),
         "destination_deposit_id": hex::encode(dest_deposit_id),
         "amount": amount_msats,
@@ -98,7 +108,9 @@ async fn submit_transfer_lock(
         "completion_script": completion_script,
         "timeout_height": timeout_height,
         "transfer_id": hex::encode(transfer_id),
-        "signature": hex::encode(signature.serialize()),
+        "op_nonce": op_nonce,
+        "op_expiry": op_expiry,
+        "signature": hex::encode(&signature_bytes),
     });
 
     let req_id = transport

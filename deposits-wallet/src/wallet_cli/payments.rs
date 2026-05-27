@@ -316,10 +316,13 @@ pub async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let descriptor = format!("pk({})", hex::encode(our_pubkey.serialize()));
     let source_id = deposits_core::types::compute_deposit_id(&descriptor);
 
-    // Generate nonce
+    // Generate transfer_nonce (32-byte channel identifier) and transfer_id
+    // (32-byte application-layer identifier). Both are wallet-picked random.
     let mut rng = OsRng;
-    let mut nonce = [0u8; 32];
-    rng.fill_bytes(&mut nonce);
+    let mut transfer_nonce = [0u8; 32];
+    rng.fill_bytes(&mut transfer_nonce);
+    let mut transfer_id = [0u8; 32];
+    rng.fill_bytes(&mut transfer_id);
 
     // Convert to msats for signing and request
     let amount_msats = amount_sats * 1000;
@@ -336,21 +339,33 @@ pub async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Er
         }
     };
 
-    // Compute signing message and transfer_id (all in msats)
-    let msg_hash = deposits_core::signature_utils::transfer_lock_signing_message(
-        &nonce,
-        &source_id,
-        &dest_id,
-        amount_msats,
-        fee_msats,
-        &completion_script,
+    // Build a proto TransferLock op (empty witness) and sign over the dep-17
+    // operation preimage via `sign_op`. The operator binds the same preimage
+    // when it stages the op, so the witness here authorizes the exact
+    // operation that will land in the ledger.
+    let op_nonce = deposits_core::signing::fresh_op_nonce();
+    let op_expiry = u32::MAX; // TODO: tighter window via chain_tip + margin
+    let proto = deposits_core::messages::LedgerOperation::TransferLock {
+        transfer_nonce,
+        source_deposit_id: source_id,
+        destination_deposit_id: dest_id,
+        amount: amount_msats,
+        fee: fee_msats,
+        completion_script: completion_script.clone(),
         timeout_height,
-    );
-    let transfer_id = deposits_core::signature_utils::compute_transfer_id(&msg_hash);
-
-    // Sign
-    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
-    let signature = secp.sign_schnorr(&msg, &keypair);
+        transfer_id,
+        nonce: op_nonce,
+        expiry: op_expiry,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    let signed = deposits_core::signing::sign_op(proto, &secret_key)
+        .ok_or("sign_op failed: unsignable variant")?;
+    let signature_bytes = match &signed {
+        deposits_core::messages::LedgerOperation::TransferLock { witness, .. } => {
+            witness.stack[0].clone()
+        }
+        _ => unreachable!("sign_op preserves variant"),
+    };
 
     println!("Transfer Lock Request");
     println!("=====================");
@@ -384,7 +399,7 @@ pub async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Er
     transport.set_response_ledger_filter(vec![ledger_id.to_string()]);
 
     let request_params = serde_json::json!({
-        "nonce": hex::encode(nonce),
+        "transfer_nonce": hex::encode(transfer_nonce),
         "source_deposit_id": hex::encode(source_id),
         "destination_deposit_id": hex::encode(dest_id),
         "amount": amount_msats,
@@ -392,7 +407,9 @@ pub async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Er
         "completion_script": completion_script,
         "timeout_height": timeout_height,
         "transfer_id": hex::encode(transfer_id),
-        "signature": hex::encode(signature.serialize()),
+        "op_nonce": op_nonce,
+        "op_expiry": op_expiry,
+        "signature": hex::encode(&signature_bytes),
     });
 
     println!("Sending transfer lock request...");
@@ -773,24 +790,37 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
     };
 
     let completion_script = format!("sha256({})", hash_hex);
-    let mut nonce = [0u8; 32];
-    rng.fill_bytes(&mut nonce);
+    let mut transfer_nonce = [0u8; 32];
+    rng.fill_bytes(&mut transfer_nonce);
+    let mut transfer_id = [0u8; 32];
+    rng.fill_bytes(&mut transfer_id);
 
-    let msg_hash = transfer_lock_signing_message(
-        &nonce,
-        &from_deposit_id,
-        &dest_id,
-        amount_msats,
-        operator_fee,
-        &completion_script,
-        timeout,
-    );
-    let transfer_id = compute_transfer_id(&msg_hash);
-    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
-    let signature = secp.sign_schnorr(&msg, &from_keypair);
+    let op_nonce = deposits_core::signing::fresh_op_nonce();
+    let op_expiry = u32::MAX; // TODO: tighter window via chain_tip + margin
+    let proto = deposits_core::messages::LedgerOperation::TransferLock {
+        transfer_nonce,
+        source_deposit_id: from_deposit_id,
+        destination_deposit_id: dest_id,
+        amount: amount_msats,
+        fee: operator_fee,
+        completion_script: completion_script.clone(),
+        timeout_height: timeout,
+        transfer_id,
+        nonce: op_nonce,
+        expiry: op_expiry,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    let signed = deposits_core::signing::sign_op(proto, &from_secret)
+        .ok_or("sign_op failed: unsignable variant")?;
+    let signature_bytes = match &signed {
+        deposits_core::messages::LedgerOperation::TransferLock { witness, .. } => {
+            witness.stack[0].clone()
+        }
+        _ => unreachable!("sign_op preserves variant"),
+    };
 
     let lock_params = serde_json::json!({
-        "nonce": hex::encode(nonce),
+        "transfer_nonce": hex::encode(transfer_nonce),
         "source_deposit_id": hex::encode(from_deposit_id),
         "destination_deposit_id": courier_deposit_id_hex,
         "amount": amount_msats,
@@ -798,7 +828,9 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
         "completion_script": completion_script,
         "timeout_height": timeout,
         "transfer_id": hex::encode(transfer_id),
-        "signature": hex::encode(signature.serialize()),
+        "op_nonce": op_nonce,
+        "op_expiry": op_expiry,
+        "signature": hex::encode(&signature_bytes),
     });
 
     let lock_req_id = transport
@@ -1914,22 +1946,37 @@ pub async fn send(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .saturating_add(amount_msats.saturating_mul(default.rate_bps as u64) / 10_000)
     };
 
-    // Nonce + transfer_id signature.
-    let mut nonce = [0u8; 32];
-    OsRng.fill_bytes(&mut nonce);
+    // transfer_nonce (channel identifier) and transfer_id (application
+    // identifier) are wallet-picked random 32-byte values. The dep-17
+    // op_nonce / op_expiry are signed into the operation preimage by sign_op.
+    let mut transfer_nonce = [0u8; 32];
+    OsRng.fill_bytes(&mut transfer_nonce);
+    let mut transfer_id = [0u8; 32];
+    OsRng.fill_bytes(&mut transfer_id);
 
-    let msg_hash = transfer_lock_signing_message(
-        &nonce,
-        &source_id,
-        &dest_id,
-        amount_msats,
-        fee_msats,
-        &completion_script,
+    let op_nonce = deposits_core::signing::fresh_op_nonce();
+    let op_expiry = u32::MAX; // TODO: tighter window via chain_tip + margin
+    let proto = deposits_core::messages::LedgerOperation::TransferLock {
+        transfer_nonce,
+        source_deposit_id: source_id,
+        destination_deposit_id: dest_id,
+        amount: amount_msats,
+        fee: fee_msats,
+        completion_script: completion_script.clone(),
         timeout_height,
-    );
-    let transfer_id = compute_transfer_id(&msg_hash);
-    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
-    let signature = secp.sign_schnorr(&msg, &src_kp);
+        transfer_id,
+        nonce: op_nonce,
+        expiry: op_expiry,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    let signed = deposits_core::signing::sign_op(proto, &src_sk)
+        .ok_or("sign_op failed: unsignable variant")?;
+    let signature_bytes = match &signed {
+        deposits_core::messages::LedgerOperation::TransferLock { witness, .. } => {
+            witness.stack[0].clone()
+        }
+        _ => unreachable!("sign_op preserves variant"),
+    };
 
     println!("Send");
     println!("====");
@@ -1944,7 +1991,7 @@ pub async fn send(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     // ─── Phase 1: lock ───
     let lock_params = serde_json::json!({
-        "nonce": hex::encode(nonce),
+        "transfer_nonce": hex::encode(transfer_nonce),
         "source_deposit_id": hex::encode(source_id),
         "destination_deposit_id": hex::encode(dest_id),
         "amount": amount_msats,
@@ -1952,7 +1999,9 @@ pub async fn send(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "completion_script": completion_script,
         "timeout_height": timeout_height,
         "transfer_id": hex::encode(transfer_id),
-        "signature": hex::encode(signature.serialize()),
+        "op_nonce": op_nonce,
+        "op_expiry": op_expiry,
+        "signature": hex::encode(&signature_bytes),
     });
 
     println!("[1/2] Locking funds...");

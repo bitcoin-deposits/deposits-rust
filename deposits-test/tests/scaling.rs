@@ -78,6 +78,8 @@ fn scaling_reserve_backing() {
                     sequence_number: 99,
                 },
                 &NoVerify,
+                &deposits_protocol::types::AllowAll,
+                0,
             )
             .unwrap();
 
@@ -238,7 +240,12 @@ fn scaling_witness_verification() {
             .op(&names[0])
             .ledger
             .state
-            .apply_with_verifier(&bad_op, &CoreWitnessVerifier::new(0))
+            .apply_with_verifier(
+                &bad_op,
+                &CoreWitnessVerifier::new(0),
+                &deposits_core::dep16::Dep16Authorizer::new(),
+                0,
+            )
             .unwrap();
 
         let detected = !violations.is_empty();

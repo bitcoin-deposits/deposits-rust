@@ -55,6 +55,8 @@ fn invariant_e1_reserve_backing() {
                 sequence_number: 9,
             },
             &NoVerify,
+            &deposits_protocol::types::AllowAll,
+            0,
         )
         .unwrap();
 
@@ -276,7 +278,12 @@ fn invariant_c1_witness_validity() {
         },
     };
     let (_, good_violations) = state
-        .apply_with_verifier(&good_op, &CoreWitnessVerifier::new(0))
+        .apply_with_verifier(
+            &good_op,
+            &CoreWitnessVerifier::new(0),
+            &deposits_protocol::types::AllowAll,
+            0,
+        )
         .unwrap();
     assert!(good_violations.is_empty(), "C1: valid witness must pass");
 
@@ -294,7 +301,12 @@ fn invariant_c1_witness_validity() {
         },
     };
     let (_, bad_violations) = state
-        .apply_with_verifier(&bad_op, &CoreWitnessVerifier::new(0))
+        .apply_with_verifier(
+            &bad_op,
+            &CoreWitnessVerifier::new(0),
+            &deposits_protocol::types::AllowAll,
+            0,
+        )
         .unwrap();
     assert!(
         !bad_violations.is_empty(),

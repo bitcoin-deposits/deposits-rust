@@ -145,10 +145,30 @@ impl Node {
             &request.ledger_id[..16.min(request.ledger_id.len())]
         );
 
-        // Extract parameters
-        let nonce_hex = match request.params.get("nonce").and_then(|v| v.as_str()) {
+        // Extract parameters. `transfer_nonce` is the 32-byte channel-identifier
+        // nonce that lives in the TransferLock operation; `op_nonce` / `op_expiry`
+        // are the dep-17 replay-protection fields the wallet signs over.
+        let transfer_nonce_hex = match request
+            .params
+            .get("transfer_nonce")
+            .and_then(|v| v.as_str())
+        {
             Some(n) => n,
-            None => return (false, None, Some("Missing nonce".to_string())),
+            None => return (false, None, Some("Missing transfer_nonce".to_string())),
+        };
+        let op_nonce = match request.params.get("op_nonce").and_then(|v| v.as_u64()) {
+            Some(n) => n,
+            None => return (false, None, Some("Missing op_nonce parameter".to_string())),
+        };
+        let op_expiry = match request.params.get("op_expiry").and_then(|v| v.as_u64()) {
+            Some(e) if e <= u32::MAX as u64 => e as u32,
+            _ => {
+                return (
+                    false,
+                    None,
+                    Some("Missing or out-of-range op_expiry parameter".to_string()),
+                )
+            }
         };
         let source_id_hex = match request
             .params
@@ -205,10 +225,10 @@ impl Node {
             None => return (false, None, Some("Missing signature".to_string())),
         };
 
-        // Parse nonce
-        let nonce: [u8; 32] = match hex::decode(nonce_hex) {
+        // Parse transfer_nonce (32-byte channel identifier)
+        let transfer_nonce: [u8; 32] = match hex::decode(transfer_nonce_hex) {
             Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
-            _ => return (false, None, Some("Invalid nonce".to_string())),
+            _ => return (false, None, Some("Invalid transfer_nonce".to_string())),
         };
 
         // Parse deposit IDs
@@ -253,9 +273,6 @@ impl Node {
         // need the descriptor (conformance does the witness check at
         // stage time) but the block still does the deposit-exists
         // and timeout-height preflight validations.
-        // Phase 3: source deposit's per-deposit replay nonce; signed into the
-        // operation preimage as deposit.last_op_nonce + 1.
-        let source_op_nonce: u64;
         let _ = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = match ledgers.get(ledger_id) {
@@ -274,10 +291,6 @@ impl Node {
                 Some(d) => d,
                 None => return (false, None, Some("Source deposit not found".to_string())),
             };
-            // Phase 5c: pick a fresh nonce (timestamp-derived); the protocol's replay
-            // check catches collisions explicitly via seen_nonces.
-            let _ = deposit; // satisfy the borrow without reading last_op_nonce
-            source_op_nonce = deposits_core::signing::fresh_op_nonce();
 
             // Validate timeout_height against max_transfer_timeout_blocks (strictest quorum member)
             let max_timeout = ledger
@@ -402,7 +415,7 @@ impl Node {
             stack: vec![signature.serialize().to_vec()],
         };
         let operation = LedgerOperation::TransferLock {
-            transfer_nonce: nonce,
+            transfer_nonce,
             source_deposit_id,
             destination_deposit_id,
             amount: amount_msats,
@@ -410,8 +423,8 @@ impl Node {
             completion_script: completion_script.to_string(),
             timeout_height,
             transfer_id,
-            nonce: source_op_nonce,
-            expiry: u32::MAX,
+            nonce: op_nonce,
+            expiry: op_expiry,
             witness,
         };
 

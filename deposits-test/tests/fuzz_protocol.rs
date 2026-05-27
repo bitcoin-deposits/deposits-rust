@@ -290,7 +290,8 @@ impl ProtocolSim {
             return false;
         }
         let verifier = CoreWitnessVerifier::new(0);
-        match replica.apply_with_verifier(op, &verifier) {
+        let authorizer = deposits_protocol::types::AllowAll;
+        match replica.apply_with_verifier(op, &verifier, &authorizer, block_height) {
             Ok((_, violations)) => violations.is_empty(),
             Err(_) => false,
         }
@@ -304,8 +305,10 @@ impl ProtocolSim {
         if self.honest.contains(&proposer) {
             let state_clone = self.operators[proposer].ledger.state.clone();
             let verifier = CoreWitnessVerifier::new(0);
-            if state_clone.check_and_apply(&op, &verifier).is_err() {
-                return Outcome::RejectedLocal;
+            let authorizer = deposits_protocol::types::AllowAll;
+            match state_clone.apply_with_verifier(&op, &verifier, &authorizer, 0) {
+                Ok((_, violations)) if violations.is_empty() => {}
+                _ => return Outcome::RejectedLocal,
             }
         } else {
             // Adversary still needs the raw apply to succeed, otherwise the

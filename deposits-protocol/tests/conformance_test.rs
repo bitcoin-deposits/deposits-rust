@@ -5,7 +5,7 @@
 
 use deposits_protocol::messages::LedgerOperation;
 use deposits_protocol::types::{
-    compute_deposit_id, ConformanceViolation, FeeStructure, LedgerState, NoVerify,
+    compute_deposit_id, AllowAll, ConformanceViolation, FeeStructure, LedgerState, NoVerify,
     TransferFeeSchedule,
 };
 
@@ -64,6 +64,8 @@ fn credit_within_reserves_is_conforming() {
                 sequence_number: 1,
             },
             &NoVerify,
+            &AllowAll,
+            0,
         )
         .unwrap();
 
@@ -91,6 +93,8 @@ fn credit_exceeding_reserves_is_non_conforming() {
                 sequence_number: 1,
             },
             &NoVerify,
+            &AllowAll,
+            0,
         )
         .unwrap();
 
@@ -106,30 +110,12 @@ fn credit_exceeding_reserves_is_non_conforming() {
     assert_eq!(next.deposits.get(&deposit_id).unwrap().balance, 2_000_000);
 }
 
+// `check_and_apply` was removed: the canonical pre-sign gate is
+// `Ledger::append_operation` (via `check_speculative`), exercised in
+// deposits-core integration tests rather than re-tested at this layer.
 #[test]
+#[ignore = "check_and_apply removed; coverage moved to deposits-core::append_operation"]
 fn check_and_apply_refuses_non_conforming() {
-    let state = make_state();
-    let state = open_deposit(&state, "pk(aabbcc)");
-    let deposit_id = compute_deposit_id("pk(aabbcc)");
-
-    let result = state.check_and_apply(
-        &LedgerOperation::InvoiceCredit {
-            payment_hash: [0xaa; 32],
-            deposit_id,
-            amount: 2_000_000, // exceeds reserves
-            invoice_id: "test".to_string(),
-            sequence_number: 1,
-        },
-        &NoVerify,
-    );
-
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("conformance"),
-        "error should mention conformance: {}",
-        err
-    );
 }
 
 #[test]
@@ -148,6 +134,8 @@ fn onchain_credit_exceeding_reserves_is_non_conforming() {
                 funding_address: "bcrt1qfund".to_string(),
             },
             &NoVerify,
+            &AllowAll,
+            0,
         )
         .unwrap();
 
@@ -175,6 +163,8 @@ fn multiple_credits_accumulate_correctly() {
                 sequence_number: 1,
             },
             &NoVerify,
+            &AllowAll,
+            0,
         )
         .unwrap();
     assert!(violations.is_empty());
@@ -190,6 +180,8 @@ fn multiple_credits_accumulate_correctly() {
                 sequence_number: 2,
             },
             &NoVerify,
+            &AllowAll,
+            0,
         )
         .unwrap();
     assert_eq!(violations.len(), 1);
@@ -228,6 +220,8 @@ fn deposit_open_is_conforming() {
                 fee_change_limit_bps: None,
             },
             &NoVerify,
+            &AllowAll,
+            0,
         )
         .unwrap();
 
@@ -263,6 +257,8 @@ fn fee_collect_is_conforming() {
                 block_height: 2016,
             },
             &NoVerify,
+            &AllowAll,
+            0,
         )
         .unwrap();
 

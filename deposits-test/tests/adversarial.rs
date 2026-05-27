@@ -199,15 +199,22 @@ fn attack_forged_invoice_witness() {
         },
     };
 
-    // check_and_apply should reject (operator path)
-    let result = net
+    // apply_with_verifier must surface a violation (operator path)
+    let (_, violations) = net
         .op("alice")
         .ledger
         .state
-        .check_and_apply(&op, &CoreWitnessVerifier::new(0));
+        .apply_with_verifier(
+            &op,
+            &CoreWitnessVerifier::new(0),
+            &deposits_core::dep16::Dep16Authorizer::new(),
+            0,
+        )
+        .expect("apply succeeds; the rejection is in conformance");
     assert!(
-        result.is_err(),
-        "Forged witness must be rejected by conformance check"
+        !violations.is_empty(),
+        "Forged witness must be flagged: {:?}",
+        violations
     );
 }
 

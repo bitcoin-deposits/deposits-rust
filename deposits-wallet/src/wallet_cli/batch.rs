@@ -255,29 +255,45 @@ async fn batch_transfer_lock(
     // Convert to msats
     let amount_msats = amount_sats * 1000;
 
-    // Generate nonce
+    // Wallet picks transfer_nonce (channel id), transfer_id (app id), and the
+    // dep-17 replay nonce/expiry. sign_op binds the op preimage with these.
     let mut rng = OsRng;
-    let mut nonce = [0u8; 32];
-    rng.fill_bytes(&mut nonce);
+    let mut transfer_nonce = [0u8; 32];
+    rng.fill_bytes(&mut transfer_nonce);
+    let mut transfer_id = [0u8; 32];
+    rng.fill_bytes(&mut transfer_id);
 
-    // Compute signing message and transfer_id (all in msats)
-    let msg_hash = deposits_core::signature_utils::transfer_lock_signing_message(
-        &nonce,
-        &info.deposit_id,
-        &dest_bytes,
-        amount_msats,
-        fee_msats,
-        &completion_script,
+    let op_nonce = deposits_core::signing::fresh_op_nonce();
+    let op_expiry = u32::MAX; // TODO: tighter window via chain_tip + margin
+    let proto = deposits_core::messages::LedgerOperation::TransferLock {
+        transfer_nonce,
+        source_deposit_id: info.deposit_id,
+        destination_deposit_id: dest_bytes,
+        amount: amount_msats,
+        fee: fee_msats,
+        completion_script: completion_script.clone(),
         timeout_height,
-    );
-    let transfer_id = deposits_core::signature_utils::compute_transfer_id(&msg_hash);
-
-    // Sign
-    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
-    let signature = secp.sign_schnorr(&msg, &info.keypair);
+        transfer_id,
+        nonce: op_nonce,
+        expiry: op_expiry,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    let signed = match deposits_core::signing::sign_op(proto, &info.keypair.secret_key()) {
+        Some(s) => s,
+        None => {
+            return serde_json::json!({"success": false, "error": "sign_op failed"})
+        }
+    };
+    let signature_bytes = match &signed {
+        deposits_core::messages::LedgerOperation::TransferLock { witness, .. } => {
+            witness.stack[0].clone()
+        }
+        _ => unreachable!("sign_op preserves variant"),
+    };
+    let _ = secp; // secp no longer needed for signing; left in scope for other call sites
 
     let request_params = serde_json::json!({
-        "nonce": hex::encode(nonce),
+        "transfer_nonce": hex::encode(transfer_nonce),
         "source_deposit_id": hex::encode(info.deposit_id),
         "destination_deposit_id": hex::encode(dest_bytes),
         "amount": amount_msats,
@@ -285,7 +301,9 @@ async fn batch_transfer_lock(
         "completion_script": completion_script,
         "timeout_height": timeout_height,
         "transfer_id": hex::encode(transfer_id),
-        "signature": hex::encode(signature.serialize()),
+        "op_nonce": op_nonce,
+        "op_expiry": op_expiry,
+        "signature": hex::encode(&signature_bytes),
     });
 
     // Send request

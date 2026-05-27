@@ -291,8 +291,12 @@ async fn lightning_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error
         i += 1;
     }
 
-    if positional.len() < 5 {
-        eprintln!("Usage: deposits-node lightning lock <reserves_id> <deposit_pubkey> <amount_msats> <payment_id> <signature>");
+    if positional.len() < 7 {
+        eprintln!(
+            "Usage: deposits-node lightning lock \
+             <reserves_id> <deposit_pubkey> <amount_msats> <payment_id> <signature> \
+             <op_nonce> <op_expiry>"
+        );
         return Ok(());
     }
 
@@ -319,6 +323,16 @@ async fn lightning_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let mut signature = [0u8; 64];
     signature.copy_from_slice(&signature_bytes);
 
+    // dep-17 replay-protection fields: the signature above is over the
+    // operation preimage that includes these. Caller produced it externally
+    // (sign_op + the exact same nonce/expiry).
+    let op_nonce: u64 = positional[5]
+        .parse()
+        .map_err(|_| format!("Invalid op_nonce: {}", positional[5]))?;
+    let op_expiry: u32 = positional[6]
+        .parse()
+        .map_err(|_| format!("Invalid op_expiry: {}", positional[6]))?;
+
     // Compute deposit_id from pubkey and create witness
     let descriptor = format!("pk({})", positional[1]);
     let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
@@ -343,7 +357,15 @@ async fn lightning_lock(args: &[String]) -> Result<(), Box<dyn std::error::Error
     );
 
     let new_locked = node
-        .lock_invoice_payment(reserves_id, deposit_id, amount_msats, payment_id, witness)
+        .lock_invoice_payment(
+            reserves_id,
+            deposit_id,
+            amount_msats,
+            payment_id,
+            op_nonce,
+            op_expiry,
+            witness,
+        )
         .await?;
 
     println!("\nPayment locked!");
@@ -633,22 +655,30 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let config = parse_config(&config_args)?;
     let mut node = Node::new(config).await?;
 
-    // Create signatures for lock and fulfill
-    let lock_signature =
-        deposits_core::create_payment_signature(&secret_key, &payment_id, amount_msats)
-            .map_err(|e| format!("Failed to create lock signature: {:?}", e))?;
-
-    let fulfill_signature =
-        deposits_core::create_payment_signature(&secret_key, &payment_id, amount_msats)
-            .map_err(|e| format!("Failed to create fulfill signature: {:?}", e))?;
-
-    // Create witnesses from signatures
-    let lock_witness = deposits_core::types::DescriptorWitness {
-        stack: vec![lock_signature.to_vec()],
+    // Sign the dep-17 operation preimage for InvoiceLock. The wallet would
+    // normally do this; here the CLI has the private key directly. Pick a
+    // fresh op_nonce and a sentinel op_expiry — same defaults the operator
+    // used before this path was lifted into the wallet.
+    let op_nonce = deposits_core::signing::fresh_op_nonce();
+    let op_expiry = u32::MAX;
+    let lock_proto = deposits_core::messages::LedgerOperation::InvoiceLock {
+        deposit_id,
+        amount: amount_msats,
+        payment_id,
+        sequence_number: 0,
+        nonce: op_nonce,
+        expiry: op_expiry,
+        witness: deposits_core::types::DescriptorWitness::new(),
     };
-    let fulfill_witness = deposits_core::types::DescriptorWitness {
-        stack: vec![fulfill_signature.to_vec()],
+    let lock_signed = deposits_core::signing::sign_op(lock_proto, &secret_key)
+        .ok_or("sign_op failed: unsignable variant")?;
+    let lock_witness = match &lock_signed {
+        deposits_core::messages::LedgerOperation::InvoiceLock { witness, .. } => witness.clone(),
+        _ => unreachable!("sign_op preserves variant"),
     };
+    // Fulfill carries its own witness — same signature shape as lock since
+    // the descriptor evaluates against the same preimage.
+    let fulfill_witness = lock_witness.clone();
 
     // Lock the funds with co-signing
     println!("  Locking {} msats...", amount_msats);
@@ -658,6 +688,8 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
             deposit_id,
             amount_msats,
             payment_id,
+            op_nonce,
+            op_expiry,
             lock_witness,
         )
         .await?;

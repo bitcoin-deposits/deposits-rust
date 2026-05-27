@@ -168,7 +168,7 @@ fn deposit_struct_receive_requires_sig_tlv_roundtrip() {
         fee_change_limit_bps: None,
         opened_at_block: 0,
         pending_fee_change: None,
-        last_op_nonce: 0,
+        seen_nonces: std::collections::BTreeSet::new(),
     };
 
     let encoded = deposit.tlv_encode();
@@ -200,7 +200,7 @@ fn deposit_struct_without_flag_field_defaults_false() {
         fee_change_limit_bps: None,
         opened_at_block: 0,
         pending_fee_change: None,
-        last_op_nonce: 0,
+        seen_nonces: std::collections::BTreeSet::new(),
     };
 
     let encoded = deposit.tlv_encode();

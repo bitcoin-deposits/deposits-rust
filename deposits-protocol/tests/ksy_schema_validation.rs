@@ -224,6 +224,8 @@ const DESCRIPTOR: u64 = 202;
 const WITNESS: u64 = 204;
 const NEW_DESCRIPTOR: u64 = 208;
 const NONCE: u64 = 210;
+const OP_NONCE: u64 = 288; // u64, per-deposit dep-17 replay nonce
+const OP_EXPIRY: u64 = 290; // u32, block-height window for dep-17 replay GC
 const SOURCE_DEPOSIT_ID: u64 = 212;
 const DESTINATION_DEPOSIT_ID: u64 = 214;
 const COMPLETION_SCRIPT: u64 = 216;
@@ -318,6 +320,8 @@ fn schema_deposit_key_rotate() {
         &[
             (DEPOSIT_ID, deposit_id()),
             (NEW_DESCRIPTOR, str_bytes("pk(03...)")),
+            (OP_NONCE, u64_bytes(42)),
+            (OP_EXPIRY, u32_bytes(u32::MAX)),
             (WITNESS, witness_tlv()),
         ],
     );
@@ -348,6 +352,8 @@ fn schema_invoice_lock() {
             (AMOUNT, u64_bytes(5_000_000)),
             (PAYMENT_ID, hash32()),
             (SEQUENCE_NUMBER, u64_bytes(43)),
+            (OP_NONCE, u64_bytes(42)),
+            (OP_EXPIRY, u32_bytes(u32::MAX)),
             (WITNESS, witness_tlv()),
         ],
     );
@@ -409,6 +415,8 @@ fn schema_onchain_lock() {
             (FEES, u64_bytes(500)),
             (DESTINATION_ADDRESS, str_bytes("bcrt1qdest")),
             (WITHDRAWAL_ID, hash32()),
+            (OP_NONCE, u64_bytes(42)),
+            (OP_EXPIRY, u32_bytes(u32::MAX)),
             (WITNESS, witness_tlv()),
         ],
     );
@@ -552,6 +560,8 @@ fn schema_transfer_lock() {
             (COMPLETION_SCRIPT, str_bytes("sha256(abcd1234)")),
             (TIMEOUT_HEIGHT, u32_bytes(5000)),
             (TRANSFER_ID, hash32()),
+            (OP_NONCE, u64_bytes(42)),
+            (OP_EXPIRY, u32_bytes(u32::MAX)),
             (WITNESS, witness_tlv()),
         ],
     );

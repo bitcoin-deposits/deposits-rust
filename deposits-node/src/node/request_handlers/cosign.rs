@@ -575,6 +575,8 @@ impl Node {
                             &deposits_core::descriptor::CoreWitnessVerifier::new(
                                 current_block_height,
                             ),
+                            &deposits_core::dep16::Dep16Authorizer::new(),
+                            current_block_height,
                         );
                         if !violations.is_empty() {
                             tracing::warn!(

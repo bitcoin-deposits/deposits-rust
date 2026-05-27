@@ -263,6 +263,7 @@ impl LedgerActor {
         match ledger.apply_and_check(
             &op,
             &deposits_core::descriptor::CoreWitnessVerifier::new(update.block_height),
+            update.block_height,
         ) {
             Ok(violations) if !violations.is_empty() => {
                 tracing::warn!(

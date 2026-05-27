@@ -1128,36 +1128,55 @@ async fn execute_transfer(
     let receiver = &deposits[work.receiver_idx];
     let transport = &transports[sender.node_idx.load(Ordering::Relaxed)];
 
-    // Generate nonce
+    // Wallet picks transfer_nonce, transfer_id, and the dep-17 op_nonce/op_expiry.
     let mut rng = OsRng;
-    let mut nonce = [0u8; 32];
-    rng.fill_bytes(&mut nonce);
+    let mut transfer_nonce = [0u8; 32];
+    rng.fill_bytes(&mut transfer_nonce);
+    let mut transfer_id = [0u8; 32];
+    rng.fill_bytes(&mut transfer_id);
 
     let completion_script = format!("sha256({})", hex::encode(work.hash));
 
-    // Convert to msats for signing and request
     let amount_msats = work.amount_sats * 1000;
-    // Fee is computed in msats: fixed_msats + rate_bps on amount_msats
     let fee_msats = work.fee_msats;
 
-    // Compute signing message and transfer_id (all in msats)
-    let msg_hash = deposits_core::signature_utils::transfer_lock_signing_message(
-        &nonce,
-        &sender.deposit_id,
-        &receiver.deposit_id,
-        amount_msats,
-        fee_msats,
-        &completion_script,
+    let op_nonce = deposits_core::signing::fresh_op_nonce();
+    let op_expiry = u32::MAX;
+    let proto = deposits_core::messages::LedgerOperation::TransferLock {
+        transfer_nonce,
+        source_deposit_id: sender.deposit_id,
+        destination_deposit_id: receiver.deposit_id,
+        amount: amount_msats,
+        fee: fee_msats,
+        completion_script: completion_script.clone(),
         timeout_height,
-    );
-    let transfer_id = deposits_core::signature_utils::compute_transfer_id(&msg_hash);
-
-    // Sign
-    let msg = Message::from_digest(msg_hash);
-    let signature = secp.sign_schnorr(&msg, &sender.keypair);
+        transfer_id,
+        nonce: op_nonce,
+        expiry: op_expiry,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    let signed = match deposits_core::signing::sign_op(proto, &sender.keypair.secret_key()) {
+        Some(s) => s,
+        None => {
+            return TransferResult {
+                success: false,
+                locked: false,
+                lock_us: 0,
+                complete_us: 0,
+                error: Some("sign_op failed".into()),
+            }
+        }
+    };
+    let signature_bytes = match &signed {
+        deposits_core::messages::LedgerOperation::TransferLock { witness, .. } => {
+            witness.stack[0].clone()
+        }
+        _ => unreachable!("sign_op preserves variant"),
+    };
+    let _ = secp;
 
     let lock_params = serde_json::json!({
-        "nonce": hex::encode(nonce),
+        "transfer_nonce": hex::encode(transfer_nonce),
         "source_deposit_id": hex::encode(sender.deposit_id),
         "destination_deposit_id": hex::encode(receiver.deposit_id),
         "amount": amount_msats,
@@ -1165,7 +1184,9 @@ async fn execute_transfer(
         "completion_script": completion_script,
         "timeout_height": timeout_height,
         "transfer_id": hex::encode(transfer_id),
-        "signature": hex::encode(signature.serialize()),
+        "op_nonce": op_nonce,
+        "op_expiry": op_expiry,
+        "signature": hex::encode(&signature_bytes),
     });
 
     // ── transfer_lock ──

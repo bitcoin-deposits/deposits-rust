@@ -9,9 +9,9 @@
 //! operation preimage; the protocol's conformance check routes it through the new
 //! `Dep16Authorizer` and accepts (or rejects for adversarial inputs).
 //!
-//! This exercises the full Phase 4 path through `apply_with_verifier_and_authorizer`:
-//! state-machine apply, conformance check, dep-16 authorization, integration with the
-//! existing `WitnessVerifier`-routed checks for the other variants. The `Dep16Authorizer`
+//! This exercises the full path through `apply_with_verifier`: state-machine apply,
+//! conformance check, dep-16 authorization, integration with the existing
+//! `WitnessVerifier`-routed checks for the other variants. The `Dep16Authorizer`
 //! has its own focused unit tests in `deposits-core/src/dep16/authorizer.rs`; this file
 //! is about the protocol-level integration.
 
@@ -84,8 +84,7 @@ fn signed_rotate(
 /// The happy path: owner-signed rotation with a strictly-increasing nonce and a real
 /// signature over the dep-17 operation preimage produces zero conformance violations
 /// when routed through `Dep16Authorizer`. Confirms the full integration:
-///   - apply_with_verifier_and_authorizer threads the Authorizer through to
-///     check_conformance
+///   - apply_with_verifier threads the Authorizer through to check_conformance
 ///   - DepositKeyRotate's check_conformance arm calls authorizer.authorize(...)
 ///   - Dep16Authorizer parses the OLD descriptor, translates the op, builds the
 ///     keyed witness from the byte-stack, evaluates via the dep-16 evaluator,
@@ -99,7 +98,7 @@ fn deposit_key_rotate_authorized_by_owner_signature() {
 
     let authorizer = Dep16Authorizer::new();
     let (next, violations) = state
-        .apply_with_verifier_and_authorizer(&op, &NoVerify, &authorizer)
+        .apply_with_verifier(&op, &NoVerify, &authorizer, 0)
         .expect("apply must succeed");
 
     // No InvalidWitness for DepositKeyRotate. (Other violations — replay protection,
@@ -136,7 +135,7 @@ fn deposit_key_rotate_rejected_when_signed_by_wrong_key() {
 
     let authorizer = Dep16Authorizer::new();
     let (_, violations) = state
-        .apply_with_verifier_and_authorizer(&op, &NoVerify, &authorizer)
+        .apply_with_verifier(&op, &NoVerify, &authorizer, 0)
         .expect("apply succeeds; the violation is in conformance");
 
     assert!(
@@ -179,7 +178,7 @@ fn signature_for_one_nonce_doesnt_authorize_another() {
 
     let authorizer = Dep16Authorizer::new();
     let (_, violations) = state
-        .apply_with_verifier_and_authorizer(&op_replay, &NoVerify, &authorizer)
+        .apply_with_verifier(&op_replay, &NoVerify, &authorizer, 0)
         .expect("apply succeeds; the violation is in conformance");
 
     assert!(
@@ -195,24 +194,22 @@ fn signature_for_one_nonce_doesnt_authorize_another() {
     );
 }
 
-/// The back-compat `apply_with_verifier` path (without an explicit authorizer)
-/// falls back to `AllowAll` — preserving the legacy "accept everything for
-/// descriptor checks" shape that `NoVerify` gave for `WitnessVerifier`. Phase 6
-/// removes the back-compat shim entirely when every caller has migrated.
-///
-/// This is the same tradeoff the protocol made before: tests / callers that
-/// don't want cryptographic authorization can plug in `NoVerify`/`AllowAll` and
-/// proceed; real production paths use `apply_with_verifier_and_authorizer` to
-/// thread a real `Dep16Authorizer`.
+/// Explicit `AllowAll` opt-out: a caller that doesn't want descriptor
+/// authorization (e.g. a unit test focused on a different invariant) can plug
+/// in `AllowAll` and the rotation passes regardless of the witness. Companion
+/// to `deposit_key_rotate_authorized_by_owner_signature` (which uses a real
+/// `Dep16Authorizer`) — together they confirm that the authorization decision
+/// is fully delegated to whatever `Authorizer` the caller supplies.
 #[test]
-fn back_compat_path_accepts_rotation_under_allowall() {
+fn allow_all_opt_out_accepts_rotation() {
+    use deposits_protocol::types::AllowAll;
     let (sk, _) = keypair(0x11);
     let (state, did, _) = state_with_pk_deposit(0x11);
     let new_desc = format!("wsh(prove(pk({})))", keypair(0x22).1);
     let op = signed_rotate(did, &new_desc, 1, &sk);
 
     let (_, violations) = state
-        .apply_with_verifier(&op, &NoVerify) // no authorizer → AllowAll
+        .apply_with_verifier(&op, &NoVerify, &AllowAll, 0)
         .expect("apply succeeds");
     assert!(
         !violations.iter().any(|v| matches!(
@@ -222,7 +219,7 @@ fn back_compat_path_accepts_rotation_under_allowall() {
                 ..
             }
         )),
-        "back-compat path (AllowAll) must not raise InvalidWitness: {:?}",
+        "AllowAll authorizer must not raise InvalidWitness: {:?}",
         violations,
     );
 }
@@ -280,7 +277,7 @@ fn threshold_rotation_two_of_three() {
         },
     };
     let (_, violations_ab) = state
-        .apply_with_verifier_and_authorizer(&op_ab, &NoVerify, &authorizer)
+        .apply_with_verifier(&op_ab, &NoVerify, &authorizer, 0)
         .expect("apply must succeed");
     assert!(
         !violations_ab.iter().any(|v| matches!(
@@ -305,7 +302,7 @@ fn threshold_rotation_two_of_three() {
         },
     };
     let (_, violations_a) = state
-        .apply_with_verifier_and_authorizer(&op_a_only, &NoVerify, &authorizer)
+        .apply_with_verifier(&op_a_only, &NoVerify, &authorizer, 0)
         .expect("apply succeeds; the violation is in conformance");
     assert!(
         violations_a.iter().any(|v| matches!(
