@@ -263,7 +263,10 @@ impl Node {
                 Some(d) => d,
                 None => return (false, None, Some("Source deposit not found".to_string())),
             };
-            source_op_nonce = deposit.last_op_nonce.saturating_add(1);
+            // Phase 5c: pick a fresh nonce (timestamp-derived); the protocol's replay
+            // check catches collisions explicitly via seen_nonces.
+            let _ = deposit; // satisfy the borrow without reading last_op_nonce
+            source_op_nonce = deposits_core::signing::fresh_op_nonce();
 
             // Validate timeout_height against max_transfer_timeout_blocks (strictest quorum member)
             let max_timeout = ledger

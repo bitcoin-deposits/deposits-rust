@@ -2423,7 +2423,7 @@ mod tests {
             fee_change_limit_bps: None,
             opened_at_block: 0,
             pending_fee_change: None,
-            last_op_nonce: 0,
+            seen_nonces: std::collections::BTreeSet::new(),
         };
         let dest_deposit = Deposit {
             deposit_id: dest_id,
@@ -2440,7 +2440,7 @@ mod tests {
             fee_change_limit_bps: None,
             opened_at_block: 0,
             pending_fee_change: None,
-            last_op_nonce: 0,
+            seen_nonces: std::collections::BTreeSet::new(),
         };
         ledger.state.deposits.insert(source_id, source_deposit);
         ledger.state.deposits.insert(dest_id, dest_deposit);
@@ -2534,7 +2534,7 @@ mod tests {
             fee_change_limit_bps: None,
             opened_at_block: 0,
             pending_fee_change: None,
-            last_op_nonce: 0,
+            seen_nonces: std::collections::BTreeSet::new(),
         };
         ledger.state.deposits.insert(source_id, source_deposit);
 

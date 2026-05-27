@@ -79,14 +79,14 @@ pub enum ConformanceViolation {
     DescriptorTooLarge { actual: usize, max: u32 },
 
     /// A signature-bearing op (InvoiceLock / OnchainLock / TransferLock /
-    /// DepositKeyRotate) supplied a `nonce` that does not strictly increase
-    /// past the deposit's `last_op_nonce`. Replay protection for the dep-16
-    /// operation preimage; without this, a signed op could be replayed at
-    /// any later moment against the same deposit. See PLAN-dep16-integration.md
-    /// phase 3.
-    NonceNotIncreasing {
+    /// DepositKeyRotate) supplied a `nonce` already present in the deposit's
+    /// `seen_nonces`. Replay protection for the dep-16 operation preimage: the
+    /// same nonce can be reused once `current_height` has passed every expiry
+    /// the nonce was ever paired with (`ExpiryPassed` catches the original
+    /// signed op in that case, so reuse is safe). See PLAN-dep16-integration.md
+    /// phase 5c.
+    NonceReplay {
         operation: &'static str,
-        last_op_nonce: u64,
         actual: u64,
     },
 
@@ -155,14 +155,10 @@ impl std::fmt::Display for ConformanceViolation {
                 "descriptor size {} bytes exceeds quorum max of {} bytes",
                 actual, max
             ),
-            Self::NonceNotIncreasing {
-                operation,
-                last_op_nonce,
-                actual,
-            } => write!(
+            Self::NonceReplay { operation, actual } => write!(
                 f,
-                "{}: nonce {} ≤ deposit.last_op_nonce {}",
-                operation, actual, last_op_nonce,
+                "{}: nonce {} already accepted on this deposit within an unexpired window",
+                operation, actual,
             ),
             Self::ExpiryPassed {
                 operation,

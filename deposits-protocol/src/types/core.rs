@@ -390,13 +390,18 @@ pub struct Deposit {
     /// Pending fee change: new fees and the block at which they take effect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_fee_change: Option<(FeeStructure, u32)>,
-    /// Highest accepted dep-16 nonce on this deposit. Operations carrying a signature-bearing
-    /// `nonce` field (the four signature-bearing variants of `LedgerOperation`) are rejected
-    /// unless `nonce > last_op_nonce`; on acceptance, `last_op_nonce` is bumped to the op's
-    /// nonce. Replay protection enforced outside the descriptor evaluator. See
-    /// PLAN-dep16-integration.md phase 3.
+    /// Nonces this deposit has already accepted, paired with the expiry the signed op
+    /// committed to. Replay protection: a signature-bearing op carrying a `nonce` already
+    /// present in this set is rejected as a replay. The expiry component lets the protocol
+    /// garbage-collect entries: once `current_height > expiry`, the original signature can
+    /// no longer be applied anyway (ExpiryPassed catches it), so the nonce is safe to
+    /// forget.
+    ///
+    /// Storage is bounded by O(ops × expiry-window): for a wallet that picks `expiry =
+    /// current_height + 144`, ops within the most recent ~144 blocks stay tracked. GC
+    /// happens lazily on each conformance check. See PLAN-dep16-integration.md phase 5c.
     #[serde(default)]
-    pub last_op_nonce: u64,
+    pub seen_nonces: std::collections::BTreeSet<(u64, u32)>,
 }
 
 impl Deposit {
@@ -420,7 +425,7 @@ impl Deposit {
             fee_change_limit_bps: None,
             opened_at_block: 0,
             pending_fee_change: None,
-            last_op_nonce: 0,
+            seen_nonces: std::collections::BTreeSet::new(),
         }
     }
 

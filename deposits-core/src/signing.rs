@@ -342,6 +342,24 @@ pub fn create_withdrawal_signature(
     Ok(sig.serialize())
 }
 
+/// Pick a fresh per-deposit dep-16 nonce. Returns a high-resolution-timestamp-derived
+/// u64 that is monotonically increasing in practice (one nanosecond per call's worst
+/// case) and astronomically unlikely to collide with any previously-used nonce on any
+/// deposit. Suitable for the wallet-side or operator-side choice of `nonce` on a
+/// signature-bearing `LedgerOperation`.
+///
+/// The protocol's replay protection (phase 5c) catches collisions explicitly — a
+/// duplicate nonce within an unexpired window produces a `NonceReplay` violation —
+/// so the only correctness requirement on the chosen value is uniqueness within the
+/// window, not strict ordering.
+pub fn fresh_op_nonce() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
 /// Sign a signature-bearing `LedgerOperation` against the dep-17 operation preimage and
 /// return the same operation with the signature inserted into its witness stack.
 ///

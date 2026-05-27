@@ -479,7 +479,7 @@ impl Node {
                 );
             }
 
-            (ledger.next_sequence(), deposit.last_op_nonce.saturating_add(1))
+            (ledger.next_sequence(), deposits_core::signing::fresh_op_nonce())
         };
 
         let lock_operation = LedgerOperation::InvoiceLock {

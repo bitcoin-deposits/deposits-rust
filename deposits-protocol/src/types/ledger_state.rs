@@ -359,14 +359,12 @@ impl LedgerState {
                 deposit_id,
                 new_descriptor,
                 nonce,
+                expiry,
                 ..
             } => {
                 if let Some(deposit) = next.deposits.get_mut(deposit_id) {
                     deposit.descriptor = new_descriptor.clone();
-                    // Bump per-deposit replay nonce. The conformance check in
-                    // check_conformance compares this against pre_state to refuse
-                    // ops whose nonce does not strictly increase.
-                    deposit.last_op_nonce = *nonce;
+                    deposit.seen_nonces.insert((*nonce, *expiry));
                 }
             }
             LedgerOperation::InvoiceCredit {
@@ -395,6 +393,7 @@ impl LedgerState {
                 payment_id,
                 sequence_number,
                 nonce,
+                expiry,
                 witness,
                 ..
             } => {
@@ -403,7 +402,7 @@ impl LedgerState {
                     .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.lock(*amount)?;
-                deposit.last_op_nonce = *nonce;
+                deposit.seen_nonces.insert((*nonce, *expiry));
                 // Cache the depositor's witness on the open lock so the
                 // eventual InvoiceFulfill (committed asynchronously by
                 // the background payment-completion task once LDK
@@ -474,6 +473,7 @@ impl LedgerState {
                 destination_address,
                 withdrawal_id,
                 nonce,
+                expiry,
                 ..
             } => {
                 let deposit = next
@@ -487,7 +487,7 @@ impl LedgerState {
                 // inputs from simulator paths.
                 let total = amount.saturating_add(*fee_sats);
                 deposit.lock(total)?;
-                deposit.last_op_nonce = *nonce;
+                deposit.seen_nonces.insert((*nonce, *expiry));
                 next.pending_withdrawals.insert(
                     *withdrawal_id,
                     PendingWithdrawal {
@@ -693,6 +693,7 @@ impl LedgerState {
                 timeout_height,
                 transfer_id,
                 nonce,
+                expiry,
                 ..
             } => {
                 let deposit = next
@@ -710,7 +711,7 @@ impl LedgerState {
                 // any locked portion). TransferLock just marks more of that
                 // balance as locked — it does NOT reduce the obligation.
                 deposit.locked_balance = deposit.locked_balance.saturating_add(total);
-                deposit.last_op_nonce = *nonce;
+                deposit.seen_nonces.insert((*nonce, *expiry));
                 next.pending_transfers.insert(
                     *transfer_id,
                     PendingTransfer {
@@ -778,25 +779,27 @@ impl LedgerState {
         operation: &crate::messages::LedgerOperation,
         verifier: &impl WitnessVerifier,
     ) -> crate::DepositsResult<(Self, Vec<ConformanceViolation>)> {
-        // Back-compat shim: callers that supply only a WitnessVerifier get an
-        // AllowAll authorizer, preserving legacy "accept everything for descriptor
-        // checks" semantics (the same shape NoVerify gave for WitnessVerifier).
-        // Production paths use `apply_with_verifier_and_authorizer` to pass a real
-        // Dep16Authorizer. Phase 6 unifies the two methods and drops this shim.
-        self.apply_with_verifier_and_authorizer(operation, verifier, &crate::types::AllowAll)
+        // Back-compat shim. current_height = 0 means the expiry check trivially passes
+        // for any op whose expiry is ≥ 0 (always true for u32); seen_nonces GC keeps
+        // every entry. Callers that need real expiry / nonce-window enforcement use
+        // apply_with_verifier_and_authorizer with a chain-tip height.
+        self.apply_with_verifier_and_authorizer(operation, verifier, &crate::types::AllowAll, 0)
     }
 
-    /// `apply_with_verifier` augmented with a dep-16 `Authorizer` for ops that
-    /// have switched to the new authorization path. Phase 4 of
-    /// `PLAN-dep16-integration.md`: `DepositKeyRotate` routes through here.
+    /// `apply_with_verifier` augmented with a dep-16 `Authorizer` and a chain-tip
+    /// height. The chain-tip drives the expiry check (`op.expiry < current_height`
+    /// is rejected) and the seen_nonces GC (entries whose `expiry < current_height`
+    /// are dropped before the uniqueness check).
     pub fn apply_with_verifier_and_authorizer(
         &self,
         operation: &crate::messages::LedgerOperation,
         verifier: &impl WitnessVerifier,
         authorizer: &impl crate::types::Authorizer,
+        current_height: u32,
     ) -> crate::DepositsResult<(Self, Vec<ConformanceViolation>)> {
         let next = self.apply(operation)?;
-        let violations = next.check_conformance(operation, Some(self), verifier, authorizer);
+        let violations =
+            next.check_conformance(operation, Some(self), verifier, authorizer, current_height);
         Ok((next, violations))
     }
 
@@ -978,8 +981,12 @@ impl LedgerState {
                 details: format!("{:?}", e),
             }
         })?;
-        let (mut next, violations) =
-            self.apply_with_verifier_and_authorizer(&op, verifier, authorizer)?;
+        let (mut next, violations) = self.apply_with_verifier_and_authorizer(
+            &op,
+            verifier,
+            authorizer,
+            update.block_height,
+        )?;
         if let Some(v) = violations.first() {
             return Err(crate::DepositsError::ProtocolViolation {
                 violation_type: "conformance".to_string(),
@@ -1019,19 +1026,22 @@ impl LedgerState {
         verifier: &impl WitnessVerifier,
     ) -> Vec<ConformanceViolation> {
         // Back-compat shim — see apply_with_verifier for the rationale.
-        self.check_speculative_with_authorizer(operation, verifier, &crate::types::AllowAll)
+        self.check_speculative_with_authorizer(operation, verifier, &crate::types::AllowAll, 0)
     }
 
-    /// `check_speculative` augmented with a dep-16 `Authorizer` for ops on the
-    /// new path. See `apply_with_verifier_and_authorizer`.
+    /// `check_speculative` augmented with a dep-16 `Authorizer` and a chain-tip
+    /// height (for expiry / seen_nonces GC). See `apply_with_verifier_and_authorizer`.
     pub fn check_speculative_with_authorizer(
         &self,
         operation: &crate::messages::LedgerOperation,
         verifier: &impl WitnessVerifier,
         authorizer: &impl crate::types::Authorizer,
+        current_height: u32,
     ) -> Vec<ConformanceViolation> {
         match self.apply(operation) {
-            Ok(next) => next.check_conformance(operation, Some(self), verifier, authorizer),
+            Ok(next) => {
+                next.check_conformance(operation, Some(self), verifier, authorizer, current_height)
+            }
             Err(e) => vec![ConformanceViolation::StateMachineRejected {
                 detail: format!("{:?}", e),
             }],
@@ -1051,6 +1061,7 @@ impl LedgerState {
         pre_state: Option<&LedgerState>,
         verifier: &impl WitnessVerifier,
         authorizer: &impl crate::types::Authorizer,
+        current_height: u32,
     ) -> Vec<ConformanceViolation> {
         use crate::messages::LedgerOperation;
 
@@ -1149,41 +1160,61 @@ impl LedgerState {
             }
         }
 
-        // Per-deposit replay protection. Each signature-bearing op carries a
-        // `nonce: u64` that must strictly increase past the deposit's
-        // `last_op_nonce` before this op was applied; on accept, apply() bumps
-        // last_op_nonce to the op's nonce. Without pre_state we can't compare
-        // (the post-apply deposit already has the bumped nonce), so we only
-        // run the check when pre_state is available — which the standard
-        // apply_with_verifier / apply_signed path always provides.
-        // See PLAN-dep16-integration.md phase 3.
+        // Per-deposit replay protection. Each signature-bearing op carries
+        // (nonce, expiry); the deposit tracks a set of (nonce, expiry) pairs
+        // already accepted. An op is rejected if:
+        //   (a) `op.expiry < current_height` — the signature's window has passed
+        //       (ExpiryPassed)
+        //   (b) `op.nonce` matches any not-yet-GC'd entry's nonce — replay within
+        //       an unexpired window (NonceReplay)
+        // GC happens lazily here: entries whose expiry is below current_height
+        // can't be replayed anyway (ExpiryPassed would catch them) so they're
+        // dropped before the uniqueness check. On accept, apply() inserts the new
+        // (nonce, expiry) pair into the set. See PLAN-dep16-integration.md phase 5c.
         //
-        // TODO phase 3-followup: also enforce `expiry >= current_height`. Today
-        // the protocol's check_conformance doesn't receive a chain-tip height,
-        // and the expiry binds the signature for replay-window protection
-        // regardless of when the operator processes it.
+        // The check needs the deposit's pre-state because apply() has already
+        // inserted into seen_nonces by the time conformance runs; comparing against
+        // post-state would always self-match. Without pre_state we skip the check
+        // (it's available on every apply_with_verifier* / apply_signed* path).
         if let Some(pre) = pre_state {
-            let (op_name, deposit_id, op_nonce) = match operation {
-                LedgerOperation::InvoiceLock { deposit_id, nonce, .. } => {
-                    ("InvoiceLock", Some(deposit_id), Some(*nonce))
+            let (op_name, deposit_id, op_nonce, op_expiry) = match operation {
+                LedgerOperation::InvoiceLock { deposit_id, nonce, expiry, .. } => {
+                    ("InvoiceLock", Some(deposit_id), Some(*nonce), Some(*expiry))
                 }
-                LedgerOperation::OnchainLock { deposit_id, nonce, .. } => {
-                    ("OnchainLock", Some(deposit_id), Some(*nonce))
+                LedgerOperation::OnchainLock { deposit_id, nonce, expiry, .. } => {
+                    ("OnchainLock", Some(deposit_id), Some(*nonce), Some(*expiry))
                 }
-                LedgerOperation::TransferLock { source_deposit_id, nonce, .. } => {
-                    ("TransferLock", Some(source_deposit_id), Some(*nonce))
+                LedgerOperation::TransferLock { source_deposit_id, nonce, expiry, .. } => {
+                    ("TransferLock", Some(source_deposit_id), Some(*nonce), Some(*expiry))
                 }
-                LedgerOperation::DepositKeyRotate { deposit_id, nonce, .. } => {
-                    ("DepositKeyRotate", Some(deposit_id), Some(*nonce))
+                LedgerOperation::DepositKeyRotate { deposit_id, nonce, expiry, .. } => {
+                    ("DepositKeyRotate", Some(deposit_id), Some(*nonce), Some(*expiry))
                 }
-                _ => ("", None, None),
+                _ => ("", None, None, None),
             };
-            if let (Some(deposit_id), Some(op_nonce)) = (deposit_id, op_nonce) {
+            if let (Some(deposit_id), Some(op_nonce), Some(op_expiry)) =
+                (deposit_id, op_nonce, op_expiry)
+            {
+                // (a) Expiry check: the signature has already fallen out of its
+                // validity window.
+                if op_expiry < current_height {
+                    violations.push(ConformanceViolation::ExpiryPassed {
+                        operation: op_name,
+                        expiry: op_expiry,
+                        current_height,
+                    });
+                }
+                // (b) Replay check, with lazy GC.
                 if let Some(prev_deposit) = pre.deposits.get(deposit_id) {
-                    if op_nonce <= prev_deposit.last_op_nonce {
-                        violations.push(ConformanceViolation::NonceNotIncreasing {
+                    let nonce_replayed = prev_deposit
+                        .seen_nonces
+                        .iter()
+                        .any(|(seen_nonce, seen_expiry)| {
+                            *seen_expiry >= current_height && *seen_nonce == op_nonce
+                        });
+                    if nonce_replayed {
+                        violations.push(ConformanceViolation::NonceReplay {
                             operation: op_name,
-                            last_op_nonce: prev_deposit.last_op_nonce,
                             actual: op_nonce,
                         });
                     }
@@ -1402,21 +1433,31 @@ impl LedgerState {
 
 #[cfg(test)]
 mod replay_protection_tests {
-    //! Validator behavior for phase-3 per-deposit replay protection: a
-    //! signature-bearing op carrying `nonce <= deposit.last_op_nonce` produces
-    //! a `NonceNotIncreasing` conformance violation. `apply()` then bumps
-    //! `last_op_nonce` to the op's nonce, so the next op needs a higher one.
-    //! See PLAN-dep16-integration.md phase 3.
+    //! Replay protection (phase 5c): the per-deposit `seen_nonces` set captures every
+    //! (nonce, expiry) pair the deposit has accepted within an unexpired window.
+    //!   * `NonceReplay` fires when a new op's nonce matches a not-yet-GC'd entry.
+    //!   * `ExpiryPassed` fires when a new op's expiry is already below current_height.
+    //!   * Entries with `expiry < current_height` are GC'd lazily on each check —
+    //!     the corresponding signature can't be applied anyway (ExpiryPassed catches
+    //!     it), so the nonce becomes safe to reuse.
+    //! See PLAN-dep16-integration.md phase 5c.
 
     use super::*;
     use crate::messages::LedgerOperation;
-    use crate::types::DescriptorWitness;
+    use crate::types::{Authorizer, DescriptorWitness};
     use crate::{Deposit, NoVerify};
 
+    /// A no-op authorizer used so the nonce/expiry tests aren't entangled with
+    /// descriptor authorization — those have their own coverage. (AllowAll is in
+    /// `crate::types::AllowAll` but we re-declare for clarity here.)
+    struct AllowAuthorizer;
+    impl Authorizer for AllowAuthorizer {
+        fn authorize(&self, _: &str, _: &LedgerOperation) -> bool {
+            true
+        }
+    }
+
     fn state_with_one_deposit() -> (LedgerState, [u8; 16]) {
-        // Build a state with the deterministic-from-secret-key generator point as
-        // operator_key — gives a stable ledger_id for the test without needing a
-        // separate keypair setup.
         let operator_key = bitcoin::secp256k1::PublicKey::from_slice(&[
             0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce,
             0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81,
@@ -1434,100 +1475,139 @@ mod replay_protection_tests {
         (state, did)
     }
 
-    fn invoice_lock(did: [u8; 16], amount: u64, payment_id: [u8; 32], nonce: u64) -> LedgerOperation {
+    fn invoice_lock(
+        did: [u8; 16],
+        amount: u64,
+        payment_id: [u8; 32],
+        nonce: u64,
+        expiry: u32,
+    ) -> LedgerOperation {
         LedgerOperation::InvoiceLock {
             deposit_id: did,
             amount,
             payment_id,
             sequence_number: nonce,
             nonce,
-            expiry: u32::MAX,
+            expiry,
             witness: DescriptorWitness::new(),
         }
     }
 
-    /// First lock against a fresh deposit (last_op_nonce=0) with nonce=1 is
-    /// conformant. After accept, deposit.last_op_nonce is bumped to 1.
-    #[test]
-    fn first_op_with_nonce_one_is_accepted() {
-        let (state, did) = state_with_one_deposit();
-        let op = invoice_lock(did, 50, [0xab; 32], 1);
-        let (next, violations) = state.apply_with_verifier(&op, &NoVerify).unwrap();
-        assert!(
-            !violations.iter().any(|v| matches!(v, ConformanceViolation::NonceNotIncreasing { .. })),
-            "first op with nonce=1 must not raise NonceNotIncreasing: {:?}",
-            violations,
-        );
-        assert_eq!(next.deposits[&did].last_op_nonce, 1, "apply bumps last_op_nonce");
+    fn apply(
+        state: &LedgerState,
+        op: &LedgerOperation,
+        current_height: u32,
+    ) -> (LedgerState, Vec<ConformanceViolation>) {
+        state
+            .apply_with_verifier_and_authorizer(op, &NoVerify, &AllowAuthorizer, current_height)
+            .expect("apply")
     }
 
-    /// A second op with the same nonce as the first is rejected (replay).
+    /// A first op against a fresh deposit (seen_nonces empty) is accepted; the
+    /// (nonce, expiry) pair lands in seen_nonces for future replay checks.
     #[test]
-    fn replayed_nonce_is_flagged_as_not_increasing() {
+    fn first_op_is_accepted_and_recorded() {
         let (state, did) = state_with_one_deposit();
-        let (state, _) = state
-            .apply_with_verifier(&invoice_lock(did, 50, [0xab; 32], 1), &NoVerify)
-            .unwrap();
-
-        let replay = invoice_lock(did, 50, [0xcd; 32], 1); // same nonce
-        let (_, violations) = state.apply_with_verifier(&replay, &NoVerify).unwrap();
+        let op = invoice_lock(did, 50, [0xab; 32], 42, 1000);
+        let (next, violations) = apply(&state, &op, 500);
         assert!(
-            violations.iter().any(|v| matches!(
-                v,
-                ConformanceViolation::NonceNotIncreasing { actual: 1, last_op_nonce: 1, .. }
-            )),
-            "replayed nonce must raise NonceNotIncreasing: got {:?}",
+            !violations
+                .iter()
+                .any(|v| matches!(v, ConformanceViolation::NonceReplay { .. }
+                    | ConformanceViolation::ExpiryPassed { .. })),
+            "first op must not raise replay/expiry: {:?}",
             violations,
         );
+        assert!(next.deposits[&did].seen_nonces.contains(&(42, 1000)));
     }
 
-    /// A nonce strictly below the deposit's last_op_nonce is also rejected.
-    /// The wallet might mis-pick a nonce; the validator catches it before the
-    /// signature can do damage.
+    /// A second op with the same nonce as the first (and both within their windows)
+    /// is rejected as a replay.
     #[test]
-    fn below_last_op_nonce_is_flagged() {
+    fn replayed_nonce_is_flagged() {
         let (state, did) = state_with_one_deposit();
-        let (state, _) = state
-            .apply_with_verifier(&invoice_lock(did, 50, [0xab; 32], 5), &NoVerify)
-            .unwrap();
-        let stale = invoice_lock(did, 50, [0xcd; 32], 3);
-        let (_, violations) = state.apply_with_verifier(&stale, &NoVerify).unwrap();
+        let op1 = invoice_lock(did, 50, [0xab; 32], 42, 1000);
+        let (state, _) = apply(&state, &op1, 500);
+        let op2 = invoice_lock(did, 50, [0xcd; 32], 42, 1000); // same nonce
+        let (_, violations) = apply(&state, &op2, 500);
         assert!(
             violations.iter().any(|v| matches!(
                 v,
-                ConformanceViolation::NonceNotIncreasing { actual: 3, last_op_nonce: 5, .. }
+                ConformanceViolation::NonceReplay { actual: 42, .. }
             )),
-            "stale nonce must raise NonceNotIncreasing: got {:?}",
+            "replayed nonce must raise NonceReplay: got {:?}",
             violations,
         );
     }
 
-    /// A strictly-increasing sequence is accepted; last_op_nonce tracks each.
+    /// An op whose expiry is already below current_height is rejected as expired,
+    /// even if the nonce is fresh.
     #[test]
-    fn strictly_increasing_nonces_chain_cleanly() {
+    fn expired_op_is_flagged() {
+        let (state, did) = state_with_one_deposit();
+        // current_height = 2000, op.expiry = 1000 → already passed
+        let op = invoice_lock(did, 50, [0xab; 32], 99, 1000);
+        let (_, violations) = apply(&state, &op, 2000);
+        assert!(
+            violations.iter().any(|v| matches!(
+                v,
+                ConformanceViolation::ExpiryPassed {
+                    expiry: 1000,
+                    current_height: 2000,
+                    ..
+                }
+            )),
+            "expired op must raise ExpiryPassed: got {:?}",
+            violations,
+        );
+    }
+
+    /// Once current_height passes the original op's expiry, the nonce can be reused.
+    /// The GC drops the (nonce, old-expiry) entry before the uniqueness check.
+    #[test]
+    fn nonce_becomes_reusable_after_window_passes() {
+        let (state, did) = state_with_one_deposit();
+        // Apply op1 with expiry=1000 at height 500.
+        let op1 = invoice_lock(did, 50, [0xab; 32], 42, 1000);
+        let (state, _) = apply(&state, &op1, 500);
+        // Time passes — current_height advances past op1's expiry. Reuse nonce=42.
+        let op2 = invoice_lock(did, 50, [0xcd; 32], 42, 5000);
+        let (_, violations) = apply(&state, &op2, 2000);
+        assert!(
+            !violations
+                .iter()
+                .any(|v| matches!(v, ConformanceViolation::NonceReplay { .. })),
+            "nonce reuse after expiry must not be a replay: got {:?}",
+            violations,
+        );
+    }
+
+    /// Random (non-monotonic) nonces are accepted across a sequence — what the
+    /// wallet actually picks. The protocol does not require monotonic ordering.
+    #[test]
+    fn random_nonces_chain_cleanly_within_window() {
         let (mut state, did) = state_with_one_deposit();
-        for (idx, nonce) in [1u64, 2, 5, 100].iter().enumerate() {
-            let op = invoice_lock(did, 10, [idx as u8; 32], *nonce);
-            let (next, violations) = state.apply_with_verifier(&op, &NoVerify).unwrap();
+        for (idx, nonce) in [12345u64, 999, 1_000_000, 7].iter().enumerate() {
+            let op = invoice_lock(did, 10, [idx as u8; 32], *nonce, 10_000);
+            let (next, violations) = apply(&state, &op, 500);
             assert!(
-                !violations.iter().any(|v| matches!(v, ConformanceViolation::NonceNotIncreasing { .. })),
-                "monotonic op {} (nonce={}) raised NonceNotIncreasing: {:?}",
+                !violations
+                    .iter()
+                    .any(|v| matches!(v, ConformanceViolation::NonceReplay { .. })),
+                "non-monotonic op {} (nonce={}) raised NonceReplay: {:?}",
                 idx, nonce, violations,
             );
-            assert_eq!(next.deposits[&did].last_op_nonce, *nonce);
+            assert!(next.deposits[&did].seen_nonces.contains(&(*nonce, 10_000)));
             state = next;
         }
     }
 
-    /// Fulfill variants don't carry a `nonce` field — they shouldn't be subject
-    /// to the per-deposit replay check at all. Confirms the validator's scope:
-    /// only signature-bearing ops trigger it.
+    /// Fulfill variants don't carry a `nonce` field — they shouldn't trigger
+    /// the replay check at all.
     #[test]
-    fn invoice_fulfill_is_not_subject_to_nonce_check() {
+    fn invoice_fulfill_is_not_subject_to_replay_check() {
         let (state, did) = state_with_one_deposit();
-        let (state, _) = state
-            .apply_with_verifier(&invoice_lock(did, 50, [0xab; 32], 1), &NoVerify)
-            .unwrap();
+        let (state, _) = apply(&state, &invoice_lock(did, 50, [0xab; 32], 1, 1000), 500);
         let fulfill = LedgerOperation::InvoiceFulfill {
             deposit_id: did,
             amount: 50,
@@ -1536,10 +1616,14 @@ mod replay_protection_tests {
             preimage: [0xee; 32],
             witness: DescriptorWitness::new(),
         };
-        let (_, violations) = state.apply_with_verifier(&fulfill, &NoVerify).unwrap();
+        let (_, violations) = apply(&state, &fulfill, 500);
         assert!(
-            !violations.iter().any(|v| matches!(v, ConformanceViolation::NonceNotIncreasing { .. })),
-            "fulfill ops must not run the nonce check: {:?}",
+            !violations.iter().any(|v| matches!(
+                v,
+                ConformanceViolation::NonceReplay { .. }
+                    | ConformanceViolation::ExpiryPassed { .. }
+            )),
+            "fulfill ops must not run the replay/expiry checks: {:?}",
             violations,
         );
     }

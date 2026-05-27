@@ -667,7 +667,7 @@ impl Node {
                 )));
             }
 
-            (ledger.sequence() + 1, deposit.last_op_nonce.saturating_add(1))
+            (ledger.sequence() + 1, deposits_core::signing::fresh_op_nonce())
         };
 
         let operation = LedgerOperation::InvoiceLock {
@@ -904,7 +904,7 @@ impl Node {
                 )));
             }
 
-            (deposit.balance, deposit.last_op_nonce.saturating_add(1))
+            (deposit.balance, deposits_core::signing::fresh_op_nonce())
         };
 
         let operation = LedgerOperation::OnchainLock {
