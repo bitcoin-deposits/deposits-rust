@@ -718,6 +718,7 @@ import { sha512 } from './vendor/noble-hashes-sha512.js';
 import { bytesToHex, hexToBytes, utf8ToBytes } from './vendor/noble-hashes-utils.js';
 import * as secp from './vendor/noble-secp256k1.js';
 import { schnorr } from './vendor/noble-curves-secp256k1.js';
+import * as dep17 from './vendor/dep17.js';
 import qrcode from './vendor/qrcode-generator.js';
 import jsQR from './vendor/jsqr.js';
 import { WORDLIST } from './vendor/bip39-english.js';
@@ -913,21 +914,11 @@ function depositIdentity(d) {
 }
 
 // ============================================================
-// Signing helpers (match Rust signature_utils)
+// Per-op signing is via the dep-17 operation preimage helpers in
+// vendor/dep17.js (`dep17.signOpAsWitness(op, sk)`). The legacy
+// SHA256("INVOICE:...") / "WITHDRAWAL:..." / "TRANSFER:..." helpers
+// that used to live here are gone — Dep16Authorizer rejects them.
 // ============================================================
-function transferLockSigningMessage(nonce, srcId, dstId, amount, fee, completionScript, timeoutHeight) {
-  const msg = `TRANSFER:${bytesToHex(nonce)}:${bytesToHex(srcId)}:${bytesToHex(dstId)}:${amount}:${fee}:${completionScript}:${timeoutHeight}`;
-  return sha256(utf8ToBytes(msg));
-}
-
-function computeTransferId(signingMessage) {
-  return sha256(signingMessage);
-}
-
-function invoiceLockSigningMessage(depositId, paymentHash, amountMsat) {
-  const msg = `INVOICE:${bytesToHex(depositId)}:${bytesToHex(paymentHash)}:${amountMsat}`;
-  return sha256(utf8ToBytes(msg));
-}
 
 // Minimal BOLT11 decoder — extracts payment_hash and amount from a bech32-encoded invoice
 function decodeBolt11(invoice) {
@@ -998,14 +989,6 @@ function getBits(data5, bitOffset, numBits) {
     }
   }
   return val;
-}
-
-function withdrawalSigningMessage(nonce, depositId, address, amount, fee) {
-  // Match Rust: OnChainWithdrawal::signing_message format
-  // Need to check what the Rust code produces
-  // For now, use the same format pattern
-  const msg = `WITHDRAWAL:${bytesToHex(nonce)}:${bytesToHex(depositId)}:${address}:${amount}:${fee}`;
-  return sha256(utf8ToBytes(msg));
 }
 
 // ============================================================
@@ -3216,8 +3199,15 @@ window.doAutoSpread = async function() {
       const secretKey = deriveSecretKey(state.seed, keyIndex);
       const pubkey = getCompressedPubkey(secretKey);
       const depositId = computeDepositId(pubkey);
-      const msgHash = invoiceLockSigningMessage(depositId, paymentHash, amountMsat);
-      const sig = schnorr.sign(msgHash, secretKey);
+      const opNonce = dep17.freshOpNonce();
+      const opExpiry = 0xffffffff;
+      const witness = dep17.signOpAsWitness(
+        dep17.buildInvoiceLockOp({
+          deposit_id: depositId, amount_msats: amountMsat, payment_id: paymentHash,
+          nonce: opNonce, expiry: opExpiry,
+        }),
+        secretKey,
+      );
 
       log(`Paying ₿${amount.toLocaleString()} from ${source.alias}...`);
       const srcIdent = depositIdentity(source);
@@ -3227,7 +3217,9 @@ window.doAutoSpread = async function() {
         invoice: bolt11,
         payment_hash: bytesToHex(paymentHash),
         amount_msats: amountMsat,
-        witness: { stack: [bytesToHex(sig)] },
+        nonce: opNonce,
+        expiry: opExpiry,
+        witness,
       }, 60000);
 
       if (payResp.success) {
@@ -3305,8 +3297,15 @@ window.doRebalance = async function() {
       const secretKey = deriveSecretKey(state.seed, keyIndex);
       const pubkey = getCompressedPubkey(secretKey);
       const depositId = computeDepositId(pubkey);
-      const msgHash = invoiceLockSigningMessage(depositId, paymentHash, amountMsat);
-      const sig = schnorr.sign(msgHash, secretKey);
+      const opNonce = dep17.freshOpNonce();
+      const opExpiry = 0xffffffff;
+      const witness = dep17.signOpAsWitness(
+        dep17.buildInvoiceLockOp({
+          deposit_id: depositId, amount_msats: amountMsat, payment_id: paymentHash,
+          nonce: opNonce, expiry: opExpiry,
+        }),
+        secretKey,
+      );
 
       const srcIdent = depositIdentity(source);
       if (!srcIdent) { log(`Skip ${source.alias}: no descriptor/pubkey`, 'error'); continue; }
@@ -3315,7 +3314,9 @@ window.doRebalance = async function() {
         invoice: bolt11,
         payment_hash: bytesToHex(paymentHash),
         amount_msats: amountMsat,
-        witness: { stack: [bytesToHex(sig)] },
+        nonce: opNonce,
+        expiry: opExpiry,
+        witness,
       }, 60000);
 
       if (payResp.success) {
@@ -3641,24 +3642,42 @@ window.doWalletTransfer = async function() {
   const pubkey = getCompressedPubkey(secretKey);
   const sourceId = computeDepositId(pubkey);
 
-  const nonce = new Uint8Array(32);
-  crypto.getRandomValues(nonce);
+  const transferNonce = new Uint8Array(32);
+  crypto.getRandomValues(transferNonce);
+  const transferId = new Uint8Array(32);
+  crypto.getRandomValues(transferId);
+  const opNonce = dep17.freshOpNonce();
+  const opExpiry = 0xffffffff;
 
-  const msgHash = transferLockSigningMessage(nonce, sourceId, destId, amountMsats, fee, completionScript, timeout);
-  const transferId = computeTransferId(msgHash);
-  const sig = schnorr.sign(msgHash, secretKey);
+  const witness = dep17.signOpAsWitness(
+    dep17.buildTransferLockOp({
+      transfer_nonce: transferNonce,
+      source_deposit_id: sourceId,
+      destination_deposit_id: destId,
+      amount_msats: amountMsats,
+      fee_msats: fee,
+      completion_script: completionScript,
+      timeout_height: timeout,
+      transfer_id: transferId,
+      nonce: opNonce, expiry: opExpiry,
+    }),
+    secretKey,
+  );
+  const signatureHex = witness.stack[0];
 
   try {
     log(`Transferring ₿${amount} to ${toAlias}...`);
     const lockResponse = await sendRequest(deposit.ledger_id, 'transfer_lock', {
-      nonce: bytesToHex(nonce),
+      transfer_nonce: bytesToHex(transferNonce),
       source_deposit_id: bytesToHex(sourceId),
       destination_deposit_id: destHex,
       amount: amountMsats, fee,
       completion_script: completionScript,
       timeout_height: timeout,
       transfer_id: bytesToHex(transferId),
-      signature: bytesToHex(sig),
+      op_nonce: opNonce,
+      op_expiry: opExpiry,
+      signature: signatureHex,
     }, 15000);
 
     if (!lockResponse.success) {
@@ -3844,8 +3863,15 @@ window.doWalletPayInvoice = async function() {
     const secretKey = deriveSecretKey(state.seed, keyIndex);
     const pubkey = getCompressedPubkey(secretKey);
     const depositId = computeDepositId(pubkey);
-    const msgHash = invoiceLockSigningMessage(depositId, paymentHash, amountMsat);
-    const sig = schnorr.sign(msgHash, secretKey);
+    const opNonce = dep17.freshOpNonce();
+    const opExpiry = 0xffffffff;
+    const witness = dep17.signOpAsWitness(
+      dep17.buildInvoiceLockOp({
+        deposit_id: depositId, amount_msats: amountMsat, payment_id: paymentHash,
+        nonce: opNonce, expiry: opExpiry,
+      }),
+      secretKey,
+    );
 
     log(`Paying ₿${amountMsat / 1000}...`);
     const ident = depositIdentity(deposit);
@@ -3855,7 +3881,9 @@ window.doWalletPayInvoice = async function() {
       invoice: bolt11,
       payment_hash: bytesToHex(paymentHash),
       amount_msats: amountMsat,
-      witness: { stack: [bytesToHex(sig)] },
+      nonce: opNonce,
+      expiry: opExpiry,
+      witness,
     }, 60000);
 
     if (response.success) {
@@ -3881,19 +3909,33 @@ window.doWalletWithdraw = async function() {
     const secretKey = deriveSecretKey(state.seed, keyIndex);
     const pubkey = getCompressedPubkey(secretKey);
     const depositId = computeDepositId(pubkey);
-    const nonce = new Uint8Array(32);
-    crypto.getRandomValues(nonce);
+    // Wallet picks withdrawal_id (32 bytes random) and the dep-17 op_nonce/expiry.
+    const withdrawalId = new Uint8Array(32);
+    crypto.getRandomValues(withdrawalId);
     const feeSats = 500;
-    const msgHash = withdrawalSigningMessage(nonce, depositId, address, amount, feeSats);
-    const sig = schnorr.sign(msgHash, secretKey);
+    const opNonce = dep17.freshOpNonce();
+    const opExpiry = 0xffffffff;
+    const witness = dep17.signOpAsWitness(
+      dep17.buildOnchainLockOp({
+        deposit_id: depositId,
+        amount_msats: amount * 1000,
+        fee_sats: feeSats,
+        destination_address: address,
+        withdrawal_id: withdrawalId,
+        nonce: opNonce, expiry: opExpiry,
+      }),
+      secretKey,
+    );
 
     log(`Withdrawing ₿${amount}...`);
     const ident = depositIdentity(deposit) || { descriptor: `pk(${bytesToHex(pubkey)})` };
     const response = await sendRequest(deposit.ledger_id, 'withdraw', {
       descriptor: ident.descriptor,
       address, amount_sats: amount, fee_sats: feeSats,
-      nonce: bytesToHex(nonce),
-      witness: { stack: [bytesToHex(sig)] },
+      withdrawal_id: bytesToHex(withdrawalId),
+      nonce: opNonce,
+      expiry: opExpiry,
+      witness,
     }, 60000);
 
     if (response.success) {
@@ -4292,7 +4334,9 @@ async function checkForFraud() {
       continue;
     }
 
-    // Embed: create a self-transfer with the proof hash as nonce
+    // Embed: create a self-transfer with the proof hash as transfer_nonce.
+    // The fraud-proof watcher recognizes the embedding by matching the
+    // proof hash against the TransferLock's transfer_nonce field.
     try {
       const proofHashBytes = hexToBytes(ev.fraud_proof_hash);
       const keyIndex = deposit.key_index || 0;
@@ -4300,29 +4344,42 @@ async function checkForFraud() {
       const pubkey = getCompressedPubkey(secretKey);
       const depositId = computeDepositId(pubkey);
 
-      // Small self-transfer: 1000 msats (1 sat) + fee, with proof hash as nonce
       const amountMsats = 1000;
       const feeMsats = deposit.transfer_fee_fixed || 2;
       const timeout = cachedBlockHeight + 144;
       const transferId = sha256(proofHashBytes); // deterministic
+      const completionScript = 'sha256(' + ev.fraud_proof_hash.slice(0,16) + ')';
+      const opNonce = dep17.freshOpNonce();
+      const opExpiry = 0xffffffff;
 
-      const msgHash = transferLockSigningMessage(
-        proofHashBytes, depositId, depositId, amountMsats, feeMsats,
-        'sha256(' + ev.fraud_proof_hash.slice(0,16) + ')', timeout
+      const witness = dep17.signOpAsWitness(
+        dep17.buildTransferLockOp({
+          transfer_nonce: proofHashBytes,
+          source_deposit_id: depositId,
+          destination_deposit_id: depositId,
+          amount_msats: amountMsats,
+          fee_msats: feeMsats,
+          completion_script: completionScript,
+          timeout_height: timeout,
+          transfer_id: transferId,
+          nonce: opNonce, expiry: opExpiry,
+        }),
+        secretKey,
       );
-      const sig = schnorr.sign(msgHash, secretKey);
 
       log(`Embedding fraud proof in transfer on ${deposit.alias}...`);
       const response = await sendRequest(deposit.ledger_id, 'transfer_lock', {
-        nonce: ev.fraud_proof_hash,
+        transfer_nonce: ev.fraud_proof_hash,
         source_deposit_id: bytesToHex(depositId),
         destination_deposit_id: bytesToHex(depositId),
         amount: amountMsats,
         fee: feeMsats,
-        completion_script: 'sha256(' + ev.fraud_proof_hash.slice(0,16) + ')',
+        completion_script: completionScript,
         timeout_height: timeout,
         transfer_id: bytesToHex(transferId),
-        signature: bytesToHex(sig),
+        op_nonce: opNonce,
+        op_expiry: opExpiry,
+        signature: witness.stack[0],
       }, 30000);
 
       if (response.success) {
@@ -4352,12 +4409,23 @@ window.doWithdraw = async function() {
     const pubkey = getCompressedPubkey(secretKey);
 
     const depositId = computeDepositId(pubkey);
-    const nonce = new Uint8Array(32);
-    crypto.getRandomValues(nonce);
+    const withdrawalId = new Uint8Array(32);
+    crypto.getRandomValues(withdrawalId);
     const feeSats = 500;
+    const opNonce = dep17.freshOpNonce();
+    const opExpiry = 0xffffffff;
 
-    const msgHash = withdrawalSigningMessage(nonce, depositId, address, amount, feeSats);
-    const sig = schnorr.sign(msgHash, secretKey);
+    const witness = dep17.signOpAsWitness(
+      dep17.buildOnchainLockOp({
+        deposit_id: depositId,
+        amount_msats: amount * 1000,
+        fee_sats: feeSats,
+        destination_address: address,
+        withdrawal_id: withdrawalId,
+        nonce: opNonce, expiry: opExpiry,
+      }),
+      secretKey,
+    );
 
     const ident = depositIdentity(selectedDeposit) || { descriptor: `pk(${bytesToHex(pubkey)})` };
     const response = await sendRequest(selectedDeposit.ledger_id, 'withdraw', {
@@ -4365,8 +4433,10 @@ window.doWithdraw = async function() {
       address: address,
       amount_sats: amount,
       fee_sats: feeSats,
-      nonce: bytesToHex(nonce),
-      witness: { stack: [bytesToHex(sig)] },
+      withdrawal_id: bytesToHex(withdrawalId),
+      nonce: opNonce,
+      expiry: opExpiry,
+      witness,
     }, 60000);
 
     if (response.success) {
@@ -4585,14 +4655,21 @@ window.doPayInvoiceSubmit = async function() {
     const { paymentHash, amountMsat } = decodeBolt11(bolt11);
     log(`Invoice: ₿${amountMsat / 1000}, hash=${bytesToHex(paymentHash).slice(0,16)}...`);
 
-    // Sign authorization: INVOICE:{deposit_id}:{payment_hash}:{amount_msat}
+    // Sign dep-17 InvoiceLock authorization.
     const keyIndex = selectedDeposit.key_index || 0;
     const secretKey = deriveSecretKey(state.seed, keyIndex);
     const pubkey = getCompressedPubkey(secretKey);
     const depositId = computeDepositId(pubkey);
 
-    const msgHash = invoiceLockSigningMessage(depositId, paymentHash, amountMsat);
-    const sig = schnorr.sign(msgHash, secretKey);
+    const opNonce = dep17.freshOpNonce();
+    const opExpiry = 0xffffffff;
+    const witness = dep17.signOpAsWitness(
+      dep17.buildInvoiceLockOp({
+        deposit_id: depositId, amount_msats: amountMsat, payment_id: paymentHash,
+        nonce: opNonce, expiry: opExpiry,
+      }),
+      secretKey,
+    );
 
     log('Paying invoice...');
     const ident = depositIdentity(selectedDeposit) || { descriptor: `pk(${bytesToHex(pubkey)})` };
@@ -4601,7 +4678,9 @@ window.doPayInvoiceSubmit = async function() {
       invoice: bolt11,
       payment_hash: bytesToHex(paymentHash),
       amount_msats: amountMsat,
-      witness: { stack: [bytesToHex(sig)] },
+      nonce: opNonce,
+      expiry: opExpiry,
+      witness,
     }, 60000);
 
     if (response.success) {
@@ -4730,17 +4809,32 @@ window.doTransferLock = async function() {
     const pubkey = getCompressedPubkey(secretKey);
     const sourceId = computeDepositId(pubkey);
 
-    const nonce = new Uint8Array(32);
-    crypto.getRandomValues(nonce);
+    const transferNonce = new Uint8Array(32);
+    crypto.getRandomValues(transferNonce);
+    const transferId = new Uint8Array(32);
+    crypto.getRandomValues(transferId);
+    const opNonce = dep17.freshOpNonce();
+    const opExpiry = 0xffffffff;
 
-    const msgHash = transferLockSigningMessage(nonce, sourceId, destBytes, amountMsats, feeMsats, completionScript, timeout);
-    const transferId = computeTransferId(msgHash);
-    const sig = schnorr.sign(msgHash, secretKey);
+    const witness = dep17.signOpAsWitness(
+      dep17.buildTransferLockOp({
+        transfer_nonce: transferNonce,
+        source_deposit_id: sourceId,
+        destination_deposit_id: destBytes,
+        amount_msats: amountMsats,
+        fee_msats: feeMsats,
+        completion_script: completionScript,
+        timeout_height: timeout,
+        transfer_id: transferId,
+        nonce: opNonce, expiry: opExpiry,
+      }),
+      secretKey,
+    );
 
     log(`Transfer lock: ₿${amountSats}, ID: ${bytesToHex(transferId).slice(0, 16)}...`);
 
     const response = await sendRequest(deposit.ledger_id, 'transfer_lock', {
-      nonce: bytesToHex(nonce),
+      transfer_nonce: bytesToHex(transferNonce),
       source_deposit_id: bytesToHex(sourceId),
       destination_deposit_id: destHex,
       amount: amountMsats,
@@ -4748,7 +4842,9 @@ window.doTransferLock = async function() {
       completion_script: completionScript,
       timeout_height: timeout,
       transfer_id: bytesToHex(transferId),
-      signature: bytesToHex(sig),
+      op_nonce: opNonce,
+      op_expiry: opExpiry,
+      signature: witness.stack[0],
     }, 15000);
 
     if (response.success) {
@@ -4970,8 +5066,10 @@ window.doRoutedTransfer = async function() {
     const fromDepositId = computeDepositId(fromPubkey);
 
     const completionScript = `sha256(${hashHex})`;
-    const nonce = new Uint8Array(32);
-    crypto.getRandomValues(nonce);
+    const transferNonce = new Uint8Array(32);
+    crypto.getRandomValues(transferNonce);
+    const transferId = new Uint8Array(32);
+    crypto.getRandomValues(transferId);
 
     // Fee for the inbound transfer_lock (operator fee on source ledger)
     const srcAd = window._discoveredAds?.[fromDep.ledger_id];
@@ -4979,15 +5077,26 @@ window.doRoutedTransfer = async function() {
       ? (srcAd.transfer_fee_fixed_msats || 0) + Math.floor(amountMsats * (srcAd.transfer_fee_rate_bps || 0) / 10000)
       : 2000; // fallback: 2 sats
 
-    const msgHash = transferLockSigningMessage(
-      nonce, fromDepositId, hexToBytes(agentDepositIdHex),
-      amountMsats, operatorFee, completionScript, timeout
+    const opNonce = dep17.freshOpNonce();
+    const opExpiry = 0xffffffff;
+    const agentDepositId = hexToBytes(agentDepositIdHex);
+    const witness = dep17.signOpAsWitness(
+      dep17.buildTransferLockOp({
+        transfer_nonce: transferNonce,
+        source_deposit_id: fromDepositId,
+        destination_deposit_id: agentDepositId,
+        amount_msats: amountMsats,
+        fee_msats: operatorFee,
+        completion_script: completionScript,
+        timeout_height: timeout,
+        transfer_id: transferId,
+        nonce: opNonce, expiry: opExpiry,
+      }),
+      fromSecretKey,
     );
-    const transferId = computeTransferId(msgHash);
-    const sig = schnorr.sign(msgHash, fromSecretKey);
 
     const lockResp = await sendRequest(fromDep.ledger_id, 'transfer_lock', {
-      nonce: bytesToHex(nonce),
+      transfer_nonce: bytesToHex(transferNonce),
       source_deposit_id: bytesToHex(fromDepositId),
       destination_deposit_id: agentDepositIdHex,
       amount: amountMsats,
@@ -4995,7 +5104,9 @@ window.doRoutedTransfer = async function() {
       completion_script: completionScript,
       timeout_height: timeout,
       transfer_id: bytesToHex(transferId),
-      signature: bytesToHex(sig),
+      op_nonce: opNonce,
+      op_expiry: opExpiry,
+      signature: witness.stack[0],
     }, 30000);
 
     if (!lockResp.success) throw new Error(`Lock failed: ${lockResp.error}`);

@@ -446,3 +446,31 @@ fn sign_op_deposit_key_rotate_authorized_by_dep16() {
     let op = deposits_core::signing::sign_op(proto, &sk).expect("DepositKeyRotate is signable");
     assert_authorizer_accepts(&state, &op, "DepositKeyRotate");
 }
+
+/// Pinned dep-17 sighash for a fixed InvoiceLock. Cross-language parity
+/// fixture: the same op shape must produce exactly this hash in the JS port
+/// at `deposits-web/wallet/vendor/dep17.js`. If you change preimage
+/// construction (encode.rs / to_dep16) and this hash moves, the JS port
+/// breaks silently until you mirror the change there.
+#[test]
+fn dep17_invoice_lock_sighash_pinned() {
+    let did = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10,
+    ];
+    let op = LedgerOperation::InvoiceLock {
+        deposit_id: did,
+        amount: 100_000_u64,
+        payment_id: [0xaa; 32],
+        sequence_number: 7,
+        nonce: 42_u64,
+        expiry: u32::MAX,
+        witness: DescriptorWitness::new(),
+    };
+    let sighash = deposits_core::dep16::operations::operation_sighash(&op).unwrap();
+    assert_eq!(
+        hex::encode(sighash),
+        "60317ef178dce942d76273d3873c9f7a945906b31209d25db69c72fc4428251c",
+        "dep-17 sighash drifted — update deposits-web/wallet/vendor/dep17.js too",
+    );
+}
