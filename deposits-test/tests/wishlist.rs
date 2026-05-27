@@ -694,28 +694,26 @@ fn tier2_4_proof_hash_embedding() {
     // of the evidence — if this hash is computed the same way by all
     // verifiers, the embedding location is effectively canonical.
 
-    // Behavioral test: the proof hash must be deterministic and sensitive
-    // to all fields. We test this by hashing the same signing messages
-    // with different parameters and verifying they produce different results.
-    //
-    // The signing message builders are the canonical embedding —
-    // if they produce deterministic, distinct hashes for different inputs,
-    // the embedding is unambiguous.
-    let msg1 = deposits_protocol::invoice_lock_signing_message(
-        &compute_deposit_id("pk(test)"),
-        &[0x01; 32],
-        100_000,
-    );
-    let msg2 = deposits_protocol::invoice_lock_signing_message(
-        &compute_deposit_id("pk(test)"),
-        &[0x01; 32],
-        100_000,
-    );
-    let msg3 = deposits_protocol::invoice_lock_signing_message(
-        &compute_deposit_id("pk(other)"),
-        &[0x01; 32],
-        100_000,
-    );
+    // Behavioral test: the dep-17 operation preimage must be deterministic
+    // and sensitive to every field that distinguishes one authorization
+    // from another. Hash the preimage for the same op twice (must match)
+    // and for ops differing only in deposit_id (must differ).
+    let mk = |did: [u8; 16]| {
+        let op = deposits_core::messages::LedgerOperation::InvoiceLock {
+            deposit_id: did,
+            amount: 100_000,
+            payment_id: [0x01; 32],
+            sequence_number: 1,
+            nonce: 0,
+            expiry: u32::MAX,
+            witness: deposits_protocol::types::DescriptorWitness::new(),
+        };
+        deposits_core::dep16::operations::operation_sighash(&op)
+            .expect("InvoiceLock has a dep-17 preimage")
+    };
+    let msg1 = mk(compute_deposit_id("pk(test)"));
+    let msg2 = mk(compute_deposit_id("pk(test)"));
+    let msg3 = mk(compute_deposit_id("pk(other)"));
     let deterministic = msg1 == msg2;
     let distinct = msg1 != msg3;
 

@@ -130,33 +130,20 @@ fn attack_withdraw_exceeds_balance() {
 
     // Attack: try to lock withdrawal for more than balance
     let withdrawal_id = [0x01; 32];
-    let msg = deposits_protocol::withdrawal_signing_message(
-        &withdrawal_id,
-        &deposit_id,
-        "bcrt1qattacker",
-        200_000, // more than the 100k balance
-        1_000,
-    );
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &user.secret_key);
-    let sig =
-        secp.sign_schnorr_no_aux_rand(&bitcoin::secp256k1::Message::from_digest(msg), &keypair);
+    let proto = LedgerOperation::OnchainLock {
+        deposit_id,
+        amount: 200_000,
+        fee_sats: 1_000,
+        destination_address: "bcrt1qattacker".to_string(),
+        withdrawal_id,
+        nonce: deposits_core::signing::fresh_op_nonce(),
+        expiry: u32::MAX,
+        witness: deposits_protocol::DescriptorWitness::new(),
+    };
+    let op = deposits_core::signing::sign_op(proto, &user.secret_key)
+        .expect("OnchainLock signs via dep-17 preimage");
 
-    let result = net
-        .op_mut("alice")
-        .ledger
-        .apply_operation(&LedgerOperation::OnchainLock {
-            deposit_id,
-            amount: 200_000,
-            fee_sats: 1_000,
-            destination_address: "bcrt1qattacker".to_string(),
-            withdrawal_id,
-            nonce: 0,
-            expiry: u32::MAX,
-            witness: deposits_protocol::DescriptorWitness {
-                stack: vec![sig.serialize().to_vec()],
-            },
-        });
+    let result = net.op_mut("alice").ledger.apply_operation(&op);
 
     assert!(
         result.is_err(),
@@ -176,28 +163,23 @@ fn attack_forged_invoice_witness() {
     net.op_mut("alice")
         .credit_deposit(deposit_id, 500_000, [0xAA; 32]);
 
-    // Attack: lock an invoice with a forged signature (not signed by the depositor)
+    // Attack: lock an invoice with a forged signature (signed by the attacker, not
+    // the depositor). sign_op produces a real signature over the dep-17 preimage —
+    // the forgery is using the wrong key, so the descriptor (which expects the
+    // depositor's pubkey) won't be satisfied by the witness.
     let attacker_key = net.create_depositor("attacker", 99);
     let payment_id = [0x01; 32];
-    let msg = deposits_protocol::invoice_lock_signing_message(&deposit_id, &payment_id, 500_000);
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &attacker_key.secret_key);
-    let bad_sig =
-        secp.sign_schnorr_no_aux_rand(&bitcoin::secp256k1::Message::from_digest(msg), &keypair);
-
-    // The operation may succeed at the state level (apply doesn't verify witnesses)
-    // but conformance checking should catch it
-    let op = LedgerOperation::InvoiceLock {
+    let proto = LedgerOperation::InvoiceLock {
         deposit_id,
         amount: 500_000,
         payment_id,
         sequence_number: net.op("alice").ledger.state.sequence + 1,
-        nonce: 0,
+        nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
-        witness: deposits_protocol::DescriptorWitness {
-            stack: vec![bad_sig.serialize().to_vec()],
-        },
+        witness: deposits_protocol::DescriptorWitness::new(),
     };
+    let op = deposits_core::signing::sign_op(proto, &attacker_key.secret_key)
+        .expect("InvoiceLock signs via dep-17 preimage");
 
     // apply_with_verifier must surface a violation (operator path)
     let (_, violations) = net
@@ -363,27 +345,19 @@ fn attack_drain_via_overlapping_locks() {
 
     // Attack: try to lock another 80k (only 20k available)
     let payment_id2 = [0x02; 32];
-    let msg = deposits_protocol::invoice_lock_signing_message(&deposit_id, &payment_id2, 80_000);
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &user.secret_key);
-    let sig =
-        secp.sign_schnorr_no_aux_rand(&bitcoin::secp256k1::Message::from_digest(msg), &keypair);
-
     let next_seq = net.op("alice").ledger.state.sequence + 1;
-    let result = net
-        .op_mut("alice")
-        .ledger
-        .apply_operation(&LedgerOperation::InvoiceLock {
-            deposit_id,
-            amount: 80_000,
-            payment_id: payment_id2,
-            sequence_number: next_seq,
-            nonce: 0,
-            expiry: u32::MAX,
-            witness: deposits_protocol::DescriptorWitness {
-                stack: vec![sig.serialize().to_vec()],
-            },
-        });
+    let proto = LedgerOperation::InvoiceLock {
+        deposit_id,
+        amount: 80_000,
+        payment_id: payment_id2,
+        sequence_number: next_seq,
+        nonce: deposits_core::signing::fresh_op_nonce(),
+        expiry: u32::MAX,
+        witness: deposits_protocol::DescriptorWitness::new(),
+    };
+    let op = deposits_core::signing::sign_op(proto, &user.secret_key)
+        .expect("InvoiceLock signs via dep-17 preimage");
+    let result = net.op_mut("alice").ledger.apply_operation(&op);
 
     assert!(
         result.is_err(),

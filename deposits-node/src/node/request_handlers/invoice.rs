@@ -356,7 +356,7 @@ impl Node {
     /// - invoice: bolt11 invoice string
     /// - payment_hash: 32-byte hex (must match invoice)
     /// - amount_msats: amount in msats (must match invoice)
-    /// - witness: DescriptorWitness authorizing the spend over `invoice_lock_signing_message`
+    /// - witness: DescriptorWitness authorizing the spend over the dep-17 InvoiceLock preimage
     pub(crate) async fn process_pay_invoice_request(
         &self,
         request: &crate::nostr::LedgerRequest,
@@ -794,10 +794,9 @@ impl Node {
                 // Commit InvoiceFulfill with the real preimage so the
                 // ledger record is also proof-of-payment. The witness
                 // re-attaches the depositor's authorization that
-                // InvoiceLock cached on `open_invoice_locks` —
-                // conformance verifies witness over
-                // `invoice_lock_signing_message(deposit_id, payment_id,
-                // amount)`, the same message Lock signed.
+                // InvoiceLock cached on `open_invoice_locks` — the
+                // same signature still satisfies the descriptor over
+                // the lock's dep-17 preimage.
                 let (fulfill_sequence, lock_witness) = {
                     let ledger = ledger_arc.read().unwrap();
                     let witness = ledger

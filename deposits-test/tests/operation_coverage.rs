@@ -36,32 +36,19 @@ fn onchain_credit_lock_fulfill() {
 
     // OnchainLock (withdrawal)
     let withdrawal_id = [0x01; 32];
-    let msg = deposits_protocol::withdrawal_signing_message(
-        &withdrawal_id,
-        &did,
-        "bcrt1qdest",
-        100_000,
-        1_000,
-    );
-    let secp = Secp256k1::new();
-    let keypair = Keypair::from_secret_key(&secp, &user.secret_key);
-    let sig = secp.sign_schnorr_no_aux_rand(&Message::from_digest(msg), &keypair);
-
-    net.op_mut("alice")
-        .ledger
-        .apply_operation(&LedgerOperation::OnchainLock {
-            deposit_id: did,
-            amount: 100_000,
-            fee_sats: 1_000,
-            destination_address: "bcrt1qdest".into(),
-            withdrawal_id,
-            nonce: 0,
-            expiry: u32::MAX,
-            witness: DescriptorWitness {
-                stack: vec![sig.serialize().to_vec()],
-            },
-        })
-        .unwrap();
+    let proto = LedgerOperation::OnchainLock {
+        deposit_id: did,
+        amount: 100_000,
+        fee_sats: 1_000,
+        destination_address: "bcrt1qdest".into(),
+        withdrawal_id,
+        nonce: deposits_core::signing::fresh_op_nonce(),
+        expiry: u32::MAX,
+        witness: DescriptorWitness::new(),
+    };
+    let op = deposits_core::signing::sign_op(proto, &user.secret_key)
+        .expect("OnchainLock signs via dep-17 preimage");
+    net.op_mut("alice").ledger.apply_operation(&op).unwrap();
 
     let deposit = net.op("alice").ledger.state.deposits.get(&did).unwrap();
     // OnchainLock locks amount + fee_sats (both leave when the withdrawal
@@ -111,32 +98,19 @@ fn onchain_fail_returns_funds() {
 
     // Lock
     let withdrawal_id = [0x01; 32];
-    let msg = deposits_protocol::withdrawal_signing_message(
-        &withdrawal_id,
-        &did,
-        "bcrt1qdest",
-        100_000,
-        1_000,
-    );
-    let secp = Secp256k1::new();
-    let keypair = Keypair::from_secret_key(&secp, &user.secret_key);
-    let sig = secp.sign_schnorr_no_aux_rand(&Message::from_digest(msg), &keypair);
-
-    net.op_mut("alice")
-        .ledger
-        .apply_operation(&LedgerOperation::OnchainLock {
-            deposit_id: did,
-            amount: 100_000,
-            fee_sats: 1_000,
-            destination_address: "bcrt1qdest".into(),
-            withdrawal_id,
-            nonce: 0,
-            expiry: u32::MAX,
-            witness: DescriptorWitness {
-                stack: vec![sig.serialize().to_vec()],
-            },
-        })
-        .unwrap();
+    let proto = LedgerOperation::OnchainLock {
+        deposit_id: did,
+        amount: 100_000,
+        fee_sats: 1_000,
+        destination_address: "bcrt1qdest".into(),
+        withdrawal_id,
+        nonce: deposits_core::signing::fresh_op_nonce(),
+        expiry: u32::MAX,
+        witness: DescriptorWitness::new(),
+    };
+    let op = deposits_core::signing::sign_op(proto, &user.secret_key)
+        .expect("OnchainLock signs via dep-17 preimage");
+    net.op_mut("alice").ledger.apply_operation(&op).unwrap();
 
     // Confirm the lock recorded by OnchainLock.
     let deposit = net.op("alice").ledger.state.deposits.get(&did).unwrap();
@@ -446,39 +420,24 @@ fn transfer_complete_on_already_completed_ignored() {
     net.op_mut("alice").credit_deposit(src, 100_000, [0xAA; 32]);
 
     // Lock
-    let nonce = [0x42; 32];
-    let msg = deposits_protocol::transfer_lock_signing_message(
-        &nonce,
-        &src,
-        &dst,
-        30_000,
-        500,
-        "sha256(aa)",
-        900_000,
-    );
-    let transfer_id = deposits_protocol::compute_transfer_id(&msg);
-    let secp = Secp256k1::new();
-    let keypair = Keypair::from_secret_key(&secp, &sender.secret_key);
-    let sig = secp.sign_schnorr_no_aux_rand(&Message::from_digest(msg), &keypair);
-
-    net.op_mut("alice")
-        .ledger
-        .apply_operation(&LedgerOperation::TransferLock {
-            transfer_nonce: nonce,
-            source_deposit_id: src,
-            destination_deposit_id: dst,
-            amount: 30_000,
-            fee: 500,
-            completion_script: "sha256(aa)".into(),
-            timeout_height: 900_000,
-            transfer_id,
-            nonce: 0,
-            expiry: u32::MAX,
-            witness: DescriptorWitness {
-                stack: vec![sig.serialize().to_vec()],
-            },
-        })
-        .unwrap();
+    let transfer_nonce = [0x42; 32];
+    let transfer_id = [0x43; 32];
+    let proto = LedgerOperation::TransferLock {
+        transfer_nonce,
+        source_deposit_id: src,
+        destination_deposit_id: dst,
+        amount: 30_000,
+        fee: 500,
+        completion_script: "sha256(aa)".into(),
+        timeout_height: 900_000,
+        transfer_id,
+        nonce: deposits_core::signing::fresh_op_nonce(),
+        expiry: u32::MAX,
+        witness: DescriptorWitness::new(),
+    };
+    let op = deposits_core::signing::sign_op(proto, &sender.secret_key)
+        .expect("TransferLock signs via dep-17 preimage");
+    net.op_mut("alice").ledger.apply_operation(&op).unwrap();
 
     // Complete
     net.op_mut("alice")

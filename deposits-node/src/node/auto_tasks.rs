@@ -638,9 +638,9 @@ impl Node {
                     // Witness was cached on `OpenInvoiceLock` at
                     // InvoiceLock-apply time so we can re-attach it
                     // here without round-tripping back to the wallet.
-                    // Conformance: `verify_witness(descriptor, witness,
-                    // invoice_lock_signing_message(deposit_id,
-                    // payment_id, amount))` — same message Lock signed.
+                    // Conformance: the cached witness still satisfies
+                    // the descriptor over the lock's dep-17 preimage,
+                    // which is exactly what InvoiceFulfill's check wants.
                     if lock.witness.stack.is_empty() {
                         tracing::error!(
                             "auto_complete_outbound: payment {}: lock has no cached \

@@ -165,11 +165,6 @@ pub use validation::{
     ValidationReport,
     ValidationRules,
 };
-// Re-export signing message builders from signature_utils (pure data construction)
-pub use signature_utils::{
-    compute_transfer_id, invoice_lock_signing_message, transfer_lock_signing_message,
-    withdrawal_signing_message,
-};
 // Re-export crypto operations from signing module
 pub use message_handlers::{HandlerResult, ResponseData};
 pub use message_validation::{
@@ -217,7 +212,7 @@ pub use operation_validation::{
 };
 pub use signing::{
     create_deposit_guarantee_signature, create_deposit_offer_signature,
-    create_payment_authorization_signature, create_payment_signature, create_withdrawal_signature,
+    create_payment_authorization_signature, create_payment_signature,
     verify_deposit_guarantee_signature, verify_deposit_offer_signature, verify_payment_signature,
 };
 pub use tlv::{TlvBuilder, TlvDecode, TlvEncode, TlvError, TlvReader, TlvResult, TlvStream};

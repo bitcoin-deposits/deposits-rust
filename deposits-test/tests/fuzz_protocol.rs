@@ -978,7 +978,7 @@ fn sign_pk_witness(sk: &SecretKey, msg_hash: &[u8; 32]) -> DescriptorWitness {
     }
 }
 
-/// Build an OnchainLock op signed with `source_sk`. Returns (op, withdrawal_id).
+/// Build an OnchainLock op signed with `source_sk` via the dep-17 preimage.
 fn build_onchain_lock(
     source: &(DepositId, String, u16),
     amount: u64,
@@ -987,28 +987,22 @@ fn build_onchain_lock(
     source_sk: &SecretKey,
     withdrawal_id: [u8; 32],
 ) -> LedgerOperation {
-    let msg = signature_utils::withdrawal_signing_message(
-        &withdrawal_id,
-        &source.0,
-        &destination_address,
-        amount,
-        fee_sats,
-    );
-    let witness = sign_pk_witness(source_sk, &msg);
-    LedgerOperation::OnchainLock {
+    let proto = LedgerOperation::OnchainLock {
         deposit_id: source.0,
         amount,
         fee_sats,
         destination_address,
         withdrawal_id,
-        nonce: 0,
+        nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
-        witness,
-    }
+        witness: DescriptorWitness::new(),
+    };
+    deposits_core::signing::sign_op(proto, source_sk)
+        .expect("OnchainLock signs via dep-17 preimage")
 }
 
-/// Build an InvoiceLock op signed with `source_sk`. Returns (op, payment_id,
-/// preimage) so the caller can record the preimage for later Fulfill.
+/// Build an InvoiceLock op signed with `source_sk` via the dep-17 preimage.
+/// Returns (op, payment_id) so callers can record the preimage for later Fulfill.
 fn build_invoice_lock(
     source: &(DepositId, String, u16),
     amount: u64,
@@ -1018,22 +1012,22 @@ fn build_invoice_lock(
 ) -> (LedgerOperation, [u8; 32]) {
     use bitcoin::hashes::{sha256, Hash};
     let payment_id = sha256::Hash::hash(&preimage).to_byte_array();
-    let msg = signature_utils::invoice_lock_signing_message(&source.0, &payment_id, amount);
-    let witness = sign_pk_witness(source_sk, &msg);
-    let op = LedgerOperation::InvoiceLock {
+    let proto = LedgerOperation::InvoiceLock {
         deposit_id: source.0,
         amount,
         payment_id,
         sequence_number,
-        nonce: 0,
+        nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
-        witness,
+        witness: DescriptorWitness::new(),
     };
+    let op = deposits_core::signing::sign_op(proto, source_sk)
+        .expect("InvoiceLock signs via dep-17 preimage");
     (op, payment_id)
 }
 
-/// Build a TransferLock for an intra-ledger transfer. Returns (op, transfer_id,
-/// preimage) so honest callers can later TransferComplete.
+/// Build a TransferLock for an intra-ledger transfer signed via dep-17.
+/// Returns (op, transfer_id) so honest callers can later TransferComplete.
 fn build_transfer_lock(
     source: &(DepositId, String, u16),
     dest: &(DepositId, String, u16),
@@ -1042,24 +1036,20 @@ fn build_transfer_lock(
     timeout_height: u32,
     source_sk: &SecretKey,
     preimage: [u8; 32],
-    nonce: [u8; 32],
+    transfer_nonce: [u8; 32],
 ) -> (LedgerOperation, [u8; 32]) {
     use bitcoin::hashes::{sha256, Hash};
     let hash = sha256::Hash::hash(&preimage).to_byte_array();
     let completion_script = format!("sha256({})", hex::encode(hash));
-    let signing_msg = signature_utils::transfer_lock_signing_message(
-        &nonce,
-        &source.0,
-        &dest.0,
-        amount,
-        fee,
-        &completion_script,
-        timeout_height,
-    );
-    let witness = sign_pk_witness(source_sk, &signing_msg);
-    let transfer_id = signature_utils::compute_transfer_id(&signing_msg);
-    let op = LedgerOperation::TransferLock {
-        transfer_nonce: nonce,
+    // transfer_id is now a wallet-picked random 32 bytes; for determinism in
+    // the fuzz harness, derive it from (transfer_nonce, hash) so the same
+    // inputs always produce the same id.
+    let mut tid_input = Vec::with_capacity(64);
+    tid_input.extend_from_slice(&transfer_nonce);
+    tid_input.extend_from_slice(&hash);
+    let transfer_id = sha256::Hash::hash(&tid_input).to_byte_array();
+    let proto = LedgerOperation::TransferLock {
+        transfer_nonce,
         source_deposit_id: source.0,
         destination_deposit_id: dest.0,
         amount,
@@ -1067,10 +1057,12 @@ fn build_transfer_lock(
         completion_script,
         timeout_height,
         transfer_id,
-        nonce: 0,
+        nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
-        witness,
+        witness: DescriptorWitness::new(),
     };
+    let op = deposits_core::signing::sign_op(proto, source_sk)
+        .expect("TransferLock signs via dep-17 preimage");
     (op, transfer_id)
 }
 
@@ -1527,9 +1519,10 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
         let did = lock.deposit_id;
         let amount = lock.amount;
         let source = op.deposits.iter().find(|(d, _, _)| *d == did).cloned()?;
-        let source_sk = op.depositor_keys.get(&did).copied()?;
-        let msg = signature_utils::invoice_lock_signing_message(&did, &pid, amount);
-        let witness = sign_pk_witness(&source_sk, &msg);
+        let _source_sk = op.depositor_keys.get(&did).copied()?;
+        // OpenInvoiceLock caches the lock's witness; reuse it directly so
+        // the fulfill carries the same signature the descriptor admitted.
+        let witness = lock.witness.clone();
         let o = if rng.range(100) < 70 {
             // Fulfill path — needs the real preimage.
             let preimage = op.open_invoice_preimages.get(&pid).copied()?;

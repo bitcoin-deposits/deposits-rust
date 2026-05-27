@@ -216,22 +216,19 @@ fn invariant_e4_negative_expected_value() {
 // C1: witness must satisfy descriptor
 // =========================================================================
 
-// Phase 5: this test was written against the legacy `verify_witness` path and the old
-// `invoice_lock_signing_message` helper. The new path (Authorizer trait routed via
-// `apply_with_verifier_and_authorizer` + a real Dep16Authorizer) signs the dep-17
-// operation preimage instead. The equivalent properties — valid witness passes, forged
-// witness is flagged — are covered end-to-end in
-// `deposits-core/tests/dep16_authorizer_test.rs`. A port of this specific test to the new
-// path is welcome but not required for the invariant; ignored for now to avoid duplicating
-// the equivalent coverage.
+// C1: a witness must satisfy the deposit's descriptor. Equivalent end-to-end
+// coverage also lives in `deposits-core/tests/dep16_authorizer_test.rs`, but
+// keeping this attack-log-flavored case alive documents the property in the
+// invariants-test surface for the threat-model report.
 #[test]
-#[ignore = "ported to deposits-core/tests/dep16_authorizer_test.rs under the new path"]
 fn invariant_c1_witness_validity() {
     let mut log = AttackLog::new();
     let (user_sk, user_pk) = make_key(10);
     let (attacker_sk, _) = make_key(99);
 
-    let descriptor = format!("pk({})", hex::encode(user_pk.serialize()));
+    // Dep16Authorizer parses descriptors as dep-16 sources; the canonical shape
+    // is `wsh(prove(pk(K)))` rather than bare `pk(K)`.
+    let descriptor = format!("wsh(prove(pk({})))", hex::encode(user_pk.serialize()));
     let deposit_id = compute_deposit_id(&descriptor);
 
     let mut state = LedgerState::new(make_key(1).1, "bcrt1q".into(), 0);
@@ -262,51 +259,40 @@ fn invariant_c1_witness_validity() {
         })
         .unwrap();
 
-    // Valid witness (correct key)
-    let payment_id = [0x01; 32];
-    let msg = deposits_protocol::invoice_lock_signing_message(&deposit_id, &payment_id, 100_000);
-    let good_sig = sign_schnorr(&user_sk, &msg);
-    let good_op = LedgerOperation::InvoiceLock {
+    let authorizer = deposits_core::dep16::Dep16Authorizer::new();
+
+    // Valid witness (correct key, dep-17 preimage)
+    let good_proto = LedgerOperation::InvoiceLock {
         deposit_id,
         amount: 100_000,
-        payment_id,
+        payment_id: [0x01; 32],
         sequence_number: 2,
-        nonce: 1, // strictly > deposit.last_op_nonce (default 0); phase-3 replay rule
+        nonce: 1,
         expiry: u32::MAX,
-        witness: DescriptorWitness {
-            stack: vec![good_sig.to_vec()],
-        },
+        witness: DescriptorWitness::new(),
     };
+    let good_op = deposits_core::signing::sign_op(good_proto, &user_sk)
+        .expect("InvoiceLock signs via dep-17 preimage");
     let (_, good_violations) = state
-        .apply_with_verifier(
-            &good_op,
-            &CoreWitnessVerifier::new(0),
-            &deposits_protocol::types::AllowAll,
-            0,
-        )
+        .apply_with_verifier(&good_op, &CoreWitnessVerifier::new(0), &authorizer, 0)
         .unwrap();
-    assert!(good_violations.is_empty(), "C1: valid witness must pass");
+    eprintln!("violations: {:?}", good_violations); assert!(good_violations.is_empty(), "C1: valid witness must pass");
 
-    // Invalid witness (wrong key)
-    let bad_sig = sign_schnorr(&attacker_sk, &msg);
-    let bad_op = LedgerOperation::InvoiceLock {
+    // Forged witness (wrong key signing the same op shape — descriptor
+    // expects user_pk, signature comes from attacker_sk)
+    let bad_proto = LedgerOperation::InvoiceLock {
         deposit_id,
         amount: 100_000,
         payment_id: [0x02; 32],
         sequence_number: 3,
-        nonce: 2, // strictly > last_op_nonce after the good_op above bumped it to 1
+        nonce: 2,
         expiry: u32::MAX,
-        witness: DescriptorWitness {
-            stack: vec![bad_sig.to_vec()],
-        },
+        witness: DescriptorWitness::new(),
     };
+    let bad_op = deposits_core::signing::sign_op(bad_proto, &attacker_sk)
+        .expect("InvoiceLock signs via dep-17 preimage");
     let (_, bad_violations) = state
-        .apply_with_verifier(
-            &bad_op,
-            &CoreWitnessVerifier::new(0),
-            &deposits_protocol::types::AllowAll,
-            0,
-        )
+        .apply_with_verifier(&bad_op, &CoreWitnessVerifier::new(0), &authorizer, 0)
         .unwrap();
     assert!(
         !bad_violations.is_empty(),
@@ -322,7 +308,7 @@ fn invariant_c1_witness_validity() {
         blocked: true,
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
-        notes: "CoreWitnessVerifier catches wrong-key Schnorr signatures".into(),
+        notes: "Dep16Authorizer rejects sigs over the dep-17 preimage that don't satisfy the descriptor".into(),
         steps: vec![],
     });
 }
@@ -381,18 +367,35 @@ fn invariant_c3_signature_binding() {
     let descriptor = format!("pk({})", hex::encode(user_pk.serialize()));
     let deposit_id = compute_deposit_id(&descriptor);
 
-    // Create two different signing messages for different operations
-    let msg_invoice =
-        deposits_protocol::invoice_lock_signing_message(&deposit_id, &[0x01; 32], 100_000);
-    let msg_withdrawal = deposits_protocol::withdrawal_signing_message(
-        &[0x02; 32],
-        &deposit_id,
-        "bcrt1q",
-        100_000,
-        1000,
-    );
+    let preimage = |op: &LedgerOperation| {
+        deposits_core::dep16::operations::operation_sighash(op)
+            .expect("test op has a dep-17 preimage")
+    };
 
-    // Same key, different messages — signatures must differ
+    // Two different dep-17 preimages for different ops (invoice vs withdrawal)
+    let invoice_op = LedgerOperation::InvoiceLock {
+        deposit_id,
+        amount: 100_000,
+        payment_id: [0x01; 32],
+        sequence_number: 1,
+        nonce: 0,
+        expiry: u32::MAX,
+        witness: DescriptorWitness::new(),
+    };
+    let withdrawal_op = LedgerOperation::OnchainLock {
+        deposit_id,
+        amount: 100_000,
+        fee_sats: 1000,
+        destination_address: "bcrt1q".into(),
+        withdrawal_id: [0x02; 32],
+        nonce: 0,
+        expiry: u32::MAX,
+        witness: DescriptorWitness::new(),
+    };
+    let msg_invoice = preimage(&invoice_op);
+    let msg_withdrawal = preimage(&withdrawal_op);
+
+    // Same key, different ops — signatures over the preimages must differ
     let sig_invoice = sign_schnorr(&user_sk, &msg_invoice);
     let sig_withdrawal = sign_schnorr(&user_sk, &msg_withdrawal);
 
@@ -401,12 +404,18 @@ fn invariant_c3_signature_binding() {
         "C3: different operations must produce different signatures"
     );
 
-    // Verify that signing messages include the deposit_id (ledger binding)
-    let msg_other_deposit = deposits_protocol::invoice_lock_signing_message(
-        &[0xFF; 16], // different deposit
-        &[0x01; 32],
-        100_000,
-    );
+    // dep-17 preimage embeds deposit_id (via the op's deposit_id field), so
+    // the same op shape on a different deposit produces a different preimage.
+    let other_op = LedgerOperation::InvoiceLock {
+        deposit_id: [0xFF; 16],
+        amount: 100_000,
+        payment_id: [0x01; 32],
+        sequence_number: 1,
+        nonce: 0,
+        expiry: u32::MAX,
+        witness: DescriptorWitness::new(),
+    };
+    let msg_other_deposit = preimage(&other_op);
     assert_ne!(
         msg_invoice, msg_other_deposit,
         "C3: different deposits must produce different signing messages"
@@ -421,7 +430,7 @@ fn invariant_c3_signature_binding() {
         blocked: true,
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
-        notes: "Signing messages include deposit_id, operation type, and parameters".into(),
+        notes: "dep-17 preimage binds op_type, deposit_id, and every authorization parameter".into(),
         steps: vec![],
     });
 }
@@ -655,23 +664,18 @@ fn invariant_s3_balance_non_negative() {
 
     // Try to lock more than available
     let payment_id = [0x01; 32];
-    let msg = deposits_protocol::invoice_lock_signing_message(&did, &payment_id, 200_000);
-    let sig = sign_schnorr(&user.secret_key, &msg);
-
-    let result = net
-        .op_mut("alice")
-        .ledger
-        .apply_operation(&LedgerOperation::InvoiceLock {
-            deposit_id: did,
-            amount: 200_000, // more than 100k balance
-            payment_id,
-            sequence_number: 99,
-            nonce: 0,
-            expiry: u32::MAX,
-            witness: DescriptorWitness {
-                stack: vec![sig.to_vec()],
-            },
-        });
+    let proto = LedgerOperation::InvoiceLock {
+        deposit_id: did,
+        amount: 200_000, // more than 100k balance
+        payment_id,
+        sequence_number: 99,
+        nonce: deposits_core::signing::fresh_op_nonce(),
+        expiry: u32::MAX,
+        witness: DescriptorWitness::new(),
+    };
+    let op = deposits_core::signing::sign_op(proto, &user.secret_key)
+        .expect("InvoiceLock signs via dep-17 preimage");
+    let result = net.op_mut("alice").ledger.apply_operation(&op);
 
     log.record(AttackResult {
         name: "S3: Balance non-negative".into(),

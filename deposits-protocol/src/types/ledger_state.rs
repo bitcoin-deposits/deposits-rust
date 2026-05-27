@@ -1086,40 +1086,6 @@ impl LedgerState {
             }
         }
 
-        // TransferLock: the declared `transfer_id` must equal the id
-        // derived from the operation's signing message. Otherwise the
-        // depositor could authorize one set of terms while the
-        // committed pending-transfer entry routes by a different id.
-        if let LedgerOperation::TransferLock {
-            transfer_nonce,
-            source_deposit_id,
-            destination_deposit_id,
-            amount,
-            fee,
-            completion_script,
-            timeout_height,
-            transfer_id,
-            ..
-        } = operation
-        {
-            let signing_msg = crate::signature_utils::transfer_lock_signing_message(
-                transfer_nonce,
-                source_deposit_id,
-                destination_deposit_id,
-                *amount,
-                *fee,
-                completion_script,
-                *timeout_height,
-            );
-            let expected = crate::signature_utils::compute_transfer_id(&signing_msg);
-            if expected != *transfer_id {
-                violations.push(ConformanceViolation::MismatchedTransferId {
-                    expected,
-                    actual: *transfer_id,
-                });
-            }
-        }
-
         // Per-deposit replay protection. Each signature-bearing op carries
         // (nonce, expiry); the deposit tracks a set of (nonce, expiry) pairs
         // already accepted. An op is rejected if:

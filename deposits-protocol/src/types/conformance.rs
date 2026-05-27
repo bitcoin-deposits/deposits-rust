@@ -40,16 +40,6 @@ pub enum ConformanceViolation {
     /// OnchainLock's `destination_address` was empty.
     EmptyDestination,
 
-    /// TransferLock's declared `transfer_id` field disagrees with the
-    /// id derived from the operation's signing message. Without this
-    /// check, a writer could craft a transfer whose authoritative id
-    /// (used for later TransferComplete lookup) differs from the id
-    /// the depositor signed over.
-    MismatchedTransferId {
-        expected: [u8; 32],
-        actual: [u8; 32],
-    },
-
     /// DepositKeyRotate's `new_descriptor` failed to parse as a
     /// miniscript descriptor. Without rejecting at rotation time the
     /// resulting deposit becomes unspendable through normal paths.
@@ -126,12 +116,6 @@ impl std::fmt::Display for ConformanceViolation {
                 write!(f, "zero amount in {}", operation)
             }
             Self::EmptyDestination => write!(f, "empty destination address"),
-            Self::MismatchedTransferId { expected, actual } => write!(
-                f,
-                "transfer_id mismatch: declared {} but signing message yields {}",
-                hex::encode(actual),
-                hex::encode(expected),
-            ),
             Self::UnparseableDescriptor { operation, detail } => write!(
                 f,
                 "unparseable descriptor in {}: {}",

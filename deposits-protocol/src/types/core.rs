@@ -269,12 +269,12 @@ pub struct OpenInvoiceLock {
     /// background `auto_complete_outbound_payments` task once LDK
     /// reports the payment settled) can re-attach it. The conformance
     /// verifier requires every InvoiceFulfill carry a witness that
-    /// satisfies the deposit descriptor over `invoice_lock_signing_message`,
-    /// and the only entity that can produce one is the depositor — so
-    /// the operator has to keep it from lock time. `serde(default)`
-    /// for backward compatibility with state files written before this
-    /// field existed; those locks will fail their eventual fulfill
-    /// conformance check (auto-task logs the failure).
+    /// satisfies the deposit descriptor over the dep-17 operation
+    /// preimage, and the only entity that can produce one is the
+    /// depositor — so the operator has to keep it from lock time.
+    /// `serde(default)` for backward compatibility with state files
+    /// written before this field existed; those locks will fail their
+    /// eventual fulfill conformance check (auto-task logs the failure).
     #[serde(default)]
     pub witness: DescriptorWitness,
 }

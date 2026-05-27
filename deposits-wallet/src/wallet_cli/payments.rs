@@ -96,7 +96,7 @@ pub async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     // Source the descriptor of truth from the deposit record. The
     // `deposit_id` is its hash; the witness is whatever satisfies
-    // the descriptor over `withdrawal_signing_message`.
+    // the descriptor over the dep-17 operation preimage.
     let (descriptor, deposit_id_hex) = deposit_record_identity(deposit)
         .ok_or("Deposit record missing descriptor / deposit_pubkey — re-open this deposit")?;
     let deposit_id_bytes =
@@ -546,7 +546,6 @@ pub async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error
 pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use bitcoin::secp256k1::rand::rngs::OsRng;
     use bitcoin::secp256k1::rand::RngCore;
-    use deposits_core::signature_utils::{compute_transfer_id, transfer_lock_signing_message};
     use deposits_core::types::compute_deposit_id;
 
     let mut from_alias: Option<String> = None;
@@ -1315,12 +1314,12 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     let mut deposit_id = [0u8; 16];
     deposit_id.copy_from_slice(&deposit_id_bytes);
 
-    // Phase 5d: sign the dep-17 operation preimage (not the legacy
-    // invoice_lock_signing_message). The wallet picks `nonce` (timestamp-derived;
-    // any unique-within-window value works under the seen_nonces replay rule) and
-    // `expiry` (chain-tip + margin; sender currently picks a far-future placeholder
-    // since the wallet doesn't yet plumb chain-tip access — TODO: thread chain-tip
-    // and pick `tip + 144` once the wallet wraps a sync source).
+    // Sign the dep-17 operation preimage. The wallet picks `nonce`
+    // (timestamp-derived; any unique-within-window value works under the
+    // seen_nonces replay rule) and `expiry` (chain-tip + margin; sender
+    // currently picks a far-future placeholder since the wallet doesn't yet
+    // plumb chain-tip access — TODO: thread chain-tip and pick `tip + 144`
+    // once the wallet wraps a sync source).
     //
     // The witness ends up being whatever satisfies the descriptor — for pk(...)
     // it's a single Schnorr sig over the dep-17 sighash.
@@ -1798,7 +1797,6 @@ pub async fn send(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use bitcoin::hashes::{sha256, Hash};
     use bitcoin::secp256k1::rand::rngs::OsRng;
     use bitcoin::secp256k1::rand::RngCore;
-    use deposits_core::signature_utils::{compute_transfer_id, transfer_lock_signing_message};
     use deposits_core::types::compute_deposit_id;
 
     let mut src_alias: Option<String> = None;

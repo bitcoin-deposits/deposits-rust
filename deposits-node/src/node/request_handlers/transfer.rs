@@ -12,7 +12,7 @@ impl Node {
     /// - amount_sats: amount to withdraw
     /// - fee_sats: fee for the withdrawal transaction
     /// - nonce: hex-encoded 32-byte nonce
-    /// - witness: DescriptorWitness over `withdrawal_signing_message`
+    /// - witness: DescriptorWitness over the dep-17 OnchainLock preimage
     pub(crate) async fn process_withdraw_request(
         &self,
         request: &crate::nostr::LedgerRequest,

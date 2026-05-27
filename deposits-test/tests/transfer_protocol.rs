@@ -16,30 +16,15 @@ fn transfer_lock_and_complete() {
         .credit_deposit(src_id, 100_000, [0xAA; 32]);
 
     // Lock transfer
-    let nonce = [0x42; 32];
+    let transfer_nonce = [0x42; 32];
+    let transfer_id = [0x43; 32];
     let amount = 30_000u64;
     let fee = 500u64;
     let completion_script = "sha256(deadbeef)";
     let timeout_height = 900_000u32;
 
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let msg_hash = deposits_protocol::transfer_lock_signing_message(
-        &nonce,
-        &src_id,
-        &dst_id,
-        amount,
-        fee,
-        completion_script,
-        timeout_height,
-    );
-    let transfer_id = deposits_protocol::compute_transfer_id(&msg_hash);
-
-    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &sender.secret_key);
-    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
-    let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-
-    let lock_op = deposits_protocol::LedgerOperation::TransferLock {
-        transfer_nonce: nonce,
+    let proto = deposits_protocol::LedgerOperation::TransferLock {
+        transfer_nonce,
         source_deposit_id: src_id,
         destination_deposit_id: dst_id,
         amount,
@@ -47,12 +32,12 @@ fn transfer_lock_and_complete() {
         completion_script: completion_script.to_string(),
         timeout_height,
         transfer_id,
-        nonce: 0,
+        nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
-        witness: deposits_protocol::DescriptorWitness {
-            stack: vec![sig.serialize().to_vec()],
-        },
+        witness: deposits_protocol::DescriptorWitness::new(),
     };
+    let lock_op = deposits_core::signing::sign_op(proto, &sender.secret_key)
+        .expect("TransferLock signs via dep-17 preimage");
     net.op_mut("alice")
         .ledger
         .apply_operation(&lock_op)
@@ -110,27 +95,12 @@ fn transfer_fail_returns_funds_to_source() {
         .credit_deposit(src_id, 100_000, [0xAA; 32]);
 
     // Lock
-    let nonce = [0x42; 32];
+    let transfer_nonce = [0x42; 32];
+    let transfer_id = [0x43; 32];
     let amount = 30_000u64;
     let fee = 500u64;
-    let msg_hash = deposits_protocol::transfer_lock_signing_message(
-        &nonce,
-        &src_id,
-        &dst_id,
-        amount,
-        fee,
-        "sha256(aa)",
-        900_000,
-    );
-    let transfer_id = deposits_protocol::compute_transfer_id(&msg_hash);
-
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &sender.secret_key);
-    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
-    let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-
-    let lock_op = deposits_protocol::LedgerOperation::TransferLock {
-        transfer_nonce: nonce,
+    let proto = deposits_protocol::LedgerOperation::TransferLock {
+        transfer_nonce,
         source_deposit_id: src_id,
         destination_deposit_id: dst_id,
         amount,
@@ -138,12 +108,12 @@ fn transfer_fail_returns_funds_to_source() {
         completion_script: "sha256(aa)".to_string(),
         timeout_height: 900_000,
         transfer_id,
-        nonce: 0,
+        nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
-        witness: deposits_protocol::DescriptorWitness {
-            stack: vec![sig.serialize().to_vec()],
-        },
+        witness: deposits_protocol::DescriptorWitness::new(),
     };
+    let lock_op = deposits_core::signing::sign_op(proto, &sender.secret_key)
+        .expect("TransferLock signs via dep-17 preimage");
     net.op_mut("alice")
         .ledger
         .apply_operation(&lock_op)
@@ -184,25 +154,10 @@ fn transfer_insufficient_balance_rejected() {
         .credit_deposit(src_id, 10_000, [0xAA; 32]);
 
     // Try to transfer more than balance
-    let nonce = [0x42; 32];
-    let msg_hash = deposits_protocol::transfer_lock_signing_message(
-        &nonce,
-        &src_id,
-        &_dst_id,
-        50_000,
-        500,
-        "sha256(aa)",
-        900_000,
-    );
-    let transfer_id = deposits_protocol::compute_transfer_id(&msg_hash);
-
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &sender.secret_key);
-    let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
-    let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-
-    let lock_op = deposits_protocol::LedgerOperation::TransferLock {
-        transfer_nonce: nonce,
+    let transfer_nonce = [0x42; 32];
+    let transfer_id = [0x43; 32];
+    let proto = deposits_protocol::LedgerOperation::TransferLock {
+        transfer_nonce,
         source_deposit_id: src_id,
         destination_deposit_id: _dst_id,
         amount: 50_000,
@@ -210,12 +165,12 @@ fn transfer_insufficient_balance_rejected() {
         completion_script: "sha256(aa)".to_string(),
         timeout_height: 900_000,
         transfer_id,
-        nonce: 0,
+        nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
-        witness: deposits_protocol::DescriptorWitness {
-            stack: vec![sig.serialize().to_vec()],
-        },
+        witness: deposits_protocol::DescriptorWitness::new(),
     };
+    let lock_op = deposits_core::signing::sign_op(proto, &sender.secret_key)
+        .expect("TransferLock signs via dep-17 preimage");
 
     let result = net.op_mut("alice").ledger.apply_operation(&lock_op);
     assert!(result.is_err());

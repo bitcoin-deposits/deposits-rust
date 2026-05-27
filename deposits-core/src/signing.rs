@@ -14,10 +14,6 @@
 use crate::error::DepositsError;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{schnorr::Signature, Keypair, Message, PublicKey, Secp256k1, SecretKey};
-use deposits_protocol::signature_utils::{
-    compute_transfer_id, invoice_lock_signing_message, transfer_lock_signing_message,
-    withdrawal_signing_message,
-};
 
 /// Create a deposit guarantee signature (Bob's commitment to credit specific deposit)
 /// Bob's private key signs: "DEPOSIT_GUARANTEE:{invoice}:{deposit_pubkey}"
@@ -294,54 +290,6 @@ pub fn verify_deposit_offer_signature(
 // matches on each Lock/Fulfill op variant, builds the same
 // signing message, calls `verifier.verify_witness`).
 
-/// Create a withdrawal authorization signature.
-///
-/// Creates a Schnorr signature authorizing a withdrawal from a deposit.
-/// This signature is used as part of the DescriptorWitness for the withdrawal.
-///
-/// # Arguments
-/// * `secret_key` - The deposit holder's secret key
-/// * `nonce` - Unique nonce for the withdrawal request
-/// * `deposit_pubkey` - The deposit's public key (for deriving deposit_id)
-/// * `destination_address` - Address to withdraw to
-/// * `amount_sats` - Amount to withdraw in satoshis
-/// * `fee_sats` - Transaction fee in satoshis
-///
-/// # Returns
-/// A 64-byte Schnorr signature
-pub fn create_withdrawal_signature(
-    secret_key: &SecretKey,
-    nonce: &[u8; 32],
-    deposit_pubkey: &PublicKey,
-    destination_address: &str,
-    amount_sats: u64,
-    fee_sats: u64,
-) -> Result<[u8; 64], DepositsError> {
-    use bitcoin::secp256k1::schnorr::Signature;
-    use bitcoin::secp256k1::Keypair;
-
-    // Derive deposit_id from pubkey (for backwards compatibility)
-    let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
-    let deposit_id = crate::types::compute_deposit_id(&descriptor);
-
-    // Get the message hash
-    let message_hash = withdrawal_signing_message(
-        nonce,
-        &deposit_id,
-        destination_address,
-        amount_sats,
-        fee_sats,
-    );
-
-    // Sign with Schnorr
-    let secp = Secp256k1::new();
-    let keypair = Keypair::from_secret_key(&secp, secret_key);
-    let msg = Message::from_digest(message_hash);
-    let sig: Signature = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-
-    Ok(sig.serialize())
-}
-
 /// Pick a fresh per-deposit dep-16 nonce. Returns a high-resolution-timestamp-derived
 /// u64 that is monotonically increasing in practice (one nanosecond per call's worst
 /// case) and astronomically unlikely to collide with any previously-used nonce on any
@@ -372,10 +320,6 @@ pub fn fresh_op_nonce() -> u64 {
 ///
 /// Returns `None` for variants that don't go through dep-16 authorization (fulfills,
 /// administrative ops) — callers shouldn't try to sign these.
-///
-/// Phase 5b replaces the legacy per-variant signing-helper pattern
-/// (`invoice_lock_signing_message` + sign + insert) with this uniform helper. See
-/// PLAN-dep16-integration.md.
 pub fn sign_op(
     op: deposits_protocol::messages::LedgerOperation,
     secret_key: &SecretKey,
@@ -384,12 +328,14 @@ pub fn sign_op(
     use deposits_protocol::types::DescriptorWitness;
 
     let sighash = crate::dep16::operations::operation_sighash(&op)?;
+    // Sign with the same algorithm Dep16Authorizer verifies with (ECDSA over
+    // the dep-17 preimage). secp256k1 produces a low-s signature by default,
+    // matching the verifier's rejection of high-s twins.
     let secp = Secp256k1::new();
-    let keypair = Keypair::from_secret_key(&secp, secret_key);
     let msg = Message::from_digest(sighash);
-    let sig: Signature = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+    let ecdsa_sig = secp.sign_ecdsa(&msg, secret_key);
     let witness = DescriptorWitness {
-        stack: vec![sig.serialize().to_vec()],
+        stack: vec![ecdsa_sig.serialize_compact().to_vec()],
     };
     Some(match op {
         LedgerOperation::InvoiceLock {
@@ -714,20 +660,18 @@ mod tests {
     // do.
 
     /// `sign_op` round-trips: given a partially-built InvoiceLock with empty witness,
-    /// the helper computes the dep-17 sighash, signs it, and returns the same op with
-    /// the signature inserted into the witness stack. The resulting witness signature,
-    /// when verified against the same dep-17 sighash, must validate under the
-    /// deposit key — confirming the helper signs the right bytes.
+    /// the helper computes the dep-17 sighash, signs it via ECDSA (the algorithm
+    /// `Dep16Authorizer`'s `EcdsaVerifier` checks against), and returns the op with
+    /// the signature inserted. The witness signature must verify under the deposit
+    /// key — confirming the helper signs the right bytes with the right algorithm.
     #[test]
     fn sign_op_round_trip() {
-        use bitcoin::secp256k1::{schnorr::Signature as SchnorrSig, Keypair, XOnlyPublicKey};
+        use bitcoin::secp256k1::ecdsa::Signature as EcdsaSig;
         use deposits_protocol::messages::LedgerOperation;
         use deposits_protocol::types::DescriptorWitness;
 
-        let (sk, _) = create_test_keypair();
+        let (sk, pk) = create_test_keypair();
         let secp = Secp256k1::new();
-        let keypair = Keypair::from_secret_key(&secp, &sk);
-        let xonly = XOnlyPublicKey::from_keypair(&keypair).0;
 
         let proto = LedgerOperation::InvoiceLock {
             deposit_id: [0xde; 16],
@@ -741,17 +685,15 @@ mod tests {
         let signed = sign_op(proto.clone(), &sk).expect("InvoiceLock is signature-bearing");
         let sighash = crate::dep16::operations::operation_sighash(&proto).unwrap();
 
-        // The witness now carries a single 64-byte Schnorr signature that verifies
-        // against the dep-17 sighash under the signing key.
         let witness = match &signed {
             LedgerOperation::InvoiceLock { witness, .. } => witness,
             _ => panic!("variant changed"),
         };
         assert_eq!(witness.stack.len(), 1);
         assert_eq!(witness.stack[0].len(), 64);
-        let sig = SchnorrSig::from_slice(&witness.stack[0]).unwrap();
+        let sig = EcdsaSig::from_compact(&witness.stack[0]).unwrap();
         let msg = Message::from_digest(sighash);
-        secp.verify_schnorr(&sig, &msg, &xonly)
+        secp.verify_ecdsa(&msg, &sig, &pk)
             .expect("signature must verify against the dep-17 sighash");
     }
 

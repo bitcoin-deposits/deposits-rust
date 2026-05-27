@@ -7,7 +7,6 @@
 //! Negotiation and execution (bilateral HTLC) are handled in a follow-up.
 
 use deposits_core::messages::LedgerOperation;
-use deposits_core::signature_utils::{compute_transfer_id, transfer_lock_signing_message};
 use deposits_core::tlv::TlvDecode;
 use deposits_core::types::{compute_deposit_id, TransferFeeSchedule};
 use deposits_nostr::{SwapAdvertisement, SwapRequest, SwapResponse};

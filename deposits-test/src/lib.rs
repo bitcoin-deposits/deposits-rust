@@ -151,7 +151,8 @@ impl Operator {
         self.ledger.append_operation(op).unwrap();
     }
 
-    /// Lock an invoice payment (requires depositor signature).
+    /// Lock an invoice payment (requires depositor signature over the dep-17
+    /// operation preimage).
     pub fn lock_invoice(
         &mut self,
         depositor: &Depositor,
@@ -159,31 +160,24 @@ impl Operator {
         amount: u64,
         payment_id: [u8; 32],
     ) {
-        let secp = Secp256k1::new();
-        let msg_hash =
-            deposits_protocol::invoice_lock_signing_message(&deposit_id, &payment_id, amount);
-        let keypair = Keypair::from_secret_key(&secp, &depositor.secret_key);
-        let msg = Message::from_digest(msg_hash);
-        let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-
-        let op = LedgerOperation::InvoiceLock {
+        let op_nonce = deposits_core::signing::fresh_op_nonce();
+        let op_expiry = u32::MAX;
+        let proto = LedgerOperation::InvoiceLock {
             deposit_id,
             amount,
             payment_id,
             sequence_number: self.ledger.state.sequence + 1,
-            // phase 3: per-deposit replay protection. Test fixture uses placeholder values;
-            // real wallet code threads the deposit's last_op_nonce + 1 and a current_height + N
-            // expiry.
-            nonce: self.ledger.state.sequence + 1,
-            expiry: u32::MAX,
-            witness: DescriptorWitness {
-                stack: vec![sig.serialize().to_vec()],
-            },
+            nonce: op_nonce,
+            expiry: op_expiry,
+            witness: DescriptorWitness::new(),
         };
+        let op = deposits_core::signing::sign_op(proto, &depositor.secret_key)
+            .expect("InvoiceLock signs via dep-17 preimage");
         self.ledger.append_operation(op).unwrap();
     }
 
-    /// Fulfill an invoice payment (with preimage).
+    /// Fulfill an invoice payment (with preimage). Reuses the lock witness shape:
+    /// signature over the dep-17 preimage of an InvoiceLock with matching fields.
     pub fn fulfill_invoice(
         &mut self,
         depositor: &Depositor,
@@ -192,21 +186,30 @@ impl Operator {
         payment_id: [u8; 32],
         preimage: [u8; 32],
     ) {
-        let secp = Secp256k1::new();
-        let msg_hash =
-            deposits_protocol::invoice_lock_signing_message(&deposit_id, &payment_id, amount);
-        let keypair = Keypair::from_secret_key(&secp, &depositor.secret_key);
-        let msg = Message::from_digest(msg_hash);
-        let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+        let op_nonce = deposits_core::signing::fresh_op_nonce();
+        let op_expiry = u32::MAX;
+        let lock_proto = LedgerOperation::InvoiceLock {
+            deposit_id,
+            amount,
+            payment_id,
+            sequence_number: self.ledger.state.sequence + 1,
+            nonce: op_nonce,
+            expiry: op_expiry,
+            witness: DescriptorWitness::new(),
+        };
+        let signed_lock = deposits_core::signing::sign_op(lock_proto, &depositor.secret_key)
+            .expect("InvoiceLock signs via dep-17 preimage");
+        let witness = match &signed_lock {
+            LedgerOperation::InvoiceLock { witness, .. } => witness.clone(),
+            _ => unreachable!(),
+        };
 
         let op = LedgerOperation::InvoiceFulfill {
             deposit_id,
             amount,
             payment_id,
             sequence_number: self.ledger.state.sequence + 1,
-            witness: DescriptorWitness {
-                stack: vec![sig.serialize().to_vec()],
-            },
+            witness,
             preimage,
         };
         self.ledger.append_operation(op).unwrap();

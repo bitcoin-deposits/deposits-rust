@@ -39,7 +39,6 @@
 
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
-use deposits_core::signature_utils::invoice_lock_signing_message;
 use deposits_node::nostr::NostrTransportBuilder;
 use deposits_test::regtest::*;
 
@@ -207,29 +206,37 @@ async fn pay_invoice_self_pay_returns_real_preimage() {
     //
     // Wallet seed lives at <data_dir>/seed.hex — written by the first
     // `wallet_open`. Derive the send deposit's secret at its key_index
-    // (matches `derive_secret_key_at_index` in the wallet) and produce
-    // a Schnorr sig over `invoice_lock_signing_message`.
+    // (matches `derive_secret_key_at_index` in the wallet) and sign the
+    // dep-17 operation preimage via `sign_op`. The operator's pay_invoice
+    // handler reads op_nonce/op_expiry from the request and binds them
+    // into the InvoiceLock it stages, so the wallet's signature verifies.
     let seed_hex = std::fs::read_to_string(wdir.join("seed.hex")).unwrap();
     let seed_bytes = hex::decode(seed_hex.trim()).unwrap();
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&seed_bytes);
     let send_sk = derive_deposit_secret(&seed, bitcoin::Network::Regtest, send_key_index);
 
-    let secp = Secp256k1::new();
-    let send_keypair = Keypair::from_secret_key(&secp, &send_sk);
     let mut send_deposit_id = [0u8; 16];
     send_deposit_id.copy_from_slice(
         &hex::decode(&send_deposit_id_hex).expect("send_deposit_id hex"),
     );
     let amount_msat = amount_sats * 1000;
-    let lock_msg = invoice_lock_signing_message(&send_deposit_id, &payment_hash, amount_msat);
-    let lock_sig = secp.sign_schnorr(&Message::from_digest(lock_msg), &send_keypair);
-    // DescriptorWitness serializes as `{stack: [[u8…], …]}` — an array
-    // of byte arrays, NOT hex strings. Build the typed struct and let
-    // serde produce the right shape rather than constructing JSON by
-    // hand.
-    let witness = deposits_core::types::DescriptorWitness {
-        stack: vec![lock_sig.serialize().to_vec()],
+    let op_nonce = deposits_core::signing::fresh_op_nonce();
+    let op_expiry = u32::MAX;
+    let proto = deposits_core::messages::LedgerOperation::InvoiceLock {
+        deposit_id: send_deposit_id,
+        amount: amount_msat,
+        payment_id: payment_hash,
+        sequence_number: 0,
+        nonce: op_nonce,
+        expiry: op_expiry,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    let signed = deposits_core::signing::sign_op(proto, &send_sk)
+        .expect("InvoiceLock signs via dep-17 preimage");
+    let witness = match signed {
+        deposits_core::messages::LedgerOperation::InvoiceLock { witness, .. } => witness,
+        _ => unreachable!(),
     };
 
     // ── Step 3: pay_invoice (self-pay path) ───────────────────────────
@@ -243,6 +250,8 @@ async fn pay_invoice_self_pay_returns_real_preimage() {
                 "payment_hash": payment_hash_hex,
                 "amount_msats": amount_msat,
                 "witness": witness,
+                "nonce": op_nonce,
+                "expiry": op_expiry,
             }),
         )
         .await

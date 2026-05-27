@@ -615,101 +615,131 @@ fn signed_ledger_update_tlv_decode_empty() {
 }
 
 // ============================================================================
-// 11. Protocol signing messages (deposits-core re-exports)
+// 11. dep-17 operation preimage (per-op authorization sighash)
 // ============================================================================
+//
+// The dep-17 operation preimage is what signature-bearing ops are signed
+// over. Determinism + field sensitivity here is the binding property: a
+// signature for one op shape can't authorize a different op shape, so a
+// replay or substitution attack can't reuse signatures across contexts.
+
+fn invoice_lock_preimage(deposit_id: [u8; 16], payment_id: [u8; 32], amount: u64) -> [u8; 32] {
+    let op = deposits_core::messages::LedgerOperation::InvoiceLock {
+        deposit_id,
+        amount,
+        payment_id,
+        sequence_number: 1,
+        nonce: 0,
+        expiry: u32::MAX,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    deposits_core::dep16::operations::operation_sighash(&op)
+        .expect("InvoiceLock has a dep-17 preimage")
+}
+
+fn transfer_lock_preimage(
+    transfer_nonce: [u8; 32],
+    src: [u8; 16],
+    dst: [u8; 16],
+    amount: u64,
+    fee: u64,
+    completion_script: &str,
+    timeout: u32,
+) -> [u8; 32] {
+    let op = deposits_core::messages::LedgerOperation::TransferLock {
+        transfer_nonce,
+        source_deposit_id: src,
+        destination_deposit_id: dst,
+        amount,
+        fee,
+        completion_script: completion_script.into(),
+        timeout_height: timeout,
+        transfer_id: [0; 32],
+        nonce: 0,
+        expiry: u32::MAX,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    deposits_core::dep16::operations::operation_sighash(&op)
+        .expect("TransferLock has a dep-17 preimage")
+}
+
+fn withdrawal_preimage(
+    withdrawal_id: [u8; 32],
+    deposit_id: [u8; 16],
+    address: &str,
+    amount: u64,
+    fee: u64,
+) -> [u8; 32] {
+    let op = deposits_core::messages::LedgerOperation::OnchainLock {
+        deposit_id,
+        amount,
+        fee_sats: fee,
+        destination_address: address.into(),
+        withdrawal_id,
+        nonce: 0,
+        expiry: u32::MAX,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    deposits_core::dep16::operations::operation_sighash(&op)
+        .expect("OnchainLock has a dep-17 preimage")
+}
 
 #[test]
-fn invoice_lock_signing_message_deterministic() {
-    use deposits_core::signature_utils::invoice_lock_signing_message;
-
-    let deposit_id = [0xaa; 16];
-    let payment_hash = [0xbb; 32];
-    let amount = 50_000u64;
-
-    let msg1 = invoice_lock_signing_message(&deposit_id, &payment_hash, amount);
-    let msg2 = invoice_lock_signing_message(&deposit_id, &payment_hash, amount);
+fn invoice_lock_preimage_deterministic() {
+    let msg1 = invoice_lock_preimage([0xaa; 16], [0xbb; 32], 50_000);
+    let msg2 = invoice_lock_preimage([0xaa; 16], [0xbb; 32], 50_000);
     assert_eq!(msg1, msg2);
     assert_ne!(msg1, [0u8; 32]);
 }
 
 #[test]
-fn invoice_lock_signing_message_changes_with_amount() {
-    use deposits_core::signature_utils::invoice_lock_signing_message;
-
-    let deposit_id = [0xaa; 16];
-    let payment_hash = [0xbb; 32];
-
-    let msg_a = invoice_lock_signing_message(&deposit_id, &payment_hash, 1000);
-    let msg_b = invoice_lock_signing_message(&deposit_id, &payment_hash, 2000);
+fn invoice_lock_preimage_changes_with_amount() {
+    let msg_a = invoice_lock_preimage([0xaa; 16], [0xbb; 32], 1000);
+    let msg_b = invoice_lock_preimage([0xaa; 16], [0xbb; 32], 2000);
     assert_ne!(msg_a, msg_b);
 }
 
 #[test]
-fn invoice_lock_signing_message_changes_with_payment_hash() {
-    use deposits_core::signature_utils::invoice_lock_signing_message;
-
-    let deposit_id = [0xaa; 16];
-    let amount = 1000u64;
-
-    let msg_a = invoice_lock_signing_message(&deposit_id, &[0x11; 32], amount);
-    let msg_b = invoice_lock_signing_message(&deposit_id, &[0x22; 32], amount);
+fn invoice_lock_preimage_changes_with_payment_hash() {
+    let msg_a = invoice_lock_preimage([0xaa; 16], [0x11; 32], 1000);
+    let msg_b = invoice_lock_preimage([0xaa; 16], [0x22; 32], 1000);
     assert_ne!(msg_a, msg_b);
 }
 
 #[test]
-fn transfer_lock_signing_message_deterministic() {
-    use deposits_core::signature_utils::transfer_lock_signing_message;
-
-    let nonce = [0x01; 32];
-    let src = [0xaa; 16];
-    let dst = [0xbb; 16];
-
-    let msg1 = transfer_lock_signing_message(&nonce, &src, &dst, 1000, 10, "preimage(abc)", 850000);
-    let msg2 = transfer_lock_signing_message(&nonce, &src, &dst, 1000, 10, "preimage(abc)", 850000);
+fn transfer_lock_preimage_deterministic() {
+    let msg1 = transfer_lock_preimage(
+        [0x01; 32], [0xaa; 16], [0xbb; 16], 1000, 10, "preimage(abc)", 850000,
+    );
+    let msg2 = transfer_lock_preimage(
+        [0x01; 32], [0xaa; 16], [0xbb; 16], 1000, 10, "preimage(abc)", 850000,
+    );
     assert_eq!(msg1, msg2);
 }
 
 #[test]
-fn transfer_lock_signing_message_changes_with_script() {
-    use deposits_core::signature_utils::transfer_lock_signing_message;
-
-    let nonce = [0x01; 32];
-    let src = [0xaa; 16];
-    let dst = [0xbb; 16];
-
-    let msg_a =
-        transfer_lock_signing_message(&nonce, &src, &dst, 1000, 10, "preimage(abc)", 850000);
-    let msg_b =
-        transfer_lock_signing_message(&nonce, &src, &dst, 1000, 10, "preimage(xyz)", 850000);
+fn transfer_lock_preimage_changes_with_script() {
+    let msg_a = transfer_lock_preimage(
+        [0x01; 32], [0xaa; 16], [0xbb; 16], 1000, 10, "preimage(abc)", 850000,
+    );
+    let msg_b = transfer_lock_preimage(
+        [0x01; 32], [0xaa; 16], [0xbb; 16], 1000, 10, "preimage(xyz)", 850000,
+    );
     assert_ne!(msg_a, msg_b);
 }
 
 #[test]
-fn withdrawal_signing_message_deterministic() {
-    use deposits_core::signature_utils::withdrawal_signing_message;
-
-    let nonce = [0x42; 32];
-    let deposit_id = [0xaa; 16];
+fn withdrawal_preimage_deterministic() {
     let address = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
-    let amount = 50_000u64;
-    let fee = 500u64;
-
-    let msg1 = withdrawal_signing_message(&nonce, &deposit_id, address, amount, fee);
-    let msg2 = withdrawal_signing_message(&nonce, &deposit_id, address, amount, fee);
+    let msg1 = withdrawal_preimage([0x42; 32], [0xaa; 16], address, 50_000, 500);
+    let msg2 = withdrawal_preimage([0x42; 32], [0xaa; 16], address, 50_000, 500);
     assert_eq!(msg1, msg2);
 }
 
 #[test]
-fn withdrawal_signing_message_changes_with_address() {
-    use deposits_core::signature_utils::withdrawal_signing_message;
-
-    let nonce = [0x42; 32];
-    let deposit_id = [0xaa; 16];
-    let amount = 50_000u64;
-    let fee = 500u64;
-
-    let msg_a = withdrawal_signing_message(&nonce, &deposit_id, "bc1qaddr1", amount, fee);
-    let msg_b = withdrawal_signing_message(&nonce, &deposit_id, "bc1qaddr2", amount, fee);
+fn withdrawal_preimage_changes_with_address() {
+    let msg_a = withdrawal_preimage([0x42; 32], [0xaa; 16], "bc1qaddr1", 50_000, 500);
+    let msg_b = withdrawal_preimage([0x42; 32], [0xaa; 16], "bc1qaddr2", 50_000, 500);
     assert_ne!(msg_a, msg_b);
 }
 
