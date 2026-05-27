@@ -778,8 +778,25 @@ impl LedgerState {
         operation: &crate::messages::LedgerOperation,
         verifier: &impl WitnessVerifier,
     ) -> crate::DepositsResult<(Self, Vec<ConformanceViolation>)> {
+        // Back-compat shim: callers that supply only a WitnessVerifier get a
+        // DenyAll authorizer, which rejects every dep-16-routed op. Production
+        // paths use `apply_with_verifier_and_authorizer` to pass a real
+        // Dep16Authorizer for DepositKeyRotate. Phase 5 broadens the coverage;
+        // phase 6 unifies the two methods and drops this shim.
+        self.apply_with_verifier_and_authorizer(operation, verifier, &crate::types::DenyAll)
+    }
+
+    /// `apply_with_verifier` augmented with a dep-16 `Authorizer` for ops that
+    /// have switched to the new authorization path. Phase 4 of
+    /// `PLAN-dep16-integration.md`: `DepositKeyRotate` routes through here.
+    pub fn apply_with_verifier_and_authorizer(
+        &self,
+        operation: &crate::messages::LedgerOperation,
+        verifier: &impl WitnessVerifier,
+        authorizer: &impl crate::types::Authorizer,
+    ) -> crate::DepositsResult<(Self, Vec<ConformanceViolation>)> {
         let next = self.apply(operation)?;
-        let violations = next.check_conformance(operation, Some(self), verifier);
+        let violations = next.check_conformance(operation, Some(self), verifier, authorizer);
         Ok((next, violations))
     }
 
@@ -823,6 +840,19 @@ impl LedgerState {
         &self,
         update: &crate::types::SignedLedgerUpdate,
         verifier: &impl WitnessVerifier,
+    ) -> crate::DepositsResult<Self> {
+        // Back-compat shim — see apply_with_verifier for the rationale.
+        self.apply_signed_with_authorizer(update, verifier, &crate::types::DenyAll)
+    }
+
+    /// `apply_signed` augmented with a dep-16 `Authorizer` for ops on the new
+    /// path. Production write paths in `deposits-node` use this directly so
+    /// `DepositKeyRotate` routes through the dep-16 authorization.
+    pub fn apply_signed_with_authorizer(
+        &self,
+        update: &crate::types::SignedLedgerUpdate,
+        verifier: &impl WitnessVerifier,
+        authorizer: &impl crate::types::Authorizer,
     ) -> crate::DepositsResult<Self> {
         use crate::messages::LedgerOperation;
         use crate::tlv::TlvDecode;
@@ -948,7 +978,8 @@ impl LedgerState {
                 details: format!("{:?}", e),
             }
         })?;
-        let (mut next, violations) = self.apply_with_verifier(&op, verifier)?;
+        let (mut next, violations) =
+            self.apply_with_verifier_and_authorizer(&op, verifier, authorizer)?;
         if let Some(v) = violations.first() {
             return Err(crate::DepositsError::ProtocolViolation {
                 violation_type: "conformance".to_string(),
@@ -987,8 +1018,20 @@ impl LedgerState {
         operation: &crate::messages::LedgerOperation,
         verifier: &impl WitnessVerifier,
     ) -> Vec<ConformanceViolation> {
+        // Back-compat shim — see apply_with_verifier for the rationale.
+        self.check_speculative_with_authorizer(operation, verifier, &crate::types::DenyAll)
+    }
+
+    /// `check_speculative` augmented with a dep-16 `Authorizer` for ops on the
+    /// new path. See `apply_with_verifier_and_authorizer`.
+    pub fn check_speculative_with_authorizer(
+        &self,
+        operation: &crate::messages::LedgerOperation,
+        verifier: &impl WitnessVerifier,
+        authorizer: &impl crate::types::Authorizer,
+    ) -> Vec<ConformanceViolation> {
         match self.apply(operation) {
-            Ok(next) => next.check_conformance(operation, Some(self), verifier),
+            Ok(next) => next.check_conformance(operation, Some(self), verifier, authorizer),
             Err(e) => vec![ConformanceViolation::StateMachineRejected {
                 detail: format!("{:?}", e),
             }],
@@ -1007,6 +1050,7 @@ impl LedgerState {
         operation: &crate::messages::LedgerOperation,
         pre_state: Option<&LedgerState>,
         verifier: &impl WitnessVerifier,
+        authorizer: &impl crate::types::Authorizer,
     ) -> Vec<ConformanceViolation> {
         use crate::messages::LedgerOperation;
 
@@ -1316,18 +1360,19 @@ impl LedgerState {
                 }
             }
             LedgerOperation::DepositKeyRotate {
-                deposit_id,
-                new_descriptor,
-                witness,
-                ..
+                deposit_id, ..
             } => {
-                // The witness must satisfy the OLD descriptor (proving authorization to rotate).
-                // apply() already updated the descriptor, so we use pre_state to get the old one.
+                // The witness must satisfy the OLD descriptor (proving authorization to
+                // rotate). apply() already updated the descriptor, so we use pre_state to get
+                // the old one.
+                //
+                // Phase 4: routed through the dep-16 Authorizer. The signing message is the
+                // dep-17 operation preimage sighash (built from nonce/expiry/op_type/args/
+                // deposit_id), not SHA256(new_descriptor) — replay protection now binds to
+                // the full op shape, not just the candidate descriptor bytes.
                 if let Some(pre) = pre_state {
                     if let Some(old_deposit) = pre.deposits.get(deposit_id) {
-                        // Message is SHA256(new_descriptor)
-                        let msg = sha256::Hash::hash(new_descriptor.as_bytes()).to_byte_array();
-                        if !verifier.verify_witness(&old_deposit.descriptor, witness, &msg) {
+                        if !authorizer.authorize(&old_deposit.descriptor, operation) {
                             violations.push(ConformanceViolation::InvalidWitness {
                                 operation: "DepositKeyRotate",
                                 detail: "witness does not satisfy old deposit descriptor"

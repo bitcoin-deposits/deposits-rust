@@ -230,3 +230,68 @@ impl WitnessVerifier for NoVerify {
         true
     }
 }
+
+/// dep-16 authorization surface. Replaces [`WitnessVerifier`] for ops that flow
+/// through the dep-16 evaluator (descriptor → typed operation → ledger state →
+/// keyed witness → verdict). Currently used by `DepositKeyRotate`'s conformance
+/// check; the four lock-side variants (`InvoiceLock`, `OnchainLock`,
+/// `TransferLock`, and `TransferRelease`'s release-descriptor) move to it in
+/// phase 5 as the operation-mapping translation gains coverage. After phase 6,
+/// `WitnessVerifier` is removed and `Authorizer` is the sole authorization
+/// trait the protocol declares.
+///
+/// Distinct from `WitnessVerifier` in three ways: (a) the message a signature
+/// commits to is the dep-17 operation preimage rather than a per-operation
+/// signing-helper digest; (b) the witness is interpreted in the dep-16 keyed
+/// sense (signatures keyed by pubkey, preimages by hash) rather than as a
+/// positional byte stack; (c) descriptor evaluation can read ledger state via
+/// the dep-16 LedgerState surface rather than only timelock-vs-height. See
+/// PLAN-dep16-integration.md phase 4.
+pub trait Authorizer {
+    /// Authorize an operation by evaluating its dep-16 form against the named
+    /// descriptor. Returns `true` iff the operation's embedded witness
+    /// satisfies the descriptor's policy.
+    ///
+    /// The descriptor argument is explicit (rather than read from the deposit
+    /// in `state`) so callers can authorize a modification against a pre-state
+    /// descriptor — `DepositKeyRotate` authorizes against the *old* descriptor
+    /// while `apply()` is mid-flight installing the new one.
+    fn authorize(
+        &self,
+        descriptor: &str,
+        operation: &crate::messages::LedgerOperation,
+    ) -> bool;
+
+    /// Same role as [`WitnessVerifier::validate_descriptor`]: parse-check a
+    /// descriptor string, returning `None` if parseable and `Some(detail)`
+    /// otherwise. Used to fail unparseable descriptors at admission rather
+    /// than at first authorization. Default accepts everything (matching the
+    /// `NoVerify` shape).
+    fn validate_descriptor(&self, descriptor: &str) -> Option<String> {
+        let _ = descriptor;
+        None
+    }
+}
+
+/// `Authorizer` that authorizes nothing — every call returns `false`. Useful as
+/// a placeholder in tests that don't need to authorize anything (the four
+/// lock-side variants still route through `WitnessVerifier`, so a test
+/// exercising `DepositKeyRotate` alone can plug in a real `Authorizer` and
+/// leave other paths under `WitnessVerifier`).
+pub struct DenyAll;
+
+impl Authorizer for DenyAll {
+    fn authorize(&self, _: &str, _: &crate::messages::LedgerOperation) -> bool {
+        false
+    }
+}
+
+/// `Authorizer` that authorizes everything — for protocol-layer tests that
+/// don't need cryptographic authorization.
+pub struct AllowAll;
+
+impl Authorizer for AllowAll {
+    fn authorize(&self, _: &str, _: &crate::messages::LedgerOperation) -> bool {
+        true
+    }
+}

@@ -18,15 +18,18 @@
 //! defines the per-operation translation. Phases 3 onward fill in the per-deposit nonce/expiry
 //! plumbing, the `Authorizer` trait, and the call-site switchover.
 
+pub mod authorizer;
 pub mod operations;
+
+pub use authorizer::Dep16Authorizer;
 
 /// The calculus's surface, re-exported. Callers can spell
 /// `deposits_core::dep16::Descriptor` instead of
 /// `miniscript::calculus::Descriptor`, etc. Kept narrow on purpose — names not exported here are
 /// still reachable via `miniscript::calculus::*` for cases that need them.
 pub use miniscript::calculus::{
-    evaluate, parse, Descriptor, EvalError, HashValue, LedgerState, Operation, OperationData,
-    Symbol, Value, Witness,
+    evaluate, parse, Descriptor, EvalError, HashValue, LedgerState, Obligation, Operation,
+    OperationData, Symbol, Value, Witness,
 };
 
 /// The fraud-proof bundle and replay primitive — used by phase-7 work but kept exported here so
