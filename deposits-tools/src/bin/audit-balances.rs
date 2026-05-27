@@ -118,6 +118,7 @@ async fn run(
     #[derive(Debug)]
     struct Row {
         op: &'static str,
+        field: &'static str,
         ledger_id_short: String,
         sequence: u64,
         reserves_id: String,
@@ -139,51 +140,79 @@ async fn run(
             Ok(o) => o,
             Err(_) => continue,
         };
-        let (label, reserves_id) = match &op {
-            LedgerOperation::LedgerOpen { reserves_id, .. } => ("LedgerOpen", reserves_id),
-            LedgerOperation::QuorumBegin { reserves_id, .. } => ("QuorumBegin", reserves_id),
-            _ => continue,
-        };
-        let ledger_id_short = hex::encode(&u.ledger_id[..8]);
-        if verbose {
-            eprintln!(
-                "  seq {} {} from ledger {}… → {}",
-                u.sequence_number, label, ledger_id_short, reserves_id
-            );
-        }
-        // Classify the reserves_id. Try to parse as an address; if it
-        // parses on `network`, look it up. Otherwise flag.
-        let (chain, note) = match reserves_id.parse::<bitcoin::Address<
-            bitcoin::address::NetworkUnchecked,
-        >>() {
-            Ok(parsed) => match parsed.clone().require_network(network) {
-                Ok(_) => match fetch_chain_stats(&http, esplora_url, reserves_id).await {
-                    Ok(stats) => (Some(stats), String::new()),
-                    Err(e) => (None, format!("query-failed: {}", e)),
-                },
-                Err(_) => (None, "wrong-network".to_string()),
-            },
-            Err(_) => {
-                // Heuristic tag for the unparseable forms we know about.
-                if reserves_id.starts_with("genesis:") {
-                    (None, "genesis-placeholder".to_string())
-                } else if reserves_id.len() == 66
-                    && reserves_id.chars().all(|c| c.is_ascii_hexdigit())
-                {
-                    (None, "pubkey-hex".to_string())
-                } else {
-                    (None, "unparseable".to_string())
-                }
+        // Every op variant that names a chain address. The `field`
+        // column lets the output disambiguate (e.g. OnchainLock's
+        // destination_address vs OnchainCredit's funding_address).
+        let mut hits: Vec<(&'static str, &'static str, String)> = Vec::new();
+        match &op {
+            LedgerOperation::LedgerOpen { reserves_id, .. } => {
+                hits.push(("LedgerOpen", "reserves_id", reserves_id.clone()));
             }
-        };
-        rows.push(Row {
-            op: label,
-            ledger_id_short,
-            sequence: u.sequence_number,
-            reserves_id: reserves_id.clone(),
-            chain,
-            note,
-        });
+            LedgerOperation::QuorumBegin { reserves_id, .. } => {
+                hits.push(("QuorumBegin", "reserves_id", reserves_id.clone()));
+            }
+            LedgerOperation::DisputeAcquire {
+                new_reserves_address,
+                ..
+            } => {
+                hits.push((
+                    "DisputeAcquire",
+                    "new_reserves",
+                    new_reserves_address.clone(),
+                ));
+            }
+            LedgerOperation::OnchainCredit {
+                funding_address, ..
+            } => {
+                hits.push(("OnchainCredit", "funding", funding_address.clone()));
+            }
+            LedgerOperation::OnchainLock {
+                destination_address,
+                ..
+            } => {
+                hits.push((
+                    "OnchainLock",
+                    "destination",
+                    destination_address.clone(),
+                ));
+            }
+            LedgerOperation::OnchainFulfill {
+                destination_address,
+                ..
+            } => {
+                hits.push((
+                    "OnchainFulfill",
+                    "destination",
+                    destination_address.clone(),
+                ));
+            }
+            _ => {}
+        }
+        if hits.is_empty() {
+            continue;
+        }
+        let ledger_id_short = hex::encode(&u.ledger_id[..8]);
+        for (label, field, addr_str) in hits {
+            if verbose {
+                eprintln!(
+                    "  seq {} {} ({}) from ledger {}… → {}",
+                    u.sequence_number, label, field, ledger_id_short, addr_str
+                );
+            }
+            let (chain, note) = classify_and_query(
+                &http, esplora_url, network, &addr_str,
+            )
+            .await;
+            rows.push(Row {
+                op: label,
+                field,
+                ledger_id_short: ledger_id_short.clone(),
+                sequence: u.sequence_number,
+                reserves_id: addr_str,
+                chain,
+                note,
+            });
+        }
     }
 
     // Stable sort: by ledger_id, then sequence, then op (LedgerOpen<QuorumBegin).
@@ -199,10 +228,10 @@ async fn run(
 
     eprintln!();
     println!(
-        "{:<12} {:>4} {:<11} {:<64} {:>14} {:>14} {:>14} {:>5}  note",
-        "ledger", "seq", "op", "reserves_id", "funded_sats", "spent_sats", "balance", "txs"
+        "{:<12} {:>4} {:<15} {:<14} {:<64} {:>14} {:>14} {:>14} {:>5}  note",
+        "ledger", "seq", "op", "field", "address", "funded_sats", "spent_sats", "balance", "txs"
     );
-    println!("{}", "─".repeat(150));
+    println!("{}", "─".repeat(170));
 
     let mut grand_balance: i64 = 0;
     let mut grand_funded: u64 = 0;
@@ -216,10 +245,11 @@ async fn run(
                 grand_spent += stats.spent_txo_sum;
                 grand_balance += stats.balance();
                 println!(
-                    "{:<12} {:>4} {:<11} {:<64} {:>14} {:>14} {:>14} {:>5}  {}",
+                    "{:<12} {:>4} {:<15} {:<14} {:<64} {:>14} {:>14} {:>14} {:>5}  {}",
                     r.ledger_id_short,
                     r.sequence,
                     r.op,
+                    r.field,
                     r.reserves_id,
                     stats.funded_txo_sum,
                     stats.spent_txo_sum,
@@ -230,10 +260,11 @@ async fn run(
             }
             None => {
                 println!(
-                    "{:<12} {:>4} {:<11} {:<64} {:>14} {:>14} {:>14} {:>5}  {}",
+                    "{:<12} {:>4} {:<15} {:<14} {:<64} {:>14} {:>14} {:>14} {:>5}  {}",
                     r.ledger_id_short,
                     r.sequence,
                     r.op,
+                    r.field,
                     r.reserves_id,
                     "-",
                     "-",
@@ -247,17 +278,49 @@ async fn run(
 
     println!();
     println!("=== Totals ===");
-    println!("  Events scanned:    {}", events.len());
-    println!("  LedgerOpens:       {}", counts.get("LedgerOpen").copied().unwrap_or(0));
-    println!("  QuorumBegins:      {}", counts.get("QuorumBegin").copied().unwrap_or(0));
-    println!("  Total funded:      {} sats", grand_funded);
-    println!("  Total spent:       {} sats", grand_spent);
+    println!("  Events scanned:        {}", events.len());
+    for (op_name, n) in &counts {
+        println!("  {:<22} {}", format!("{}:", op_name), n);
+    }
+    println!("  Total funded:          {} sats", grand_funded);
+    println!("  Total spent:           {} sats", grand_spent);
     println!(
-        "  Net balance:       {} sats ({:.8} BTC)",
+        "  Net balance:           {} sats ({:.8} BTC)",
         grand_balance,
         grand_balance as f64 / 100_000_000.0
     );
     Ok(())
+}
+
+/// Try to parse `addr_str` as a Bitcoin address on `network`; if it
+/// parses, look it up via Esplora. Else categorize the form so the
+/// output can explain why it's not chain-queryable.
+async fn classify_and_query(
+    http: &reqwest::Client,
+    esplora_url: &str,
+    network: bitcoin::Network,
+    addr_str: &str,
+) -> (Option<ChainStats>, String) {
+    match addr_str.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>() {
+        Ok(parsed) => match parsed.clone().require_network(network) {
+            Ok(_) => match fetch_chain_stats(http, esplora_url, addr_str).await {
+                Ok(stats) => (Some(stats), String::new()),
+                Err(e) => (None, format!("query-failed: {}", e)),
+            },
+            Err(_) => (None, "wrong-network".to_string()),
+        },
+        Err(_) => {
+            if addr_str.starts_with("genesis:") {
+                (None, "genesis-placeholder".to_string())
+            } else if addr_str.len() == 66
+                && addr_str.chars().all(|c| c.is_ascii_hexdigit())
+            {
+                (None, "pubkey-hex".to_string())
+            } else {
+                (None, "unparseable".to_string())
+            }
+        }
+    }
 }
 
 async fn fetch_all_9100(
