@@ -407,6 +407,12 @@ struct LedgerSummary {
     ledger_hash: [u8; 32],
     ruleset_name: String,
     quorum_expiry: u32,
+    /// (txid, vout) of the actual on-chain reserves UTXO the daemon's
+    /// snapshot recorded. We pull this from the legacy json's `outpoint_*`
+    /// fields so that when our local rebuild produces a different address
+    /// than the on-chain output (script-builder drift), we can still
+    /// inspect the real script and report where the money is.
+    outpoint: Option<(bitcoin::Txid, u32)>,
 }
 
 fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
@@ -509,6 +515,7 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
             None => return Ok(None), // ledger never reached an Active quorum
         };
     let mut ruleset_name = ruleset.unwrap_or_else(|| "legacy".to_string());
+    let mut outpoint: Option<(bitcoin::Txid, u32)> = None;
 
     // Prefer the per-ledger `taproot_reserves.json` snapshot if it exists.
     // The QuorumBegin op's `ledger_hash` field is a ledger-state hash and
@@ -629,6 +636,14 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
                             // deposits-node's `default_ruleset_name`.
                             ruleset_name = rs.to_string();
                         }
+                        if let (Some(txid_str), Some(vout)) = (
+                            entry.get("outpoint_txid").and_then(|x| x.as_str()),
+                            entry.get("outpoint_vout").and_then(|x| x.as_u64()),
+                        ) {
+                            if let Ok(txid) = bitcoin::Txid::from_str(txid_str) {
+                                outpoint = Some((txid, vout as u32));
+                            }
+                        }
                         break;
                     }
                 }
@@ -640,6 +655,7 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
         ledger_id: state.ledger_id,
         operator_key: state.operator_key,
         reserves_id,
+        outpoint,
         quorum_members,
         ledger_hash,
         ruleset_name,
@@ -680,6 +696,46 @@ fn fetch_utxo(
         .ok_or("missing value")?;
     let txid = bitcoin::Txid::from_str(txid_str).map_err(|e| format!("txid: {}", e))?;
     Ok(Some((bitcoin::OutPoint { txid, vout }, value)))
+}
+
+/// Fetch the scriptpubkey of a specific outpoint via esplora, plus the
+/// derived address for the configured network. Returns `None` if the txid
+/// can't be retrieved or the vout doesn't exist.
+fn fetch_outpoint_script(
+    esplora: &str,
+    txid: bitcoin::Txid,
+    vout: u32,
+    network: Network,
+) -> Result<Option<(bitcoin::ScriptBuf, Option<Address>)>, String> {
+    let url = format!("{}/tx/{}", esplora, txid);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("http client: {}", e))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("GET {}: {}", url, e))?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let v: serde_json::Value = resp.json().map_err(|e| format!("json: {}", e))?;
+    let vouts = match v.get("vout").and_then(|x| x.as_array()) {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    let vo = match vouts.get(vout as usize) {
+        Some(o) => o,
+        None => return Ok(None),
+    };
+    let script_hex = match vo.get("scriptpubkey").and_then(|x| x.as_str()) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    let script_bytes = hex::decode(script_hex).map_err(|e| format!("script hex: {}", e))?;
+    let script = bitcoin::ScriptBuf::from_bytes(script_bytes);
+    let address = Address::from_script(&script, network).ok();
+    Ok(Some((script, address)))
 }
 
 /// Walk forward from a spent reserves address along the largest-value output
@@ -921,13 +977,97 @@ fn sweep_ledger(
         ));
     }
 
-    // Find the on-chain UTXO. If the reserves address is spent, follow the
-    // chain forward — operators that rotated without updating the local
-    // reserves snapshot have funds at a downstream output. Walk until we
-    // hit an unspent leaf, then attempt to sweep IT.
+    // Find the on-chain UTXO. If the rebuilt reserves address has no UTXO,
+    // we try three escalations in order:
+    //   (1) the JSON-recorded outpoint — the daemon told us exactly which
+    //       (txid, vout) the rotation tx wrote, even when its address field
+    //       drifts from on-chain reality. This is the most useful diagnostic:
+    //       inspect the actual scriptpubkey at that outpoint, report whether
+    //       it's still unspent and which address it actually resolves to.
+    //   (2) chase the spend chain forward from the rebuilt address (catches
+    //       legitimate post-snapshot rotations).
+    //   (3) give up cleanly.
+    if fetch_utxo(&reserves_address, esplora)?.is_none() {
+        // (1) JSON-recorded outpoint diagnostic.
+        if let Some((txid, vout)) = summary.outpoint {
+            match fetch_outpoint_script(esplora, txid, vout, network)? {
+                Some((script, Some(actual_addr))) => {
+                    let drift = actual_addr.script_pubkey() != reserves_script;
+                    let unspent = fetch_utxo(&actual_addr, esplora)?;
+                    println!(
+                        "  ledger {}…: snapshot outpoint {}:{} resolves to {}",
+                        hex::encode(&summary.ledger_id[..8]),
+                        txid,
+                        vout,
+                        actual_addr
+                    );
+                    if drift {
+                        println!(
+                            "    DRIFT: snapshot json says address={} but tx vout's \
+                             scriptpubkey resolves to {}",
+                            reserves_address, actual_addr
+                        );
+                        println!(
+                            "    on-chain scriptpubkey (hex): {}",
+                            hex::encode(script.as_bytes())
+                        );
+                    }
+                    match unspent {
+                        Some((op, val)) => {
+                            println!(
+                                "    UNSPENT chain leaf: {} sats at {}:{}",
+                                val, op.txid, op.vout
+                            );
+                            if drift {
+                                println!(
+                                    "    funds are recoverable but signing requires \
+                                     the script-builder version that produced this \
+                                     scriptpubkey. Run reserves-bisect.sh to identify it."
+                                );
+                                return Ok(());
+                            }
+                            return Ok(()); // rebuild matched but UTXO at a different op — also bail
+                        }
+                        None => {
+                            println!(
+                                "    UTXO at recorded outpoint is already spent."
+                            );
+                        }
+                    }
+                }
+                Some((script, None)) => {
+                    println!(
+                        "  ledger {}…: snapshot outpoint {}:{} scriptpubkey {} \
+                         doesn't parse as a {} address",
+                        hex::encode(&summary.ledger_id[..8]),
+                        txid,
+                        vout,
+                        hex::encode(script.as_bytes()),
+                        match network {
+                            Network::Bitcoin => "mainnet",
+                            Network::Testnet => "testnet",
+                            Network::Signet => "signet",
+                            Network::Regtest => "regtest",
+                            _ => "unknown",
+                        }
+                    );
+                }
+                None => {
+                    println!(
+                        "  ledger {}…: snapshot outpoint {}:{} not found on esplora",
+                        hex::encode(&summary.ledger_id[..8]),
+                        txid,
+                        vout
+                    );
+                }
+            }
+        }
+    }
+
     let (outpoint, amount, current_address) = match fetch_utxo(&reserves_address, esplora)? {
         Some((op, val)) => (op, val, reserves_address.clone()),
         None => {
+            // (2) chain chase.
             println!(
                 "  ledger {}…: reserves address has no unspent UTXO; following spend chain…",
                 hex::encode(&summary.ledger_id[..8])
@@ -939,12 +1079,6 @@ fn sweep_ledger(
                         val, addr
                     );
                     if addr != reserves_address {
-                        // The downstream UTXO sits at a DIFFERENT address than
-                        // our local rebuild — the rotation moved to a vault
-                        // whose (members, ruleset, ledger_hash, expiry) we
-                        // can't reconstruct from local state. Skip with a
-                        // clear note; the funds are visible but unreachable
-                        // through this code path.
                         println!(
                             "    address differs from our rebuild {} — rotation \
                              happened off-state, can't sign blindly; skipping",
@@ -955,6 +1089,7 @@ fn sweep_ledger(
                     (op, val, addr)
                 }
                 None => {
+                    // (3) give up.
                     println!(
                         "    no unspent UTXO downstream — funds left this address tree"
                     );
