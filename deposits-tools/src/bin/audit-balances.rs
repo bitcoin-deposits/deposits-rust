@@ -319,11 +319,31 @@ async fn run(
     );
 
     if trace_spends {
-        let known: std::collections::HashMap<String, String> = rows
+        let mut known: std::collections::HashMap<String, String> = rows
             .iter()
             .filter(|r| r.chain.is_some())
             .map(|r| (r.reserves_id.clone(), format!("{} {}", r.op, r.field)))
             .collect();
+
+        // Reconstruct lottery-script output addresses for every dispute
+        // round that armed (≥2 DisputeArmed events with the same
+        // reserves_id on the same ledger). These confiscation outputs
+        // never get announced as their own Nostr op — they're
+        // deterministic functions of the disputants' commitments + the
+        // quorum membership snapshot — so we rebuild them locally and
+        // fold them into the tracked set. Without this, every
+        // confiscation-tx destination shows up as `external` (where the
+        // funds actually live, waiting on reveal+claim or recovery).
+        eprintln!("Reconstructing lottery-script addresses for armed dispute rounds…");
+        match reconstruct_lottery_addresses(relay_url, network, &events).await {
+            Ok(lottery) => {
+                eprintln!("  {} lottery output(s) reconstructed", lottery.len());
+                for (addr, label) in lottery {
+                    known.entry(addr).or_insert(label);
+                }
+            }
+            Err(e) => eprintln!("  lottery reconstruction failed: {}", e),
+        }
         let to_trace: Vec<&Row> = rows
             .iter()
             .filter(|r| r.chain.as_ref().is_some_and(|c| c.spent_txo_sum > 0))
@@ -382,6 +402,230 @@ async fn run(
     }
 
     Ok(())
+}
+
+/// For every dispute round that armed (≥2 `DisputeArmed` events sharing a
+/// (ledger_id, reserves_id) round identifier), reconstruct the lottery script
+/// the confiscation tx pays into and return its P2TR address along with a
+/// human-readable label.
+///
+/// Mirrors `cooperative_refund.rs::process_cooperative_refund_request` —
+/// pull the disputed ledger's full kind:9100 history, walk for the
+/// `original_operator` and the most recent `QuorumBegin.quorum_members`
+/// snapshot, then collect each disputant's `(operator_id, commitment_hash,
+/// target_reserves)` into `LotteryParticipant`s, build a `LotteryScriptBuilder`
+/// with `recovery_voters = qb_members - original_operator` and `threshold =
+/// majority`, and read `.address` off the built `LotteryOutput`.
+async fn reconstruct_lottery_addresses(
+    relay_url: &str,
+    network: bitcoin::Network,
+    events: &[SignedLedgerUpdate],
+) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
+    use deposits_core::tapscript_reserves::{LotteryParticipant, LotteryScriptBuilder};
+
+    // Group DisputeArmed events by (ledger_id_hex, armed_block). All
+    // disputants in a single round arm at the same `armed_block`
+    // (declared by DisputeEnter), so that pair uniquely identifies the
+    // confiscation tx the round will produce.
+    let mut rounds: std::collections::HashMap<
+        (String, u32),
+        Vec<(bitcoin::secp256k1::PublicKey, [u8; 20], String)>,
+    > = std::collections::HashMap::new();
+    for u in events {
+        let op = match LedgerOperation::tlv_decode(&u.message) {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        if let LedgerOperation::DisputeArmed {
+            armed_block,
+            commitment_hash,
+            target_reserves,
+            ..
+        } = op
+        {
+            let ledger_hex = hex::encode(u.ledger_id);
+            let key = (ledger_hex, armed_block);
+            let entry = rounds.entry(key).or_default();
+            // Each disputant arms once per round; dedup by operator pubkey
+            // in case the same operator republished.
+            if !entry.iter().any(|(pk, _, _)| pk == &u.operator_id) {
+                entry.push((u.operator_id, commitment_hash, target_reserves));
+            }
+        }
+    }
+
+    let mut out = std::collections::HashMap::new();
+    for ((ledger_hex, armed_block), participants_raw) in rounds {
+        if participants_raw.len() < 2 {
+            // A single armed disputant is not a lottery — needs ≥2 to form
+            // a script with computable winner.
+            continue;
+        }
+        let ledger_tag = &ledger_hex[..16.min(ledger_hex.len())];
+        let history = match fetch_ledger_history(relay_url, ledger_tag).await {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!(
+                    "  skip ledger {}: history fetch failed: {}",
+                    &ledger_tag[..8],
+                    e
+                );
+                continue;
+            }
+        };
+
+        // Walk for original_operator (LedgerOpen) and the most recent
+        // QuorumBegin.quorum_members. The cooperative_refund handler does
+        // the same scan — see its inline comment for why we don't need a
+        // specific sequence cutoff (any QuorumBegin observed on the
+        // operator's chain is the recovery-voter set).
+        let mut original_operator: Option<bitcoin::secp256k1::PublicKey> = None;
+        let mut qb_members: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
+        for u in &history {
+            let op = match LedgerOperation::tlv_decode(&u.message) {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            match op {
+                LedgerOperation::LedgerOpen { operator_id, .. }
+                    if original_operator.is_none() =>
+                {
+                    original_operator = Some(operator_id);
+                }
+                LedgerOperation::QuorumBegin { quorum_members, .. } => {
+                    qb_members = quorum_members.iter().map(|m| m.pubkey).collect();
+                }
+                _ => {}
+            }
+        }
+        let original_operator = match original_operator {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "  skip ledger {}: no LedgerOpen in history",
+                    &ledger_tag[..8]
+                );
+                continue;
+            }
+        };
+        if qb_members.is_empty() {
+            eprintln!(
+                "  skip ledger {} round@{}: no QuorumBegin observed",
+                &ledger_tag[..8],
+                armed_block
+            );
+            continue;
+        }
+
+        let mut participants: Vec<LotteryParticipant> = participants_raw
+            .into_iter()
+            .map(|(pk, commitment, target)| {
+                LotteryParticipant::new(pk.x_only_public_key().0, commitment, target)
+            })
+            .collect();
+        participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+
+        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = qb_members
+            .iter()
+            .filter(|pk| **pk != original_operator)
+            .map(|pk| pk.x_only_public_key().0)
+            .collect();
+        let recovery_threshold = (recovery_voters.len() / 2) + 1;
+
+        let lottery = match LotteryScriptBuilder::new(
+            participants,
+            recovery_voters,
+            recovery_threshold,
+            network,
+        )
+        .build()
+        {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "  skip ledger {} round@{}: lottery build failed: {:?}",
+                    &ledger_tag[..8],
+                    armed_block,
+                    e
+                );
+                continue;
+            }
+        };
+        let addr_str = lottery.address.to_string();
+        let label = format!(
+            "LotteryScript (ledger {} armed_block={})",
+            &ledger_tag[..8],
+            armed_block
+        );
+        out.insert(addr_str, label);
+    }
+    Ok(out)
+}
+
+/// Pull every kind:9100 event for the given `ledger_tag` (16-hex-char prefix
+/// of a ledger_id) from the relay, no op-type filter, no pagination cap.
+/// Used by the lottery-script reconstruction pass to walk the full history.
+async fn fetch_ledger_history(
+    relay_url: &str,
+    ledger_tag: &str,
+) -> Result<Vec<SignedLedgerUpdate>, Box<dyn std::error::Error>> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(relay_url)
+        .await
+        .map_err(|e| format!("connect to {}: {}", relay_url, e))?;
+
+    let sub_id = format!("ledger-{}", &ledger_tag[..8]);
+    let filter = serde_json::json!({
+        "kinds": [9100],
+        "#d": [ledger_tag],
+        "limit": 10000,
+    });
+    let req = serde_json::json!(["REQ", sub_id, filter]);
+    ws.send(Message::Text(req.to_string())).await?;
+
+    let mut out = Vec::new();
+    loop {
+        let msg = match tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => text,
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => break,
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(_))) | Err(_) => break,
+        };
+        let arr: serde_json::Value = match serde_json::from_str(&msg) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let arr = match arr.as_array() {
+            Some(a) => a,
+            None => continue,
+        };
+        match arr.first().and_then(|v| v.as_str()) {
+            Some("EVENT") => {
+                let event = match arr.get(2) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                let content = match event.get("content").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let bytes = match BASE64.decode(content) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                if let Ok(u) = SignedLedgerUpdate::tlv_decode(&bytes) {
+                    out.push(u);
+                }
+            }
+            Some("EOSE") => break,
+            _ => {}
+        }
+    }
+    let close = serde_json::json!(["CLOSE", sub_id]);
+    ws.send(Message::Text(close.to_string())).await.ok();
+    Ok(out)
 }
 
 /// A single tx that spends one or more UTXOs of an address we care about.
