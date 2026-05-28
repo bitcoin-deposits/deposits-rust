@@ -723,16 +723,7 @@ async fn fetch_spend_traces(
             Some(last) => format!("{}/address/{}/txs/chain/{}", esplora_url, addr, last),
             None => format!("{}/address/{}/txs", esplora_url, addr),
         };
-        let resp = http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("GET {}: {}", url, e))?;
-        if !resp.status().is_success() {
-            return Err(format!("status {}", resp.status()));
-        }
-        let txs: Vec<serde_json::Value> =
-            resp.json().await.map_err(|e| format!("json: {}", e))?;
+        let txs: Vec<serde_json::Value> = esplora_get(http, &url).await?;
         if txs.is_empty() {
             break;
         }
@@ -1014,15 +1005,7 @@ async fn fetch_chain_stats(
     address: &str,
 ) -> Result<ChainStats, String> {
     let url = format!("{}/address/{}", esplora_url, address);
-    let resp = http
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("GET {}: {}", url, e))?;
-    if !resp.status().is_success() {
-        return Err(format!("status {}", resp.status()));
-    }
-    let v: serde_json::Value = resp.json().await.map_err(|e| format!("json: {}", e))?;
+    let v: serde_json::Value = esplora_get(http, &url).await?;
     let chain = v.get("chain_stats").cloned().unwrap_or_default();
     let mempool = v.get("mempool_stats").cloned().unwrap_or_default();
     let chain_funded_c = chain
@@ -1065,4 +1048,43 @@ async fn fetch_chain_stats(
         spent_txo_count: chain_spent_c + mem_spent_c,
         spent_txo_sum: chain_spent_s + mem_spent_s,
     })
+}
+
+/// Esplora GET with retry-on-429 and a small baseline delay between calls.
+/// mempool.space's public endpoint rate-limits aggressively (the project's
+/// own docs cite ~5-10 req/s); a baseline 250ms pacing plus exponential
+/// backoff on 429 covers the common case without making the audit dramatically
+/// slower. Retries cap at 5 attempts (total ~6 s of backoff in the worst
+/// case), then propagate the error so callers see what addr failed.
+async fn esplora_get<T: serde::de::DeserializeOwned>(
+    http: &reqwest::Client,
+    url: &str,
+) -> Result<T, String> {
+    // Baseline pacing: cheap to apply unconditionally, and the bot-net-style
+    // rate limits on public esplora endpoints make this the difference
+    // between completing and getting kicked off mid-trace.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let mut backoff_ms: u64 = 500;
+    for attempt in 1..=5 {
+        let resp = http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("GET {}: {}", url, e))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            eprintln!(
+                "  esplora 429 (attempt {}/5), backing off {} ms…",
+                attempt, backoff_ms
+            );
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            backoff_ms = backoff_ms.saturating_mul(2);
+            continue;
+        }
+        if !status.is_success() {
+            return Err(format!("status {}", status));
+        }
+        return resp.json::<T>().await.map_err(|e| format!("json: {}", e));
+    }
+    Err("gave up after 5 retries on 429".to_string())
 }
