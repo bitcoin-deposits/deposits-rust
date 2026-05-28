@@ -569,6 +569,73 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
         }
     }
 
+    // Legacy fallback: pre-per-ledger daemons wrote a single array file at
+    // `<data_dir>/wallet/taproot_reserves.json`. One entry per active vault
+    // across the operator's whole node; we walk for an entry whose
+    // `.address` matches `reserves_id` and override the same fields.
+    //
+    // node_cli/reserves.rs:367+ uses the same lookup for the `reserves spend`
+    // path; matching it here keeps sweep-all aligned with the manual flow.
+    let wallet_dir = jsonl
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| Path::new(".").to_path_buf());
+    let legacy_json = wallet_dir.join("taproot_reserves.json");
+    if legacy_json.exists() {
+        if let Ok(raw) = std::fs::read_to_string(&legacy_json) {
+            if let Ok(arr) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(entries) = arr.as_array() {
+                    for entry in entries {
+                        let addr = entry
+                            .get("address")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("");
+                        if addr != reserves_id {
+                            continue;
+                        }
+                        if let Some(h) = entry
+                            .get("ledger_hash")
+                            .and_then(|x| x.as_str())
+                            .and_then(|s| hex::decode(s).ok())
+                            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                        {
+                            ledger_hash = h;
+                        }
+                        if let Some(members_arr) =
+                            entry.get("quorum_members").and_then(|x| x.as_array())
+                        {
+                            let parsed: Result<Vec<_>, _> = members_arr
+                                .iter()
+                                .filter_map(|m| m.as_str())
+                                .map(|s| s.parse::<bitcoin::secp256k1::PublicKey>())
+                                .collect();
+                            if let Ok(ms) = parsed {
+                                if !ms.is_empty() {
+                                    quorum_members = ms;
+                                }
+                            }
+                        }
+                        if let Some(qe) =
+                            entry.get("quorum_expiry").and_then(|x| x.as_u64())
+                        {
+                            quorum_expiry = qe as u32;
+                        }
+                        if let Some(rs) =
+                            entry.get("ruleset_name").and_then(|x| x.as_str())
+                        {
+                            // Skip null (legacy entries have no ruleset_name);
+                            // the default we set above stays "legacy", matching
+                            // deposits-node's `default_ruleset_name`.
+                            ruleset_name = rs.to_string();
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     Ok(Some(LedgerSummary {
         ledger_id: state.ledger_id,
         operator_key: state.operator_key,
