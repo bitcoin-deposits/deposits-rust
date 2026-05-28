@@ -174,6 +174,21 @@ async fn run(
                     new_reserves_address.clone(),
                 ));
             }
+            LedgerOperation::DisputeArmed {
+                target_reserves, ..
+            } => {
+                // The lottery-winner-payout address each disputant
+                // pre-declares. A confiscation tx that resolves the
+                // lottery will land funds at one of these (the winning
+                // disputant's) before DisputeAcquire publishes — so
+                // having them in the tracked set lets the spend trace
+                // correctly label that intermediate hop.
+                hits.push((
+                    "DisputeArmed",
+                    "target_reserves",
+                    target_reserves.clone(),
+                ));
+            }
             LedgerOperation::OnchainCredit {
                 funding_address, ..
             } => {
@@ -509,7 +524,8 @@ const ADDRESS_BEARING_DISCRIMINANTS: &[&str] = &[
     "35", // OnchainCredit   → funding_address
     "36", // OnchainLock     → destination_address
     "38", // OnchainFulfill  → destination_address
-    "55", // DisputeAcquire  → new_reserves_address
+    "55", // DisputeAcquire  → new_reserves_address (lottery winner's reserves)
+    "57", // DisputeArmed    → target_reserves (each disputant's intended winnings address)
 ];
 
 /// Page through every kind:9100 event the relay holds whose `t` tag is in
