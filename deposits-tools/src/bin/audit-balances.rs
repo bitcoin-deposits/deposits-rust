@@ -15,7 +15,12 @@
 //! Usage:
 //!   audit-balances [--relay wss://...] [--esplora https://...]
 //!                  [--network bitcoin|testnet|signet|regtest]
-//!                  [--limit N] [--verbose]
+//!                  [--limit N] [--verbose] [--trace-spends]
+//!
+//! `--trace-spends` walks every spending tx out of each tracked address and
+//! reports where the sats went, labeling destinations as `change` (same
+//! address), `tracked` (another tracked reserves address), or `external`
+//! (anything else). Useful for "I thought no money left the system — did it?".
 //!
 //! Exit code 0 iff the relay scan + esplora queries completed cleanly.
 
@@ -48,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut esplora_url = DEFAULT_ESPLORA.to_string();
     let mut limit: Option<usize> = None;
     let mut verbose = false;
+    let mut trace_spends = false;
     let mut network = bitcoin::Network::Bitcoin;
 
     let mut i = 1;
@@ -79,6 +85,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 verbose = true;
                 i += 1;
             }
+            "--trace-spends" => {
+                trace_spends = true;
+                i += 1;
+            }
             "--help" | "-h" => {
                 println!(
                     "Usage: audit-balances [OPTIONS]\n\n\
@@ -89,7 +99,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      --esplora URL     Esplora HTTP API (default: mempool.space/api)\n  \
                      --network NAME    bitcoin|testnet|signet|regtest (default bitcoin)\n  \
                      --limit N         Cap addresses queried (sorted by first-seen order)\n  \
-                     --verbose         Per-event trace"
+                     --verbose         Per-event trace\n  \
+                     --trace-spends    For each address with spent_sats > 0, walk the\n  \
+                     \x20                spending tx(s) and report destinations"
                 );
                 return Ok(());
             }
@@ -98,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(run(&relay_url, &esplora_url, network, limit, verbose))
+    rt.block_on(run(&relay_url, &esplora_url, network, limit, verbose, trace_spends))
 }
 
 async fn run(
@@ -107,6 +119,7 @@ async fn run(
     network: bitcoin::Network,
     limit: Option<usize>,
     verbose: bool,
+    trace_spends: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Collecting kind:9100 events from {} …", relay_url);
     let events = fetch_all_9100(relay_url).await?;
@@ -289,7 +302,170 @@ async fn run(
         grand_balance,
         grand_balance as f64 / 100_000_000.0
     );
+
+    if trace_spends {
+        let known: std::collections::HashMap<String, String> = rows
+            .iter()
+            .filter(|r| r.chain.is_some())
+            .map(|r| (r.reserves_id.clone(), format!("{} {}", r.op, r.field)))
+            .collect();
+        let to_trace: Vec<&Row> = rows
+            .iter()
+            .filter(|r| r.chain.as_ref().is_some_and(|c| c.spent_txo_sum > 0))
+            .collect();
+        if to_trace.is_empty() {
+            println!();
+            println!("=== Spend traces ===");
+            println!("  (no tracked address has any spends)");
+        } else {
+            println!();
+            println!("=== Spend traces ===");
+            // Dedup by address — many `LedgerOpen` rows share a reserves_id.
+            let mut seen_addrs: std::collections::HashSet<&str> =
+                std::collections::HashSet::new();
+            for r in to_trace {
+                if !seen_addrs.insert(r.reserves_id.as_str()) {
+                    continue;
+                }
+                println!();
+                println!(
+                    "{} ({} {}) — spent {} sats:",
+                    r.reserves_id,
+                    r.op,
+                    r.field,
+                    r.chain.as_ref().unwrap().spent_txo_sum
+                );
+                match fetch_spend_traces(&http, esplora_url, &r.reserves_id).await {
+                    Ok(traces) if traces.is_empty() => {
+                        println!("  (esplora returned no spending txs — maybe rate-limited?)");
+                    }
+                    Ok(traces) => {
+                        for t in traces {
+                            println!(
+                                "  tx {} ({} sats from this address):",
+                                t.txid, t.inputs_from_us
+                            );
+                            for (dst, val) in &t.destinations {
+                                let label = if dst == &r.reserves_id {
+                                    "change".to_string()
+                                } else if let Some(meta) = known.get(dst) {
+                                    format!("tracked: {}", meta)
+                                } else {
+                                    "external".to_string()
+                                };
+                                println!(
+                                    "    {:>14} sats → {}  [{}]",
+                                    val, dst, label
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => println!("  trace failed: {}", e),
+                }
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// A single tx that spends one or more UTXOs of an address we care about.
+/// `inputs_from_us` is the total sats from `addr` consumed by this tx (the
+/// other inputs, if any, came from other addresses and aren't our concern).
+struct SpendTrace {
+    txid: String,
+    inputs_from_us: u64,
+    destinations: Vec<(String, u64)>,
+}
+
+/// Walk every spending tx of `addr` via the esplora `/address/<a>/txs` +
+/// `/address/<a>/txs/chain/<last>` pagination, returning one `SpendTrace`
+/// per tx that consumes at least one UTXO of `addr`.
+async fn fetch_spend_traces(
+    http: &reqwest::Client,
+    esplora_url: &str,
+    addr: &str,
+) -> Result<Vec<SpendTrace>, String> {
+    let mut traces = Vec::new();
+    let mut last_seen: Option<String> = None;
+    loop {
+        let url = match &last_seen {
+            Some(last) => format!("{}/address/{}/txs/chain/{}", esplora_url, addr, last),
+            None => format!("{}/address/{}/txs", esplora_url, addr),
+        };
+        let resp = http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("GET {}: {}", url, e))?;
+        if !resp.status().is_success() {
+            return Err(format!("status {}", resp.status()));
+        }
+        let txs: Vec<serde_json::Value> =
+            resp.json().await.map_err(|e| format!("json: {}", e))?;
+        if txs.is_empty() {
+            break;
+        }
+        let last_txid = txs
+            .last()
+            .and_then(|t| t.get("txid"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        for tx in &txs {
+            let txid = match tx.get("txid").and_then(|v| v.as_str()) {
+                Some(t) => t.to_string(),
+                None => continue,
+            };
+            let mut inputs_from_us: u64 = 0;
+            let mut spending = false;
+            if let Some(vin) = tx.get("vin").and_then(|v| v.as_array()) {
+                for input in vin {
+                    let prev_addr = input
+                        .get("prevout")
+                        .and_then(|p| p.get("scriptpubkey_address"))
+                        .and_then(|v| v.as_str());
+                    if prev_addr == Some(addr) {
+                        spending = true;
+                        inputs_from_us += input
+                            .get("prevout")
+                            .and_then(|p| p.get("value"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                    }
+                }
+            }
+            if !spending {
+                continue;
+            }
+            let mut destinations = Vec::new();
+            if let Some(vout) = tx.get("vout").and_then(|v| v.as_array()) {
+                for out in vout {
+                    let dst = out
+                        .get("scriptpubkey_address")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("OP_RETURN")
+                        .to_string();
+                    let val = out
+                        .get("value")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    destinations.push((dst, val));
+                }
+            }
+            traces.push(SpendTrace {
+                txid,
+                inputs_from_us,
+                destinations,
+            });
+        }
+        // Esplora pages are bounded (mempool.space ~25-50 per page); stop
+        // when we get a short page or fail to extract a cursor.
+        match last_txid {
+            Some(t) if txs.len() >= 25 => last_seen = Some(t),
+            _ => break,
+        }
+    }
+    Ok(traces)
 }
 
 /// Try to parse `addr_str` as a Bitcoin address on `network`; if it
