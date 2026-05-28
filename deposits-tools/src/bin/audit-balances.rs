@@ -103,6 +103,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 trace_spends = true;
                 i += 1;
             }
+            "--esplora-pace-ms" if i + 1 < args.len() => {
+                // SAFETY: setting an env var here so esplora_get can read it
+                // without threading another arg through every call. The audit
+                // is single-process; nobody else reads this var.
+                std::env::set_var("AUDIT_ESPLORA_PACE_MS", &args[i + 1]);
+                i += 2;
+            }
             "--help" | "-h" => {
                 println!(
                     "Usage: audit-balances [OPTIONS]\n\n\
@@ -117,7 +124,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      --limit N          Cap addresses queried (sorted by first-seen order)\n  \
                      --verbose          Per-event trace\n  \
                      --trace-spends     For each address with spent_sats > 0, walk the\n  \
-                     \x20                 spending tx(s) and report destinations"
+                     \x20                 spending tx(s) and report destinations\n  \
+                     --esplora-pace-ms N Min delay between esplora calls (default 250)"
                 );
                 return Ok(());
             }
@@ -206,7 +214,11 @@ async fn run(
     let mut rows: Vec<Row> = Vec::new();
 
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
+        // Generous per-request ceiling: throttled mempool.space endpoints
+        // can take 30+s to respond even on success. esplora_get's retry
+        // loop handles the back-off; this cap just prevents a truly dead
+        // socket from hanging forever.
+        .timeout(Duration::from_secs(60))
         .build()?;
 
     for u in &events {
@@ -1050,41 +1062,61 @@ async fn fetch_chain_stats(
     })
 }
 
-/// Esplora GET with retry-on-429 and a small baseline delay between calls.
-/// mempool.space's public endpoint rate-limits aggressively (the project's
-/// own docs cite ~5-10 req/s); a baseline 250ms pacing plus exponential
-/// backoff on 429 covers the common case without making the audit dramatically
-/// slower. Retries cap at 5 attempts (total ~6 s of backoff in the worst
-/// case), then propagate the error so callers see what addr failed.
+/// Esplora GET with retry-on-{429, timeout, transient-network-error} and a
+/// configurable baseline delay between calls. mempool.space's public endpoint
+/// rate-limits aggressively and, once throttled, sometimes stops responding
+/// altogether (the request just times out rather than coming back 429).
+/// Retries cover both cases, with an exponential backoff capped at 8 attempts
+/// (worst case: 500ms + 1s + 2s + 4s + 8s + 16s + 32s + 64s ≈ 2 min). On a
+/// truly broken endpoint the final error propagates.
 async fn esplora_get<T: serde::de::DeserializeOwned>(
     http: &reqwest::Client,
     url: &str,
 ) -> Result<T, String> {
-    // Baseline pacing: cheap to apply unconditionally, and the bot-net-style
-    // rate limits on public esplora endpoints make this the difference
-    // between completing and getting kicked off mid-trace.
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    tokio::time::sleep(Duration::from_millis(esplora_pace_ms())).await;
     let mut backoff_ms: u64 = 500;
-    for attempt in 1..=5 {
-        let resp = http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| format!("GET {}: {}", url, e))?;
-        let status = resp.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            eprintln!(
-                "  esplora 429 (attempt {}/5), backing off {} ms…",
-                attempt, backoff_ms
-            );
-            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-            backoff_ms = backoff_ms.saturating_mul(2);
-            continue;
+    let mut last_err: Option<String> = None;
+    for attempt in 1..=8 {
+        match http.get(url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    eprintln!(
+                        "  esplora 429 (attempt {}/8), backing off {} ms…",
+                        attempt, backoff_ms
+                    );
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = backoff_ms.saturating_mul(2);
+                    continue;
+                }
+                if !status.is_success() {
+                    return Err(format!("status {}", status));
+                }
+                return resp.json::<T>().await.map_err(|e| format!("json: {}", e));
+            }
+            Err(e) => {
+                // Timeout or transient network failure — same backoff as 429.
+                // (esplora endpoints behind a throttle often just stop
+                // responding rather than returning a 429 cleanly.)
+                let label = if e.is_timeout() { "timeout" } else { "network" };
+                eprintln!(
+                    "  esplora {} (attempt {}/8), backing off {} ms…",
+                    label, attempt, backoff_ms
+                );
+                last_err = Some(format!("GET {}: {}", url, e));
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = backoff_ms.saturating_mul(2);
+            }
         }
-        if !status.is_success() {
-            return Err(format!("status {}", status));
-        }
-        return resp.json::<T>().await.map_err(|e| format!("json: {}", e));
     }
-    Err("gave up after 5 retries on 429".to_string())
+    Err(last_err.unwrap_or_else(|| "gave up after 8 attempts".to_string()))
+}
+
+/// Read --esplora-pace-ms once from env (set at arg-parse time) so each
+/// esplora_get call doesn't re-parse. Defaults to 250ms.
+fn esplora_pace_ms() -> u64 {
+    std::env::var("AUDIT_ESPLORA_PACE_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(250)
 }
