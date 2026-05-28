@@ -1351,6 +1351,65 @@ impl LotteryOutput {
             .control_block(&(leaf, LeafVersion::TapScript))
     }
 
+    /// The four recovery leaves in `(csv_blocks, threshold, script)` tuples,
+    /// matching the order they were added in `LotteryScriptBuilder::build`:
+    ///   - `(144,  T)`     ~1 day,  primary recovery
+    ///   - `(1008, T-1)`   ~1 week
+    ///   - `(4032, T-2)`   ~4 weeks
+    ///   - `(8064, 1)`     ~8 weeks, the timeout-recovery escape hatch
+    ///
+    /// `T` is `self.recovery_threshold`. The lower thresholds clamp at 1 via
+    /// `saturating_sub(N).max(1)`, mirroring `build`'s `recovery_specs`.
+    ///
+    /// Spenders pick whichever leaf they can satisfy: an honest sweep takes
+    /// the lowest CSV that their available signer set meets the threshold for.
+    pub fn recovery_leaves(&self) -> Vec<(u32, usize, ScriptBuf)> {
+        let specs: [(u32, usize); 4] = [
+            (144, self.recovery_threshold),
+            (1008, self.recovery_threshold.saturating_sub(1).max(1)),
+            (4032, self.recovery_threshold.saturating_sub(2).max(1)),
+            (crate::constants::TIMEOUT_RECOVERY_CSV_BLOCKS, 1usize),
+        ];
+        specs
+            .iter()
+            .filter_map(|(csv, threshold)| {
+                let builder = LotteryScriptBuilder::new(
+                    self.participants.clone(),
+                    self.recovery_voters.clone(),
+                    *threshold,
+                    self.network,
+                );
+                builder
+                    .build_recovery_script(*csv)
+                    .ok()
+                    .map(|script| (*csv, *threshold, script))
+            })
+            .collect()
+    }
+
+    /// Control block for a previously-obtained recovery leaf script (from
+    /// `recovery_leaves`). Returns `None` if the script isn't in this
+    /// output's Taproot tree (caller passed a stale or wrong script).
+    pub fn recovery_control_block(
+        &self,
+        leaf_script: &ScriptBuf,
+    ) -> Option<bitcoin::taproot::ControlBlock> {
+        self.spend_info
+            .control_block(&(leaf_script.clone(), LeafVersion::TapScript))
+    }
+
+    /// The x-only recovery voter keys in the sorted order the recovery leaf
+    /// script consumes them (script encodes the first key with CHECKSIG, then
+    /// the rest with CHECKSIGADD; both `build_recovery_script` and this helper
+    /// sort by `.serialize()`). Use this to build the `signatures: &[Option<
+    /// [u8; 64]>]` arg to `ReservesSpendBuilder::create_checksigadd_witness`
+    /// — index `i` of that arg corresponds to the key at `recovery_voter_order()[i]`.
+    pub fn recovery_voter_order(&self) -> Vec<XOnlyPublicKey> {
+        let mut sorted = self.recovery_voters.clone();
+        sorted.sort_by_key(|k| k.serialize());
+        sorted
+    }
+
     /// Create a witness for spending through the partial-reveal leaf
     /// when disputant `missing_idx` failed to reveal.
     ///

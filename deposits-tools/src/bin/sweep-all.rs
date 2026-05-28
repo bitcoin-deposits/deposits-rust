@@ -615,6 +615,48 @@ fn fetch_utxo(
     Ok(Some((bitcoin::OutPoint { txid, vout }, value)))
 }
 
+/// Current chain tip height per esplora.
+fn fetch_tip_height(esplora: &str) -> Result<u32, String> {
+    let url = format!("{}/blocks/tip/height", esplora);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("http client: {}", e))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("GET {}: {}", url, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("esplora {}: status {}", url, resp.status()));
+    }
+    resp.text()
+        .map_err(|e| format!("body: {}", e))?
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| format!("parse height: {}", e))
+}
+
+/// Block height of the tx that funded a given UTXO, or `None` for mempool.
+fn fetch_tx_block_height(esplora: &str, txid: &bitcoin::Txid) -> Result<Option<u32>, String> {
+    let url = format!("{}/tx/{}/status", esplora, txid);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("http client: {}", e))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("GET {}: {}", url, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("esplora {}: status {}", url, resp.status()));
+    }
+    let v: serde_json::Value = resp.json().map_err(|e| format!("json: {}", e))?;
+    if v.get("confirmed").and_then(|c| c.as_bool()) != Some(true) {
+        return Ok(None);
+    }
+    Ok(v.get("block_height").and_then(|h| h.as_u64()).map(|h| h as u32))
+}
+
 fn broadcast_tx(esplora: &str, tx: &bitcoin::Transaction) -> Result<bitcoin::Txid, String> {
     use bitcoin::consensus::encode::serialize_hex;
     let url = format!("{}/tx", esplora);
@@ -804,6 +846,304 @@ fn sweep_ledger(
     Ok(())
 }
 
+/// For each armed dispute round in a ledger's history, rebuild the lottery
+/// script address (same logic as audit-balances::reconstruct_lottery_addresses),
+/// look up its on-chain UTXO, and — if unspent and a recovery leaf's CSV is
+/// satisfied with keys we hold — sweep via that leaf to `destination_script`.
+///
+/// The lottery output's claim leaves need preimages we don't have (they live
+/// in CustodyLotteryReveal events that may never have been published). The
+/// recovery leaves only need a quorum-minus-disputed-operator signature
+/// threshold, which sweep-all already holds if it operates the whole cluster.
+fn sweep_lottery_recovery_for_ledger(
+    jsonl: &std::path::Path,
+    operator_name: &str,
+    keyring: &HashMap<bitcoin::secp256k1::PublicKey, [u8; 32]>,
+    destination_script: &bitcoin::ScriptBuf,
+    network: Network,
+    esplora: &str,
+    dry_run: bool,
+) -> Result<usize, String> {
+    use deposits_core::tapscript_reserves::{LotteryParticipant, LotteryScriptBuilder};
+    use std::io::BufRead;
+
+    // Re-parse the jsonl (same shape sweep-all already uses for
+    // summarize_ledger — kept narrow here to avoid threading more data
+    // through the existing summary type).
+    let file = std::fs::File::open(jsonl).map_err(|e| format!("open {:?}: {}", jsonl, e))?;
+    let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("Update") {
+            continue;
+        }
+        let mut obj = match v.as_object() {
+            Some(o) => o.clone(),
+            None => continue,
+        };
+        obj.remove("type");
+        if let Ok(u) =
+            serde_json::from_value::<SignedLedgerUpdate>(serde_json::Value::Object(obj))
+        {
+            updates.push(u);
+        }
+    }
+    if updates.is_empty() {
+        return Ok(0);
+    }
+
+    // Original operator from LedgerOpen, most recent QuorumBegin members.
+    let mut original_operator: Option<bitcoin::secp256k1::PublicKey> = None;
+    let mut qb_members: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
+    for u in &updates {
+        match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::LedgerOpen { operator_id, .. })
+                if original_operator.is_none() =>
+            {
+                original_operator = Some(operator_id);
+            }
+            Ok(LedgerOperation::QuorumBegin { quorum_members, .. }) => {
+                qb_members = quorum_members.iter().map(|m| m.pubkey).collect();
+            }
+            _ => {}
+        }
+    }
+    let original_operator = match original_operator {
+        Some(p) => p,
+        None => return Ok(0),
+    };
+    if qb_members.is_empty() {
+        return Ok(0);
+    }
+
+    // Group DisputeArmed by armed_block (the round identifier).
+    let mut rounds: HashMap<u32, Vec<(bitcoin::secp256k1::PublicKey, [u8; 20], String)>> =
+        HashMap::new();
+    for u in &updates {
+        if let Ok(LedgerOperation::DisputeArmed {
+            armed_block,
+            commitment_hash,
+            target_reserves,
+            ..
+        }) = LedgerOperation::tlv_decode(&u.message)
+        {
+            let entry = rounds.entry(armed_block).or_default();
+            if !entry.iter().any(|(pk, _, _)| pk == &u.operator_id) {
+                entry.push((u.operator_id, commitment_hash, target_reserves));
+            }
+        }
+    }
+
+    let mut swept = 0usize;
+    for (armed_block, participants_raw) in rounds {
+        if participants_raw.len() < 2 {
+            continue;
+        }
+        let mut participants: Vec<LotteryParticipant> = participants_raw
+            .into_iter()
+            .map(|(pk, commit, target)| {
+                LotteryParticipant::new(pk.x_only_public_key().0, commit, target)
+            })
+            .collect();
+        participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+
+        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = qb_members
+            .iter()
+            .filter(|pk| **pk != original_operator)
+            .map(|pk| pk.x_only_public_key().0)
+            .collect();
+        let recovery_threshold = (recovery_voters.len() / 2) + 1;
+
+        let lottery = match LotteryScriptBuilder::new(
+            participants,
+            recovery_voters.clone(),
+            recovery_threshold,
+            network,
+        )
+        .build()
+        {
+            Ok(l) => l,
+            Err(e) => {
+                println!(
+                    "[{}] lottery round@{}: build failed: {:?}",
+                    operator_name, armed_block, e
+                );
+                continue;
+            }
+        };
+
+        let (outpoint, value) = match fetch_utxo(&lottery.address, esplora)? {
+            Some(u) => u,
+            None => continue, // no funds at this lottery output — nothing to sweep
+        };
+
+        // CSV gate: confirmations = tip - funding_height + 1 must reach the
+        // leaf's csv_blocks. Pick the lowest CSV we satisfy with the keys
+        // we hold. If we hold the timeout-recovery (threshold 1) leaf's key
+        // and CSV-8064 has elapsed, that's the fallback.
+        let funding_height = match fetch_tx_block_height(esplora, &outpoint.txid)? {
+            Some(h) => h,
+            None => {
+                println!(
+                    "[{}] lottery round@{} {} sats: still in mempool — skipping",
+                    operator_name, armed_block, value
+                );
+                continue;
+            }
+        };
+        let tip = fetch_tip_height(esplora)?;
+        let confirmations = tip.saturating_sub(funding_height) + 1;
+
+        // The order of recovery_leaves() matches the build_recovery_script
+        // order — lowest CSV first. Pick the first leaf where we have
+        // threshold keys AND CSV is satisfied.
+        let recovery_leaves = lottery.recovery_leaves();
+        let voter_order = lottery.recovery_voter_order();
+        let voter_full_pks: Vec<bitcoin::secp256k1::PublicKey> = qb_members
+            .iter()
+            .filter(|pk| **pk != original_operator)
+            .copied()
+            .collect();
+        // Map x-only → full pubkey so we can look up the seed in the keyring
+        // (keyring is keyed on full secp256k1::PublicKey, but the lottery
+        // recovery leaf works in x-only).
+        let xonly_to_full: HashMap<bitcoin::secp256k1::XOnlyPublicKey, bitcoin::secp256k1::PublicKey> =
+            voter_full_pks
+                .iter()
+                .map(|pk| (pk.x_only_public_key().0, *pk))
+                .collect();
+
+        let chosen = recovery_leaves.iter().find(|(csv, threshold, _)| {
+            if confirmations < *csv {
+                return false;
+            }
+            let held = voter_order
+                .iter()
+                .filter(|xo| {
+                    xonly_to_full
+                        .get(xo)
+                        .map(|pk| keyring.contains_key(pk))
+                        .unwrap_or(false)
+                })
+                .count();
+            held >= *threshold
+        });
+        let (csv_blocks, threshold, leaf_script) = match chosen {
+            Some(t) => (t.0, t.1, t.2.clone()),
+            None => {
+                println!(
+                    "[{}] lottery round@{} {} sats: no recovery leaf yet satisfiable \
+                     (confirmations={}, smallest CSV=144)",
+                    operator_name, armed_block, value, confirmations
+                );
+                continue;
+            }
+        };
+
+        // Build spend tx with sequence = csv_blocks (BIP-68 relative timelock).
+        let params = SpendTxParams {
+            reserves_outpoint: outpoint,
+            reserves_amount: value,
+            destination_script: destination_script.clone(),
+            splits: Vec::new(),
+            fee_rate_sat_vbyte: 2,
+            lock_time: 0,
+        };
+        let mut tx = ReservesSpendBuilder::build_spend_transaction(&params, &lottery.script_pubkey())
+            .map_err(|e| format!("build spend tx: {:?}", e))?;
+        tx.input[0].sequence = Sequence::from_height(csv_blocks as u16);
+
+        let sighash = ReservesSpendBuilder::compute_sighash(
+            &tx,
+            0,
+            value,
+            &lottery.script_pubkey(),
+            &leaf_script,
+        )
+        .map_err(|e| format!("compute sighash: {:?}", e))?;
+        let sighash_bytes: [u8; 32] = *sighash.as_ref();
+        let msg = Message::from_digest(sighash_bytes);
+
+        // Sign with threshold keys in script-key order. The recovery leaf
+        // script processes keys sorted by .serialize(); voter_order matches.
+        let secp = Secp256k1::new();
+        let mut sigs_by_xonly: HashMap<bitcoin::secp256k1::XOnlyPublicKey, [u8; 64]> =
+            HashMap::new();
+        for xo in &voter_order {
+            if sigs_by_xonly.len() >= threshold {
+                break;
+            }
+            let full_pk = match xonly_to_full.get(xo) {
+                Some(p) => p,
+                None => continue,
+            };
+            let seed = match keyring.get(full_pk) {
+                Some(s) => s,
+                None => continue,
+            };
+            let secret = derive_operator_secret(seed, network)?;
+            let keypair = Keypair::from_secret_key(&secp, &secret);
+            let sig = secp.sign_schnorr(&msg, &keypair);
+            sigs_by_xonly.insert(keypair.x_only_public_key().0, *sig.as_ref());
+        }
+        if sigs_by_xonly.len() < threshold {
+            return Err(format!(
+                "collected {}/{} sigs for lottery recovery",
+                sigs_by_xonly.len(),
+                threshold
+            ));
+        }
+
+        let signatures: Vec<Option<[u8; 64]>> = voter_order
+            .iter()
+            .map(|xo| sigs_by_xonly.get(xo).copied())
+            .collect();
+        let control_block = lottery
+            .recovery_control_block(&leaf_script)
+            .ok_or("no control block for recovery leaf")?;
+        let witness = ReservesSpendBuilder::create_checksigadd_witness(
+            &signatures,
+            &leaf_script,
+            &control_block,
+        );
+        tx.input[0].witness = witness;
+
+        let txid = tx.compute_txid();
+        println!(
+            "[{}] lottery round@{}: sweeping {} sats from {}:{} via recovery leaf CSV={} (T={}, confirms={})",
+            operator_name,
+            armed_block,
+            value,
+            outpoint.txid,
+            outpoint.vout,
+            csv_blocks,
+            threshold,
+            confirmations,
+        );
+        println!(
+            "    tx {} ({} → dest, fee {} sats)",
+            txid,
+            tx.output[0].value.to_sat(),
+            value.saturating_sub(tx.output[0].value.to_sat())
+        );
+        if dry_run {
+            swept += 1;
+            continue;
+        }
+        let broadcast_txid = broadcast_tx(esplora, &tx)?;
+        println!("    broadcast: {}", broadcast_txid);
+        swept += 1;
+    }
+    Ok(swept)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args()?;
 
@@ -837,6 +1177,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut reserves_errors = 0usize;
     let mut wpkh_attempted = 0usize;
     let mut wpkh_errors = 0usize;
+    let mut lottery_swept = 0usize;
+    let mut lottery_errors = 0usize;
 
     // BIP-44 gap-limit conventionally 20; we keep it generous to catch
     // address-index drift on a busy node.
@@ -889,6 +1231,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ) {
                 println!("    ERROR: {}", e);
                 reserves_errors += 1;
+            }
+
+            // Lottery-script recovery sweep for the same ledger. The
+            // confiscation-tx output sits at a deterministic P2TR derived
+            // from the disputants' commitments + the recovery voter set;
+            // if disputants never revealed (or the lottery winner never
+            // claimed) and the CSV has elapsed, this sweeps via the
+            // smallest-CSV recovery leaf we can satisfy.
+            match sweep_lottery_recovery_for_ledger(
+                &path,
+                &op.name,
+                &keyring,
+                &destination_script,
+                args.network,
+                &args.esplora,
+                args.dry_run,
+            ) {
+                Ok(n) => lottery_swept += n,
+                Err(e) => {
+                    println!("    LOTTERY ERROR: {}", e);
+                    lottery_errors += 1;
+                }
             }
         }
 
@@ -1012,11 +1376,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Reserves errors:    {}", reserves_errors);
     println!("  WPKH attempted:     {}", wpkh_attempted);
     println!("  WPKH errors:        {}", wpkh_errors);
+    println!("  Lottery swept:      {}", lottery_swept);
+    println!("  Lottery errors:     {}", lottery_errors);
     println!(
         "  Mode:               {}",
         if args.dry_run { "dry-run" } else { "live" }
     );
-    if reserves_errors + wpkh_errors > 0 {
+    if reserves_errors + wpkh_errors + lottery_errors > 0 {
         std::process::exit(1);
     }
     Ok(())
