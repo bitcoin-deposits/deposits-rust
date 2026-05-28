@@ -499,6 +499,22 @@ async fn classify_and_query(
     }
 }
 
+/// `t`-tag discriminants of every op that names a chain address. The relay
+/// can filter on these natively (operators tag their kind:9100 events with
+/// the op discriminant at publish time — see deposits-nostr's TAG_OP_TYPE),
+/// so the audit pulls only the events it actually decodes.
+const ADDRESS_BEARING_DISCRIMINANTS: &[&str] = &[
+    "1",  // LedgerOpen      → reserves_id
+    "12", // QuorumBegin     → reserves_id
+    "35", // OnchainCredit   → funding_address
+    "36", // OnchainLock     → destination_address
+    "38", // OnchainFulfill  → destination_address
+    "55", // DisputeAcquire  → new_reserves_address
+];
+
+/// Page through every kind:9100 event the relay holds whose `t` tag is in
+/// [`ADDRESS_BEARING_DISCRIMINANTS`]. Pagination uses `until = oldest_seen - 1`
+/// after each page; we stop when a page returns zero events.
 async fn fetch_all_9100(
     relay_url: &str,
 ) -> Result<Vec<SignedLedgerUpdate>, Box<dyn std::error::Error>> {
@@ -509,54 +525,86 @@ async fn fetch_all_9100(
         .await
         .map_err(|e| format!("connect to {}: {}", relay_url, e))?;
 
-    let sub_id = "audit";
-    // No limit field: pull everything the relay will give us. strfry's
-    // default cap is ~500 events — for a large relay we'd need to page,
-    // but for a single audit pass that's good enough.
-    let filter = serde_json::json!({ "kinds": [9100], "limit": 100000 });
-    let req = serde_json::json!(["REQ", sub_id, filter]);
-    ws.send(Message::Text(req.to_string())).await?;
-
     let mut out = Vec::new();
+    let mut until: Option<u64> = None;
+    let mut page = 0usize;
     loop {
-        let msg = match tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
-            Ok(Some(Ok(Message::Text(text)))) => text,
-            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => break,
-            Ok(Some(Ok(_))) => continue,
-            Ok(Some(Err(_))) | Err(_) => break,
-        };
-        let arr: serde_json::Value = match serde_json::from_str(&msg) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let arr = match arr.as_array() {
-            Some(a) => a,
-            None => continue,
-        };
-        match arr.first().and_then(|v| v.as_str()) {
-            Some("EVENT") => {
-                let event = match arr.get(2) {
-                    Some(e) => e,
-                    None => continue,
-                };
-                let content = match event.get("content").and_then(|v| v.as_str()) {
-                    Some(s) => s,
-                    None => continue,
-                };
-                let bytes = match BASE64.decode(content) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                if let Ok(u) = SignedLedgerUpdate::tlv_decode(&bytes) {
-                    out.push(u);
-                }
-            }
-            Some("EOSE") => break,
-            _ => {}
+        page += 1;
+        let sub_id = format!("audit-{}", page);
+        let mut filter = serde_json::json!({
+            "kinds": [9100],
+            "#t": ADDRESS_BEARING_DISCRIMINANTS,
+            "limit": 500,
+        });
+        if let Some(u) = until {
+            filter["until"] = serde_json::Value::from(u);
         }
+        let req = serde_json::json!(["REQ", sub_id, filter]);
+        ws.send(Message::Text(req.to_string())).await?;
+
+        let mut page_count = 0usize;
+        let mut page_oldest: Option<u64> = None;
+        loop {
+            let msg = match tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => text,
+                Ok(Some(Ok(Message::Close(_)))) | Ok(None) => break,
+                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Err(_))) | Err(_) => break,
+            };
+            let arr: serde_json::Value = match serde_json::from_str(&msg) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let arr = match arr.as_array() {
+                Some(a) => a,
+                None => continue,
+            };
+            match arr.first().and_then(|v| v.as_str()) {
+                Some("EVENT") if arr.get(1).and_then(|v| v.as_str()) == Some(sub_id.as_str()) => {
+                    let event = match arr.get(2) {
+                        Some(e) => e,
+                        None => continue,
+                    };
+                    let created_at = event.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+                    page_oldest = Some(match page_oldest {
+                        Some(o) => o.min(created_at),
+                        None => created_at,
+                    });
+                    let content = match event.get("content").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let bytes = match BASE64.decode(content) {
+                        Ok(b) => b,
+                        Err(_) => continue,
+                    };
+                    if let Ok(u) = SignedLedgerUpdate::tlv_decode(&bytes) {
+                        out.push(u);
+                        page_count += 1;
+                    }
+                }
+                Some("EOSE") if arr.get(1).and_then(|v| v.as_str()) == Some(sub_id.as_str()) => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let close = serde_json::json!(["CLOSE", sub_id]);
+        ws.send(Message::Text(close.to_string())).await.ok();
+
+        eprintln!("  page {}: {} event(s)", page, page_count);
+        if page_count == 0 {
+            break;
+        }
+        // Cursor for the next page: one second before the oldest event on
+        // this page. If the relay returned events but no `created_at`,
+        // there's nothing to advance to — stop to avoid an infinite loop.
+        until = match page_oldest {
+            Some(o) if o > 0 => Some(o - 1),
+            _ => break,
+        };
     }
-    let close = serde_json::json!(["CLOSE", sub_id]);
-    ws.send(Message::Text(close.to_string())).await.ok();
+
     Ok(out)
 }
 
