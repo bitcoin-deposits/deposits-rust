@@ -682,6 +682,127 @@ fn fetch_utxo(
     Ok(Some((bitcoin::OutPoint { txid, vout }, value)))
 }
 
+/// Walk forward from a spent reserves address along the largest-value output
+/// chain, returning the first unspent UTXO encountered. Stops at depth
+/// `max_hops` to avoid infinite chases on pathological data.
+///
+/// The "rotation" model: when an operator rotates reserves, the spending tx
+/// has one large output (the new vault) and possibly some small change /
+/// fee-bump outputs. Pick the largest output that's bc1p (taproot-shaped) on
+/// each hop; if unspent, return it.
+fn chase_reserves_chain(
+    start: &Address,
+    network: Network,
+    esplora: &str,
+    max_hops: usize,
+) -> Result<Option<(bitcoin::OutPoint, u64, Address)>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("http client: {}", e))?;
+    let mut current: Address = start.clone();
+    let start_str = start.to_string();
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(start_str.clone());
+
+    for hop in 0..max_hops {
+        // First: is `current` itself unspent? (After hop 0 the current
+        // address was a vout of a previous spend tx; might still be sitting.)
+        if hop > 0 {
+            if let Some((op, val)) = fetch_utxo(&current, esplora)? {
+                return Ok(Some((op, val, current.clone())));
+            }
+        }
+        // Find the spending tx out of `current`. Esplora returns confirmed
+        // txs for an address (newest-first); we look for one whose vin
+        // consumes a UTXO of `current`.
+        let url = format!("{}/address/{}/txs", esplora, current);
+        let resp = client
+            .get(&url)
+            .send()
+            .map_err(|e| format!("GET {}: {}", url, e))?;
+        if !resp.status().is_success() {
+            return Err(format!("esplora {}: status {}", url, resp.status()));
+        }
+        let txs: Vec<serde_json::Value> =
+            resp.json().map_err(|e| format!("json: {}", e))?;
+
+        let cur_str = current.to_string();
+        let spending = txs.iter().find(|tx| {
+            tx.get("vin").and_then(|v| v.as_array()).map_or(false, |vin| {
+                vin.iter().any(|i| {
+                    i.get("prevout")
+                        .and_then(|p| p.get("scriptpubkey_address"))
+                        .and_then(|v| v.as_str())
+                        == Some(cur_str.as_str())
+                })
+            })
+        });
+        let tx = match spending {
+            Some(t) => t,
+            None => {
+                println!(
+                    "      hop {}: no spending tx found from {}",
+                    hop, current
+                );
+                return Ok(None);
+            }
+        };
+        let txid = tx.get("txid").and_then(|v| v.as_str()).unwrap_or("");
+        println!("      hop {}: spent in {} — picking largest vout", hop, txid);
+
+        // Largest taproot-shape (bc1p) output of the spending tx. If none,
+        // try the largest output regardless of shape — the rotation may
+        // have used a different address class in some old code paths.
+        let vout = tx.get("vout").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let mut candidate: Option<(usize, u64, Address)> = None;
+        for (idx, v) in vout.iter().enumerate() {
+            let value = match v.get("value").and_then(|x| x.as_u64()) {
+                Some(n) => n,
+                None => continue,
+            };
+            let addr_str = match v.get("scriptpubkey_address").and_then(|x| x.as_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            let addr = match addr_str
+                .parse::<Address<bitcoin::address::NetworkUnchecked>>()
+                .ok()
+                .and_then(|a| a.require_network(network).ok())
+            {
+                Some(a) => a,
+                None => continue,
+            };
+            // Don't backtrack — skip an output that lands at an address we
+            // already walked through.
+            if visited.contains(&addr_str.to_string()) {
+                continue;
+            }
+            match &candidate {
+                None => candidate = Some((idx, value, addr)),
+                Some((_, best, _)) if value > *best => {
+                    candidate = Some((idx, value, addr))
+                }
+                _ => {}
+            }
+        }
+        let (_, _, next) = match candidate {
+            Some(c) => c,
+            None => {
+                println!("      hop {}: no usable vout (all already visited)", hop);
+                return Ok(None);
+            }
+        };
+        visited.insert(next.to_string());
+        current = next;
+    }
+    println!(
+        "      max hops ({}) exhausted without finding an unspent UTXO",
+        max_hops
+    );
+    Ok(None)
+}
+
 /// Current chain tip height per esplora.
 fn fetch_tip_height(esplora: &str) -> Result<u32, String> {
     let url = format!("{}/blocks/tip/height", esplora);
@@ -800,17 +921,49 @@ fn sweep_ledger(
         ));
     }
 
-    // Find the on-chain UTXO.
-    let (outpoint, amount) = match fetch_utxo(&reserves_address, esplora)? {
-        Some(u) => u,
+    // Find the on-chain UTXO. If the reserves address is spent, follow the
+    // chain forward — operators that rotated without updating the local
+    // reserves snapshot have funds at a downstream output. Walk until we
+    // hit an unspent leaf, then attempt to sweep IT.
+    let (outpoint, amount, current_address) = match fetch_utxo(&reserves_address, esplora)? {
+        Some((op, val)) => (op, val, reserves_address.clone()),
         None => {
             println!(
-                "  ledger {}…: reserves address has no unspent UTXO; skipping",
+                "  ledger {}…: reserves address has no unspent UTXO; following spend chain…",
                 hex::encode(&summary.ledger_id[..8])
             );
-            return Ok(());
+            match chase_reserves_chain(&reserves_address, network, esplora, 10)? {
+                Some((op, val, addr)) => {
+                    println!(
+                        "    chain leaf: {} sats at {}",
+                        val, addr
+                    );
+                    if addr != reserves_address {
+                        // The downstream UTXO sits at a DIFFERENT address than
+                        // our local rebuild — the rotation moved to a vault
+                        // whose (members, ruleset, ledger_hash, expiry) we
+                        // can't reconstruct from local state. Skip with a
+                        // clear note; the funds are visible but unreachable
+                        // through this code path.
+                        println!(
+                            "    address differs from our rebuild {} — rotation \
+                             happened off-state, can't sign blindly; skipping",
+                            reserves_address
+                        );
+                        return Ok(());
+                    }
+                    (op, val, addr)
+                }
+                None => {
+                    println!(
+                        "    no unspent UTXO downstream — funds left this address tree"
+                    );
+                    return Ok(());
+                }
+            }
         }
     };
+    let _ = current_address;
 
     // Confirm we hold enough keys to make tier-0's threshold.
     let majority = (total_voters / 2) + 1;
