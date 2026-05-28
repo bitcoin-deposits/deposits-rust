@@ -13,16 +13,25 @@
 //! per address, and reports per-address chain stats grouped by source.
 //!
 //! Usage:
-//!   audit-balances [--relay wss://...] [--esplora https://...]
+//!   audit-balances [--relay wss://...]... [--esplora https://...]
+//!                  [--ingest-jsonl <path>]...
 //!                  [--network bitcoin|testnet|signet|regtest]
 //!                  [--limit N] [--verbose] [--trace-spends]
 //!
+//! `--relay` and `--ingest-jsonl` are both repeatable. Events from every
+//! source are merged and deduped by `content_hash`. Use `--ingest-jsonl`
+//! pointed at an operator's `<data_dir>/.../ledgers/` directory to recover
+//! events the relay no longer serves (e.g. operators that haven't
+//! republished an old DisputeArmed).
+//!
 //! `--trace-spends` walks every spending tx out of each tracked address and
 //! reports where the sats went, labeling destinations as `change` (same
-//! address), `tracked` (another tracked reserves address), or `external`
-//! (anything else). Useful for "I thought no money left the system — did it?".
+//! address), `tracked` (another tracked reserves address — including
+//! lottery-script outputs reconstructed from DisputeArmed events), or
+//! `external` (anything else). Useful for "I thought no money left the
+//! system — did it?".
 //!
-//! Exit code 0 iff the relay scan + esplora queries completed cleanly.
+//! Exit code 0 iff every source completed cleanly.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use deposits_core::messages::LedgerOperation;
@@ -49,7 +58,8 @@ impl ChainStats {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let mut relay_url = DEFAULT_RELAY.to_string();
+    let mut relay_urls: Vec<String> = Vec::new();
+    let mut jsonl_paths: Vec<std::path::PathBuf> = Vec::new();
     let mut esplora_url = DEFAULT_ESPLORA.to_string();
     let mut limit: Option<usize> = None;
     let mut verbose = false;
@@ -60,7 +70,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while i < args.len() {
         match args[i].as_str() {
             "--relay" | "-r" if i + 1 < args.len() => {
-                relay_url = args[i + 1].clone();
+                relay_urls.push(args[i + 1].clone());
+                i += 2;
+            }
+            "--ingest-jsonl" if i + 1 < args.len() => {
+                jsonl_paths.push(std::path::PathBuf::from(&args[i + 1]));
                 i += 2;
             }
             "--esplora" | "-e" if i + 1 < args.len() => {
@@ -93,15 +107,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!(
                     "Usage: audit-balances [OPTIONS]\n\n\
                      Discover every chain address declared by LedgerOpen / QuorumBegin\n\
-                     events on a Nostr relay, then query Esplora for balances.\n\n\
+                     events on a Nostr relay (or in a local JSONL ledger directory),\n\
+                     then query Esplora for balances.\n\n\
                      Options:\n  \
-                     --relay URL       Nostr relay (default: relay.bitcoindeposits.net)\n  \
-                     --esplora URL     Esplora HTTP API (default: mempool.space/api)\n  \
-                     --network NAME    bitcoin|testnet|signet|regtest (default bitcoin)\n  \
-                     --limit N         Cap addresses queried (sorted by first-seen order)\n  \
-                     --verbose         Per-event trace\n  \
-                     --trace-spends    For each address with spent_sats > 0, walk the\n  \
-                     \x20                spending tx(s) and report destinations"
+                     --relay URL        Nostr relay (repeatable; default: relay.bitcoindeposits.net)\n  \
+                     --ingest-jsonl PATH Operator data dir or single jsonl file (repeatable)\n  \
+                     --esplora URL      Esplora HTTP API (default: mempool.space/api)\n  \
+                     --network NAME     bitcoin|testnet|signet|regtest (default bitcoin)\n  \
+                     --limit N          Cap addresses queried (sorted by first-seen order)\n  \
+                     --verbose          Per-event trace\n  \
+                     --trace-spends     For each address with spent_sats > 0, walk the\n  \
+                     \x20                 spending tx(s) and report destinations"
                 );
                 return Ok(());
             }
@@ -109,21 +125,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if relay_urls.is_empty() && jsonl_paths.is_empty() {
+        relay_urls.push(DEFAULT_RELAY.to_string());
+    }
+
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(run(&relay_url, &esplora_url, network, limit, verbose, trace_spends))
+    rt.block_on(run(
+        &relay_urls,
+        &jsonl_paths,
+        &esplora_url,
+        network,
+        limit,
+        verbose,
+        trace_spends,
+    ))
 }
 
 async fn run(
-    relay_url: &str,
+    relay_urls: &[String],
+    jsonl_paths: &[std::path::PathBuf],
     esplora_url: &str,
     network: bitcoin::Network,
     limit: Option<usize>,
     verbose: bool,
     trace_spends: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("Collecting kind:9100 events from {} …", relay_url);
-    let events = fetch_all_9100(relay_url).await?;
-    eprintln!("  {} event(s) collected", events.len());
+    // Pull events from every configured source (relays + local JSONL paths)
+    // and dedupe by content_hash so duplicates across sources collapse.
+    let mut events: Vec<SignedLedgerUpdate> = Vec::new();
+    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut accept = |batch: Vec<SignedLedgerUpdate>| {
+        for u in batch {
+            if seen.insert(u.content_hash) {
+                events.push(u);
+            }
+        }
+    };
+
+    for relay in relay_urls {
+        eprintln!("Collecting kind:9100 events from {} …", relay);
+        match fetch_all_9100(relay).await {
+            Ok(batch) => {
+                let n = batch.len();
+                accept(batch);
+                eprintln!("  +{} from {}", n, relay);
+            }
+            Err(e) => eprintln!("  relay {} failed: {}", relay, e),
+        }
+    }
+    for path in jsonl_paths {
+        eprintln!("Ingesting JSONL from {} …", path.display());
+        match ingest_jsonl_path(path) {
+            Ok(batch) => {
+                let n = batch.len();
+                accept(batch);
+                eprintln!("  +{} from {}", n, path.display());
+            }
+            Err(e) => eprintln!("  jsonl {} failed: {}", path.display(), e),
+        }
+    }
+    eprintln!("  {} unique event(s) total", events.len());
 
     // One row per LedgerOpen / QuorumBegin event — no filtering, no
     // dedup. Republish duplicates and non-on-chain placeholders both
@@ -335,7 +396,7 @@ async fn run(
         // confiscation-tx destination shows up as `external` (where the
         // funds actually live, waiting on reveal+claim or recovery).
         eprintln!("Reconstructing lottery-script addresses for armed dispute rounds…");
-        match reconstruct_lottery_addresses(relay_url, network, &events).await {
+        match reconstruct_lottery_addresses(relay_urls, network, &events).await {
             Ok(lottery) => {
                 eprintln!("  {} lottery output(s) reconstructed", lottery.len());
                 for (addr, label) in lottery {
@@ -417,7 +478,7 @@ async fn run(
 /// with `recovery_voters = qb_members - original_operator` and `threshold =
 /// majority`, and read `.address` off the built `LotteryOutput`.
 async fn reconstruct_lottery_addresses(
-    relay_url: &str,
+    relay_urls: &[String],
     network: bitcoin::Network,
     events: &[SignedLedgerUpdate],
 ) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
@@ -462,17 +523,27 @@ async fn reconstruct_lottery_addresses(
             continue;
         }
         let ledger_tag = &ledger_hex[..16.min(ledger_hex.len())];
-        let history = match fetch_ledger_history(relay_url, ledger_tag).await {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!(
-                    "  skip ledger {}: history fetch failed: {}",
-                    &ledger_tag[..8],
-                    e
-                );
-                continue;
+        // Walk EVERY configured relay for this ledger's history and merge
+        // (the per-ledger #d fetch covers more ops than the global #t scan,
+        // so we re-query rather than reuse `events`). Plus the in-scope
+        // events themselves — those came from JSONL ingestion too.
+        let mut history: Vec<SignedLedgerUpdate> = Vec::new();
+        let mut history_seen: std::collections::HashSet<[u8; 32]> =
+            std::collections::HashSet::new();
+        for relay in relay_urls {
+            if let Ok(h) = fetch_ledger_history(relay, ledger_tag).await {
+                for u in h {
+                    if history_seen.insert(u.content_hash) {
+                        history.push(u);
+                    }
+                }
             }
-        };
+        }
+        for u in events.iter().filter(|u| hex::encode(u.ledger_id) == ledger_hex) {
+            if history_seen.insert(u.content_hash) {
+                history.push(u.clone());
+            }
+        }
 
         // Walk for original_operator (LedgerOpen) and the most recent
         // QuorumBegin.quorum_members. The cooperative_refund handler does
@@ -756,6 +827,75 @@ async fn classify_and_query(
             }
         }
     }
+}
+
+/// Walk `path` for `<ledger_id>.jsonl` files and parse each line as a
+/// `SignedLedgerUpdate`. The on-disk format wraps each update in
+/// `{"type":"Update", ...rest}`, so we strip the discriminator before
+/// re-parsing (mirrors deposits-tools/sweep-all.rs::summarize_ledger).
+///
+/// If `path` is a file, ingest just that file. If a directory, recurse
+/// looking for `*.jsonl` (matches the operator's
+/// `<data_dir>/.../ledgers/<ledger_id>.jsonl` layout).
+fn ingest_jsonl_path(
+    path: &std::path::Path,
+) -> Result<Vec<SignedLedgerUpdate>, Box<dyn std::error::Error>> {
+    let mut out = Vec::new();
+    let meta = std::fs::metadata(path)
+        .map_err(|e| format!("stat {}: {}", path.display(), e))?;
+    if meta.is_file() {
+        ingest_one_jsonl(path, &mut out)?;
+        return Ok(out);
+    }
+    // Recursively walk the directory for *.jsonl files.
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                let _ = ingest_one_jsonl(&p, &mut out);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn ingest_one_jsonl(
+    path: &std::path::Path,
+    out: &mut Vec<SignedLedgerUpdate>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("open {}: {}", path.display(), e))?;
+    for line in std::io::BufReader::new(file).lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("Update") {
+            continue;
+        }
+        let mut obj = match v.as_object() {
+            Some(o) => o.clone(),
+            None => continue,
+        };
+        obj.remove("type");
+        if let Ok(u) = serde_json::from_value::<SignedLedgerUpdate>(serde_json::Value::Object(obj))
+        {
+            out.push(u);
+        }
+    }
+    Ok(())
 }
 
 /// `t`-tag discriminants of every op that names a chain address. The relay
