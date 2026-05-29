@@ -68,6 +68,7 @@ pub mod dep16;
 pub mod descriptor;
 pub mod event_store;
 pub mod ledger;
+pub mod legacy_builders;
 pub mod signing;
 #[macro_use]
 pub mod logging;
