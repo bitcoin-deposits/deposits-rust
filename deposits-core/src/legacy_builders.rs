@@ -245,6 +245,64 @@ pub mod v_2026_04_17 {
     }
 }
 
+/// Pre-b3d38acc builder behaviour: same tier layout as v_2026_04_17 but with
+/// the OPERATOR's x-only pubkey as the Taproot internal key (the NUMS
+/// vulnerability that `b3d38acc` fixed). If the daemon was running this
+/// version at tx-construction time but b3d38acc-era code at metadata-write
+/// time, that explains the JSON-vs-on-chain address drift.
+pub mod v_pre_2026_04_17 {
+    use super::*;
+
+    pub fn build_with_operator_internal_key(
+        voter_set: &VoterSet,
+        tiers: &[v_2026_04_17::ThresholdTier],
+        network: Network,
+        ledger_hash: [u8; 32],
+    ) -> Result<(Address, TaprootSpendInfo, Vec<ScriptBuf>), String> {
+        let secp = Secp256k1::new();
+        let leaves: Vec<ScriptBuf> = tiers
+            .iter()
+            .map(|t| v_2026_04_17::build_threshold_leaf(t, voter_set))
+            .collect();
+        if leaves.is_empty() {
+            return Err("no tiers".to_string());
+        }
+        // Commitment leaf (inline, since v_2026_04_17::build_commitment_leaf is private).
+        let commitment_leaf = Builder::new()
+            .push_slice(ledger_hash)
+            .push_opcode(OP_DROP)
+            .push_opcode(OP_PUSHBYTES_0)
+            .into_script();
+        // Pre-fix internal key: tie-breaker (operator) x-only pubkey.
+        let internal_key = voter_set
+            .tie_breaker()
+            .map(|v| v.x_only())
+            .unwrap_or_else(|| voter_set.sorted_x_only_pubkeys()[0]);
+        let mut builder = TaprootBuilder::new();
+        let num_spending_leaves = leaves.len();
+        let total_leaves = num_spending_leaves + 1;
+        for (i, script) in leaves.iter().enumerate() {
+            let depth = if total_leaves == 2 { 1 } else { (i + 1) as u8 };
+            builder = builder
+                .add_leaf(depth, script.clone())
+                .map_err(|e| format!("add leaf {}: {:?}", i, e))?;
+        }
+        let commitment_depth = if total_leaves == 2 {
+            1
+        } else {
+            num_spending_leaves as u8
+        };
+        builder = builder
+            .add_leaf(commitment_depth, commitment_leaf)
+            .map_err(|e| format!("add commitment leaf: {:?}", e))?;
+        let spend_info = builder
+            .finalize(&secp, internal_key)
+            .map_err(|e| format!("finalize: {:?}", e))?;
+        let address = Address::p2tr(&secp, internal_key, spend_info.merkle_root(), network);
+        Ok((address, spend_info, leaves))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,3 +360,5 @@ mod tests {
         );
     }
 }
+
+
