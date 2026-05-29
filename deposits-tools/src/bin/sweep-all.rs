@@ -413,6 +413,27 @@ struct LedgerSummary {
     /// than the on-chain output (script-builder drift), we can still
     /// inspect the real script and report where the money is.
     outpoint: Option<(bitcoin::Txid, u32)>,
+    /// When the snapshot is self-describing (new format introduced
+    /// 2026-05-29), these carry everything sweep-all needs to spend the
+    /// vault without rebuilding the script tree: the on-chain scriptpubkey,
+    /// the Taproot internal key, and per-tier (leaf script, control block)
+    /// pairs. Old JSONs without this data fall back to the rebuild path.
+    persisted_tree: Option<PersistedTree>,
+}
+
+#[derive(Clone, Debug)]
+struct PersistedTree {
+    script_pubkey: bitcoin::ScriptBuf,
+    #[allow(dead_code)] // useful for diagnostics; sweep just needs the leaves
+    internal_key: bitcoin::secp256k1::XOnlyPublicKey,
+    tier_leaves: Vec<PersistedTierLeaf>,
+}
+
+#[derive(Clone, Debug)]
+struct PersistedTierLeaf {
+    tier_index: u32,
+    leaf_script: bitcoin::ScriptBuf,
+    control_block: bitcoin::taproot::ControlBlock,
 }
 
 fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
@@ -516,6 +537,7 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
         };
     let mut ruleset_name = ruleset.unwrap_or_else(|| "legacy".to_string());
     let mut outpoint: Option<(bitcoin::Txid, u32)> = None;
+    let mut persisted_tree: Option<PersistedTree> = None;
 
     // Prefer the per-ledger `taproot_reserves.json` snapshot if it exists.
     // The QuorumBegin op's `ledger_hash` field is a ledger-state hash and
@@ -570,6 +592,15 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
                         {
                             ruleset_name = rs.to_string();
                         }
+                        if let (Some(txid_str), Some(vout)) = (
+                            v.get("outpoint_txid").and_then(|x| x.as_str()),
+                            v.get("outpoint_vout").and_then(|x| x.as_u64()),
+                        ) {
+                            if let Ok(txid) = bitcoin::Txid::from_str(txid_str) {
+                                outpoint = Some((txid, vout as u32));
+                            }
+                        }
+                        persisted_tree = parse_persisted_tree(&v);
                     }
                 }
             }
@@ -644,6 +675,9 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
                                 outpoint = Some((txid, vout as u32));
                             }
                         }
+                        // Pick up the self-describing tree fields if the
+                        // snapshot was written by post-2026-05-29 code.
+                        persisted_tree = parse_persisted_tree(entry);
                         break;
                     }
                 }
@@ -656,6 +690,7 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
         operator_key: state.operator_key,
         reserves_id,
         outpoint,
+        persisted_tree,
         quorum_members,
         ledger_hash,
         ruleset_name,
@@ -696,6 +731,44 @@ fn fetch_utxo(
         .ok_or("missing value")?;
     let txid = bitcoin::Txid::from_str(txid_str).map_err(|e| format!("txid: {}", e))?;
     Ok(Some((bitcoin::OutPoint { txid, vout }, value)))
+}
+
+/// Parse the self-describing-tree fields from a JSON object describing a
+/// vault snapshot. Returns `None` if any required field is missing, malformed,
+/// or empty — caller falls back to the rebuild path in that case.
+fn parse_persisted_tree(entry: &serde_json::Value) -> Option<PersistedTree> {
+    let spk_hex = entry.get("script_pubkey").and_then(|v| v.as_str())?;
+    let ik_hex = entry.get("internal_key").and_then(|v| v.as_str())?;
+    let tier_leaves_val = entry.get("tier_leaves").and_then(|v| v.as_array())?;
+    if tier_leaves_val.is_empty() {
+        return None;
+    }
+    let script_pubkey = bitcoin::ScriptBuf::from_bytes(hex::decode(spk_hex).ok()?);
+    let internal_key =
+        bitcoin::secp256k1::XOnlyPublicKey::from_slice(&hex::decode(ik_hex).ok()?).ok()?;
+    let mut tier_leaves = Vec::with_capacity(tier_leaves_val.len());
+    for tl in tier_leaves_val {
+        let tier_index = tl.get("tier_index").and_then(|v| v.as_u64())? as u32;
+        let script_bytes = hex::decode(tl.get("script_hex").and_then(|v| v.as_str())?).ok()?;
+        let cb_bytes =
+            hex::decode(tl.get("control_block_hex").and_then(|v| v.as_str())?).ok()?;
+        let leaf_script = bitcoin::ScriptBuf::from_bytes(script_bytes);
+        let control_block = bitcoin::taproot::ControlBlock::decode(&cb_bytes).ok()?;
+        tier_leaves.push(PersistedTierLeaf {
+            tier_index,
+            leaf_script,
+            control_block,
+        });
+    }
+    // Tier-0 must exist — sweep-all signs through it.
+    if !tier_leaves.iter().any(|t| t.tier_index == 0) {
+        return None;
+    }
+    Some(PersistedTree {
+        script_pubkey,
+        internal_key,
+        tier_leaves,
+    })
 }
 
 /// Fetch the scriptpubkey of a specific outpoint via esplora, plus the
@@ -957,12 +1030,41 @@ fn sweep_ledger(
     let taproot_output = builder
         .build()
         .map_err(|e| format!("build taproot: {:?}", e))?;
-    let reserves_script = taproot_output.script_pubkey();
-    let reserves_address = taproot_output.address.clone();
+    let mut reserves_script = taproot_output.script_pubkey();
+    let mut reserves_address = taproot_output.address.clone();
 
-    // Sanity: the address we just rebuilt must match what the QuorumBegin
-    // declared. If it doesn't, our view of (members, ledger_hash, ruleset,
-    // expiry) is wrong and signing would produce an unusable witness.
+    // If the snapshot carries a self-describing tree (post-2026-05-29
+    // format), trust IT over the rebuild. The rebuild's purpose is to
+    // recover when the daemon didn't persist the tree; once persisted,
+    // any future builder-code drift is irrelevant to recovery.
+    let persisted_used = summary.persisted_tree.is_some();
+    if let Some(p) = &summary.persisted_tree {
+        reserves_script = p.script_pubkey.clone();
+        reserves_address = match Address::from_script(&reserves_script, network) {
+            Ok(a) => a,
+            Err(e) => {
+                return Err(format!(
+                    "persisted script_pubkey doesn't parse as a {} address: {:?}",
+                    match network {
+                        Network::Bitcoin => "mainnet",
+                        Network::Testnet => "testnet",
+                        Network::Signet => "signet",
+                        Network::Regtest => "regtest",
+                        _ => "unknown",
+                    },
+                    e
+                ))
+            }
+        };
+        println!(
+            "  ledger {}…: using self-describing snapshot ({} tier leaves persisted)",
+            hex::encode(&summary.ledger_id[..8]),
+            p.tier_leaves.len()
+        );
+    }
+
+    // Sanity: the address we'll spend from must match what the QuorumBegin
+    // declared OR the on-chain reality if we're using a persisted snapshot.
     let declared: Address<bitcoin::address::NetworkUnchecked> = summary
         .reserves_id
         .parse()
@@ -1127,9 +1229,19 @@ fn sweep_ledger(
     };
     let mut tx = ReservesSpendBuilder::build_spend_transaction(&params, &reserves_script)
         .map_err(|e| format!("build spend tx: {:?}", e))?;
-    let leaf_script = builder
-        .build_threshold_leaf(&tier0)
-        .map_err(|e| format!("build tier-0 leaf: {:?}", e))?;
+    // Prefer the persisted tier-0 leaf when a self-describing snapshot is
+    // present. Same fallback story: rebuild only if we have to.
+    let leaf_script = if let Some(p) = &summary.persisted_tree {
+        p.tier_leaves
+            .iter()
+            .find(|t| t.tier_index == 0)
+            .map(|t| t.leaf_script.clone())
+            .ok_or("persisted snapshot lacks tier-0 leaf")?
+    } else {
+        builder
+            .build_threshold_leaf(&tier0)
+            .map_err(|e| format!("build tier-0 leaf: {:?}", e))?
+    };
     let sighash = ReservesSpendBuilder::compute_sighash(
         &tx,
         0,
@@ -1164,9 +1276,18 @@ fn sweep_ledger(
     // Assemble witness. Stack order: sigs in reverse-sorted-voter order,
     // then leaf_script, then control_block.
     let sorted = voter_set.sorted_x_only_pubkeys();
-    let control_block = taproot_output
-        .control_block_for_tier(0)
-        .ok_or("no control block for tier 0")?;
+    let control_block = if let Some(p) = &summary.persisted_tree {
+        p.tier_leaves
+            .iter()
+            .find(|t| t.tier_index == 0)
+            .map(|t| t.control_block.clone())
+            .ok_or("persisted snapshot lacks tier-0 control block")?
+    } else {
+        taproot_output
+            .control_block_for_tier(0)
+            .ok_or("no control block for tier 0")?
+    };
+    let _ = persisted_used;
     let mut witness = Witness::new();
     for x_only in sorted.iter().rev() {
         match sigs.get(x_only) {

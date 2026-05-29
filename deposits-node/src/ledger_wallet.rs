@@ -674,6 +674,49 @@ impl LedgerWallet {
     }
 
     fn save_taproot_reserves(dir: &Path, info: &TaprootReservesInfo) -> Result<(), Error> {
+        // Capture the on-chain scriptPubKey + internal key + per-tier control
+        // blocks. With these in the snapshot, recovery doesn't need to
+        // rebuild the script tree from inputs — it can sign with the
+        // persisted leaves directly, immune to future builder code drift.
+        let script_pubkey = Some(hex::encode(info.taproot_output.script_pubkey().as_bytes()));
+        let internal_key = Some(hex::encode(info.taproot_output.internal_key().serialize()));
+        let mut tier_leaves: Vec<TierLeafSerde> = Vec::new();
+        for (tier_index, tier) in info.taproot_output.config.tiers.iter().enumerate() {
+            use deposits_core::TapscriptReservesBuilder;
+            let builder = TapscriptReservesBuilder::new(
+                info.taproot_output.voter_set.clone(),
+                info.taproot_output.config.clone(),
+                info.taproot_output.network,
+                info.taproot_output.ledger_hash,
+            );
+            let leaf_script = match builder.build_threshold_leaf(tier) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        "save_taproot_reserves: tier {} leaf rebuild failed: {:?}",
+                        tier_index,
+                        e
+                    );
+                    continue;
+                }
+            };
+            let control_block = match info.taproot_output.control_block_for_tier(tier_index) {
+                Some(cb) => cb,
+                None => {
+                    tracing::warn!(
+                        "save_taproot_reserves: tier {} control block missing",
+                        tier_index
+                    );
+                    continue;
+                }
+            };
+            tier_leaves.push(TierLeafSerde {
+                tier_index: tier_index as u32,
+                script_hex: hex::encode(leaf_script.as_bytes()),
+                control_block_hex: hex::encode(control_block.serialize()),
+            });
+        }
+
         let serde = TaprootReservesInfoSerde {
             outpoint_txid: info.outpoint.txid.to_string(),
             outpoint_vout: info.outpoint.vout,
@@ -685,6 +728,9 @@ impl LedgerWallet {
             address: info.taproot_output.address.to_string(),
             confirmed: info.confirmed,
             ruleset_name: info.ruleset_name.clone(),
+            script_pubkey,
+            internal_key,
+            tier_leaves,
         };
         let json = serde_json::to_string_pretty(&serde)
             .map_err(|e| Error::Wallet(format!("serialize taproot_reserves: {}", e)))?;
@@ -712,6 +758,44 @@ struct TaprootReservesInfoSerde {
     /// the on-chain UTXO that file describes.
     #[serde(default = "default_ruleset_name")]
     ruleset_name: String,
+
+    // ------------------------------------------------------------------
+    // Self-describing tree snapshot (added 2026-05-29). Sweep / recovery
+    // paths prefer these over rebuilding from (operator, members,
+    // ledger_hash, expiry, ruleset_name) so future builder changes can't
+    // make an old vault unspendable.
+    //
+    // Old JSONs predate these fields; `#[serde(default)]` makes them
+    // backward-compatible — readers fall back to current-code rebuild.
+    // ------------------------------------------------------------------
+    /// Hex-encoded on-chain `scriptPubKey` of the vault output. Sanity
+    /// check: if a reader's rebuild produces a different script than this,
+    /// they MUST trust the persisted leaves / control blocks below over
+    /// their own rebuild.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    script_pubkey: Option<String>,
+    /// Hex of the 32-byte x-only Taproot internal key the tree was built
+    /// against. Lets a reader rebuild the spend_info from the persisted
+    /// leaves without re-running the build pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    internal_key: Option<String>,
+    /// One entry per tier of the tier-config used at build time, in tier
+    /// order (tier_0 = majority-immediate first). Each carries enough to
+    /// spend that leaf without rebuilding: the leaf script bytes and the
+    /// pre-computed control block (encodes internal key + merkle path).
+    #[serde(default)]
+    tier_leaves: Vec<TierLeafSerde>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct TierLeafSerde {
+    /// Zero-based tier index (0 = tier-0 majority-immediate, etc.).
+    tier_index: u32,
+    /// Hex of the tapscript leaf bytes (what goes into the witness).
+    script_hex: String,
+    /// Hex of the control block (what goes into the witness alongside the
+    /// leaf script). 33 + 32×n bytes where n is the merkle path length.
+    control_block_hex: String,
 }
 
 fn default_ruleset_name() -> String {
