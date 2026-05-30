@@ -362,3 +362,102 @@ mod tests {
 }
 
 
+
+#[cfg(test)]
+mod subset_search {
+    use super::*;
+    use bitcoin::secp256k1::PublicKey;
+    use std::str::FromStr;
+
+    /// Brute-force search across subsets of snowden's recorded quorum_members
+    /// + tier configurations. None of the 8 subset combinations matches the
+    /// on-chain `bc1pfq2e6y8c…`, ruling out "quorum joined incrementally
+    /// while broadcast was already in flight" as the cause. The drift must
+    /// be in `ledger_hash` (the only remaining variable that affects the
+    /// script for v_2026_04_17 — operator is fixed, network is fixed, tier
+    /// CLTV is relative not anchored).
+    ///
+    /// Kept as a regression test so future builder changes can't make any
+    /// of these subset addresses accidentally collide with each other or
+    /// with the on-chain target.
+    #[test]
+    fn snowden_quorum_subset_search() {
+        let operator = PublicKey::from_str(
+            "02b017e1288da93b90d9ca139d9fdb3310c4ba65d451803875471c2b6d57a4520f",
+        )
+        .unwrap();
+        let all_members: Vec<PublicKey> = [
+            ("assange", "0206c4db20bda97893e99f843b0acf6bd61624baa09c72536841a974230f1e4995"),
+            ("finney",  "036cba47c801a59c0792fd4a214ec6b37eb6f206a5be68a9d87064d5f89fd8a777"),
+            ("hughes",  "02208787bb5c2d2428d4055d353d4656642be7ef6550a3240b2063b4c073d8ae1a"),
+        ]
+        .into_iter()
+        .map(|(_, hex)| PublicKey::from_str(hex).unwrap())
+        .collect();
+        let names = ["assange", "finney", "hughes"];
+        let ledger_hash: [u8; 32] = hex::decode(
+            "7fc25d5245e7003be4f1c4138fbf608bf0ecbb4eca7be4954529d42168473b76",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        const TARGET: &str =
+            "bc1pfq2e6y8cpdd06nug6pdsgcuvvedevmkr43nr554vkj3s6ykdjqsqzse4n5";
+
+        // Try every subset of {0,1,2,3} members (including empty, which
+        // triggers the single-tier operator-only branch).
+        for mask in 0u8..=0b111 {
+            let mut members = Vec::new();
+            let mut label_parts = Vec::new();
+            for i in 0..3 {
+                if mask & (1 << i) != 0 {
+                    members.push(all_members[i]);
+                    label_parts.push(names[i]);
+                }
+            }
+            let label = if members.is_empty() {
+                "none".to_string()
+            } else {
+                label_parts.join("+")
+            };
+            let voter_set = VoterSet::new(operator, members.clone());
+
+            // Try every reasonable tier configuration. With n=1 (operator only),
+            // single-tier "Operator only" was the daemon's branch. With n>=2,
+            // default_for_voter_count(n) where n includes the operator.
+            let tier_options = if members.is_empty() {
+                vec![(
+                    "single-tier-operator-only",
+                    vec![v_2026_04_17::ThresholdTier {
+                        threshold: 1,
+                        requires_tie_breaker: true,
+                        timelock_blocks: 0,
+                    }],
+                )]
+            } else {
+                vec![(
+                    "default_for_voter_count(members+1)",
+                    v_2026_04_17::default_tiers(members.len() + 1),
+                )]
+            };
+
+            for (tier_label, tiers) in tier_options {
+                let result = v_2026_04_17::build(
+                    &voter_set,
+                    &tiers,
+                    Network::Bitcoin,
+                    ledger_hash,
+                );
+                match result {
+                    Ok((addr, _, _)) => {
+                        let m = if addr.to_string() == TARGET { " ★" } else { "" };
+                        println!("members=[{}] tiers={}: {}{}", label, tier_label, addr, m);
+                    }
+                    Err(e) => {
+                        println!("members=[{}] tiers={}: BUILD ERR {}", label, tier_label, e);
+                    }
+                }
+            }
+        }
+    }
+}
