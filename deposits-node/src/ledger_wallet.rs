@@ -673,7 +673,49 @@ impl LedgerWallet {
         }))
     }
 
+    /// Persist the taproot reserves snapshot, refusing to silently overwrite
+    /// a snapshot whose `script_pubkey` doesn't match `info`'s. This is the
+    /// guard that prevents the historical "metadata-write path used stale
+    /// inputs, produced a different scriptPubKey than the on-chain reality,
+    /// silently overwrote the correct snapshot" bug class (see commits
+    /// 61b375c5 / 830a3a24 / e52e5cd4 for the production case that motivated
+    /// this).
+    ///
+    /// Mutating only the `confirmed` flag (same outpoint, same script) is
+    /// allowed; everything else is rejected with a loud error so the operator
+    /// notices instead of losing recoverability silently.
     fn save_taproot_reserves(dir: &Path, info: &TaprootReservesInfo) -> Result<(), Error> {
+        let path = Self::taproot_reserves_path(dir);
+        if path.exists() {
+            if let Ok(raw) = fs::read_to_string(&path) {
+                if let Ok(existing) = serde_json::from_str::<TaprootReservesInfoSerde>(&raw) {
+                    // The pre-Phase-1 format lacks `script_pubkey`; in that case
+                    // we can't compare, so allow the write (the next write will
+                    // populate the field and lock in the guard).
+                    let new_spk = hex::encode(info.taproot_output.script_pubkey().as_bytes());
+                    if let Some(ref existing_spk) = existing.script_pubkey {
+                        if existing_spk != &new_spk {
+                            return Err(Error::Wallet(format!(
+                                "refusing to overwrite taproot snapshot at {}: existing \
+                                 script_pubkey={} differs from new {}. This would lose the \
+                                 ability to spend the on-chain UTXO. Delete the file \
+                                 explicitly if you want to start over.",
+                                path.display(),
+                                existing_spk,
+                                new_spk,
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        Self::save_taproot_reserves_unchecked(dir, info)
+    }
+
+    fn save_taproot_reserves_unchecked(
+        dir: &Path,
+        info: &TaprootReservesInfo,
+    ) -> Result<(), Error> {
         // Capture the on-chain scriptPubKey + internal key + per-tier control
         // blocks. With these in the snapshot, recovery doesn't need to
         // rebuild the script tree from inputs — it can sign with the
@@ -975,6 +1017,90 @@ mod tests {
                 bal.untrusted_pending.to_sat(),
             );
         }
+    }
+
+    /// Regression test for the silent-overwrite bug: once a snapshot has been
+    /// persisted with a script_pubkey (Phase 1+ format), any subsequent save
+    /// with a DIFFERENT script_pubkey must be rejected. This is the structural
+    /// guard against the historical d269a384-era "metadata-write path used
+    /// stale inputs, overwrote the correct snapshot with a wrong one" bug.
+    #[test]
+    fn save_taproot_reserves_refuses_to_overwrite_different_script() {
+        use deposits_core::tapscript_reserves::{
+            TapscriptReservesBuilder, ThresholdConfig, VoterSet,
+        };
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+
+        let tmp = TempDir::new().unwrap();
+        let secp = Secp256k1::new();
+
+        // Build two TaprootReservesInfo with the SAME operator/members but
+        // DIFFERENT ledger_hashes (mirrors the production drift pattern).
+        let sk = SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let operator = PublicKey::from_secret_key(&secp, &sk);
+        let other_sk = SecretKey::from_slice(&[11u8; 32]).unwrap();
+        let member = PublicKey::from_secret_key(&secp, &other_sk);
+        let voter_set = VoterSet::new(operator, vec![member]);
+        let config = ThresholdConfig::default_for_voter_count(2);
+
+        let h_correct: [u8; 32] = [0xaa; 32];
+        let h_wrong: [u8; 32] = [0xbb; 32];
+
+        let make = |h: [u8; 32]| -> TaprootReservesInfo {
+            let builder = TapscriptReservesBuilder::new(
+                voter_set.clone(),
+                config.clone(),
+                Network::Regtest,
+                h,
+            );
+            let taproot_output = builder.build().expect("build");
+            TaprootReservesInfo {
+                outpoint: OutPoint {
+                    txid: Txid::from_str(
+                        "0000000000000000000000000000000000000000000000000000000000000001",
+                    )
+                    .unwrap(),
+                    vout: 0,
+                },
+                amount: 100_000,
+                operator,
+                quorum_members: vec![member],
+                quorum_expiry: 1000,
+                ledger_hash: h,
+                taproot_output,
+                ruleset_name: "legacy".to_string(),
+                confirmed: false,
+            }
+        };
+
+        let correct = make(h_correct);
+        let wrong = make(h_wrong);
+
+        // Sanity: they produce different scripts (otherwise this test is moot)
+        assert_ne!(
+            correct.taproot_output.script_pubkey(),
+            wrong.taproot_output.script_pubkey(),
+            "different ledger_hashes must produce different scriptpubkeys for this test to mean anything",
+        );
+
+        // First write succeeds.
+        LedgerWallet::save_taproot_reserves(tmp.path(), &correct).expect("first save");
+
+        // Same script — confirmed flag flip — allowed.
+        let mut still_correct = correct.clone();
+        still_correct.confirmed = true;
+        LedgerWallet::save_taproot_reserves(tmp.path(), &still_correct)
+            .expect("same-script re-save should succeed");
+
+        // Different script — rejected with a loud error.
+        let err = LedgerWallet::save_taproot_reserves(tmp.path(), &wrong)
+            .expect_err("different-script save MUST be rejected");
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("refusing to overwrite"),
+            "error should explain the refusal, got: {}",
+            msg
+        );
     }
 
     #[test]
