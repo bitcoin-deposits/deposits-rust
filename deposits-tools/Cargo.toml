@@ -5,6 +5,10 @@ edition = "2021"
 description = "Bitcoin Deposits tooling and test binaries"
 
 [[bin]]
+name = "authorize-receive"
+path = "src/bin/authorize-receive.rs"
+
+[[bin]]
 name = "decode-updates"
 path = "src/bin/decode-updates.rs"
 

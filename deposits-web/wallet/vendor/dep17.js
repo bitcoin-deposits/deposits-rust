@@ -12,7 +12,24 @@
 // signOp(op, secretKey) returns a 64-byte compact ECDSA signature.
 
 import { sha256 } from './noble-hashes-sha256.js';
+import { hmac } from './noble-hashes-hmac.js';
 import * as secp from './noble-secp256k1.js';
+
+// noble-secp256k1's sync sign() path needs hmacSha256Sync wired up; without
+// this, `secp.sign(...)` throws "etc.hmacSha256Sync not set". The async path
+// uses crypto.subtle, but dep17.js exposes a sync signOp. Wire once at module
+// load so every caller (browser and Node test runner) works the same way.
+if (!secp.etc.hmacSha256Sync) {
+  secp.etc.hmacSha256Sync = (key, ...msgs) => {
+    // Concatenate msg fragments — noble's hmac takes a single message.
+    let total = 0;
+    for (const m of msgs) total += m.length;
+    const buf = new Uint8Array(total);
+    let off = 0;
+    for (const m of msgs) { buf.set(m, off); off += m.length; }
+    return hmac(sha256, key, buf);
+  };
+}
 
 // ---- low-level encoders ----------------------------------------------------
 
@@ -167,6 +184,26 @@ export function buildTransferLockOp({transfer_nonce, source_deposit_id, destinat
   };
 }
 
+// Receive-side authorization. Used by `make_invoice` / `make_offer` for
+// deposits with `receive_requires_sig`, and the destination-side check
+// in a transfer-release. Op shape mirrors `deposits_core::dep16::operations::
+// receive_op`: op_type='receive', args carries optional transfer_id only.
+//
+// Wire format documented in RECEIVE-WITNESS.md at the workspace root.
+export function buildReceiveOp({deposit_id, nonce, expiry, transfer_id}) {
+  const args = {};
+  if (transfer_id !== undefined && transfer_id !== null) {
+    args.transfer_id = { tag: 'bytes', value: transfer_id };
+  }
+  return {
+    op_type: 'receive',
+    args,
+    deposit_id,
+    nonce,
+    expiry,
+  };
+}
+
 // ---- signing --------------------------------------------------------------
 
 // Sign the dep-17 sighash of `op` with ECDSA (low-s, deterministic) under
@@ -185,6 +222,35 @@ export function signOpAsWitness(op, secretKey) {
   const sigBytes = signOp(op, secretKey);
   const hex = Array.from(sigBytes).map(b => b.toString(16).padStart(2, '0')).join('');
   return { stack: [hex] };
+}
+
+// Receive-side authorization: signs the receive-op preimage under one or more
+// participant keys and returns the ReceiveWitness JSON shape:
+//   { nonce, expiry, signatures: { <pubkey-hex>: <sig-hex>, ... } }
+//
+// `signers` is an iterable of {secretKey: Uint8Array(32), publicKey: Uint8Array(33)}
+// — single-key descriptors pass one; threshold descriptors pass one per signing
+// participant. Each signs the SAME preimage; the operator-side authorizer accepts
+// any combination that satisfies the descriptor's threshold.
+//
+// Wire format spec: RECEIVE-WITNESS.md (workspace root).
+export function signReceiveWitness(op, signers) {
+  const preimage = operationPreimage(op);
+  const sighash = operationSighash(preimage);
+  const signatures = {};
+  for (const {secretKey, publicKey} of signers) {
+    const sig = secp.sign(sighash, secretKey);
+    const sigHex = Array.from(sig.toCompactRawBytes())
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+    const keyHex = Array.from(publicKey)
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+    signatures[keyHex] = sigHex;
+  }
+  return {
+    nonce: typeof op.nonce === 'bigint' ? Number(op.nonce) : op.nonce,
+    expiry: op.expiry,
+    signatures,
+  };
 }
 
 // Wallet-side helper: pick a fresh u64 op_nonce. The protocol's seen_nonces GC

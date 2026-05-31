@@ -475,6 +475,50 @@ fn dep17_invoice_lock_sighash_pinned() {
     );
 }
 
+/// Pin the receive_op sighash for the same canonical (deposit_id, nonce,
+/// expiry) inputs the JS side mirrors in deposits-web/wallet/tests/
+/// sighash-pinned.mjs. Two variants — without and with transfer_id.
+///
+/// If either hash moves, the JS port has silently diverged and the web
+/// wallet's `signReceiveWitness` produces signatures the rust authorizer
+/// will reject. Update both sides together.
+#[test]
+fn dep17_receive_op_sighash_pinned() {
+    let did = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10,
+    ];
+
+    // No transfer_id (admission-time receive on make_invoice / make_offer).
+    let sighash_no_tx = deposits_core::dep16::operations::receive_op_sighash(
+        &did,
+        42_u64,
+        u32::MAX,
+        None,
+    );
+    assert_eq!(
+        hex::encode(sighash_no_tx),
+        "ea8dbd030cbe8b4734dbf277cac107c2db62e47883e02e58c58e4ed1e3b1072e",
+        "receive_op sighash drifted (no transfer_id) — \
+         update deposits-web/wallet/tests/sighash-pinned.mjs too",
+    );
+
+    // With transfer_id (transfer-release destination receive).
+    let transfer_id = [0xAB; 32];
+    let sighash_with_tx = deposits_core::dep16::operations::receive_op_sighash(
+        &did,
+        42_u64,
+        u32::MAX,
+        Some(&transfer_id),
+    );
+    assert_eq!(
+        hex::encode(sighash_with_tx),
+        "9f050992d374b517e322e5e0f62030e73ae71c7c43b20f771ffaa49feaec672a",
+        "receive_op sighash drifted (with transfer_id) — \
+         update deposits-web/wallet/tests/sighash-pinned.mjs too",
+    );
+}
+
 // ============================================================================
 // authorize_receive — unit tests for the receive-side dep-16 auth gate.
 //
