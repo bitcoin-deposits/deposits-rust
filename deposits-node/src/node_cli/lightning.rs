@@ -57,8 +57,6 @@ pub async fn lightning_command(args: &[String]) -> Result<(), Box<dyn std::error
 }
 
 async fn lightning_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::ldk_cli::LdkCli;
-
     if args.is_empty() {
         eprintln!("Usage: deposits-node lightning invoice <amount_sats> [description]");
         eprintln!("\nExample:");
@@ -72,7 +70,7 @@ async fn lightning_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let amount_msat = amount_sats * 1000;
     let description = args.get(1).map(|s| s.as_str()).unwrap_or("Deposit invoice");
 
-    let cli = LdkCli::from_env();
+    let cli = crate::lightning_backend::from_env();
     let invoice = cli.create_invoice(amount_msat, description)?;
 
     println!("{}", invoice);
@@ -80,8 +78,6 @@ async fn lightning_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Er
 }
 
 async fn lightning_pay(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::ldk_cli::LdkCli;
-
     if args.is_empty() {
         eprintln!("Usage: deposits-node lightning pay <bolt11_invoice>");
         eprintln!("\nExample:");
@@ -91,7 +87,7 @@ async fn lightning_pay(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
     let invoice = &args[0];
 
-    let cli = LdkCli::from_env();
+    let cli = crate::lightning_backend::from_env();
     let payment_id = cli.pay_invoice(invoice)?;
 
     println!("Payment initiated!");
@@ -100,64 +96,57 @@ async fn lightning_pay(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 }
 
 async fn lightning_balance(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::ldk_cli::LdkCli;
-
-    let cli = LdkCli::from_env();
+    let cli = crate::lightning_backend::from_env();
     let balances = cli.get_balances()?;
 
     println!("Lightning Wallet Balance:");
-    println!(
-        "  On-chain total:     {} sats",
-        balances.total_onchain_balance_sats
-    );
+    println!("  On-chain total:     {} sats", balances.onchain_total_sats);
     println!(
         "  On-chain spendable: {} sats",
-        balances.spendable_onchain_balance_sats
+        balances.onchain_spendable_sats
     );
     println!(
         "  Lightning balance:  {} sats",
-        balances.total_lightning_balance_sats
+        balances.lightning_total_sats
     );
-    println!(
-        "  Anchor reserves:    {} sats",
-        balances.total_anchor_channels_reserve_sats
-    );
+    // Anchor-channels reserve was LDK-specific and lived on the inherent
+    // LdkCli::Balances; the neutral LightningBackend::Balances drops it
+    // (LND / CLN don't expose an equivalent). Use `deposits-node debug …`
+    // if you need raw LDK fields.
     Ok(())
 }
 
 async fn lightning_info(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::ldk_cli::LdkCli;
-
-    let cli = LdkCli::from_env();
+    let cli = crate::lightning_backend::from_env();
     let info = cli.get_node_info()?;
 
-    println!("LDK Node Info:");
+    println!("Lightning Node Info:");
     println!("  Node ID: {}", info.node_id);
-    if let Some(block) = info.current_best_block {
-        println!("  Block height: {}", block.height);
-        println!("  Block hash: {}", block.block_hash);
+    if let Some(height) = info.current_best_block_height {
+        println!("  Block height: {}", height);
+    }
+    if let Some(hash) = info.current_best_block_hash {
+        println!("  Block hash: {}", hash);
     }
     Ok(())
 }
 
 async fn lightning_channels(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::ldk_cli::LdkCli;
+    let cli = crate::lightning_backend::from_env();
+    let channels = cli.list_channels()?;
 
-    let cli = LdkCli::from_env();
-    let response = cli.list_channels()?;
-
-    if response.channels.is_empty() {
+    if channels.is_empty() {
         println!("No channels found.");
         return Ok(());
     }
 
-    println!("Lightning Channels ({} total):", response.channels.len());
+    println!("Lightning Channels ({} total):", channels.len());
     println!();
 
-    for channel in response.channels {
+    for channel in channels {
         let status = if channel.is_usable {
             "usable"
-        } else if channel.is_channel_ready {
+        } else if channel.is_ready {
             "ready"
         } else {
             "pending"
@@ -168,7 +157,7 @@ async fn lightning_channels(_args: &[String]) -> Result<(), Box<dyn std::error::
             "    Counterparty: {}...",
             &channel.counterparty_node_id[..16]
         );
-        println!("    Capacity:  {} sats", channel.channel_value_sats);
+        println!("    Capacity:  {} sats", channel.capacity_sats);
         println!("    Outbound:  {} msat", channel.outbound_capacity_msat);
         println!("    Inbound:   {} msat", channel.inbound_capacity_msat);
         println!("    Status:    {}", status);
@@ -178,25 +167,24 @@ async fn lightning_channels(_args: &[String]) -> Result<(), Box<dyn std::error::
 }
 
 async fn lightning_payments(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::ldk_cli::LdkCli;
+    use crate::lightning_backend::PaymentStatus;
 
-    let cli = LdkCli::from_env();
-    let response = cli.list_payments()?;
+    let cli = crate::lightning_backend::from_env();
+    let payments = cli.list_payments()?;
 
-    if response.payments.is_empty() {
+    if payments.is_empty() {
         println!("No payments found.");
         return Ok(());
     }
 
-    println!("Lightning Payments ({} total):", response.payments.len());
+    println!("Lightning Payments ({} total):", payments.len());
     println!();
 
-    for payment in response.payments {
+    for payment in payments {
         let status = match payment.status {
-            0 => "pending",
-            1 => "succeeded",
-            2 => "failed",
-            _ => "unknown",
+            PaymentStatus::Pending => "pending",
+            PaymentStatus::Succeeded => "succeeded",
+            PaymentStatus::Failed => "failed",
         };
 
         println!("  Payment: {}...", &payment.id[..16.min(payment.id.len())]);
@@ -240,24 +228,23 @@ async fn lightning_open_locks(args: &[String]) -> Result<(), Box<dyn std::error:
     } else {
         println!("{} open lock(s) total.", total);
 
-        // If LDK is available, show payment status for each
-        use crate::ldk_cli::LdkCli;
-        let cli = LdkCli::from_env();
-        if let Ok(resp) = cli.list_payments() {
-            println!("\nLDK payment status:");
+        // If the Lightning backend is reachable, show payment status for each.
+        use crate::lightning_backend::PaymentStatus;
+        let cli = crate::lightning_backend::from_env();
+        if let Ok(payments) = cli.list_payments() {
+            println!("\nLightning backend payment status:");
             for (lid, arc) in ledgers.iter() {
                 let ledger = arc.read().unwrap();
                 for payment_id in ledger.state.open_invoice_locks.keys() {
                     let hex_id = hex::encode(payment_id);
-                    let matching = resp.payments.iter().find(|p| p.id == hex_id);
+                    let matching = payments.iter().find(|p| p.id == hex_id);
                     let status = match matching {
                         Some(p) => match p.status {
-                            0 => "PENDING",
-                            1 => "SUCCEEDED (needs fulfill)",
-                            2 => "FAILED (needs fail)",
-                            _ => "UNKNOWN",
+                            PaymentStatus::Pending => "PENDING",
+                            PaymentStatus::Succeeded => "SUCCEEDED (needs fulfill)",
+                            PaymentStatus::Failed => "FAILED (needs fail)",
                         },
-                        None => "NOT FOUND in LDK",
+                        None => "NOT FOUND in backend",
                     };
                     println!(
                         "  {}... on {}...: {}",
@@ -543,7 +530,6 @@ async fn lightning_fulfill(args: &[String]) -> Result<(), Box<dyn std::error::Er
 /// Send a Lightning payment FROM a deposit (combined lock + pay + fulfill)
 async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use bitcoin::secp256k1::SecretKey;
-    use crate::ldk_cli::LdkCli;
 
     let mut positional: Vec<String> = Vec::new();
     let mut config_args = Vec::new();
@@ -589,7 +575,7 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let descriptor = format!("pk({})", hex::encode(deposit_pubkey.serialize()));
     let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
 
-    let cli = LdkCli::from_env();
+    let cli = crate::lightning_backend::from_env();
 
     println!("Sending Lightning payment from deposit...");
     println!("  Reserves: {}", reserves_id);
@@ -618,19 +604,19 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
     std::thread::sleep(std::time::Duration::from_secs(3));
 
     // Check payment status and get preimage
+    use crate::lightning_backend::PaymentStatus;
     let payments = cli.list_payments()?;
     let payment = payments
-        .payments
         .iter()
         .find(|p| p.id == payment_id_hex)
         .ok_or("Payment not found in payment list")?;
 
-    if payment.status != 1 {
-        return Err(format!("Payment failed with status: {}", payment.status).into());
+    if payment.status != PaymentStatus::Succeeded {
+        return Err(format!("Payment did not succeed: {:?}", payment.status).into());
     }
 
     let preimage_hex = payment
-        .preimage
+        .preimage_hex
         .as_ref()
         .ok_or("Payment succeeded but no preimage returned")?;
     let preimage_bytes =

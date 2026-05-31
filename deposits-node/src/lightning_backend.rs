@@ -163,3 +163,27 @@ pub enum PaymentStatus {
     Succeeded,
     Failed,
 }
+
+/// Build the [`LightningBackend`] selected at runtime via environment.
+///
+/// `LIGHTNING_BACKEND` selects the impl. Today only `ldk` is implemented;
+/// `lnd` and `cln` are added in follow-on commits. Defaulting to `ldk`
+/// keeps existing deployments working without any env changes.
+///
+/// Reads per-backend config from env too — the LDK backend uses
+/// `LDK_CLI`, `LDK_HOST`, `LDK_PORT`, `LDK_API_KEY` (see
+/// [`crate::ldk_cli::LdkCliConfig::from_env`]).
+pub fn from_env() -> Box<dyn LightningBackend> {
+    match std::env::var("LIGHTNING_BACKEND")
+        .ok()
+        .as_deref()
+        .unwrap_or("ldk")
+    {
+        "ldk" => Box::new(crate::ldk_cli::LdkCli::from_env()),
+        other => panic!(
+            "LIGHTNING_BACKEND={:?} not implemented. Supported: \"ldk\" \
+             (lnd / cln land in follow-on commits per PACKAGING_PLAN.md Tier 1a).",
+            other
+        ),
+    }
+}

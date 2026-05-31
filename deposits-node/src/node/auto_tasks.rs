@@ -345,10 +345,11 @@ impl Node {
 
     /// Automatically credit deposits when Lightning invoices are paid.
     ///
-    /// This polls LDK for payment status and creates InvoiceCredit operations
-    /// for any pending invoices that have been successfully paid.
+    /// This polls the Lightning backend for payment status and creates
+    /// InvoiceCredit operations for any pending invoices that have been
+    /// successfully paid.
     pub async fn auto_credit_received_payments(&self) {
-        use crate::ldk_cli::LdkCli;
+        use crate::lightning_backend::PaymentStatus;
 
         // Get pending invoices
         let pending: Vec<([u8; 32], PendingInvoice)> = {
@@ -366,12 +367,15 @@ impl Node {
 
         tracing::info!("auto_credit: checking {} pending invoice(s)", pending.len());
 
-        // Query LDK for payment status
-        let cli = LdkCli::from_env();
+        // Query the Lightning backend for payment status
+        let cli = crate::lightning_backend::from_env();
         let payments = match cli.list_payments() {
-            Ok(resp) => {
-                tracing::info!("auto_credit: LDK returned {} payments", resp.payments.len());
-                resp.payments
+            Ok(payments) => {
+                tracing::info!(
+                    "auto_credit: Lightning backend returned {} payments",
+                    payments.len()
+                );
+                payments
             }
             Err(e) => {
                 tracing::warn!("auto_credit: Failed to list payments: {}", e);
@@ -387,9 +391,8 @@ impl Node {
             let matching_payment = payments.iter().find(|p| p.id == payment_hash_hex);
 
             if let Some(payment) = matching_payment {
-                // status: 0 = pending, 1 = succeeded, 2 = failed
                 match payment.status {
-                    1 => {
+                    PaymentStatus::Succeeded => {
                         // Payment succeeded - credit the deposit
                         tracing::info!(
                             "Invoice paid! Crediting deposit {}... with {} msat (hash: {}...)",
@@ -432,7 +435,7 @@ impl Node {
                             }
                         }
                     }
-                    2 => {
+                    PaymentStatus::Failed => {
                         // Payment failed - remove from pending (invoice expired or rejected)
                         tracing::warn!(
                             "Invoice {}... payment failed, removing from pending",
@@ -440,7 +443,7 @@ impl Node {
                         );
                         self.pending_invoices.lock().unwrap().remove(&payment_hash);
                     }
-                    _ => {
+                    PaymentStatus::Pending => {
                         // Still pending, do nothing
                     }
                 }
@@ -464,13 +467,14 @@ impl Node {
         self.save_pending_invoices();
     }
 
-    /// Resolve open outbound invoice locks by checking LDK payment status.
+    /// Resolve open outbound invoice locks by checking the Lightning
+    /// backend's payment status.
     ///
-    /// Scans all owned ledgers for open_invoice_locks. For each, queries LDK
-    /// for the payment status and commits InvoiceFulfill (if succeeded) or
-    /// InvoiceFail (if failed). Pending payments are left alone.
+    /// Scans all owned ledgers for open_invoice_locks. For each, queries
+    /// the backend for the payment status and commits InvoiceFulfill (if
+    /// succeeded) or InvoiceFail (if failed). Pending payments are left alone.
     pub async fn auto_complete_outbound_payments(&self) {
-        use crate::ldk_cli::LdkCli;
+        use crate::lightning_backend::PaymentStatus;
 
         // Collect open locks from all owned ledgers
         let mut open_locks: Vec<(String, [u8; 32], deposits_core::types::OpenInvoiceLock)> =
@@ -502,9 +506,9 @@ impl Node {
             open_locks.len()
         );
 
-        let cli = LdkCli::from_env();
+        let cli = crate::lightning_backend::from_env();
         let payments = match cli.list_payments() {
-            Ok(resp) => resp.payments,
+            Ok(payments) => payments,
             Err(e) => {
                 tracing::warn!("auto_complete_outbound: failed to list payments: {}", e);
                 return;
@@ -516,7 +520,7 @@ impl Node {
             let matching = payments.iter().find(|p| p.id == payment_hex);
 
             match matching {
-                Some(p) if p.status == 1 => {
+                Some(p) if p.status == PaymentStatus::Succeeded => {
                     // Succeeded — commit InvoiceFulfill.
                     //
                     // Pre-flight the preimage: LDK has occasionally
@@ -545,7 +549,7 @@ impl Node {
                     //     when list-payments doesn't have one.
                     let mut preimage = [0u8; 32];
                     let mut preimage_source = "list-payments";
-                    let mut preimage_hex_opt = p.preimage.clone();
+                    let mut preimage_hex_opt = p.preimage_hex.clone();
                     if preimage_hex_opt.is_none() {
                         match cli.get_payment_preimage(&payment_hex) {
                             Ok(Some(p_inbound)) => {
@@ -680,7 +684,7 @@ impl Node {
                         ),
                     }
                 }
-                Some(p) if p.status == 2 => {
+                Some(p) if p.status == PaymentStatus::Failed => {
                     // Failed — commit InvoiceFail
                     let sequence = {
                         let ledgers = self.handler.ledgers.lock().unwrap();

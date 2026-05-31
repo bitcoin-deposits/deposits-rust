@@ -21,7 +21,6 @@ impl Node {
         &self,
         request: &crate::nostr::LedgerRequest,
     ) -> (bool, Option<String>, Option<String>) {
-        use crate::ldk_cli::LdkCli;
         use lightning_invoice::Bolt11Invoice;
         use std::str::FromStr;
 
@@ -134,8 +133,9 @@ impl Node {
             return (false, None, Some(err));
         }
 
-        // Create invoice via LdkCli (same as `deposits-node lightning invoice`)
-        let cli = LdkCli::from_env();
+        // Create invoice via the configured Lightning backend (same as
+        // `deposits-node lightning invoice`).
+        let cli = crate::lightning_backend::from_env();
 
         let invoice_result = if let Some(dh) = description_hash {
             cli.create_invoice_with_desc_hash(amount_msat, dh)
@@ -361,7 +361,6 @@ impl Node {
         &self,
         request: &crate::nostr::LedgerRequest,
     ) -> (bool, Option<String>, Option<String>) {
-        use crate::ldk_cli::LdkCli;
         use deposits_core::messages::LedgerOperation;
         use lightning_invoice::Bolt11Invoice;
         use std::str::FromStr;
@@ -544,7 +543,7 @@ impl Node {
                 // hashing to the BOLT11's payment_hash.
                 let payment_hex = hex::encode(payment_id);
                 let preimage = {
-                    let cli = LdkCli::from_env();
+                    let cli = crate::lightning_backend::from_env();
                     match cli.get_payment_preimage(&payment_hex) {
                         Ok(Some(p)) => p,
                         Ok(None) => {
@@ -635,7 +634,7 @@ impl Node {
         // if the daemon dies between dispatch and resolve, the
         // open_invoice_lock survives on disk and gets reconciled
         // against LDK on the next periodic tick.
-        let cli = LdkCli::from_env();
+        let cli = crate::lightning_backend::from_env();
         match cli.pay_invoice(invoice_str) {
             Ok(_) => {
                 tracing::info!(
@@ -697,17 +696,18 @@ impl Node {
             }
             tokio::time::sleep(poll_interval).await;
             let payments = match cli.list_payments() {
-                Ok(r) => r.payments,
+                Ok(payments) => payments,
                 Err(e) => {
                     tracing::debug!("list_payments error (will retry): {}", e);
                     continue;
                 }
             };
             if let Some(p) = payments.iter().find(|p| p.id == payment_hex) {
+                use crate::lightning_backend::PaymentStatus;
                 match p.status {
-                    1 => break Some(Ok(p.preimage.clone())),
-                    2 => break Some(Err(())),
-                    _ => continue, // 0 = pending; keep polling
+                    PaymentStatus::Succeeded => break Some(Ok(p.preimage_hex.clone())),
+                    PaymentStatus::Failed => break Some(Err(())),
+                    PaymentStatus::Pending => continue,
                 }
             }
         };
