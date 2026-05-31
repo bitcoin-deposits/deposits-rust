@@ -1046,6 +1046,21 @@ let state = {
   keyIndex: 0,
 };
 
+// Test hooks for deposits-web/wallet/tests/browser/*.spec.mjs. Only attached
+// on localhost so production users running the wallet from a real domain
+// can't poke at internals. Each entry is module-scoped and otherwise unreachable
+// to outside callers.
+if (typeof window !== 'undefined' &&
+    (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost')) {
+  window._test = {
+    setState: (s) => Object.assign(state, s),
+    getState: () => state,
+    maybeBuildReceiveWitness: (d, t) => maybeBuildReceiveWitness(d, t),
+    deriveSecretKey: (seed, i) => deriveSecretKey(seed, i),
+    getCompressedPubkey: (sk) => getCompressedPubkey(sk),
+  };
+}
+
 let sockets = [];    // [{ws, url, connected, readOnly}]
 let pendingRequests = new Map(); // eventId -> {resolve, reject, timeout}
 // ledger_id → Set of relay URLs where the operator can be reached

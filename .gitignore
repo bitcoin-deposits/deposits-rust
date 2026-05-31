@@ -29,3 +29,9 @@ simulator-ledger.db-shm
 # Stray top-level logs from `tee`-based script debugging. The cluster's
 # own logs live under `deposits-tools/data/` (already ignored).
 /*.log
+
+# JS test infra (deposits-web/wallet/). package.json + package-lock.json
+# are committed for reproducible installs; everything else regenerates.
+node_modules/
+deposits-web/wallet/test-results/
+deposits-web/wallet/playwright-report/

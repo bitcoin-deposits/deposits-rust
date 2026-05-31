@@ -4,6 +4,10 @@
   "type": "module",
   "description": "Single-page deposits wallet. The web build is served as static assets by nginx (Dockerfile); this package.json exists so Node's test runner can import vendor/dep17.js as an ES module for the cross-implementation tests under tests/.",
   "scripts": {
-    "test": "node --test tests/"
+    "test": "node --test tests/sighash-pinned.test.mjs tests/round-trip-receive.test.mjs",
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
   }
 }
