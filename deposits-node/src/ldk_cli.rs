@@ -405,6 +405,110 @@ pub struct PaymentInfo {
     pub preimage: Option<String>,
 }
 
+// -- LightningBackend impl --
+//
+// Adapts the LDK-shaped response types above to the neutral types the
+// `LightningBackend` trait declares. See deposits-node/src/lightning_backend.rs
+// for the design rationale; per PACKAGING_PLAN.md Tier 1 this is the first
+// of three backends (LDK, LND, CLN) the daemon will eventually swap between
+// at startup. The inherent methods on `LdkCli` stay so existing callers
+// don't break; the trait impl just forwards and converts.
+
+use crate::lightning_backend::{
+    Balances as BackendBalances, ChannelInfo as BackendChannelInfo, LightningBackend,
+    NodeInfo as BackendNodeInfo, PaymentInfo as BackendPaymentInfo, PaymentStatus,
+};
+
+impl LightningBackend for LdkCli {
+    fn get_node_info(&self) -> Result<BackendNodeInfo, Error> {
+        let info = self.get_node_info()?;
+        Ok(BackendNodeInfo {
+            node_id: info.node_id,
+            current_best_block_height: info.current_best_block.as_ref().map(|b| b.height),
+            current_best_block_hash: info.current_best_block.map(|b| b.block_hash),
+        })
+    }
+
+    fn get_balances(&self) -> Result<BackendBalances, Error> {
+        let b = self.get_balances()?;
+        Ok(BackendBalances {
+            onchain_total_sats: b.total_onchain_balance_sats,
+            onchain_spendable_sats: b.spendable_onchain_balance_sats,
+            lightning_total_sats: b.total_lightning_balance_sats,
+        })
+    }
+
+    fn create_invoice(&self, amount_msat: u64, description: &str) -> Result<String, Error> {
+        LdkCli::create_invoice(self, amount_msat, description)
+    }
+
+    fn create_invoice_with_desc_hash(
+        &self,
+        amount_msat: u64,
+        desc_hash_hex: &str,
+    ) -> Result<String, Error> {
+        LdkCli::create_invoice_with_desc_hash(self, amount_msat, desc_hash_hex)
+    }
+
+    fn create_invoice_any_amount(&self, description: &str) -> Result<String, Error> {
+        LdkCli::create_invoice_any_amount(self, description)
+    }
+
+    fn pay_invoice(&self, invoice: &str) -> Result<String, Error> {
+        LdkCli::pay_invoice(self, invoice)
+    }
+
+    fn pay_invoice_with_amount(
+        &self,
+        invoice: &str,
+        amount_msat: u64,
+    ) -> Result<String, Error> {
+        LdkCli::pay_invoice_with_amount(self, invoice, amount_msat)
+    }
+
+    fn list_channels(&self) -> Result<Vec<BackendChannelInfo>, Error> {
+        let resp = LdkCli::list_channels(self)?;
+        Ok(resp
+            .channels
+            .into_iter()
+            .map(|c| BackendChannelInfo {
+                channel_id: c.channel_id,
+                counterparty_node_id: c.counterparty_node_id,
+                capacity_sats: c.channel_value_sats,
+                outbound_capacity_msat: c.outbound_capacity_msat,
+                inbound_capacity_msat: c.inbound_capacity_msat,
+                is_usable: c.is_usable,
+                is_ready: c.is_channel_ready,
+            })
+            .collect())
+    }
+
+    fn list_payments(&self) -> Result<Vec<BackendPaymentInfo>, Error> {
+        let resp = LdkCli::list_payments(self)?;
+        Ok(resp
+            .payments
+            .into_iter()
+            .map(|p| BackendPaymentInfo {
+                id: p.id,
+                status: match p.status {
+                    1 => PaymentStatus::Succeeded,
+                    2 => PaymentStatus::Failed,
+                    _ => PaymentStatus::Pending,
+                },
+                amount_msat: p.amount_msat,
+                preimage_hex: p.preimage,
+            })
+            .collect())
+    }
+
+    fn get_payment_preimage(
+        &self,
+        payment_id_hex: &str,
+    ) -> Result<Option<[u8; 32]>, Error> {
+        LdkCli::get_payment_preimage(self, payment_id_hex)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +517,14 @@ mod tests {
     fn test_config_from_env() {
         let config = LdkCliConfig::default();
         assert_eq!(config.port, 3000);
+    }
+
+    /// Compile-time check: `LdkCli` actually satisfies the
+    /// `LightningBackend` trait. If the trait or impl drifts, this fails
+    /// to type-check before runtime exercises it.
+    #[test]
+    fn ldk_cli_implements_lightning_backend() {
+        fn assert_backend<T: LightningBackend>() {}
+        assert_backend::<LdkCli>();
     }
 }
