@@ -368,42 +368,56 @@ impl Node {
                 let ledger = ledger_arc.read().unwrap();
                 if let Some(dest_deposit) = ledger.state.deposits.get(&destination_deposit_id) {
                     if dest_deposit.receive_requires_sig {
-                        // Verify receive signature from destination deposit key
-                        let recv_sig_hex = match request
-                            .params
-                            .get("receive_signature")
-                            .and_then(|v| v.as_str())
-                        {
-                            Some(s) => s,
+                        // The destination's descriptor must authorize this transfer-release
+                        // via a dep-16 receive witness; `transfer_id` is bound into the op
+                        // preimage so the signature is replay-proof across transfers.
+                        let recv_witness_value = match request.params.get("receive_witness") {
+                            Some(v) => v,
                             None => {
                                 return (
                                     false,
                                     None,
-                                    Some(
-                                        "Destination deposit requires receive_signature"
-                                            .to_string(),
-                                    ),
+                                    Some("Destination deposit requires receive_witness".to_string()),
                                 )
                             }
                         };
-                        let recv_sig = match hex::decode(recv_sig_hex)
-                            .ok()
-                            .and_then(|bytes| Signature::from_slice(&bytes).ok())
-                        {
-                            Some(sig) => sig,
-                            None => {
-                                return (false, None, Some("Invalid receive_signature".to_string()))
-                            }
-                        };
-                        // Destination descriptor signs the transfer_id to authorize receiving
-                        let recv_witness = DescriptorWitness {
-                            stack: vec![recv_sig.serialize().to_vec()],
-                        };
+                        let recv_witness: deposits_core::dep16::ReceiveWitness =
+                            match serde_json::from_value(recv_witness_value.clone()) {
+                                Ok(w) => w,
+                                Err(e) => {
+                                    return (
+                                        false,
+                                        None,
+                                        Some(format!("Invalid receive_witness shape: {}", e)),
+                                    )
+                                }
+                            };
                         let tip = self.wallet.get_block_height().unwrap_or(0);
-                        match deposits_core::descriptor::verify_witness(&dest_deposit.descriptor, &recv_witness, &transfer_id, tip) {
-                            Ok(true) => {},
-                            Ok(false) => return (false, None, Some("Invalid receive_signature: does not satisfy destination descriptor".to_string())),
-                            Err(e) => return (false, None, Some(format!("Receive signature verification failed: {}", e))),
+                        if recv_witness.expiry < tip {
+                            return (
+                                false,
+                                None,
+                                Some(format!(
+                                    "receive_witness expired (expiry={} < tip={})",
+                                    recv_witness.expiry, tip
+                                )),
+                            );
+                        }
+                        let authorizer = deposits_core::dep16::Dep16Authorizer::new();
+                        if !authorizer.authorize_receive(
+                            &dest_deposit.descriptor,
+                            &destination_deposit_id,
+                            Some(&transfer_id),
+                            &recv_witness,
+                        ) {
+                            return (
+                                false,
+                                None,
+                                Some(
+                                    "receive_witness does not satisfy destination descriptor"
+                                        .to_string(),
+                                ),
+                            );
                         }
                     }
                 }

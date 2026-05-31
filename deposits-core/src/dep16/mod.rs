@@ -21,7 +21,7 @@
 pub mod authorizer;
 pub mod operations;
 
-pub use authorizer::Dep16Authorizer;
+pub use authorizer::{Dep16Authorizer, ReceiveWitness};
 
 /// The calculus's surface, re-exported. Callers can spell
 /// `deposits_core::dep16::Descriptor` instead of

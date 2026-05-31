@@ -236,6 +236,55 @@ pub fn operation_sighash(op: &LedgerOperation) -> Option<[u8; 32]> {
     Some(miniscript::calculus::operation_sighash(&preimage))
 }
 
+/// Build a synthetic dep-16 [`OperationData`] for a receive authorization. No corresponding
+/// [`LedgerOperation`] variant exists — receives gate inbound value movement at admission time
+/// (invoice/offer creation, transfer-release destination) rather than producing a state-machine
+/// op, so the operation is built in-memory only by both wallet (for signing) and node (for
+/// verification).
+///
+/// Wire-format coordination point with wallets: the wallet computes
+/// `operation_sighash(receive_op(...))` and produces a signature over it. The wallet sends
+/// `{ nonce, expiry, signatures: [...] }`. The node calls
+/// [`receive_op`] with the same `(deposit_id, nonce, expiry, transfer_id)` and verifies each
+/// signature against the resulting preimage via [`crate::dep16::Dep16Authorizer::authorize_receive`].
+///
+/// Args carried:
+/// - When `transfer_id` is `Some`: receive is the destination side of a transfer; the
+///   `transfer_id` lands in args so the wallet's signature binds to this specific transfer
+///   (not just "any receive to this deposit").
+/// - When `transfer_id` is `None`: receive is the admission-time gate on an invoice/offer;
+///   args are empty.
+pub fn receive_op(
+    deposit_id: &deposits_protocol::types::DepositId,
+    nonce: u64,
+    expiry: u32,
+    transfer_id: Option<&[u8]>,
+) -> OperationData<PublicKey> {
+    let mut args = BTreeMap::new();
+    if let Some(t) = transfer_id {
+        args.insert("transfer_id".to_string(), Value::Bytes(t.to_vec()));
+    }
+    OperationData {
+        op_type: Symbol::new(op_type::RECEIVE),
+        args,
+        deposit_id: pad_deposit_id(deposit_id),
+        nonce,
+        expiry,
+    }
+}
+
+/// Tagged-hash sighash of a [`receive_op`]. The bytes wallets sign to authorize a receive.
+pub fn receive_op_sighash(
+    deposit_id: &deposits_protocol::types::DepositId,
+    nonce: u64,
+    expiry: u32,
+    transfer_id: Option<&[u8]>,
+) -> [u8; 32] {
+    let op = receive_op(deposit_id, nonce, expiry, transfer_id);
+    let preimage = miniscript::calculus::operation_preimage(&op);
+    miniscript::calculus::operation_sighash(&preimage)
+}
+
 /// Zero-extend a 16-byte [`DepositId`](deposits_protocol::types::DepositId) into the 32-byte
 /// `deposit_id` dep-16's [`OperationData`] expects. The protocol's DepositId is itself derived
 /// from `SHA256(descriptor)[..16]`, so the zero-padding preserves uniqueness; phase 6 can revisit

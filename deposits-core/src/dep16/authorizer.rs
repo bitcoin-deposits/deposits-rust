@@ -63,6 +63,78 @@ impl Authorizer for Dep16Authorizer {
     }
 }
 
+/// Inbound receive authorization wire format. The wallet signs the dep-17 preimage of
+/// [`super::operations::receive_op`] with the same `(deposit_id, nonce, expiry, transfer_id)`
+/// the node will use, and sends this struct as the `receive_witness` / `receive_signature`
+/// request param.
+///
+/// `signatures` is a map of compressed-pubkey hex → 64-byte ECDSA signature hex. Multi-key
+/// descriptors (`pk_threshold`, `pk_any`) collect one entry per signer.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ReceiveWitness {
+    /// Per-deposit monotonic nonce. Bound into the operation preimage; future per-deposit
+    /// replay protection (phase 3) will reject `nonce <= last_seen`.
+    pub nonce: u64,
+    /// Absolute block height after which this signature is no longer accepted.
+    pub expiry: u32,
+    /// `compressed-pubkey-hex → 64-byte ECDSA sig hex`.
+    pub signatures: std::collections::BTreeMap<String, String>,
+}
+
+impl Dep16Authorizer {
+    /// Authorize an inbound receive against a deposit's descriptor. Builds the synthetic
+    /// receive op (via [`super::operations::receive_op`]) with the same inputs the wallet
+    /// signed against, converts the wire signatures into the dep-16 keyed witness shape, and
+    /// evaluates the descriptor under `op_type = receive`.
+    ///
+    /// Replaces the legacy `verify_witness(descriptor, &DescriptorWitness, &message)` path
+    /// for receive-side authorization. Two call sites:
+    /// - admission-time receive on a `receive_requires_sig` deposit (invoice / offer creation)
+    ///   — pass `transfer_id = None`
+    /// - destination-side receive on a transfer release — pass `transfer_id = Some(...)`
+    pub fn authorize_receive(
+        &self,
+        descriptor: &str,
+        deposit_id: &deposits_protocol::types::DepositId,
+        transfer_id: Option<&[u8]>,
+        receive_witness: &ReceiveWitness,
+    ) -> bool {
+        authorize_receive_inner(&self.verifier, descriptor, deposit_id, transfer_id, receive_witness)
+            .unwrap_or(false)
+    }
+}
+
+fn authorize_receive_inner(
+    verifier: &EcdsaVerifier,
+    descriptor: &str,
+    deposit_id: &deposits_protocol::types::DepositId,
+    transfer_id: Option<&[u8]>,
+    receive_witness: &ReceiveWitness,
+) -> Option<bool> {
+    let d = miniscript::calculus::parse::<PublicKey>(descriptor).ok()?;
+    let op = super::operations::receive_op(
+        deposit_id,
+        receive_witness.nonce,
+        receive_witness.expiry,
+        transfer_id,
+    );
+    let mut witness = Dep16Witness::<PublicKey>::empty();
+    for (key_hex, sig_hex) in &receive_witness.signatures {
+        let key_bytes = hex::decode(key_hex).ok()?;
+        if key_bytes.len() != 33 {
+            return None;
+        }
+        let key = PublicKey::from_slice(&key_bytes).ok()?;
+        let sig_bytes = hex::decode(sig_hex).ok()?;
+        if sig_bytes.len() != 64 {
+            return None;
+        }
+        witness = witness.with_signature(key, Dep16Signature(sig_bytes));
+    }
+    let state = super::ProtocolLedgerState::empty();
+    miniscript::calculus::evaluate(&d, &op, &state, &witness, verifier).ok()
+}
+
 /// The actual authorization logic, factored out so the trait method can `unwrap_or(false)`
 /// on any error (parse failure, missing witness, ledger-state read on an op that doesn't
 /// have one). Phase 4 keeps the "unauthorized on any error" stance from the legacy

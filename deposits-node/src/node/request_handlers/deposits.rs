@@ -53,11 +53,14 @@ pub(super) fn parse_descriptor_param(
     Ok((descriptor, id))
 }
 
-/// Verify a `receive_witness` (a `DescriptorWitness`-shaped JSON value)
-/// against a deposit's descriptor. The "message" is the deposit_id
-/// padded to 32 bytes, matching the legacy `receive_signature`
-/// convention. Used by `make_offer` and `make_invoice` whenever the
-/// deposit (or proposed deposit) has `receive_requires_sig`.
+/// Verify a [`deposits_core::dep16::ReceiveWitness`]-shaped JSON value against a deposit's
+/// descriptor. Routes through `Dep16Authorizer::authorize_receive` — the wallet signed the
+/// dep-17 preimage of `receive_op(deposit_id, nonce, expiry, transfer_id=None)`, the node
+/// reconstructs that preimage and verifies. Used by `make_offer` and `make_invoice` whenever
+/// the deposit (or proposed deposit) has `receive_requires_sig`.
+///
+/// `chain_tip` is the operator's current height; once phase 3 per-deposit nonce/expiry lands
+/// it'll feed the expiry/nonce gating.
 pub(super) fn verify_receive_witness(
     descriptor: &str,
     deposit_id: &deposits_core::types::DepositId,
@@ -68,15 +71,20 @@ pub(super) fn verify_receive_witness(
         .params
         .get("receive_witness")
         .ok_or_else(|| "Deposit requires receive_witness".to_string())?;
-    let witness: deposits_core::types::DescriptorWitness =
+    let witness: deposits_core::dep16::ReceiveWitness =
         serde_json::from_value(witness_value.clone())
             .map_err(|e| format!("Invalid receive_witness shape: {}", e))?;
-    let mut msg = [0u8; 32];
-    msg[..16].copy_from_slice(deposit_id);
-    match deposits_core::descriptor::verify_witness(descriptor, &witness, &msg, chain_tip) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err("receive_witness does not satisfy deposit descriptor".to_string()),
-        Err(e) => Err(format!("receive_witness verification error: {:?}", e)),
+    if witness.expiry < chain_tip {
+        return Err(format!(
+            "receive_witness expired (expiry={} < chain_tip={})",
+            witness.expiry, chain_tip
+        ));
+    }
+    let authorizer = deposits_core::dep16::Dep16Authorizer::new();
+    if authorizer.authorize_receive(descriptor, deposit_id, None, &witness) {
+        Ok(())
+    } else {
+        Err("receive_witness does not satisfy deposit descriptor".to_string())
     }
 }
 
