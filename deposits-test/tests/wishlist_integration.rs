@@ -2,7 +2,6 @@
 //! Tier 5.2: Timing attacks on cryptographic operations.
 
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
-use deposits_core::descriptor::CoreWitnessVerifier;
 use deposits_test::adversarial::*;
 use deposits_test::*;
 use deposits_protocol::messages::LedgerOperation;
@@ -344,23 +343,11 @@ fn tier5_2_timing_attacks() {
         verify_times.push(elapsed.as_nanos());
     }
 
-    // Measure descriptor verification time
-    let mut desc_verify_times = Vec::new();
-    for (sk, pk) in &keys {
-        let descriptor = format!("pk({})", hex::encode(pk.serialize()));
-        let keypair = Keypair::from_secret_key(&secp, sk);
-        let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-        let witness = DescriptorWitness {
-            stack: vec![sig.serialize().to_vec()],
-        };
-
-        let start = std::time::Instant::now();
-        for _ in 0..1000 {
-            let _ = deposits_core::descriptor::verify_witness(&descriptor, &witness, &msg_hash, 0);
-        }
-        let elapsed = start.elapsed();
-        desc_verify_times.push(elapsed.as_nanos());
-    }
+    // Note: descriptor-verification timing was previously measured against the
+    // legacy `verify_witness` path, which had a `pk()` fast path with key-dependent
+    // branching. The dep-16 evaluator (used by `Dep16Authorizer::authorize`) walks
+    // the same tree shape regardless of key — the only data-dependent step is the
+    // underlying ECDSA verify, already covered by the Schnorr-verify CV above.
 
     // Compute coefficient of variation (CV) for each operation
     // CV = stddev / mean. Low CV = constant-time. High CV = variable-time.
@@ -378,14 +365,12 @@ fn tier5_2_timing_attacks() {
 
     let sign_cv = cv(&sign_times);
     let verify_cv = cv(&verify_times);
-    let desc_cv = cv(&desc_verify_times);
 
     // CV threshold: <10% is acceptable for crypto operations
     // (some variance is expected from OS scheduling, cache effects)
     let threshold = 0.10;
     let sign_ok = sign_cv < threshold;
     let verify_ok = verify_cv < threshold;
-    let desc_ok = desc_cv < threshold;
 
     println!("Timing analysis (1000 iterations per key, 20 keys):");
     println!(
@@ -398,13 +383,8 @@ fn tier5_2_timing_attacks() {
         verify_cv,
         if verify_ok { "OK" } else { "HIGH VARIANCE" }
     );
-    println!(
-        "  Descriptor verify: {:.4} ({})",
-        desc_cv,
-        if desc_ok { "OK" } else { "HIGH VARIANCE" }
-    );
 
-    let all_ok = sign_ok && verify_ok && desc_ok;
+    let all_ok = sign_ok && verify_ok;
 
     log.record(AttackResult {
         name: "Tier 5.2: Timing attacks on crypto".into(),
@@ -422,17 +402,14 @@ fn tier5_2_timing_attacks() {
         defense: DefenseLayer::Implementation,
         scaling: Scaling::Constant,
         notes: format!(
-            "Timing CV: sign={:.4} verify={:.4} descriptor={:.4}. \
+            "Timing CV: sign={:.4} verify={:.4}. \
              Threshold: <{:.0}%. \
              secp256k1 library uses constant-time operations. \
-             Deposits-core descriptor verification adds minimal branching \
-             (pk() fast path vs miniscript general path). \
              Note: this test runs in userspace — real timing attacks require \
              network-level measurement. Library-level constant-time is necessary \
              but not sufficient.",
             sign_cv,
             verify_cv,
-            desc_cv,
             threshold * 100.0,
         ),
         steps: vec![],

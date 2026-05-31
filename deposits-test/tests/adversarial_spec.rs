@@ -2,7 +2,6 @@
 //!
 //! These test whether the implementation actually enforces what the spec claims.
 
-use deposits_core::descriptor::CoreWitnessVerifier;
 use deposits_core::ledger::Ledger;
 use deposits_test::adversarial::*;
 use deposits_test::*;

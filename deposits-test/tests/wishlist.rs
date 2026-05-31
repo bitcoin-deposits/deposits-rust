@@ -3,7 +3,6 @@
 //! Each test covers one item from the adversarial testing roadmap.
 
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
-use deposits_core::descriptor::CoreWitnessVerifier;
 use deposits_core::ledger::Ledger;
 use deposits_test::adversarial::*;
 use deposits_test::*;
@@ -252,70 +251,105 @@ use deposits_protocol::TlvDecode;
 
 #[test]
 fn tier5_1_signature_malleability() {
+    use deposits_protocol::messages::LedgerOperation;
+    use deposits_protocol::types::Authorizer;
+
     let mut log = AttackLog::new();
 
-    // Schnorr signatures (BIP-340) are non-malleable by construction:
-    // there's exactly one valid 64-byte encoding for each (key, message) pair.
-    // But the implementation must:
-    // 1. Accept only 64-byte signatures (not DER, not compact+recovery)
-    // 2. Reject signatures with s > curve order / 2 (if applicable)
-    // 3. Not accept the same signature for different messages
+    // The dep-16 evaluator uses ECDSA over the dep-17 operation preimage. The
+    // implementation must:
+    // 1. Accept only 64-byte (compact) signatures
+    // 2. Reject signatures with s > curve order / 2 (libsecp256k1 enforces low-s)
+    // 3. Bind to the operation: same sig, different op → rejected (preimage differs)
 
     let (sk, pk) = make_key(10);
-    let descriptor = format!("pk({})", hex::encode(pk.serialize()));
-    let msg_hash = [0xAA; 32];
-
-    let secp = Secp256k1::new();
-    let keypair = Keypair::from_secret_key(&secp, &sk);
-    let msg = Message::from_digest(msg_hash);
-    let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-    let sig_bytes = sig.serialize();
-
-    let witness = DescriptorWitness {
-        stack: vec![sig_bytes.to_vec()],
+    let descriptor = format!("wsh(prove(pk({})))", hex::encode(pk.serialize()));
+    let did = [0xCC; 16];
+    let proto = LedgerOperation::InvoiceLock {
+        deposit_id: did,
+        amount: 1_000,
+        payment_id: [0x33; 32],
+        sequence_number: 1,
+        nonce: 1,
+        expiry: u32::MAX,
+        witness: DescriptorWitness::new(),
     };
+    let signed = deposits_core::signing::sign_op(proto, &sk).expect("sign_op");
 
-    // Canonical signature should verify
-    let valid = deposits_core::descriptor::verify_witness(&descriptor, &witness, &msg_hash, 0)
-        .unwrap_or(false);
-    assert!(valid, "Canonical Schnorr signature must verify");
+    let authorizer = deposits_core::dep16::Dep16Authorizer::new();
 
-    // Test: wrong-length signature should be rejected
-    let short_witness = DescriptorWitness {
-        stack: vec![sig_bytes[..32].to_vec()], // only 32 bytes
-    };
-    let short_result =
-        deposits_core::descriptor::verify_witness(&descriptor, &short_witness, &msg_hash, 0)
-            .unwrap_or(false);
-    assert!(!short_result, "Short signature must be rejected");
-
-    // Test: flipped bit should be rejected
-    let mut malleated = sig_bytes;
-    malleated[31] ^= 0x01;
-    let mal_witness = DescriptorWitness {
-        stack: vec![malleated.to_vec()],
-    };
-    let mal_result =
-        deposits_core::descriptor::verify_witness(&descriptor, &mal_witness, &msg_hash, 0)
-            .unwrap_or(false);
-    assert!(!mal_result, "Bit-flipped signature must be rejected");
-
-    // Test: all-zero signature should be rejected
-    let zero_witness = DescriptorWitness {
-        stack: vec![vec![0u8; 64]],
-    };
-    let zero_result =
-        deposits_core::descriptor::verify_witness(&descriptor, &zero_witness, &msg_hash, 0)
-            .unwrap_or(false);
-    assert!(!zero_result, "All-zero signature must be rejected");
-
-    // Test: signature for different message should be rejected
-    let wrong_msg = [0xBB; 32];
-    let wrong_result = deposits_core::descriptor::verify_witness(&descriptor, &witness, &wrong_msg, 0)
-        .unwrap_or(false);
+    // Canonical signature must authorize.
     assert!(
-        !wrong_result,
-        "Signature for wrong message must be rejected"
+        authorizer.authorize(&descriptor, &signed),
+        "Canonical ECDSA signature over the dep-17 preimage must authorize"
+    );
+
+    // Helper: rebuild the op with a custom (potentially malformed) witness stack.
+    fn with_stack(op: &LedgerOperation, stack: Vec<Vec<u8>>) -> LedgerOperation {
+        match op {
+            LedgerOperation::InvoiceLock {
+                deposit_id,
+                amount,
+                payment_id,
+                sequence_number,
+                nonce,
+                expiry,
+                ..
+            } => LedgerOperation::InvoiceLock {
+                deposit_id: *deposit_id,
+                amount: *amount,
+                payment_id: *payment_id,
+                sequence_number: *sequence_number,
+                nonce: *nonce,
+                expiry: *expiry,
+                witness: DescriptorWitness { stack },
+            },
+            _ => unreachable!(),
+        }
+    }
+    let sig_bytes = match &signed {
+        LedgerOperation::InvoiceLock { witness, .. } => witness.stack[0].clone(),
+        _ => unreachable!(),
+    };
+
+    // Short signature: stack_to_keyed rejects non-64-byte entries; no key gets bound.
+    let short_op = with_stack(&signed, vec![sig_bytes[..32].to_vec()]);
+    assert!(
+        !authorizer.authorize(&descriptor, &short_op),
+        "Short signature must be rejected"
+    );
+
+    // Bit-flipped signature: ECDSA verify rejects.
+    let mut malleated = sig_bytes.clone();
+    malleated[31] ^= 0x01;
+    let mal_op = with_stack(&signed, vec![malleated]);
+    assert!(
+        !authorizer.authorize(&descriptor, &mal_op),
+        "Bit-flipped signature must be rejected"
+    );
+
+    // All-zero signature: ECDSA verify rejects.
+    let zero_op = with_stack(&signed, vec![vec![0u8; 64]]);
+    assert!(
+        !authorizer.authorize(&descriptor, &zero_op),
+        "All-zero signature must be rejected"
+    );
+
+    // Wrong-op replay: take the signature, attach it to a DIFFERENT op (different
+    // nonce → different preimage). Must be rejected. nonce/amount/payment_id are
+    // all bound into the dep-17 preimage; mutating any one breaks the signature.
+    let wrong_proto = LedgerOperation::InvoiceLock {
+        deposit_id: did,
+        amount: 1_000,
+        payment_id: [0x33; 32],
+        sequence_number: 1,
+        nonce: 2, // different nonce → different preimage
+        expiry: u32::MAX,
+        witness: DescriptorWitness { stack: vec![sig_bytes.clone()] },
+    };
+    assert!(
+        !authorizer.authorize(&descriptor, &wrong_proto),
+        "Signature over wrong op-preimage must be rejected"
     );
 
     log.record(AttackResult {
@@ -327,8 +361,8 @@ fn tier5_1_signature_malleability() {
         blocked: true,
         defense: DefenseLayer::Implementation,
         scaling: Scaling::Constant,
-        notes: "BIP-340 Schnorr: canonical verified, short rejected, \
-                bit-flip rejected, zero rejected, wrong-message rejected."
+        notes: "ECDSA over dep-17 preimage: canonical verified, short rejected, \
+                bit-flip rejected, zero rejected, wrong-op replay rejected."
             .into(),
         steps: vec![],
     });
@@ -340,69 +374,21 @@ fn tier5_1_signature_malleability() {
 
 #[test]
 fn tier5_5_descriptor_parsing_edge_cases() {
+    use deposits_protocol::types::Authorizer;
     let mut log = AttackLog::new();
-    let msg_hash = [0xAA; 32];
 
-    // Test various pathological descriptor strings
+    // Test various pathological descriptor strings via the dep-16 authorizer's
+    // descriptor validation. `validate_descriptor` returns Some(error) for any
+    // unparseable input — that's the safety property: every pathological input
+    // must fail parsing rather than crash or be silently accepted.
+    let authorizer = deposits_core::dep16::Dep16Authorizer::new();
+    let check = |desc: &str| authorizer.validate_descriptor(desc).is_some();
 
-    // Empty descriptor
-    let empty = deposits_core::descriptor::verify_witness(
-        "",
-        &DescriptorWitness {
-            stack: vec![vec![0xFF; 64]],
-        },
-        &msg_hash,
-        0,
-    );
-    let empty_safe = empty.is_err() || !empty.unwrap_or(true);
-
-    // Very long descriptor
-    let long_desc = format!("pk({})", "ab".repeat(1000));
-    let long = deposits_core::descriptor::verify_witness(
-        &long_desc,
-        &DescriptorWitness {
-            stack: vec![vec![0xFF; 64]],
-        },
-        &msg_hash,
-        0,
-    );
-    let long_safe = long.is_err() || !long.unwrap_or(true);
-
-    // Nested parentheses
-    let nested = "pk(pk(pk(aabb)))";
-    let nested_result = deposits_core::descriptor::verify_witness(
-        nested,
-        &DescriptorWitness {
-            stack: vec![vec![0xFF; 64]],
-        },
-        &msg_hash,
-        0,
-    );
-    let nested_safe = nested_result.is_err() || !nested_result.unwrap_or(true);
-
-    // Null bytes in descriptor
-    let null_desc = "pk(\x00\x00)";
-    let null_result = deposits_core::descriptor::verify_witness(
-        null_desc,
-        &DescriptorWitness {
-            stack: vec![vec![0xFF; 64]],
-        },
-        &msg_hash,
-        0,
-    );
-    let null_safe = null_result.is_err() || !null_result.unwrap_or(true);
-
-    // Unicode in descriptor
-    let unicode_desc = "pk(🔑)";
-    let unicode_result = deposits_core::descriptor::verify_witness(
-        unicode_desc,
-        &DescriptorWitness {
-            stack: vec![vec![0xFF; 64]],
-        },
-        &msg_hash,
-        0,
-    );
-    let unicode_safe = unicode_result.is_err() || !unicode_result.unwrap_or(true);
+    let empty_safe = check("");
+    let long_safe = check(&format!("pk({})", "ab".repeat(1000)));
+    let nested_safe = check("pk(pk(pk(aabb)))");
+    let null_safe = check("pk(\x00\x00)");
+    let unicode_safe = check("pk(🔑)");
 
     let all_safe = empty_safe && long_safe && nested_safe && null_safe && unicode_safe;
 
