@@ -557,9 +557,18 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
         if let Ok(raw) = std::fs::read_to_string(&per_ledger_json) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(addr) = v.get("address").and_then(|x| x.as_str()) {
-                    // Only override when the json describes THIS reserves
-                    // address; otherwise it's stale from a prior rotation.
-                    if addr == reserves_id {
+                    // Accept either address-match (pre-migration) or
+                    // identity-match-with-persisted-script (post-migration:
+                    // address was rewritten to on-chain reality, which by
+                    // definition differs from the stale QuorumBegin
+                    // reserves_id). The post-migration branch is gated on
+                    // `script_pubkey` being present so we never silently
+                    // accept a stale entry as authoritative.
+                    let address_match = addr == reserves_id;
+                    let identity_match = !address_match
+                        && v.get("script_pubkey").is_some()
+                        && entry_identity_matches(&v, &state.operator_key, &quorum_members);
+                    if address_match || identity_match {
                         if let Some(h) = v
                             .get("ledger_hash")
                             .and_then(|x| x.as_str())
@@ -629,7 +638,15 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
                             .get("address")
                             .and_then(|x| x.as_str())
                             .unwrap_or("");
-                        if addr != reserves_id {
+                        let address_match = addr == reserves_id;
+                        let identity_match = !address_match
+                            && entry.get("script_pubkey").is_some()
+                            && entry_identity_matches(
+                                entry,
+                                &state.operator_key,
+                                &quorum_members,
+                            );
+                        if !address_match && !identity_match {
                             continue;
                         }
                         if let Some(h) = entry
@@ -736,6 +753,39 @@ fn fetch_utxo(
 /// Parse the self-describing-tree fields from a JSON object describing a
 /// vault snapshot. Returns `None` if any required field is missing, malformed,
 /// or empty — caller falls back to the rebuild path in that case.
+/// Match a `taproot_reserves.json` entry against a ledger's identity
+/// (operator + member set) instead of address. Used as a fallback when
+/// the entry's `address` field has been rewritten to on-chain reality by
+/// a migration but the QuorumBegin op still carries the stale value.
+fn entry_identity_matches(
+    entry: &serde_json::Value,
+    operator: &bitcoin::secp256k1::PublicKey,
+    members: &[bitcoin::secp256k1::PublicKey],
+) -> bool {
+    let op_match = entry
+        .get("operator")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<bitcoin::secp256k1::PublicKey>().ok())
+        .map(|p| &p == operator)
+        .unwrap_or(false);
+    if !op_match {
+        return false;
+    }
+    let entry_members: Vec<bitcoin::secp256k1::PublicKey> = entry
+        .get("quorum_members")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.as_str())
+                .filter_map(|s| s.parse::<bitcoin::secp256k1::PublicKey>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let entry_set: std::collections::HashSet<_> = entry_members.iter().collect();
+    let ledger_set: std::collections::HashSet<_> = members.iter().collect();
+    entry_set == ledger_set
+}
+
 fn parse_persisted_tree(entry: &serde_json::Value) -> Option<PersistedTree> {
     let spk_hex = entry.get("script_pubkey").and_then(|v| v.as_str())?;
     let ik_hex = entry.get("internal_key").and_then(|v| v.as_str())?;
@@ -1064,19 +1114,26 @@ fn sweep_ledger(
     }
 
     // Sanity: the address we'll spend from must match what the QuorumBegin
-    // declared OR the on-chain reality if we're using a persisted snapshot.
-    let declared: Address<bitcoin::address::NetworkUnchecked> = summary
-        .reserves_id
-        .parse()
-        .map_err(|e| format!("parse declared reserves_id: {}", e))?;
-    let declared = declared
-        .require_network(network)
-        .map_err(|e| format!("declared reserves network mismatch: {}", e))?;
-    if declared.script_pubkey() != reserves_script {
-        return Err(format!(
-            "reserves address rebuild mismatch: declared {} but rebuilt {}",
-            declared, reserves_address
-        ));
+    // declared. SKIP when using a persisted snapshot — the persisted
+    // script IS the on-chain reality, and the QuorumBegin's reserves_id
+    // can be stale (that's the bug the persisted snapshot exists to
+    // route around). The migrate-snapshot tool only writes a persisted
+    // tree after verifying it matches the actual UTXO scriptpubkey at
+    // the recorded outpoint, so trusting it here is safe.
+    if !persisted_used {
+        let declared: Address<bitcoin::address::NetworkUnchecked> = summary
+            .reserves_id
+            .parse()
+            .map_err(|e| format!("parse declared reserves_id: {}", e))?;
+        let declared = declared
+            .require_network(network)
+            .map_err(|e| format!("declared reserves network mismatch: {}", e))?;
+        if declared.script_pubkey() != reserves_script {
+            return Err(format!(
+                "reserves address rebuild mismatch: declared {} but rebuilt {}",
+                declared, reserves_address
+            ));
+        }
     }
 
     // Find the on-chain UTXO. If the rebuilt reserves address has no UTXO,
@@ -1287,7 +1344,6 @@ fn sweep_ledger(
             .control_block_for_tier(0)
             .ok_or("no control block for tier 0")?
     };
-    let _ = persisted_used;
     let mut witness = Witness::new();
     for x_only in sorted.iter().rev() {
         match sigs.get(x_only) {
