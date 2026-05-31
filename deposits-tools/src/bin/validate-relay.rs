@@ -385,9 +385,8 @@ fn validate_ledger(
         // the tip surface as "unsatisfiable" — which is the strict
         // reading we want for an audit.
         let op = LedgerOperation::tlv_decode(&u.message).ok();
-        let verifier = deposits_core::descriptor::CoreWitnessVerifier::new(0);
         let authorizer = deposits_core::dep16::Dep16Authorizer::new();
-        match state.apply_signed(u, &verifier, &authorizer) {
+        match state.apply_signed(u, &authorizer) {
             Ok(next) => {
                 state = next;
                 if verbose {

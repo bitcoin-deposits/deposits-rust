@@ -15,7 +15,6 @@
 //! Attacker controls: 1 operator (alice) = 25% of network
 //! Target: extract more than alice's own 1M sat reserves
 
-use deposits_core::descriptor::CoreWitnessVerifier;
 use deposits_core::ledger::Ledger;
 use deposits_test::*;
 use deposits_protocol::messages::LedgerOperation;
@@ -188,7 +187,6 @@ fn attack_forged_invoice_witness() {
         .state
         .apply_with_verifier(
             &op,
-            &CoreWitnessVerifier::new(0),
             &deposits_core::dep16::Dep16Authorizer::new(),
             0,
         )

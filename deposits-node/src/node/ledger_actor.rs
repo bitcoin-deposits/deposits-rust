@@ -260,11 +260,7 @@ impl LedgerActor {
         // view at the moment it was committed; use it as the chain_tip
         // for descriptor `after()` checks. Matches the on-chain
         // perspective that `apply_and_check` is replaying.
-        match ledger.apply_and_check(
-            &op,
-            &deposits_core::descriptor::CoreWitnessVerifier::new(update.block_height),
-            update.block_height,
-        ) {
+        match ledger.apply_and_check(&op, update.block_height) {
             Ok(violations) if !violations.is_empty() => {
                 tracing::warn!(
                     ledger_id = %self.ledger_id,
@@ -385,12 +381,7 @@ impl LedgerActor {
             // `after(N)` checks on the operator side match what
             // cosigners will see when they re-run conformance.
             let staged = ledger
-                .stage_operation(
-                    operation,
-                    block_height,
-                    block_hash,
-                    &deposits_core::descriptor::CoreWitnessVerifier::new(block_height),
-                )
+                .stage_operation(operation, block_height, block_hash)
                 .map_err(|e| format!("stage failed: {}", e))?;
             let quorum_active =
                 ledger.state.quorum_state == deposits_core::QuorumState::Active;

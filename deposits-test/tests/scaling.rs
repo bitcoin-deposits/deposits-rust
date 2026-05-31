@@ -3,7 +3,6 @@
 //! Tests whether invariant boundaries shift as the network grows.
 //! A defense that holds at 4 operators but breaks at 12 is a scaling bug.
 
-use deposits_core::descriptor::CoreWitnessVerifier;
 use deposits_core::ledger::Ledger;
 use deposits_test::adversarial::*;
 use deposits_test::docker::InvariantBoundarySearch;
@@ -77,7 +76,6 @@ fn scaling_reserve_backing() {
                     invoice_id: "over".into(),
                     sequence_number: 99,
                 },
-                &NoVerify,
                 &deposits_protocol::types::AllowAll,
                 0,
             )
@@ -242,7 +240,6 @@ fn scaling_witness_verification() {
             .state
             .apply_with_verifier(
                 &bad_op,
-                &CoreWitnessVerifier::new(0),
                 &deposits_core::dep16::Dep16Authorizer::new(),
                 0,
             )

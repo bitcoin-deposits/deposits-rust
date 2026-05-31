@@ -1038,7 +1038,6 @@ impl Ledger {
         operation: LedgerOperation,
         block_height: u32,
         block_hash: [u8; 32],
-        verifier: &impl deposits_protocol::WitnessVerifier,
     ) -> DepositsResult<StagedUpdate> {
         use crate::tlv::TlvEncode;
         use bitcoin::hashes::{sha256, Hash};
@@ -1106,7 +1105,6 @@ impl Ledger {
         let authorizer = crate::dep16::Dep16Authorizer::new();
         let violations = self.state.check_speculative(
             &operation,
-            verifier,
             &authorizer,
             block_height,
         );
@@ -1161,14 +1159,12 @@ impl Ledger {
         // state-machine + conformance pipeline. Any of these failing
         // (missing/invalid signatures included) returns an error before
         // any state mutation. The staged update's `block_height` is the
-        // operator's cosigned view of the tip; feeds the verifier so
-        // descriptor `after()` checks evaluate at the right horizon.
-        let verifier =
-            crate::descriptor::CoreWitnessVerifier::new(staged.update.block_height);
+        // operator's cosigned view of the tip; descriptor `after()`
+        // checks evaluate at that horizon via the Dep16Authorizer.
         let authorizer = crate::dep16::Dep16Authorizer::new();
         let new_state =
             self.state
-                .apply_signed(&staged.update, &verifier, &authorizer)?;
+                .apply_signed(&staged.update, &authorizer)?;
         self.state = new_state;
 
         // Set opened_at_block and initial last_fee_assessment for new deposits
@@ -1539,13 +1535,12 @@ impl Ledger {
     pub fn apply_and_check(
         &mut self,
         operation: &LedgerOperation,
-        verifier: &impl deposits_protocol::WitnessVerifier,
         current_height: u32,
     ) -> DepositsResult<Vec<deposits_protocol::ConformanceViolation>> {
         let authorizer = crate::dep16::Dep16Authorizer::new();
         let (new_state, violations) =
             self.state
-                .apply_with_verifier(operation, verifier, &authorizer, current_height)?;
+                .apply_with_verifier(operation, &authorizer, current_height)?;
         self.state = new_state;
         Ok(violations)
     }
@@ -2889,7 +2884,6 @@ mod tests {
                 },
                 100,
                 [0u8; 32],
-                &deposits_protocol::NoVerify,
             )
             .expect_err("partner staging QuorumJoin must refuse");
         match err {

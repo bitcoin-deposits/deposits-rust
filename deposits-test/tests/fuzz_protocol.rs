@@ -12,7 +12,6 @@
 //! See plan: /home/claude/.claude/plans/recursive-booping-cosmos.md
 
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
-use deposits_core::descriptor::CoreWitnessVerifier;
 use deposits_core::ledger::{Ledger, LedgerProtocolState, LedgerRole};
 use deposits_core::operation_validation as op_val;
 use deposits_protocol::messages::LedgerOperation;
@@ -289,9 +288,8 @@ impl ProtocolSim {
         if !validate_per_op_as_cosigner(replica, op, block_height, armed_candidates) {
             return false;
         }
-        let verifier = CoreWitnessVerifier::new(0);
         let authorizer = deposits_protocol::types::AllowAll;
-        match replica.apply_with_verifier(op, &verifier, &authorizer, block_height) {
+        match replica.apply_with_verifier(op, &authorizer, block_height) {
             Ok((_, violations)) => violations.is_empty(),
             Err(_) => false,
         }
@@ -304,9 +302,8 @@ impl ProtocolSim {
         //    Adversary skips this step (happy to publish non-conforming).
         if self.honest.contains(&proposer) {
             let state_clone = self.operators[proposer].ledger.state.clone();
-            let verifier = CoreWitnessVerifier::new(0);
             let authorizer = deposits_protocol::types::AllowAll;
-            match state_clone.apply_with_verifier(&op, &verifier, &authorizer, 0) {
+            match state_clone.apply_with_verifier(&op, &authorizer, 0) {
                 Ok((_, violations)) if violations.is_empty() => {}
                 _ => return Outcome::RejectedLocal,
             }

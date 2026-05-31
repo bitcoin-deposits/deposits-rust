@@ -8,7 +8,6 @@ pub mod docker;
 pub mod regtest;
 
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
-use deposits_core::descriptor::CoreWitnessVerifier;
 use deposits_core::ledger::{Ledger, LedgerRole};
 use deposits_protocol::messages::LedgerOperation;
 use deposits_protocol::types::{
@@ -353,7 +352,6 @@ impl Operator {
             if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
                 if let Ok(violations) = watcher.apply_and_check(
                     &op,
-                    &CoreWitnessVerifier::new(update.block_height),
                     update.block_height,
                 ) {
                     all_violations.extend(violations);

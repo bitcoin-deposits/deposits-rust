@@ -4,7 +4,6 @@
 //! the simplest scenario that would violate it, then confirming it's blocked.
 
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
-use deposits_core::descriptor::CoreWitnessVerifier;
 use deposits_core::ledger::Ledger;
 use deposits_test::adversarial::*;
 use deposits_test::*;
@@ -54,7 +53,6 @@ fn invariant_e1_reserve_backing() {
                 invoice_id: "x".into(),
                 sequence_number: 9,
             },
-            &NoVerify,
             &deposits_protocol::types::AllowAll,
             0,
         )
@@ -274,7 +272,7 @@ fn invariant_c1_witness_validity() {
     let good_op = deposits_core::signing::sign_op(good_proto, &user_sk)
         .expect("InvoiceLock signs via dep-17 preimage");
     let (_, good_violations) = state
-        .apply_with_verifier(&good_op, &CoreWitnessVerifier::new(0), &authorizer, 0)
+        .apply_with_verifier(&good_op, &authorizer, 0)
         .unwrap();
     eprintln!("violations: {:?}", good_violations); assert!(good_violations.is_empty(), "C1: valid witness must pass");
 
@@ -292,7 +290,7 @@ fn invariant_c1_witness_validity() {
     let bad_op = deposits_core::signing::sign_op(bad_proto, &attacker_sk)
         .expect("InvoiceLock signs via dep-17 preimage");
     let (_, bad_violations) = state
-        .apply_with_verifier(&bad_op, &CoreWitnessVerifier::new(0), &authorizer, 0)
+        .apply_with_verifier(&bad_op, &authorizer, 0)
         .unwrap();
     assert!(
         !bad_violations.is_empty(),
@@ -907,7 +905,7 @@ fn invariant_coverage_summary() {
     println!("  E3 SlashingDeterrence:   TESTED (model: collateral > theft)");
     println!("  E4 NegativeExpectedValue: TESTED (model: EV < 0 with detection)");
     println!("\nCryptographic:");
-    println!("  C1 WitnessValidity:      TESTED (CoreWitnessVerifier)");
+    println!("  C1 WitnessValidity:      TESTED (Dep16Authorizer)");
     println!("  C2 PaymentUniqueness:    TESTED (HashSet dedup)");
     println!("  C3 SignatureBinding:     TESTED (signing messages include context)");
     println!("  C4 NUMSPoint:            PARTIAL (needs BIP-341 audit)");

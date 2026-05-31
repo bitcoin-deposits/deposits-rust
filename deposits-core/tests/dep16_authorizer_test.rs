@@ -20,7 +20,7 @@ use bitcoin::PublicKey;
 use deposits_core::dep16::Dep16Authorizer;
 use deposits_core::dep16::{operations, EcdsaVerifier, Verifier};
 use deposits_protocol::messages::LedgerOperation;
-use deposits_protocol::types::{ConformanceViolation, DenyAll, DescriptorWitness, NoVerify};
+use deposits_protocol::types::{ConformanceViolation, DenyAll, DescriptorWitness};
 use deposits_protocol::{Deposit, LedgerState};
 
 fn keypair(seed: u8) -> (SecretKey, PublicKey) {
@@ -98,7 +98,7 @@ fn deposit_key_rotate_authorized_by_owner_signature() {
 
     let authorizer = Dep16Authorizer::new();
     let (next, violations) = state
-        .apply_with_verifier(&op, &NoVerify, &authorizer, 0)
+        .apply_with_verifier(&op, &authorizer, 0)
         .expect("apply must succeed");
 
     // No InvalidWitness for DepositKeyRotate. (Other violations — replay protection,
@@ -135,7 +135,7 @@ fn deposit_key_rotate_rejected_when_signed_by_wrong_key() {
 
     let authorizer = Dep16Authorizer::new();
     let (_, violations) = state
-        .apply_with_verifier(&op, &NoVerify, &authorizer, 0)
+        .apply_with_verifier(&op, &authorizer, 0)
         .expect("apply succeeds; the violation is in conformance");
 
     assert!(
@@ -178,7 +178,7 @@ fn signature_for_one_nonce_doesnt_authorize_another() {
 
     let authorizer = Dep16Authorizer::new();
     let (_, violations) = state
-        .apply_with_verifier(&op_replay, &NoVerify, &authorizer, 0)
+        .apply_with_verifier(&op_replay, &authorizer, 0)
         .expect("apply succeeds; the violation is in conformance");
 
     assert!(
@@ -209,7 +209,7 @@ fn allow_all_opt_out_accepts_rotation() {
     let op = signed_rotate(did, &new_desc, 1, &sk);
 
     let (_, violations) = state
-        .apply_with_verifier(&op, &NoVerify, &AllowAll, 0)
+        .apply_with_verifier(&op, &AllowAll, 0)
         .expect("apply succeeds");
     assert!(
         !violations.iter().any(|v| matches!(
@@ -277,7 +277,7 @@ fn threshold_rotation_two_of_three() {
         },
     };
     let (_, violations_ab) = state
-        .apply_with_verifier(&op_ab, &NoVerify, &authorizer, 0)
+        .apply_with_verifier(&op_ab, &authorizer, 0)
         .expect("apply must succeed");
     assert!(
         !violations_ab.iter().any(|v| matches!(
@@ -302,7 +302,7 @@ fn threshold_rotation_two_of_three() {
         },
     };
     let (_, violations_a) = state
-        .apply_with_verifier(&op_a_only, &NoVerify, &authorizer, 0)
+        .apply_with_verifier(&op_a_only, &authorizer, 0)
         .expect("apply succeeds; the violation is in conformance");
     assert!(
         violations_a.iter().any(|v| matches!(
@@ -358,7 +358,7 @@ fn state_with_descriptor(seed: u8) -> (LedgerState, [u8; 16], bitcoin::secp256k1
 fn assert_authorizer_accepts(state: &LedgerState, op: &LedgerOperation, op_label: &str) {
     let authorizer = Dep16Authorizer::new();
     let (_, violations) = state
-        .apply_with_verifier(op, &NoVerify, &authorizer, 0)
+        .apply_with_verifier(op, &authorizer, 0)
         .expect("apply succeeds; failure would be in conformance");
     let invalid_witness = violations.iter().any(|v| {
         matches!(

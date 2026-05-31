@@ -28,7 +28,6 @@ fn watcher_detects_over_reserve_credit() {
         let violations = watcher
             .apply_and_check(
                 &op,
-                &deposits_core::descriptor::CoreWitnessVerifier::new(0),
                 last_update.block_height,
             )
             .unwrap();
@@ -136,7 +135,6 @@ fn watcher_detects_bad_invoice_witness() {
         let violations = watcher
             .apply_and_check(
                 &op,
-                &deposits_core::descriptor::CoreWitnessVerifier::new(0),
                 last_update.block_height,
             )
             .unwrap();

@@ -572,9 +572,6 @@ impl Node {
                         // uses it for descriptor `after()` checks.
                         let violations = ledger.state.check_speculative(
                             &operation,
-                            &deposits_core::descriptor::CoreWitnessVerifier::new(
-                                current_block_height,
-                            ),
                             &deposits_core::dep16::Dep16Authorizer::new(),
                             current_block_height,
                         );

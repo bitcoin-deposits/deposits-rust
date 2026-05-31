@@ -559,13 +559,12 @@ fn replay_chain(
                 // verifies operator BIP-340 sig, cosig threshold,
                 // ledger_id derivation (seq-0), chain continuity, and
                 // runs the state-machine + conformance pipeline before
-                // mutating. chain_tip=0 in the verifier is the strict
-                // reading for a replay tool with no chain view of its
-                // own — descriptor after(N) checks resolve unsatisfiable.
-                let verifier =
-                    deposits_core::descriptor::CoreWitnessVerifier::new(0);
+                // mutating. The Dep16Authorizer with chain_tip=0
+                // is the strict reading for a replay tool with no
+                // chain view of its own — descriptor after(N) checks
+                // resolve unsatisfiable.
                 let authorizer = deposits_core::dep16::Dep16Authorizer::new();
-                match state.apply_signed(update, &verifier, &authorizer) {
+                match state.apply_signed(update, &authorizer) {
                     Ok(next) => {
                         state = next;
                     }

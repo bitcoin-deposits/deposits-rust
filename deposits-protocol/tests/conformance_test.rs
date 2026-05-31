@@ -5,7 +5,7 @@
 
 use deposits_protocol::messages::LedgerOperation;
 use deposits_protocol::types::{
-    compute_deposit_id, AllowAll, ConformanceViolation, FeeStructure, LedgerState, NoVerify,
+    compute_deposit_id, AllowAll, ConformanceViolation, FeeStructure, LedgerState,
     TransferFeeSchedule,
 };
 
@@ -63,7 +63,6 @@ fn credit_within_reserves_is_conforming() {
                 invoice_id: "test".to_string(),
                 sequence_number: 1,
             },
-            &NoVerify,
             &AllowAll,
             0,
         )
@@ -92,7 +91,6 @@ fn credit_exceeding_reserves_is_non_conforming() {
                 invoice_id: "test".to_string(),
                 sequence_number: 1,
             },
-            &NoVerify,
             &AllowAll,
             0,
         )
@@ -133,7 +131,6 @@ fn onchain_credit_exceeding_reserves_is_non_conforming() {
                 amount: 5_000_000,
                 funding_address: "bcrt1qfund".to_string(),
             },
-            &NoVerify,
             &AllowAll,
             0,
         )
@@ -162,7 +159,6 @@ fn multiple_credits_accumulate_correctly() {
                 invoice_id: "inv1".to_string(),
                 sequence_number: 1,
             },
-            &NoVerify,
             &AllowAll,
             0,
         )
@@ -179,7 +175,6 @@ fn multiple_credits_accumulate_correctly() {
                 invoice_id: "inv2".to_string(),
                 sequence_number: 2,
             },
-            &NoVerify,
             &AllowAll,
             0,
         )
@@ -219,7 +214,6 @@ fn deposit_open_is_conforming() {
                 fee_change_notice_blocks: None,
                 fee_change_limit_bps: None,
             },
-            &NoVerify,
             &AllowAll,
             0,
         )
@@ -256,7 +250,6 @@ fn fee_collect_is_conforming() {
                 amount: 1_000,
                 block_height: 2016,
             },
-            &NoVerify,
             &AllowAll,
             0,
         )

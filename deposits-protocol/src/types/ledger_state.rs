@@ -12,7 +12,7 @@ use bitcoin::secp256k1::PublicKey;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::conformance::{ConformanceViolation, WitnessVerifier};
+use super::conformance::ConformanceViolation;
 use super::core::*;
 use super::serde_helpers::*;
 
@@ -780,13 +780,12 @@ impl LedgerState {
     pub fn apply_with_verifier(
         &self,
         operation: &crate::messages::LedgerOperation,
-        verifier: &impl WitnessVerifier,
         authorizer: &impl crate::types::Authorizer,
         current_height: u32,
     ) -> crate::DepositsResult<(Self, Vec<ConformanceViolation>)> {
         let next = self.apply(operation)?;
         let violations =
-            next.check_conformance(operation, Some(self), verifier, authorizer, current_height);
+            next.check_conformance(operation, Some(self), authorizer, current_height);
         Ok((next, violations))
     }
 
@@ -813,7 +812,7 @@ impl LedgerState {
     ///    updates from the new custodian pass naturally.
     /// 4. Content integrity: `update.content_hash == update.compute_hash()`.
     /// 5. Operator BIP-340 Schnorr signature over `content_hash` by
-    ///    `operator_id` (routed via `verifier.verify_signature`).
+    ///    `operator_id` (delegated to `update.verify_operator_signature()`).
     /// 6. Cosig threshold: when `self.quorum_members` is non-empty (or
     ///    `self.next_quorum_members` for the first `QuorumBegin`),
     ///    `update.cosignatures` must hold valid sigs from a majority
@@ -829,7 +828,6 @@ impl LedgerState {
     pub fn apply_signed(
         &self,
         update: &crate::types::SignedLedgerUpdate,
-        verifier: &impl WitnessVerifier,
         authorizer: &impl crate::types::Authorizer,
     ) -> crate::DepositsResult<Self> {
         use crate::messages::LedgerOperation;
@@ -957,7 +955,7 @@ impl LedgerState {
             }
         })?;
         let (mut next, violations) =
-            self.apply_with_verifier(&op, verifier, authorizer, update.block_height)?;
+            self.apply_with_verifier(&op, authorizer, update.block_height)?;
         if let Some(v) = violations.first() {
             return Err(crate::DepositsError::ProtocolViolation {
                 violation_type: "conformance".to_string(),
@@ -994,13 +992,12 @@ impl LedgerState {
     pub fn check_speculative(
         &self,
         operation: &crate::messages::LedgerOperation,
-        verifier: &impl WitnessVerifier,
         authorizer: &impl crate::types::Authorizer,
         current_height: u32,
     ) -> Vec<ConformanceViolation> {
         match self.apply(operation) {
             Ok(next) => {
-                next.check_conformance(operation, Some(self), verifier, authorizer, current_height)
+                next.check_conformance(operation, Some(self), authorizer, current_height)
             }
             Err(e) => vec![ConformanceViolation::StateMachineRejected {
                 detail: format!("{:?}", e),
@@ -1019,7 +1016,6 @@ impl LedgerState {
         &self,
         operation: &crate::messages::LedgerOperation,
         pre_state: Option<&LedgerState>,
-        verifier: &impl WitnessVerifier,
         authorizer: &impl crate::types::Authorizer,
         current_height: u32,
     ) -> Vec<ConformanceViolation> {
@@ -1152,7 +1148,7 @@ impl LedgerState {
         // the post-rotation deposit becomes unspendable through the
         // normal authorization path.
         if let LedgerOperation::DepositKeyRotate { new_descriptor, .. } = operation {
-            if let Some(detail) = verifier.validate_descriptor(new_descriptor) {
+            if let Some(detail) = authorizer.validate_descriptor(new_descriptor) {
                 violations.push(ConformanceViolation::UnparseableDescriptor {
                     operation: "DepositKeyRotate",
                     detail,
@@ -1163,7 +1159,7 @@ impl LedgerState {
         // DepositOpen: the descriptor must parse and (if a quorum is
         // active) fit within the smallest member-declared size cap.
         if let LedgerOperation::DepositOpen { descriptor, .. } = operation {
-            if let Some(detail) = verifier.validate_descriptor(descriptor) {
+            if let Some(detail) = authorizer.validate_descriptor(descriptor) {
                 violations.push(ConformanceViolation::UnparseableDescriptor {
                     operation: "DepositOpen",
                     detail,
@@ -1371,7 +1367,7 @@ mod replay_protection_tests {
     use super::*;
     use crate::messages::LedgerOperation;
     use crate::types::{Authorizer, DescriptorWitness};
-    use crate::{Deposit, NoVerify};
+    use crate::Deposit;
 
     /// A no-op authorizer used so the nonce/expiry tests aren't entangled with
     /// descriptor authorization — those have their own coverage. (AllowAll is in
@@ -1425,7 +1421,7 @@ mod replay_protection_tests {
         current_height: u32,
     ) -> (LedgerState, Vec<ConformanceViolation>) {
         state
-            .apply_with_verifier(op, &NoVerify, &AllowAuthorizer, current_height)
+            .apply_with_verifier(op, &AllowAuthorizer, current_height)
             .expect("apply")
     }
 
