@@ -43,6 +43,8 @@
 
 pub mod error;
 pub mod handler;
+pub mod chain_backend;
+pub mod esplora_backend;
 pub mod ldk_cli;
 pub mod ledger_wallet;
 pub mod lightning_backend;

@@ -36,7 +36,7 @@ Skipped: **Flatpak / Snap** — wrong fit for server daemons.
 
 ## Tier plan
 
-### Tier 1: `LightningBackend` trait + impls
+### Tier 1a: `LightningBackend` trait + impls
 
 Extract the surface `ldk_cli.rs` already implements into a `LightningBackend` trait. Make the existing `LdkCli` the LDK impl. Add `LndBackend` (macaroon + REST/gRPC) and `ClnBackend` (Unix socket / gRPC). Wire the choice from config (`LIGHTNING_BACKEND=ldk|lnd|cln` env var) so a single image supports all three.
 
@@ -46,9 +46,27 @@ Acceptance: end-to-end integration test where deposits-node runs against a polar
 
 **Why this is Tier 1**: without it, the audience can't install — every Umbrel/Start9 user is bound to a specific LN backend and we only speak one. Structural unlock for all of Tier 2-4.
 
+### Tier 1b: `ChainBackend` trait + impls
+
+The mirror of Tier 1a for bitcoin chain data. Today the daemon constructs `EsploraBuilder::new(&url).build_blocking()` at ~14 sites in `wallet.rs` (plus a few in `ledger_wallet.rs` and `recovery.rs`) — hardcoded to the esplora HTTP API. Forces every operator to also run an esplora instance even when they already have `bitcoind` + electrs.
+
+`ChainBackend` trait covers the non-BDK-handled chain operations: `get_tip`, `get_tx`, `broadcast_tx`, `get_address_utxos`, `get_address_history`, `estimate_fee`. Impls:
+
+- `EsploraBackend` — current behaviour, wraps `esplora_client`.
+- `BitcoindRpcBackend` — direct `bitcoind` JSON-RPC. Uses `scantxoutset` for address scans, `gettransaction` for tx lookups, `sendrawtransaction` for broadcast, `estimatesmartfee` for fees. Natural fit for the audience: every Umbrel/Start9/self-host user already runs `bitcoind`.
+- `ElectrumBackend` — electrum protocol (electrs/fulcrum/electrum-server). Covers users who already have electrs running for other apps.
+
+Wired from config (`CHAIN_BACKEND=esplora|bitcoind|electrum` + per-backend connection env). Single image supports all three.
+
+**Subtlety**: BDK has its own chain-source abstraction (`bdk_esplora`, `bdk_bitcoind_rpc`, `bdk_electrum`) for the wallet **sync** path. So this trait sits *above* BDK for the operations BDK doesn't cover (broadcast, fetch-by-id, get-tip, fee-estimate), and *parallel to* BDK's chain sources for sync (each backend impl wires the matching BDK source). BDK stays in-process; this trait doesn't try to replace it.
+
+Acceptance: end-to-end integration test where deposits-node runs against a bare `bitcoind` (no esplora, no electrs) and successfully scans, broadcasts, and tracks UTXOs.
+
+**Why Tier 1b matters at the same priority as 1a**: without it, the docker-compose in Tier 2 still has to bundle esplora or document "first set up electrs separately," which fights the "slot in next to your existing stack" framing. Bigger surface than 1a (more call sites, BDK type-coupling), but same audience-payoff logic.
+
 ### Tier 2: Single-operator docker-compose
 
-New `deploy/operator/docker-compose.yml`. Two services: `deposits-node` and `deposits-signer`. Internal-only network between them; signer socket via a shared volume. External bitcoin RPC + LN backend configured via env (`BITCOIN_RPC_URL`, `LIGHTNING_BACKEND`, `LND_MACAROON_FILE`, etc.). No bundled bitcoind/electrs/grafana.
+New `deploy/operator/docker-compose.yml`. Two services: `deposits-node` and `deposits-signer`. Internal-only network between them; signer socket via a shared volume. External bitcoin RPC + LN backend configured via env (`CHAIN_BACKEND`, `BITCOIND_RPC_URL`, `LIGHTNING_BACKEND`, `LND_MACAROON_FILE`, etc.). No bundled bitcoind/electrs/grafana.
 
 Plus `deploy/operator/init.sh` — a setup wizard that:
 1. Generates or imports the operator seed (interactive confirmation)
@@ -100,7 +118,7 @@ Out of scope for "packaging the operator." Separate workstream targeting the dep
 
 ## Sequencing rationale
 
-- **Tier 1 first** — structural unlock; nothing else can ship without it.
+- **Tier 1a and 1b in parallel** — both are structural unlocks; nothing else can ship without them. 1a is smaller and validated first; 1b is bigger (more call sites, BDK type-coupling) but blocks Tier 2 just as hard.
 - **Tier 2 next** — packages Tier 1 for direct VPS install. Validates the single-operator deployment shape end-to-end.
 - **Tier 3 in parallel with Tier 2** — independent code path; can be developed concurrently. Blocks "real first operator deploys to mainnet" because they need to form a quorum somehow.
 - **Tier 4 after Tier 2** — mechanical wrap; ship once Tier 2 is solid.
@@ -112,18 +130,19 @@ Out of scope for "packaging the operator." Separate workstream targeting the dep
 These need product input before too much code lands:
 
 1. **LND-first vs CLN-first** for the second `LightningBackend` impl after LDK. Alby Hub uses LDK so the existing impl already covers that crowd. LND has the larger user base (Umbrel default, Start9 default); CLN is a smaller niche. Recommend LND.
-2. **Single image vs per-backend image** — Single image with all backends compiled in + runtime selection is simpler distribution (one `docker pull`). Per-backend images are smaller but multiply CI artifacts. Recommend single image; runtime cost of dead backends is negligible.
-3. **Umbrel first or Start9 first** — Umbrel has the larger user base, easier review (PR to a public repo). Start9 has a more polished package format (config schemas, action manifests) and better operator UX. Recommend Umbrel first to maximize reach; Start9 second to set the bar for polish.
-4. **Operator admin UI: build or fork** — Alby Hub's frontend is open source. Fork-and-adapt could save weeks vs greenfield. Recommend fork-and-adapt for the initial cut; rewrite later if scope diverges enough to make the fork untenable.
-5. **What's the "default cluster" for first-time operators?** — Tier 3's "private quorum with named pubkeys" assumes the operator knows other operators. For first deployments, do we run a "public matchmaking" service that lists operators looking for partners? Or do we punt that until there's enough operator density that they find each other organically? Recommend punt; document the manual flow in launch docs.
+2. **Bitcoind-first vs Electrum-first** for the second `ChainBackend` impl after Esplora. Direct bitcoind RPC fits the "I already have a full node" audience; electrum covers users who already run electrs (less common standalone, common as part of larger stacks). Recommend bitcoind.
+3. **Single image vs per-backend image** — Single image with all backends compiled in + runtime selection is simpler distribution (one `docker pull`). Per-backend images are smaller but multiply CI artifacts. Recommend single image; runtime cost of dead backends is negligible.
+4. **Umbrel first or Start9 first** — Umbrel has the larger user base, easier review (PR to a public repo). Start9 has a more polished package format (config schemas, action manifests) and better operator UX. Recommend Umbrel first to maximize reach; Start9 second to set the bar for polish.
+5. **Operator admin UI: build or fork** — Alby Hub's frontend is open source. Fork-and-adapt could save weeks vs greenfield. Recommend fork-and-adapt for the initial cut; rewrite later if scope diverges enough to make the fork untenable.
+6. **What's the "default cluster" for first-time operators?** — Tier 3's "private quorum with named pubkeys" assumes the operator knows other operators. For first deployments, do we run a "public matchmaking" service that lists operators looking for partners? Or do we punt that until there's enough operator density that they find each other organically? Recommend punt; document the manual flow in launch docs.
 
 ## Acceptance for "ready to recommend to the audience"
 
 A self-custody Bitcoiner who already runs Alby Hub on Umbrel should be able to:
 
 1. Click "Install" on the deposits app in Umbrel's community store.
-2. Complete a setup wizard that auto-detects their LN node and configures everything.
+2. Complete a setup wizard that auto-detects their LN node + bitcoind and configures everything.
 3. Form a quorum with 2-4 other operators (whose pubkeys they found via the project's launch docs).
 4. See their first depositor open a deposit, pay an invoice through their LN node, and credit the deposit balance.
 
-Tiers 1 through 4 are sufficient to make that path work end-to-end. Tier 5 makes step 4 onward a pleasant operating experience instead of a CLI ordeal.
+Tiers 1a + 1b + 2 + 3 + 4 are sufficient to make that path work end-to-end. Tier 5 makes step 4 onward a pleasant operating experience instead of a CLI ordeal.
