@@ -401,6 +401,16 @@ body.hide-amounts .amt { visibility: hidden; }
           <label>Alias</label>
           <input id="open-alias" type="text" placeholder="my-deposit">
         </div>
+        <div class="form-group">
+          <label style="display:flex; align-items:center; gap:8px; font-weight:normal;">
+            <input id="open-receive-requires-sig" type="checkbox">
+            Require my signature to receive funds
+          </label>
+          <small style="display:block; margin-top:4px; color:#666;">
+            When on, every inbound credit (invoice, on-chain, transfer) must
+            be authorized by the deposit key. Prevents unsolicited crediting.
+          </small>
+        </div>
         <button class="primary" onclick="doOpenDeposit()">Open Deposit</button>
       </div>
     </div>
@@ -911,6 +921,35 @@ function depositIdentity(d) {
   }
   const depositIdHex = d.deposit_id || bytesToHex(computeDepositIdFromDescriptor(descriptor));
   return { descriptor, depositIdHex };
+}
+
+// Build a `receive_witness` JSON for an owned deposit if it requires one;
+// returns null otherwise. The wallet signs the dep-17 receive-op preimage with
+// the deposit's key (the same key its `pk(K)` descriptor names). Wire format
+// documented in RECEIVE-WITNESS.md.
+//
+// `transfer_id` is `null` for invoice / on-chain offer creation, and a 32-byte
+// Uint8Array for transfer-release destination authorization (when the wallet
+// is acting as the receiver of an incoming transfer).
+function maybeBuildReceiveWitness(deposit, transfer_id) {
+  if (!deposit || !deposit.receive_requires_sig) return null;
+  const ident = depositIdentity(deposit);
+  if (!ident || deposit.key_index === undefined) {
+    log('receive_requires_sig set but deposit key missing; cannot sign', 'error');
+    return null;
+  }
+  const secretKey = deriveSecretKey(state.seed, deposit.key_index);
+  const publicKey = getCompressedPubkey(secretKey);
+  const op = dep17.buildReceiveOp({
+    deposit_id: hexToBytes(ident.depositIdHex),
+    nonce: dep17.freshOpNonce(),
+    // Phase 3 will add per-deposit nonce/expiry replay protection; until then
+    // expiry is just a forward-looking field. u32 max = "never expires" given
+    // node-side check is `expiry < tip` → false.
+    expiry: 0xFFFFFFFF,
+    transfer_id: transfer_id || undefined,
+  });
+  return dep17.signReceiveWitness(op, [{ secretKey, publicKey }]);
 }
 
 // ============================================================
@@ -2331,8 +2370,10 @@ window.doOpenDeposit = async function() {
     // Single-key wallet → pk(<pubkey>); multi-key would replace this line.
     const descriptor = `pk(${pubkeyHex})`;
     const depositIdHex = bytesToHex(computeDepositId(hexToBytes(pubkeyHex)));
+    const receiveRequiresSig = !!document.getElementById('open-receive-requires-sig')?.checked;
     const openParams = { descriptor };
     if (feeFixed || feeBps) { openParams.fee_fixed = feeFixed; openParams.fee_bps = feeBps; openParams.fee_frequency = feeFreq; }
+    if (receiveRequiresSig) openParams.receive_requires_sig = true;
     const openResponse = await sendRequest(ledgerId, 'deposit_open', openParams);
 
     if (!openResponse.success && !(openResponse.error || '').includes('already')) {
@@ -2360,6 +2401,7 @@ window.doOpenDeposit = async function() {
       key_index: keyIndex,
       status: 'pending',
       operator_name: operatorName,
+      receive_requires_sig: receiveRequiresSig,
     });
     state.keyIndex = keyIndex + 1;
     saveState();
@@ -3711,11 +3753,14 @@ window.doWalletRecvLightning = async function() {
     log(`Creating Lightning invoice for ₿${amount}...`);
     const ident = depositIdentity(deposit);
     if (!ident) { log('Deposit record missing descriptor/pubkey', 'error'); return; }
-    const response = await sendRequest(deposit.ledger_id, 'make_invoice', {
+    const params = {
       descriptor: ident.descriptor,
       amount_sats: amount,
       description: `Fund ${deposit.alias}`,
-    }, 60000);
+    };
+    const recv = maybeBuildReceiveWitness(deposit);
+    if (recv) params.receive_witness = recv;
+    const response = await sendRequest(deposit.ledger_id, 'make_invoice', params, 60000);
 
     if (response.success) {
       const r = response.result || response;
@@ -3772,13 +3817,16 @@ window.doWalletRecvOnchain = async function() {
 
     const ident = depositIdentity(deposit);
     if (!ident) { log('Deposit record missing descriptor/pubkey', 'error'); return; }
-    const response = await sendRequest(deposit.ledger_id, 'make_offer', {
+    const params = {
       descriptor: ident.descriptor,
       max_sats: amount,
       min_sats: Math.min(1000, Math.max(1, amount - 1)),
       blocks_valid: 144,
       fee_fixed: feeFixed, fee_bps: feeBps, fee_frequency: feeFreq,
-    }, 60000);
+    };
+    const recv = maybeBuildReceiveWitness(deposit);
+    if (recv) params.receive_witness = recv;
+    const response = await sendRequest(deposit.ledger_id, 'make_offer', params, 60000);
 
     if (response.success) {
       const r = response.result || response;
@@ -4473,7 +4521,7 @@ window.doAddOffer = async function() {
 
     const ident = depositIdentity(selectedDeposit);
     if (!ident) { log('Deposit record missing descriptor/pubkey', 'error'); return; }
-    const response = await sendRequest(selectedDeposit.ledger_id, 'make_offer', {
+    const params = {
       descriptor: ident.descriptor,
       max_sats: amount,
       min_sats: Math.min(1000, Math.max(1, amount - 1)),
@@ -4481,7 +4529,10 @@ window.doAddOffer = async function() {
       fee_fixed: feeFixed,
       fee_bps: feeBps,
       fee_frequency: feeFreq,
-    }, 60000);
+    };
+    const recv = maybeBuildReceiveWitness(selectedDeposit);
+    if (recv) params.receive_witness = recv;
+    const response = await sendRequest(selectedDeposit.ledger_id, 'make_offer', params, 60000);
 
     if (response.success) {
       const r = response.result || response;
@@ -4527,11 +4578,14 @@ window.doFundLightning = async function() {
     log(`Creating Lightning invoice for ₿${amount}...`);
     const ident = depositIdentity(selectedDeposit);
     if (!ident) { log('Deposit record missing descriptor/pubkey', 'error'); return; }
-    const response = await sendRequest(selectedDeposit.ledger_id, 'make_invoice', {
+    const params = {
       descriptor: ident.descriptor,
       amount_sats: amount,
       description: `Fund deposit ${selectedDeposit.alias}`,
-    }, 60000);
+    };
+    const recv = maybeBuildReceiveWitness(selectedDeposit);
+    if (recv) params.receive_witness = recv;
+    const response = await sendRequest(selectedDeposit.ledger_id, 'make_invoice', params, 60000);
 
     if (response.success) {
       const r = response.result || response;
@@ -5330,11 +5384,14 @@ window.doMakeInvoice = async function() {
   try {
     const ident = depositIdentity(deposit);
     if (!ident) { log('Deposit record missing descriptor/pubkey', 'error'); return; }
-    const response = await sendRequest(deposit.ledger_id, 'make_invoice', {
+    const params = {
       descriptor: ident.descriptor,
       amount_sats: amount,
       description: `Deposit to ${alias}`,
-    }, 60000);
+    };
+    const recv = maybeBuildReceiveWitness(deposit);
+    if (recv) params.receive_witness = recv;
+    const response = await sendRequest(deposit.ledger_id, 'make_invoice', params, 60000);
 
     if (response.success) {
       const r = response.result || response;
