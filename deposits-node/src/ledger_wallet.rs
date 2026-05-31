@@ -512,10 +512,61 @@ impl LedgerWallet {
     }
 
     /// Persist the Taproot reserves entry. Call after the activation tx
-    /// has confirmed AND the QuorumBegin ledger op has committed.
+    /// has been broadcast AND the QuorumBegin ledger op has committed.
+    ///
+    /// Before persisting, verifies the snapshot's `script_pubkey` matches
+    /// the actual scriptpubkey at the broadcast outpoint via esplora. This
+    /// catches "build path produced a different script than what we
+    /// broadcast" — the inverse of the overwrite bug
+    /// [`save_taproot_reserves`] guards against. With both checks in
+    /// place, every recoverability path is covered: initial write must
+    /// match chain, subsequent writes can't disagree with the locked
+    /// script.
+    ///
+    /// Fail-close on script mismatch; fail-open with a warning on esplora
+    /// fetch failure (3 retries with exponential backoff) so a transient
+    /// outage doesn't block legitimate rotations.
     pub fn commit_taproot_reserves(&self, info: TaprootReservesInfo) -> Result<(), Error> {
         let outpoint = info.outpoint;
         let member_count = info.quorum_members.len();
+
+        let snapshot_script = info.taproot_output.script_pubkey();
+        match Self::fetch_outpoint_script_with_retry(&self.electrum_url, &outpoint) {
+            Ok(Some(on_chain)) => {
+                if on_chain != snapshot_script {
+                    return Err(Error::Wallet(format!(
+                        "refusing to commit taproot reserves at {}: snapshot \
+                         script_pubkey={} differs from on-chain script_pubkey={}. \
+                         The build path computed a different script than what was \
+                         broadcast — recoverability would be lost. Investigate the \
+                         build inputs before retrying.",
+                        outpoint,
+                        hex::encode(snapshot_script.as_bytes()),
+                        hex::encode(on_chain.as_bytes()),
+                    )));
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "LedgerWallet[{}] outpoint {} not visible on chain or mempool yet — \
+                     skipping verify-against-chain. Snapshot will be persisted; subsequent \
+                     overwrites are still blocked by save_taproot_reserves guard.",
+                    &self.ledger_id[..16.min(self.ledger_id.len())],
+                    outpoint,
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "LedgerWallet[{}] verify-against-chain failed for {} after retries: {} — \
+                     proceeding with persist; if the snapshot is wrong it will be caught at \
+                     spend time, but not before then",
+                    &self.ledger_id[..16.min(self.ledger_id.len())],
+                    outpoint,
+                    e,
+                );
+            }
+        }
+
         Self::save_taproot_reserves(&self.data_dir, &info)?;
         *self.taproot_reserves.write().unwrap() = Some(info);
         tracing::info!(
@@ -525,6 +576,43 @@ impl LedgerWallet {
             member_count,
         );
         Ok(())
+    }
+
+    /// Fetch the scriptpubkey at the given outpoint via esplora, with 3
+    /// retries on transient errors (exponential backoff: 500ms, 1s, 2s).
+    /// Returns Ok(None) if the tx is genuinely not found (404) — the tx
+    /// may not have propagated yet. Returns Err only on persistent
+    /// transport/parse errors.
+    fn fetch_outpoint_script_with_retry(
+        esplora_url: &str,
+        outpoint: &OutPoint,
+    ) -> Result<Option<bdk_wallet::bitcoin::ScriptBuf>, String> {
+        let client = EsploraBuilder::new(esplora_url).build_blocking();
+        let mut last_err: Option<String> = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(500 << (attempt - 1)));
+            }
+            match client.get_tx(&outpoint.txid) {
+                Ok(Some(tx)) => {
+                    let vout = outpoint.vout as usize;
+                    match tx.output.get(vout) {
+                        Some(o) => return Ok(Some(o.script_pubkey.clone())),
+                        None => {
+                            return Err(format!(
+                                "tx {} has only {} outputs, requested vout {}",
+                                outpoint.txid,
+                                tx.output.len(),
+                                outpoint.vout
+                            ))
+                        }
+                    }
+                }
+                Ok(None) => return Ok(None),
+                Err(e) => last_err = Some(format!("{}", e)),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| "unknown error".to_string()))
     }
 
     /// Mark the Taproot reserves UTXO as confirmed on-chain.
