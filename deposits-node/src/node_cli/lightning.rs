@@ -110,7 +110,7 @@ async fn lightning_balance(_args: &[String]) -> Result<(), Box<dyn std::error::E
         balances.lightning_total_sats
     );
     // Anchor-channels reserve was LDK-specific and lived on the inherent
-    // LdkCli::Balances; the neutral LightningBackend::Balances drops it
+    // LdkBackend::Balances; the neutral LightningBackend::Balances drops it
     // (LND / CLN don't expose an equivalent). Use `deposits-node debug …`
     // if you need raw LDK fields.
     Ok(())

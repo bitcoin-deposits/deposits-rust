@@ -5,10 +5,12 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-//! LDK Server client for Lightning operations
+//! `LightningBackend` impl talking to LDK Server via `ldk-server-cli`.
 //!
-//! This module provides a client for ldk-server via the ldk-server-cli binary.
-//! The CLI handles the protobuf encoding and HMAC authentication required by ldk-server.
+//! Shells out to the `ldk-server-cli` binary for each operation; the CLI
+//! handles protobuf encoding and HMAC authentication against the ldk-server
+//! HTTP API. Sibling impls (`LndBackend`, `ClnBackend`) land per
+//! PACKAGING_PLAN.md Tier 1a; the trait surface stays unchanged.
 
 use serde::Deserialize;
 use std::process::Command;
@@ -17,7 +19,7 @@ use crate::Error;
 
 /// Configuration for connecting to an LDK server
 #[derive(Debug, Clone)]
-pub struct LdkCliConfig {
+pub struct LdkBackendConfig {
     /// Path to ldk-server-cli binary
     pub cli_path: String,
     /// LDK server host
@@ -30,7 +32,7 @@ pub struct LdkCliConfig {
     pub tls_cert: Option<String>,
 }
 
-impl Default for LdkCliConfig {
+impl Default for LdkBackendConfig {
     fn default() -> Self {
         Self {
             cli_path: std::env::var("LDK_CLI").unwrap_or_else(|_| "ldk-server-cli".to_string()),
@@ -49,7 +51,7 @@ impl Default for LdkCliConfig {
     }
 }
 
-impl LdkCliConfig {
+impl LdkBackendConfig {
     /// Create from environment variables
     pub fn from_env() -> Self {
         Self::default()
@@ -57,19 +59,19 @@ impl LdkCliConfig {
 }
 
 /// LDK Server client - uses ldk-server-cli binary
-pub struct LdkCli {
-    config: LdkCliConfig,
+pub struct LdkBackend {
+    config: LdkBackendConfig,
 }
 
-impl LdkCli {
+impl LdkBackend {
     /// Create a new LDK client
-    pub fn new(config: LdkCliConfig) -> Self {
+    pub fn new(config: LdkBackendConfig) -> Self {
         Self { config }
     }
 
     /// Create from environment variables
     pub fn from_env() -> Self {
-        Self::new(LdkCliConfig::from_env())
+        Self::new(LdkBackendConfig::from_env())
     }
 
     /// Run CLI command and return the JSON output
@@ -411,7 +413,7 @@ pub struct PaymentInfo {
 // `LightningBackend` trait declares. See deposits-node/src/lightning_backend.rs
 // for the design rationale; per PACKAGING_PLAN.md Tier 1 this is the first
 // of three backends (LDK, LND, CLN) the daemon will eventually swap between
-// at startup. The inherent methods on `LdkCli` stay so existing callers
+// at startup. The inherent methods on `LdkBackend` stay so existing callers
 // don't break; the trait impl just forwards and converts.
 
 use crate::lightning_backend::{
@@ -419,7 +421,7 @@ use crate::lightning_backend::{
     NodeInfo as BackendNodeInfo, PaymentInfo as BackendPaymentInfo, PaymentStatus,
 };
 
-impl LightningBackend for LdkCli {
+impl LightningBackend for LdkBackend {
     fn get_node_info(&self) -> Result<BackendNodeInfo, Error> {
         let info = self.get_node_info()?;
         Ok(BackendNodeInfo {
@@ -439,7 +441,7 @@ impl LightningBackend for LdkCli {
     }
 
     fn create_invoice(&self, amount_msat: u64, description: &str) -> Result<String, Error> {
-        LdkCli::create_invoice(self, amount_msat, description)
+        LdkBackend::create_invoice(self, amount_msat, description)
     }
 
     fn create_invoice_with_desc_hash(
@@ -447,15 +449,15 @@ impl LightningBackend for LdkCli {
         amount_msat: u64,
         desc_hash_hex: &str,
     ) -> Result<String, Error> {
-        LdkCli::create_invoice_with_desc_hash(self, amount_msat, desc_hash_hex)
+        LdkBackend::create_invoice_with_desc_hash(self, amount_msat, desc_hash_hex)
     }
 
     fn create_invoice_any_amount(&self, description: &str) -> Result<String, Error> {
-        LdkCli::create_invoice_any_amount(self, description)
+        LdkBackend::create_invoice_any_amount(self, description)
     }
 
     fn pay_invoice(&self, invoice: &str) -> Result<String, Error> {
-        LdkCli::pay_invoice(self, invoice)
+        LdkBackend::pay_invoice(self, invoice)
     }
 
     fn pay_invoice_with_amount(
@@ -463,11 +465,11 @@ impl LightningBackend for LdkCli {
         invoice: &str,
         amount_msat: u64,
     ) -> Result<String, Error> {
-        LdkCli::pay_invoice_with_amount(self, invoice, amount_msat)
+        LdkBackend::pay_invoice_with_amount(self, invoice, amount_msat)
     }
 
     fn list_channels(&self) -> Result<Vec<BackendChannelInfo>, Error> {
-        let resp = LdkCli::list_channels(self)?;
+        let resp = LdkBackend::list_channels(self)?;
         Ok(resp
             .channels
             .into_iter()
@@ -484,7 +486,7 @@ impl LightningBackend for LdkCli {
     }
 
     fn list_payments(&self) -> Result<Vec<BackendPaymentInfo>, Error> {
-        let resp = LdkCli::list_payments(self)?;
+        let resp = LdkBackend::list_payments(self)?;
         Ok(resp
             .payments
             .into_iter()
@@ -505,7 +507,7 @@ impl LightningBackend for LdkCli {
         &self,
         payment_id_hex: &str,
     ) -> Result<Option<[u8; 32]>, Error> {
-        LdkCli::get_payment_preimage(self, payment_id_hex)
+        LdkBackend::get_payment_preimage(self, payment_id_hex)
     }
 }
 
@@ -515,16 +517,16 @@ mod tests {
 
     #[test]
     fn test_config_from_env() {
-        let config = LdkCliConfig::default();
+        let config = LdkBackendConfig::default();
         assert_eq!(config.port, 3000);
     }
 
-    /// Compile-time check: `LdkCli` actually satisfies the
+    /// Compile-time check: `LdkBackend` actually satisfies the
     /// `LightningBackend` trait. If the trait or impl drifts, this fails
     /// to type-check before runtime exercises it.
     #[test]
-    fn ldk_cli_implements_lightning_backend() {
+    fn ldk_backend_implements_lightning_backend() {
         fn assert_backend<T: LightningBackend>() {}
-        assert_backend::<LdkCli>();
+        assert_backend::<LdkBackend>();
     }
 }

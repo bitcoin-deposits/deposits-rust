@@ -6,7 +6,7 @@ use super::super::*;
 impl Node {
     /// Process a make_invoice request - create Lightning invoice for deposit credit
     ///
-    /// Uses LdkCli to talk to the ldk-server sidecar (same as `deposits-node lightning invoice`)
+    /// Uses LdkBackend to talk to the ldk-server sidecar (same as `deposits-node lightning invoice`)
     ///
     /// Params:
     /// - descriptor: full miniscript expression that pays out the deposit, OR
@@ -349,7 +349,7 @@ impl Node {
 
     /// Process a pay_invoice request - pay Lightning invoice from deposit
     ///
-    /// Uses LdkCli to talk to the ldk-server sidecar (same as `deposits-node lightning pay`)
+    /// Uses LdkBackend to talk to the ldk-server sidecar (same as `deposits-node lightning pay`)
     ///
     /// Params:
     /// - descriptor: full miniscript expression that pays out the deposit
@@ -626,7 +626,7 @@ impl Node {
             }
         }
 
-        // Pay invoice via LdkCli, then wait synchronously for LDK to
+        // Pay invoice via LdkBackend, then wait synchronously for LDK to
         // settle. We return one Kind 20102 carrying the actual outcome
         // — preimage on success, error on failure — so the wallet
         // doesn't have to poll Kind 9100 ledger updates to learn what

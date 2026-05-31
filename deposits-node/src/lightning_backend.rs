@@ -1,13 +1,13 @@
 //! Pluggable Lightning backend.
 //!
-//! Today's `deposits-node` calls `ldk-server-cli` directly from `ldk_cli.rs`,
+//! Today's `deposits-node` calls `ldk-server-cli` directly from `ldk_backend.rs`,
 //! which means the audience of operators who run LND or CLN (or any non-LDK
 //! Lightning daemon) can't install us. This module is the structural fix:
 //! a trait that captures every Lightning operation the daemon currently
 //! performs, with implementations swappable at runtime via config.
 //!
 //! Per [PACKAGING_PLAN.md](../../PACKAGING_PLAN.md) Tier 1: the trait
-//! lands first, [`crate::ldk_cli::LdkCli`] becomes the first impl, then
+//! lands first, [`crate::ldk_backend::LdkBackend`] becomes the first impl, then
 //! `LndBackend` / `ClnBackend` follow as separate commits without touching
 //! the trait surface.
 //!
@@ -29,7 +29,7 @@
 //! ## Sync vs async
 //!
 //! Every method is synchronous because every current caller is synchronous;
-//! `ldk_cli.rs` blocks on a subprocess. When a future async-native backend
+//! `ldk_backend.rs` blocks on a subprocess. When a future async-native backend
 //! lands (e.g. an LND gRPC client), it either blocks on its own tokio
 //! runtime (the [`crate::remote_signer::RemoteSigner`] pattern) or this
 //! trait grows an async variant. Today async would be premature.
@@ -172,14 +172,14 @@ pub enum PaymentStatus {
 ///
 /// Reads per-backend config from env too — the LDK backend uses
 /// `LDK_CLI`, `LDK_HOST`, `LDK_PORT`, `LDK_API_KEY` (see
-/// [`crate::ldk_cli::LdkCliConfig::from_env`]).
+/// [`crate::ldk_backend::LdkBackendConfig::from_env`]).
 pub fn from_env() -> Box<dyn LightningBackend> {
     match std::env::var("LIGHTNING_BACKEND")
         .ok()
         .as_deref()
         .unwrap_or("ldk")
     {
-        "ldk" => Box::new(crate::ldk_cli::LdkCli::from_env()),
+        "ldk" => Box::new(crate::ldk_backend::LdkBackend::from_env()),
         other => panic!(
             "LIGHTNING_BACKEND={:?} not implemented. Supported: \"ldk\" \
              (lnd / cln land in follow-on commits per PACKAGING_PLAN.md Tier 1a).",
