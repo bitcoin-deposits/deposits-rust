@@ -36,9 +36,9 @@ pub use types::{
     AllowAll, AuditResult, Authorizer, ChannelId, CommitmentExtraOutput, ConformanceViolation,
     CrossLedgerViolation, DenyAll, Deposit, DepositId, DepositInfo, DepositOffer,
     DepositOfferStatus, DescriptorWitness, DisputeState, FeeStructure, Invoice, InvoiceInfo,
-    LedgerState, LedgerStateUpdate, LedgerUpdate, NoVerify, OnChainWithdrawal,
+    LedgerState, LedgerStateUpdate, LedgerUpdate, OnChainWithdrawal,
     OnChainWithdrawalStatus, PendingInvoice, PendingTransfer, QuorumJoinRequestMsg,
     QuorumJoinResponseMsg, QuorumState, QuorumVoteMsg, ReservesOutput, ReservesStatus,
     SignedLedgerUpdate, SignedLedgerUpdateLog, TransferFeeSchedule, Violation,
-    WithdrawalCompleteResult, WithdrawalLockResult, WitnessVerifier,
+    WithdrawalCompleteResult, WithdrawalLockResult,
 };

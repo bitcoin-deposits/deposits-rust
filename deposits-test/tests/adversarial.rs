@@ -19,7 +19,7 @@ use deposits_core::ledger::Ledger;
 use deposits_test::*;
 use deposits_protocol::messages::LedgerOperation;
 use deposits_protocol::types::{
-    compute_deposit_id, ConformanceViolation, DisputeState, FeeStructure, NoVerify, QuorumState,
+    compute_deposit_id, ConformanceViolation, DisputeState, FeeStructure, QuorumState,
 };
 use deposits_protocol::TlvDecode;
 

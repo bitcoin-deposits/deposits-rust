@@ -7,10 +7,6 @@
 
 //! Conformance checking types and traits.
 
-use bitcoin::secp256k1::PublicKey;
-
-use super::core::DescriptorWitness;
-
 // ============================================================================
 // Conformance Checking
 // ============================================================================
@@ -163,70 +159,16 @@ impl std::fmt::Display for ConformanceViolation {
     }
 }
 
-/// Trait for verifying witnesses and signatures during ledger state application.
+/// Authorization surface for descriptor evaluation. The protocol layer
+/// declares the trait; deposits-core's `Dep16Authorizer` provides the real
+/// impl via the dep-16 calculus (descriptor → typed operation → ledger state
+/// → keyed witness → verdict).
 ///
-/// deposits-protocol defines the interface; deposits-core provides the real
-/// implementation using miniscript descriptors and secp256k1 verification.
-pub trait WitnessVerifier {
-    /// Verify a descriptor witness against a message hash.
-    fn verify_witness(
-        &self,
-        descriptor: &str,
-        witness: &DescriptorWitness,
-        message_hash: &[u8; 32],
-    ) -> bool;
-
-    /// Verify a 64-byte Schnorr/ECDSA signature.
-    fn verify_signature(
-        &self,
-        pubkey: &PublicKey,
-        message: &[u8; 32],
-        signature: &[u8; 64],
-    ) -> bool;
-
-    /// Check that a descriptor string parses as miniscript. Returns
-    /// `None` if parseable; `Some(detail)` with a human-readable
-    /// error otherwise. Used by `check_conformance` to surface
-    /// `UnparseableDescriptor` on `DepositOpen`/`DepositKeyRotate`
-    /// without pulling the `miniscript` crate into `deposits-protocol`.
-    fn validate_descriptor(&self, descriptor: &str) -> Option<String> {
-        // Default: accept everything. The protocol-layer NoVerify
-        // ships this; deposits-core overrides with a real check.
-        let _ = descriptor;
-        None
-    }
-}
-
-/// No-op verifier that accepts all witnesses and signatures.
-/// Used when conformance checking without cryptographic verification
-/// (e.g., in protocol-layer tests or lightweight replay).
-pub struct NoVerify;
-
-impl WitnessVerifier for NoVerify {
-    fn verify_witness(&self, _: &str, _: &DescriptorWitness, _: &[u8; 32]) -> bool {
-        true
-    }
-    fn verify_signature(&self, _: &PublicKey, _: &[u8; 32], _: &[u8; 64]) -> bool {
-        true
-    }
-}
-
-/// dep-16 authorization surface. Replaces [`WitnessVerifier`] for ops that flow
-/// through the dep-16 evaluator (descriptor → typed operation → ledger state →
-/// keyed witness → verdict). Currently used by `DepositKeyRotate`'s conformance
-/// check; the four lock-side variants (`InvoiceLock`, `OnchainLock`,
-/// `TransferLock`, and `TransferRelease`'s release-descriptor) move to it in
-/// phase 5 as the operation-mapping translation gains coverage. After phase 6,
-/// `WitnessVerifier` is removed and `Authorizer` is the sole authorization
-/// trait the protocol declares.
-///
-/// Distinct from `WitnessVerifier` in three ways: (a) the message a signature
-/// commits to is the dep-17 operation preimage rather than a per-operation
-/// signing-helper digest; (b) the witness is interpreted in the dep-16 keyed
-/// sense (signatures keyed by pubkey, preimages by hash) rather than as a
-/// positional byte stack; (c) descriptor evaluation can read ledger state via
-/// the dep-16 LedgerState surface rather than only timelock-vs-height. See
-/// PLAN-dep16-integration.md phase 4.
+/// The message a signature commits to is the dep-17 operation preimage. The
+/// witness is interpreted in the dep-16 keyed sense (signatures keyed by
+/// pubkey, preimages by hash) rather than as a positional byte stack.
+/// Descriptor evaluation can read ledger state via the dep-16 LedgerState
+/// surface rather than only timelock-vs-height.
 pub trait Authorizer {
     /// Authorize an operation by evaluating its dep-16 form against the named
     /// descriptor. Returns `true` iff the operation's embedded witness
@@ -242,11 +184,10 @@ pub trait Authorizer {
         operation: &crate::messages::LedgerOperation,
     ) -> bool;
 
-    /// Same role as [`WitnessVerifier::validate_descriptor`]: parse-check a
-    /// descriptor string, returning `None` if parseable and `Some(detail)`
-    /// otherwise. Used to fail unparseable descriptors at admission rather
-    /// than at first authorization. Default accepts everything (matching the
-    /// `NoVerify` shape).
+    /// Parse-check a descriptor string, returning `None` if parseable and
+    /// `Some(detail)` otherwise. Used to fail unparseable descriptors at
+    /// admission rather than at first authorization. Default accepts
+    /// everything.
     fn validate_descriptor(&self, descriptor: &str) -> Option<String> {
         let _ = descriptor;
         None
