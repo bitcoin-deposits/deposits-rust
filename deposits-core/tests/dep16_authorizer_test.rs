@@ -474,3 +474,244 @@ fn dep17_invoice_lock_sighash_pinned() {
         "dep-17 sighash drifted — update deposits-web/wallet/vendor/dep17.js too",
     );
 }
+
+// ============================================================================
+// authorize_receive — unit tests for the receive-side dep-16 auth gate.
+//
+// Wire format documented in RECEIVE-WITNESS.md at the workspace root.
+// Production callers: `verify_receive_witness` in deposits-node/src/node/
+// request_handlers/deposits.rs and the destination check in
+// request_handlers/transfer.rs.
+// ============================================================================
+
+mod authorize_receive {
+    use super::*;
+    use bitcoin::secp256k1::Message;
+    use deposits_core::dep16::operations::receive_op_sighash;
+    use deposits_core::dep16::ReceiveWitness;
+    use std::collections::BTreeMap;
+
+    /// Sign `sighash` with `sk` and return the 64-byte compact ECDSA encoding,
+    /// hex-encoded as the wire format wants it.
+    fn sign(sk: &SecretKey, sighash: &[u8; 32]) -> String {
+        let secp = Secp256k1::new();
+        let sig = secp.sign_ecdsa(&Message::from_digest(*sighash), sk);
+        hex::encode(sig.serialize_compact())
+    }
+
+    fn one_sig(pk: PublicKey, sig_hex: String) -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        m.insert(hex::encode(pk.to_bytes()), sig_hex);
+        m
+    }
+
+    /// Happy path: single-key descriptor, signature over the canonical receive_op
+    /// preimage → authorize_receive returns true.
+    #[test]
+    fn happy_path_single_key() {
+        let (sk, pk) = keypair(0x11);
+        let descriptor = format!("wsh(prove(pk({})))", pk);
+        let did = [0xCC; 16];
+        let nonce = 1;
+        let expiry = u32::MAX;
+
+        let sighash = receive_op_sighash(&did, nonce, expiry, None);
+        let witness = ReceiveWitness {
+            nonce,
+            expiry,
+            signatures: one_sig(pk, sign(&sk, &sighash)),
+        };
+
+        let auth = Dep16Authorizer::new();
+        assert!(auth.authorize_receive(&descriptor, &did, None, &witness));
+    }
+
+    /// A signature from a key the descriptor doesn't reference is rejected.
+    /// (Specifically: the descriptor expects pk(K), but the witness carries a
+    /// signature keyed to K' ≠ K.)
+    #[test]
+    fn wrong_key_rejected() {
+        let (_, owner_pk) = keypair(0x11);
+        let (attacker_sk, attacker_pk) = keypair(0x22);
+        let descriptor = format!("wsh(prove(pk({})))", owner_pk);
+        let did = [0xCC; 16];
+        let nonce = 1;
+        let expiry = u32::MAX;
+
+        let sighash = receive_op_sighash(&did, nonce, expiry, None);
+        let witness = ReceiveWitness {
+            nonce,
+            expiry,
+            signatures: one_sig(attacker_pk, sign(&attacker_sk, &sighash)),
+        };
+
+        let auth = Dep16Authorizer::new();
+        assert!(!auth.authorize_receive(&descriptor, &did, None, &witness));
+    }
+
+    /// Cross-deposit replay: a signature made over the preimage for deposit A
+    /// must not authorize a receive to deposit B. `deposit_id` is bound into
+    /// the preimage.
+    #[test]
+    fn cross_deposit_replay_rejected() {
+        let (sk, pk) = keypair(0x11);
+        let descriptor = format!("wsh(prove(pk({})))", pk);
+        let did_a = [0xAA; 16];
+        let did_b = [0xBB; 16];
+
+        let sighash = receive_op_sighash(&did_a, 1, u32::MAX, None);
+        let witness = ReceiveWitness {
+            nonce: 1,
+            expiry: u32::MAX,
+            signatures: one_sig(pk, sign(&sk, &sighash)),
+        };
+
+        let auth = Dep16Authorizer::new();
+        assert!(
+            auth.authorize_receive(&descriptor, &did_a, None, &witness),
+            "sanity: witness must authorize against the deposit it was signed for"
+        );
+        assert!(
+            !auth.authorize_receive(&descriptor, &did_b, None, &witness),
+            "same witness against a different deposit_id must be rejected"
+        );
+    }
+
+    /// Replaying a witness with a different nonce in the body is rejected — the
+    /// node reconstructs the preimage from the witness's stated nonce, so the
+    /// signature has to match.
+    #[test]
+    fn nonce_mismatch_rejected() {
+        let (sk, pk) = keypair(0x11);
+        let descriptor = format!("wsh(prove(pk({})))", pk);
+        let did = [0xCC; 16];
+
+        // Sign for nonce=1, but advertise nonce=2 in the witness. The node
+        // builds the preimage with nonce=2 and the signature doesn't match.
+        let sighash_signed_for = receive_op_sighash(&did, 1, u32::MAX, None);
+        let witness = ReceiveWitness {
+            nonce: 2,
+            expiry: u32::MAX,
+            signatures: one_sig(pk, sign(&sk, &sighash_signed_for)),
+        };
+
+        let auth = Dep16Authorizer::new();
+        assert!(!auth.authorize_receive(&descriptor, &did, None, &witness));
+    }
+
+    /// Cross-transfer replay: a signature made for transfer T1's release must
+    /// not authorize T2's release, even on the same deposit.
+    #[test]
+    fn cross_transfer_replay_rejected() {
+        let (sk, pk) = keypair(0x11);
+        let descriptor = format!("wsh(prove(pk({})))", pk);
+        let did = [0xCC; 16];
+        let transfer_a = [0xAA; 32];
+        let transfer_b = [0xBB; 32];
+
+        let sighash = receive_op_sighash(&did, 1, u32::MAX, Some(&transfer_a));
+        let witness = ReceiveWitness {
+            nonce: 1,
+            expiry: u32::MAX,
+            signatures: one_sig(pk, sign(&sk, &sighash)),
+        };
+
+        let auth = Dep16Authorizer::new();
+        assert!(
+            auth.authorize_receive(&descriptor, &did, Some(&transfer_a), &witness),
+            "sanity: witness must authorize against the transfer it was signed for"
+        );
+        assert!(
+            !auth.authorize_receive(&descriptor, &did, Some(&transfer_b), &witness),
+            "same witness against a different transfer_id must be rejected"
+        );
+    }
+
+    /// Adding a transfer_id where the original signed without one (and vice
+    /// versa) is also rejected — the args set is part of the preimage.
+    #[test]
+    fn transfer_id_presence_matters() {
+        let (sk, pk) = keypair(0x11);
+        let descriptor = format!("wsh(prove(pk({})))", pk);
+        let did = [0xCC; 16];
+        let transfer_id = [0xAA; 32];
+
+        // Signed WITHOUT transfer_id.
+        let sighash = receive_op_sighash(&did, 1, u32::MAX, None);
+        let witness = ReceiveWitness {
+            nonce: 1,
+            expiry: u32::MAX,
+            signatures: one_sig(pk, sign(&sk, &sighash)),
+        };
+
+        let auth = Dep16Authorizer::new();
+        assert!(
+            !auth.authorize_receive(&descriptor, &did, Some(&transfer_id), &witness),
+            "no-transfer signature against transfer-bearing receive must be rejected"
+        );
+    }
+
+    /// 2-of-3 threshold descriptor: any two signatures authorize; one alone
+    /// doesn't.
+    #[test]
+    fn threshold_two_of_three() {
+        let (sk_a, pk_a) = keypair(0x11);
+        let (sk_b, pk_b) = keypair(0x22);
+        let (_, pk_c) = keypair(0x33);
+
+        // pk_threshold(2, [a, b, c]) under wsh(prove(...))
+        let descriptor = format!(
+            "wsh(prove(pk_threshold(2, [{}, {}, {}])))",
+            pk_a, pk_b, pk_c
+        );
+        let did = [0xCC; 16];
+        let nonce = 1;
+        let expiry = u32::MAX;
+        let sighash = receive_op_sighash(&did, nonce, expiry, None);
+
+        // Two-signer witness (a + b) authorizes.
+        let two_sig_witness = ReceiveWitness {
+            nonce,
+            expiry,
+            signatures: {
+                let mut m = BTreeMap::new();
+                m.insert(hex::encode(pk_a.to_bytes()), sign(&sk_a, &sighash));
+                m.insert(hex::encode(pk_b.to_bytes()), sign(&sk_b, &sighash));
+                m
+            },
+        };
+        let auth = Dep16Authorizer::new();
+        assert!(
+            auth.authorize_receive(&descriptor, &did, None, &two_sig_witness),
+            "2 of 3 signatures must satisfy pk_threshold(2, ...)"
+        );
+
+        // One-signer witness (a alone) does not.
+        let one_sig_witness = ReceiveWitness {
+            nonce,
+            expiry,
+            signatures: one_sig(pk_a, sign(&sk_a, &sighash)),
+        };
+        assert!(
+            !auth.authorize_receive(&descriptor, &did, None, &one_sig_witness),
+            "1 of 3 signatures must not satisfy pk_threshold(2, ...)"
+        );
+    }
+
+    /// Malformed hex (wrong length signature) is rejected without crashing.
+    #[test]
+    fn malformed_signature_rejected() {
+        let (_, pk) = keypair(0x11);
+        let descriptor = format!("wsh(prove(pk({})))", pk);
+        let did = [0xCC; 16];
+
+        let witness = ReceiveWitness {
+            nonce: 1,
+            expiry: u32::MAX,
+            signatures: one_sig(pk, "deadbeef".to_string()), // way too short
+        };
+
+        let auth = Dep16Authorizer::new();
+        assert!(!auth.authorize_receive(&descriptor, &did, None, &witness));
+    }
+}
