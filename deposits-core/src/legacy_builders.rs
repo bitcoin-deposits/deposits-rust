@@ -17,6 +17,40 @@
 //! Why "frozen": once a version is in here, its behaviour MUST NEVER change.
 //! Otherwise we'd silently lose access to vault outputs we previously
 //! identified by their script bytes. Pinned-fixture tests assert this.
+//!
+//! # Freeze-first protocol (mandatory for any breaking change)
+//!
+//! When you change `TapscriptReservesBuilder` in a way that alters the
+//! script bytes for any input set, the snapshot test
+//! [`crate::tapscript_reserves::frozen_builder_snapshot`] will fail. Before
+//! fixing the test by updating the expected hash:
+//!
+//! 1. **Freeze the PRE-CHANGE behaviour here.** Add a new submodule
+//!    `v_YYYY_MM_DD` (today's UTC date) that reproduces the exact behaviour
+//!    of the builder as it stood BEFORE your change. Use [`v_2026_04_17`]
+//!    as a template — copy its build/leaf/spendinfo functions verbatim
+//!    from the current `tapscript_reserves.rs`.
+//! 2. **Pin a fixture test for the new submodule.** Mirror
+//!    [`tests::v_2026_04_17_pinned_snowden_fixture`]: pick a real input
+//!    set, run the frozen builder, assert the resulting address byte-for-
+//!    byte. This test guards against future drift OF THE FROZEN VERSION.
+//! 3. **Then, and only then, update the snapshot test's expected hash** in
+//!    `tapscript_reserves.rs` to your new behaviour.
+//!
+//! If you skip steps 1–2, on-chain UTXOs built by the pre-change builder
+//! become unrecoverable: `migrate-snapshot` will have no way to identify
+//! which historical version produced them, and `legacy-recover`'s
+//! bisection will return no match. This is exactly the trap the 2026-05-01
+//! deployment fell into (3 operators, ~144k sats stuck for ~4 weeks);
+//! the freeze-first protocol is the structural guard against repeat.
+//!
+//! # Naming
+//!
+//! - `v_YYYY_MM_DD` — UTC date of the LAST DAY the version was in force
+//!   on `main` (i.e. the day before your breaking change lands). Same
+//!   format `v_2026_04_17` uses.
+//! - One submodule per breaking change. Avoid umbrella names like
+//!   "v_legacy" — specific dates make bisection cheap.
 
 use crate::tapscript_reserves::VoterSet;
 use bitcoin::{

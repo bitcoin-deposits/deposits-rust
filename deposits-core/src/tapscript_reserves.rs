@@ -2622,3 +2622,95 @@ mod tests {
         }
     }
 }
+
+/// Frozen-builder enforcement: a snapshot test against a canonical input
+/// set. If the current `TapscriptReservesBuilder` produces a script that
+/// doesn't match `EXPECTED_CURRENT_SCRIPT_HEX`, this test fails — and the
+/// failure means a behaviour change that, if shipped, would silently
+/// strand any on-chain UTXOs previously built by this code path.
+///
+/// The freeze-first protocol on failure is documented in
+/// [`crate::legacy_builders`]. The short version: before updating the
+/// expected hex below, copy the CURRENT behaviour into a new
+/// `v_YYYY_MM_DD` submodule in `legacy_builders.rs` with its own pinned
+/// fixture test, so future migrations can identify and spend UTXOs from
+/// the old code path.
+///
+/// The canonical inputs mirror snowden's recorded snapshot, so the same
+/// (operator, members, ledger_hash) feed both this test and the
+/// `v_2026_04_17_pinned_snowden_fixture` test in `legacy_builders` —
+/// the two together pin "old behaviour" and "current behaviour" side
+/// by side.
+#[cfg(test)]
+mod frozen_builder_snapshot {
+    use super::*;
+    use bitcoin::Network;
+    use std::str::FromStr;
+
+    /// scriptPubKey hex produced by the current `TapscriptReservesBuilder`
+    /// for the canonical input set below.
+    ///
+    /// **DO NOT update this constant in isolation.** If a code change moves
+    /// this hash, the freeze-first protocol applies:
+    ///
+    ///   1. Identify the PRE-CHANGE script bytes (this constant's current
+    ///      value, or `git show HEAD~1:deposits-core/src/tapscript_reserves.rs`).
+    ///   2. In `deposits-core/src/legacy_builders.rs`, add a new submodule
+    ///      `v_YYYY_MM_DD` (today's date) that REPRODUCES the pre-change
+    ///      behaviour exactly. Use `v_2026_04_17` as a template.
+    ///   3. Add a pinned-fixture test in `legacy_builders.rs` asserting the
+    ///      new submodule produces the pre-change script.
+    ///   4. ONLY THEN update this constant to the new behaviour.
+    ///
+    /// Skipping steps 1-3 means future on-chain UTXOs built by the old code
+    /// become unspendable by `migrate-snapshot` / `legacy-recover`.
+    const EXPECTED_CURRENT_SCRIPT_HEX: &str =
+        "5120b62884a295859784cbb9ae10e517be37b83c3184eb258d320fa2b1cae51c2255";
+
+    #[test]
+    fn current_builder_matches_pinned_snapshot() {
+        let operator = PublicKey::from_str(
+            "02b017e1288da93b90d9ca139d9fdb3310c4ba65d451803875471c2b6d57a4520f",
+        )
+        .unwrap();
+        let members: Vec<PublicKey> = [
+            "0206c4db20bda97893e99f843b0acf6bd61624baa09c72536841a974230f1e4995",
+            "036cba47c801a59c0792fd4a214ec6b37eb6f206a5be68a9d87064d5f89fd8a777",
+            "02208787bb5c2d2428d4055d353d4656642be7ef6550a3240b2063b4c073d8ae1a",
+        ]
+        .into_iter()
+        .map(|s| PublicKey::from_str(s).unwrap())
+        .collect();
+        let voter_set = VoterSet::new(operator, members.clone());
+        let ledger_hash: [u8; 32] = hex::decode(
+            "7fc25d5245e7003be4f1c4138fbf608bf0ecbb4eca7be4954529d42168473b76",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let config = ThresholdConfig::default_for_voter_count(members.len() + 1);
+        let builder = TapscriptReservesBuilder::new(
+            voter_set,
+            config,
+            Network::Bitcoin,
+            ledger_hash,
+        );
+        let out = builder.build().expect("build current");
+        let actual = hex::encode(out.script_pubkey().as_bytes());
+        assert_eq!(
+            actual, EXPECTED_CURRENT_SCRIPT_HEX,
+            "\n\nTapscriptReservesBuilder output CHANGED for the canonical inputs.\n\
+             \n\
+             If this is intentional, follow the freeze-first protocol:\n\
+             \n\
+               1. cp v_2026_04_17 → v_<today> in deposits-core/src/legacy_builders.rs,\n\
+                  reproducing the PRE-CHANGE behaviour exactly.\n\
+               2. Add a pinned-fixture test in legacy_builders.rs.\n\
+               3. Then update EXPECTED_CURRENT_SCRIPT_HEX above to: {}\n\
+             \n\
+             Skipping steps 1-2 means on-chain UTXOs built before this commit\n\
+             become unspendable by migrate-snapshot / legacy-recover.\n",
+            actual
+        );
+    }
+}
