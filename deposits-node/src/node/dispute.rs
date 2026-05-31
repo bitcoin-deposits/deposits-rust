@@ -2531,8 +2531,7 @@ impl Node {
         };
         let confs = match self
             .wallet
-            .get_outpoint_value_and_confs(outpoint.txid, outpoint.vout)
-            .await?
+            .get_outpoint_value_and_confs(outpoint.txid, outpoint.vout)?
         {
             Some((_value, c)) => c,
             None => return Ok(false),

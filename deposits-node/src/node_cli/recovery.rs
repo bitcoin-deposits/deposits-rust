@@ -16,7 +16,6 @@ use deposits_core::{SignedLedgerUpdate, TlvDecode, TlvEncode};
 use crate::nostr::{NostrTransportBuilder, KIND_LEDGER_DISPUTE, KIND_LEDGER_UPDATE};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use bdk_esplora::esplora_client::Builder as EsploraBuilder;
 use nostr_sdk::prelude::*;
 use tokio::sync::Mutex;
 
@@ -1074,9 +1073,8 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
         &original_operator.to_string()[..16]
     );
 
-    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora
-        .get_height()
+    let current_block_height = crate::chain_backend::from_env(&config.electrum_url)
+        .get_tip_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     let initiation_block = current_block_height;
@@ -1263,9 +1261,8 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
         our_armed.sequence_number
     );
 
-    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora
-        .get_height()
+    let current_block_height = crate::chain_backend::from_env(&config.electrum_url)
+        .get_tip_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     let custody_release = LedgerOperation::DisputeYield;
@@ -1539,9 +1536,8 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
     hash_input.extend_from_slice(&message_bytes);
     let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
-    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora
-        .get_height()
+    let current_block_height = crate::chain_backend::from_env(&config.electrum_url)
+        .get_tip_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     let update_msg = format!(
@@ -1727,9 +1723,8 @@ pub async fn recovery_rebuild_quorum_add(
         our_latest.sequence_number
     );
 
-    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora
-        .get_height()
+    let current_block_height = crate::chain_backend::from_env(&config.electrum_url)
+        .get_tip_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     let operation = LedgerOperation::QuorumAddMember {
@@ -2064,9 +2059,8 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("  Found {} updates from you", our_updates.len());
     println!("  Latest sequence: {}", latest.sequence_number);
 
-    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora
-        .get_height()
+    let current_block_height = crate::chain_backend::from_env(&config.electrum_url)
+        .get_tip_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     // Generate random preimage (17-20 bytes for lottery entropy)
@@ -2127,9 +2121,9 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
             let txid_obj = bitcoin::Txid::from_raw_hash(
                 bitcoin::hashes::Hash::from_byte_array(txid_bytes),
             );
-            let tx = esplora
+            let tx = crate::chain_backend::from_env(&config.electrum_url)
                 .get_tx(&txid_obj)
-                .map_err(|e| format!("Failed to fetch declared UTXO tx: {:?}", e))?
+                .map_err(|e| format!("Failed to fetch declared UTXO tx: {}", e))?
                 .ok_or_else(|| format!("declared UTXO tx {} not on-chain", txid_obj))?;
             let output = tx
                 .output
@@ -2369,9 +2363,8 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         );
     }
 
-    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora
-        .get_height()
+    let current_block_height = crate::chain_backend::from_env(&config.electrum_url)
+        .get_tip_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     let earliest_armed = candidates.iter().map(|(_, b, _)| *b).min().unwrap();
@@ -2391,9 +2384,9 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    let entropy_block_hash_hex = esplora
+    let entropy_block_hash_hex = crate::chain_backend::from_env(&config.electrum_url)
         .get_block_hash(entropy_block_height)
-        .map_err(|e| format!("Failed to get entropy block hash: {:?}", e))?;
+        .map_err(|e| format!("Failed to get entropy block hash: {}", e))?;
     let entropy_block_hash: [u8; 32] = {
         let hash_bytes = entropy_block_hash_hex.to_byte_array();
         let mut reversed = hash_bytes;
@@ -2686,13 +2679,12 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
         deposits_core::types::compute_deposit_id(&descriptor)
     });
 
-    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-    let current_block_height = esplora
-        .get_height()
+    let current_block_height = crate::chain_backend::from_env(&config.electrum_url)
+        .get_tip_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
-    let block_hash_hex = esplora
+    let block_hash_hex = crate::chain_backend::from_env(&config.electrum_url)
         .get_block_hash(current_block_height)
-        .map_err(|e| format!("Failed to get block hash: {:?}", e))?;
+        .map_err(|e| format!("Failed to get block hash: {}", e))?;
     let block_hash: [u8; 32] = {
         let hash_bytes = block_hash_hex.to_byte_array();
         let mut reversed = hash_bytes;
@@ -3047,42 +3039,19 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     println!("  Lottery address: {}", lottery_output.address);
 
     // Look up reserves UTXO
-    use bdk_esplora::esplora_client::Builder as EsploraBuilder;
-    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-
     let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = reserves_address_str
         .parse()
         .map_err(|e| format!("Invalid reserves address: {}", e))?;
     let reserves_addr = reserves_addr
         .require_network(config.network)
         .map_err(|e| format!("Address network mismatch: {}", e))?;
-
     let script_pubkey = reserves_addr.script_pubkey();
-    let utxos = esplora
-        .scripthash_txs(&script_pubkey, None)
-        .map_err(|e| format!("Failed to query Esplora: {:?}", e))?;
-
-    // Find unspent output
-    let mut reserves_utxo: Option<(bitcoin::OutPoint, u64)> = None;
-    for tx in &utxos {
-        for (vout, output) in tx.vout.iter().enumerate() {
-            if output.scriptpubkey == script_pubkey {
-                let outpoint = bitcoin::OutPoint::new(tx.txid, vout as u32);
-                let status = esplora
-                    .get_output_status(&tx.txid, vout as u64)
-                    .map_err(|e| format!("Failed to check output status: {:?}", e))?;
-                if status.map(|s| !s.spent).unwrap_or(true) {
-                    reserves_utxo = Some((outpoint, output.value));
-                    break;
-                }
-            }
-        }
-        if reserves_utxo.is_some() {
-            break;
-        }
-    }
-
-    let (reserves_outpoint, reserves_amount) = reserves_utxo.ok_or("No unspent reserves found")?;
+    let utxo = crate::chain_backend::from_env(&config.electrum_url)
+        .find_unspent_output_at(script_pubkey.as_script())
+        .map_err(|e| format!("Failed to query chain backend: {}", e))?;
+    let (reserves_outpoint, reserves_amount) = utxo
+        .map(|u| (u.outpoint, u.value_sats))
+        .ok_or("No unspent reserves found")?;
 
     println!(
         "  Found reserves: {} sats at {}",
@@ -3916,39 +3885,15 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     );
 
     // Find the lottery UTXO on-chain
-    use bdk_esplora::esplora_client::Builder as EsploraBuilder;
-    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-
     let lottery_script = lottery_output.address.script_pubkey();
-
-    // Query for transactions at the lottery address
-    let txs = esplora
-        .scripthash_txs(&lottery_script, None)
-        .map_err(|e| format!("Failed to query lottery address: {:?}", e))?;
-
-    // Find unspent output
-    let mut lottery_utxo: Option<(bitcoin::OutPoint, u64)> = None;
-    for tx in &txs {
-        for (vout, output) in tx.vout.iter().enumerate() {
-            if output.scriptpubkey == lottery_script {
-                let outpoint = bitcoin::OutPoint::new(tx.txid, vout as u32);
-                let status = esplora
-                    .get_output_status(&tx.txid, vout as u64)
-                    .map_err(|e| format!("Failed to check output status: {:?}", e))?;
-                if status.map(|s| !s.spent).unwrap_or(true) {
-                    lottery_utxo = Some((outpoint, output.value));
-                    break;
-                }
-            }
-        }
-        if lottery_utxo.is_some() {
-            break;
-        }
-    }
-
-    let (lottery_outpoint, lottery_amount) = lottery_utxo.ok_or(
-        "No unspent UTXO found at lottery address. Was confiscation transaction confirmed?",
-    )?;
+    let utxo = crate::chain_backend::from_env(&config.electrum_url)
+        .find_unspent_output_at(lottery_script.as_script())
+        .map_err(|e| format!("Failed to query lottery address: {}", e))?;
+    let (lottery_outpoint, lottery_amount) = utxo
+        .map(|u| (u.outpoint, u.value_sats))
+        .ok_or(
+            "No unspent UTXO found at lottery address. Was confiscation transaction confirmed?",
+        )?;
 
     println!(
         "  Found lottery UTXO: {} ({} sats)",
@@ -4171,12 +4116,13 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     let our_armed = our_armed.ok_or("Could not find our DisputeArmed update")?;
 
     // Get current block for entropy reference
-    let current_block_height = esplora
-        .get_height()
-        .map_err(|e| format!("Failed to get block height: {:?}", e))?;
-    let current_block_hash = esplora
+    let backend = crate::chain_backend::from_env(&config.electrum_url);
+    let current_block_height = backend
+        .get_tip_height()
+        .map_err(|e| format!("Failed to get block height: {}", e))?;
+    let current_block_hash = backend
         .get_block_hash(current_block_height)
-        .map_err(|e| format!("Failed to get block hash: {:?}", e))?;
+        .map_err(|e| format!("Failed to get block hash: {}", e))?;
     let current_block_hash: [u8; 32] = *current_block_hash.as_ref();
 
     // Create DisputeAcquire operation
@@ -4269,7 +4215,6 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
 pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use crate::nostr::NostrTransportBuilder;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-    use bdk_esplora::esplora_client::Builder as EsploraBuilder;
     use bitcoin::hashes::{sha256, Hash};
     use bitcoin::secp256k1::{Keypair, PublicKey, Secp256k1};
     use bitcoin::{Amount, ScriptBuf, Transaction, TxIn, TxOut, Witness};
@@ -4419,8 +4364,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     println!("  Quorum members: {}", quorum_members.len());
 
     // Find the UTXO at current_reserves_address
-    let esplora = EsploraBuilder::new(&config.electrum_url).build_blocking();
-
+    let backend = crate::chain_backend::from_env(&config.electrum_url);
     let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
         current_reserves_address
             .parse()
@@ -4428,34 +4372,13 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     let reserves_addr = reserves_addr
         .require_network(config.network)
         .map_err(|e| format!("Address network mismatch: {}", e))?;
-
     let script_pubkey = reserves_addr.script_pubkey();
-    let txs = esplora
-        .scripthash_txs(&script_pubkey, None)
-        .map_err(|e| format!("Failed to query address: {:?}", e))?;
-
-    // Find unspent output
-    let mut reserves_utxo: Option<(bitcoin::OutPoint, u64)> = None;
-    for tx in &txs {
-        for (vout, output) in tx.vout.iter().enumerate() {
-            if output.scriptpubkey == script_pubkey {
-                let outpoint = bitcoin::OutPoint::new(tx.txid, vout as u32);
-                let status = esplora
-                    .get_output_status(&tx.txid, vout as u64)
-                    .map_err(|e| format!("Failed to check output status: {:?}", e))?;
-                if status.map(|s| !s.spent).unwrap_or(true) {
-                    reserves_utxo = Some((outpoint, output.value));
-                    break;
-                }
-            }
-        }
-        if reserves_utxo.is_some() {
-            break;
-        }
-    }
-
-    let (reserves_outpoint, reserves_amount) =
-        reserves_utxo.ok_or("No unspent UTXO found at reserves address")?;
+    let utxo = backend
+        .find_unspent_output_at(script_pubkey.as_script())
+        .map_err(|e| format!("Failed to query chain backend: {}", e))?;
+    let (reserves_outpoint, reserves_amount) = utxo
+        .map(|u| (u.outpoint, u.value_sats))
+        .ok_or("No unspent UTXO found at reserves address")?;
 
     println!(
         "  Found UTXO: {} ({} sats)",
@@ -4470,9 +4393,9 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     // QuorumBegin operation written after the rotation TX confirms.
     // Both must use the same value or the on-chain script and the
     // ledger record diverge.
-    let pre_rotation_height = esplora
-        .get_height()
-        .map_err(|e| format!("Failed to get block height: {:?}", e))?;
+    let pre_rotation_height = backend
+        .get_tip_height()
+        .map_err(|e| format!("Failed to get block height: {}", e))?;
     let quorum_expiry = pre_rotation_height + 144;
 
     // Build Taproot quorum address. `recovery rotate-to-quorum` is a
@@ -4578,12 +4501,12 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     let txid_bytes: [u8; 32] = *rotation_txid.as_ref();
 
     // Get current block height for quorum_expiry calculation
-    let current_block_height = esplora
-        .get_height()
-        .map_err(|e| format!("Failed to get block height: {:?}", e))?;
-    let current_block_hash = esplora
+    let current_block_height = backend
+        .get_tip_height()
+        .map_err(|e| format!("Failed to get block height: {}", e))?;
+    let current_block_hash = backend
         .get_block_hash(current_block_height)
-        .map_err(|e| format!("Failed to get block hash: {:?}", e))?;
+        .map_err(|e| format!("Failed to get block hash: {}", e))?;
     let block_hash: [u8; 32] = *current_block_hash.as_ref();
 
     let quorum_size = (quorum_members.len() + 1) as u8;

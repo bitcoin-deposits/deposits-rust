@@ -627,7 +627,6 @@ impl Node {
                         match self
                             .wallet
                             .get_outpoint_value_and_confs(txid, *new_outpoint_vout)
-                            .await
                         {
                             Ok(Some((value_sats, confs))) => {
                                 if value_sats != expected_sats {

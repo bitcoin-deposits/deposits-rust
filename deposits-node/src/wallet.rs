@@ -197,37 +197,29 @@ impl Wallet {
     /// Phase 4 simultaneously) saturated the runtime worker pool and
     /// caused the 5s cosign deadline to time out across the cluster
     /// — even when the operator's electrs already saw the tx confirmed.
-    /// Fetch a transaction from esplora by txid. Returns `None` if the
-    /// txid isn't on-chain (or in mempool). Used by fraud-proof verifiers
+    /// Fetch a transaction from the chain backend by txid. Returns `None` if
+    /// the txid isn't on-chain (or in mempool). Used by fraud-proof verifiers
     /// that need the raw TX bytes (e.g., `WinnerCollateralDeviation`).
-    pub async fn get_transaction(
+    ///
+    /// Was async (used `build_async`) before the ChainBackend migration;
+    /// now sync because the trait is sync (every backend impl blocks on
+    /// HTTP/RPC anyway). Callers that were awaiting can drop `.await`.
+    pub fn get_transaction(
         &self,
         txid: bitcoin::Txid,
     ) -> Result<Option<bitcoin::Transaction>, Error> {
-        let client = EsploraBuilder::new(&self.electrum_url)
-            .build_async()
-            .map_err(|e| Error::Wallet(format!("Failed to build esplora client: {}", e)))?;
-        client
-            .get_tx(&txid)
-            .await
-            .map_err(|e| Error::Wallet(format!("Failed to fetch tx: {}", e)))
+        crate::chain_backend::from_env(&self.electrum_url).get_tx(&txid)
     }
 
-    pub async fn get_outpoint_value_and_confs(
+    pub fn get_outpoint_value_and_confs(
         &self,
         txid: bitcoin::Txid,
         vout: u32,
     ) -> Result<Option<(u64, u32)>, Error> {
-        let client = EsploraBuilder::new(&self.electrum_url)
-            .build_async()
-            .map_err(|e| Error::Wallet(format!("Failed to build esplora client: {}", e)))?;
+        let backend = crate::chain_backend::from_env(&self.electrum_url);
 
         // Transaction lookup — None if the tx doesn't exist on-chain yet.
-        let tx = match client
-            .get_tx(&txid)
-            .await
-            .map_err(|e| Error::Wallet(format!("Failed to fetch tx: {}", e)))?
-        {
+        let tx = match backend.get_tx(&txid)? {
             Some(t) => t,
             None => return Ok(None),
         };
@@ -238,31 +230,23 @@ impl Wallet {
         };
         let value_sats = output.value.to_sat();
 
-        // Check unspent.
-        let spent = client
-            .get_output_status(&txid, vout as u64)
-            .await
-            .map_err(|e| Error::Wallet(format!("Failed to get output status: {}", e)))?
-            .map(|s| s.spent)
-            .unwrap_or(false);
-        if spent {
+        // Check unspent. is_output_unspent returns Some(true) for unspent,
+        // Some(false) for spent, None for unknown (treat as unspent — the
+        // tx exists per the get_tx above, so the output exists too).
+        let unspent = backend
+            .is_output_unspent(&txid, vout)?
+            .unwrap_or(true);
+        if !unspent {
             return Ok(None);
         }
 
-        // Confirmation depth. A TxStatus without a block_height means
-        // mempool / unconfirmed → 0 confirmations.
-        let status = client
-            .get_tx_status(&txid)
-            .await
-            .map_err(|e| Error::Wallet(format!("Failed to get tx status: {}", e)))?;
-        let tx_height = match status.block_height {
+        // Confirmation depth. None block height means mempool / unconfirmed
+        // → 0 confirmations.
+        let tx_height = match backend.get_tx_block_height(&txid)? {
             Some(h) => h,
             None => return Ok(Some((value_sats, 0))),
         };
-        let tip = client
-            .get_height()
-            .await
-            .map_err(|e| Error::Wallet(format!("Failed to get chain tip: {}", e)))?;
+        let tip = backend.get_tip_height()?;
         // Tip - tx_height + 1 (a tx in the tip block itself is 1 confirmation).
         let confs = tip.saturating_sub(tx_height).saturating_add(1);
         Ok(Some((value_sats, confs)))
@@ -270,16 +254,9 @@ impl Wallet {
 
     /// Fetch current block info from esplora and update cache
     pub fn fetch_block_info(&self) -> Result<(u32, [u8; 32]), Error> {
-        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
-
-        let height = client
-            .get_height()
-            .map_err(|e| Error::Wallet(format!("Failed to get block height: {}", e)))?;
-
-        let hash = client
-            .get_block_hash(height)
-            .map_err(|e| Error::Wallet(format!("Failed to get block hash: {}", e)))?;
-
+        let backend = crate::chain_backend::from_env(&self.electrum_url);
+        let height = backend.get_tip_height()?;
+        let hash = backend.get_block_hash(height)?;
         let hash_bytes: [u8; 32] = *hash.as_ref();
 
         *self.block_height.lock().unwrap() = height;
@@ -319,12 +296,11 @@ impl Wallet {
     /// reject on `None`, so the conservative failure mode is "not
     /// confirmed" rather than crashing the verifier.
     pub fn confirms_block(&self, block_hash: &[u8; 32]) -> Option<u32> {
-        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
         let bh = bitcoin::BlockHash::from_byte_array(*block_hash);
-        match client.get_block_status(&bh) {
-            Ok(status) if status.in_best_chain => status.height,
-            _ => None,
-        }
+        crate::chain_backend::from_env(&self.electrum_url)
+            .get_block_height_if_in_best_chain(&bh)
+            .ok()
+            .flatten()
     }
 
     /// Get the wallet balance (non-reserves funds)
@@ -374,18 +350,12 @@ impl Wallet {
     /// Lightweight sync: just update block height and hash (2 HTTP requests).
     /// Call this frequently (e.g. every 5s) to keep block info fresh.
     pub fn sync_block_height(&self) -> Result<(), Error> {
-        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
-
-        let height = client
-            .get_height()
-            .map_err(|e| Error::Wallet(format!("Failed to get block height: {}", e)))?;
-
+        let backend = crate::chain_backend::from_env(&self.electrum_url);
+        let height = backend.get_tip_height()?;
         *self.block_height.lock().unwrap() = height;
-
-        if let Ok(hash) = client.get_block_hash(height) {
+        if let Ok(hash) = backend.get_block_hash(height) {
             *self.block_hash.lock().unwrap() = *hash.as_ref();
         }
-
         tracing::debug!("Block height synced: {}", height);
         Ok(())
     }
@@ -466,13 +436,7 @@ impl Wallet {
     /// BDK uses it to order conflicting unconfirmed txs (later-seen
     /// wins). Real wall-clock now() is the right value here.
     pub fn broadcast(&self, tx: &Transaction) -> Result<Txid, Error> {
-        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
-
-        client
-            .broadcast(tx)
-            .map_err(|e| Error::Wallet(format!("Broadcast failed: {}", e)))?;
-
-        let txid = tx.compute_txid();
+        let txid = crate::chain_backend::from_env(&self.electrum_url).broadcast_tx(tx)?;
         tracing::info!("Broadcast tx: {}", txid);
 
         // Stamp the tx into BDK's mempool view immediately. The lock is
@@ -498,58 +462,9 @@ impl Wallet {
         &self,
         script: &bitcoin::ScriptBuf,
     ) -> Result<Option<(OutPoint, u64)>, Error> {
-        use bitcoin::hashes::{sha256, Hash};
-
-        // Compute the scripthash in non-reversed format for esplora API.
-        // The esplora-client library's scripthash_txs uses bitcoin's {:x}
-        // format which is byte-reversed, but electrs expects the non-reversed
-        // SHA256 hash.  Query the API directly instead.
-        let script_hash = sha256::Hash::hash(script.as_bytes());
-        let script_hash_hex = hex::encode(script_hash.to_byte_array());
-
-        let url = format!("{}/scripthash/{}/txs", self.electrum_url, script_hash_hex);
-
-        let http = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| Error::Wallet(format!("Failed to create HTTP client: {}", e)))?;
-
-        let response = http
-            .get(&url)
-            .send()
-            .map_err(|e| Error::Wallet(format!("Failed to query esplora: {}", e)))?;
-
-        if !response.status().is_success() {
-            return Err(Error::Wallet(format!(
-                "Esplora returned status {}: {}",
-                response.status(),
-                response
-                    .text()
-                    .unwrap_or_else(|_| "unknown error".to_string())
-            )));
-        }
-
-        let txs: Vec<bdk_esplora::esplora_client::Tx> = response
-            .json()
-            .map_err(|e| Error::Wallet(format!("Failed to parse esplora response: {}", e)))?;
-
-        let esplora = EsploraBuilder::new(&self.electrum_url).build_blocking();
-
-        for tx in &txs {
-            for (vout, output) in tx.vout.iter().enumerate() {
-                if &output.scriptpubkey == script {
-                    let outpoint = OutPoint::new(tx.txid, vout as u32);
-                    let status = esplora
-                        .get_output_status(&tx.txid, vout as u64)
-                        .map_err(|e| Error::Wallet(format!("Failed to check output: {:?}", e)))?;
-                    if status.map(|s| !s.spent).unwrap_or(true) {
-                        return Ok(Some((outpoint, output.value)));
-                    }
-                }
-            }
-        }
-
-        Ok(None)
+        let utxo = crate::chain_backend::from_env(&self.electrum_url)
+            .find_unspent_output_at(script.as_script())?;
+        Ok(utxo.map(|u| (u.outpoint, u.value_sats)))
     }
 
     /// Send an on-chain withdrawal with OP_RETURN commitment
@@ -688,12 +603,7 @@ impl Wallet {
             .map_err(|e| Error::Wallet(format!("Failed to extract withdrawal tx: {}", e)))?;
 
         // Broadcast the transaction
-        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
-        client
-            .broadcast(&tx)
-            .map_err(|e| Error::Wallet(format!("Failed to broadcast withdrawal: {}", e)))?;
-
-        let txid = tx.compute_txid();
+        let txid = crate::chain_backend::from_env(&self.electrum_url).broadcast_tx(&tx)?;
         tracing::info!(
             "Broadcast withdrawal tx: {} (amount: {} sats, op_return: {})",
             txid,
@@ -712,66 +622,19 @@ impl Wallet {
         &self,
         address: &Address<bitcoin::address::NetworkUnchecked>,
     ) -> Result<Option<(String, u64)>, Error> {
-        use bitcoin::hashes::{sha256, Hash};
-
-        // Get the script pubkey for this address
-        // Use assume_checked() since we trust addresses from our deposit offers
         let address_checked = address.clone().assume_checked();
         let script_pubkey = address_checked.script_pubkey();
-
-        // Compute the scripthash in non-reversed format for esplora API
-        // Note: The esplora-client library uses bitcoin's {:x} format which is byte-reversed,
-        // but electrs expects the non-reversed SHA256 hash.
-        let script_hash = sha256::Hash::hash(script_pubkey.as_bytes());
-        let hash_bytes = script_hash.to_byte_array();
-        let script_hash_hex = hex::encode(hash_bytes);
-
-        // Query esplora directly with correct hash format
-        let url = format!("{}/scripthash/{}/txs", self.electrum_url, script_hash_hex);
-
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| Error::Wallet(format!("Failed to create HTTP client: {}", e)))?;
-
-        let response = client
-            .get(&url)
-            .send()
-            .map_err(|e| Error::Wallet(format!("Failed to query esplora: {}", e)))?;
-
-        if !response.status().is_success() {
-            return Err(Error::Wallet(format!(
-                "Esplora returned status {}: {}",
-                response.status(),
-                response
-                    .text()
-                    .unwrap_or_else(|_| "unknown error".to_string())
-            )));
-        }
-
-        // Parse the JSON response
-        let txs: Vec<bdk_esplora::esplora_client::Tx> = response
-            .json()
-            .map_err(|e| Error::Wallet(format!("Failed to parse esplora response: {}", e)))?;
-
-        // Look for confirmed transactions that have outputs to this address
-        for tx in txs {
-            // Find outputs that match our address
-            for (vout, output) in tx.vout.iter().enumerate() {
-                if output.scriptpubkey == script_pubkey {
-                    // Found a matching output
-                    tracing::info!(
-                        "Found funding tx {} vout {} with {} sats",
-                        tx.txid,
-                        vout,
-                        output.value
-                    );
-                    return Ok(Some((tx.txid.to_string(), output.value)));
-                }
-            }
-        }
-
-        Ok(None)
+        let utxo = crate::chain_backend::from_env(&self.electrum_url)
+            .find_unspent_output_at(script_pubkey.as_script())?;
+        Ok(utxo.map(|u| {
+            tracing::info!(
+                "Found funding tx {} vout {} with {} sats",
+                u.outpoint.txid,
+                u.outpoint.vout,
+                u.value_sats
+            );
+            (u.outpoint.txid.to_string(), u.value_sats)
+        }))
     }
 
     /// Create a mock wallet for testing. Used by both in-crate unit

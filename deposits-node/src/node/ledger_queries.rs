@@ -2607,7 +2607,7 @@ async fn wait_for_outpoint_confs(
     let start = std::time::Instant::now();
     let poll_interval = std::time::Duration::from_secs(3);
     loop {
-        match wallet.get_outpoint_value_and_confs(txid, vout).await {
+        match wallet.get_outpoint_value_and_confs(txid, vout) {
             Ok(Some((_, confs))) if confs >= required => {
                 tracing::debug!(
                     "Outpoint {}:{} reached {} confirmations (required {})",

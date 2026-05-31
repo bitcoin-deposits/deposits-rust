@@ -587,13 +587,13 @@ impl LedgerWallet {
         esplora_url: &str,
         outpoint: &OutPoint,
     ) -> Result<Option<bdk_wallet::bitcoin::ScriptBuf>, String> {
-        let client = EsploraBuilder::new(esplora_url).build_blocking();
+        let backend = crate::chain_backend::from_env(esplora_url);
         let mut last_err: Option<String> = None;
         for attempt in 0..3 {
             if attempt > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(500 << (attempt - 1)));
             }
-            match client.get_tx(&outpoint.txid) {
+            match backend.get_tx(&outpoint.txid) {
                 Ok(Some(tx)) => {
                     let vout = outpoint.vout as usize;
                     match tx.output.get(vout) {
@@ -640,11 +640,7 @@ impl LedgerWallet {
     /// subsequent build_tx on this wallet won't re-pick the same
     /// inputs.
     pub fn broadcast(&self, tx: &Transaction) -> Result<Txid, Error> {
-        let client = EsploraBuilder::new(&self.electrum_url).build_blocking();
-        client
-            .broadcast(tx)
-            .map_err(|e| Error::Wallet(format!("ledger wallet broadcast: {}", e)))?;
-        let txid = tx.compute_txid();
+        let txid = crate::chain_backend::from_env(&self.electrum_url).broadcast_tx(tx)?;
 
         let last_seen = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

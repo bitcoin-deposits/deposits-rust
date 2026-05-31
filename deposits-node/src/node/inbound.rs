@@ -1223,7 +1223,6 @@ impl Node {
         let claim_tx = self
             .wallet
             .get_transaction(claim_txid)
-            .await
             .map_err(|e| format!("fetch claim TX: {}", e))?
             .ok_or_else(|| format!("claim TX {} not on-chain", claim_txid))?;
         // Lottery output value: read it off input 0's prevout. The claim
@@ -1240,7 +1239,6 @@ impl Node {
         let prevout_tx = self
             .wallet
             .get_transaction(lottery_prevout.txid)
-            .await
             .map_err(|e| format!("fetch lottery prevout TX: {}", e))?
             .ok_or_else(|| format!("prevout TX {} not on-chain", lottery_prevout.txid))?;
         let lottery_amount_sats = prevout_tx

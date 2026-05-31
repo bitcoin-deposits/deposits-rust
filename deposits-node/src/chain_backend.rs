@@ -111,3 +111,26 @@ pub struct UnspentOutput {
     /// Output value, sats.
     pub value_sats: u64,
 }
+
+/// Build the [`ChainBackend`] selected at runtime via environment.
+///
+/// `CHAIN_BACKEND` selects the impl. Today only `esplora` is implemented;
+/// `bitcoind` and `electrum` are added in follow-on commits.
+///
+/// The URL is per-backend (esplora HTTP endpoint, bitcoind RPC URL,
+/// electrum hostname:port). Callers pass it from their config — typically
+/// `Wallet::electrum_url()` or the daemon's `--esplora`-style flag.
+pub fn from_env(url: &str) -> Box<dyn ChainBackend> {
+    match std::env::var("CHAIN_BACKEND")
+        .ok()
+        .as_deref()
+        .unwrap_or("esplora")
+    {
+        "esplora" => Box::new(crate::esplora_backend::EsploraBackend::new(url)),
+        other => panic!(
+            "CHAIN_BACKEND={:?} not implemented. Supported: \"esplora\" \
+             (bitcoind / electrum land in follow-on commits per PACKAGING_PLAN.md Tier 1b).",
+            other
+        ),
+    }
+}

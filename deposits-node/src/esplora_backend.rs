@@ -94,20 +94,16 @@ impl ChainBackend for EsploraBackend {
         &self,
         script: &Script,
     ) -> Result<Option<UnspentOutput>, Error> {
-        // Hit esplora's /scripthash/<hash>/txs endpoint via the raw HTTP
-        // path (not exposed on the typed client) — matches what the
-        // current wallet.rs scan code does. Walk each tx's vouts for
-        // outputs paying `script` and use get_output_status to filter to
-        // unspent. Return the first one found.
+        // Hit /scripthash/<hash>/txs directly. The esplora-client library
+        // would auto-format the hash using bitcoin's {:x} (byte-reversed)
+        // which is the Blockstream-public-esplora convention; electrs
+        // expects the non-reversed SHA256 hash. Bypass the typed client
+        // to use the non-reversed form so we work against the electrs
+        // every operator runs.
         use bitcoin::hashes::{sha256, Hash as _};
 
-        let script_hash_bytes = sha256::Hash::hash(script.as_bytes());
-        let script_hash_hex: String = script_hash_bytes
-            .as_byte_array()
-            .iter()
-            .rev() // electrum/esplora script_hash is little-endian display
-            .map(|b| format!("{:02x}", b))
-            .collect();
+        let script_hash = sha256::Hash::hash(script.as_bytes());
+        let script_hash_hex = hex::encode(script_hash.to_byte_array());
         let url = format!("{}/scripthash/{}/txs", self.url, script_hash_hex);
 
         let http = reqwest::blocking::Client::builder()

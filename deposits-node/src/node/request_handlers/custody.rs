@@ -972,7 +972,7 @@ impl Node {
             let txid = bitcoin::Txid::from_raw_hash(
                 bitcoin::hashes::Hash::from_byte_array(rc.txid),
             );
-            match self.wallet.get_outpoint_value_and_confs(txid, rc.vout).await {
+            match self.wallet.get_outpoint_value_and_confs(txid, rc.vout) {
                 Ok(Some((value_sats, confs))) => {
                     if value_sats < rc.amount {
                         return Err(format!(
