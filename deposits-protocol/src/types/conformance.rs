@@ -194,11 +194,9 @@ pub trait Authorizer {
     }
 }
 
-/// `Authorizer` that authorizes nothing — every call returns `false`. Useful as
-/// a placeholder in tests that don't need to authorize anything (the four
-/// lock-side variants still route through `WitnessVerifier`, so a test
-/// exercising `DepositKeyRotate` alone can plug in a real `Authorizer` and
-/// leave other paths under `WitnessVerifier`).
+/// `Authorizer` that authorizes nothing — every call returns `false`. Useful
+/// as a placeholder in tests where descriptor authorization should fail
+/// uniformly.
 pub struct DenyAll;
 
 impl Authorizer for DenyAll {

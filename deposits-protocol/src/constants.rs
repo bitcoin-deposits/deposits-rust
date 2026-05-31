@@ -80,8 +80,8 @@ pub const MAX_QUORUM_SIZE_POLICY: usize = 7;
 pub const VALID_QUORUM_SIZES: [usize; 3] = [3, 5, 7];
 
 /// Confirmation depth applied when evaluating descriptor `after(N)`
-/// timelocks during off-chain authorization (see
-/// `deposits_core::descriptor::verify_witness`).
+/// timelocks during off-chain authorization (used by the dep-16
+/// evaluator's `ProtocolLedgerState::current_height` reading).
 ///
 /// Without this cushion, a cosigner who signs at `tip == N` could see
 /// that signature retroactively invalidated by a reorg dropping the
