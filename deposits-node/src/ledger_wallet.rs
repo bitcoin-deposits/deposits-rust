@@ -778,13 +778,33 @@ impl LedgerWallet {
                     // populate the field and lock in the guard).
                     let new_spk = hex::encode(info.taproot_output.script_pubkey().as_bytes());
                     if let Some(ref existing_spk) = existing.script_pubkey {
-                        if existing_spk != &new_spk {
+                        // Allow overwrite when the outpoint differs — that's a
+                        // genuine rotation moving to a new UTXO. The script
+                        // is expected to change with each rotation (new
+                        // quorum_expiry / members produce a different vault
+                        // address). The bug class this guard targets is the
+                        // metadata-write path producing a different script
+                        // for the *same* outpoint — i.e., the in-memory
+                        // snapshot disagrees with the existing UTXO's actual
+                        // script. Only refuse when outpoint matches but
+                        // script doesn't.
+                        let existing_txid = existing
+                            .outpoint_txid
+                            .parse::<bdk_wallet::bitcoin::Txid>()
+                            .ok();
+                        let same_outpoint = existing_txid
+                            .map(|t| t == info.outpoint.txid && existing.outpoint_vout == info.outpoint.vout)
+                            .unwrap_or(true);
+                        if same_outpoint && existing_spk != &new_spk {
                             return Err(Error::Wallet(format!(
-                                "refusing to overwrite taproot snapshot at {}: existing \
-                                 script_pubkey={} differs from new {}. This would lose the \
-                                 ability to spend the on-chain UTXO. Delete the file \
-                                 explicitly if you want to start over.",
+                                "refusing to overwrite taproot snapshot at {}: same outpoint \
+                                 {} but existing script_pubkey={} differs from new {}. This \
+                                 indicates the build path computed a different script than \
+                                 what was committed at this outpoint — would lose the ability \
+                                 to spend the on-chain UTXO. Investigate the build inputs \
+                                 before retrying.",
                                 path.display(),
+                                info.outpoint,
                                 existing_spk,
                                 new_spk,
                             )));
