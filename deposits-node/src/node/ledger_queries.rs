@@ -1182,51 +1182,48 @@ impl Node {
             existing.quorum_expiry,
         );
 
-        // DEP-05 §Lifecycle: pick the highest-numbered tier whose CLTV is
-        // satisfied at the current chain tip. Higher = more degraded =
-        // fewer cosigner sigs required. For Tier 0 (active period) this
-        // resolves to tier_index=0 (the existing strict-majority path).
-        // Past `quorum_expiry + 8064` we get tier_index=3 (operator-alone),
-        // which is the only fully-supported degraded path right now: its
-        // single-CHECKSIG-of-tie_breaker witness is operator-only and
-        // doesn't need any cosigner participation.
-        //
-        // Tier 1/2 in cltv-offset-v2 collapse to single-CHECKSIG of
-        // `sorted_keys[0]` (whoever sorts lowest). That works if the
-        // operator happens to be sorted_keys[0] but otherwise needs a
-        // specific cosigner's on-chain sig — not yet plumbed. For now,
-        // the selector skips Tier 1/2 to avoid silently building a TX
-        // we can't sign. Future commit can add pubkey-specific tier
-        // selection.
+        // DEP-05 §Lifecycle: pick the highest-numbered tier whose CLTV
+        // is satisfied at the current chain tip. Higher = more degraded
+        // = fewer cosigner sigs required. The selector accepts three
+        // shapes from build_threshold_leaf:
+        //   * Multisig (`threshold > 1`, no tie-breaker requirement) —
+        //     CHECKSIGADD over the voter set. Operator + (threshold-1)
+        //     cosigners. Same witness pattern as Tier 0 + the existing
+        //     confiscation flow at recovery.rs:3199.
+        //   * Operator-alone (`threshold == 1 && requires_tie_breaker`)
+        //     — single CHECKSIG of operator. Witness is just the
+        //     operator's sig. No cosigner solicitation needed.
+        //   * Skipped: `threshold == 1 && !requires_tie_breaker` —
+        //     single CHECKSIG of `sorted_keys[0]` (whoever sorts
+        //     lowest). Works only if operator == sorted_keys[0] OR if
+        //     we route that specific cosigner's spend sig, neither of
+        //     which is plumbed. Tier 1/2 in cltv-offset-v2 collapse
+        //     to this shape when minority(n) == 1 (true for n ≤ 5).
+        //     For larger quorums (Q=5+) Tier 1 is true multisig and
+        //     handled by the first branch.
         let current_height = self.wallet.get_block_height().unwrap_or(0);
         let (tier_index, tier) = {
-            // Prefer Tier 3 (operator alone) if available, then fall
-            // back to Tier 0 (active majority). Tier 1/2 deferred.
             let mut chosen: Option<(usize, deposits_core::tapscript_reserves::ThresholdTier)> = None;
             for (idx, t) in cur_config.tiers.iter().enumerate() {
-                // CLTV satisfied?
                 if current_height < t.timelock_blocks {
-                    continue;
+                    continue; // CLTV not yet satisfied
                 }
-                // Only Tier 0 (no CLTV) or Tier-3-shaped (single
-                // CHECKSIG of tie_breaker = operator). Skip the
-                // sorted_keys[0] flavor of Tier 1/2.
-                let is_tier0 = idx == 0;
+                let is_multisig = t.threshold > 1;
                 let is_operator_alone = t.threshold == 1 && t.requires_tie_breaker;
-                if !(is_tier0 || is_operator_alone) {
-                    continue;
+                if !(is_multisig || is_operator_alone) {
+                    continue; // single-CHECKSIG-of-sorted_keys[0] shape — skip
                 }
-                // Prefer higher-numbered (more degraded → fewer
-                // cosigners needed). The loop walks in order so we
-                // overwrite with the latest acceptable tier.
+                // Walk in order; overwrite with each acceptable tier so
+                // we end up with the highest-numbered (most degraded).
                 chosen = Some((idx, t.clone()));
             }
             chosen.ok_or_else(|| {
                 Error::Protocol(format!(
                     "no usable tier at chain tip {} for ledger expiry {} \
-                     (ruleset={}, quorum_size={}). Tier 0 disabled? Tier 3 \
-                     CLTV not yet satisfied? Tier 1/2 single-key spend not \
-                     yet supported.",
+                     (ruleset={}, quorum_size={}). Tier 0 disabled? \
+                     Higher tiers all collapsed to single-CHECKSIG-of-\
+                     sorted_keys[0] (Q ≤ 5 with cltv-offset-v2) and \
+                     CLTV not yet satisfied for Tier 3?",
                     current_height,
                     existing.quorum_expiry,
                     existing.ruleset_name,
