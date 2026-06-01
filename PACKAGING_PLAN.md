@@ -80,19 +80,39 @@ Compile-time conformance + fixture-parser tests on each impl. Cluster integratio
 
 One known limitation: `ElectrumBackend::get_block_height_if_in_best_chain` walks the last ~2016 blocks; lookups against deeper hashes return `Ok(None)`. Bitcoind / esplora callers needing deep cold-block confirmation should pick those backends.
 
-### Tier 2: Single-operator docker-compose
+### Tier 2: Single-operator docker-compose ✅ shipped
 
-New `deploy/operator/docker-compose.yml`. Two services: `deposits-node` and `deposits-signer`. Internal-only network between them; signer socket via a shared volume. External bitcoin RPC + LN backend configured via env (`CHAIN_BACKEND`, `BITCOIND_RPC_URL`, `LIGHTNING_BACKEND`, `LND_MACAROON_FILE`, etc.). No bundled bitcoind/electrs/grafana.
+Lives under [`deploy/operator/`](deploy/operator/):
+- `docker-compose.yml` — two services (deposits-signer, deposits-node).
+  Internal-only `signer-net` between them; signer socket via a shared
+  named volume. Same image runs both binaries (entrypoint overrides
+  pick which). All external deps (bitcoin RPC, LN backend, relays)
+  declared via env, none bundled.
+- `.env.example` — every supported env var with comments + sensible
+  defaults. Comprehensive enough that operators who don't want to use
+  the wizard can edit by hand.
+- `init.sh` — interactive wizard. Walks through network + LN backend +
+  chain backend + relays + seed (generate or import). Runs
+  `deposits-signer init`, extracts the daemon transport-pubkey via the
+  `deposits-node transport-pubkey` subcommand, allowlists it on the
+  signer, writes `SIGNER_PUBKEY` back into `.env`. Idempotent.
+- `README.md` — 5-minute quickstart + per-backend bind-mount snippets
+  (LND macaroon, CLN socket, bitcoind cookie) + operating cheatsheet +
+  troubleshooting + backup checklist + a "what's bundled vs not" table
+  that makes the minimalism explicit.
 
-Plus `deploy/operator/init.sh` — a setup wizard that:
-1. Generates or imports the operator seed (interactive confirmation)
-2. Runs `deposits-signer init` against a fresh data dir
-3. Runs `deposits-node transport-pubkey` to extract the daemon's transport key
-4. Runs `deposits-signer trust add` to allowlist it
-5. Writes `.env` with the resulting `SIGNER_PUBKEY`
-6. Prints "you can now `docker compose up -d`"
+Acceptance unchanged: a clean Ubuntu VPS with bitcoind + LND already
+running follows `README.md` and is operational in ~5 minutes.
 
-Acceptance: a clean Ubuntu VPS with bitcoind + LND already running can install and bring up an operator in 5 minutes following a single docs page.
+What's NOT yet there:
+- Pre-built images on a public registry. Operators build locally
+  (`docker build -f deposits-node/Dockerfile .`) until CI ships images
+  to `ghcr.io/bitcoin-deposits/deposits-node`. The compose's
+  `${DEPOSITS_IMAGE:-deposits-node:latest}` env var is ready for the
+  registry swap.
+- Acceptance test against a real Ubuntu VPS. Shape is right; needs a
+  live drive-through to surface anything the wizard's prompts don't
+  cover.
 
 ### Tier 3: Quorum-formation wizard
 

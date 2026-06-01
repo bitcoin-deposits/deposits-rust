@@ -1,0 +1,138 @@
+# Single-operator deployment for deposits-node.
+#
+# Per PACKAGING_PLAN.md Tier 2. Designed to slot in next to an operator's
+# existing Bitcoin + Lightning infrastructure — no bundled bitcoind, no
+# bundled electrs, no bundled Lightning node. The operator configures
+# which backend talks to what via .env.
+#
+# Two services:
+#   - deposits-signer: holds the operator seed, listens on a Unix socket.
+#     Internal-only network; never speaks to the outside.
+#   - deposits-node:   runs the daemon; talks to the signer (via socket
+#     volume), to the operator's existing LN node + bitcoin via env, and
+#     to the nostr relays for protocol traffic.
+#
+# Usage:
+#   1. Copy .env.example to .env and edit
+#   2. Run ./init.sh (interactive wizard) — generates the signer keys,
+#      extracts the daemon's transport pubkey, allowlists it on the signer,
+#      writes SIGNER_PUBKEY back to .env
+#   3. docker compose up -d
+#
+# See README.md for the 5-minute walkthrough.
+
+services:
+  deposits-signer:
+    image: ${DEPOSITS_IMAGE:-deposits-node:latest}
+    container_name: ${OPERATOR_NAME:-operator}-signer
+    restart: unless-stopped
+    # Bypass the multi-purpose image entrypoint; we want the signer
+    # binary directly with explicit args.
+    entrypoint: ["/usr/local/bin/deposits-signer"]
+    command:
+      - "run"
+      - "--data-dir"
+      - "/var/lib/dsigner"
+      - "--socket"
+      - "/run/dsigner/socket"
+    volumes:
+      # Persistent signer state — seed, transport keypair, allowlist,
+      # anti-equivocation store. The wizard's `deposits-signer init`
+      # populates this on first run.
+      - signer_data:/var/lib/dsigner
+      # Shared socket volume so deposits-node can reach the signer
+      # without exposing it over the network.
+      - signer_socket:/run/dsigner
+    networks:
+      - signer-net
+    # Health check via the pubkey subcommand. Faster + more meaningful
+    # than a generic process check; if the binary is broken or the
+    # data-dir is corrupted, this fails immediately.
+    healthcheck:
+      test: ["CMD", "deposits-signer", "pubkey", "--data-dir", "/var/lib/dsigner"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 3s
+
+  deposits-node:
+    image: ${DEPOSITS_IMAGE:-deposits-node:latest}
+    container_name: ${OPERATOR_NAME:-operator}
+    restart: unless-stopped
+    depends_on:
+      deposits-signer:
+        condition: service_healthy
+    entrypoint: ["/usr/local/bin/deposits-node"]
+    command:
+      - "run"
+      - "--name"
+      - "${OPERATOR_NAME:-operator}"
+      - "--network"
+      - "${NETWORK:?NETWORK must be set (bitcoin|testnet|signet|regtest)}"
+      - "--data-dir"
+      - "/var/lib/deposits"
+      - "--esplora"
+      - "${ESPLORA_URL:-http://localhost:3000}"   # ignored if CHAIN_BACKEND ≠ esplora
+      - "--signer-pubkey"
+      - "${SIGNER_PUBKEY:?run ./init.sh to generate}"
+      - "--signer-socket"
+      - "/run/dsigner/socket"
+    environment:
+      # Required: nostr relays. First is the durable ledgers relay; others
+      # are messaging fallbacks.
+      RELAY_LEDGERS: ${RELAY_LEDGERS:?must set wss:// or ws:// URL of the ledger relay}
+      RELAY_MESSAGING: ${RELAY_MESSAGING:-}
+
+      # Lightning backend. Default ldk; set to lnd / cln per the impls.
+      LIGHTNING_BACKEND: ${LIGHTNING_BACKEND:-ldk}
+      # Per-LN-backend wiring. Unused vars are harmless empty strings.
+      LDK_HOST: ${LDK_HOST:-}
+      LDK_PORT: ${LDK_PORT:-}
+      LDK_API_KEY: ${LDK_API_KEY:-}
+      LDK_TLS_CERT: ${LDK_TLS_CERT:-}
+      LND_REST_URL: ${LND_REST_URL:-}
+      LND_MACAROON_HEX: ${LND_MACAROON_HEX:-}
+      LND_MACAROON_FILE: ${LND_MACAROON_FILE:-}
+      LND_TLS_CERT_FILE: ${LND_TLS_CERT_FILE:-}
+      CLN_SOCKET_PATH: ${CLN_SOCKET_PATH:-}
+
+      # Chain backend. Default esplora; set to bitcoind / electrum per the impls.
+      CHAIN_BACKEND: ${CHAIN_BACKEND:-esplora}
+      BITCOIND_RPC_URL: ${BITCOIND_RPC_URL:-}
+      BITCOIND_RPC_USER: ${BITCOIND_RPC_USER:-}
+      BITCOIND_RPC_PASS: ${BITCOIND_RPC_PASS:-}
+      BITCOIND_COOKIE_FILE: ${BITCOIND_COOKIE_FILE:-}
+      ELECTRUM_HOST: ${ELECTRUM_HOST:-}
+      ELECTRUM_PORT: ${ELECTRUM_PORT:-}
+
+      # Misc operational
+      NODE_NAME: ${OPERATOR_NAME:-operator}
+      RUST_LOG: ${RUST_LOG:-info}
+      MAX_DEPOSIT_BALANCE_MSATS: ${MAX_DEPOSIT_BALANCE_MSATS:-}
+    volumes:
+      - node_data:/var/lib/deposits
+      - signer_socket:/run/dsigner:ro
+      # The compose itself doesn't try to mount LN/bitcoin credentials —
+      # the operator declares those mounts in docker-compose.override.yml
+      # (see README.md for the per-backend examples). Keeps this file
+      # static instead of trying to conditionally bind-mount based on env.
+    networks:
+      - signer-net
+      - external
+    ports:
+      # The operator-protocol RPC is over nostr (no inbound port); only
+      # expose the metrics endpoint for the operator's own Prometheus.
+      - "${METRICS_BIND:-127.0.0.1:9100}:9100"
+
+networks:
+  # signer ↔ node only. internal: true means no traffic leaves this
+  # network even if a container tries — defense in depth for the seed.
+  signer-net:
+    internal: true
+  # node ↔ outside world: nostr relays, Lightning RPC, bitcoin RPC, etc.
+  external:
+
+volumes:
+  signer_data:
+  signer_socket:
+  node_data:
