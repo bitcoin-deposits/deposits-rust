@@ -226,6 +226,12 @@
     .badge.partner { background: rgba(91, 141, 239, 0.18); color: var(--blue); }
     .badge.operator{ background: rgba(247, 147, 26, 0.18); color: var(--accent); }
     .badge.err     { background: rgba(217, 83, 79, 0.18); color: var(--red); }
+    .badge.tier-0  { background: rgba(76, 174, 90, 0.18); color: var(--green); }
+    .badge.tier-1  { background: rgba(240, 173, 78, 0.18); color: var(--yellow); }
+    .badge.tier-2  { background: rgba(240, 173, 78, 0.18); color: var(--yellow); }
+    .badge.tier-3  { background: rgba(217, 83, 79, 0.18); color: var(--red); }
+    .badge.tier-postexpiry { background: rgba(240, 173, 78, 0.18); color: var(--yellow); }
+    .badge.cascade-off { background: rgba(141, 150, 179, 0.15); color: var(--fg-muted); }
 
     /* status / errors / token gate */
     .empty {
@@ -289,6 +295,7 @@
       <button data-tab="dashboard" class="active">dashboard</button>
       <button data-tab="ledgers">ledgers</button>
       <button data-tab="quorum">quorum</button>
+      <button data-tab="lifecycle">lifecycle</button>
       <button data-tab="activity">activity</button>
       <button data-tab="signer">signer</button>
     </div>
@@ -352,6 +359,12 @@
       <div id="quorum-ours"><div class="loading">loading…</div></div>
       <h1 class="section-title" style="margin-top:1.5rem">serving on</h1>
       <div id="quorum-serving"><div class="loading">loading…</div></div>
+    </section>
+
+    <!-- lifecycle -->
+    <section data-pane="lifecycle" style="display:none">
+      <h1 class="section-title">quorum lifecycle</h1>
+      <div id="lifecycle-feed"><div class="loading">loading…</div></div>
     </section>
 
     <!-- activity -->
@@ -517,6 +530,52 @@ async function loadQuorum() {
   }
 }
 
+function tierBadgeClass(tier, cascadeActive) {
+  if (!cascadeActive) return 'cascade-off';
+  if (tier.includes('Tier 0 (post-expiry')) return 'tier-postexpiry';
+  if (tier.startsWith('Tier 0')) return 'tier-0';
+  if (tier.startsWith('Tier 1')) return 'tier-1';
+  if (tier.startsWith('Tier 2')) return 'tier-2';
+  if (tier.startsWith('Tier 3')) return 'tier-3';
+  return '';
+}
+
+async function loadLifecycle() {
+  const items = await api('/lifecycle');
+  if (!items) return;
+  const el = document.getElementById('lifecycle-feed');
+  if (!items.length) {
+    el.innerHTML = '<div class="empty">No ledgers yet.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="card"><table class="feed"><thead><tr>' +
+    '<th>ledger</th><th>role</th><th>tier</th><th>threshold</th>' +
+    '<th>quorum_expiry</th><th>next tier</th><th>blocks left</th>' +
+    '</tr></thead><tbody>' +
+    items.map(i => {
+      const cls = tierBadgeClass(i.tier, i.cascade_active);
+      const expiry = i.quorum_expiry == null
+        ? '—'
+        : i.quorum_expiry.toLocaleString();
+      const nextLabel = i.next_tier_label || (i.cascade_active ? '—' : 'no cascade (legacy)');
+      const blocksLeft = i.blocks_until_next_tier == null
+        ? '—'
+        : i.blocks_until_next_tier.toLocaleString();
+      const threshold = `${i.required_sigs_for_begin} of ${i.quorum_size}` +
+        (i.value_moving_allowed ? '' : ' <span class="badge tier-1" style="margin-left:0.4rem;font-size:0.65rem">est. ops only</span>');
+      return `
+        <tr>
+          <td class="lid">${shortLid(i.ledger_id)}</td>
+          <td><span class="badge ${i.role}">${i.role}</span></td>
+          <td><span class="badge ${cls}">${i.tier}</span></td>
+          <td>${threshold}</td>
+          <td>${expiry}</td>
+          <td>${nextLabel}</td>
+          <td>${blocksLeft}</td>
+        </tr>`;
+    }).join('') + '</tbody></table></div>';
+}
+
 async function loadActivity() {
   const acts = await api('/activity');
   if (!acts) return;
@@ -577,7 +636,7 @@ async function init() {
   try {
     await loadStatus();
     await loadSigner();      // populates nav-right + signer pane
-    await Promise.all([loadLedgers(), loadQuorum(), loadActivity()]);
+    await Promise.all([loadLedgers(), loadQuorum(), loadLifecycle(), loadActivity()]);
     // refresh status + signer every 10s
     setInterval(() => { loadStatus(); loadSigner(); }, 10_000);
   } catch (e) {

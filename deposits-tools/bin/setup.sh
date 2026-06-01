@@ -612,7 +612,12 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
         # is deterministic from the operator seed), inflating the
         # spend past available coins.
         ACTIVATION_SATS=$((PER_LEDGER_SATS - 1000))
+        # Opt the cluster into cltv-offset-v2 so the DEP-05 §Lifecycle
+        # cosign cascade engages past quorum_expiry (legacy ledgers
+        # preserve old strict-majority-fatal behavior and sit out the
+        # new code path).
         run_cmd "$i" quorum begin "$ledger_id" --amount-sats $ACTIVATION_SATS \
+            --protocol-version cltv-offset-v2 \
             > "$BEGIN_LOG_DIR/op${i}_l${l}.log" 2>&1 &
         begin_pids+=("$!")
     done

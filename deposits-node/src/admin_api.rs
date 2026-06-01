@@ -99,6 +99,7 @@ pub async fn serve(config: AdminConfig, node: Arc<Node>) -> Result<(), Error> {
         .route("/status", get(get_status))
         .route("/ledgers", get(get_ledgers))
         .route("/quorum", get(get_quorum))
+        .route("/lifecycle", get(get_lifecycle))
         .route("/activity", get(get_activity))
         .route("/signer", get(get_signer))
         .with_state(node)
@@ -272,6 +273,127 @@ async fn get_quorum(State(node): State<Arc<Node>>) -> Json<QuorumInfo> {
         our_ledgers,
         serving_on,
     })
+}
+
+#[derive(Serialize)]
+struct LifecycleEntry {
+    ledger_id: String,
+    role: &'static str,
+    /// `quorum_expiry` block height as set in the most recent
+    /// `QuorumBegin`. Null on pre-quorum ledgers.
+    quorum_expiry: Option<u32>,
+    chain_tip: u32,
+    /// Current tier the ledger is operating under. See DEP-05
+    /// §Lifecycle.
+    tier: &'static str,
+    /// Distinct cosignatures required for an establishment op
+    /// (`QuorumBegin` / `QuorumAddMember` / `QuorumRemoveMember`)
+    /// at the current tier.
+    required_sigs_for_begin: usize,
+    /// Active quorum size. Threshold context for the `required_sigs`
+    /// value above.
+    quorum_size: usize,
+    /// Whether value-moving ops can be cosigned at this tier. True
+    /// only at Tier 0 (before `quorum_expiry`).
+    value_moving_allowed: bool,
+    /// Block height the next tier opens, if any. Null at Tier 3 (last).
+    next_tier_block: Option<u32>,
+    /// Label of the next tier ("Tier-0 post-expiry", "Tier 1", ...).
+    /// Null at Tier 3.
+    next_tier_label: Option<&'static str>,
+    /// Blocks remaining until the next tier opens. Null at Tier 3.
+    blocks_until_next_tier: Option<u32>,
+    /// Whether the lifecycle cascade applies to this ledger. False
+    /// for `legacy` ruleset (where post-expiry is fatal, no cascade).
+    cascade_active: bool,
+}
+
+fn tier_label(tier: deposits_core::cosign_threshold::LifecycleTier) -> &'static str {
+    use deposits_core::cosign_threshold::LifecycleTier::*;
+    match tier {
+        Tier0 => "Tier 0 (active)",
+        Tier0PostExpiry => "Tier 0 (post-expiry, majority confiscation window)",
+        Tier1 => "Tier 1 (minority)",
+        Tier2 => "Tier 2 (single cosigner)",
+        Tier3 => "Tier 3 (operator alone)",
+    }
+}
+
+async fn get_lifecycle(State(node): State<Arc<Node>>) -> Json<Vec<LifecycleEntry>> {
+    use deposits_core::cosign_threshold::{cosign_requirement, LifecycleTier};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tlv::TlvDecode;
+
+    // The DEP-05 §Lifecycle offsets, mirrored in the helper but kept
+    // here too so we can report the *next* boundary for UX.
+    const TIER_1_OFFSET: u32 = 720;
+    const TIER_2_OFFSET: u32 = 4032;
+    const TIER_3_OFFSET: u32 = 8064;
+
+    let chain_tip = node.wallet.get_block_height().unwrap_or(0);
+    // Probe op used purely to ask the helper "what threshold for a
+    // QuorumBegin right now?". Choosing QuorumRemoveMember as the
+    // probe is fine — any Establishment-class op yields the same
+    // required_sigs at the same tier.
+    let probe_op = LedgerOperation::QuorumRemoveMember {
+        quorum_member: node.node_id,
+        operator_signature: [0u8; 64],
+    };
+
+    let ledgers = node.handler.ledgers.lock().unwrap();
+    let mut out = Vec::new();
+    for (ledger_id, arc) in ledgers.iter() {
+        let l = arc.read().unwrap();
+        let is_ours = l.operator_key() == node.node_id;
+        let req = cosign_requirement(&l.state, &probe_op, chain_tip);
+        let cascade_active = matches!(
+            l.state.active_ruleset_name.as_str(),
+            "cltv-offset-v2" | "cltv-offset-literal"
+        );
+
+        // Determine next-tier boundary for the UX countdown. Only
+        // meaningful while the cascade is active and an expiry is set.
+        let (next_block, next_label) = if !cascade_active {
+            (None, None)
+        } else if let Some(expiry) = l.state.quorum_expiry {
+            match req.tier {
+                LifecycleTier::Tier0 => (Some(expiry), Some("Tier 0 post-expiry")),
+                LifecycleTier::Tier0PostExpiry => (
+                    Some(expiry.saturating_add(TIER_1_OFFSET)),
+                    Some("Tier 1 (minority)"),
+                ),
+                LifecycleTier::Tier1 => (
+                    Some(expiry.saturating_add(TIER_2_OFFSET)),
+                    Some("Tier 2 (single cosigner)"),
+                ),
+                LifecycleTier::Tier2 => (
+                    Some(expiry.saturating_add(TIER_3_OFFSET)),
+                    Some("Tier 3 (operator alone)"),
+                ),
+                LifecycleTier::Tier3 => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+        let blocks_until = next_block.map(|b| b.saturating_sub(chain_tip));
+
+        out.push(LifecycleEntry {
+            ledger_id: ledger_id.clone(),
+            role: if is_ours { "operator" } else { "partner" },
+            quorum_expiry: l.state.quorum_expiry,
+            chain_tip,
+            tier: tier_label(req.tier),
+            required_sigs_for_begin: req.required_sigs,
+            quorum_size: l.state.quorum_members.len(),
+            value_moving_allowed: matches!(req.tier, LifecycleTier::Tier0),
+            next_tier_block: next_block,
+            next_tier_label: next_label,
+            blocks_until_next_tier: blocks_until,
+            cascade_active,
+        });
+    }
+    out.sort_by(|a, b| a.ledger_id.cmp(&b.ledger_id));
+    Json(out)
 }
 
 #[derive(Serialize)]

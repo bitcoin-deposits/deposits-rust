@@ -13,12 +13,13 @@ use std::str::FromStr;
 pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
         eprintln!(
-            "Usage: deposits-node quorum <add|remove|join|begin|refresh|request|list|form-with|show-identity> [args...]"
+            "Usage: deposits-node quorum <add|remove|join|begin|repair|refresh|request|list|form-with|show-identity> [args...]"
         );
         eprintln!("  add            Add a single quorum member to our ledger");
         eprintln!("  remove         Remove a quorum member from our ledger");
         eprintln!("  join           Record that we joined another operator's quorum");
         eprintln!("  begin          Activate quorum-based Taproot spending");
+        eprintln!("  repair         Re-establish quorum past `quorum_expiry` via the DEP-05 §Lifecycle cascade");
         eprintln!("  refresh        Re-add active members and rotate when all responded (idempotent)");
         eprintln!("  request        Request a peer to join our quorum");
         eprintln!("  list           List quorum relationships");
@@ -31,6 +32,7 @@ pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::E
         "remove" => quorum_remove(&args[1..]).await,
         "join" => quorum_join_cmd(&args[1..]).await,
         "begin" => quorum_begin(&args[1..]).await,
+        "repair" => quorum_repair(&args[1..]).await,
         "refresh" => quorum_refresh(&args[1..]).await,
         "request" => quorum_request(&args[1..]).await,
         "list" => quorum_list(&args[1..]).await,
@@ -39,7 +41,7 @@ pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::E
         cmd => {
             eprintln!("Unknown quorum subcommand: {}", cmd);
             eprintln!(
-                "Usage: deposits-node quorum <add|remove|join|begin|refresh|request|list|form-with|show-identity> [args...]"
+                "Usage: deposits-node quorum <add|remove|join|begin|repair|refresh|request|list|form-with|show-identity> [args...]"
             );
             Ok(())
         }
@@ -163,6 +165,165 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         println!("  Tier 2: Emergency recovery (extended timeout)");
     }
 
+    Ok(())
+}
+
+/// Re-establish quorum past `quorum_expiry` via the DEP-05 §Lifecycle
+/// cascade.
+///
+/// Sibling to `quorum begin`. Difference: this one expects the ledger
+/// to be *past* `quorum_expiry` and is the operator's degraded
+/// self-rescue path. The daemon-side cosign coordinator already picks
+/// the right threshold for the current tier via the shared
+/// `cosign_threshold::cosign_requirement` helper — this command is
+/// the explicit-intent entry point, plus a pre-flight that prints the
+/// current tier and refuses unless the operator confirms (or passes
+/// `--yes`).
+///
+/// Refuses if the ledger is still in Tier 0 (pre-expiry) — use
+/// `quorum begin` for routine rotation.
+async fn quorum_repair(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use deposits_core::cosign_threshold::{cosign_requirement, LifecycleTier};
+    use deposits_core::messages::LedgerOperation;
+
+    let mut reserves_id: Option<String> = None;
+    let mut amount_sats: Option<u64> = None;
+    let mut protocol_version: Option<String> = None;
+    let mut yes = false;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            match args[i].as_str() {
+                "--amount-sats" if i + 1 < args.len() => {
+                    amount_sats = Some(args[i + 1].parse()?);
+                    i += 2;
+                    continue;
+                }
+                "--protocol-version" if i + 1 < args.len() => {
+                    protocol_version = Some(args[i + 1].clone());
+                    i += 2;
+                    continue;
+                }
+                "--yes" | "-y" => {
+                    yes = true;
+                    i += 1;
+                    continue;
+                }
+                _ => {
+                    config_args.push(args[i].clone());
+                    if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                        config_args.push(args[i + 1].clone());
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+        if reserves_id.is_none() {
+            reserves_id = Some(args[i].clone());
+        } else {
+            config_args.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config.clone()).await?;
+    let ledger_id = match reserves_id {
+        Some(id) => super::resolve_to_ledger_id(&node, &id)?,
+        None => match node.get_primary_ledger() {
+            Some((lid, _)) => lid,
+            None => return Err("No ledger found. Open a ledger first with 'ledger open'.".into()),
+        },
+    };
+
+    // Pre-flight: look up the ledger, compute current tier via the
+    // shared helper. Refuse if we're not past expiry (Tier 0).
+    let (tier, required, qsize, expiry_block) = {
+        let ledgers = node.handler.ledgers.lock().unwrap();
+        let arc = ledgers
+            .get(&ledger_id)
+            .ok_or_else(|| format!("Ledger not found locally: {}", ledger_id))?;
+        let l = arc.read().unwrap();
+        let chain_tip = node.wallet.get_block_height().unwrap_or(0);
+        // Probe with a representative establishment op — every
+        // Establishment-class op yields the same required_sigs at the
+        // same tier.
+        let probe = LedgerOperation::QuorumRemoveMember {
+            quorum_member: node.node_id,
+            operator_signature: [0u8; 64],
+        };
+        let req = cosign_requirement(&l.state, &probe, chain_tip);
+        (req.tier, req.required_sigs, l.state.quorum_members.len(), l.state.quorum_expiry)
+    };
+    drop(node);
+
+    println!("Ledger {}", &ledger_id);
+    match (expiry_block, tier) {
+        (None, _) => return Err("No quorum_expiry set — this ledger has no active quorum to repair. \
+                                  Use `quorum begin` instead.".into()),
+        (Some(_), LifecycleTier::Tier0) => {
+            return Err(format!(
+                "Ledger is at Tier 0 (active period, before quorum_expiry={}). \
+                 Use `quorum begin` for routine rotation. `quorum repair` is only \
+                 meaningful past quorum_expiry.",
+                expiry_block.unwrap()
+            )
+            .into());
+        }
+        (Some(e), t) => {
+            println!("  quorum_expiry: {}", e);
+            println!("  current tier:  {:?}", t);
+            println!(
+                "  required:      {} of {} cosignatures{}",
+                required,
+                qsize,
+                if matches!(t, LifecycleTier::Tier3) {
+                    " (operator alone — no cosig solicited)"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+
+    if !yes {
+        eprintln!(
+            "\nThis is a degraded re-establishment per DEP-05 §Lifecycle. \
+             Pass --yes to proceed."
+        );
+        return Ok(());
+    }
+
+    let mut params = serde_json::Map::new();
+    if let Some(amt) = amount_sats {
+        params.insert("amount_sats".to_string(), serde_json::json!(amt));
+    }
+    if let Some(pv) = protocol_version {
+        params.insert("protocol_version".to_string(), serde_json::json!(pv));
+    }
+    let result = send_daemon_request(
+        &config,
+        &ledger_id,
+        "quorum_begin",
+        serde_json::Value::Object(params),
+    )
+    .await?;
+
+    println!("\nRe-established!");
+    if let Some(txid) = result.get("txid").and_then(|v| v.as_str()) {
+        println!("  TXID: {}", txid);
+    }
+    if let Some(addr) = result.get("new_address").and_then(|v| v.as_str()) {
+        println!("  New Address: {}", addr);
+    }
+    if let Some(expiry) = result.get("quorum_expiry").and_then(|v| v.as_u64()) {
+        println!("  Next expiry: {}", expiry);
+    }
     Ok(())
 }
 
