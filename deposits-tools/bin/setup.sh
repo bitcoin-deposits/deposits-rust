@@ -198,6 +198,11 @@ start_node() {
         LDK_HOST="$LDK_HOST" LDK_PORT="$LDK_PORT" \
         LDK_API_KEY="$LDK_API_KEY" LDK_TLS_CERT="$LDK_TLS_CERT" \
         LDK_SELF_PAY_DIR="$LDK_SELF_PAY_DIR" \
+        LIGHTNING_BACKEND="${LIGHTNING_BACKEND:-ldk}" \
+        LND_REST_URL="$LND_REST_URL" \
+        LND_MACAROON_HEX="$LND_MACAROON_HEX" \
+        LND_TLS_CERT_FILE="$LND_TLS_CERT_FILE" \
+        CLN_SOCKET_PATH="$CLN_SOCKET_PATH" \
         "$DEPOSITS_NODE" run \
         --seed "$seed" --name "$name" \
         --network regtest --data-dir "$data_dir" \
@@ -290,31 +295,105 @@ echo ""
 
 log_info "=== Phase 1b: Start Daemons ==="
 
-# LDK wiring (optional). When the `lightning` container is up, refresh
-# the TLS cert from inside it (ldk-server regenerates self-signed certs
-# on every container start) and export LDK_* so each operator's
-# `make_invoice` / `pay_invoice` handler can talk to it. Without this,
-# operators fall through to "ldk-server-cli not in PATH" and any
-# Lightning-touching test fails. Mirrors `_common.sh:start_node`'s
-# block but lives here because setup.sh has its own start_node copy.
+# Lightning backend wiring.
+#
+# Default (`LIGHTNING_BACKEND` unset or `=ldk`): export LDK_* so each
+# operator's make_invoice / pay_invoice handler talks to the shared
+# `lightning` (LDK) container. Same behaviour we've had for ages.
+#
+# `LIGHTNING_BACKEND=lnd`: extract the macaroon + TLS cert from the
+# `lnd` container, export LND_REST_URL / LND_MACAROON_HEX /
+# LND_TLS_CERT_FILE, also export LIGHTNING_BACKEND so deposits-node's
+# `lightning_backend::from_env()` picks LndBackend. Container must be
+# up (started via `docker compose --profile lnd up -d lnd`).
+#
+# `LIGHTNING_BACKEND=cln`: bind-mount the lightning-rpc socket to a
+# host path (CLN container does this), export CLN_SOCKET_PATH +
+# LIGHTNING_BACKEND.
+#
+# Either backend exercises the same LightningBackend trait surface
+# through the same call sites the daemon uses in production — real-wire
+# regression test for the backends introduced per PACKAGING_PLAN.md
+# Tier 1a.
 LDK_CLI=""; LDK_REAL_CLI=""; LDK_HOST=""; LDK_PORT=""
 LDK_API_KEY=""; LDK_TLS_CERT=""; LDK_SELF_PAY_DIR=""
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^lightning$'; then
-    mkdir -p "$TOOLS_DIR/certs"
-    if docker cp lightning:/ldk/tls.crt "$TOOLS_DIR/certs/lightning.crt" 2>/dev/null; then
-        log_ok "Refreshed LDK TLS cert from lightning container"
-    fi
-    LDK_CLI="$TOOLS_DIR/bin/ldk-cli-wrapper.sh"
-    LDK_REAL_CLI="${LDK_SERVER_CLI:-$HOME/ldk-server/target/release/ldk-server-cli}"
-    [ -x "$LDK_REAL_CLI" ] || log_warn "ldk-server-cli not found at $LDK_REAL_CLI"
-    LDK_HOST="localhost"
-    LDK_PORT="3111"
-    LDK_API_KEY=$(docker exec lightning sh -c "cat /ldk/regtest/api_key | od -A n -t x1 | tr -d ' \n'" 2>/dev/null || echo "")
-    LDK_TLS_CERT="$TOOLS_DIR/certs/lightning.crt"
-    LDK_SELF_PAY_DIR="$DATA_ROOT/self-pay"
-    mkdir -p "$LDK_SELF_PAY_DIR"
-fi
+LND_REST_URL=""; LND_MACAROON_HEX=""; LND_TLS_CERT_FILE=""
+CLN_SOCKET_PATH=""
+
+case "${LIGHTNING_BACKEND:-ldk}" in
+    ldk)
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^lightning$'; then
+            mkdir -p "$TOOLS_DIR/certs"
+            if docker cp lightning:/ldk/tls.crt "$TOOLS_DIR/certs/lightning.crt" 2>/dev/null; then
+                log_ok "Refreshed LDK TLS cert from lightning container"
+            fi
+            LDK_CLI="$TOOLS_DIR/bin/ldk-cli-wrapper.sh"
+            LDK_REAL_CLI="${LDK_SERVER_CLI:-$HOME/ldk-server/target/release/ldk-server-cli}"
+            [ -x "$LDK_REAL_CLI" ] || log_warn "ldk-server-cli not found at $LDK_REAL_CLI"
+            LDK_HOST="localhost"
+            LDK_PORT="3111"
+            LDK_API_KEY=$(docker exec lightning sh -c "cat /ldk/regtest/api_key | od -A n -t x1 | tr -d ' \n'" 2>/dev/null || echo "")
+            LDK_TLS_CERT="$TOOLS_DIR/certs/lightning.crt"
+            LDK_SELF_PAY_DIR="$DATA_ROOT/self-pay"
+            mkdir -p "$LDK_SELF_PAY_DIR"
+        fi
+        ;;
+
+    lnd)
+        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^lnd$'; then
+            log_warn "LIGHTNING_BACKEND=lnd but the 'lnd' container is not running."
+            log_warn "Start it first: docker compose --profile lnd up -d lnd"
+            exit 1
+        fi
+        # Wait for LND to finish bootstrap (wallet creation + macaroon write).
+        # Each tick checks for the admin macaroon file; bail after 60s.
+        lnd_macaroon_path="/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon"
+        waited=0
+        while ! docker exec lnd test -f "$lnd_macaroon_path" 2>/dev/null; do
+            sleep 1; waited=$((waited + 1))
+            if [ "$waited" -ge 60 ]; then
+                log_warn "LND macaroon never appeared at $lnd_macaroon_path"
+                exit 1
+            fi
+        done
+        # Extract macaroon as hex and TLS cert.
+        mkdir -p "$TOOLS_DIR/certs"
+        LND_MACAROON_HEX=$(docker exec lnd xxd -p -c 0 "$lnd_macaroon_path" 2>/dev/null | tr -d '\n')
+        docker cp lnd:/root/.lnd/tls.cert "$TOOLS_DIR/certs/lnd.cert" 2>/dev/null \
+            || { log_warn "Failed to extract LND TLS cert"; exit 1; }
+        LND_REST_URL="https://localhost:8081"
+        LND_TLS_CERT_FILE="$TOOLS_DIR/certs/lnd.cert"
+        log_ok "LND wired: REST=$LND_REST_URL, macaroon ${#LND_MACAROON_HEX} hex chars"
+        ;;
+
+    cln)
+        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^cln$'; then
+            log_warn "LIGHTNING_BACKEND=cln but the 'cln' container is not running."
+            log_warn "Start it first: docker compose --profile cln up -d cln"
+            exit 1
+        fi
+        # The cln container bind-mounts /root/.lightning to ./data/cln on the
+        # host (see docker-compose.yml). Socket is at .../regtest/lightning-rpc.
+        CLN_SOCKET_PATH="$TOOLS_DIR/data/cln/regtest/lightning-rpc"
+        waited=0
+        while [ ! -S "$CLN_SOCKET_PATH" ]; do
+            sleep 1; waited=$((waited + 1))
+            if [ "$waited" -ge 60 ]; then
+                log_warn "CLN socket never appeared at $CLN_SOCKET_PATH"
+                exit 1
+            fi
+        done
+        log_ok "CLN wired: socket=$CLN_SOCKET_PATH"
+        ;;
+
+    *)
+        log_warn "Unknown LIGHTNING_BACKEND=$LIGHTNING_BACKEND. Supported: ldk, lnd, cln."
+        exit 1
+        ;;
+esac
+
 export LDK_CLI LDK_REAL_CLI LDK_HOST LDK_PORT LDK_API_KEY LDK_TLS_CERT LDK_SELF_PAY_DIR
+export LIGHTNING_BACKEND LND_REST_URL LND_MACAROON_HEX LND_TLS_CERT_FILE CLN_SOCKET_PATH
 
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     start_node "$i"

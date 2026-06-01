@@ -36,7 +36,13 @@ services:
         "-rpcpassword=pass",
         "-fallbackfee=0.00001",
         "-rest",
-        "-txindex"
+        "-txindex",
+        # ZMQ publish endpoints — required by the lnd and cln services
+        # (PACKAGING_PLAN.md Tier 1a end-to-end test). Bind to 0.0.0.0
+        # so siblings on the regtest network can subscribe. Additive;
+        # no impact on the default LDK path.
+        "-zmqpubrawblock=tcp://0.0.0.0:28332",
+        "-zmqpubrawtx=tcp://0.0.0.0:28333"
       ]
     ports:
       - "18543:18443"  # Regtest RPC port (offset to avoid conflict with LDK compose)
@@ -134,6 +140,93 @@ services:
         condition: service_healthy
       electrs:
         condition: service_started
+    networks:
+      - regtest
+
+  # =========================================================================
+  # LND backend for the cluster (profile: lnd)
+  #
+  # Drop-in alternative to the bundled LDK `lightning` service for
+  # end-to-end testing the `LndBackend` impl. Spun up via
+  # `LIGHTNING_BACKEND=lnd ./bin/setup.sh N`, which also configures the
+  # operators' env to point at this node's REST endpoint instead of LDK.
+  #
+  # Production-shape (one LND for the whole cluster, all operators
+  # share it) mirrors the current LDK profile — this is for trait
+  # validation, not multi-tenant LN isolation.
+  # =========================================================================
+
+  lnd:
+    image: lightninglabs/lnd:v0.18.5-beta
+    container_name: lnd
+    profiles: [lnd]
+    command:
+      [
+        "lnd",
+        "--bitcoin.active",
+        "--bitcoin.regtest",
+        "--bitcoin.node=bitcoind",
+        "--bitcoind.rpchost=bitcoin:18443",
+        "--bitcoind.rpcuser=user",
+        "--bitcoind.rpcpass=pass",
+        "--bitcoind.zmqpubrawblock=tcp://bitcoin:28332",
+        "--bitcoind.zmqpubrawtx=tcp://bitcoin:28333",
+        "--noseedbackup",                          # generate wallet deterministically; test-only
+        "--rpclisten=0.0.0.0:10009",
+        "--restlisten=0.0.0.0:8080",
+        "--listen=0.0.0.0:9735",
+        "--tlsextradomain=lnd",                    # cert valid for the container DNS name
+        "--tlsextradomain=localhost",              # and for host access
+        "--debuglevel=info",
+        "--accept-keysend"
+      ]
+    ports:
+      - "8081:8080"                                # host-side REST: deposits-node hits https://localhost:8081
+      - "10010:10009"                              # gRPC for ad-hoc debugging via lncli
+      - "9736:9735"                                # peer-to-peer; unused in single-LN cluster
+    volumes:
+      - lnd_data:/root/.lnd
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+    networks:
+      - regtest
+
+  # =========================================================================
+  # CLN backend for the cluster (profile: cln)
+  #
+  # As with `lnd`, this is for end-to-end testing the `ClnBackend` impl.
+  # Spun up via `LIGHTNING_BACKEND=cln ./bin/setup.sh N`.
+  #
+  # The lightning-rpc Unix socket is bind-mounted to a host path so
+  # operators (which run as bare processes on the host) can reach it
+  # via CLN_SOCKET_PATH.
+  # =========================================================================
+
+  cln:
+    image: elementsproject/lightningd:v24.11
+    container_name: cln
+    profiles: [cln]
+    command:
+      [
+        "lightningd",
+        "--network=regtest",
+        "--bitcoin-rpcconnect=bitcoin",
+        "--bitcoin-rpcport=18443",
+        "--bitcoin-rpcuser=user",
+        "--bitcoin-rpcpassword=pass",
+        "--addr=0.0.0.0:9735",
+        "--log-level=info",
+        "--alias=cln-cluster"
+      ]
+    volumes:
+      # Bind-mount the lightning-dir to a host path. The lightning-rpc
+      # socket lives at $HOST_PATH/regtest/lightning-rpc — set
+      # CLN_SOCKET_PATH to that on the host side.
+      - ./data/cln:/root/.lightning
+    depends_on:
+      bitcoin:
+        condition: service_healthy
     networks:
       - regtest
 
@@ -314,6 +407,7 @@ volumes:
   bitcoin_data:
   electrs_data:
   ldk_data:
+  lnd_data:
   ldk_cli:
   nip05_data:
   self_pay_data:

@@ -886,25 +886,54 @@ start_node() {
         [ "$r" != "$own_relay" ] && relay_args="$relay_args --relay $r"
     done
 
-    # LDK Lightning: all operators share a single node via self-pay wrapper
-    if [ -f "$TOOLS_DIR/certs/lightning.crt" ]; then
-        local ldk_real_cli="${LDK_SERVER_CLI:-$HOME/ldk-server/target/release/ldk-server-cli}"
-        if [ ! -x "$ldk_real_cli" ]; then
-            log_warn "ldk-server-cli not found at $ldk_real_cli"
-        fi
+    # Lightning backend wiring. Default (or LIGHTNING_BACKEND=ldk) wires the
+    # shared LDK self-pay node. `=lnd` extracts the macaroon from the lnd
+    # container and points operators at its REST endpoint. `=cln` exposes
+    # CLN's lightning-rpc Unix socket via the bind-mounted host path. See
+    # PACKAGING_PLAN.md Tier 1a for the trait surface this exercises.
+    case "${LIGHTNING_BACKEND:-ldk}" in
+        ldk)
+            # All operators share a single LDK node via self-pay wrapper.
+            if [ -f "$TOOLS_DIR/certs/lightning.crt" ]; then
+                local ldk_real_cli="${LDK_SERVER_CLI:-$HOME/ldk-server/target/release/ldk-server-cli}"
+                if [ ! -x "$ldk_real_cli" ]; then
+                    log_warn "ldk-server-cli not found at $ldk_real_cli"
+                fi
 
-        local ldk_api_key
-        ldk_api_key=$(docker exec lightning sh -c "cat /ldk/\$(printenv NETWORK)/api_key | od -A n -t x1 | tr -d ' \n'" 2>/dev/null || echo "")
+                local ldk_api_key
+                ldk_api_key=$(docker exec lightning sh -c "cat /ldk/\$(printenv NETWORK)/api_key | od -A n -t x1 | tr -d ' \n'" 2>/dev/null || echo "")
 
-        export LDK_CLI="$TOOLS_DIR/bin/ldk-cli-wrapper.sh"
-        export LDK_REAL_CLI="$ldk_real_cli"
-        export LDK_HOST="localhost"
-        export LDK_PORT="3111"
-        [ -n "$ldk_api_key" ] && export LDK_API_KEY="$ldk_api_key"
-        export LDK_TLS_CERT="$TOOLS_DIR/certs/lightning.crt"
-        export LDK_SELF_PAY_DIR="$DATA_ROOT/self-pay"
-        mkdir -p "$DATA_ROOT/self-pay"
-    fi
+                export LDK_CLI="$TOOLS_DIR/bin/ldk-cli-wrapper.sh"
+                export LDK_REAL_CLI="$ldk_real_cli"
+                export LDK_HOST="localhost"
+                export LDK_PORT="3111"
+                [ -n "$ldk_api_key" ] && export LDK_API_KEY="$ldk_api_key"
+                export LDK_TLS_CERT="$TOOLS_DIR/certs/lightning.crt"
+                export LDK_SELF_PAY_DIR="$DATA_ROOT/self-pay"
+                mkdir -p "$DATA_ROOT/self-pay"
+            fi
+            ;;
+        lnd)
+            # Shared LND container — extract macaroon + cert each start, in
+            # case the container was recreated.
+            mkdir -p "$TOOLS_DIR/certs"
+            local lnd_macaroon_path="/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon"
+            export LND_MACAROON_HEX=$(docker exec lnd xxd -p -c 0 "$lnd_macaroon_path" 2>/dev/null | tr -d '\n')
+            docker cp lnd:/root/.lnd/tls.cert "$TOOLS_DIR/certs/lnd.cert" 2>/dev/null \
+                || log_warn "Failed to extract LND TLS cert (is the lnd container running?)"
+            export LND_REST_URL="https://localhost:8081"
+            export LND_TLS_CERT_FILE="$TOOLS_DIR/certs/lnd.cert"
+            export LIGHTNING_BACKEND=lnd
+            ;;
+        cln)
+            # CLN's lightning-rpc socket is bind-mounted to ./data/cln on the host.
+            export CLN_SOCKET_PATH="$TOOLS_DIR/data/cln/regtest/lightning-rpc"
+            export LIGHTNING_BACKEND=cln
+            ;;
+        *)
+            log_warn "Unknown LIGHTNING_BACKEND=$LIGHTNING_BACKEND; falling back to default"
+            ;;
+    esac
 
     local esplora_url=$(get_node_electrs_url "$node")
 
