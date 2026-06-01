@@ -186,20 +186,37 @@ Acceptance: an operator who has never used the deposits CLI can do a full day's 
 ### Tier 6 — REMOVED
 
 Previously framed as "NWC speaker (depositor-side)." Removed because
-NWC has no primitive for the depositor's wallet to produce a dep-17
-receive-witness signature with the deposit's key — NWC's surface is
-BOLT11 payments / invoice creation / balance queries, not arbitrary
-preimage signing with a path-derived key.
+NWC has no primitive that fits the deposits-rust witness model — and
+this is true for every depositor-side authorization in the protocol,
+not just the receive-side flow:
 
-NWC-compatible wallets (Alby Extension, Mutiny, etc.) can still pay
-BOLT11 invoices an operator issues today — that path works without
-any deposits-specific integration. The receive-witness flow that lets
-depositors gate inbound credits (`receive_requires_sig = true`) needs
-custody of the deposit's signing key, which NWC isn't built to grant.
+- **Outbound** (`InvoiceLock` / `OnchainLock` / `TransferLock`): the
+  wallet signs the op's dep-17 preimage with the deposit key.
+- **Inbound** (`receive_witness` on a `receive_requires_sig` deposit):
+  same primitive.
+- **Modifications** (`DepositDescriptorUpdate`): same primitive.
+- **DepositOpen** itself: the wallet registers the descriptor that
+  future operations sign against.
 
-If a real depositor-facing tier slots in here later, it'd be wallet
-polish work (the receive-side flow we already shipped) or the
-wallet-side advertisement-protocol update flagged in SIGNER.md §9.
+NWC's surface is Lightning-flavored — `pay_invoice`, `make_invoice`,
+`lookup_invoice`, `get_balance`, `sign_message` (over a fixed
+nip-44-shaped envelope with the wallet's identity key, not arbitrary
+bytes). The deposit key isn't NWC's identity key — depositors derive
+deposit keys per-deposit from their seed under a deposits-rust-defined
+derivation path. Even if NWC shipped a generic `sign_arbitrary` it
+wouldn't reach that key.
+
+So "NWC depositor flow" is a category error. NWC-compatible wallets
+(Alby Extension, Mutiny, etc.) can pay Lightning invoices a deposits
+operator happens to issue, but the *payer* is just a Lightning
+customer — they're not a deposit holder in any sense the protocol
+recognizes. The receiving deposit credits whoever issued it; the
+payer's NWC wallet is irrelevant to the deposits side.
+
+If a real depositor-facing tier slots in later, it's wallet polish
+work (the receive-side flow already shipped in deposits-web, the
+wallet-side advertisement-protocol update flagged in SIGNER.md §9,
+or new wallet-side features for native depositor UX).
 
 ## Sequencing rationale
 
