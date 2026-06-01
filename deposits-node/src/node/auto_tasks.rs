@@ -804,19 +804,34 @@ impl Node {
             if current_block.saturating_add(threshold_blocks) < snap.quorum_expiry {
                 continue;
             }
-            // But: never retry past expiry. Cosigners refuse every op
-            // on an Active quorum past `quorum_expiry`
-            // (`post_expiry_cosign_refused` in `validate_for_cosign`).
-            // The refresh sends QuorumAddMember consent requests + a
-            // rotation QuorumBegin, both of which need cosigs, so the
-            // whole thing 0/N-times-out every periodic cycle until the
-            // operator yields or migrates to a new genesis. Bail
-            // quietly instead of spamming the logs.
+            // Past expiry: behaviour depends on the ledger's ruleset.
+            //
+            // Legacy: cosigners refuse every op past quorum_expiry
+            // (`post_expiry_cosign_refused`), so a refresh attempt
+            // 0/N-times-out every periodic cycle. Bail quietly.
+            //
+            // cltv-offset-v2 / cltv-offset-literal: DEP-05 §Lifecycle
+            // cascade applies. The cosign coordinator picks the right
+            // threshold for the current tier (majority at Tier-0
+            // post-expiry, degraded at higher tiers), and the wallet
+            // picks the right on-chain spend tier. Auto-refresh can
+            // now drive the operator's self-rescue path without manual
+            // `quorum repair`. The cosigner-side rotation_sign handler
+            // honours the lifecycle gate too.
+            //
+            // TODO: the proactive auto_quorum_refresh path is still
+            // tuned for the pre-expiry "rotate-before-deadline" idiom
+            // (members re-add → QuorumBegin). The post-expiry path
+            // needs different orchestration (e.g. fewer member-consent
+            // requests since cosigners may be offline). For now the
+            // explicit `quorum repair` CLI is the supported entry
+            // point past expiry; the auto-refresh leaves the cascade
+            // dormant unless invoked manually.
             if current_block > snap.quorum_expiry {
                 tracing::debug!(
-                    "auto_quorum_refresh: ledger {}... already past \
-                     quorum_expiry={} (current {}), skipping — \
-                     cosigners refuse all post-expiry ops",
+                    "auto_quorum_refresh: ledger {}... past quorum_expiry={} \
+                     (current {}), skipping — use `quorum repair` to invoke \
+                     the lifecycle cascade explicitly",
                     &snap.ledger_id[..16],
                     snap.quorum_expiry,
                     current_block
