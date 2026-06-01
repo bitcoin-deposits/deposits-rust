@@ -2102,7 +2102,11 @@ impl Node {
                 }
             };
 
-            let confiscation_tx = Transaction {
+            // Provisional TX shape; lock_time is patched below once we
+            // know which lifecycle tier we're spending under (degraded
+            // tiers carry an absolute CLTV target the spending TX must
+            // honour via nLockTime).
+            let mut confiscation_tx = Transaction {
                 version: bitcoin::transaction::Version::TWO,
                 lock_time: bitcoin::absolute::LockTime::ZERO,
                 input: vec![TxIn {
@@ -2170,29 +2174,62 @@ impl Node {
                 }
             }
 
-            // Use quorum-override tier (threshold without tie-breaker)
-            let (tier_index, tier) = match threshold_config
-                .tiers
-                .iter()
-                .enumerate()
-                .find(|(_, t)| !t.requires_tie_breaker && t.threshold > 1)
-            {
-                Some(t) => t,
-                None => {
-                    tracing::error!("No quorum-override tier found");
-                    continue;
+            // DEP-06 §Phase 2: recovery-quorum cosign threshold
+            // cascades through the DEP-05 §Lifecycle tiers. Pick the
+            // highest-numbered non-tie-breaker tier whose CLTV is
+            // satisfied at the current chain tip. Higher = more
+            // degraded = fewer recovery-quorum sigs required. Skip
+            // requires_tie_breaker (operator-alone), which the
+            // recovery quorum can't satisfy by definition.
+            let current_height = self
+                .wallet
+                .get_block_height()
+                .ok()
+                .unwrap_or(0);
+            let (tier_index, tier) = {
+                let mut chosen: Option<(usize, &deposits_core::tapscript_reserves::ThresholdTier)> = None;
+                for (idx, t) in threshold_config.tiers.iter().enumerate() {
+                    if t.requires_tie_breaker {
+                        continue; // Tier 3 — operator only, recovery quorum can't sign
+                    }
+                    if current_height < t.timelock_blocks {
+                        continue; // CLTV not yet satisfied
+                    }
+                    chosen = Some((idx, t));
+                }
+                match chosen {
+                    Some((idx, t)) => (idx, t.clone()),
+                    None => {
+                        tracing::error!(
+                            "No usable confiscation tier at chain tip {} \
+                             (quorum_expiry={}, ruleset={})",
+                            current_height,
+                            quorum_expiry_at_qb,
+                            ruleset.name,
+                        );
+                        continue;
+                    }
                 }
             };
 
             tracing::info!(
-                "  Using Tier {} for confiscation (threshold={}/{})",
+                "  Using Tier {} for confiscation (threshold={}/{}, lock_time={})",
                 tier_index,
                 tier.threshold,
-                voter_count
+                voter_count,
+                tier.timelock_blocks,
+            );
+
+            // Patch the TX's nLockTime to match the tier's CLTV target.
+            // Tier 0 has timelock_blocks=0 → unchanged. Tier 1+ require
+            // nLockTime ≥ quorum_expiry + offset so the OP_CLTV in the
+            // tier's leaf script is satisfied.
+            confiscation_tx.lock_time = bitcoin::absolute::LockTime::from_consensus(
+                tier.timelock_blocks,
             );
 
             // Build leaf script and compute sighash
-            let leaf_script = match taproot_builder.build_threshold_leaf(tier) {
+            let leaf_script = match taproot_builder.build_threshold_leaf(&tier) {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!("Failed to build leaf script: {:?}", e);
@@ -2329,6 +2366,12 @@ impl Node {
                 "lottery_address": lottery_output.address.to_string(),
                 "violation_details": "Confiscation to lottery for dispute resolution",
                 "last_valid_sequence": last_valid_sequence,
+                // DEP-06 §Phase 2: tier_index lets the cosigner-side
+                // rebuild the matching leaf for sighash verification.
+                // Without this, cosigners would default to the
+                // first-non-tie-breaker-tier-with-threshold>1 fallback
+                // and miss when we're rotating at a degraded tier.
+                "tier_index": tier_index,
             });
 
             let request_id = match self

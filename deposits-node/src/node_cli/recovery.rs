@@ -3159,7 +3159,9 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         outs
     };
 
-    let confiscation_tx = Transaction {
+    // Provisional shape; lock_time patched below once we know which
+    // lifecycle tier we're spending under.
+    let mut confiscation_tx = Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: bitcoin::absolute::LockTime::ZERO,
         input: vec![TxIn {
@@ -3195,18 +3197,62 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         .build()
         .map_err(|e| format!("Failed to build Taproot output: {:?}", e))?;
 
-    // Use quorum-override tier (threshold without tie-breaker)
-    let (tier_index, tier) = threshold_config
-        .tiers
-        .iter()
-        .enumerate()
-        .find(|(_, t)| !t.requires_tie_breaker && t.threshold > 1)
-        .ok_or("No quorum-override tier found")?;
+    // DEP-06 §Phase 2: recovery-quorum cosign threshold cascades
+    // through DEP-05 §Lifecycle. Pick the highest-numbered non-tie-
+    // breaker tier whose CLTV is satisfied at the current chain tip.
+    // Read tip via esplora blocking client (same source the recovery
+    // flow uses for UTXO checks above).
+    let esplora_url = config.electrum_url.trim_end_matches('/').to_string();
+    let current_height: u32 = {
+        let url = format!("{}/blocks/tip/height", esplora_url);
+        let resp = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .ok()
+            .and_then(|c| c.get(&url).send().ok())
+            .and_then(|r| r.text().ok())
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        match resp {
+            Some(h) => h,
+            None => {
+                eprintln!(
+                    "  warning: failed to fetch chain tip from {}; defaulting to 0 \
+                     (will resolve to Tier 0)",
+                    esplora_url
+                );
+                0
+            }
+        }
+    };
+    let (tier_index, tier) = {
+        let mut chosen: Option<(usize, &deposits_core::ThresholdTier)> = None;
+        for (idx, t) in threshold_config.tiers.iter().enumerate() {
+            if t.requires_tie_breaker {
+                continue;
+            }
+            if current_height < t.timelock_blocks {
+                continue;
+            }
+            chosen = Some((idx, t));
+        }
+        chosen.ok_or_else(|| {
+            format!(
+                "No usable confiscation tier at chain tip {} for ledger \
+                 (quorum_expiry={}, ruleset={})",
+                current_height, quorum_expiry_at_qb, ruleset.name
+            )
+        })?
+    };
 
     println!(
-        "  Using Tier {} for confiscation (threshold={}/{})",
-        tier_index, tier.threshold, voter_count
+        "  Using Tier {} for confiscation (threshold={}/{}, lock_time={})",
+        tier_index, tier.threshold, voter_count, tier.timelock_blocks
     );
+
+    // Patch nLockTime so the tier's OP_CLTV is satisfied (Tier 0 → 0,
+    // unchanged).
+    confiscation_tx.lock_time =
+        bitcoin::absolute::LockTime::from_consensus(tier.timelock_blocks);
 
     // Build leaf script and compute sighash
     let leaf_script = taproot_builder
@@ -3270,6 +3316,9 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
             "lottery_address": lottery_output.address.to_string(),
             "violation_details": "Confiscation to lottery for dispute resolution",
             "last_valid_sequence": 0,
+            // DEP-06 §Phase 2: cosigner-side rebuilds the matching
+            // leaf for sighash verification.
+            "tier_index": tier_index,
         });
 
         let request_id = publish_transport

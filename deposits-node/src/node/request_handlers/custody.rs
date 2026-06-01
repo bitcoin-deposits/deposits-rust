@@ -1347,11 +1347,35 @@ impl Node {
             .build()
             .map_err(|e| format!("rebuild taproot: {:?}", e))?;
 
-        let tier = threshold_config
-            .tiers
-            .iter()
-            .find(|t| !t.requires_tie_breaker && t.threshold > 1)
-            .ok_or_else(|| "no quorum-override tier".to_string())?;
+        // DEP-06 §Phase 2: prefer the operator-stated tier_index from
+        // the request. Fall back to the first non-tie-breaker tier with
+        // threshold > 1 for back-compat with requests that predate the
+        // tier_index plumbing.
+        let tier = match request
+            .params
+            .get("tier_index")
+            .and_then(|v| v.as_u64())
+            .and_then(|i| threshold_config.tiers.get(i as usize))
+        {
+            Some(t) => t,
+            None => threshold_config
+                .tiers
+                .iter()
+                .find(|t| !t.requires_tie_breaker && t.threshold > 1)
+                .ok_or_else(|| "no usable confiscation tier".to_string())?,
+        };
+        // Sanity: verify the proposed TX's nLockTime matches the tier's
+        // CLTV target. Without this, the operator could ask us to sign
+        // a degraded-tier sighash but submit a TX whose lock_time
+        // doesn't satisfy OP_CLTV — the broadcast would fail and we'd
+        // have wasted a cosignature.
+        let lock_time_value = proposed_tx.lock_time.to_consensus_u32();
+        if lock_time_value != tier.timelock_blocks {
+            return Err(format!(
+                "tx lock_time {} does not match tier CLTV target {}",
+                lock_time_value, tier.timelock_blocks
+            ));
+        }
         let leaf_script = taproot_builder
             .build_threshold_leaf(tier)
             .map_err(|e| format!("rebuild leaf script: {:?}", e))?;
