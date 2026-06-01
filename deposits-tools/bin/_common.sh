@@ -935,6 +935,30 @@ start_node() {
             ;;
     esac
 
+    # Chain backend wiring. Default `esplora` keeps existing behaviour
+    # (operators talk to electrs at port 3102). `bitcoind` points at the
+    # regtest bitcoind container's RPC; `electrum` points at electrs's
+    # electrum-protocol port. Parallel to the LIGHTNING_BACKEND case above.
+    case "${CHAIN_BACKEND:-esplora}" in
+        esplora)
+            : # operators already get --esplora from elsewhere; nothing extra
+            ;;
+        bitcoind)
+            export BITCOIND_RPC_URL="http://127.0.0.1:18543"
+            export BITCOIND_RPC_USER="user"
+            export BITCOIND_RPC_PASS="pass"
+            export CHAIN_BACKEND=bitcoind
+            ;;
+        electrum)
+            export ELECTRUM_HOST="127.0.0.1"
+            export ELECTRUM_PORT="50101"
+            export CHAIN_BACKEND=electrum
+            ;;
+        *)
+            log_warn "Unknown CHAIN_BACKEND=$CHAIN_BACKEND; falling back to default"
+            ;;
+    esac
+
     local esplora_url=$(get_node_electrs_url "$node")
 
     # Optionally provision a per-operator deposits-signer.

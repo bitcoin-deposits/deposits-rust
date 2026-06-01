@@ -203,6 +203,12 @@ start_node() {
         LND_MACAROON_HEX="$LND_MACAROON_HEX" \
         LND_TLS_CERT_FILE="$LND_TLS_CERT_FILE" \
         CLN_SOCKET_PATH="$CLN_SOCKET_PATH" \
+        CHAIN_BACKEND="${CHAIN_BACKEND:-esplora}" \
+        BITCOIND_RPC_URL="$BITCOIND_RPC_URL" \
+        BITCOIND_RPC_USER="$BITCOIND_RPC_USER" \
+        BITCOIND_RPC_PASS="$BITCOIND_RPC_PASS" \
+        ELECTRUM_HOST="$ELECTRUM_HOST" \
+        ELECTRUM_PORT="$ELECTRUM_PORT" \
         "$DEPOSITS_NODE" run \
         --seed "$seed" --name "$name" \
         --network regtest --data-dir "$data_dir" \
@@ -394,6 +400,40 @@ esac
 
 export LDK_CLI LDK_REAL_CLI LDK_HOST LDK_PORT LDK_API_KEY LDK_TLS_CERT LDK_SELF_PAY_DIR
 export LIGHTNING_BACKEND LND_REST_URL LND_MACAROON_HEX LND_TLS_CERT_FILE CLN_SOCKET_PATH
+
+# Chain backend wiring. Default `esplora` keeps existing behaviour
+# (operators talk to electrs at port 3102 via the --esplora flag).
+# `bitcoind` points at the regtest bitcoind container's RPC; `electrum`
+# points at electrs's electrum-protocol port (port 50101). Mirrors the
+# LIGHTNING_BACKEND env-gate pattern above.
+BITCOIND_RPC_URL=""; BITCOIND_RPC_USER=""; BITCOIND_RPC_PASS=""
+ELECTRUM_HOST=""; ELECTRUM_PORT=""
+
+case "${CHAIN_BACKEND:-esplora}" in
+    esplora)
+        : # operators already get --esplora $ELECTRS_URL; nothing extra
+        ;;
+    bitcoind)
+        # bitcoin container exposes RPC on host port 18543 with the
+        # well-known regtest user/pass from the compose command line.
+        BITCOIND_RPC_URL="http://127.0.0.1:18543"
+        BITCOIND_RPC_USER="user"
+        BITCOIND_RPC_PASS="pass"
+        log_ok "Chain backend: bitcoind at $BITCOIND_RPC_URL"
+        ;;
+    electrum)
+        # electrs exposes the electrum protocol on host port 50101.
+        ELECTRUM_HOST="127.0.0.1"
+        ELECTRUM_PORT="50101"
+        log_ok "Chain backend: electrum at $ELECTRUM_HOST:$ELECTRUM_PORT"
+        ;;
+    *)
+        log_warn "Unknown CHAIN_BACKEND=$CHAIN_BACKEND. Supported: esplora, bitcoind, electrum."
+        exit 1
+        ;;
+esac
+export CHAIN_BACKEND BITCOIND_RPC_URL BITCOIND_RPC_USER BITCOIND_RPC_PASS
+export ELECTRUM_HOST ELECTRUM_PORT
 
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     start_node "$i"

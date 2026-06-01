@@ -82,12 +82,15 @@ at LedgerOpen, enforced by co-signers).
 | `LIGHTNING_BACKEND=lnd` | Use the `lnd` container (profile `lnd`) instead of LDK. Operators get `LND_REST_URL` / `LND_MACAROON_HEX` / `LND_TLS_CERT_FILE` exported automatically; macaroon is extracted from the container on each run. Start the container first: `docker compose --profile lnd up -d lnd`. |
 | `LIGHTNING_BACKEND=cln` | Use the `cln` container (profile `cln`). Operators get `CLN_SOCKET_PATH` pointing at the bind-mounted `lightning-rpc` socket. Start the container first: `docker compose --profile cln up -d cln`. |
 | `LIGHTNING_BACKEND=ldk` | Explicit form of the default (shared LDK container) |
+| `CHAIN_BACKEND=bitcoind` | Operators read chain data via the regtest bitcoind container's JSON-RPC at port 18543 (user:pass) instead of electrs/esplora. Exercises `BitcoindRpcBackend`. |
+| `CHAIN_BACKEND=electrum` | Operators read chain data via electrs's electrum protocol on host port 50101. Exercises `ElectrumBackend`. |
+| `CHAIN_BACKEND=esplora` | Explicit form of the default (electrs HTTP at port 3102) |
 
-Combinations work: `LIGHTNING_BACKEND=lnd DEPOSITS_USE_SIGNER=1 ./bin/setup.sh 3`
-exercises both the LND backend and the remote signer end-to-end. The
+Combinations work: `LIGHTNING_BACKEND=lnd CHAIN_BACKEND=bitcoind DEPOSITS_USE_SIGNER=1 ./bin/setup.sh 3`
+exercises LND, bitcoind RPC, AND the remote signer end-to-end. The
 existing tier-3 integration tests in `deposits-test/` pass unchanged
-with any combination — protocol behaviour doesn't depend on which LN
-runtime sits under the trait.
+with any combination — protocol behaviour doesn't depend on which
+runtime sits under the LightningBackend or ChainBackend trait.
 
 ## Infrastructure
 

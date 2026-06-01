@@ -58,23 +58,27 @@ Outstanding for full audience coverage: end-to-end integration tests against a r
 
 **Why this was Tier 1**: without it, every Umbrel/Start9 user was bound to a specific LN backend and we only spoke one. With this landed, the operator picks `LIGHTNING_BACKEND=lnd` (Umbrel default) or `cln` and a single image works.
 
-### Tier 1b: `ChainBackend` trait + impls
+### Tier 1b: `ChainBackend` trait + impls ✅ shipped
 
-The mirror of Tier 1a for bitcoin chain data. Today the daemon constructs `EsploraBuilder::new(&url).build_blocking()` at ~14 sites in `wallet.rs` (plus a few in `ledger_wallet.rs` and `recovery.rs`) — hardcoded to the esplora HTTP API. Forces every operator to also run an esplora instance even when they already have `bitcoind` + electrs.
+Mirror of Tier 1a for bitcoin chain data. Three impls: `EsploraBackend`
+(electrs/esplora HTTP), `BitcoindRpcBackend` (direct bitcoind JSON-RPC),
+`ElectrumBackend` (electrum protocol over TCP). Selected at runtime via
+`CHAIN_BACKEND=esplora|bitcoind|electrum` env; single image supports all three.
 
-`ChainBackend` trait covers the non-BDK-handled chain operations: `get_tip`, `get_tx`, `broadcast_tx`, `get_address_utxos`, `get_address_history`, `estimate_fee`. Impls:
+Trait surface: `get_tip_height`, `get_block_hash`, `get_block_height_if_in_best_chain`, `get_tx`, `get_tx_block_height`, `is_output_unspent`, `find_unspent_output_at`, `broadcast_tx`.
 
-- `EsploraBackend` — current behaviour, wraps `esplora_client`.
-- `BitcoindRpcBackend` — direct `bitcoind` JSON-RPC. Uses `scantxoutset` for address scans, `gettransaction` for tx lookups, `sendrawtransaction` for broadcast, `estimatesmartfee` for fees. Natural fit for the audience: every Umbrel/Start9/self-host user already runs `bitcoind`.
-- `ElectrumBackend` — electrum protocol (electrs/fulcrum/electrum-server). Covers users who already have electrs running for other apps.
+What landed:
+- `e55dc3ac`: ChainBackend trait + EsploraBackend impl
+- `3fb0da62`: migrate 14 wallet.rs + 4 ledger_wallet.rs + 11 recovery.rs callers to `&dyn ChainBackend`
+- `<this>`: BitcoindRpcBackend + ElectrumBackend impls + env-driven dispatch + cluster integration
 
-Wired from config (`CHAIN_BACKEND=esplora|bitcoind|electrum` + per-backend connection env). Single image supports all three.
+**Subtlety**: BDK has its own chain-source abstraction (`bdk_esplora`, `bdk_bitcoind_rpc`, `bdk_electrum`) for the wallet **sync** path. The ChainBackend trait sits *above* BDK for the operations BDK doesn't cover (broadcast, fetch-by-id, get-tip, output-status), and *parallel to* BDK's chain sources for the sync path (each backend impl wires the matching BDK source). BDK stays in-process; this trait isn't an attempt to replace it.
 
-**Subtlety**: BDK has its own chain-source abstraction (`bdk_esplora`, `bdk_bitcoind_rpc`, `bdk_electrum`) for the wallet **sync** path. So this trait sits *above* BDK for the operations BDK doesn't cover (broadcast, fetch-by-id, get-tip, fee-estimate), and *parallel to* BDK's chain sources for sync (each backend impl wires the matching BDK source). BDK stays in-process; this trait doesn't try to replace it.
+Compile-time conformance + fixture-parser tests on each impl. Cluster integration via `CHAIN_BACKEND=bitcoind|electrum ./bin/setup.sh N` — exercises the backends end-to-end through the existing tier-3 protocol tests.
 
-Acceptance: end-to-end integration test where deposits-node runs against a bare `bitcoind` (no esplora, no electrs) and successfully scans, broadcasts, and tracks UTXOs.
+**Why Tier 1b mattered at the same priority as 1a**: without it, the docker-compose in Tier 2 still had to bundle esplora or document "first set up electrs separately," which fought the "slot in next to your existing stack" framing. With it done, the Tier-2 single-operator compose can express `CHAIN_BACKEND=bitcoind` against an operator's existing `bitcoind` and not bundle anything extra.
 
-**Why Tier 1b matters at the same priority as 1a**: without it, the docker-compose in Tier 2 still has to bundle esplora or document "first set up electrs separately," which fights the "slot in next to your existing stack" framing. Bigger surface than 1a (more call sites, BDK type-coupling), but same audience-payoff logic.
+One known limitation: `ElectrumBackend::get_block_height_if_in_best_chain` walks the last ~2016 blocks; lookups against deeper hashes return `Ok(None)`. Bitcoind / esplora callers needing deep cold-block confirmation should pick those backends.
 
 ### Tier 2: Single-operator docker-compose
 

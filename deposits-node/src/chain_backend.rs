@@ -114,12 +114,19 @@ pub struct UnspentOutput {
 
 /// Build the [`ChainBackend`] selected at runtime via environment.
 ///
-/// `CHAIN_BACKEND` selects the impl. Today only `esplora` is implemented;
-/// `bitcoind` and `electrum` are added in follow-on commits.
+/// `CHAIN_BACKEND` selects the impl. Defaults to `esplora` so existing
+/// deployments keep working without any env changes.
 ///
-/// The URL is per-backend (esplora HTTP endpoint, bitcoind RPC URL,
-/// electrum hostname:port). Callers pass it from their config — typically
-/// `Wallet::electrum_url()` or the daemon's `--esplora`-style flag.
+/// `url` is the esplora-only fallback hint — every caller passes it from
+/// their wallet's config because esplora is the default. The other backends
+/// read their own connection config from env (and ignore `url`):
+/// - `esplora`  — uses `url` directly
+/// - `bitcoind` — `BITCOIND_RPC_URL`, `BITCOIND_RPC_USER`+`BITCOIND_RPC_PASS`
+///   or `BITCOIND_COOKIE_FILE`
+/// - `electrum` — `ELECTRUM_HOST`, `ELECTRUM_PORT`
+///
+/// Construction errors panic — these are startup-time misconfiguration
+/// the operator needs to see immediately.
 pub fn from_env(url: &str) -> Box<dyn ChainBackend> {
     match std::env::var("CHAIN_BACKEND")
         .ok()
@@ -127,9 +134,16 @@ pub fn from_env(url: &str) -> Box<dyn ChainBackend> {
         .unwrap_or("esplora")
     {
         "esplora" => Box::new(crate::esplora_backend::EsploraBackend::new(url)),
+        "bitcoind" => Box::new(
+            crate::bitcoind_backend::BitcoindRpcBackend::from_env()
+                .unwrap_or_else(|e| panic!("bitcoind backend init failed: {}", e)),
+        ),
+        "electrum" => Box::new(
+            crate::electrum_backend::ElectrumBackend::from_env()
+                .unwrap_or_else(|e| panic!("electrum backend init failed: {}", e)),
+        ),
         other => panic!(
-            "CHAIN_BACKEND={:?} not implemented. Supported: \"esplora\" \
-             (bitcoind / electrum land in follow-on commits per PACKAGING_PLAN.md Tier 1b).",
+            "CHAIN_BACKEND={:?} not supported. Supported: \"esplora\", \"bitcoind\", \"electrum\".",
             other
         ),
     }

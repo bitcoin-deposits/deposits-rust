@@ -43,8 +43,10 @@
 
 pub mod error;
 pub mod handler;
+pub mod bitcoind_backend;
 pub mod chain_backend;
 pub mod cln_backend;
+pub mod electrum_backend;
 pub mod esplora_backend;
 pub mod ldk_backend;
 pub mod ledger_wallet;

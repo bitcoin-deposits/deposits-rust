@@ -75,11 +75,13 @@ services:
         "--network=regtest",
         "--daemon-rpc-addr=bitcoin:18443",
         "--http-addr=0.0.0.0:3002",
+        "--electrum-rpc-addr=0.0.0.0:50001",
         "--monitoring-addr=0.0.0.0:4224"
       ]
     ports:
       - "3102:3002"
       - "4224:4224"
+      - "50101:50001"            # electrum protocol — for CHAIN_BACKEND=electrum tests
     volumes:
       - electrs_data:/data
     networks:
