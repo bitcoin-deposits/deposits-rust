@@ -232,9 +232,25 @@ impl Node {
             Err(_) => return,
         };
 
+        // Grace period (DEP-05 §Lifecycle): once `quorum_expiry` passes,
+        // both re-establishment (operator-initiated) and confiscation
+        // (cosigner-initiated) become available — but if cosigners
+        // auto-dispute the instant expiry hits, the operator has zero
+        // wall-clock window to attempt self-rescue. Hold off auto-
+        // dispute until the Tier-1 boundary opens (`quorum_expiry +
+        // 720`), giving the operator the post-expiry majority-
+        // confiscation window to re-establish via `quorum repair`
+        // before partner cosigners race to confiscate. Override via
+        // `DEPOSITS_AUTO_DISPUTE_GRACE_BLOCKS` for test/dev.
+        const DEFAULT_GRACE_BLOCKS: u32 = 720;
+        let grace_blocks: u32 = std::env::var("DEPOSITS_AUTO_DISPUTE_GRACE_BLOCKS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_GRACE_BLOCKS);
+
         // Snapshot: which ledgers are we a quorum member of that have
-        // passed expiry? Take a copy under the lock so we can release
-        // before doing async work.
+        // passed expiry by more than the grace period? Take a copy
+        // under the lock so we can release before doing async work.
         let candidates: Vec<(String, u64)> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let mut out = Vec::new();
@@ -248,7 +264,8 @@ impl Node {
                     Some(e) => e,
                     None => continue,
                 };
-                if current_height <= expiry {
+                let auto_dispute_block = expiry.saturating_add(grace_blocks);
+                if current_height <= auto_dispute_block {
                     continue;
                 }
                 // Operator of own ledger doesn't auto-dispute.

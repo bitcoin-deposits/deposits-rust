@@ -1166,26 +1166,8 @@ impl Node {
         let new_script_pubkey = new_taproot_output.script_pubkey();
         let new_address = new_taproot_output.address.clone();
 
-        // Build the deterministic rotation TX (1 input → 1 output).
-        let params = SpendTxParams {
-            reserves_outpoint: existing.outpoint,
-            reserves_amount: existing.amount,
-            destination_script: new_script_pubkey.clone(),
-            splits: Vec::new(),
-            fee_rate_sat_vbyte: 5,
-            lock_time: 0,
-        };
-        let prev_script_pubkey = existing.taproot_output.script_pubkey();
-        let rotation_tx = ReservesSpendBuilder::build_spend_transaction(
-            &params,
-            &prev_script_pubkey,
-        )
-        .map_err(|e| Error::Wallet(format!("build rotation tx: {:?}", e)))?;
-        let new_amount = rotation_tx.output[0].value.to_sat();
-        let new_txid = rotation_tx.compute_txid();
-
-        // Rebuild the *current* (pre-rotation) builder so we can hand out
-        // the tier-0 leaf script for sighash + witness assembly.
+        // Rebuild the *current* (pre-rotation) builder + config so we can
+        // address any tier's leaf script for sighash + witness assembly.
         let cur_voters_others: Vec<PublicKey> = existing
             .quorum_members
             .iter()
@@ -1199,11 +1181,81 @@ impl Node {
             cur_voter_set.all_voters().len(),
             existing.quorum_expiry,
         );
-        let tier0 = cur_config
-            .tiers
-            .first()
-            .cloned()
-            .ok_or_else(|| Error::Protocol("current ruleset has no tier 0".to_string()))?;
+
+        // DEP-05 §Lifecycle: pick the highest-numbered tier whose CLTV is
+        // satisfied at the current chain tip. Higher = more degraded =
+        // fewer cosigner sigs required. For Tier 0 (active period) this
+        // resolves to tier_index=0 (the existing strict-majority path).
+        // Past `quorum_expiry + 8064` we get tier_index=3 (operator-alone),
+        // which is the only fully-supported degraded path right now: its
+        // single-CHECKSIG-of-tie_breaker witness is operator-only and
+        // doesn't need any cosigner participation.
+        //
+        // Tier 1/2 in cltv-offset-v2 collapse to single-CHECKSIG of
+        // `sorted_keys[0]` (whoever sorts lowest). That works if the
+        // operator happens to be sorted_keys[0] but otherwise needs a
+        // specific cosigner's on-chain sig — not yet plumbed. For now,
+        // the selector skips Tier 1/2 to avoid silently building a TX
+        // we can't sign. Future commit can add pubkey-specific tier
+        // selection.
+        let current_height = self.wallet.get_block_height().unwrap_or(0);
+        let (tier_index, tier) = {
+            // Prefer Tier 3 (operator alone) if available, then fall
+            // back to Tier 0 (active majority). Tier 1/2 deferred.
+            let mut chosen: Option<(usize, deposits_core::tapscript_reserves::ThresholdTier)> = None;
+            for (idx, t) in cur_config.tiers.iter().enumerate() {
+                // CLTV satisfied?
+                if current_height < t.timelock_blocks {
+                    continue;
+                }
+                // Only Tier 0 (no CLTV) or Tier-3-shaped (single
+                // CHECKSIG of tie_breaker = operator). Skip the
+                // sorted_keys[0] flavor of Tier 1/2.
+                let is_tier0 = idx == 0;
+                let is_operator_alone = t.threshold == 1 && t.requires_tie_breaker;
+                if !(is_tier0 || is_operator_alone) {
+                    continue;
+                }
+                // Prefer higher-numbered (more degraded → fewer
+                // cosigners needed). The loop walks in order so we
+                // overwrite with the latest acceptable tier.
+                chosen = Some((idx, t.clone()));
+            }
+            chosen.ok_or_else(|| {
+                Error::Protocol(format!(
+                    "no usable tier at chain tip {} for ledger expiry {} \
+                     (ruleset={}, quorum_size={}). Tier 0 disabled? Tier 3 \
+                     CLTV not yet satisfied? Tier 1/2 single-key spend not \
+                     yet supported.",
+                    current_height,
+                    existing.quorum_expiry,
+                    existing.ruleset_name,
+                    cur_voter_set.all_voters().len(),
+                ))
+            })?
+        };
+        let tier_lock_time = tier.timelock_blocks;
+        let operator_alone = tier.threshold == 1 && tier.requires_tie_breaker;
+
+        // Build the deterministic rotation TX (1 input → 1 output).
+        // lock_time matches the tier's CLTV target (0 for Tier 0).
+        let params = SpendTxParams {
+            reserves_outpoint: existing.outpoint,
+            reserves_amount: existing.amount,
+            destination_script: new_script_pubkey.clone(),
+            splits: Vec::new(),
+            fee_rate_sat_vbyte: 5,
+            lock_time: tier_lock_time,
+        };
+        let prev_script_pubkey = existing.taproot_output.script_pubkey();
+        let rotation_tx = ReservesSpendBuilder::build_spend_transaction(
+            &params,
+            &prev_script_pubkey,
+        )
+        .map_err(|e| Error::Wallet(format!("build rotation tx: {:?}", e)))?;
+        let new_amount = rotation_tx.output[0].value.to_sat();
+        let new_txid = rotation_tx.compute_txid();
+
         let cur_builder = TapscriptReservesBuilder::new(
             cur_voter_set.clone(),
             cur_config,
@@ -1211,8 +1263,8 @@ impl Node {
             existing.ledger_hash,
         );
         let leaf_script = cur_builder
-            .build_threshold_leaf(&tier0)
-            .map_err(|e| Error::Wallet(format!("build tier-0 leaf: {:?}", e)))?;
+            .build_threshold_leaf(&tier)
+            .map_err(|e| Error::Wallet(format!("build tier-{} leaf: {:?}", tier_index, e)))?;
 
         let sighash = ReservesSpendBuilder::compute_sighash(
             &rotation_tx,
@@ -1238,17 +1290,27 @@ impl Node {
             std::collections::HashMap::new();
         sigs.insert(operator_key, our_sig);
 
-        // Tier-0 threshold: majority of all voters.
-        let total_voters = existing.quorum_members.len() + 1; // +1 operator
-        let majority = (total_voters / 2) + 1;
-        let cosigner_threshold = majority.saturating_sub(1); // operator already signed
+        // Tier-aware cosigner threshold. Tier 3 (operator-alone) needs
+        // zero cosigner sigs — we short-circuit the multicast entirely
+        // below. Tier 0 needs majority (= tier.threshold) total sigs,
+        // and the operator's already in `sigs`.
+        let cosigner_threshold = if operator_alone {
+            0
+        } else {
+            tier.threshold.saturating_sub(1)
+        };
 
         // Send rotation_sign request to the ledger; cosigners verify
         // TX shape + sighash and reply via KIND_LEDGER_RESPONSE.
+        // tier_index lets the cosigner-side rebuild the same leaf
+        // script we used for sighash; otherwise they'd default to
+        // Tier 0 and the sighash check would fail when the operator
+        // is rotating at a degraded tier.
         let unsigned_tx_hex = hex::encode(bitcoin::consensus::encode::serialize(&rotation_tx));
         let request_params = serde_json::json!({
             "sighash": hex::encode(sighash_bytes),
             "unsigned_tx": unsigned_tx_hex,
+            "tier_index": tier_index,
             // Operator's own ledger_hash + new_first_expiry so the cosigner
             // rebuilds the *expected* rotated Taproot output with the same
             // inputs the operator used. Until chain_tip_hash is consistent
@@ -1259,19 +1321,38 @@ impl Node {
             "ledger_hash": hex::encode(new_ledger_hash),
             "new_quorum_expiry": new_first_expiry,
         });
-        let request_id = self
-            .nostr
-            .send_ledger_request(ledger_id, "rotation_sign", request_params)
-            .await
-            .map_err(|e| Error::Protocol(format!("publish rotation_sign: {:?}", e)))?;
-        tracing::info!(
-            "auto_rotation: published rotation_sign request {} for ledger {}... (need {} cosigner sigs)",
-            &request_id[..16.min(request_id.len())],
-            &ledger_id[..16],
-            cosigner_threshold
-        );
+        // Tier-3 short-circuit: operator-alone path. No cosignatures
+        // needed for the on-chain spend; skip the multicast + poll.
+        // The off-chain ledger update's cosignatures are handled
+        // separately by the cosign coordinator (which also short-
+        // circuits at Tier 3).
+        let request_id = if operator_alone {
+            tracing::info!(
+                "auto_rotation: Tier-{} operator-alone path for ledger {}... — skipping cosigner multicast",
+                tier_index,
+                &ledger_id[..16],
+            );
+            String::new()
+        } else {
+            let id = self
+                .nostr
+                .send_ledger_request(ledger_id, "rotation_sign", request_params)
+                .await
+                .map_err(|e| Error::Protocol(format!("publish rotation_sign: {:?}", e)))?;
+            tracing::info!(
+                "auto_rotation: published rotation_sign request {} for ledger {}... \
+                 (tier={}, need {} cosigner sigs)",
+                &id[..16.min(id.len())],
+                &ledger_id[..16],
+                tier_index,
+                cosigner_threshold
+            );
+            id
+        };
 
-        // Poll relay for responses tagged with our request_id.
+        // Poll relay for responses tagged with our request_id (skip for
+        // operator-alone path).
+        if !operator_alone {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
         let active_set: std::collections::HashSet<PublicKey> =
             existing.quorum_members.iter().copied().collect();
@@ -1377,31 +1458,43 @@ impl Node {
                 cosigner_threshold
             )));
         }
+        } // end if !operator_alone
 
-        // Assemble the witness. Stack order for tier-0 majority leaf is:
-        // [sig_N, sig_{N-1}, ..., sig_0, leaf_script, control_block]
-        // where sig_i corresponds to voter at sorted_x_only_pubkeys()[i].
-        // Empty bytes for voters that didn't sign (still a valid stack
-        // entry for OP_CHECKSIGADD).
-        let sorted = cur_voter_set.sorted_x_only_pubkeys();
+        // Assemble the witness, shape depending on the tier we picked.
         let control_block = existing
             .taproot_output
-            .control_block_for_tier(0)
-            .ok_or_else(|| Error::Protocol("no control block for tier 0".to_string()))?;
+            .control_block_for_tier(tier_index)
+            .ok_or_else(|| {
+                Error::Protocol(format!("no control block for tier {}", tier_index))
+            })?;
 
         let mut witness = Witness::new();
-        for x_only in sorted.iter().rev() {
-            // Map x_only back to a full PublicKey we have a sig for.
-            let mut pushed = false;
-            for (pk, sig) in &sigs {
-                if pk.x_only_public_key().0 == *x_only {
-                    witness.push(sig);
-                    pushed = true;
-                    break;
+        if operator_alone {
+            // Tier-3 leaf: `<operator_xonly> CHECKSIG`. Witness is just
+            // the operator's sig.
+            let op_sig = sigs.get(&operator_key).ok_or_else(|| {
+                Error::Protocol("operator sig missing for Tier-3 path".to_string())
+            })?;
+            witness.push(op_sig);
+        } else {
+            // Tier-0 (and any future multisig tier): CHECKSIGADD pattern.
+            // Stack order: [sig_N, sig_{N-1}, ..., sig_0, leaf, ctrl]
+            // where sig_i corresponds to voter at sorted_x_only_pubkeys()[i].
+            // Empty bytes for voters that didn't sign (still a valid
+            // stack entry for OP_CHECKSIGADD).
+            let sorted = cur_voter_set.sorted_x_only_pubkeys();
+            for x_only in sorted.iter().rev() {
+                let mut pushed = false;
+                for (pk, sig) in &sigs {
+                    if pk.x_only_public_key().0 == *x_only {
+                        witness.push(sig);
+                        pushed = true;
+                        break;
+                    }
                 }
-            }
-            if !pushed {
-                witness.push([] as [u8; 0]);
+                if !pushed {
+                    witness.push([] as [u8; 0]);
+                }
             }
         }
         witness.push(leaf_script.as_bytes());

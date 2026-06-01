@@ -510,7 +510,19 @@ impl Node {
             }
             let block_height = self.wallet.get_block_height().unwrap_or(0);
             let qe = state.quorum_expiry.unwrap_or(0);
-            if qe != 0 && block_height > qe {
+            // Past expiry, refuse only on legacy ledgers. cltv-offset-v2
+            // ledgers are entitled to the DEP-05 §Lifecycle self-rescue
+            // path: cosigners cosign QuorumBegin (the establishment op
+            // `rotation_sign` is supporting) at degraded thresholds via
+            // the cosign_threshold helper. The downstream sighash check
+            // and the operator's collected cosignature count must still
+            // both line up; this gate just removes the blanket refusal
+            // so the lifecycle cascade can engage.
+            let cascade_active = matches!(
+                state.active_ruleset_name.as_str(),
+                "cltv-offset-v2" | "cltv-offset-literal"
+            );
+            if qe != 0 && block_height > qe && !cascade_active {
                 return (
                     false,
                     None,
@@ -693,16 +705,43 @@ impl Node {
                 )
             }
         };
-        let tier0 = match current_output.config.tiers.first() {
+        // tier_index from the operator's request. Default to 0 for
+        // back-compat with rotation_sign requests that predate the
+        // DEP-05 §Lifecycle plumbing.
+        let tier_index = request
+            .params
+            .get("tier_index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let chosen_tier = match current_output.config.tiers.get(tier_index) {
             Some(t) => t.clone(),
             None => {
                 return (
                     false,
                     None,
-                    Some("current taproot output has no tiers".to_string()),
+                    Some(format!(
+                        "tier_index {} out of range (config has {} tiers)",
+                        tier_index,
+                        current_output.config.tiers.len()
+                    )),
                 )
             }
         };
+        // Sanity: verify the proposed TX's lock_time matches the tier's
+        // CLTV target. Without this check the operator could ask for a
+        // degraded tier but submit a TX that the on-chain script won't
+        // accept (BIP-65 OP_CLTV requires nLockTime >= target).
+        let lock_time_value = proposed_tx.lock_time.to_consensus_u32();
+        if lock_time_value != chosen_tier.timelock_blocks {
+            return (
+                false,
+                None,
+                Some(format!(
+                    "rotation tx lock_time {} does not match tier-{} CLTV target {}",
+                    lock_time_value, tier_index, chosen_tier.timelock_blocks
+                )),
+            );
+        }
         let leaf_script = {
             // Rebuild the builder once more so we can call build_threshold_leaf.
             // (TapscriptReservesOutput doesn't expose its inner builder.)
@@ -723,13 +762,13 @@ impl Node {
                 self.wallet.network(),
                 ledger_hash,
             );
-            match builder.build_threshold_leaf(&tier0) {
+            match builder.build_threshold_leaf(&chosen_tier) {
                 Ok(s) => s,
                 Err(e) => {
                     return (
                         false,
                         None,
-                        Some(format!("build tier-0 leaf: {:?}", e)),
+                        Some(format!("build tier-{} leaf: {:?}", tier_index, e)),
                     )
                 }
             }
