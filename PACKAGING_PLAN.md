@@ -114,14 +114,29 @@ What's NOT yet there:
   live drive-through to surface anything the wizard's prompts don't
   cover.
 
-### Tier 3: Quorum-formation wizard
+### Tier 3: Quorum-formation wizard (private flow ✅ shipped; public flow pending)
 
-Today's quorum formation assumes `setup.sh`-style co-bring-up. The audience needs two flows:
+**Private flow ✅** — operators who know each other's pubkeys out-of-band:
 
-- **Private (known peers)**: `deposits-node quorum form-with --members <pk1> <pk2> <pk3>`. The local operator publishes a `QuorumAddMember` for each named pubkey; peers see the requests via their existing inbound flow and accept via `deposits-node quorum accept-membership <ledger_id>`. When all members are in, the first `QuorumBegin` rotates reserves into the multisig.
-- **Public (advertise + match)**: extension to the existing advertisement protocol (or a new ad type) — operator advertises "seeking partners for quorum, Q=N." Other operators see seekers via `deposits-node quorum list-seekers`, request to join, and the seeker accepts. Same `QuorumAddMember` → `QuorumBegin` underneath.
+- `deposits-node quorum show-identity` — prints operator pubkey + owned
+  ledger IDs in copy-paste form. Peers paste into a chat / email.
+- `deposits-node quorum form-with --ledger-id <our> --member <pk>:<lid> [--member ...] [--begin --amount-sats N]`
+  — orchestrator: validates inputs, calls quorum_add for each member
+  sequentially, optionally runs quorum begin at the end.
+- [`deploy/operator/QUORUM.md`](deploy/operator/QUORUM.md) — walkthrough
+  covering show-identity → coordination → form-with → verify → operate.
+  Includes Q sizing, membership expiry, troubleshooting.
 
-Acceptance: 3 operators on 3 different boxes form a quorum via documented commands. No `setup.sh`-style co-bring-up required.
+Acceptance for private flow: 3 operators on 3 different boxes can
+form a quorum following QUORUM.md without ever touching `setup.sh`.
+
+**Public flow** — still pending. Operator advertises "seeking partners
+for quorum" on the ledger relay; other operators discover via
+`quorum list-seekers`, request to join, originator accepts. Touches the
+advertisement protocol (new ad shape) + adds two CLI commands. Bigger
+lift than the private flow; ships when there's enough operator density
+that strangers-finding-strangers is the natural pattern. For now the
+documented path is "use the project's announce channel out-of-band."
 
 ### Tier 4: Umbrel community app
 

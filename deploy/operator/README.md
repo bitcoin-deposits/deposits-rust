@@ -28,6 +28,14 @@ containers slot in next to it.
   images are pulled from `ghcr.io/bitcoin-deposits/deposits-node:latest`
   once that registry path lands.
 
+## Forming a quorum with peers
+
+Once your operator is running, the next step is forming a quorum with
+other operators (Q-1 cosigners). See [QUORUM.md](./QUORUM.md) for the
+walkthrough — covers `quorum show-identity`, sharing pubkeys + ledger
+IDs out of band, and running `quorum form-with --begin` to add members
+and rotate reserves in a single command.
+
 ## 5-minute quickstart
 
 From this directory (`deploy/operator/`):

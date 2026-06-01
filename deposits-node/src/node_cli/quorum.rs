@@ -12,14 +12,18 @@ use std::str::FromStr;
 
 pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
-        eprintln!("Usage: deposits-node quorum <add|remove|join|begin|refresh|request|list> [args...]");
-        eprintln!("  add      Add a quorum member to our ledger");
-        eprintln!("  remove   Remove a quorum member from our ledger");
-        eprintln!("  join     Record that we joined another operator's quorum");
-        eprintln!("  begin    Activate quorum-based Taproot spending");
-        eprintln!("  refresh  Re-add active members and rotate when all responded (idempotent)");
-        eprintln!("  request  Request a peer to join our quorum");
-        eprintln!("  list     List quorum relationships");
+        eprintln!(
+            "Usage: deposits-node quorum <add|remove|join|begin|refresh|request|list|form-with|show-identity> [args...]"
+        );
+        eprintln!("  add            Add a single quorum member to our ledger");
+        eprintln!("  remove         Remove a quorum member from our ledger");
+        eprintln!("  join           Record that we joined another operator's quorum");
+        eprintln!("  begin          Activate quorum-based Taproot spending");
+        eprintln!("  refresh        Re-add active members and rotate when all responded (idempotent)");
+        eprintln!("  request        Request a peer to join our quorum");
+        eprintln!("  list           List quorum relationships");
+        eprintln!("  form-with      Form a quorum with N named peers in one shot (add + begin)");
+        eprintln!("  show-identity  Print this operator's pubkey + owned ledger IDs (for peer coordination)");
         return Ok(());
     }
     match args[0].as_str() {
@@ -30,9 +34,13 @@ pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::E
         "refresh" => quorum_refresh(&args[1..]).await,
         "request" => quorum_request(&args[1..]).await,
         "list" => quorum_list(&args[1..]).await,
+        "form-with" => quorum_form_with(&args[1..]).await,
+        "show-identity" => quorum_show_identity(&args[1..]).await,
         cmd => {
             eprintln!("Unknown quorum subcommand: {}", cmd);
-            eprintln!("Usage: deposits-node quorum <add|remove|join|begin|refresh|request|list> [args...]");
+            eprintln!(
+                "Usage: deposits-node quorum <add|remove|join|begin|refresh|request|list|form-with|show-identity> [args...]"
+            );
             Ok(())
         }
     }
@@ -699,6 +707,226 @@ async fn quorum_refresh(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
     if let Some(expiry) = result.get("quorum_expiry").and_then(|v| v.as_u64()) {
         println!("  New quorum_expiry: {}", expiry);
+    }
+
+    Ok(())
+}
+
+/// Form a quorum with N named peers in one shot.
+///
+/// Per PACKAGING_PLAN.md Tier 3 "private flow": operators who know each
+/// other's pubkeys + ledger IDs out-of-band (via the show-identity
+/// command + a side channel) form a quorum with a single command instead
+/// of running `quorum add` N times manually.
+///
+/// Usage:
+///   deposits-node quorum form-with --ledger-id <our_ledger_id> \
+///       --member <pubkey>:<ledger_id> \
+///       --member <pubkey>:<ledger_id> \
+///       [--member ...] \
+///       [--begin --amount-sats N]
+///
+/// The optional `--begin --amount-sats N` runs `quorum begin` after all
+/// members are added — without it, the operator can review the state
+/// (e.g. `quorum list`) before activating.
+async fn quorum_form_with(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut our_ledger_id: Option<String> = None;
+    let mut members: Vec<(String, String)> = Vec::new(); // (pubkey_str, ledger_id)
+    let mut do_begin = false;
+    let mut amount_sats: Option<u64> = None;
+    let mut config_args: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--ledger-id" if i + 1 < args.len() => {
+                our_ledger_id = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--member" if i + 1 < args.len() => {
+                let raw = &args[i + 1];
+                let (pk, lid) = raw.split_once(':').ok_or_else(|| {
+                    format!("--member must be <pubkey>:<ledger_id>, got: {}", raw)
+                })?;
+                members.push((pk.to_string(), lid.to_string()));
+                i += 2;
+            }
+            "--begin" => {
+                do_begin = true;
+                i += 1;
+            }
+            "--amount-sats" if i + 1 < args.len() => {
+                amount_sats = Some(args[i + 1].parse().map_err(|_| {
+                    format!("Invalid --amount-sats value: {}", args[i + 1])
+                })?);
+                i += 2;
+            }
+            // Pass-through for daemon-config flags like --relay, --data-dir
+            other if other.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+
+    let our_ledger_id = our_ledger_id.ok_or(
+        "--ledger-id required (use `quorum show-identity` to list your ledger IDs)",
+    )?;
+    if members.is_empty() {
+        return Err("at least one --member required".into());
+    }
+    if !super::is_ledger_id(&our_ledger_id) {
+        return Err(format!(
+            "--ledger-id must be 64 hex chars; got: {}",
+            our_ledger_id
+        )
+        .into());
+    }
+    if do_begin && amount_sats.is_none() {
+        return Err("--begin requires --amount-sats <N>".into());
+    }
+
+    // Validate each member tuple up-front so partial failures aren't possible.
+    for (pk_str, lid) in &members {
+        PublicKey::from_str(pk_str)
+            .map_err(|e| format!("invalid member pubkey {}: {}", pk_str, e))?;
+        if !super::is_ledger_id(lid) {
+            return Err(format!(
+                "member's ledger_id must be 64 hex chars; got: {}",
+                lid
+            )
+            .into());
+        }
+    }
+
+    let config = parse_config(&config_args)?;
+
+    println!(
+        "Forming quorum on ledger {}... with {} member(s):",
+        &our_ledger_id[..16],
+        members.len()
+    );
+    for (pk, lid) in &members {
+        println!(
+            "  - {}... (collateral ledger {}...)",
+            &pk[..16.min(pk.len())],
+            &lid[..16.min(lid.len())]
+        );
+    }
+    println!();
+
+    // Add each member via the same daemon RPC `quorum add` uses. Sequential
+    // — gives clear progress signal and avoids racing the daemon's
+    // membership-request flow against itself.
+    let mut succeeded = 0usize;
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for (pk_str, member_ledger_id) in &members {
+        let params = serde_json::json!({
+            "member_pubkey": pk_str,
+            "member_ledger_id": member_ledger_id,
+        });
+        print!(
+            "  adding {}... ",
+            &pk_str[..16.min(pk_str.len())]
+        );
+        match send_daemon_request(&config, &our_ledger_id, "quorum_add", params).await {
+            Ok(_) => {
+                println!("✓");
+                succeeded += 1;
+            }
+            Err(e) => {
+                println!("✗ ({})", e);
+                failures.push((pk_str.clone(), e.to_string()));
+            }
+        }
+    }
+
+    println!();
+    if !failures.is_empty() {
+        println!(
+            "Failed to add {} of {} members; check daemon logs and re-run after fixing:",
+            failures.len(),
+            members.len()
+        );
+        for (pk, err) in &failures {
+            println!("  - {}: {}", pk, err);
+        }
+        return Err("not all members added; refusing to begin".into());
+    }
+    println!("All {} member(s) added.", succeeded);
+
+    if do_begin {
+        println!();
+        println!(
+            "Activating quorum: begin --amount-sats {}",
+            amount_sats.unwrap()
+        );
+        let params = serde_json::json!({
+            "amount_sats": amount_sats.unwrap(),
+        });
+        match send_daemon_request(&config, &our_ledger_id, "quorum_begin", params).await {
+            Ok(result) => {
+                println!("Quorum activated.");
+                if let Some(addr) = result.get("new_address").and_then(|v| v.as_str()) {
+                    println!("  New reserves address: {}", addr);
+                }
+                if let Some(txid) = result.get("txid").and_then(|v| v.as_str()) {
+                    println!("  Rotation txid:        {}", txid);
+                }
+            }
+            Err(e) => {
+                return Err(format!("members added but begin failed: {}", e).into());
+            }
+        }
+    } else {
+        println!();
+        println!("Members added. Run `quorum begin <ledger_id> --amount-sats N` when ready");
+        println!("to rotate reserves into the quorum multisig, OR re-run form-with with");
+        println!("--begin --amount-sats N to do both in one shot.");
+    }
+
+    Ok(())
+}
+
+/// Print this operator's pubkey + owned ledger IDs in a copy-paste-friendly
+/// format. Peers paste the output into a chat / email when coordinating
+/// quorum formation; the receiving operator passes the pubkey + ledger_id
+/// to their own `quorum form-with --member <pk>:<lid>`.
+async fn quorum_show_identity(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_config(args)?;
+    let node = Node::new(config).await?;
+
+    println!("Operator pubkey: {}", node.node_id);
+    let (our_ledgers, _joined) = node.list_quorum_info();
+    if our_ledgers.is_empty() {
+        println!();
+        println!("(no owned ledgers — open one with `ledger open` first)");
+        return Ok(());
+    }
+    println!();
+    println!("Owned ledgers (any can be used as your collateral on a peer's quorum):");
+    for (ledger_id, active, _pending) in &our_ledgers {
+        let role_hint = if active.is_empty() {
+            ""
+        } else {
+            "  [quorum already active]"
+        };
+        println!("  {}{}", ledger_id, role_hint);
+    }
+    println!();
+    println!("Share with a peer who wants you in their quorum:");
+    println!("  pubkey:   {}", node.node_id);
+    println!("  ledger:   <pick one ledger ID from the list above>");
+    println!();
+    println!("Or paste this line for one of your ledgers:");
+    if let Some((ledger_id, _, _)) = our_ledgers.first() {
+        println!("  {}:{}", node.node_id, ledger_id);
     }
 
     Ok(())
