@@ -36,15 +36,27 @@ Skipped: **Flatpak / Snap** — wrong fit for server daemons.
 
 ## Tier plan
 
-### Tier 1a: `LightningBackend` trait + impls
+### Tier 1a: `LightningBackend` trait + impls ✅ shipped
 
-Extract the surface `ldk_cli.rs` already implements into a `LightningBackend` trait. Make the existing `LdkCli` the LDK impl. Add `LndBackend` (macaroon + REST/gRPC) and `ClnBackend` (Unix socket / gRPC). Wire the choice from config (`LIGHTNING_BACKEND=ldk|lnd|cln` env var) so a single image supports all three.
+Extracted the surface `ldk_cli.rs` already implements into a `LightningBackend` trait. Three impls: `LdkBackend` (subprocess to `ldk-server-cli`), `LndBackend` (REST + macaroon), `ClnBackend` (Unix-socket JSON-RPC). Selected at runtime via `LIGHTNING_BACKEND=ldk|lnd|cln` env; single image supports all three.
 
-The trait surface (extracted verbatim from current callers): `get_node_info`, `get_balances`, `create_invoice` (with + without description hash), `create_invoice_any_amount`, `pay_invoice` (with + without amount override), `list_channels`, `list_payments`, `get_payment_preimage`.
+Trait surface: `get_node_info`, `get_balances`, `create_invoice` (with + without description hash), `create_invoice_any_amount`, `pay_invoice` (with + without amount override), `list_channels`, `list_payments`, `get_payment_preimage`.
 
-Acceptance: end-to-end integration test where deposits-node runs against a polar-spawned LND node (or a Docker LND in CI) and successfully makes/pays invoices.
+What landed (Sep 2026 commits):
+- `223a440e`: LightningBackend trait + LdkBackend impl
+- `f568d302`: migrate the ~11 production callers to `&dyn LightningBackend`
+- `748a6e25`: rename LdkCli → LdkBackend for symmetry with sibling impls
+- `<this>`: LndBackend + ClnBackend impls + env-driven dispatch
 
-**Why this is Tier 1**: without it, the audience can't install — every Umbrel/Start9 user is bound to a specific LN backend and we only speak one. Structural unlock for all of Tier 2-4.
+Compile-time conformance tests on all three impls; JSON-fixture parsers for the LND/CLN response shapes; trait-method-mapping unit tests.
+
+Two known limitations:
+- `LndBackend::get_node_info` returns no `current_best_block_hash` (LND's `/v1/getinfo` doesn't surface it). Display-only impact.
+- `ClnBackend::create_invoice_with_desc_hash` returns `Err` because CLN's `invoice` command doesn't accept an explicit description hash. NIP-57 zap invoices need LDK or LND today; an upstream CLN improvement (or our `invoicerequest` adoption) fixes this later.
+
+Outstanding for full audience coverage: end-to-end integration tests against a real LND / CLN (polar / docker — requires CI infrastructure investment). Compile-time conformance covers the "does this type satisfy the trait" question; real wire validation against live nodes lands when CI gets there.
+
+**Why this was Tier 1**: without it, every Umbrel/Start9 user was bound to a specific LN backend and we only spoke one. With this landed, the operator picks `LIGHTNING_BACKEND=lnd` (Umbrel default) or `cln` and a single image works.
 
 ### Tier 1b: `ChainBackend` trait + impls
 

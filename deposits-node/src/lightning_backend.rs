@@ -166,13 +166,21 @@ pub enum PaymentStatus {
 
 /// Build the [`LightningBackend`] selected at runtime via environment.
 ///
-/// `LIGHTNING_BACKEND` selects the impl. Today only `ldk` is implemented;
-/// `lnd` and `cln` are added in follow-on commits. Defaulting to `ldk`
-/// keeps existing deployments working without any env changes.
+/// `LIGHTNING_BACKEND` selects the impl. Defaults to `ldk` so existing
+/// deployments keep working without any env changes.
 ///
-/// Reads per-backend config from env too — the LDK backend uses
-/// `LDK_CLI`, `LDK_HOST`, `LDK_PORT`, `LDK_API_KEY` (see
-/// [`crate::ldk_backend::LdkBackendConfig::from_env`]).
+/// Per-backend config also comes from env:
+/// - `ldk` — `LDK_CLI`, `LDK_HOST`, `LDK_PORT`, `LDK_API_KEY` (see
+///   [`crate::ldk_backend::LdkBackendConfig::from_env`])
+/// - `lnd` — `LND_REST_URL`, `LND_MACAROON_HEX` or `LND_MACAROON_FILE`,
+///   `LND_TLS_CERT_FILE`, `LND_TLS_INSECURE` (see
+///   [`crate::lnd_backend::LndBackend::from_env`])
+/// - `cln` — `CLN_SOCKET_PATH` (see
+///   [`crate::cln_backend::ClnBackend::from_env`])
+///
+/// Construction errors (missing macaroon, unreadable socket, etc.) panic
+/// — these are startup-time misconfiguration the operator needs to see
+/// immediately, not runtime errors callers should try to recover from.
 pub fn from_env() -> Box<dyn LightningBackend> {
     match std::env::var("LIGHTNING_BACKEND")
         .ok()
@@ -180,9 +188,16 @@ pub fn from_env() -> Box<dyn LightningBackend> {
         .unwrap_or("ldk")
     {
         "ldk" => Box::new(crate::ldk_backend::LdkBackend::from_env()),
+        "lnd" => Box::new(
+            crate::lnd_backend::LndBackend::from_env()
+                .unwrap_or_else(|e| panic!("LND backend init failed: {}", e)),
+        ),
+        "cln" => Box::new(
+            crate::cln_backend::ClnBackend::from_env()
+                .unwrap_or_else(|e| panic!("CLN backend init failed: {}", e)),
+        ),
         other => panic!(
-            "LIGHTNING_BACKEND={:?} not implemented. Supported: \"ldk\" \
-             (lnd / cln land in follow-on commits per PACKAGING_PLAN.md Tier 1a).",
+            "LIGHTNING_BACKEND={:?} not supported. Supported: \"ldk\", \"lnd\", \"cln\".",
             other
         ),
     }

@@ -44,10 +44,12 @@
 pub mod error;
 pub mod handler;
 pub mod chain_backend;
+pub mod cln_backend;
 pub mod esplora_backend;
 pub mod ldk_backend;
 pub mod ledger_wallet;
 pub mod lightning_backend;
+pub mod lnd_backend;
 pub mod metrics;
 pub mod node;
 pub mod node_cli;
