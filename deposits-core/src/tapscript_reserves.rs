@@ -288,70 +288,69 @@ impl TapscriptReservesBuilder {
         // Get sorted pubkeys for deterministic script construction
         let sorted_keys = self.voter_set.sorted_x_only_pubkeys();
 
-        // Build threshold check using CHECKSIGADD pattern (BIP-342)
-        // For n-of-m: push keys, use CHECKSIGADD, then check threshold
-        if tier.threshold == 1 {
-            // Single-sig case: just CHECKSIG with first available key
-            if tier.requires_tie_breaker {
-                if let Some(tb) = self.voter_set.tie_breaker() {
-                    builder = builder
-                        .push_x_only_key(&tb.x_only())
-                        .push_opcode(OP_CHECKSIG);
-                } else {
-                    return Err(DepositsError::InvalidState(
-                        "Tie-breaker required but not found".to_string(),
-                    ));
-                }
-            } else {
-                // Any single key can spend
-                builder = builder
-                    .push_x_only_key(&sorted_keys[0])
-                    .push_opcode(OP_CHECKSIG);
-            }
-        } else {
-            // Multi-sig case using CHECKSIGADD (BIP-342)
-            // Pattern: <key1> CHECKSIG <key2> CHECKSIGADD <key3> CHECKSIGADD ... <threshold> GREATERTHANOREQUAL
-
-            let keys_to_use = if tier.requires_tie_breaker {
-                // Must include tie-breaker, plus enough others to meet threshold
-                let tb = self.voter_set.tie_breaker().ok_or_else(|| {
-                    DepositsError::InvalidState("Tie-breaker required but not found".to_string())
-                })?;
-
-                let mut keys = vec![tb.x_only()];
-                for voter in self.voter_set.primary_voters() {
-                    keys.push(voter.x_only());
-                }
-                // Sort for determinism
-                keys.sort_by_key(|a| a.serialize());
-                keys
-            } else {
-                sorted_keys.clone()
-            };
-
-            if keys_to_use.len() < tier.threshold {
-                return Err(DepositsError::InvalidState(format!(
-                    "Not enough keys ({}) for threshold ({})",
-                    keys_to_use.len(),
-                    tier.threshold
-                )));
-            }
-
-            // First key uses CHECKSIG
+        // Operator-alone special case: tie-breaker required AND
+        // threshold == 1 means "ONLY the operator can spend." Emit a
+        // single-key CHECKSIG of the tie-breaker (operator). This is
+        // distinct from "any one voter" which uses the general
+        // CHECKSIGADD path below.
+        if tier.threshold == 1 && tier.requires_tie_breaker {
+            let tb = self.voter_set.tie_breaker().ok_or_else(|| {
+                DepositsError::InvalidState("Tie-breaker required but not found".to_string())
+            })?;
             builder = builder
-                .push_x_only_key(&keys_to_use[0])
+                .push_x_only_key(&tb.x_only())
                 .push_opcode(OP_CHECKSIG);
-
-            // Subsequent keys use CHECKSIGADD
-            for key in keys_to_use.iter().skip(1) {
-                builder = builder.push_x_only_key(key).push_opcode(OP_CHECKSIGADD);
-            }
-
-            // Check threshold (use >= so meeting OR exceeding threshold works)
-            builder = builder
-                .push_int(tier.threshold as i64)
-                .push_opcode(OP_GREATERTHANOREQUAL);
+            return Ok(builder.into_script());
         }
+
+        // General CHECKSIGADD path. Used for every other tier — strict
+        // majority, minority, "any one voter" (threshold=1 without
+        // tie-breaker), etc. The witness shape is uniform: one sig (or
+        // empty push) per voter in sorted order, plus the leaf+control_
+        // block tail. This means rotation and confiscation can share
+        // witness-assembly code across tiers without special-casing the
+        // single-signer-from-the-quorum scenario.
+        //
+        // Pattern: <key1> CHECKSIG <key2> CHECKSIGADD … <threshold>
+        // GREATERTHANOREQUAL
+
+        let keys_to_use = if tier.requires_tie_breaker {
+            // Must include tie-breaker, plus the primary voters
+            let tb = self.voter_set.tie_breaker().ok_or_else(|| {
+                DepositsError::InvalidState("Tie-breaker required but not found".to_string())
+            })?;
+            let mut keys = vec![tb.x_only()];
+            for voter in self.voter_set.primary_voters() {
+                keys.push(voter.x_only());
+            }
+            keys.sort_by_key(|a| a.serialize());
+            keys
+        } else {
+            sorted_keys.clone()
+        };
+
+        if keys_to_use.len() < tier.threshold {
+            return Err(DepositsError::InvalidState(format!(
+                "Not enough keys ({}) for threshold ({})",
+                keys_to_use.len(),
+                tier.threshold
+            )));
+        }
+
+        // First key uses CHECKSIG
+        builder = builder
+            .push_x_only_key(&keys_to_use[0])
+            .push_opcode(OP_CHECKSIG);
+
+        // Subsequent keys use CHECKSIGADD
+        for key in keys_to_use.iter().skip(1) {
+            builder = builder.push_x_only_key(key).push_opcode(OP_CHECKSIGADD);
+        }
+
+        // Check threshold (use >= so meeting OR exceeding threshold works)
+        builder = builder
+            .push_int(tier.threshold as i64)
+            .push_opcode(OP_GREATERTHANOREQUAL);
 
         Ok(builder.into_script())
     }
@@ -2664,8 +2663,14 @@ mod frozen_builder_snapshot {
     ///
     /// Skipping steps 1-3 means future on-chain UTXOs built by the old code
     /// become unspendable by `migrate-snapshot` / `legacy-recover`.
+    // Updated 2026-06-01 with the build_threshold_leaf cleanup that
+    // makes `threshold == 1 && !requires_tie_breaker` use CHECKSIGADD
+    // over all voters instead of single-CHECKSIG of sorted_keys[0].
+    // Per project owner: no v1 deployment exists, so the freeze-first
+    // legacy_builders dance was skipped — there are no on-chain UTXOs
+    // committed to the prior script shape.
     const EXPECTED_CURRENT_SCRIPT_HEX: &str =
-        "5120b62884a295859784cbb9ae10e517be37b83c3184eb258d320fa2b1cae51c2255";
+        "51202da85682af56fd62b6fa106e30831a8dbfa05c74259bdca8e0cfad0242ff0e55";
 
     #[test]
     fn current_builder_matches_pinned_snapshot() {
