@@ -154,6 +154,8 @@ start_node() {
     local seed="${SEEDS[$name]}"
     local data_dir="$DATA_ROOT/$name"
     local metrics_port=$((9100 + idx))
+    # Per-op admin UI port (default daemon picks 8765 → collides for ops 1..N).
+    local admin_port=$((8765 + idx))
     mkdir -p "$data_dir"
 
     # Optional: provision a co-located deposits-signer when
@@ -214,6 +216,7 @@ start_node() {
         --network regtest --data-dir "$data_dir" \
         --esplora "$ELECTRS_URL" \
         --metrics-port "$metrics_port" \
+        --admin-bind "127.0.0.1:$admin_port" \
         --fast-poll \
         $RELAY_ARGS \
         $signer_flags >> "$data_dir/daemon.log" 2>&1 &
