@@ -77,6 +77,12 @@ services:
       - "${SIGNER_PUBKEY:?run ./init.sh to generate}"
       - "--signer-socket"
       - "/run/dsigner/socket"
+      # Bind the admin UI on all container interfaces so the host port
+      # mapping above (ADMIN_BIND → 8765) actually reaches it. The host
+      # mapping is loopback-only by default, so this stays operator-LAN-
+      # private even though the container side is 0.0.0.0.
+      - "--admin-bind"
+      - "0.0.0.0:8765"
     environment:
       # Required: nostr relays. First is the durable ledgers relay; others
       # are messaging fallbacks.
@@ -123,6 +129,9 @@ services:
       # The operator-protocol RPC is over nostr (no inbound port); only
       # expose the metrics endpoint for the operator's own Prometheus.
       - "${METRICS_BIND:-127.0.0.1:9100}:9100"
+      # Operator admin UI (Tier 5). Loopback by default — see ADMIN.md
+      # for the TLS reverse-proxy pattern if you need remote access.
+      - "${ADMIN_BIND:-127.0.0.1:8765}:8765"
 
 networks:
   # signer ↔ node only. internal: true means no traffic leaves this

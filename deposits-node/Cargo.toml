@@ -80,6 +80,15 @@ lightning-invoice = "0.32"
 # HTTP client for lightning payments
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }
 
+# HTTP server for the operator admin UI (PACKAGING_PLAN Tier 5).
+# Pairs with the embedded vanilla-JS frontend served from
+# deposits-node/admin-ui/. Pin to a stable axum 0.7.x so the bearer-token
+# middleware shape doesn't shift under us.
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["set-header"] }
+rand = "0.8"
+
 
 # CPU profiler — timer-based sampling, works in Docker on any host OS
 pprof = { version = "0.14", features = ["flamegraph", "protobuf-codec"] }

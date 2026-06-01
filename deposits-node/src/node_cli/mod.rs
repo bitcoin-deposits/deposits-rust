@@ -437,6 +437,12 @@ OPTIONS (most subcommands accept these):
 `run`-only options:
     --metrics-port <port>
                        Port for the Prometheus metrics endpoint
+    --admin-bind <addr>
+                       Bind address for the operator admin UI
+                       (default: 127.0.0.1:8765 — loopback only).
+                       The token is written to <data-dir>/admin-token
+                       and logged on first boot.
+    --admin-disabled   Don't start the admin UI.
     --fast-poll        Tighten periodic-task intervals (2s ledger reload,
                        5s periodic, 30s wallet sync) for test/dev clusters.
                        Production runs leave this off.

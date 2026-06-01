@@ -170,18 +170,36 @@ add-ons — each has its own packaging format. Per the recommendation
 in this plan: Umbrel first (biggest user base), Start9 second
 (polished UX), others as demand surfaces.
 
-### Tier 5: Web operator admin UI
+### Tier 5: Web operator admin UI — SHIPPED (read-only MVP)
 
-The polished-UX target — what Alby Hub does for Lightning, applied to the deposits operator surface. Static frontend (probably vanilla TS or React, served by the deposits-node directly so it's behind the same auth boundary as the admin RPCs). Pages:
+Daemon embeds a vanilla-HTML/CSS/JS read-only admin UI behind a
+bearer token. Shipped scope:
 
-- Dashboard: ledgers, quorums, collateral position, recent activity, sync status.
-- Actions: rotate quorum, respond to dispute, lock for fulfillment, transfer between deposits.
-- Settings: LN backend config, bitcoin RPC, relay URLs, signer status, network preferences.
-- Audit log: every operator-initiated action with timestamp, op type, target, outcome.
+- `deposits-node/src/admin_api.rs` — axum 0.7 server, bearer-token
+  auth middleware, JSON endpoints (`/api/status`, `/api/ledgers`,
+  `/api/quorum`, `/api/activity`, `/api/signer`).
+- `deposits-node/admin-ui/index.html` — single-file frontend
+  `include_str!`'d into the binary. Mirrors `deposits-web/explorer/`
+  visual idiom verbatim (CSS variables, dark theme, bitcoin-orange
+  accent, monospaced data; brand glyph `⟁`). Tabs: dashboard /
+  ledgers / quorum / activity / signer. 10s polling for status +
+  signer.
+- Token: 32-byte hex, generated on first boot at
+  `<data-dir>/admin-token` (mode 0600), logged once with paste hint.
+- CLI: `--admin-bind <addr>` (default `127.0.0.1:8765`) and
+  `--admin-disabled`.
+- Compose: port mapped via `ADMIN_BIND` env in
+  `deploy/operator/.env.example`; container binds `0.0.0.0:8765`
+  internally so the loopback-only host mapping reaches it.
+- Docs: `deploy/operator/ADMIN.md` covers token rotation, browser
+  access, TLS reverse-proxy (caddy/nginx) for remote.
 
-Needs a new "admin API" surface on the daemon (today's `node_cli/*` flows are CLI-shaped, not HTTP-shaped). Auth via a generated bearer token written to disk on first run (operator copies it once); a future iteration can do proper user accounts.
-
-Acceptance: an operator who has never used the deposits CLI can do a full day's operator work — open a quorum, watch payments flow, respond to a dispute, rotate keys — entirely in the browser.
+**Deliberately out of scope** (UI is read-only): write paths — quorum
+rotation, dispute response, transfer actions, signer config — stay
+in CLI subcommands. The UI is for "did the thing I just did
+actually take?", not for moving money. A future iteration can add
+mutation endpoints if there's operator demand, but it's strictly
+optional polish; the CLI covers the full lifecycle.
 
 ### Tier 6 — REMOVED
 

@@ -28,6 +28,13 @@ containers slot in next to it.
   images are pulled from `ghcr.io/bitcoin-deposits/deposits-node:latest`
   once that registry path lands.
 
+## Operator admin UI
+
+The daemon ships a built-in browser UI at `http://127.0.0.1:8765/`
+(loopback only by default). See [ADMIN.md](./ADMIN.md) for the
+authentication walkthrough, what each tab shows, and how to expose it
+to the wider network behind TLS.
+
 ## Forming a quorum with peers
 
 Once your operator is running, the next step is forming a quorum with

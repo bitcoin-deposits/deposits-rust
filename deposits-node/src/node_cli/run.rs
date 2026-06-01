@@ -10,8 +10,14 @@ use crate::Node;
 use std::sync::Arc;
 
 pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse --metrics-port separately (before parse_config since it's run-specific)
+    // Parse --metrics-port, --admin-bind, --admin-disabled separately
+    // (before parse_config since they're run-specific). Defaults match
+    // PACKAGING_PLAN Tier 5: the admin UI binds 127.0.0.1:8765 unless
+    // disabled. Loopback-only by default — operators terminate TLS
+    // upstream (caddy/nginx) before exposing to the public internet.
     let mut metrics_port: Option<u16> = None;
+    let mut admin_bind: String = "127.0.0.1:8765".to_string();
+    let mut admin_disabled = false;
     let mut filtered_args: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -20,6 +26,13 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             if i < args.len() {
                 metrics_port = Some(args[i].parse().map_err(|_| "Invalid metrics port")?);
             }
+        } else if args[i] == "--admin-bind" {
+            i += 1;
+            if i < args.len() {
+                admin_bind = args[i].clone();
+            }
+        } else if args[i] == "--admin-disabled" {
+            admin_disabled = true;
         } else {
             filtered_args.push(args[i].clone());
         }
@@ -56,6 +69,32 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let node = Arc::new(Node::new(config).await?);
 
     tracing::info!("Node ID: {}", node.node_id);
+
+    // Start the operator admin UI (PACKAGING_PLAN Tier 5) as early as
+    // possible — before sync, before nostr subscribe, before the main
+    // event loop. That way if any of those fail, the operator can
+    // still load the UI and see *why* (signer tab will report the
+    // connection state, dashboard shows the current chain tip
+    // (cached) and operator pubkey). Loopback-bound by default.
+    if !admin_disabled {
+        let bind_addr: std::net::SocketAddr = admin_bind
+            .parse()
+            .map_err(|e| format!("Invalid --admin-bind {}: {}", admin_bind, e))?;
+        let token = crate::admin_api::ensure_token(node.data_dir())?;
+        let admin_node = node.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::admin_api::serve(
+                crate::admin_api::AdminConfig { bind_addr, token },
+                admin_node,
+            )
+            .await
+            {
+                tracing::warn!("admin UI exited: {}", e);
+            }
+        });
+    } else {
+        tracing::info!("Admin UI disabled (--admin-disabled)");
+    }
 
     // Sync wallet
     tracing::info!("Syncing wallet...");
