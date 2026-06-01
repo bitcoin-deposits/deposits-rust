@@ -46,6 +46,15 @@ Routine rotation flows through Tier 0 and so has no timelock — the
 quorum-majority cosigns each rotation TX while the current quorum is
 still active.
 
+This on-chain tier schedule is mirrored off-chain by the cosignature
+threshold for *establishment operations* (`QuorumAddMember`,
+`QuorumRemoveMember`, `QuorumBegin`) — see DEP-05 §Lifecycle for the
+full event table. The two layers share the same anchor and offsets, so
+authority at the chain tip is identical whether you read it from the
+tapscript leaves or from the off-chain cosign rule. Non-establishment
+operations remain strictly Tier-0 cosignable and become uncosignable
+past `quorum_expiry` until a fresh `QuorumBegin` resets the schedule.
+
 For the simple 2-party case (n ≤ 2), the minority and single-member
 tiers collapse (in a 2-of-2 quorum, one member IS both), so the
 cascade is:
@@ -153,15 +162,22 @@ propagation:
 
 ### Respectful custody (QuorumExpired only)
 
-When the operator fails to rotate before `quorum_expiry`, the custody transfer
-is *respectful*:
+When the operator fails to rotate before `quorum_expiry`, respectful
+custody transfer becomes available — but it now races against the
+operator's own re-establishment path under the same lifecycle tiers
+(see DEP-05 §Lifecycle and DEP-06 §"Race: Re-establishment vs
+Confiscation"). If the operator self-rescues first with a degraded
+`QuorumBegin`, no custody transfer occurs.
 
 - The fraud proof is `QuorumExpired`. Evidence is just an anchor block hash
   whose height in the verifier's chain exceeds the ledger's `quorum_expiry`.
 - Cosigners enforce the deadline at the cosign edge: past `quorum_expiry`,
-  they refuse to cosign *any* operation, including a fresh `QuorumBegin`.
-  The operator must rotate *before* the deadline; missing it is fatal to the
-  current quorum.
+  they refuse to cosign *value-moving* operations. They WILL still cosign
+  *establishment* operations (`QuorumAddMember`, `QuorumRemoveMember`,
+  `QuorumBegin`) at the threshold required for the current lifecycle
+  tier — see DEP-05 §Lifecycle. Missing `quorum_expiry` is therefore
+  not fatal; it opens both the confiscation path (this section) and
+  the operator's degraded re-establishment path concurrently.
 - Confiscation tx is bifurcated:
   - `obligations` worth of reserves → lottery winner
   - `(reserves − obligations) + full collateral` → operator's pubkey (change)

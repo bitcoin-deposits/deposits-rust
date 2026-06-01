@@ -93,7 +93,9 @@ The participant ordering (canonical, derived from sorted `quorum_pubkey`) and th
 
 #### Phase 2: Confiscation
 
-After the arm window closes, the recovery quorum (quorum members minus the disputants — the disputed operator + non-arming members) cosigns a confiscation transaction that spends the disputed reserves UTXO to a new Taproot output: the **lottery output**. Its tapscript tree contains:
+After the arm window closes, the recovery quorum (quorum members minus the disputants — the disputed operator + non-arming members) cosigns a confiscation transaction that spends the disputed reserves UTXO to a new Taproot output: the **lottery output**. The required recovery-quorum threshold for the confiscation cosignature follows the lifecycle schedule in DEP-05 §Lifecycle: a strict majority of the recovery quorum at Tier 0 (immediately past `quorum_expiry`), a minority at Tier 1 (`quorum_expiry + 720`), a single recovery-quorum member at Tier 2 (`quorum_expiry + 4032`). The confiscation transaction's on-chain spend witness uses the matching on-chain tier from DEP-03 §Spending Tiers, so on-chain and off-chain authority always agree at the chain tip when the confiscation TX is signed.
+
+Its tapscript tree contains:
 
 - A primary lottery claim leaf that dispatches to the `(sum mod N)`-th disputant on full reveal
 - For N≥11, K=1 partial-reveal leaves at CSV 72 (one per missing disputant) that handle the dominant single-non-revealer case
@@ -127,15 +129,64 @@ The script supports up to N=15 disputants, but the operational policy in this re
 
 #### Respectful vs Punitive
 
-**Respectful** (unavailability without proven fraud):
+**Respectful** (unavailability without proven fraud, `QuorumExpired`):
 - Only the amount covering the ledger's obligations goes to the winner
 - Change (including collateral) is returned to the original operator's pubkey
+- Past `quorum_expiry`, this path races against the operator's own
+  re-establishment under the same lifecycle tiers — see §Race below
+  and DEP-05 §Lifecycle. The recovery-quorum cosignature threshold
+  for the confiscation TX cascades through the same tiers, so a
+  minority of cosigners can drive a respectful confiscation at
+  Tier 1, a single cosigner at Tier 2.
 
 **Punitive** (proven non-conformance):
 - The full UTXO (reserves + collateral) goes to the winner
 - The winner inherits deposit obligations and retains the collateral as compensation
 - Excess reserves (above obligations) are split equally among quorum members
 - If the operator runs multiple ledgers, proof of non-conformance on one ledger can be presented to the other ledgers' quorums, triggering slashing there as well
+- Punitive disputes operate at strict majority; they do not cascade
+  through the lifecycle tiers because the misbehaviour is provable
+  *now* — the protocol does not wait for cosigners to vanish before
+  acting on a non-conforming update.
+
+### Race: Re-establishment vs Confiscation
+
+Past `quorum_expiry`, two paths compete for the same on-chain
+reserves UTXO at every lifecycle tier (see DEP-05 §Lifecycle for the
+full schedule):
+
+- **Re-establishment** — the operator initiates a fresh `QuorumBegin`
+  with whatever cosigners they can still reach, spending the reserves
+  UTXO into a new vault. The off-chain cosignature threshold and the
+  on-chain script-path threshold both come from the current tier.
+- **Confiscation** — a sufficient quorum-member subset files a
+  `QuorumExpired` dispute (respectful only — see §"Respectful vs
+  Punitive" above), arms, and cosigns a confiscation TX. Same
+  tier-keyed threshold on both layers.
+
+Because both paths consume the same on-chain UTXO, the tiebreaker is
+which spending transaction confirms on-chain first. The losing path's
+TX, if broadcast at all, becomes a double-spend and is dropped from
+mempools. Off-chain ledger state follows: the prevailing TX is either
+the `new_outpoint` of a fresh `QuorumBegin` (re-establishment won) or
+the input of a confiscation lottery output (confiscation won).
+Wallets verifying ledger continuity reconcile against whichever
+appears on-chain.
+
+The cascade is not "first to act in a tier wins"; it is "first tier
+opens, both options simultaneously become valid." At Tier 1
+(`quorum_expiry + 720`), the operator and a minority of cosigners can
+re-establish, AND a minority of cosigners can confiscate — the
+on-chain UTXO contention resolves the race. The operator's incentive
+to win is preserving reputation and other ledger commitments; the
+cosigners' incentive to win is the slashing reward (punitive) or the
+operator-fee takeover (respectful).
+
+Tier 3 has no confiscation pair — only the operator can sign Tier 3
+on-chain, so only re-establishment is available there. By the time
+the chain tip reaches `quorum_expiry + 8064`, every cosigner-driven
+path has been available for ~8 weeks; the choice is the operator's
+reputation against the unconditional Tier-3 spend.
 
 ### Recovery
 

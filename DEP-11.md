@@ -32,7 +32,9 @@ Without this obligation, an operator could hold deposits hostage — refusing to
 Fee collection is at the operator's discretion within the `frequency_blocks` period. Skipping or delaying collection is not non-conforming — it reduces operator revenue but does not affect depositor funds. Quorum members may decline to co-sign for operators who do not collect fees, as uncollected fees create accounting discrepancies.
 
 ### Quorum Rotation
-The operator must append a new `QuorumBegin` before `quorum_expiry`. Signing updates after `quorum_expiry` without a new quorum is non-conforming — the operator is operating without the bilateral agreement the protocol requires. This is provable: any co-signed update with `block_height >= quorum_expiry` on a ledger without a subsequent `QuorumBegin` constitutes evidence.
+The operator should append a new `QuorumBegin` before `quorum_expiry` to keep the full strict-majority cosign protection active. Signing **value-moving** updates after `quorum_expiry` without a new `QuorumBegin` is non-conforming — the operator is operating without the bilateral agreement the protocol requires. This is provable: any co-signed value-moving update with `block_height >= quorum_expiry` on a ledger without a subsequent `QuorumBegin` constitutes evidence.
+
+A post-expiry `QuorumBegin` itself is **not** non-conforming: it is the operator's degraded self-rescue path, valid at the tier-keyed cosignature threshold in DEP-05 §Lifecycle. Successfully appending such a `QuorumBegin` (and confirming the matching on-chain rotation TX) resets the lifecycle and re-opens normal value-moving operation.
 
 ## Quorum Member Obligations
 
@@ -66,7 +68,7 @@ Wallets should distribute funds across operators with non-overlapping quorum mem
 | Lightning credit | Preimage exists, no credit | Yes (with preimage) |
 | Transfer timeout | Operator signs past `timeout_height` with funds locked | Yes |
 | Withdrawal/transfer processing | Operator signs past `DeliveryEmbed block_height + service_response_blocks` without processing embedded request | Yes |
-| Quorum rotation | Operator signs past `quorum_expiry` without new quorum | Yes |
+| Quorum rotation | Operator signs a value-moving update past `quorum_expiry` without a subsequent `QuorumBegin` | Yes |
 | Dispute response | Member active after `evidence_block + dispute_response_blocks` | Yes |
 | Collateral maintenance | UTXO reduced below reserves + collateral | Yes |
 | Fee collection | Within `frequency_blocks` | No (advisory) |

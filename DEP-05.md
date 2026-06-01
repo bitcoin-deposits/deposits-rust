@@ -56,7 +56,7 @@ These fields are per-member, not reduced to a quorum-wide minimum — different 
 1. **Promotes the staged membership.** The pending set (`next_quorum_members`, populated by `QuorumAddMember`) **replaces** the active voting set wholesale. Anything not in the staged set at `QuorumBegin` time is dropped. This means refreshing an existing quorum requires re-staging every member the operator wants to keep by issuing a fresh `QuorumAddMember` for each before the new `QuorumBegin`.
 2. **Rotates the on-chain multisig.** The operator spends the old reserves UTXO into a new Taproot output whose script reflects the new active member set (see DEP-03).
 
-After `QuorumBegin`, every subsequent update MUST carry co-signatures from a strict majority (`floor(n/2) + 1`) of the new active quorum. This prevents the operator from maintaining parallel chains — a majority of cosigners will have seen and validated the canonical chain before signing any new update. `QuorumBegin` also records the `quorum_expiry` (shortest membership duration), `collateral_amount_msats`, and (since 2026-05) a parallel `quorum_member_ledger_ids` array pairing each member's pubkey with their own ledger_id (sourced from the corresponding `QuorumAddMember.member_ledger_id`). The pairing lets fraud-proof verifiers and other consumers tie a cosigner's `member_ledger_hash` (carried in the cosignatures field) back to a specific on-chain ledger without re-walking the operator's `QuorumAddMember` history. Older `QuorumBegin` events omit the array; decoders that need the mapping for those fall back to deriving it from the operator's prior `QuorumAddMember` operations.
+After `QuorumBegin`, every subsequent update MUST carry the cosignature threshold specified in §Lifecycle for the operation's class at the update's `block_height`. Within the active period (before `quorum_expiry`) the threshold is strict majority (`floor(n/2) + 1`) for every operation; past `quorum_expiry` it cascades through the lifecycle tiers and applies only to establishment operations (`QuorumAddMember`, `QuorumRemoveMember`, `QuorumBegin`). The strict-majority rule prevents the operator from maintaining parallel chains within the active period — a majority of cosigners will have seen and validated the canonical chain before signing any new update. `QuorumBegin` also records the `quorum_expiry` (shortest membership duration), `collateral_amount_msats`, and (since 2026-05) a parallel `quorum_member_ledger_ids` array pairing each member's pubkey with their own ledger_id (sourced from the corresponding `QuorumAddMember.member_ledger_id`). The pairing lets fraud-proof verifiers and other consumers tie a cosigner's `member_ledger_hash` (carried in the cosignatures field) back to a specific on-chain ledger without re-walking the operator's `QuorumAddMember` history. Older `QuorumBegin` events omit the array; decoders that need the mapping for those fall back to deriving it from the operator's prior `QuorumAddMember` operations.
 
 **The first `QuorumBegin` (applied from `PreQuorum`) itself MUST carry cosignatures from `floor(n/2) + 1` of the staged set** (n = `len(next_quorum_members)` at apply time). Without this rule the operator could unilaterally transition the ledger to Active with a fabricated member list or a reserves outpoint that doesn't exist on-chain — there is no active quorum yet to refuse a bad update, and post-transition the operator is trusted only because the active quorum attested the rotation. Validators MUST reject a first `QuorumBegin` that lacks this majority, and cosigners MUST verify the reserves UTXO exists, is unspent, carries the declared value, and has a network-dependent minimum number of confirmations before signing (see DEP-03 §QuorumBegin for thresholds). The operator cannot issue a `QuorumBegin` against an empty staged set — it must have first issued one or more `QuorumAddMember` operations.
 
@@ -146,9 +146,13 @@ Quorum members must maintain a full state replica of any ledger they co-sign for
 
 If any check fails, the member MUST refuse to co-sign. The chain continuity check (1) is the primary defense against parallel chains — if the operator has published a non-conforming update that the member rejected, subsequent updates will have a different `previous_hash` and the member will refuse.
 
-### Majority Requirement
+### Cosignature Threshold
 
-After `QuorumBegin`, every update requires `floor(n/2) + 1` co-signatures from distinct quorum members. This ensures a majority of the quorum has validated every update. Since each cosigner verifies chain continuity from their own tip, the operator cannot obtain a majority for two different updates at the same sequence number — at least one member of any majority will have already signed the other version and will refuse.
+The number of distinct quorum-member cosignatures an update requires depends on the operation's *class* and the *lifecycle tier* at the update's `block_height`. See §Lifecycle below for the full schedule.
+
+Within the active period (`block_height < quorum_expiry`) every update requires `floor(n/2) + 1` cosignatures from distinct quorum members. This ensures a majority of the quorum has validated every update. Since each cosigner verifies chain continuity from their own tip, the operator cannot obtain a majority for two different updates at the same sequence number — at least one member of any majority will have already signed the other version and will refuse.
+
+Past `quorum_expiry`, value-moving operations become uncosignable (no threshold authorizes them); only *establishment operations* (`QuorumAddMember`, `QuorumRemoveMember`, `QuorumBegin`) can still be cosigned, and their required threshold cascades through the tiers in §Lifecycle as time passes.
 
 ### Conformance
 
@@ -156,11 +160,35 @@ Co-signing without state validation is non-conforming — a member who co-signs 
 
 ### Membership Duration
 
-Quorum membership duration is limited by `quorum_expiry` — the shortest member's `membership_until`. Before this block, the operator must refresh the quorum via a new `QuorumBegin`.
+Quorum membership duration is limited by `quorum_expiry` — the shortest member's `membership_until`. Before this block, the operator should refresh the quorum via a new `QuorumBegin` to reset the lifecycle and keep the full strict-majority cosign protection active. Missing the deadline is **not** fatal — see §Lifecycle for the graceful self-rescue path.
+
+### Lifecycle
+
+A quorum's authority cascades through tiers anchored to `quorum_expiry`. At each tier the off-chain cosignature threshold for *establishment operations* (`QuorumAddMember`, `QuorumRemoveMember`, `QuorumBegin`) matches the on-chain spending tier from DEP-03 §Spending Tiers, so the two layers can never disagree about who has authority at a given chain tip. *Non-establishment operations* (every other op type — `InvoiceLock`, `OnchainFulfill`, transfers, etc.) are only cosignable in Tier 0; past `quorum_expiry` they become uncosignable until a fresh `QuorumBegin` resets the schedule.
+
+| # | Event                          | Block                   | On-chain tier | Off-chain cosign threshold                              |
+|---|--------------------------------|-------------------------|---------------|---------------------------------------------------------|
+| 0 | begin                          | `H0 = QuorumBegin block`| Tier 0        | initial QuorumBegin signers (see §QuorumBegin)          |
+| 1 | (rotation expected)            | `< quorum_expiry`       | Tier 0        | majority of cosigners                                   |
+| 2 | quorum expiration              | `quorum_expiry`         | Tier 0 ends   | (value-moving ops become uncosignable)                  |
+| 3 | majority confiscation          | `quorum_expiry`         | Tier 0        | majority cosigners → DEP-06 `QuorumExpired` confiscation |
+| 4 | minority re-establishment      | `quorum_expiry + 720`   | Tier 1        | operator + minority cosigners → degraded `QuorumBegin`   |
+| 5 | minority confiscation          | `quorum_expiry + 720`   | Tier 1        | minority cosigners → degraded DEP-06 confiscation        |
+| 6 | solo-member re-establishment   | `quorum_expiry + 4032`  | Tier 2        | operator + one cosigner → degraded `QuorumBegin`         |
+| 7 | solo-member confiscation       | `quorum_expiry + 4032`  | Tier 2        | one cosigner → degraded DEP-06 confiscation              |
+| 8 | solo operator re-establishment | `quorum_expiry + 8064`  | Tier 3        | operator alone (no cosignatures required)                |
+
+At every post-expiry tier, both *re-establishment* (operator-initiated `QuorumBegin`) and *respectful confiscation* (cosigner-initiated `QuorumExpired` dispute — see DEP-06) become available simultaneously. The two paths race for the same on-chain reserves UTXO; whichever spending transaction confirms first prevails, and the loser's path becomes invalid. Tier 3 has no confiscation pair — the operator cannot confiscate from themselves.
+
+The cascade encodes "give the accountable party first crack at each authority level": cosigners get majority confiscation immediately at expiry because they were trusted to keep the quorum healthy; the operator gets minority re-establishment next (self-rescue with whoever they can still reach); minority cosigners get a final confiscation window; the operator gets solo re-establishment as the last resort. An honest operator who values their reputation or other ledger commitments will defend the ledger by re-establishing rather than walking away at Tier 3.
+
+A successful `QuorumBegin` at any tier — degraded or not — spends the reserves UTXO into a new vault whose tapscript bakes a fresh `quorum_expiry` and a new lifetime schedule. All tiers reset.
 
 ### Confiscation
 
-If the operator is proven non-conforming (see DEP-06), the quorum confiscates the operator's UTXO. The collateral portion is forfeited; deposit obligations are transferred to the new custodian. This is the primary economic deterrent against operator misbehavior.
+If the operator is proven non-conforming (see DEP-06), the quorum confiscates the operator's UTXO at the strict-majority tier. The collateral portion is forfeited; deposit obligations are transferred to the new custodian. This is the primary economic deterrent against operator misbehavior.
+
+Past `quorum_expiry`, respectful confiscation under the `QuorumExpired` proof also becomes available at the same degraded thresholds as re-establishment (see §Lifecycle and DEP-06 §Respectful custody). A minority of cosigners can drive an `QuorumExpired` confiscation at Tier 1, a single cosigner at Tier 2.
 
 ## Related DEPs
 

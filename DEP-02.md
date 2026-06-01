@@ -68,7 +68,7 @@ Each `cosig_entry` is:
 
 Total entry size: 129 bytes. Entries MUST be sorted by cosigner_pubkey (lexicographic on serialized bytes). This ensures deterministic hashing. Decoders MUST either reject unsorted input or canonicalize it before verifying `current_hash` and the operator signature — otherwise a malicious sender can reorder entries to produce a distinct but otherwise-valid hash for the same logical cosignature set, enabling signature malleability.
 
-After `QuorumBegin`, updates MUST include at least `floor(n/2) + 1` cosignatures from distinct quorum members (where n is the quorum size). Updates with fewer cosignatures are non-conforming.
+After `QuorumBegin`, updates MUST carry the cosignature threshold specified in DEP-05 §Lifecycle for the operation's class and the lifecycle tier at the update's `block_height`. Within the active period (`block_height < quorum_expiry`) this resolves to `floor(n/2) + 1` cosignatures from distinct quorum members (where n is the quorum size) — strict majority — for every operation. Past `quorum_expiry`, only establishment operations (`QuorumAddMember`, `QuorumRemoveMember`, `QuorumBegin`) remain cosignable and their required threshold cascades through the tiers in DEP-05 §Lifecycle; updates carrying any other op type past `quorum_expiry` are non-conforming regardless of cosignature count.
 
 For backward compatibility, decoders SHOULD accept the deprecated single-cosig format (tags 14/16/18) from pre-quorum updates and upgrades in progress.
 
@@ -88,7 +88,7 @@ For backward compatibility, decoders SHOULD accept the deprecated single-cosig f
 
 The operator signs the content and all co-signatures (see Signing). Their signature is folded into `chain_hash`, which becomes the next update's `previous_hash`. All signatures are committed to the chain without circularity.
 
-After `QuorumBegin`, the cosig entries are mandatory — omitting them is non-conforming. Before quorum establishment, cosig entries are omitted on all updates **except the first `QuorumBegin`**, which MUST carry cosignatures from `floor(n/2) + 1` of the members staged via prior `QuorumAddMember` operations (n = `len(next_quorum_members)` at the point the update is applied). Decoders MUST reject a first `QuorumBegin` that lacks this majority. Without the rule, the operator could unilaterally transition to Active with a fabricated member list or a reserves outpoint that doesn't actually exist on-chain. See DEP-05 §QuorumBegin for the full rule and DEP-03 §QuorumBegin for the on-chain verification obligation cosigners must discharge before signing.
+After `QuorumBegin`, the cosig entries are mandatory at whatever threshold DEP-05 §Lifecycle prescribes for the operation type and tier — omitting them entirely, or providing fewer than the prescribed count, is non-conforming. Before quorum establishment, cosig entries are omitted on all updates **except the first `QuorumBegin`**, which MUST carry cosignatures from `floor(n/2) + 1` of the members staged via prior `QuorumAddMember` operations (n = `len(next_quorum_members)` at the point the update is applied). Decoders MUST reject a first `QuorumBegin` that lacks this majority. Without the rule, the operator could unilaterally transition to Active with a fabricated member list or a reserves outpoint that doesn't actually exist on-chain. See DEP-05 §QuorumBegin for the full rule and DEP-03 §QuorumBegin for the on-chain verification obligation cosigners must discharge before signing.
 
 The first update (sequence 0) has `previous_hash` = `[0; 32]`.
 
@@ -106,7 +106,7 @@ Each quorum member independently signs a tagged hash over the update content and
 
 `current_hash` is not signed directly — it incorporates the co-signatures themselves, so it cannot be known at signing time.
 
-The operator collects `floor(n/2) + 1` co-signatures before finalizing the update. Each cosigner independently validates the operation against their local state replica and verifies chain continuity from their validated tip before signing.
+The operator collects the threshold of co-signatures specified in DEP-05 §Lifecycle (within the active period this is `floor(n/2) + 1`; past `quorum_expiry` it cascades through the tier schedule and only authorizes establishment operations) before finalizing the update. Each cosigner independently validates the operation against their local state replica and verifies chain continuity from their validated tip before signing.
 
 ### Operator
 
