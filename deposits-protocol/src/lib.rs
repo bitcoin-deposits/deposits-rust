@@ -6,6 +6,7 @@
 #![allow(missing_docs)]
 
 pub mod constants;
+pub mod cosign_threshold;
 pub mod error;
 pub mod fraud;
 pub mod messages;

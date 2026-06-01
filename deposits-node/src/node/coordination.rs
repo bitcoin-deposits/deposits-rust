@@ -365,37 +365,58 @@ impl Node {
             }
         }
 
-        // Determine cosig threshold: floor(n/2) + 1.
+        // Determine cosig threshold per DEP-05 §Lifecycle.
         //
-        // Normally the threshold is drawn from the active quorum_members,
-        // but the *first* QuorumBegin is a special case: state is still
-        // PreQuorum when we issue the request, the active list is empty,
-        // and the members we want attesting this rotation are the ones
-        // staged via QuorumAddMember — i.e. next_quorum_members. They are
-        // the ones who will be cosigners after this update applies, and
-        // they are the ones with skin in the game for verifying the
-        // reserves UTXO before signing.
+        // Tier-0 active period resolves to strict majority of the
+        // active quorum_members (or next_quorum_members for the *first*
+        // QuorumBegin, where state is PreQuorum + no active list yet).
+        // Past quorum_expiry the helper cascades through minority →
+        // single-cosigner → operator-alone for establishment ops, and
+        // refuses value-moving ops outright. We translate operator-alone
+        // (Tier 3) into `threshold = 0` so the wait loop returns
+        // immediately without soliciting any cosignatures.
         let threshold = {
+            use deposits_core::cosign_threshold::cosign_requirement;
+            use deposits_core::tlv::TlvDecode;
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
                 .get(ledger_id)
                 .map(|arc| {
                     let l = arc.read().unwrap();
-                    let active_members = &l.state.quorum_members;
-                    let members = if active_members.is_empty() {
-                        &l.state.next_quorum_members
-                    } else {
-                        active_members
+                    let op = match deposits_core::LedgerOperation::tlv_decode(&update.message) {
+                        Ok(o) => o,
+                        // Decode failure — fall back to old default rather
+                        // than blow up the request path. Validators will
+                        // catch the malformed op separately.
+                        Err(_) => return 1,
                     };
-                    let n = members.len();
-                    if n == 0 {
+                    let req = cosign_requirement(&l.state, &op, update.block_height);
+                    if req.operator_alone {
+                        0
+                    } else if req.required_sigs == 0 {
+                        // Pre-quorum non-QuorumBegin or other early-state
+                        // updates: ask for one cosig as a sanity check,
+                        // matching pre-change behaviour for that branch.
                         1
                     } else {
-                        (n / 2) + 1
+                        req.required_sigs
                     }
                 })
                 .unwrap_or(1)
         };
+
+        // Tier 3 (operator-alone, post quorum_expiry + 8064): the
+        // helper says zero cosignatures are required. Short-circuit
+        // the multicast + wait — no point soliciting signatures we
+        // won't honor anyway. The operator's solo signature on the
+        // update is what carries the rotation.
+        if threshold == 0 {
+            tracing::info!(
+                "[COSIGN] seq={} Tier-3 operator-alone path: no cosignatures solicited",
+                update.sequence_number,
+            );
+            return Ok(Vec::new());
+        }
 
         let collector = Arc::new(CosignCollector::new(threshold));
 

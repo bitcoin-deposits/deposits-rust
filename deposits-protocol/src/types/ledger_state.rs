@@ -897,14 +897,17 @@ impl LedgerState {
             });
         }
 
-        // 6. Cosig threshold. Empty active quorum → genesis or
+        // 6. Cosig threshold per DEP-05 §Lifecycle (and DEP-02
+        //    §Cosignatures). Empty active quorum → genesis or
         //    pre-QuorumBegin updates; no cosigs required. For the
         //    first QuorumBegin specifically, the quorum is staged in
         //    `next_quorum_members` (not yet promoted) — accept cosigs
-        //    from that set. Delegates to `SignedLedgerUpdate::
-        //    verify_cosign_signatures`, which encodes the deposits
-        //    tagged-hash signing scheme + threshold rules used by the
-        //    `cosign_update` handler.
+        //    from that set. The required threshold comes from
+        //    `cosign_threshold::cosign_requirement` so the lifecycle
+        //    cascade (majority → minority → single → operator-alone
+        //    past quorum_expiry, for establishment ops only) is
+        //    applied uniformly. Delegates signature verification to
+        //    `SignedLedgerUpdate::verify_cosign_signatures`.
         let cosig_set: Vec<bitcoin::secp256k1::PublicKey> = if !self.quorum_members.is_empty() {
             self.quorum_members.iter().map(|m| m.pubkey).collect()
         } else if matches!(
@@ -916,12 +919,26 @@ impl LedgerState {
             Vec::new()
         };
         if !cosig_set.is_empty() {
-            let threshold = (cosig_set.len() / 2) + 1;
-            if let Err(e) = update.verify_cosign_signatures(&cosig_set, threshold) {
+            let op = LedgerOperation::tlv_decode(&update.message).map_err(|e| {
+                crate::DepositsError::ProtocolViolation {
+                    violation_type: "bad_operation_payload".to_string(),
+                    details: format!("decode operation for threshold check: {:?}", e),
+                }
+            })?;
+            let req = crate::cosign_threshold::cosign_requirement(self, &op, update.block_height);
+            if !req.allowed {
                 return Err(crate::DepositsError::ProtocolViolation {
-                    violation_type: "insufficient_cosignatures".to_string(),
-                    details: e,
+                    violation_type: "uncosignable_op_at_tier".to_string(),
+                    details: req.reason,
                 });
+            }
+            if !req.operator_alone {
+                if let Err(e) = update.verify_cosign_signatures(&cosig_set, req.required_sigs) {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "insufficient_cosignatures".to_string(),
+                        details: e,
+                    });
+                }
             }
         }
 

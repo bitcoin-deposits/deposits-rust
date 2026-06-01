@@ -429,13 +429,18 @@ impl Ledger {
             }
         }
 
-        // 6. First QuorumBegin must be cosigned by a majority of the staged
-        // members. The state still reads PreQuorum at this point (the
-        // transition to Active happens in apply_state_changes), so check 5
-        // above hasn't fired. Without this gate, the operator could
-        // unilaterally append a QuorumBegin — making up a membership set
-        // and/or pointing to a reserves outpoint that doesn't exist or
-        // hasn't confirmed — with no peer attestation.
+        // 6. First QuorumBegin must be cosigned per DEP-05 §Lifecycle.
+        // The state still reads PreQuorum at this point (the
+        // transition to Active happens in apply_state_changes), so
+        // check 5 above hasn't fired. Without this gate, the operator
+        // could unilaterally append a QuorumBegin — making up a
+        // membership set and/or pointing to a reserves outpoint that
+        // doesn't exist or hasn't confirmed — with no peer attestation.
+        //
+        // The cosign_threshold helper handles the staged-set lookup
+        // (no quorum_members yet, but op is QuorumBegin) and returns
+        // Tier-0 strict majority since quorum_expiry isn't set on a
+        // pre-quorum ledger.
         if self.state.quorum_state == QuorumState::PreQuorum
             && matches!(operation, LedgerOperation::QuorumBegin { .. })
         {
@@ -453,14 +458,18 @@ impl Ledger {
                         .to_string(),
                 });
             }
-            let threshold = staged.len() / 2 + 1;
+            let req = deposits_protocol::cosign_threshold::cosign_requirement(
+                &self.state,
+                &operation,
+                update.block_height,
+            );
             update
-                .verify_cosign_signatures(&staged, threshold)
+                .verify_cosign_signatures(&staged, req.required_sigs)
                 .map_err(|e| DepositsError::ProtocolViolation {
                     violation_type: "missing_cosignature".to_string(),
                     details: format!(
                         "First QuorumBegin requires {} of {} staged-member cosignatures: {}",
-                        threshold,
+                        req.required_sigs,
                         staged.len(),
                         e
                     ),
@@ -1639,22 +1648,24 @@ impl Ledger {
     }
 
     /// Cosigner-edge validation: combines stateless `validate_operation`
-    /// with the post-expiry refusal rule.
+    /// with the DEP-05 §Lifecycle tier rule for what's cosignable at
+    /// the current chain tip.
     ///
-    /// Once a quorum's `quorum_expiry` block has passed, cosigners refuse
-    /// to sign *any* operation, including a fresh `QuorumBegin`. Operators
-    /// must rotate before the deadline; missing it forces them onto the
-    /// Tier-1 (operator-alone after expiry) recovery path. There is no
-    /// "rotate at the last second" exemption — the deadline is the
-    /// deadline, and that's what makes it a meaningful obligation.
+    /// Past `quorum_expiry`, the helper refuses value-moving operations
+    /// but permits establishment ops (`QuorumAddMember`,
+    /// `QuorumRemoveMember`, `QuorumBegin`) at the threshold matching
+    /// the current lifecycle tier — the operator's degraded self-rescue
+    /// path. See DEP-05 §Lifecycle and DEP-06 §Race for the full
+    /// behaviour.
     ///
-    /// Pre-quorum (no `quorum_expiry` set) and operations on a still-active
-    /// quorum (`current_block <= quorum_expiry`) pass through.
+    /// Legacy-ruleset ledgers preserve the pre-Lifecycle behavior: past
+    /// expiry, refuse everything. They predate the cascade and have
+    /// literal on-chain timelocks that don't anchor to `quorum_expiry`.
     ///
     /// Callers: cosign request handlers, before they sign anything. NOT
-    /// the operator's own apply path — operators can still apply ops
-    /// post-expiry (e.g. via Tier-1 recovery) but won't get cosignatures
-    /// for them.
+    /// the operator's own apply path — operators are free to attempt
+    /// degraded re-establishment by collecting their own signatures
+    /// against this helper's permission gate.
     pub fn validate_for_cosign(
         &self,
         operation: &LedgerOperation,
@@ -1662,23 +1673,46 @@ impl Ledger {
     ) -> DepositsResult<()> {
         self.validate_operation(operation)?;
 
-        if let Some(expiry) = self.state.quorum_expiry {
-            if current_block_height > expiry
-                && self.state.quorum_state == deposits_protocol::QuorumState::Active
-            {
-                return Err(DepositsError::ProtocolViolation {
-                    violation_type: "post_expiry_cosign_refused".to_string(),
-                    details: format!(
-                        "Quorum expired at block {}; current {}. \
-                         Cosigners refuse to sign past expiry — the operator \
-                         missed their rotation window. Recovery path is Tier-1 \
-                         (operator-alone after expiry) followed by a fresh \
-                         genesis bootstrap, not another QuorumBegin against \
-                         this expired quorum.",
-                        expiry, current_block_height
-                    ),
-                });
+        // Legacy ledgers: keep the old "fatal at expiry" behavior. The
+        // cltv-offset-v2 lifecycle cascade doesn't apply because legacy
+        // timelocks are literal (1008/2016/4032), not anchored to
+        // quorum_expiry — the off-chain side can't safely mirror an
+        // on-chain schedule that doesn't exist.
+        if self.state.active_ruleset_name != "cltv-offset-v2"
+            && self.state.active_ruleset_name != "cltv-offset-literal"
+        {
+            if let Some(expiry) = self.state.quorum_expiry {
+                if current_block_height > expiry
+                    && self.state.quorum_state == deposits_protocol::QuorumState::Active
+                {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "post_expiry_cosign_refused".to_string(),
+                        details: format!(
+                            "Quorum expired at block {}; current {}. Legacy ruleset \
+                             cosigners refuse to sign past expiry — the operator \
+                             must rotate before the deadline. Migrate to \
+                             `cltv-offset-v2` for the degraded self-rescue path.",
+                            expiry, current_block_height
+                        ),
+                    });
+                }
             }
+            return Ok(());
+        }
+
+        // cltv-offset-v2 cascade: refuse only what the helper refuses.
+        // Value-moving ops past expiry → refused. Establishment ops at
+        // every tier (including Tier 3 / operator-alone) → permitted.
+        let req = deposits_protocol::cosign_threshold::cosign_requirement(
+            &self.state,
+            operation,
+            current_block_height,
+        );
+        if !req.allowed {
+            return Err(DepositsError::ProtocolViolation {
+                violation_type: "uncosignable_op_at_tier".to_string(),
+                details: req.reason,
+            });
         }
 
         Ok(())
