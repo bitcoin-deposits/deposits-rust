@@ -18,7 +18,7 @@ This was the original product vision. The current deployment shape (`setup.sh 3`
 | Today | Audience expects |
 |---|---|
 | `deposits-tools/docker-compose.yml` bundles bitcoind + electrs + grafana + LDK | Slot in next to existing bitcoin + LN; depend on them via env |
-| `ldk_cli.rs` hardcodes `ldk-server-cli` subprocess (no trait) | Pluggable backend: LDK, LND, CLN, NWC fallback |
+| `ldk_cli.rs` hardcodes `ldk-server-cli` subprocess (no trait) | Pluggable backend: LDK, LND, CLN |
 | `setup.sh N` creates a cluster of N operators on one box | "I'm one operator, here are 4 pubkeys to form a quorum with" |
 | Quorum formation requires coordinated `setup.sh`-style bring-up | Public-discovery + handshake flow for forming quorums with strangers |
 | Operator admin is `docker exec` + `node_cli/*` CLI | Web admin (Alby-Hub-shaped) for the operators who don't want to live in a terminal |
@@ -29,8 +29,7 @@ This was the original product vision. The current deployment shape (`setup.sh 3`
 1. **Single-host docker-compose** — `deploy/operator.docker-compose.yml`. Two services (deposits-node, deposits-signer). External LN + bitcoin via env. Foundation for everything below.
 2. **Umbrel community app** — wraps the single-host compose; depends on the bitcoin-core Umbrel app and one of the LN apps.
 3. **Start9 `.s9pk`** — heavier manifest format with config schemas and action manifests; better operator UX once the work is done.
-4. **NWC speaker (depositor-side)** — separable workstream, not a packaging task per se. Lets Alby Extension / Mutiny / Coinos users pay-in/out without installing the deposits-web wallet.
-5. **Plain Linux + systemd units / .deb / AUR** — defer. Real ongoing maintenance burden; not a great first-audience fit.
+4. **Plain Linux + systemd units / .deb / AUR** — defer. Real ongoing maintenance burden; not a great first-audience fit.
 
 Skipped: **Flatpak / Snap** — wrong fit for server daemons.
 
@@ -184,11 +183,23 @@ Needs a new "admin API" surface on the daemon (today's `node_cli/*` flows are CL
 
 Acceptance: an operator who has never used the deposits CLI can do a full day's operator work — open a quorum, watch payments flow, respond to a dispute, rotate keys — entirely in the browser.
 
-### Tier 6: NWC speaker (depositor-side)
+### Tier 6 — REMOVED
 
-Lets any NWC-compatible wallet (Alby Extension, Alby Go, Mutiny, Coinos, etc.) connect to a deposits operator and pay-in/out against a deposit balance, without installing the `deposits-web` wallet.
+Previously framed as "NWC speaker (depositor-side)." Removed because
+NWC has no primitive for the depositor's wallet to produce a dep-17
+receive-witness signature with the deposit's key — NWC's surface is
+BOLT11 payments / invoice creation / balance queries, not arbitrary
+preimage signing with a path-derived key.
 
-Out of scope for "packaging the operator." Separate workstream targeting the depositor audience. Mentioned here for completeness; sequence independently.
+NWC-compatible wallets (Alby Extension, Mutiny, etc.) can still pay
+BOLT11 invoices an operator issues today — that path works without
+any deposits-specific integration. The receive-witness flow that lets
+depositors gate inbound credits (`receive_requires_sig = true`) needs
+custody of the deposit's signing key, which NWC isn't built to grant.
+
+If a real depositor-facing tier slots in here later, it'd be wallet
+polish work (the receive-side flow we already shipped) or the
+wallet-side advertisement-protocol update flagged in SIGNER.md §9.
 
 ## Sequencing rationale
 
@@ -197,7 +208,6 @@ Out of scope for "packaging the operator." Separate workstream targeting the dep
 - **Tier 3 in parallel with Tier 2** — independent code path; can be developed concurrently. Blocks "real first operator deploys to mainnet" because they need to form a quorum somehow.
 - **Tier 4 after Tier 2** — mechanical wrap; ship once Tier 2 is solid.
 - **Tier 5 is polish** — significant scope (probably weeks of work for a credible MVP), not blocking the install path. Worth starting in parallel with Tiers 2-4 if there's bandwidth.
-- **Tier 6 is parallel** — different audience, no dependency on the operator-packaging tiers.
 
 ## Open decisions
 
