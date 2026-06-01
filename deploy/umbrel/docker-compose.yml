@@ -1,0 +1,107 @@
+# Umbrel community-apps compose for deposits-node.
+#
+# This is the Umbrel-shaped variant of deploy/operator/docker-compose.yml.
+# It uses Umbrel's injected env vars (APP_BITCOIN_NODE_IP, APP_LIGHTNING_NODE_*,
+# APP_DATA_DIR) and the IP-allocation scheme Umbrel imposes on community apps.
+#
+# The non-Umbrel variant under deploy/operator/ is the source of truth for
+# the docker-compose shape; this file should track its changes so the two
+# stay in sync.
+
+version: "3.7"
+
+services:
+  # Anchor service that publishes the app's web/HTTP surface. Umbrel
+  # requires one. We expose the daemon's Prometheus metrics endpoint
+  # here so Umbrel's app-store page can link to it directly.
+  app_proxy:
+    environment:
+      APP_HOST: $APP_DEPOSITS_NODE_DEPOSITS_NODE_IP
+      APP_PORT: 9100
+      PROXY_AUTH_ADD: "false"
+
+  # Out-of-process signer. Holds the operator seed. Reaches the daemon
+  # over a shared volume socket — never speaks to the network directly,
+  # so even a daemon compromise leaks the Nostr key but not the operator
+  # seed. See SIGNER.md for the full rationale.
+  deposits-signer:
+    image: ghcr.io/bitcoin-deposits/deposits-node:0.1.0
+    user: "1000:1000"
+    restart: on-failure
+    stop_grace_period: 1m
+    entrypoint: ["/usr/local/bin/deposits-signer"]
+    command:
+      - "run"
+      - "--data-dir"
+      - "/var/lib/dsigner"
+      - "--socket"
+      - "/run/dsigner/socket"
+    volumes:
+      - ${APP_DATA_DIR}/signer:/var/lib/dsigner
+      - ${APP_DATA_DIR}/socket:/run/dsigner
+    networks:
+      default:
+        ipv4_address: $APP_DEPOSITS_NODE_SIGNER_IP
+
+  # The daemon. Talks to the signer over the shared socket, talks to
+  # Umbrel's bundled bitcoind via JSON-RPC (CHAIN_BACKEND=bitcoind),
+  # talks to Umbrel's LND via REST + macaroon (LIGHTNING_BACKEND=lnd).
+  # The relay URL points at the project's mainnet ledger relay by
+  # default; operators with their own relay can override via the
+  # app's settings or by editing this compose post-install.
+  deposits-node:
+    image: ghcr.io/bitcoin-deposits/deposits-node:0.1.0
+    user: "1000:1000"
+    restart: on-failure
+    stop_grace_period: 1m
+    depends_on:
+      - deposits-signer
+    entrypoint: ["/usr/local/bin/deposits-node"]
+    command:
+      - "run"
+      - "--name"
+      - "umbrel-operator"
+      - "--network"
+      - "bitcoin"
+      - "--data-dir"
+      - "/var/lib/deposits"
+      - "--signer-pubkey"
+      - "${SIGNER_PUBKEY:-not-yet-initialized}"
+      - "--signer-socket"
+      - "/run/dsigner/socket"
+      - "--esplora"
+      - "http://${APP_BITCOIN_NODE_IP}:${APP_BITCOIN_RPC_PORT}"
+    environment:
+      # Nostr relay for the ledger. Operators with their own relay can
+      # replace this — survives app restarts because Umbrel doesn't
+      # touch env vars between updates.
+      RELAY_LEDGERS: wss://relay.bitcoindeposits.net
+      RELAY_MESSAGING: ""
+
+      # Bitcoin chain via Umbrel's bundled bitcoind. CHAIN_BACKEND=bitcoind
+      # uses the JSON-RPC directly; no electrs / esplora dependency.
+      CHAIN_BACKEND: bitcoind
+      BITCOIND_RPC_URL: http://${APP_BITCOIN_NODE_IP}:${APP_BITCOIN_RPC_PORT}
+      BITCOIND_RPC_USER: ${APP_BITCOIN_RPC_USER}
+      BITCOIND_RPC_PASS: ${APP_BITCOIN_RPC_PASS}
+
+      # Lightning via Umbrel's bundled LND. LND_MACAROON_FILE + LND_TLS_CERT_FILE
+      # point at the paths Umbrel's `APP_LIGHTNING_NODE_DATA_DIR` bind-mount
+      # exposes (see volume below).
+      LIGHTNING_BACKEND: lnd
+      LND_REST_URL: https://${APP_LIGHTNING_NODE_IP}:${APP_LIGHTNING_NODE_LND_REST_PORT}
+      LND_MACAROON_FILE: /lnd/data/chain/bitcoin/mainnet/admin.macaroon
+      LND_TLS_CERT_FILE: /lnd/tls.cert
+
+      NODE_NAME: umbrel-operator
+      RUST_LOG: info
+    volumes:
+      - ${APP_DATA_DIR}/node:/var/lib/deposits
+      - ${APP_DATA_DIR}/socket:/run/dsigner:ro
+      # Umbrel exposes LND's data dir to other apps via this variable.
+      # Read-only — we only need to read the macaroon + TLS cert; LND
+      # owns the rest.
+      - ${APP_LIGHTNING_NODE_DATA_DIR}:/lnd:ro
+    networks:
+      default:
+        ipv4_address: $APP_DEPOSITS_NODE_DEPOSITS_NODE_IP

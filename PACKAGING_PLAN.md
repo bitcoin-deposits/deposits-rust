@@ -138,15 +138,38 @@ lift than the private flow; ships when there's enough operator density
 that strangers-finding-strangers is the natural pattern. For now the
 documented path is "use the project's announce channel out-of-band."
 
-### Tier 4: Umbrel community app
+### Tier 4: Umbrel community app (manifest ready, submission blocked)
 
-`umbrel/umbrel-app.yml` (metadata: name, version, port, dependencies on `bitcoin` and one of the LN apps), `umbrel/docker-compose.yml` (Umbrel-shaped: app-store-managed volumes, depends-on for bitcoin and the chosen LN app, env vars wired from Umbrel's standard variables), icon, screenshots. PR to `getumbrel/umbrel-apps`.
+The Umbrel community-apps package lives in
+[`deploy/umbrel/`](deploy/umbrel/):
 
-Once Tier 1 + 2 are solid, Tier 4 is mostly mechanical — the compose is already written; this wraps it in Umbrel's manifest format.
+- `umbrel-app.yml` — manifest (id, version, deps on `bitcoind` +
+  `lightning`, repo + support URLs, port = metrics endpoint, gallery)
+- `docker-compose.yml` — Umbrel-shaped: uses `APP_BITCOIN_NODE_IP` /
+  `APP_LIGHTNING_NODE_*` / `APP_DATA_DIR` env vars; bakes in
+  `CHAIN_BACKEND=bitcoind` + `LIGHTNING_BACKEND=lnd`
+- `icon.svg` — vault motif in bitcoin orange
+- `README.md` — submission steps + status (what blocks publication today)
 
-Same shape can be adapted to Start9's `.s9pk`, Citadel community apps, MyNode add-ons — but each has its own packaging format and review process. Pick one to ship through first; the rest are mechanical follow-ons.
+**Three things block submission to getumbrel/umbrel-apps:**
 
-Acceptance: app appears in the Umbrel community store, installs against a clean Umbrel instance, comes up green and lets the user complete the operator setup wizard from the Umbrel UI.
+1. **Published Docker images.** The compose pins
+   `ghcr.io/bitcoin-deposits/deposits-node:0.1.0`. That tag needs to
+   exist on a public registry. CI publish-on-tag needs to land first.
+2. **Gallery screenshots** — three `.jpg`s referenced by name from the
+   manifest. Trivial once the app is running for someone to capture.
+3. **First-boot UX inside Umbrel.** The deploy/operator wizard is
+   interactive; Umbrel users can't run an interactive shell against an
+   app from the UI. Either ship an `exports.sh`-triggered first-boot
+   script, a "first time setup" web page, or document the manual
+   `docker exec` bootstrap (current README does the last).
+
+Once those land the PR is small and mechanical.
+
+Same shape adapts to Start9's `.s9pk`, Citadel community apps, MyNode
+add-ons — each has its own packaging format. Per the recommendation
+in this plan: Umbrel first (biggest user base), Start9 second
+(polished UX), others as demand surfaces.
 
 ### Tier 5: Web operator admin UI
 

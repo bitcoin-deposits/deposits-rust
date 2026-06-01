@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Background: bitcoin-orange rounded square (Umbrel community-app convention). -->
+  <rect width="512" height="512" rx="96" fill="#F7931A"/>
+
+  <!-- Vault body — slightly off-white inset rectangle. -->
+  <rect x="80" y="120" width="352" height="272" rx="16" fill="#FAFAFA" stroke="#1A1A1A" stroke-width="8"/>
+
+  <!-- Vault door — slightly inset darker rectangle with rivets. -->
+  <rect x="120" y="160" width="272" height="192" rx="8" fill="#E8E8E8" stroke="#1A1A1A" stroke-width="6"/>
+
+  <!-- Rivets on the door corners. -->
+  <circle cx="140" cy="180" r="6" fill="#1A1A1A"/>
+  <circle cx="372" cy="180" r="6" fill="#1A1A1A"/>
+  <circle cx="140" cy="332" r="6" fill="#1A1A1A"/>
+  <circle cx="372" cy="332" r="6" fill="#1A1A1A"/>
+
+  <!-- Combination dial — center circle with bitcoin ₿ inside. -->
+  <circle cx="256" cy="256" r="56" fill="#1A1A1A"/>
+  <circle cx="256" cy="256" r="48" fill="#F7931A"/>
+
+  <!-- Bitcoin ₿ glyph. Approximated with text; Umbrel renders SVG so this is fine. -->
+  <text x="256" y="290" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif"
+        font-size="64" font-weight="700" text-anchor="middle" fill="#1A1A1A">₿</text>
+
+  <!-- Hinges on the left edge of the door. -->
+  <rect x="116" y="200" width="8" height="24" fill="#1A1A1A"/>
+  <rect x="116" y="288" width="8" height="24" fill="#1A1A1A"/>
+</svg>

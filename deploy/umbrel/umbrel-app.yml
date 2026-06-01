@@ -1,0 +1,55 @@
+# Umbrel community-apps manifest for deposits-node.
+# Per PACKAGING_PLAN.md Tier 4 — wraps deploy/operator's compose +
+# wizard in the Umbrel App Store's manifest format.
+#
+# To submit:
+#   1. Fork getumbrel/umbrel-apps
+#   2. Copy this directory into the fork as `deposits-node/`
+#   3. Open a PR (Umbrel review covers: manifest schema, no malicious
+#      docker images, port allocation doesn't conflict)
+#
+# Blocking publication today (see deploy/umbrel/README.md):
+#   - `image:` in docker-compose.yml references a pre-built published
+#     image. We don't ship one yet; reviewers will need to wait for
+#     ghcr.io/bitcoin-deposits/deposits-node:vX.Y.Z to exist.
+
+manifestVersion: 1
+id: deposits-node
+category: bitcoin
+name: Deposits
+version: "0.1.0"
+tagline: Custodial-with-collateral Bitcoin deposits, with a multi-operator quorum and on-chain fraud proofs.
+description: >-
+  Run a deposits-node operator on your Umbrel and become part of a
+  multi-operator quorum that holds depositors' funds with on-chain
+  slashable collateral.
+
+
+  Pairs with your existing Bitcoin Core + LND apps — talks to them
+  via the standard Umbrel inter-app variables. After install, walk
+  through the bootstrap wizard via the app's setup page or via
+  `docker exec` to generate the operator seed, initialize the
+  out-of-process signer, and form a quorum with the other operators
+  you coordinate with.
+
+
+  Operator-side documentation at the project's repo; depositor-side
+  wallet is a separate component (see the deposits-web app or use
+  the BOLT11 / on-chain rails directly).
+developer: bitcoin-deposits
+website: https://bitcoindeposits.net
+dependencies:
+  - bitcoind
+  - lightning
+repo: https://github.com/bitcoin-deposits/deposits-rust
+support: https://github.com/bitcoin-deposits/deposits-rust/issues
+port: 9100
+gallery:
+  - 1.jpg
+  - 2.jpg
+  - 3.jpg
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+submitter: bitcoin-deposits
+submission: https://github.com/getumbrel/umbrel-apps/pull/PENDING
