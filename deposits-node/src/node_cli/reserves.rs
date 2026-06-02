@@ -473,7 +473,6 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         };
 
         let mut matched_name: Option<String> = None;
-        let mut matched_key_desc: Option<&'static str> = None;
         let mut taproot_output: Option<deposits_core::tapscript_reserves::TaprootReservesOutput> =
             None;
 
@@ -499,7 +498,6 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 }
                 if let Some(out) = try_ruleset_and_key(name, key) {
                     matched_name = Some(name.clone());
-                    matched_key_desc = Some(desc);
                     taproot_output = Some(out);
                     eprintln!(
                         "  matched on-chain script under ruleset={:?} internal_key={} \

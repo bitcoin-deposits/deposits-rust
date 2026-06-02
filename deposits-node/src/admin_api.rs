@@ -30,15 +30,15 @@
 //! commit so the trait + UI scaffolding can be validated first.
 
 use axum::{
-    extract::{Request, State},
+    extract::{Path as AxumPath, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
-    routing::get,
+    routing::{delete, get, post},
     Router,
 };
 use rand::RngCore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -102,6 +102,11 @@ pub async fn serve(config: AdminConfig, node: Arc<Node>) -> Result<(), Error> {
         .route("/lifecycle", get(get_lifecycle))
         .route("/activity", get(get_activity))
         .route("/signer", get(get_signer))
+        .route(
+            "/candidate-queue",
+            get(get_candidate_queue).post(post_candidate_queue),
+        )
+        .route("/candidate-queue/:pubkey", delete(delete_candidate_queue_entry))
         .with_state(node)
         .route_layer(middleware::from_fn_with_state(
             config.token.clone(),
@@ -496,6 +501,93 @@ async fn get_signer(State(node): State<Arc<Node>>) -> Json<SignerStatus> {
         transport,
         connected,
     })
+}
+
+// ── candidate queue ───────────────────────────────────────────────────
+//
+// The first deliberate write surface on the admin API. The queue is
+// daemon-local config (which peers the operator trusts as potential
+// cosigner replacements during post-expiry self-rescue), not signing
+// material — bearer-token auth is sufficient. Mutation here doesn't
+// move money, doesn't sign anything; it just records operator intent.
+
+async fn get_candidate_queue(
+    State(node): State<Arc<Node>>,
+) -> Json<Vec<crate::candidate_queue::Candidate>> {
+    let queue = crate::candidate_queue::CandidateQueue::load(node.data_dir());
+    Json(queue.entries)
+}
+
+#[derive(Deserialize)]
+struct CandidatePostBody {
+    /// 66-hex compressed secp256k1 pubkey.
+    pubkey: String,
+    /// 64-hex ledger_id of the candidate's own ledger.
+    member_ledger_id: String,
+}
+
+#[derive(Serialize)]
+struct CandidatePostResponse {
+    added: bool,
+    queue_size: usize,
+}
+
+async fn post_candidate_queue(
+    State(node): State<Arc<Node>>,
+    Json(body): Json<CandidatePostBody>,
+) -> Result<Json<CandidatePostResponse>, (StatusCode, String)> {
+    let pk = body.pubkey.trim().to_string();
+    let lid = body.member_ledger_id.trim().to_string();
+    if pk.len() != 66 || !pk.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "pubkey must be 66 hex chars (compressed secp256k1)".into(),
+        ));
+    }
+    if lid.len() != 64 || !lid.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "member_ledger_id must be 64 hex chars".into(),
+        ));
+    }
+    let mut queue = crate::candidate_queue::CandidateQueue::load(node.data_dir());
+    let added = queue
+        .enqueue(
+            node.data_dir(),
+            crate::candidate_queue::Candidate {
+                pubkey: pk,
+                member_ledger_id: lid,
+                added_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            },
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("save: {}", e)))?;
+    Ok(Json(CandidatePostResponse {
+        added,
+        queue_size: queue.entries.len(),
+    }))
+}
+
+#[derive(Serialize)]
+struct CandidateDeleteResponse {
+    removed: bool,
+    queue_size: usize,
+}
+
+async fn delete_candidate_queue_entry(
+    State(node): State<Arc<Node>>,
+    AxumPath(pubkey): AxumPath<String>,
+) -> Result<Json<CandidateDeleteResponse>, (StatusCode, String)> {
+    let mut queue = crate::candidate_queue::CandidateQueue::load(node.data_dir());
+    let removed = queue
+        .drain(node.data_dir(), &pubkey)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("save: {}", e)))?;
+    Ok(Json(CandidateDeleteResponse {
+        removed,
+        queue_size: queue.entries.len(),
+    }))
 }
 
 #[cfg(test)]
