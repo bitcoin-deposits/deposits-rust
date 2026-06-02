@@ -768,6 +768,7 @@ impl Node {
             quorum_expiry: u32,
             active_members: Vec<deposits_core::types::QuorumMember>,
             pending_members: Vec<deposits_core::types::QuorumMember>,
+            ruleset_name: String,
         }
         let ledgers_to_check: Vec<LedgerSnapshot> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
@@ -794,6 +795,7 @@ impl Node {
                         quorum_expiry: expiry,
                         active_members: l.state.quorum_members.clone(),
                         pending_members: l.state.next_quorum_members.clone(),
+                        ruleset_name: l.state.active_ruleset_name.clone(),
                     })
                 })
                 .collect()
@@ -812,29 +814,32 @@ impl Node {
             //
             // cltv-offset-v2 / cltv-offset-literal: DEP-05 §Lifecycle
             // cascade applies. The cosign coordinator picks the right
-            // threshold for the current tier (majority at Tier-0
-            // post-expiry, degraded at higher tiers), and the wallet
-            // picks the right on-chain spend tier. Auto-refresh can
-            // now drive the operator's self-rescue path without manual
-            // `quorum repair`. The cosigner-side rotation_sign handler
-            // honours the lifecycle gate too.
-            //
-            // TODO: the proactive auto_quorum_refresh path is still
-            // tuned for the pre-expiry "rotate-before-deadline" idiom
-            // (members re-add → QuorumBegin). The post-expiry path
-            // needs different orchestration (e.g. fewer member-consent
-            // requests since cosigners may be offline). For now the
-            // explicit `quorum repair` CLI is the supported entry
-            // point past expiry; the auto-refresh leaves the cascade
-            // dormant unless invoked manually.
-            if current_block > snap.quorum_expiry {
+            // tier threshold (majority at Tier-0 post-expiry, degraded
+            // at higher tiers), the wallet picks the right on-chain
+            // spend tier, and the cosigner-side gate honours
+            // establishment ops past expiry. Drive the self-rescue
+            // autonomously without waiting for `quorum repair`. Opt
+            // out with `DEPOSITS_DISABLE_AUTO_SELF_RESCUE=1`.
+            let cascade_active = matches!(
+                snap.ruleset_name.as_str(),
+                "cltv-offset-v2" | "cltv-offset-literal"
+            );
+            let post_expiry = current_block > snap.quorum_expiry;
+            let auto_self_rescue_disabled = std::env::var(
+                "DEPOSITS_DISABLE_AUTO_SELF_RESCUE",
+            )
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+            if post_expiry && (!cascade_active || auto_self_rescue_disabled) {
                 tracing::debug!(
                     "auto_quorum_refresh: ledger {}... past quorum_expiry={} \
-                     (current {}), skipping — use `quorum repair` to invoke \
-                     the lifecycle cascade explicitly",
+                     (current {}), skipping (cascade_active={}, disabled={}) — \
+                     use `quorum repair` to invoke the cascade explicitly",
                     &snap.ledger_id[..16],
                     snap.quorum_expiry,
-                    current_block
+                    current_block,
+                    cascade_active,
+                    auto_self_rescue_disabled,
                 );
                 continue;
             }
@@ -941,12 +946,27 @@ impl Node {
             let _ = all_fresh;
 
             if !still_all_fresh {
-                tracing::info!(
-                    "auto_quorum_refresh: ledger {}... not all members fresh; \
-                     will retry next cycle",
-                    &snap.ledger_id[..16]
-                );
-                continue;
+                if post_expiry && cascade_active {
+                    // Post-expiry self-rescue: skip the all-fresh gate.
+                    // Some members may be unreachable (the very reason
+                    // we're rescuing). The cosign coordinator picks
+                    // the tier threshold based on chain tip and
+                    // collects whatever sigs are available; whoever
+                    // doesn't respond is dropped from the new quorum.
+                    tracing::info!(
+                        "auto_quorum_refresh: ledger {}... post-expiry self-\
+                         rescue — proceeding without all-fresh gate (some \
+                         members may be unreachable)",
+                        &snap.ledger_id[..16]
+                    );
+                } else {
+                    tracing::info!(
+                        "auto_quorum_refresh: ledger {}... not all members fresh; \
+                         will retry next cycle",
+                        &snap.ledger_id[..16]
+                    );
+                    continue;
+                }
             }
 
             // Detach the actual rotation as a background task. It can

@@ -223,3 +223,125 @@ fn quorum_repair_succeeds_at_tier0_post_expiry() {
         original_expiry, new_expiry
     );
 }
+
+/// Companion to `quorum_repair_succeeds_at_tier0_post_expiry` — proves
+/// the same self-rescue happens *autonomously* via auto_quorum_refresh,
+/// no operator CLI invocation. Validates the auto_quorum_refresh post-
+/// expiry path that ships in the auto-self-rescue commit.
+///
+/// Pipeline:
+///   1. Discover op0's first cltv-offset-v2 ledger; read quorum_expiry.
+///   2. Mine to expiry+10 (Tier-0 post-expiry, within grace).
+///   3. Wait — do NOT invoke `quorum repair`. The daemon's periodic
+///      auto_quorum_refresh should fire on its own.
+///   4. Assert a new QuorumBegin lands within the periodic budget.
+#[test]
+#[ignore]
+fn auto_quorum_refresh_self_rescues_past_expiry() {
+    if !cluster_available() {
+        eprintln!("skipping: cluster not running — start with ./bin/setup.sh 3");
+        return;
+    }
+
+    let _node = build_node_with_danger();
+    let ledger = discover_op0_ledger();
+    eprintln!("[setup] op0 ledger: {}…", &ledger[..16]);
+
+    let history = read_ledger_history(&op0_data_dir(), &ledger);
+    let mut original_expiry: Option<u32> = None;
+    let mut ruleset_name: Option<String> = None;
+    let mut original_reserves_id: Option<String> = None;
+    for u in history.iter().rev() {
+        if let Ok(LedgerOperation::QuorumBegin {
+            quorum_expiry,
+            protocol_version,
+            reserves_id,
+            ..
+        }) = LedgerOperation::tlv_decode(&u.message)
+        {
+            original_expiry = Some(quorum_expiry);
+            ruleset_name = protocol_version.clone();
+            original_reserves_id = Some(reserves_id.clone());
+            break;
+        }
+    }
+    let original_expiry = original_expiry.expect("op0 ledger has no QuorumBegin");
+    let ruleset_name = ruleset_name.unwrap_or_else(|| "legacy".to_string());
+    let original_reserves_id = original_reserves_id.unwrap();
+    assert!(
+        ruleset_name == "cltv-offset-v2" || ruleset_name == "cltv-offset-literal",
+        "test requires cltv-offset-v2 ledger (got {})",
+        ruleset_name,
+    );
+    eprintln!(
+        "[setup] original quorum_expiry={} ruleset={}",
+        original_expiry, ruleset_name
+    );
+
+    // Mine to expiry+10. Same Tier-0 post-expiry window as the manual
+    // test; auto-refresh should pick it up next periodic.
+    let current = current_block_height();
+    let target = original_expiry + 10;
+    let to_mine = if current >= target {
+        20
+    } else {
+        target - current
+    };
+    eprintln!(
+        "[mine] current={} → target={} → mining {} blocks",
+        current, target, to_mine
+    );
+    mine_blocks(to_mine);
+
+    // ── Wait for the daemon's auto_quorum_refresh to land a new QuorumBegin ──
+    // auto_tasks periodic cycle is ~10s with --fast-poll, so a 120s
+    // deadline gives ~12 cycles. The first attempt may race with cosigner
+    // wallet sync; subsequent cycles retry.
+    eprintln!(
+        "[wait]  awaiting autonomous self-rescue (no `quorum repair` invocation)…"
+    );
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut new_expiry: Option<u32> = None;
+    let mut new_reserves_id: Option<String> = None;
+    while Instant::now() < deadline {
+        let history = read_ledger_history(&op0_data_dir(), &ledger);
+        for u in history.iter().rev() {
+            if let Ok(LedgerOperation::QuorumBegin {
+                quorum_expiry,
+                reserves_id,
+                ..
+            }) = LedgerOperation::tlv_decode(&u.message)
+            {
+                if quorum_expiry > original_expiry {
+                    new_expiry = Some(quorum_expiry);
+                    new_reserves_id = Some(reserves_id.clone());
+                    break;
+                }
+            }
+        }
+        if new_expiry.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+    let new_expiry = new_expiry.expect(
+        "auto_quorum_refresh did not land a new post-expiry QuorumBegin \
+         within 180s — autonomous self-rescue path failed",
+    );
+    let new_reserves_id = new_reserves_id.unwrap();
+    assert!(
+        new_expiry > original_expiry,
+        "new quorum_expiry ({}) must exceed original ({})",
+        new_expiry,
+        original_expiry,
+    );
+    assert_ne!(
+        new_reserves_id, original_reserves_id,
+        "rotation TX must have produced a new reserves_id",
+    );
+    eprintln!(
+        "[pass] op0 self-rescued AUTONOMOUSLY: quorum_expiry {} → {}, \
+         no CLI invocation, auto_quorum_refresh drove the rotation",
+        original_expiry, new_expiry
+    );
+}
