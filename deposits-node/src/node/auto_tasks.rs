@@ -763,14 +763,7 @@ impl Node {
         // Snapshot owned ledgers + their quorum state. Drop the lock
         // before issuing any daemon RPC so a slow handler doesn't
         // hold up other periodic tasks.
-        struct LedgerSnapshot {
-            ledger_id: String,
-            quorum_expiry: u32,
-            active_members: Vec<deposits_core::types::QuorumMember>,
-            pending_members: Vec<deposits_core::types::QuorumMember>,
-            ruleset_name: String,
-        }
-        let ledgers_to_check: Vec<LedgerSnapshot> = {
+        let ledgers_to_check: Vec<LedgerRefreshSnapshot> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
                 .iter()
@@ -790,7 +783,7 @@ impl Node {
                     {
                         return None;
                     }
-                    Some(LedgerSnapshot {
+                    Some(LedgerRefreshSnapshot {
                         ledger_id: id.clone(),
                         quorum_expiry: expiry,
                         active_members: l.state.quorum_members.clone(),
@@ -806,6 +799,64 @@ impl Node {
             if current_block.saturating_add(threshold_blocks) < snap.quorum_expiry {
                 continue;
             }
+            // Idempotency: don't double-launch per-ledger work. Same set
+            // used by the rotation-in-flight guard further down.
+            {
+                let mut in_flight = self.rotating_ledgers.lock().unwrap();
+                if in_flight.contains(&snap.ledger_id) {
+                    tracing::debug!(
+                        "auto_quorum_refresh: ledger {}... per-cycle work already in flight; skipping",
+                        &snap.ledger_id[..16]
+                    );
+                    continue;
+                }
+                in_flight.insert(snap.ledger_id.clone());
+            }
+            // Detach the per-ledger work as a background task. The
+            // refresh loop's per-member consent calls can each take 10s
+            // (the consent timeout); with the periodic-task budget also
+            // at 10s, doing this inline busts the budget the first time
+            // a member doesn't respond. Spawning per-ledger lets the
+            // budget bound only the snapshot phase, while the actual
+            // refresh / candidate-queue / rotation runs as long as it
+            // needs.
+            let node = Arc::clone(self);
+            let snap = snap;
+            tokio::spawn(async move {
+                node.run_quorum_refresh_for(snap, current_block, threshold_blocks)
+                    .await;
+            });
+        }
+    }
+
+    /// The per-ledger refresh + candidate-queue + rotation work, lifted
+    /// out of the periodic loop and run as a detached task. See
+    /// `auto_quorum_refresh` for the dispatch site.
+    pub(crate) async fn run_quorum_refresh_for(
+        self: Arc<Self>,
+        snap: LedgerRefreshSnapshot,
+        _periodic_current_block: u32,
+        threshold_blocks: u32,
+    ) {
+        // Always remove from the in-flight set on exit, regardless of
+        // success / failure / panic. Constructing a guard lets us do
+        // that without sprinkling cleanup at every early return.
+        let _guard = InFlightGuard {
+            set: Arc::clone(&self.rotating_ledgers),
+            id: snap.ledger_id.clone(),
+        };
+        // Re-read chain tip INSIDE the spawned task. The periodic-loop
+        // snapshot is taken once per ~10s tick, but spawned tasks here
+        // can run for minutes (consent timeouts × non-fresh members ×
+        // candidate-queue attempts). By the time the work runs, the
+        // chain has typically advanced past whatever the periodic
+        // captured — and the `post_expiry` gate would otherwise read
+        // stale, skipping the candidate-queue path. Read fresh.
+        let current_block = match self.wallet.get_block_height() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        {
             // Past expiry: behaviour depends on the ledger's ruleset.
             //
             // Legacy: cosigners refuse every op past quorum_expiry
@@ -841,7 +892,7 @@ impl Node {
                     cascade_active,
                     auto_self_rescue_disabled,
                 );
-                continue;
+                return;
             }
             tracing::info!(
                 "auto_quorum_refresh: ledger {}... quorum_expiry={} \
@@ -947,7 +998,9 @@ impl Node {
                         break;
                     };
                     attempts += 1;
-                    tracing::info!(
+                    // WARN — notable enough that operators with
+                    // RUST_LOG=warn should see the swap attempt.
+                    tracing::warn!(
                         "auto_quorum_refresh: trying candidate {}... as replacement \
                          for {} (attempt {}/{})",
                         &candidate.pubkey[..16.min(candidate.pubkey.len())],
@@ -1024,7 +1077,7 @@ impl Node {
                 let ledgers = self.handler.ledgers.lock().unwrap();
                 let arc = match ledgers.get(&snap.ledger_id) {
                     Some(a) => a,
-                    None => continue,
+                    None => return,
                 };
                 let l = arc.read().unwrap();
                 l.state.quorum_members.iter().all(|m| {
@@ -1059,30 +1112,16 @@ impl Node {
                          will retry next cycle",
                         &snap.ledger_id[..16]
                     );
-                    continue;
+                    return;
                 }
             }
 
-            // Detach the actual rotation as a background task. It can
-            // take minutes (cosign collection + on-chain confs +
-            // QuorumBegin op cosign), far longer than the 10s periodic
-            // task budget. The rotating_ledgers set prevents the next
-            // periodic cycle from double-launching while the prior
-            // rotation is still in flight.
-            {
-                let mut in_flight = self.rotating_ledgers.lock().unwrap();
-                if in_flight.contains(&snap.ledger_id) {
-                    tracing::debug!(
-                        "auto_quorum_refresh: ledger {}... rotation already in flight; skipping",
-                        &snap.ledger_id[..16]
-                    );
-                    continue;
-                }
-                in_flight.insert(snap.ledger_id.clone());
-            }
-
+            // Already inside a per-ledger spawned task (guarded by the
+            // in_flight set entered at dispatch time). Just call the
+            // rotation handler directly — InFlightGuard releases the
+            // slot when this function returns.
             tracing::info!(
-                "auto_quorum_refresh: ledger {}... all members fresh, rotating (detached)",
+                "auto_quorum_refresh: ledger {}... rotating",
                 &snap.ledger_id[..16]
             );
 
@@ -1097,26 +1136,43 @@ impl Node {
                 subkey_account: None,
                 subkey_attestation: None,
             };
-            let node = Arc::clone(self);
-            let in_flight_set = Arc::clone(&self.rotating_ledgers);
-            let ledger_id_for_task = snap.ledger_id.clone();
-            tokio::spawn(async move {
-                let (success, _, error) =
-                    node.process_quorum_begin_request(&begin_req).await;
-                if success {
-                    tracing::info!(
-                        "auto_quorum_refresh: ledger {}... rotated",
-                        &ledger_id_for_task[..16]
-                    );
-                } else {
-                    tracing::warn!(
-                        "auto_quorum_refresh: ledger {}... rotate failed: {}",
-                        &ledger_id_for_task[..16],
-                        error.unwrap_or_default()
-                    );
-                }
-                in_flight_set.lock().unwrap().remove(&ledger_id_for_task);
-            });
+            let (success, _, error) =
+                self.process_quorum_begin_request(&begin_req).await;
+            if success {
+                tracing::info!(
+                    "auto_quorum_refresh: ledger {}... rotated",
+                    &snap.ledger_id[..16]
+                );
+            } else {
+                tracing::warn!(
+                    "auto_quorum_refresh: ledger {}... rotate failed: {}",
+                    &snap.ledger_id[..16],
+                    error.unwrap_or_default()
+                );
+            }
         }
+    }
+}
+
+/// Snapshot of one ledger's quorum state, captured by the periodic
+/// task before dispatching the per-ledger work into a spawned task.
+pub(crate) struct LedgerRefreshSnapshot {
+    pub ledger_id: String,
+    pub quorum_expiry: u32,
+    pub active_members: Vec<deposits_core::types::QuorumMember>,
+    pub pending_members: Vec<deposits_core::types::QuorumMember>,
+    pub ruleset_name: String,
+}
+
+/// RAII helper: removes the ledger_id from the in-flight set on drop,
+/// regardless of how the per-ledger task exits.
+struct InFlightGuard {
+    set: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    id: String,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.set.lock().unwrap().remove(&self.id);
     }
 }
