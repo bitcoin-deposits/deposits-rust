@@ -45,6 +45,7 @@ pub mod error;
 pub mod handler;
 pub mod admin_api;
 pub mod bitcoind_backend;
+pub mod candidate_queue;
 pub mod chain_backend;
 pub mod cln_backend;
 pub mod electrum_backend;

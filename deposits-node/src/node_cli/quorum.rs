@@ -13,7 +13,7 @@ use std::str::FromStr;
 pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
         eprintln!(
-            "Usage: deposits-node quorum <add|remove|join|begin|repair|refresh|request|list|form-with|show-identity> [args...]"
+            "Usage: deposits-node quorum <add|remove|join|begin|repair|refresh|request|list|form-with|show-identity|candidate> [args...]"
         );
         eprintln!("  add            Add a single quorum member to our ledger");
         eprintln!("  remove         Remove a quorum member from our ledger");
@@ -25,6 +25,7 @@ pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::E
         eprintln!("  list           List quorum relationships");
         eprintln!("  form-with      Form a quorum with N named peers in one shot (add + begin)");
         eprintln!("  show-identity  Print this operator's pubkey + owned ledger IDs (for peer coordination)");
+        eprintln!("  candidate      Manage the pre-curated queue of replacement-member candidates");
         return Ok(());
     }
     match args[0].as_str() {
@@ -38,10 +39,11 @@ pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::E
         "list" => quorum_list(&args[1..]).await,
         "form-with" => quorum_form_with(&args[1..]).await,
         "show-identity" => quorum_show_identity(&args[1..]).await,
+        "candidate" => quorum_candidate(&args[1..]).await,
         cmd => {
             eprintln!("Unknown quorum subcommand: {}", cmd);
             eprintln!(
-                "Usage: deposits-node quorum <add|remove|join|begin|repair|refresh|request|list|form-with|show-identity> [args...]"
+                "Usage: deposits-node quorum <add|remove|join|begin|repair|refresh|request|list|form-with|show-identity|candidate> [args...]"
             );
             Ok(())
         }
@@ -1090,5 +1092,145 @@ async fn quorum_show_identity(args: &[String]) -> Result<(), Box<dyn std::error:
         println!("  {}:{}", node.node_id, ledger_id);
     }
 
+    Ok(())
+}
+
+/// Manage the pre-curated queue of replacement-member candidates.
+///
+/// Each entry is a `pubkey:member_ledger_id` pair the operator
+/// trusts as a potential cosigner. `auto_quorum_refresh` consumes
+/// from this queue (FIFO) when it needs to replace an unresponsive
+/// active member during a post-expiry self-rescue.
+///
+/// Queue is persisted at `<data-dir>/candidate_queue.json`. No
+/// network calls — these subcommands just mutate the local file.
+async fn quorum_candidate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.is_empty() {
+        eprintln!("Usage: deposits-node quorum candidate <add|list|remove> [args...]");
+        eprintln!("  add <pubkey>:<member_ledger_id>");
+        eprintln!("  list");
+        eprintln!("  remove <pubkey>");
+        return Ok(());
+    }
+    match args[0].as_str() {
+        "add" => quorum_candidate_add(&args[1..]).await,
+        "list" => quorum_candidate_list(&args[1..]).await,
+        "remove" => quorum_candidate_remove(&args[1..]).await,
+        cmd => {
+            eprintln!("Unknown candidate subcommand: {}", cmd);
+            eprintln!("Usage: deposits-node quorum candidate <add|list|remove> [args...]");
+            Ok(())
+        }
+    }
+}
+
+fn parse_pk_lid(s: &str) -> Result<(String, String), String> {
+    let (pk, lid) = s
+        .split_once(':')
+        .ok_or_else(|| format!("expected <pubkey>:<member_ledger_id>, got {:?}", s))?;
+    let pk = pk.trim();
+    let lid = lid.trim();
+    if pk.len() != 66 || !pk.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "pubkey must be 66 hex chars (compressed secp256k1), got {} chars",
+            pk.len()
+        ));
+    }
+    if lid.len() != 64 || !lid.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "member_ledger_id must be 64 hex chars, got {} chars",
+            lid.len()
+        ));
+    }
+    Ok((pk.to_string(), lid.to_string()))
+}
+
+async fn quorum_candidate_add(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut entry: Option<String> = None;
+    let mut config_args = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        } else if entry.is_none() {
+            entry = Some(args[i].clone());
+        }
+        i += 1;
+    }
+    let entry = entry.ok_or("Usage: quorum candidate add <pubkey>:<member_ledger_id>")?;
+    let (pubkey, member_ledger_id) = parse_pk_lid(&entry)?;
+
+    let config = parse_config(&config_args)?;
+    let mut queue = crate::candidate_queue::CandidateQueue::load(&config.data_dir);
+    let added = queue.enqueue(
+        &config.data_dir,
+        crate::candidate_queue::Candidate {
+            pubkey: pubkey.clone(),
+            member_ledger_id: member_ledger_id.clone(),
+            added_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        },
+    )?;
+    if added {
+        println!("Enqueued candidate: {}:{}", &pubkey[..16], &member_ledger_id[..16]);
+        println!("  Queue now has {} candidate(s)", queue.entries.len());
+    } else {
+        println!("Candidate already in queue: {}", &pubkey[..16]);
+    }
+    Ok(())
+}
+
+async fn quorum_candidate_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_config(args)?;
+    let queue = crate::candidate_queue::CandidateQueue::load(&config.data_dir);
+    if queue.is_empty() {
+        println!("Queue is empty.");
+        return Ok(());
+    }
+    println!("{} candidate(s) in queue (FIFO order):", queue.entries.len());
+    for (i, c) in queue.entries.iter().enumerate() {
+        println!(
+            "  {}: pubkey={} ledger={} added_at={}",
+            i,
+            c.pubkey,
+            &c.member_ledger_id[..16],
+            c.added_at
+        );
+    }
+    Ok(())
+}
+
+async fn quorum_candidate_remove(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut pubkey: Option<String> = None;
+    let mut config_args = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        } else if pubkey.is_none() {
+            pubkey = Some(args[i].clone());
+        }
+        i += 1;
+    }
+    let pubkey = pubkey.ok_or("Usage: quorum candidate remove <pubkey>")?;
+    let config = parse_config(&config_args)?;
+    let mut queue = crate::candidate_queue::CandidateQueue::load(&config.data_dir);
+    if queue.drain(&config.data_dir, &pubkey)? {
+        println!("Removed candidate {} from queue.", &pubkey[..16.min(pubkey.len())]);
+    } else {
+        println!("Candidate {} not in queue.", &pubkey[..16.min(pubkey.len())]);
+    }
     Ok(())
 }

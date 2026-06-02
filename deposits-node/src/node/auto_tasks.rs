@@ -913,12 +913,106 @@ impl Node {
                         "auto_quorum_refresh: member {}... refreshed",
                         prefix
                     );
-                } else {
-                    tracing::warn!(
-                        "auto_quorum_refresh: member {}... not yet refreshed: {}",
+                    continue;
+                }
+                tracing::warn!(
+                    "auto_quorum_refresh: member {}... not yet refreshed: {}",
+                    prefix,
+                    error.unwrap_or_default()
+                );
+
+                // Post-expiry self-rescue with a candidate queue: when
+                // an existing member won't refresh, pop the next pre-
+                // curated candidate and try to enlist them. The same
+                // process_quorum_add_request flow runs the consent
+                // dance with the candidate. On success they're staged
+                // and the dead member gets removed; on failure the
+                // candidate is dropped (they had their shot) and the
+                // next periodic cycle tries the next one. Up to
+                // `MAX_CANDIDATE_ATTEMPTS_PER_CYCLE` tried per
+                // unresponsive member to bound the per-cycle cost.
+                if !(post_expiry && cascade_active) {
+                    continue;
+                }
+                const MAX_CANDIDATE_ATTEMPTS_PER_CYCLE: usize = 3;
+                let mut queue = crate::candidate_queue::CandidateQueue::load(&self.data_dir);
+                let mut attempts = 0usize;
+                while attempts < MAX_CANDIDATE_ATTEMPTS_PER_CYCLE {
+                    let Some(candidate) = queue.pop_front(&self.data_dir) else {
+                        tracing::info!(
+                            "auto_quorum_refresh: candidate queue empty — no \
+                             replacement for unresponsive member {}",
+                            prefix
+                        );
+                        break;
+                    };
+                    attempts += 1;
+                    tracing::info!(
+                        "auto_quorum_refresh: trying candidate {}... as replacement \
+                         for {} (attempt {}/{})",
+                        &candidate.pubkey[..16.min(candidate.pubkey.len())],
                         prefix,
-                        error.unwrap_or_default()
+                        attempts,
+                        MAX_CANDIDATE_ATTEMPTS_PER_CYCLE
                     );
+                    let candidate_req = crate::nostr::LedgerRequest {
+                        action: "quorum_add".into(),
+                        ledger_id: snap.ledger_id.clone(),
+                        params: serde_json::json!({
+                            "member_pubkey": candidate.pubkey,
+                            "member_ledger_id": candidate.member_ledger_id,
+                            "membership_until": new_membership_until,
+                        }),
+                        event_id: String::new(),
+                        sender: String::new(),
+                        timestamp: 0,
+                        gift_wrap_sender: None,
+                        subkey_account: None,
+                        subkey_attestation: None,
+                    };
+                    let (cs, _, cerr) =
+                        self.process_quorum_add_request(&candidate_req).await;
+                    if cs {
+                        tracing::info!(
+                            "auto_quorum_refresh: candidate consented; removing \
+                             unresponsive member {} and staging replacement",
+                            prefix
+                        );
+                        // Remove the dead member from the active set so the
+                        // upcoming QuorumBegin's voter_set is just the
+                        // refreshed staged list.
+                        let remove_req = crate::nostr::LedgerRequest {
+                            action: "quorum_remove".into(),
+                            ledger_id: snap.ledger_id.clone(),
+                            params: serde_json::json!({
+                                "quorum_member": m.pubkey.to_string(),
+                            }),
+                            event_id: String::new(),
+                            sender: String::new(),
+                            timestamp: 0,
+                            gift_wrap_sender: None,
+                            subkey_account: None,
+                            subkey_attestation: None,
+                        };
+                        let (rs, _, rerr) =
+                            self.process_quorum_remove_request(&remove_req).await;
+                        if !rs {
+                            tracing::warn!(
+                                "auto_quorum_refresh: failed to remove {} \
+                                 after staging candidate: {}",
+                                prefix,
+                                rerr.unwrap_or_default()
+                            );
+                        }
+                        break;
+                    } else {
+                        tracing::warn!(
+                            "auto_quorum_refresh: candidate {}... didn't consent: {} \
+                             — dropping from queue, trying next",
+                            &candidate.pubkey[..16.min(candidate.pubkey.len())],
+                            cerr.unwrap_or_default()
+                        );
+                    }
                 }
             }
 
