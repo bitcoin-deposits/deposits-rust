@@ -22,6 +22,9 @@ COMMANDS:
                                   subsequent calls re-print the same line.
     spawn      --name <NAME>     Same as spawn-line, but exec the signer in the foreground
                                   (logs to <data-dir>/spawned/<NAME>/{stdout,stderr}.log).
+    qr [--text <STR>]            Print a QR code for the hub pubkey (or arbitrary --text).
+                                  Renders with Unicode half-blocks; one terminal cell = two
+                                  QR modules so the code stays roughly square.
     help                         Show this message
 
 OPTIONS:
@@ -62,6 +65,7 @@ fn main() -> ExitCode {
         "pubkey" => cmd_pubkey(rest),
         "spawn-line" => cmd_spawn_line(rest),
         "spawn" => cmd_spawn(rest),
+        "qr" => cmd_qr(rest),
         other => {
             eprintln!("unknown command: {}\n\n{}", other, USAGE);
             return ExitCode::FAILURE;
@@ -82,6 +86,7 @@ struct CommonArgs {
     data_dir: Option<PathBuf>,
     relays: Vec<String>,
     name: Option<String>,
+    text: Option<String>,
 }
 
 fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
@@ -105,6 +110,11 @@ fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
             "--name" => {
                 let v = args.get(i + 1).ok_or("--name requires a value")?.to_string();
                 out.name = Some(v);
+                i += 2;
+            }
+            "--text" => {
+                let v = args.get(i + 1).ok_or("--text requires a value")?.to_string();
+                out.text = Some(v);
                 i += 2;
             }
             unknown => return Err(format!("unknown option: {}", unknown)),
@@ -243,6 +253,23 @@ fn cmd_spawn_line(args: &[String]) -> Result<(), String> {
     println!("# data dir:              {}", ws.data_dir.display());
     println!();
     println!("{}", spawner.launch_line(&data_dir, &name));
+    Ok(())
+}
+
+fn cmd_qr(args: &[String]) -> Result<(), String> {
+    let c = parse_common(args)?;
+    let payload = if let Some(t) = c.text {
+        t
+    } else {
+        let data_dir = data_dir_or_default(c.data_dir);
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|e| format!("create data dir {}: {}", data_dir.display(), e))?;
+        let state = deposits_hub::state::HubState::load_or_init(&data_dir)
+            .map_err(|e| format!("hub state: {}", e))?;
+        state.hub_pubkey_hex().to_string()
+    };
+    print!("{}", deposits_hub::qr::render(&payload));
+    println!("{}", payload);
     Ok(())
 }
 
