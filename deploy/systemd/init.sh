@@ -110,9 +110,15 @@ else
     echo "    1) generate a new one (will print once — back it up immediately)"
     echo "    2) import from a file you control"
     read -rp "  choice [1/2]: " choice
+    # Portable hex-encode of /dev/urandom — xxd ships in vim-common
+    # which isn't on debian-slim by default. od is in coreutils and
+    # is guaranteed present on every linux distro.
+    hex_random() {
+        od -An -vtx1 -N32 /dev/urandom | tr -d ' \n'
+    }
     case "$choice" in
         1|"")
-            head -c 32 /dev/urandom | xxd -p -c 64 > "$seed_file_path"
+            hex_random > "$seed_file_path"
             chmod 0600 "$seed_file_path"
             chown "$SIGNER_USER:$SIGNER_USER" "$seed_file_path"
             ok "Generated 32-byte seed at $seed_file_path"
@@ -169,8 +175,15 @@ ok "Installed wrapper at /usr/local/bin/deposits-node-wrapped"
 
 install -m 0644 "$SCRIPT_DIR/deposits-signer.service" /etc/systemd/system/deposits-signer.service
 install -m 0644 "$SCRIPT_DIR/deposits-node.service"   /etc/systemd/system/deposits-node.service
-systemctl daemon-reload
-ok "Unit files installed; systemd reloaded"
+ok "Unit files installed at /etc/systemd/system/"
+# systemctl daemon-reload only works when systemd is PID 1. In a
+# container or chroot, gracefully skip and let the operator run it
+# after they reboot into a real init.
+if systemctl daemon-reload 2>/dev/null; then
+    ok "systemd reloaded"
+else
+    warn "systemctl daemon-reload skipped (no running systemd — run after reboot)"
+fi
 
 # --- done -----------------------------------------------------------------
 
