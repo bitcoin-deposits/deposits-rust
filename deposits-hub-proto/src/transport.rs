@@ -95,12 +95,14 @@ impl HubTransport {
         let filter = Filter::new()
             .kind(Kind::GiftWrap)
             .pubkey(me)
-            // Hub starts caring about gift-wraps from "now-1h" so a
-            // restart picks up retries from peers we haven't heard
-            // from for a bit. NIP-59 spec recommends jittering the
-            // wrap's created_at within ±2 days; an hour of replay
-            // protection is generous.
-            .since(Timestamp::now() - Duration::from_secs(3600));
+            // NIP-59 says wraps SHOULD jitter their `created_at` to a
+            // random point in [now - 2 days, now]. A narrow window
+            // (e.g. `now - 1h`) silently drops most legitimate wraps
+            // because their stamped time is hours-to-days in the past.
+            // Use `now - 2 days` exactly: matches the spec's worst
+            // case, and gives a re-subscribing hub a chance to pick
+            // up retries that real peers sent before we restarted.
+            .since(Timestamp::now() - Duration::from_secs(172_800));
 
         self.client
             .subscribe(vec![filter], None)

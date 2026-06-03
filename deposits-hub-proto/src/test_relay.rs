@@ -47,6 +47,12 @@ pub async fn spawn() -> String {
 struct Subscription {
     p_tags: Vec<String>,
     kinds: Vec<u64>,
+    /// `since` filter (unix seconds). Events with `created_at` below
+    /// this are dropped. None == no lower bound. Real relays honor
+    /// this strictly; our test relay used to skip the check, which
+    /// hid a NIP-59 gift-wrap bug where a too-narrow `since` window
+    /// silently filtered out jittered wraps.
+    since: Option<u64>,
     sub_id: String,
 }
 
@@ -101,6 +107,8 @@ async fn handle_connection(
             "EVENT" => {
                 let Some(event) = arr.get(1) else { continue };
                 let kind = event.get("kind").and_then(|k| k.as_u64()).unwrap_or(0);
+                let event_created_at =
+                    event.get("created_at").and_then(|c| c.as_u64()).unwrap_or(0);
                 let event_p_tags: Vec<String> = event
                     .get("tags")
                     .and_then(|t| t.as_array())
@@ -136,7 +144,11 @@ async fn handle_connection(
                         let kind_ok = sub.kinds.is_empty() || sub.kinds.contains(&kind);
                         let p_ok = sub.p_tags.is_empty()
                             || event_p_tags.iter().any(|p| sub.p_tags.contains(p));
-                        if kind_ok && p_ok {
+                        let since_ok = match sub.since {
+                            Some(s) => event_created_at >= s,
+                            None => true,
+                        };
+                        if kind_ok && p_ok && since_ok {
                             let frame = serde_json::json!(["EVENT", sub.sub_id, event]).to_string();
                             let _ = out.send(frame);
                         }
@@ -149,6 +161,7 @@ async fn handle_connection(
                 };
                 let mut p_tags = Vec::new();
                 let mut kinds = Vec::new();
+                let mut since: Option<u64> = None;
                 for filter in arr.iter().skip(2) {
                     if let Some(ks) = filter.get("kinds").and_then(|k| k.as_array()) {
                         for k in ks {
@@ -164,12 +177,22 @@ async fn handle_connection(
                             }
                         }
                     }
+                    if let Some(s) = filter.get("since").and_then(|v| v.as_u64()) {
+                        // Multiple filters' `since` values: take the
+                        // most permissive (smallest). A single filter
+                        // is the common case.
+                        since = Some(match since {
+                            Some(prev) => prev.min(s),
+                            None => s,
+                        });
+                    }
                 }
                 let mut g = conns.lock().await;
                 if let Some(c) = g.get_mut(&id) {
                     c.subscriptions.push(Subscription {
                         p_tags,
                         kinds,
+                        since,
                         sub_id: sub_id.to_string(),
                     });
                     let eose = serde_json::json!(["EOSE", sub_id]).to_string();
