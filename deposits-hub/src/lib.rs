@@ -15,5 +15,6 @@
 // hub's TUI deps along.
 pub use deposits_hub_proto::{proto, transport as nostr};
 
+pub mod spawn;
 pub mod state;
 pub mod tui;

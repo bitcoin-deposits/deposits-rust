@@ -15,17 +15,24 @@ USAGE:
     deposits-hub <COMMAND> [OPTIONS]
 
 COMMANDS:
-    run         Boot the hub: load state, open nostr client, launch the TUI
-    pubkey      Print the hub's nostr pubkey
-    help        Show this message
+    run                          Boot the hub: load state, open nostr client, launch the TUI
+    pubkey                       Print the hub's nostr pubkey
+    spawn-line --name <NAME>     Print the launch command for a signer that auto-registers
+                                  with this hub. Creates the workspace + seed on first use;
+                                  subsequent calls re-print the same line.
+    spawn      --name <NAME>     Same as spawn-line, but exec the signer in the foreground
+                                  (logs to <data-dir>/spawned/<NAME>/{stdout,stderr}.log).
+    help                         Show this message
 
 OPTIONS:
     --data-dir <DIR>   Hub data directory (default: ~/.deposits-hub)
-    --relay <URL>      Nostr relay (can be passed more than once; required for `run`)
+    --relay <URL>      Nostr relay (can be passed more than once; required for `run`, `spawn*`)
+    --name <NAME>      Signer name (workspace + label)
 
 EXAMPLES:
     deposits-hub run --relay wss://relay.bitcoindeposits.net
     deposits-hub pubkey
+    deposits-hub spawn-line --name op-alice --relay wss://relay.bitcoindeposits.net
 ";
 
 fn main() -> ExitCode {
@@ -53,6 +60,8 @@ fn main() -> ExitCode {
         }
         "run" => cmd_run(rest),
         "pubkey" => cmd_pubkey(rest),
+        "spawn-line" => cmd_spawn_line(rest),
+        "spawn" => cmd_spawn(rest),
         other => {
             eprintln!("unknown command: {}\n\n{}", other, USAGE);
             return ExitCode::FAILURE;
@@ -72,6 +81,7 @@ fn main() -> ExitCode {
 struct CommonArgs {
     data_dir: Option<PathBuf>,
     relays: Vec<String>,
+    name: Option<String>,
 }
 
 fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
@@ -90,6 +100,11 @@ fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
             "--relay" => {
                 let v = args.get(i + 1).ok_or("--relay requires a value")?.to_string();
                 out.relays.push(v);
+                i += 2;
+            }
+            "--name" => {
+                let v = args.get(i + 1).ok_or("--name requires a value")?.to_string();
+                out.name = Some(v);
                 i += 2;
             }
             unknown => return Err(format!("unknown option: {}", unknown)),
@@ -189,4 +204,82 @@ fn cmd_pubkey(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("hub state: {}", e))?;
     println!("{}", state.hub_pubkey_hex());
     Ok(())
+}
+
+fn cmd_spawn_line(args: &[String]) -> Result<(), String> {
+    let c = parse_common(args)?;
+    let data_dir = data_dir_or_default(c.data_dir);
+    let name = c.name.ok_or("missing --name")?;
+    if c.relays.is_empty() {
+        return Err("`spawn-line` requires at least one --relay (the signer needs to know where to find the hub)".to_string());
+    }
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| format!("create data dir {}: {}", data_dir.display(), e))?;
+    let state = deposits_hub::state::HubState::load_or_init(&data_dir)
+        .map_err(|e| format!("hub state: {}", e))?;
+
+    // First-time initialization (seed + signer data-dir) so the
+    // operator can copy the line to another host and have the signer
+    // start cleanly without a separate `init` step. The launch line
+    // itself is identical whether the workspace existed already or not.
+    let spawner =
+        deposits_hub::spawn::Spawner::new(state.hub_pubkey_hex().to_string(), c.relays.clone());
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {}", e))?;
+    let ws = rt
+        .block_on(spawner.ensure_initialized(&data_dir, &name))
+        .map_err(|e| format!("init signer workspace: {}", e))?;
+
+    let transport_pk = std::fs::read_to_string(ws.data_dir.join("transport_pubkey"))
+        .map_err(|e| format!("read signer transport pubkey: {}", e))?
+        .trim()
+        .to_string();
+
+    println!("# signer name:           {}", name);
+    println!("# signer transport pk:   {}", transport_pk);
+    println!("# hub pubkey:            {}", state.hub_pubkey_hex());
+    println!("# data dir:              {}", ws.data_dir.display());
+    println!();
+    println!("{}", spawner.launch_line(&data_dir, &name));
+    Ok(())
+}
+
+fn cmd_spawn(args: &[String]) -> Result<(), String> {
+    let c = parse_common(args)?;
+    let data_dir = data_dir_or_default(c.data_dir);
+    let name = c.name.ok_or("missing --name")?;
+    if c.relays.is_empty() {
+        return Err("`spawn` requires at least one --relay".to_string());
+    }
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| format!("create data dir {}: {}", data_dir.display(), e))?;
+    let state = deposits_hub::state::HubState::load_or_init(&data_dir)
+        .map_err(|e| format!("hub state: {}", e))?;
+    let spawner = deposits_hub::spawn::Spawner::new(state.hub_pubkey_hex().to_string(), c.relays);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {}", e))?;
+    rt.block_on(async move {
+        let handle = spawner
+            .spawn(&data_dir, &name)
+            .await
+            .map_err(|e| format!("spawn: {}", e))?;
+        eprintln!(
+            "spawned signer '{}' (transport pk: {}); logs in {}",
+            handle.name,
+            handle.transport_pubkey_hex,
+            handle.workspace.root.display()
+        );
+        // Wait for ctrl-c, then kill the child.
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|e| format!("ctrl_c: {}", e))?;
+        eprintln!("stopping spawned signer");
+        let _ = handle.kill().await;
+        Ok::<(), String>(())
+    })
 }
