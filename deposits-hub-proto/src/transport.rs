@@ -1,9 +1,10 @@
-//! Hub-side nostr transport.
+//! Nostr transport for the hub control plane.
 //!
-//! Owns the hub's `Keys`, holds an open `Client` against operator-
-//! configured relays, subscribes to gift-wrapped DMs addressed to the
-//! hub pubkey, decodes them as [`crate::proto::HubMessage`], and
-//! exposes:
+//! Used by both ends of the conversation: the hub's own process and any
+//! daemon (signer/node) that registers with it. Owns a long-lived
+//! `Keys` + `Client` against the configured relays, subscribes to
+//! gift-wrapped DMs addressed to the local pubkey, decodes them as
+//! [`crate::proto::HubMessage`], and exposes:
 //!
 //!   * `send(recipient, msg)` — publish a `KIND_HUB` rumor inside a
 //!     NIP-59 gift wrap, addressed to `recipient`
@@ -12,8 +13,8 @@
 //!     gift wraps arrive
 //!
 //! No retry / backoff / queueing — peers that need delivery guarantees
-//! re-send. The hub's role is "best-effort dashboard" not "reliable
-//! message bus."
+//! re-send. This is a best-effort control plane, not a reliable
+//! message bus.
 
 use crate::proto::{HubMessage, KIND_HUB};
 use nostr_sdk::prelude::*;

@@ -10,6 +10,9 @@
 //! See `proto.rs` for the wire shape, `state.rs` for the persistent
 //! inventory, and `tui.rs` for the interactive surface.
 
-pub mod nostr;
-pub mod proto;
+// Wire protocol + nostr transport live in `deposits-hub-proto` so the
+// signer (and later, the node) can pull them in without dragging the
+// hub's TUI deps along.
+pub use deposits_hub_proto::{proto, transport as nostr};
+
 pub mod state;

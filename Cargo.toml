@@ -5,6 +5,7 @@ members = [
     "deposits-nostr",
     "deposits-node",
     "deposits-hub",
+    "deposits-hub-proto",
     "deposits-wallet",
     "deposits-attestation",
     "deposits-lnurl",

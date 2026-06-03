@@ -1,0 +1,23 @@
+[package]
+name = "deposits-hub-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Bitcoin Deposits — shared wire types and nostr transport for hub ↔ peer control plane"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Wire-only crate — keep deps minimal so both deposits-signer (no TUI)
+# and deposits-hub (full TUI) can pull it in without pain.
+nostr-sdk = { version = "0.37", features = ["nip44", "nip59"] }
+rustls = { version = "0.23", features = ["ring"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+tracing = "0.1"
+hex = "0.4"
+thiserror = "1.0"
+
+[lints]
+workspace = true
