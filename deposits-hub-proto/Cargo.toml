@@ -19,5 +19,12 @@ tracing = "0.1"
 hex = "0.4"
 thiserror = "1.0"
 
+[dev-dependencies]
+# Tiny in-process relay for round-trip smoke tests. Version matches
+# what nostr-sdk 0.37 pulls in transitively so we share compile cache.
+tokio-tungstenite = "0.24"
+futures = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+
 [lints]
 workspace = true
