@@ -1,0 +1,69 @@
+[Unit]
+Description=Bitcoin Deposits — node daemon
+Documentation=https://github.com/bitcoin-deposits/deposits-rust
+After=network-online.target deposits-signer.service
+Wants=network-online.target
+Requires=deposits-signer.service
+
+# Optional — uncomment if your bitcoin/lnd run under systemd on the same
+# host and you want the daemon to wait for them before starting:
+# After=bitcoind.service lnd.service
+
+[Service]
+Type=simple
+User=deposits
+Group=deposits
+
+# Config lives in EnvironmentFile (see deposits-node.env.example). The
+# command line below carries only what systemd needs to know about
+# (network/paths/signer wiring); everything else is env-driven so it can
+# be edited without touching the unit file.
+EnvironmentFile=/etc/deposits/deposits-node.env
+
+# Wrapper script reads the EnvironmentFile and constructs `deposits-
+# node run` with the right flags — `--relay` is repeated for each
+# configured relay, which systemd's ${VAR} expansion in ExecStart
+# can't do conditionally. See deposits-node-wrapped.sh for the
+# mapping. Installed at /usr/local/bin/deposits-node-wrapped by
+# init.sh.
+ExecStart=/usr/local/bin/deposits-node-wrapped
+
+Restart=on-failure
+RestartSec=10s
+
+# State
+StateDirectory=deposits
+StateDirectoryMode=0750
+
+# Hardening — daemon holds no key material (the signer does), but it
+# does hold the operator's ledger history + wallet. Lock down anyway.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+
+# Daemon needs to talk to the signer over its Unix socket. RuntimeDirectory
+# on deposits-signer.service uses 0750 so this group can read it; the node
+# user is added to the dsigner group at install time (see init.sh).
+ReadWritePaths=/var/lib/deposits
+
+[Install]
+WantedBy=multi-user.target

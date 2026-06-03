@@ -1,0 +1,63 @@
+[Unit]
+Description=Bitcoin Deposits — signer process
+Documentation=https://github.com/bitcoin-deposits/deposits-rust
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dsigner
+Group=dsigner
+
+# The signer is a single binary; it holds the seed and an allowlist of
+# transport pubkeys that may request signatures. No env file needed —
+# its config lives entirely under its data-dir.
+ExecStart=/usr/local/bin/deposits-signer run \
+    --data-dir /var/lib/dsigner \
+    --socket /run/dsigner/socket
+
+Restart=on-failure
+RestartSec=10s
+
+# State + runtime
+StateDirectory=dsigner
+StateDirectoryMode=0700
+RuntimeDirectory=dsigner
+RuntimeDirectoryMode=0750
+
+# Hardening — the signer holds the seed; lock everything that isn't
+# absolutely necessary.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+# The signer doesn't need network for its core job (it serves over a
+# Unix socket only); RestrictAddressFamilies leaves AF_INET in case the
+# remote-signer mode is enabled. Disable AF_INET entirely if you only
+# use the local socket path.
+
+ReadWritePaths=/var/lib/dsigner /run/dsigner
+
+[Install]
+WantedBy=multi-user.target
