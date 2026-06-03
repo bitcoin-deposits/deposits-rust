@@ -10,5 +10,6 @@
 //! See `proto.rs` for the wire shape, `state.rs` for the persistent
 //! inventory, and `tui.rs` for the interactive surface.
 
+pub mod nostr;
 pub mod proto;
 pub mod state;
