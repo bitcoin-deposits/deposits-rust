@@ -97,6 +97,21 @@ pub struct NodeConfig {
     /// to come back. Three days lets cosigners miss two cycles of a
     /// 24-hour cron and still come back before the cascade opens.
     pub rotate_before_expiry_days: u32,
+
+    /// If `Some`, daemon registers with a deposits-hub control plane
+    /// over gift-wrapped nostr DMs (see `crate::hub`). The pubkey is
+    /// the hub's 32-byte x-only nostr identity; relays are where the
+    /// hub listens. Both must be set for registration to fire.
+    pub hub: Option<HubConfig>,
+}
+
+/// Daemon ↔ hub control-plane wiring.
+#[derive(Debug, Clone)]
+pub struct HubConfig {
+    /// 32-byte x-only nostr pubkey of the hub.
+    pub pubkey_hex: String,
+    /// Relays the hub listens on (gift-wraps fan out across all).
+    pub relays: Vec<String>,
 }
 
 /// Configuration for the daemon ↔ signer link.

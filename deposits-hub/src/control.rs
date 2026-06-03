@@ -12,9 +12,20 @@ use crate::state::{HubState, NodeRecord, PendingRegistration, SignerRecord};
 use std::path::Path;
 
 /// Park or refresh a Register from `sender_pk`. Returns `true` if the
-/// peer was already in inventory (caller should respond with an
-/// accepted ack) or `false` if it was just parked (caller responds
-/// with a waiting/Retry ack).
+/// peer was already in inventory **for the same role** (caller should
+/// respond with an accepted ack) or `false` if it was just parked
+/// (caller responds with a waiting/Retry ack).
+///
+/// Dedupe is per-role: a single operator running both `deposits-node`
+/// and `deposits-signer` derives the same nostr identity from the
+/// shared operator seed, so both register with the same sender pubkey
+/// but distinct roles. Treating them as one (the original bug) made
+/// the node's Register collide with the signer's already-approved
+/// entry; the node never landed in inventory.
+///
+/// Pending entries are also role-scoped — the key is `<role>:<pk>` —
+/// so an outstanding Signer registration doesn't shadow a Node
+/// registration from the same key.
 pub fn ingest_register(
     state: &mut HubState,
     data_dir: &Path,
@@ -24,13 +35,18 @@ pub fn ingest_register(
     version: String,
     label: Option<String>,
 ) -> Result<bool, String> {
-    if state.signers.contains_key(sender_pk) || state.nodes.contains_key(sender_pk) {
+    let already = match role {
+        Role::Signer => state.signers.contains_key(sender_pk),
+        Role::Node => state.nodes.contains_key(sender_pk),
+    };
+    if already {
         return Ok(true);
     }
     let now = unix_secs();
+    let pending_key = pending_key(role, sender_pk);
     let entry = state
         .pending
-        .entry(sender_pk.to_string())
+        .entry(pending_key)
         .or_insert_with(|| PendingRegistration {
             role,
             identity_pubkey: identity_pubkey.clone(),
@@ -48,29 +64,48 @@ pub fn ingest_register(
     Ok(false)
 }
 
-/// Move a pending entry into the approved inventory. Returns the label
-/// chosen for the peer (used in logs / acks). `override_label` wins if
-/// set; otherwise the peer's `suggested_label` is used, falling back to
-/// a short-form pubkey.
+/// Compose the `state.pending` key: `<role>:<sender_pk>`. Keeps Signer
+/// and Node pending entries separate when they come from the same
+/// shared-identity operator.
+pub fn pending_key(role: Role, sender_pk: &str) -> String {
+    let prefix = match role {
+        Role::Signer => "signer",
+        Role::Node => "node",
+    };
+    format!("{}:{}", prefix, sender_pk)
+}
+
+/// Move a pending entry into the approved inventory. The operator
+/// passes a pending-map key (e.g. `signer:<pk>` or `node:<pk>`) —
+/// these are what `state.pending` is keyed by. For convenience the
+/// CLI also accepts a bare pubkey and prefers the unique pending
+/// entry if there is exactly one.
 pub fn approve(
     state: &mut HubState,
     data_dir: &Path,
-    sender_pk: &str,
+    pending_key_or_pk: &str,
     override_label: Option<String>,
 ) -> Result<String, String> {
+    let resolved_key = resolve_pending_key(state, pending_key_or_pk)?;
     let entry = state
         .pending
-        .get(sender_pk)
+        .get(&resolved_key)
         .cloned()
-        .ok_or_else(|| format!("no pending entry for {}", sender_pk))?;
+        .ok_or_else(|| format!("no pending entry for {}", resolved_key))?;
+    // The sender pubkey is the second half of `<role>:<pk>`.
+    let sender_pk = resolved_key
+        .splitn(2, ':')
+        .nth(1)
+        .unwrap_or(&resolved_key)
+        .to_string();
     let now = unix_secs();
     let label = override_label
         .or(entry.suggested_label.clone())
-        .unwrap_or_else(|| short_pk(sender_pk));
+        .unwrap_or_else(|| short_pk(&sender_pk));
     match entry.role {
         Role::Signer => {
             state.signers.insert(
-                sender_pk.to_string(),
+                sender_pk.clone(),
                 SignerRecord {
                     label: label.clone(),
                     spawned_by_hub: false,
@@ -81,7 +116,7 @@ pub fn approve(
         }
         Role::Node => {
             state.nodes.insert(
-                sender_pk.to_string(),
+                sender_pk.clone(),
                 NodeRecord {
                     label: label.clone(),
                     spawned_by_hub: false,
@@ -92,19 +127,44 @@ pub fn approve(
             );
         }
     }
-    state.pending.remove(sender_pk);
+    state.pending.remove(&resolved_key);
     state.save(data_dir).map_err(|e| format!("save: {}", e))?;
     Ok(label)
 }
 
 /// Drop a pending entry. Caller should follow up with a
 /// `RegisterAck { next_action: Shutdown }` so the peer stops trying.
-pub fn reject(state: &mut HubState, data_dir: &Path, sender_pk: &str) -> Result<(), String> {
-    if state.pending.remove(sender_pk).is_none() {
-        return Err(format!("no pending entry for {}", sender_pk));
+pub fn reject(state: &mut HubState, data_dir: &Path, pending_key_or_pk: &str) -> Result<(), String> {
+    let resolved_key = resolve_pending_key(state, pending_key_or_pk)?;
+    if state.pending.remove(&resolved_key).is_none() {
+        return Err(format!("no pending entry for {}", resolved_key));
     }
     state.save(data_dir).map_err(|e| format!("save: {}", e))?;
     Ok(())
+}
+
+/// Look up a pending entry by either the full `<role>:<pk>` key or
+/// just the pubkey (works if exactly one role is pending for that pk).
+fn resolve_pending_key(state: &HubState, k: &str) -> Result<String, String> {
+    if state.pending.contains_key(k) {
+        return Ok(k.to_string());
+    }
+    // Bare pubkey path: find the unique role.
+    let matches: Vec<&String> = state
+        .pending
+        .keys()
+        .filter(|key| {
+            key.splitn(2, ':').nth(1) == Some(k)
+        })
+        .collect();
+    match matches.len() {
+        0 => Err(format!("no pending entry for {}", k)),
+        1 => Ok(matches[0].clone()),
+        n => Err(format!(
+            "{} pending entries match pubkey {} — disambiguate with `<role>:<pk>`",
+            n, k
+        )),
+    }
 }
 
 /// Send the standard "approved" ack (best-effort — heartbeat retries

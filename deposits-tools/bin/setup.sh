@@ -318,6 +318,15 @@ start_node() {
         signer_flags="--signer-pubkey $signer_pubkey --signer-socket $signer_socket"
     fi
 
+    # Hub registration flags — only when USE_HUB=1; identical to the
+    # --hub-pubkey / --hub-relay pair the signer accepts.
+    local hub_flags=""
+    if [ "${DEPOSITS_USE_HUB:-}" = "1" ] && [ -f "$HUB_DATA_DIR/hub.json" ]; then
+        local hub_pk
+        hub_pk=$("$DEPOSITS_HUB" pubkey --data-dir "$HUB_DATA_DIR" 2>/dev/null)
+        hub_flags="--hub-pubkey $hub_pk --hub-relay ws://localhost:$MSG_RELAY_PORT"
+    fi
+
     RUST_LOG="${SETUP_RUST_LOG:-warn}" LDK_CLI="$LDK_CLI" LDK_REAL_CLI="$LDK_REAL_CLI" \
         LDK_HOST="$LDK_HOST" LDK_PORT="$LDK_PORT" \
         LDK_API_KEY="$LDK_API_KEY" LDK_TLS_CERT="$LDK_TLS_CERT" \
@@ -341,7 +350,8 @@ start_node() {
         --admin-bind "127.0.0.1:$admin_port" \
         --fast-poll \
         $RELAY_ARGS \
-        $signer_flags >> "$data_dir/daemon.log" 2>&1 &
+        $signer_flags \
+        $hub_flags >> "$data_dir/daemon.log" 2>&1 &
     echo "$!" > "$data_dir/daemon.pid"
 }
 

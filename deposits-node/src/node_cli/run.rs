@@ -7,6 +7,7 @@
 
 use super::parse_config;
 use crate::Node;
+use bitcoin::secp256k1::{PublicKey, Secp256k1};
 use std::sync::Arc;
 
 pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -40,6 +41,16 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     }
 
     let config = parse_config(&filtered_args)?;
+
+    // Snapshot the bits we need for the hub task before `config` moves
+    // into `Node::new`. The hub thread runs alongside the daemon's
+    // own nostr transport — separate keys, separate filter (kind
+    // KIND_HUB / 1059 #p=<hub_pk>) — so there's no conflict with the
+    // daemon's regular peer traffic.
+    let hub_cfg = config.hub.clone();
+    let hub_seed = config.seed;
+    let hub_network = config.network;
+    let hub_label = config.operator_name.clone();
 
     // Initialize metrics if port specified
     if let Some(port) = metrics_port {
@@ -110,6 +121,39 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     // Start the node
     node.start().await?;
+
+    // Spawn the hub registration loop alongside the node's main event
+    // loop. Same nostr identity (`m/85'/.../0`) the daemon uses for
+    // operator-protocol events, but addressed to the operator-provided
+    // hub pubkey on a separate gift-wrapped channel. Hub liveness is
+    // not load-bearing — failures here log and exit the task; the
+    // daemon keeps serving.
+    if let Some(hc) = hub_cfg {
+        match deposits_signer::data::derive_keys_from_seed(&hub_seed, hub_network) {
+            Ok((op_secret, nostr_secret)) => {
+                let secp = Secp256k1::new();
+                let op_pk = PublicKey::from_secret_key(&secp, &op_secret);
+                let op_pk_hex = hex::encode(op_pk.serialize());
+                let nostr_secret_hex = hex::encode(nostr_secret.secret_bytes());
+                tokio::spawn(async move {
+                    if let Err(e) = crate::hub::run(
+                        nostr_secret_hex,
+                        hc.pubkey_hex,
+                        hc.relays,
+                        op_pk_hex,
+                        hub_label,
+                    )
+                    .await
+                    {
+                        tracing::warn!("hub loop exited: {}", e);
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!("hub registration: derive keys: {} — skipping", e);
+            }
+        }
+    }
 
     // Refresh ledger advertisements so the chain tip and obligation counters
     // reflect reality after a restart (the original ad could be hours old).

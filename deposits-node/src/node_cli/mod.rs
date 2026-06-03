@@ -482,6 +482,8 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     let mut signer_socket: Option<PathBuf> = None;
     let mut signer_pubkey: Option<bitcoin::secp256k1::PublicKey> = None;
     let mut rotate_before_expiry_days: u32 = 3;
+    let mut hub_pubkey: Option<String> = None;
+    let mut hub_relays: Vec<String> = Vec::new();
     let mut data_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".deposits-node");
@@ -611,6 +613,20 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
                     .parse()
                     .map_err(|e| format!("--rotate-before-expiry-days: {}", e))?;
             }
+            "--hub-pubkey" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--hub-pubkey requires a value".to_string());
+                }
+                hub_pubkey = Some(args[i].clone());
+            }
+            "--hub-relay" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--hub-relay requires a value".to_string());
+                }
+                hub_relays.push(args[i].clone());
+            }
             arg => {
                 return Err(format!("Unknown argument: {}", arg));
             }
@@ -675,6 +691,20 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
         }
     };
 
+    let hub = match (hub_pubkey, hub_relays.is_empty()) {
+        (Some(pk), false) => Some(crate::node::HubConfig {
+            pubkey_hex: pk,
+            relays: hub_relays,
+        }),
+        (None, true) => None,
+        (Some(_), true) => {
+            return Err("--hub-pubkey requires at least one --hub-relay".to_string());
+        }
+        (None, false) => {
+            return Err("--hub-relay set without --hub-pubkey".to_string());
+        }
+    };
+
     Ok(NodeConfig {
         seed,
         network,
@@ -687,6 +717,7 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
         skip_nostr_verify,
         signer,
         rotate_before_expiry_days,
+        hub,
     })
 }
 

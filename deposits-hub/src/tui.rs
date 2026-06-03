@@ -26,7 +26,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs};
 use ratatui::Terminal;
 use std::collections::HashMap;
 use std::io::Stdout;
@@ -399,6 +399,12 @@ impl App {
                 )));
             }
         }
+        // Clear first — Paragraph renders top-down without blanking
+        // trailing cells, so a frame with fewer lines than a previous
+        // frame leaves stale text below. (Observed: when a node
+        // disappeared, its old "signer=…  hb …" tail showed through
+        // the new shorter "Nodes (0)" line.)
+        f.render_widget(Clear, area);
         let p = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(" inventory "));
         f.render_widget(p, area);
@@ -409,6 +415,7 @@ impl App {
         entries.sort_by_key(|(_, v)| v.first_seen);
 
         if entries.is_empty() {
+            f.render_widget(Clear, area);
             let p = Paragraph::new("(no pending registrations — peers waiting for approval show up here)")
                 .block(Block::default().borders(Borders::ALL).title(" pending "));
             f.render_widget(p, area);
@@ -424,23 +431,28 @@ impl App {
         let now = unix_secs();
         let items: Vec<ListItem> = entries
             .iter()
-            .map(|(pk, e)| {
+            .map(|(pending_key, e)| {
                 let waiting = now.saturating_sub(e.first_seen);
                 let role = match e.role {
                     Role::Signer => "signer",
                     Role::Node => "node",
                 };
                 let label = e.suggested_label.as_deref().unwrap_or("(unnamed)");
+                // pending_key is "<role>:<pk>" — strip the role prefix
+                // for display since the role is already shown next to it.
+                let pk_only =
+                    pending_key.splitn(2, ':').nth(1).unwrap_or(pending_key.as_str());
                 ListItem::new(format!(
                     "{:<6} {:<24} from {}  v{}  waiting {}s",
                     role,
                     label,
-                    short_pk(pk),
+                    short_pk(pk_only),
                     e.version,
                     waiting,
                 ))
             })
             .collect();
+        f.render_widget(Clear, area);
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" pending "))
             .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))

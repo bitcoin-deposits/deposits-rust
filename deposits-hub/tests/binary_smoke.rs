@@ -203,13 +203,14 @@ async fn signer_registers_then_gets_approved() {
     let mut signer_proc =
         spawn_signer(&signer_dir, &signer_socket, &hub_pk, &relay_url, &log_dir).await;
 
-    // Wait for the pending entry to land.
-    let pending_state = poll_hub_state(&hub_dir, |s| {
-        s.pending.contains_key(&signer_nostr_pk)
-    })
-    .await
-    .expect("signer never showed up in hub.pending within 15s");
-    let pending_entry = pending_state.pending.get(&signer_nostr_pk).unwrap();
+    // Wait for the pending entry to land. Pending keys are now
+    // `<role>:<pk>` so signer/node registrations from the same operator
+    // (same nostr identity) don't collide.
+    let pending_key = format!("signer:{}", signer_nostr_pk);
+    let pending_state = poll_hub_state(&hub_dir, |s| s.pending.contains_key(&pending_key))
+        .await
+        .expect("signer never showed up in hub.pending within 15s");
+    let pending_entry = pending_state.pending.get(&pending_key).unwrap();
     assert_eq!(pending_entry.role, deposits_hub::proto::Role::Signer);
     assert!(
         pending_entry.identity_pubkey.len() == 66,
