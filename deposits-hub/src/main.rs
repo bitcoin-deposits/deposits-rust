@@ -18,6 +18,8 @@ COMMANDS:
     run                          Boot the hub: load state, open nostr client, launch the TUI.
                                   Pass --headless to skip the TUI (for CI / unattended hosts) —
                                   registrations still get parked, approve them via `approve`.
+                                  Pass --steal to take over the data dir from a running hub
+                                  (SIGTERM, then SIGKILL after 3s).
     pubkey                       Print the hub's nostr pubkey
     approve --pubkey <HEX>       Move the given pending peer into the inventory and ack it.
                                   Mirror of hitting `a` in the TUI's pending tab.
@@ -100,6 +102,7 @@ struct CommonArgs {
     seed: Option<String>,
     headless: bool,
     auto_approve: bool,
+    steal: bool,
 }
 
 fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
@@ -149,6 +152,10 @@ fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
             }
             "--auto-approve" => {
                 out.auto_approve = true;
+                i += 1;
+            }
+            "--steal" => {
+                out.steal = true;
                 i += 1;
             }
             unknown => return Err(format!("unknown option: {}", unknown)),
@@ -205,8 +212,16 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     // race on hub.json (lost writes). Bound to the function — drop
     // at return releases. Kernel auto-releases on process exit too,
     // so SIGKILL / panic don't leave a stale lock.
-    let _hub_lock = deposits_hub::lock::HubLock::acquire(&data_dir)
-        .map_err(|e| e.to_string())?;
+    //
+    // `--steal` swaps in the kill-then-acquire variant for operators
+    // who want their new hub to take over from a running one (e.g.,
+    // headless from setup.sh → interactive TUI without manual kill).
+    let _hub_lock = if c.steal {
+        deposits_hub::lock::HubLock::acquire_or_steal(&data_dir)
+    } else {
+        deposits_hub::lock::HubLock::acquire(&data_dir)
+    }
+    .map_err(|e| e.to_string())?;
 
     let state = deposits_hub::state::HubState::load_or_init(&data_dir)
         .map_err(|e| format!("hub state: {}", e))?;

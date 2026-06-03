@@ -47,6 +47,57 @@ pub struct HubLock {
 }
 
 impl HubLock {
+    /// Try to acquire the lock; if the holder is alive, signal it and
+    /// retry until it dies. Caller intent: "I'm replacing the running
+    /// hub." Used by `deposits-hub run --steal`.
+    ///
+    /// Sequence:
+    ///   1. plain `acquire`. If it succeeds, return.
+    ///   2. parse the contending pid from the lockfile.
+    ///   3. SIGTERM, then poll the lock for up to 3 seconds (fd cleanup
+    ///      on process exit releases the flock).
+    ///   4. SIGKILL if still held, poll for up to 1 more second.
+    ///   5. give up with the original `Held` error.
+    ///
+    /// Best-effort by design: if the pid is unknown, owned by a
+    /// different user, or holding the lock from a longer-than-4s
+    /// graceful-shutdown path, the steal fails — operator can re-run
+    /// or `kill -9` manually.
+    pub fn acquire_or_steal(data_dir: &Path) -> Result<Self, LockError> {
+        match Self::acquire(data_dir) {
+            Ok(h) => return Ok(h),
+            Err(LockError::Held { pid, .. }) => {
+                let pid_num: i32 = match pid.parse() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        // Lockfile didn't have a parseable pid — re-try
+                        // a final time (the holder may have just died)
+                        // then return the original error.
+                        return Self::acquire(data_dir);
+                    }
+                };
+                tracing::warn!(pid = pid_num, "hub: --steal sending SIGTERM");
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(pid_num, libc::SIGTERM);
+                }
+                if let Some(h) = poll_acquire(data_dir, 30, 100) {
+                    return Ok(h);
+                }
+                tracing::warn!(pid = pid_num, "hub: --steal escalating to SIGKILL");
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(pid_num, libc::SIGKILL);
+                }
+                if let Some(h) = poll_acquire(data_dir, 10, 100) {
+                    return Ok(h);
+                }
+                Self::acquire(data_dir)
+            }
+            Err(other) => Err(other),
+        }
+    }
+
     /// Try to acquire the data-dir lock. On contention, reads the
     /// existing lockfile contents (best-effort — the holder writes
     /// its pid) to produce a useful error message.
@@ -103,6 +154,19 @@ impl HubLock {
             Ok(Self { _file: file })
         }
     }
+}
+
+/// Poll-loop helper: try to acquire the lock up to `attempts` times,
+/// sleeping `sleep_ms` between tries. Returns the first successful
+/// `HubLock` or `None` if all attempts failed.
+fn poll_acquire(data_dir: &Path, attempts: u32, sleep_ms: u64) -> Option<HubLock> {
+    for _ in 0..attempts {
+        if let Ok(h) = HubLock::acquire(data_dir) {
+            return Some(h);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+    }
+    None
 }
 
 #[cfg(test)]

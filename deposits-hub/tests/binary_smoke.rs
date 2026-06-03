@@ -347,6 +347,107 @@ async fn spawn_line_then_bash_exec_then_auto_approve() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn steal_takes_over_from_running_hub() {
+    let relay_url = test_relay::spawn().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    #[allow(deprecated)]
+    let workspace_path = tempfile::TempDir::with_prefix("hub-steal-")
+        .expect("tempdir")
+        .into_path();
+    let hub_dir = workspace_path.join("hub");
+    let log_dir = workspace_path.join("logs");
+    std::fs::create_dir_all(&hub_dir).unwrap();
+    std::fs::create_dir_all(&log_dir).unwrap();
+    eprintln!("steal workspace: {}", workspace_path.display());
+
+    // First hub takes the lock.
+    let mut first = spawn_hub(&hub_dir, &relay_url, &log_dir, &[]).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let first_pid = first.id().expect("first hub pid");
+
+    // Plain second hub against same dir must fail (lock held).
+    let plain_out = Command::new(workspace_bin("deposits-hub"))
+        .arg("run")
+        .arg("--headless")
+        .arg("--data-dir")
+        .arg(&hub_dir)
+        .arg("--relay")
+        .arg(&relay_url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .expect("run plain second hub");
+    assert!(
+        !plain_out.status.success(),
+        "plain second hub should have failed but didn't"
+    );
+    let stderr = String::from_utf8_lossy(&plain_out.stderr);
+    assert!(
+        stderr.contains("locked by another deposits-hub"),
+        "expected lock-contention error, got: {}",
+        stderr
+    );
+
+    // --steal should kill the first and take over. Run it as a
+    // background child so we can verify the first actually died.
+    let mut stealer_log =
+        std::fs::File::create(log_dir.join("stealer.stderr")).unwrap();
+    let mut stealer = Command::new(workspace_bin("deposits-hub"))
+        .arg("run")
+        .arg("--headless")
+        .arg("--steal")
+        .arg("--data-dir")
+        .arg(&hub_dir)
+        .arg("--relay")
+        .arg(&relay_url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn stealer");
+
+    // Wait until the first hub exits (proves steal sent the signal
+    // and it landed) — but cap the wait so a hung steal fails the test.
+    let mut first_dead = false;
+    for _ in 0..50 {
+        if let Some(_) = first.try_wait().expect("try_wait first") {
+            first_dead = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        first_dead,
+        "first hub (pid {}) still alive after --steal",
+        first_pid
+    );
+
+    // Stealer must be running (it acquired the lock).
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let stealer_alive = stealer.try_wait().expect("try_wait stealer").is_none();
+    assert!(stealer_alive, "stealer exited unexpectedly");
+
+    // Drain a bit of stealer stderr for diagnostics.
+    drop(stealer_log);
+    if let Some(stderr) = stealer.stderr.take() {
+        use tokio::io::AsyncReadExt;
+        let mut buf = String::new();
+        let _ = tokio::time::timeout(
+            Duration::from_millis(200),
+            tokio::io::BufReader::new(stderr).read_to_string(&mut buf),
+        )
+        .await;
+        eprintln!("stealer stderr (first {} bytes):\n{}", buf.len(), buf);
+    }
+
+    let _ = stealer.kill().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn auto_approve_skips_pending_state() {
     let relay_url = test_relay::spawn().await;
     tokio::time::sleep(Duration::from_millis(50)).await;
