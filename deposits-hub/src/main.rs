@@ -165,128 +165,19 @@ async fn run_async(
     let transport = deposits_hub::nostr::HubTransport::connect(&secret_hex, &relays)
         .await
         .map_err(|e| format!("nostr connect: {}", e))?;
-    let mut inbox = transport
+    let inbox = transport
         .subscribe()
         .await
         .map_err(|e| format!("subscribe: {}", e))?;
 
     let state = std::sync::Arc::new(tokio::sync::Mutex::new(state));
 
-    // Ctrl-C handler — flush state and exit. The TUI commit will replace
-    // this with proper signal routing.
-    let shutdown = tokio::signal::ctrl_c();
-    tokio::pin!(shutdown);
-
-    eprintln!("hub: listening for gift-wrapped DMs on {} relay(s)", relays.len());
-
-    loop {
-        tokio::select! {
-            _ = &mut shutdown => {
-                eprintln!("hub: shutdown signal — exiting");
-                return Ok(());
-            }
-            maybe_msg = inbox.recv() => {
-                let Some(inbound) = maybe_msg else {
-                    eprintln!("hub: inbox closed unexpectedly");
-                    return Err("nostr inbox closed".to_string());
-                };
-                if let Err(e) = handle_inbound(&data_dir, &state, &transport, inbound).await {
-                    tracing::warn!("handle inbound: {}", e);
-                }
-            }
-        }
-    }
-}
-
-async fn handle_inbound(
-    data_dir: &std::path::Path,
-    state: &std::sync::Arc<tokio::sync::Mutex<deposits_hub::state::HubState>>,
-    transport: &deposits_hub::nostr::HubTransport,
-    inbound: deposits_hub::nostr::Inbound,
-) -> Result<(), String> {
-    use deposits_hub::proto::{HubMessage, NextAction};
-
-    let from_hex = inbound.from.to_hex();
-    match inbound.msg {
-        HubMessage::Register {
-            role,
-            identity_pubkey,
-            version,
-            label,
-        } => {
-            let mut st = state.lock().await;
-            let already_approved =
-                st.signers.contains_key(&from_hex) || st.nodes.contains_key(&from_hex);
-            let ack = if already_approved {
-                HubMessage::RegisterAck {
-                    accepted: true,
-                    message: "already approved".to_string(),
-                    next_action: NextAction::Heartbeat,
-                }
-            } else {
-                // Park in pending for the operator to approve via the TUI
-                // (which lands in a later commit). Idempotent: retries
-                // refresh `last_seen` without disturbing `first_seen`.
-                let now = unix_secs();
-                let entry = st
-                    .pending
-                    .entry(from_hex.clone())
-                    .or_insert_with(|| deposits_hub::state::PendingRegistration {
-                        role,
-                        identity_pubkey: identity_pubkey.clone(),
-                        suggested_label: label.clone(),
-                        version: version.clone(),
-                        first_seen: now,
-                        last_seen: now,
-                    });
-                entry.last_seen = now;
-                entry.version = version;
-                if entry.suggested_label.is_none() {
-                    entry.suggested_label = label;
-                }
-                st.save(data_dir).map_err(|e| format!("save state: {}", e))?;
-                tracing::info!(
-                    "register from {} (role={:?}, identity={}) — pending approval",
-                    &from_hex[..16],
-                    role,
-                    &identity_pubkey[..16.min(identity_pubkey.len())],
-                );
-                HubMessage::RegisterAck {
-                    accepted: false,
-                    message: "waiting for operator approval".to_string(),
-                    next_action: NextAction::Retry,
-                }
-            };
-            drop(st);
-            transport
-                .send(&from_hex, ack)
-                .await
-                .map_err(|e| format!("send ack: {}", e))?;
-        }
-        HubMessage::Heartbeat { ts, .. } => {
-            tracing::debug!("heartbeat from {} (ts={})", &from_hex[..16], ts);
-        }
-        HubMessage::StatusResp { ready, summary, .. } => {
-            tracing::info!(
-                "status from {}: ready={} summary={:?}",
-                &from_hex[..16],
-                ready,
-                summary
-            );
-        }
-        HubMessage::RegisterAck { .. } | HubMessage::StatusReq => {
-            // Hub doesn't expect these inbound — log and drop.
-            tracing::debug!("unexpected inbound from {}", &from_hex[..16]);
-        }
-    }
-    Ok(())
-}
-
-fn unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    // Hand control to the TUI. The TUI owns the terminal + the inbound
+    // dispatch loop until the operator quits with `q`. Tracing logs
+    // route to stderr — when the TUI's alt-screen is active they end
+    // up in the scrollback once we leave.
+    let app = deposits_hub::tui::App::new(data_dir, state, transport);
+    app.run(inbox).await
 }
 
 fn cmd_pubkey(args: &[String]) -> Result<(), String> {

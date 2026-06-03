@@ -16,3 +16,4 @@
 pub use deposits_hub_proto::{proto, transport as nostr};
 
 pub mod state;
+pub mod tui;
