@@ -23,10 +23,12 @@ COMMANDS:
                                   Mirror of hitting `a` in the TUI's pending tab.
     reject  --pubkey <HEX>       Drop the given pending peer and ack with Shutdown.
     spawn-line --name <NAME>     Print the launch command for a signer that auto-registers
-                                  with this hub. Creates the workspace + seed on first use;
-                                  subsequent calls re-print the same line.
+                                  [--seed <HEX>]              with this hub. Creates the workspace + seed on first
+                                                              use (or uses --seed if provided — for harnesses where
+                                                              the operator seed is fixed). Subsequent calls re-print
+                                                              the same line.
     spawn      --name <NAME>     Same as spawn-line, but exec the signer in the foreground
-                                  (logs to <data-dir>/spawned/<NAME>/{stdout,stderr}.log).
+               [--seed <HEX>]    (logs to <data-dir>/spawned/<NAME>/{stdout,stderr}.log).
     qr [--text <STR>]            Print a QR code for the hub pubkey (or arbitrary --text).
                                   Renders with Unicode half-blocks; one terminal cell = two
                                   QR modules so the code stays roughly square.
@@ -95,7 +97,9 @@ struct CommonArgs {
     name: Option<String>,
     text: Option<String>,
     pubkey: Option<String>,
+    seed: Option<String>,
     headless: bool,
+    auto_approve: bool,
 }
 
 fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
@@ -134,14 +138,35 @@ fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
                 out.pubkey = Some(v);
                 i += 2;
             }
+            "--seed" => {
+                let v = args.get(i + 1).ok_or("--seed requires a 32-byte hex value")?.to_string();
+                out.seed = Some(v);
+                i += 2;
+            }
             "--headless" => {
                 out.headless = true;
+                i += 1;
+            }
+            "--auto-approve" => {
+                out.auto_approve = true;
                 i += 1;
             }
             unknown => return Err(format!("unknown option: {}", unknown)),
         }
     }
     Ok(out)
+}
+
+fn parse_seed_arg(s: Option<&str>) -> Result<Option<[u8; 32]>, String> {
+    let Some(hex_str) = s else { return Ok(None) };
+    let bytes = hex::decode(hex_str.trim())
+        .map_err(|e| format!("--seed must be 32 bytes of hex: {}", e))?;
+    if bytes.len() != 32 {
+        return Err(format!("--seed must be 32 bytes hex, got {}", bytes.len()));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(Some(out))
 }
 
 fn data_dir_or_default(opt: Option<PathBuf>) -> PathBuf {
@@ -190,7 +215,10 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| format!("tokio runtime: {}", e))?;
-    rt.block_on(run_async(data_dir, state, c.relays, c.headless))
+    if c.auto_approve && !c.headless {
+        return Err("--auto-approve requires --headless".to_string());
+    }
+    rt.block_on(run_async(data_dir, state, c.relays, c.headless, c.auto_approve))
 }
 
 async fn run_async(
@@ -198,6 +226,7 @@ async fn run_async(
     state: deposits_hub::state::HubState,
     relays: Vec<String>,
     headless: bool,
+    auto_approve: bool,
 ) -> Result<(), String> {
     // Load the secret hex from the sibling file (state stores only the
     // pubkey — the secret stays in a 0600 file). HubState::load_or_init
@@ -220,7 +249,7 @@ async fn run_async(
     let state = std::sync::Arc::new(tokio::sync::Mutex::new(state));
 
     if headless {
-        run_headless(data_dir, state, transport, inbox).await
+        run_headless(data_dir, state, transport, inbox, auto_approve).await
     } else {
         let app = deposits_hub::tui::App::new(data_dir, state, transport);
         app.run(inbox).await
@@ -236,11 +265,16 @@ async fn run_headless(
     state: std::sync::Arc<tokio::sync::Mutex<deposits_hub::state::HubState>>,
     transport: deposits_hub::nostr::HubTransport,
     mut inbox: tokio::sync::mpsc::Receiver<deposits_hub::nostr::Inbound>,
+    auto_approve: bool,
 ) -> Result<(), String> {
     use deposits_hub::control;
     use deposits_hub::proto::HubMessage;
 
-    eprintln!("hub: headless mode — listening for registrations");
+    if auto_approve {
+        eprintln!("hub: headless + auto-approve mode — every Register is accepted");
+    } else {
+        eprintln!("hub: headless mode — listening for registrations");
+    }
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
 
@@ -266,9 +300,28 @@ async fn run_headless(
                                 control::send_already_approved_ack(&transport, &from).await;
                             }
                             Ok(false) => {
-                                drop(st);
-                                tracing::info!("register from {} — parked", &from[..16]);
-                                control::send_waiting_ack(&transport, &from).await;
+                                if auto_approve {
+                                    // Promote pending → signers/nodes immediately + ack.
+                                    let label = match control::approve(&mut st, &data_dir, &from, None) {
+                                        Ok(l) => l,
+                                        Err(e) => {
+                                            tracing::warn!("auto-approve: {}", e);
+                                            drop(st);
+                                            continue;
+                                        }
+                                    };
+                                    drop(st);
+                                    tracing::info!(
+                                        "auto-approved {} as '{}'",
+                                        &from[..16],
+                                        label
+                                    );
+                                    control::send_accept_ack(&transport, &from, &label).await;
+                                } else {
+                                    drop(st);
+                                    tracing::info!("register from {} — parked", &from[..16]);
+                                    control::send_waiting_ack(&transport, &from).await;
+                                }
                             }
                             Err(e) => tracing::warn!("ingest register: {}", e),
                         }
@@ -379,8 +432,9 @@ fn cmd_spawn_line(args: &[String]) -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| format!("tokio runtime: {}", e))?;
+    let seed_bytes = parse_seed_arg(c.seed.as_deref())?;
     let ws = rt
-        .block_on(spawner.ensure_initialized(&data_dir, &name))
+        .block_on(spawner.ensure_initialized_with_seed(&data_dir, &name, seed_bytes))
         .map_err(|e| format!("init signer workspace: {}", e))?;
 
     let transport_pk = std::fs::read_to_string(ws.data_dir.join("transport_pubkey"))
@@ -427,11 +481,17 @@ fn cmd_spawn(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("hub state: {}", e))?;
     let spawner = deposits_hub::spawn::Spawner::new(state.hub_pubkey_hex().to_string(), c.relays);
 
+    let seed_bytes = parse_seed_arg(c.seed.as_deref())?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| format!("tokio runtime: {}", e))?;
     rt.block_on(async move {
+        // ensure_initialized first so we can honor --seed; then spawn.
+        spawner
+            .ensure_initialized_with_seed(&data_dir, &name, seed_bytes)
+            .await
+            .map_err(|e| format!("init signer workspace: {}", e))?;
         let handle = spawner
             .spawn(&data_dir, &name)
             .await

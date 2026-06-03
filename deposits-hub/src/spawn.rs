@@ -133,9 +133,23 @@ impl Spawner {
         hub_data_dir: &Path,
         name: &str,
     ) -> Result<Workspace, SpawnError> {
+        self.ensure_initialized_with_seed(hub_data_dir, name, None).await
+    }
+
+    /// Like [`Self::ensure_initialized`], but accept a caller-provided
+    /// seed instead of generating one. Used by regtest / CI harnesses
+    /// where the operator seed is fixed and the signer's keys need to
+    /// match the rest of the cluster. **Trusts the caller's seed
+    /// blindly** — no entropy check; this is purely for harnesses.
+    pub async fn ensure_initialized_with_seed(
+        &self,
+        hub_data_dir: &Path,
+        name: &str,
+        seed: Option<[u8; 32]>,
+    ) -> Result<Workspace, SpawnError> {
         let ws = Workspace::for_name(hub_data_dir, name);
         if !ws.data_dir.exists() {
-            self.init_workspace(&ws).await?;
+            self.init_workspace_with_seed(&ws, seed).await?;
         }
         Ok(ws)
     }
@@ -193,14 +207,19 @@ impl Spawner {
         })
     }
 
-    /// First-time init: create dirs, generate seed, run
+    /// First-time init: create dirs, generate or accept seed, run
     /// `deposits-signer init --seed-file <tmp>`, scrub the tmp seed.
-    async fn init_workspace(&self, ws: &Workspace) -> Result<(), SpawnError> {
+    async fn init_workspace_with_seed(
+        &self,
+        ws: &Workspace,
+        seed: Option<[u8; 32]>,
+    ) -> Result<(), SpawnError> {
         std::fs::create_dir_all(&ws.root)?;
-        // The signer's `init` will create the data-dir itself; we
-        // only need to make sure the parent exists.
         let seed_tmp = ws.root.join(".seed.tmp");
-        write_random_seed(&seed_tmp)?;
+        match seed {
+            Some(bytes) => write_seed(&seed_tmp, &bytes)?,
+            None => write_random_seed(&seed_tmp)?,
+        }
 
         // Init.
         let mut cmd = Command::new(&self.bin);
@@ -256,6 +275,10 @@ fn write_random_seed(path: &Path) -> std::io::Result<()> {
     use bitcoin::secp256k1::rand::RngCore;
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
+    write_seed(path, &seed)
+}
+
+fn write_seed(path: &Path, seed: &[u8; 32]) -> std::io::Result<()> {
     std::fs::write(path, hex::encode(seed))?;
     #[cfg(unix)]
     {

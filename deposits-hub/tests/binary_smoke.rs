@@ -51,17 +51,21 @@ async fn spawn_hub(
     hub_data_dir: &Path,
     relay_url: &str,
     log_dir: &Path,
+    extra_args: &[&str],
 ) -> Child {
     let stdout = std::fs::File::create(log_dir.join("hub.stdout")).unwrap();
     let stderr = std::fs::File::create(log_dir.join("hub.stderr")).unwrap();
-    Command::new(workspace_bin("deposits-hub"))
-        .arg("run")
+    let mut cmd = Command::new(workspace_bin("deposits-hub"));
+    cmd.arg("run")
         .arg("--headless")
         .arg("--data-dir")
         .arg(hub_data_dir)
         .arg("--relay")
-        .arg(relay_url)
-        .env("RUST_LOG", "info,deposits_hub=debug,deposits_hub_proto=debug")
+        .arg(relay_url);
+    for a in extra_args {
+        cmd.arg(a);
+    }
+    cmd.env("RUST_LOG", "info,deposits_hub=debug,deposits_hub_proto=debug")
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -194,7 +198,7 @@ async fn signer_registers_then_gets_approved() {
     let signer_nostr_pk = derive_signer_nostr_pk(&seed_bytes);
 
     // Spawn hub + signer.
-    let mut hub_proc = spawn_hub(&hub_dir, &relay_url, &log_dir).await;
+    let mut hub_proc = spawn_hub(&hub_dir, &relay_url, &log_dir, &[]).await;
     tokio::time::sleep(Duration::from_millis(500)).await; // give hub time to subscribe
     let mut signer_proc =
         spawn_signer(&signer_dir, &signer_socket, &hub_pk, &relay_url, &log_dir).await;
@@ -251,6 +255,51 @@ async fn signer_registers_then_gets_approved() {
     assert!(signer_alive, "signer process exited after approve");
 
     // Teardown.
+    let _ = signer_proc.kill().await;
+    let _ = hub_proc.kill().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auto_approve_skips_pending_state() {
+    let relay_url = test_relay::spawn().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    #[allow(deprecated)]
+    let workspace_path = tempfile::TempDir::with_prefix("hub-auto-")
+        .expect("tempdir")
+        .into_path();
+    let hub_dir = workspace_path.join("hub");
+    let signer_dir = workspace_path.join("signer");
+    let signer_socket = workspace_path.join("signer.sock");
+    let log_dir = workspace_path.join("logs");
+    std::fs::create_dir_all(&hub_dir).unwrap();
+    std::fs::create_dir_all(&log_dir).unwrap();
+    eprintln!("auto-approve workspace: {}", workspace_path.display());
+
+    let hub_pk = HubState::load_or_init(&hub_dir)
+        .expect("hub init")
+        .hub_pubkey_hex()
+        .to_string();
+
+    let seed_bytes = [0x77u8; 32];
+    let seed_hex = hex::encode(seed_bytes);
+    init_signer_workspace(&signer_dir, &seed_hex);
+    let signer_nostr_pk = derive_signer_nostr_pk(&seed_bytes);
+
+    // Hub with --auto-approve.
+    let mut hub_proc =
+        spawn_hub(&hub_dir, &relay_url, &log_dir, &["--auto-approve"]).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut signer_proc =
+        spawn_signer(&signer_dir, &signer_socket, &hub_pk, &relay_url, &log_dir).await;
+
+    // Skip straight to signers — no operator step needed.
+    let approved = poll_hub_state(&hub_dir, |s| s.signers.contains_key(&signer_nostr_pk))
+        .await
+        .expect("signer never auto-approved within 15s");
+    assert!(approved.pending.is_empty(), "pending should be empty when auto-approve is on");
+    assert_eq!(approved.signers.get(&signer_nostr_pk).unwrap().label, "smoke-signer");
+
     let _ = signer_proc.kill().await;
     let _ = hub_proc.kill().await;
 }
