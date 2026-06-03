@@ -7,6 +7,8 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 deposits-signer-api = { path = "../deposits-signer-api" }
+# Wire types + transport for `--hub-pubkey` / `--hub-relay` registration.
+deposits-hub-proto = { path = "../deposits-hub-proto" }
 
 bitcoin = { version = "0.32", features = ["serde"] }
 secp256k1 = { version = "0.29", features = ["serde", "rand", "rand-std"] }

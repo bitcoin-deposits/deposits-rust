@@ -9,5 +9,6 @@
 
 pub mod data;
 pub mod framing;
+pub mod hub;
 pub mod policy;
 pub mod server;

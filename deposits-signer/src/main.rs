@@ -42,8 +42,15 @@ SUBCOMMANDS:
                 List currently allowed node pubkeys.
 
     run         --data-dir <path> --socket <path>
+                [--hub-pubkey <hex>] [--hub-relay <url>]... [--hub-label <s>]
                 Start the signer on a Unix socket. Connections must come
                 from a node in the trust list.
+
+                If --hub-pubkey + at least one --hub-relay is set, the
+                signer also registers with the operator's deposits-hub
+                over gift-wrapped nostr DMs. Acceptance is async — the
+                hub queues the registration until the operator approves
+                in the TUI.
 
 ENVIRONMENT:
     RUST_LOG    Tracing filter, e.g. RUST_LOG=deposits_signer=info
@@ -99,6 +106,9 @@ struct CommonArgs {
     data_dir: Option<PathBuf>,
     seed_file: Option<PathBuf>,
     socket: Option<PathBuf>,
+    hub_pubkey: Option<String>,
+    hub_relays: Vec<String>,
+    hub_label: Option<String>,
     positional: Vec<String>,
 }
 
@@ -118,6 +128,27 @@ fn parse_args(args: &[String]) -> Result<CommonArgs, String> {
             "--socket" => {
                 i += 1;
                 out.socket = Some(args.get(i).ok_or("--socket needs a value")?.into());
+            }
+            "--hub-pubkey" => {
+                i += 1;
+                out.hub_pubkey = Some(
+                    args.get(i)
+                        .ok_or("--hub-pubkey needs a value")?
+                        .to_string(),
+                );
+            }
+            "--hub-relay" => {
+                i += 1;
+                out.hub_relays
+                    .push(args.get(i).ok_or("--hub-relay needs a value")?.to_string());
+            }
+            "--hub-label" => {
+                i += 1;
+                out.hub_label = Some(
+                    args.get(i)
+                        .ok_or("--hub-label needs a value")?
+                        .to_string(),
+                );
             }
             other if other.starts_with("--") => {
                 return Err(format!("unknown flag {:?}", other));
@@ -236,7 +267,7 @@ fn cmd_trust(args: &[String]) -> Result<(), String> {
 fn cmd_run(args: &[String]) -> Result<(), String> {
     let c = parse_args(args)?;
     let dd = require_data_dir(&c)?;
-    let socket_path = c.socket.ok_or_else(|| "missing --socket".to_string())?;
+    let socket_path = c.socket.clone().ok_or_else(|| "missing --socket".to_string())?;
 
     let transport = dd.load_transport().map_err(|e| e.to_string())?;
     let allowlist = dd.load_allowlist().map_err(|e| e.to_string())?;
@@ -256,6 +287,20 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         tracing::warn!("allowlist is empty — no daemon will be permitted to connect");
     }
 
+    // Derive the nostr identity for the hub control plane. Uses the
+    // same `m/85'/...` path the daemon uses for the operator's nostr
+    // events, so a re-init under the same seed keeps the hub identity
+    // stable (which is what the operator's TUI expects).
+    let hub_nostr_secret = if c.hub_pubkey.is_some() {
+        Some(
+            dd.derive_keys(bitcoin::Network::Bitcoin)
+                .map(|(_op, nostr)| nostr)
+                .map_err(|e| format!("derive nostr identity: {}", e))?,
+        )
+    } else {
+        None
+    };
+
     let policy = std::sync::Arc::new(
         SeqPolicy::load(dd.policy_path()).map_err(|e| format!("load policy: {}", e))?,
     );
@@ -265,13 +310,40 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("ServerCtx::from_seed: {}", e))?,
     );
 
-    // Async runtime for the listener + per-conn tasks.
+    let transport_pubkey_hex = hex::encode(transport.public.serialize());
+
+    // Async runtime for the listener + per-conn tasks + hub loop.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| format!("tokio runtime: {}", e))?;
 
     rt.block_on(async move {
+        // Spawn the hub registration loop alongside the socket server.
+        // If relays/hub are misconfigured this logs + dies; the socket
+        // keeps serving — signing isn't blocked on hub liveness.
+        if let (Some(hub_pubkey), Some(secret)) = (c.hub_pubkey.clone(), hub_nostr_secret) {
+            if c.hub_relays.is_empty() {
+                return Err("--hub-pubkey set without --hub-relay".to_string());
+            }
+            let relays = c.hub_relays.clone();
+            let transport_pubkey = transport_pubkey_hex.clone();
+            let label = c.hub_label.clone();
+            tokio::spawn(async move {
+                if let Err(e) = deposits_signer::hub::run(
+                    secret,
+                    hub_pubkey,
+                    relays,
+                    transport_pubkey,
+                    label,
+                )
+                .await
+                {
+                    tracing::warn!("hub loop exited: {}", e);
+                }
+            });
+        }
+
         // Best-effort cleanup of a stale socket file.
         let _ = std::fs::remove_file(&socket_path);
         let listener = tokio::net::UnixListener::bind(&socket_path)
