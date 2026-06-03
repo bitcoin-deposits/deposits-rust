@@ -33,32 +33,39 @@ Two system users:
 ## 5-minute install
 
 ```bash
-# 1. Clone + build
 git clone https://github.com/bitcoin-deposits/deposits-rust.git
-cd deposits-rust
-cargo build --release -p deposits-node -p deposits-signer
+cd deposits-rust/deploy/systemd
 
-# 2. Copy binaries
-sudo install -m 0755 target/release/deposits-node   /usr/local/bin/
-sudo install -m 0755 target/release/deposits-signer /usr/local/bin/
-
-# 3. Bootstrap (creates users + dirs, generates signer keys,
-#    installs unit files, writes /etc/deposits/deposits-node.env)
-sudo deploy/systemd/init.sh
-
-# 4. Edit config (chain + LN backend creds, relays, operator name)
-sudo editor /etc/deposits/deposits-node.env
-
-# 5. Enable + start
-sudo systemctl enable --now deposits-signer deposits-node
-
-# 6. Watch logs
-sudo journalctl -u deposits-node -u deposits-signer -f
+make install-all                                # build + copy + bootstrap
+sudo editor /etc/deposits/deposits-node.env     # network, relays, backend creds
+make start                                      # systemctl enable --now
+make logs                                       # journalctl -f
 ```
 
-The init.sh wizard is idempotent — re-running it on an installed
-host doesn't regenerate the seed or clobber the env file. Run it
-again after an upgrade to install new unit files.
+The full target list:
+
+| target          | what it does                                                  |
+|-----------------|---------------------------------------------------------------|
+| `make`          | show all targets (also `make help`)                           |
+| `make build`    | `cargo build --release -p deposits-node -p deposits-signer`   |
+| `make install`  | build + copy binaries to `/usr/local/bin/`                    |
+| `make bootstrap`| run `init.sh`: users + dirs + seed + signer + unit files      |
+| `make install-all` | `install` + `bootstrap`                                    |
+| `make start`    | `systemctl enable --now deposits-signer deposits-node`        |
+| `make stop`     | disable + stop both                                           |
+| `make restart`  | restart both (signer first)                                   |
+| `make status`   | `systemctl status` for both                                   |
+| `make logs`     | `journalctl -u deposits-node -u deposits-signer -f`           |
+| `make admin-token` | print the bearer token for the admin UI                    |
+| `make upgrade`  | `git pull` + rebuild + reinstall + restart                    |
+| `make uninstall`| stop, remove binaries + unit files (preserves `/var/lib` data)|
+
+All targets are idempotent. `make install-all` re-run on an already
+installed host doesn't regenerate the seed or clobber config.
+
+If you'd rather see the underlying commands, the targets are thin
+wrappers around `cargo`, `install(1)`, `systemctl`, and `init.sh` —
+read the [`Makefile`](Makefile) for the exact dance.
 
 ## Configuration
 
@@ -103,17 +110,14 @@ or set explicit `BITCOIND_RPC_USER` / `BITCOIND_RPC_PASS`.
 ## Upgrading
 
 ```bash
-cd /path/to/deposits-rust
-git pull
-cargo build --release -p deposits-node -p deposits-signer
-sudo install -m 0755 target/release/deposits-node   /usr/local/bin/
-sudo install -m 0755 target/release/deposits-signer /usr/local/bin/
-sudo systemctl restart deposits-signer deposits-node
+cd /path/to/deposits-rust/deploy/systemd
+make upgrade
 ```
 
 The on-disk state (`/var/lib/deposits/`, `/var/lib/dsigner/`)
 survives — only the binaries are replaced. The unit files are
-installed once by `init.sh`; re-run it if you've changed them.
+installed once by `init.sh`; re-run `make bootstrap` if a release
+ships new unit files.
 
 ## What to back up
 
