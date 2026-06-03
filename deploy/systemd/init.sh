@@ -104,7 +104,13 @@ heading "Step 4/5: Operator seed + signer bootstrap"
 if [ -f "$SIGNER_DATA_DIR/transport_secret" ]; then
     ok "Signer already initialized at $SIGNER_DATA_DIR (skipping seed dance)"
 else
-    seed_file_path="$SIGNER_DATA_DIR/seed"
+    # Stage the seed in a host-tmp file. NOT inside $SIGNER_DATA_DIR
+    # — `deposits-signer init --seed-file` writes the seed to its own
+    # canonical path ($SIGNER_DATA_DIR/seed), so if our staging path
+    # collides, the post-init `rm` removes the seed the signer just
+    # placed. (mktemp gives a unique 0600 path under /tmp.)
+    seed_file_path=$(mktemp /tmp/deposits-seed-XXXXXX)
+    chmod 0600 "$seed_file_path"
     echo
     echo "  Operator seed source:"
     echo "    1) generate a new one (will print once — back it up immediately)"

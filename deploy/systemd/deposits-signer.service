@@ -50,7 +50,14 @@ SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
 CapabilityBoundingSet=
 AmbientCapabilities=
-UMask=0077
+# UMask=0007 (not 0077): the signer's Unix socket needs to be
+# accessible to the dsigner group so the `deposits` user (added to
+# the dsigner group at install time) can connect to it. Without
+# group access, the socket is mode 0700 (owner-only) and the daemon
+# gets EACCES on connect. The seed file is written via write_secret
+# which explicitly sets 0600 regardless of umask, so loosening here
+# doesn't expose key material.
+UMask=0007
 
 # The signer doesn't need network for its core job (it serves over a
 # Unix socket only); RestrictAddressFamilies leaves AF_INET in case the

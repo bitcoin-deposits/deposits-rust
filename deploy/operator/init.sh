@@ -249,9 +249,16 @@ env_set RELAY_MESSAGING "$(prompt RELAY_MESSAGING "Messaging relay (optional)" "
 
 heading "Step 5/5: Operator seed + signer bootstrap"
 
-seed_file_path="$SIGNER_DATA_DIR/seed"
+# Stage the seed in a host-tmp file. NOT inside $SIGNER_DATA_DIR —
+# `deposits-signer init --seed-file` writes the seed to its own
+# canonical path ($SIGNER_DATA_DIR/seed), so a collision means the
+# post-init `rm` removes the seed the signer just placed (the
+# signer's `run` then errors with "seed not installed").
+seed_file_path="$(mktemp -p "${TMPDIR:-/tmp}" deposits-seed-XXXXXX)"
+chmod 0600 "$seed_file_path"
 if [ -f "$SIGNER_DATA_DIR/transport_secret" ]; then
     ok "Signer already initialized at $SIGNER_DATA_DIR (skipping)"
+    rm -f "$seed_file_path"
 else
     seed_choice=$(prompt_choice "Operator seed source?" "generate a new one (will print once)" "import from a file")
     case "$seed_choice" in
