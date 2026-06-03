@@ -1,0 +1,52 @@
+[package]
+name = "deposits-hub"
+version = "0.1.0"
+edition = "2021"
+description = "Bitcoin Deposits — operator control plane (signer + node inventory, TUI dashboard)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Shared deps for nostr keypair handling — match the project's pins
+bitcoin = { version = "0.32", features = ["serde"] }
+secp256k1 = { version = "0.29", features = ["serde", "rand", "rand-std"] }
+
+# Nostr — use the same version deposits-nostr is on so we can interop
+# without a parallel client. Gift-wrap (NIP-44 / kind 1059) ships in
+# the same crate.
+nostr-sdk = { version = "0.37", features = ["nip44", "nip59"] }
+
+# Crypto provider for nostr-sdk's tls path
+rustls = { version = "0.23", features = ["ring"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# QR codes for the funding-address view
+qrcode = "0.14"
+
+# Async runtime + process supervision
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "signal", "io-util", "sync", "time", "fs"] }
+
+# Serde + JSON state persistence
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utility
+hex = "0.4"
+thiserror = "1.0"
+dirs = "5"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "deposits-hub"
+path = "src/main.rs"
