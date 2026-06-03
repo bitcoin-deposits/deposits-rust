@@ -21,7 +21,7 @@ PREFIX   := /usr/local
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build install bootstrap install-all start stop restart status logs admin-token upgrade uninstall
+.PHONY: help build install bootstrap install-all check start stop restart status logs admin-token upgrade uninstall
 
 help: ## Show this help
 	@echo "deposits-node systemd deployment targets:"
@@ -47,16 +47,19 @@ install-all: install bootstrap ## install + bootstrap in one go
 	@echo
 	@echo "Next:"
 	@echo "  sudo editor /etc/deposits/deposits-node.env   # network, relays, backend creds"
-	@echo "  make start                                    # systemctl enable --now"
+	@echo "  make start                                    # checks env, then systemctl enable --now"
 
-start: ## Enable + start both services
+check: ## Pre-flight sanity on /etc/deposits/deposits-node.env (auto-run by start)
+	@$(CURDIR)/check-env.sh
+
+start: check ## Enable + start both services (after env check)
 	sudo systemctl enable --now deposits-signer deposits-node
 	@$(MAKE) -s status
 
 stop: ## Stop + disable both services
 	sudo systemctl disable --now deposits-node deposits-signer
 
-restart: ## Restart both services (signer first, then node)
+restart: check ## Restart both services after env check (signer first)
 	sudo systemctl restart deposits-signer
 	sudo systemctl restart deposits-node
 

@@ -38,9 +38,14 @@ cd deposits-rust/deploy/systemd
 
 make install-all                                # build + copy + bootstrap
 sudo editor /etc/deposits/deposits-node.env     # network, relays, backend creds
-make start                                      # systemctl enable --now
+make start                                      # pre-flight env check + systemctl enable --now
 make logs                                       # journalctl -f
 ```
+
+If you skip the edit step, `make start` refuses with a structured
+list of what's wrong (unreadable macaroon, empty `SIGNER_PUBKEY`,
+placeholder operator name, etc.) and tells you the specific fix for
+each. Beats discovering the same issues later via `journalctl`.
 
 The full target list:
 
@@ -51,7 +56,8 @@ The full target list:
 | `make install`  | build + copy binaries to `/usr/local/bin/`                    |
 | `make bootstrap`| run `init.sh`: users + dirs + seed + signer + unit files      |
 | `make install-all` | `install` + `bootstrap`                                    |
-| `make start`    | `systemctl enable --now deposits-signer deposits-node`        |
+| `make check`    | sanity-check the env file (auto-run by `start` / `restart`)   |
+| `make start`    | `make check` + `systemctl enable --now deposits-signer deposits-node` |
 | `make stop`     | disable + stop both                                           |
 | `make restart`  | restart both (signer first)                                   |
 | `make status`   | `systemctl status` for both                                   |
