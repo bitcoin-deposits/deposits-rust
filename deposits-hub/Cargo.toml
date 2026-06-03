@@ -40,6 +40,9 @@ dirs = "5"
 
 [dev-dependencies]
 tempfile = "3"
+# Enable the proto's in-process relay so the binary smoke test has
+# something for hub/signer subprocesses to talk through.
+deposits-hub-proto = { path = "../deposits-hub-proto", features = ["test-relay"] }
 
 [lints]
 workspace = true

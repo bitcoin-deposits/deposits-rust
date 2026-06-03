@@ -154,13 +154,17 @@ impl HubState {
         };
 
         // Derive pubkey from secret to populate / sanity-check state.
+        // Nostr addresses peers by 32-byte x-only schnorr pubkeys (no
+        // 02/03 parity prefix), so we serialize as x-only here — any
+        // 33-byte compressed form would round-trip through the wire
+        // as a malformed key.
         let pubkey_hex = {
-            use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+            use bitcoin::secp256k1::{Secp256k1, SecretKey};
             let secp = Secp256k1::new();
             let sk = SecretKey::from_slice(&secret_bytes)
                 .map_err(|e| StateError::Hex(format!("secret decode: {}", e)))?;
-            let pk = PublicKey::from_secret_key(&secp, &sk);
-            hex::encode(pk.serialize())
+            let (xonly, _parity) = sk.x_only_public_key(&secp);
+            hex::encode(xonly.serialize())
         };
         if state.hub_pubkey.is_empty() {
             state.hub_pubkey = pubkey_hex;
@@ -215,7 +219,10 @@ mod tests {
     fn fresh_init_generates_keypair_and_persists() {
         let tmp = TempDir::new().unwrap();
         let s1 = HubState::load_or_init(tmp.path()).unwrap();
-        assert_eq!(s1.hub_pubkey.len(), 66); // compressed secp256k1 hex
+        // 32-byte x-only schnorr pubkey, hex-encoded → 64 chars. (NOT
+        // 66 — a 33-byte compressed key would be malformed on the
+        // nostr wire.)
+        assert_eq!(s1.hub_pubkey.len(), 64);
         assert!(tmp.path().join("hub.json").exists());
         assert!(tmp.path().join("hub-nostr-secret").exists());
 
