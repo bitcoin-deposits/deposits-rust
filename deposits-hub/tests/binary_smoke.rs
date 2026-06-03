@@ -259,6 +259,92 @@ async fn signer_registers_then_gets_approved() {
     let _ = hub_proc.kill().await;
 }
 
+/// Mirrors what `setup.sh::start_hub_signer` does: ask the hub for
+/// a `spawn-line`, exec the result in a shell, watch the hub
+/// auto-approve. Catches drift between the launch-line format and
+/// what bash callers expect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn spawn_line_then_bash_exec_then_auto_approve() {
+    let relay_url = test_relay::spawn().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    #[allow(deprecated)]
+    let workspace_path = tempfile::TempDir::with_prefix("hub-spawnline-")
+        .expect("tempdir")
+        .into_path();
+    let hub_dir = workspace_path.join("hub");
+    let log_dir = workspace_path.join("logs");
+    std::fs::create_dir_all(&hub_dir).unwrap();
+    std::fs::create_dir_all(&log_dir).unwrap();
+    eprintln!("spawn-line workspace: {}", workspace_path.display());
+
+    // Boot hub with auto-approve so we don't need a separate approve call.
+    let mut hub_proc =
+        spawn_hub(&hub_dir, &relay_url, &log_dir, &["--auto-approve"]).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Ask the hub for a launch line, the same way setup.sh does.
+    let seed_hex = hex::encode([0x33u8; 32]);
+    let out = Command::new(workspace_bin("deposits-hub"))
+        .arg("spawn-line")
+        .arg("--data-dir")
+        .arg(&hub_dir)
+        .arg("--name")
+        .arg("op0")
+        .arg("--seed")
+        .arg(&seed_hex)
+        .arg("--relay")
+        .arg(&relay_url)
+        .output()
+        .await
+        .expect("run spawn-line");
+    assert!(
+        out.status.success(),
+        "spawn-line failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let launch_line = stdout
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .last()
+        .expect("spawn-line stdout has no launch line")
+        .to_string();
+    assert!(launch_line.contains("deposits-signer"));
+    assert!(launch_line.contains("--hub-pubkey"));
+
+    // Exec it via `bash -c` — same shell invocation path as setup.sh.
+    let signer_stderr =
+        std::fs::File::create(log_dir.join("signer.stderr")).unwrap();
+    let signer_stdout =
+        std::fs::File::create(log_dir.join("signer.stdout")).unwrap();
+    let mut signer_proc = Command::new("bash")
+        .arg("-c")
+        .arg(format!("exec {}", launch_line))
+        .env("RUST_LOG", "info,deposits_signer=debug,deposits_hub_proto=debug")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(signer_stdout))
+        .stderr(Stdio::from(signer_stderr))
+        .kill_on_drop(true)
+        .spawn()
+        .expect("bash -c launch line");
+
+    // Wait for auto-approve to land.
+    let approved = poll_hub_state(&hub_dir, |s| {
+        s.signers.values().any(|r| r.label == "op0")
+    })
+    .await
+    .expect("op0 never auto-approved within 15s");
+    assert!(approved.pending.is_empty(), "pending should be empty");
+    assert!(
+        approved.signers.values().any(|r| r.label == "op0"),
+        "no signer with label op0 in inventory"
+    );
+
+    let _ = signer_proc.kill().await;
+    let _ = hub_proc.kill().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn auto_approve_skips_pending_state() {
     let relay_url = test_relay::spawn().await;

@@ -17,8 +17,20 @@ TOOLS_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_ROOT="$(dirname "$TOOLS_DIR")"
 
 DEPOSITS_NODE="${DEPOSITS_NODE:-$REPO_ROOT/target/release/deposits-node}"
+DEPOSITS_SIGNER="${DEPOSITS_SIGNER:-$REPO_ROOT/target/release/deposits-signer}"
+DEPOSITS_HUB="${DEPOSITS_HUB:-$REPO_ROOT/target/release/deposits-hub}"
 DATA_ROOT="${DATA_ROOT:-$TOOLS_DIR/data}"
 STRFRY_BIN="${STRFRY_BIN:-$SCRIPT_DIR/strfry}"
+
+# DEPOSITS_USE_HUB=1 → boot a single deposits-hub against the messaging
+# relay, have it spawn one signer per op (each with the op's deterministic
+# seed), and auto-approve registrations. Daemons then point at the hub-
+# managed signer sockets. DEPOSITS_USE_HUB implies the signer path is on
+# (overrides DEPOSITS_USE_SIGNER for compatibility).
+if [ "${DEPOSITS_USE_HUB:-}" = "1" ]; then
+    DEPOSITS_USE_SIGNER=1
+fi
+HUB_DATA_DIR="$DATA_ROOT/hub"
 
 BITCOIN_RPC_HOST="localhost"
 BITCOIN_RPC_PORT="18543"
@@ -148,6 +160,107 @@ run_cmd() {
         $RELAY_ARGS 2>&1
 }
 
+start_hub() {
+    [ "${DEPOSITS_USE_HUB:-}" != "1" ] && return
+    [ -d "$HUB_DATA_DIR" ] || mkdir -p "$HUB_DATA_DIR"
+    chmod 0700 "$HUB_DATA_DIR" 2>/dev/null || true
+    RUST_LOG="${HUB_RUST_LOG:-info}" \
+        "$DEPOSITS_HUB" run \
+        --headless --auto-approve \
+        --data-dir "$HUB_DATA_DIR" \
+        --relay "ws://localhost:$MSG_RELAY_PORT" \
+        > "$HUB_DATA_DIR/hub.log" 2>&1 &
+    echo $! > "$HUB_DATA_DIR/hub.pid"
+    # Block until the hub has materialized hub.json — that's the signal
+    # it's connected to the relay + ready to accept registrations.
+    local waited=0
+    while [ ! -f "$HUB_DATA_DIR/hub.json" ] && [ "$waited" -lt 50 ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    local hub_pk
+    hub_pk=$("$DEPOSITS_HUB" pubkey --data-dir "$HUB_DATA_DIR" 2>/dev/null)
+    log_ok "Started deposits-hub (pk=${hub_pk:0:16}…, auto-approve on)"
+}
+
+stop_hub() {
+    [ "${DEPOSITS_USE_HUB:-}" != "1" ] && return
+    local pidfile="$HUB_DATA_DIR/hub.pid"
+    if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        kill "$(cat "$pidfile")" 2>/dev/null || true
+    fi
+}
+
+# Provision a signer for op$idx via the hub: workspace, deterministic
+# seed, launch line. Echoes the socket path on stdout so the caller can
+# wire it into --signer-socket. The launch line itself is exec'd in the
+# background; the hub doesn't supervise the signer process (it just
+# accepts its registration), so we mirror the existing signer.pid
+# bookkeeping under each op's data dir.
+start_hub_signer() {
+    local idx=$1 op_seed=$2 op_data_dir=$3
+    local name="op$idx"
+    local hub_pk
+    hub_pk=$("$DEPOSITS_HUB" pubkey --data-dir "$HUB_DATA_DIR" 2>/dev/null)
+    # spawn-line is idempotent. First call inits the workspace with
+    # the provided seed; later calls just re-emit the launch line.
+    local launch_line
+    launch_line=$("$DEPOSITS_HUB" spawn-line \
+        --data-dir "$HUB_DATA_DIR" \
+        --name "$name" \
+        --seed "$op_seed" \
+        --relay "ws://localhost:$MSG_RELAY_PORT" 2>&1 | grep -v '^#' | grep -v '^$' | tail -1)
+    if [ -z "$launch_line" ]; then
+        log_warn "hub spawn-line for $name returned no launch line"
+        return 1
+    fi
+
+    local workspace="$HUB_DATA_DIR/spawned/$name/data-dir"
+    local socket="$HUB_DATA_DIR/spawned/$name/signer.sock"
+
+    # Trust the node's transport pubkey so the daemon can connect to
+    # the signer's unix socket. Hub doesn't manage allowlist (it's a
+    # signer-side concern) — call the signer binary directly here.
+    local node_transport_pubkey
+    node_transport_pubkey=$("$DEPOSITS_NODE" transport-pubkey --data-dir "$op_data_dir" 2>/dev/null)
+    "$DEPOSITS_SIGNER" trust add \
+        --data-dir "$workspace" \
+        "$node_transport_pubkey" >/dev/null 2>&1 || true
+
+    # Launch the signer (background; the launch line includes
+    # --hub-pubkey + --hub-relay so it auto-registers).
+    rm -f "$socket"
+    RUST_LOG="${HUB_SIGNER_RUST_LOG:-info}" bash -c "exec $launch_line" \
+        > "$op_data_dir/signer.log" 2>&1 &
+    echo "$!" > "$op_data_dir/signer.pid"
+
+    # Wait for the socket to appear (signer ready) and the hub to show
+    # the signer as approved (registration round-tripped).
+    local waited=0
+    while [ ! -S "$socket" ] && [ "$waited" -lt 50 ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    if [ ! -S "$socket" ]; then
+        log_warn "$name signer socket never appeared at $socket"
+        return 1
+    fi
+    waited=0
+    while ! grep -q "\"signers\":[^}]*\"" "$HUB_DATA_DIR/hub.json" 2>/dev/null \
+            || ! grep -q "\"label\": \"$name\"" "$HUB_DATA_DIR/hub.json" 2>/dev/null; do
+        sleep 0.1
+        waited=$((waited + 1))
+        [ "$waited" -ge 50 ] && break
+    done
+
+    # The signer's pubkey, used as --signer-pubkey on the node side.
+    local signer_pubkey
+    signer_pubkey=$("$DEPOSITS_SIGNER" pubkey --data-dir "$workspace")
+    # Emit two lines: socket path, then signer pubkey. Caller reads
+    # them with `read socket pk <<<$(start_hub_signer ...)`.
+    echo "$socket $signer_pubkey"
+}
+
 start_node() {
     local idx=$1
     local name="op$idx"
@@ -158,32 +271,41 @@ start_node() {
     local admin_port=$((8765 + idx))
     mkdir -p "$data_dir"
 
-    # Optional: provision a co-located deposits-signer when
-    # DEPOSITS_USE_SIGNER=1 is set in the environment. Mirrors the
-    # _common.sh::start_node logic.
+    # Provision the signer. Two modes, mutually exclusive:
+    #   * DEPOSITS_USE_HUB=1     — hub-spawned (preferred for demos +
+    #                              regtest; one hub for the whole cluster,
+    #                              one signer subprocess per op)
+    #   * DEPOSITS_USE_SIGNER=1  — co-located signer init+run inline
+    #                              (legacy path; useful when there's no
+    #                              relay infra to host the hub).
     local signer_flags=""
-    if [ "${DEPOSITS_USE_SIGNER:-}" = "1" ]; then
+    if [ "${DEPOSITS_USE_HUB:-}" = "1" ]; then
+        local hub_out
+        hub_out=$(start_hub_signer "$idx" "$seed" "$data_dir")
+        local socket_path signer_pubkey
+        read -r socket_path signer_pubkey <<< "$hub_out"
+        signer_flags="--signer-pubkey $signer_pubkey --signer-socket $socket_path"
+    elif [ "${DEPOSITS_USE_SIGNER:-}" = "1" ]; then
         local signer_data_dir="$data_dir/signer"
         local signer_socket="$data_dir/signer.sock"
-        local signer_bin="${DEPOSITS_SIGNER:-$REPO_ROOT/target/release/deposits-signer}"
         if [ ! -f "$signer_data_dir/transport_secret" ]; then
             local seed_file="$data_dir/_signer_seed.tmp"
             echo "$seed" > "$seed_file"
             chmod 0600 "$seed_file"
-            "$signer_bin" init \
+            "$DEPOSITS_SIGNER" init \
                 --data-dir "$signer_data_dir" \
                 --seed-file "$seed_file" >/dev/null
             rm -f "$seed_file"
         fi
         local node_transport_pubkey
         node_transport_pubkey=$("$DEPOSITS_NODE" transport-pubkey --data-dir "$data_dir" 2>/dev/null)
-        "$signer_bin" trust add \
+        "$DEPOSITS_SIGNER" trust add \
             --data-dir "$signer_data_dir" \
             "$node_transport_pubkey" >/dev/null 2>&1 || true
         local signer_pubkey
-        signer_pubkey=$("$signer_bin" pubkey --data-dir "$signer_data_dir")
+        signer_pubkey=$("$DEPOSITS_SIGNER" pubkey --data-dir "$signer_data_dir")
         rm -f "$signer_socket"
-        RUST_LOG=info "$signer_bin" run \
+        RUST_LOG=info "$DEPOSITS_SIGNER" run \
             --data-dir "$signer_data_dir" \
             --socket "$signer_socket" \
             > "$data_dir/signer.log" 2>&1 &
@@ -229,7 +351,8 @@ stop_nodes() {
         if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
             kill "$(cat "$pidfile")" 2>/dev/null || true
         fi
-        # Co-located signer (DEPOSITS_USE_SIGNER=1).
+        # Co-located OR hub-spawned signer — both modes write signer.pid
+        # under the op's data dir.
         local signer_pidfile="$DATA_ROOT/op$i/signer.pid"
         if [ -f "$signer_pidfile" ] && kill -0 "$(cat "$signer_pidfile")" 2>/dev/null; then
             kill "$(cat "$signer_pidfile")" 2>/dev/null || true
@@ -254,10 +377,12 @@ get() { [ -f "$STATE_DIR/$1" ] && cat "$STATE_DIR/$1"; }
 
 log_info "=== Phase 1: Reset + Fund ==="
 stop_nodes
+stop_hub
 stop_relays
 rm -rf "$DATA_ROOT"
 mkdir -p "$DATA_ROOT" "$STATE_DIR"
 start_relays
+start_hub
 
 # Ensure the faucet wallet exists with mature coinbase funds. bitcoind
 # comes up with zero wallets; we either load an existing "faucet" from
