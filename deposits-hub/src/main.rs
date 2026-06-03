@@ -15,8 +15,13 @@ USAGE:
     deposits-hub <COMMAND> [OPTIONS]
 
 COMMANDS:
-    run                          Boot the hub: load state, open nostr client, launch the TUI
+    run                          Boot the hub: load state, open nostr client, launch the TUI.
+                                  Pass --headless to skip the TUI (for CI / unattended hosts) —
+                                  registrations still get parked, approve them via `approve`.
     pubkey                       Print the hub's nostr pubkey
+    approve --pubkey <HEX>       Move the given pending peer into the inventory and ack it.
+                                  Mirror of hitting `a` in the TUI's pending tab.
+    reject  --pubkey <HEX>       Drop the given pending peer and ack with Shutdown.
     spawn-line --name <NAME>     Print the launch command for a signer that auto-registers
                                   with this hub. Creates the workspace + seed on first use;
                                   subsequent calls re-print the same line.
@@ -63,6 +68,8 @@ fn main() -> ExitCode {
         }
         "run" => cmd_run(rest),
         "pubkey" => cmd_pubkey(rest),
+        "approve" => cmd_approve(rest),
+        "reject" => cmd_reject(rest),
         "spawn-line" => cmd_spawn_line(rest),
         "spawn" => cmd_spawn(rest),
         "qr" => cmd_qr(rest),
@@ -87,6 +94,8 @@ struct CommonArgs {
     relays: Vec<String>,
     name: Option<String>,
     text: Option<String>,
+    pubkey: Option<String>,
+    headless: bool,
 }
 
 fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
@@ -116,6 +125,18 @@ fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
                 let v = args.get(i + 1).ok_or("--text requires a value")?.to_string();
                 out.text = Some(v);
                 i += 2;
+            }
+            "--pubkey" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or("--pubkey requires a value")?
+                    .to_string();
+                out.pubkey = Some(v);
+                i += 2;
+            }
+            "--headless" => {
+                out.headless = true;
+                i += 1;
             }
             unknown => return Err(format!("unknown option: {}", unknown)),
         }
@@ -169,13 +190,14 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| format!("tokio runtime: {}", e))?;
-    rt.block_on(run_async(data_dir, state, c.relays))
+    rt.block_on(run_async(data_dir, state, c.relays, c.headless))
 }
 
 async fn run_async(
     data_dir: PathBuf,
     state: deposits_hub::state::HubState,
     relays: Vec<String>,
+    headless: bool,
 ) -> Result<(), String> {
     // Load the secret hex from the sibling file (state stores only the
     // pubkey — the secret stays in a 0600 file). HubState::load_or_init
@@ -197,12 +219,131 @@ async fn run_async(
 
     let state = std::sync::Arc::new(tokio::sync::Mutex::new(state));
 
-    // Hand control to the TUI. The TUI owns the terminal + the inbound
-    // dispatch loop until the operator quits with `q`. Tracing logs
-    // route to stderr — when the TUI's alt-screen is active they end
-    // up in the scrollback once we leave.
-    let app = deposits_hub::tui::App::new(data_dir, state, transport);
-    app.run(inbox).await
+    if headless {
+        run_headless(data_dir, state, transport, inbox).await
+    } else {
+        let app = deposits_hub::tui::App::new(data_dir, state, transport);
+        app.run(inbox).await
+    }
+}
+
+/// Headless inbound dispatch loop. Same parking behavior as the TUI's
+/// `absorb_inbound`, but no terminal — exits on ctrl-c. Used by CI and
+/// unattended hosts; the operator drives approvals via the `approve` /
+/// `reject` subcommands against the same data dir.
+async fn run_headless(
+    data_dir: PathBuf,
+    state: std::sync::Arc<tokio::sync::Mutex<deposits_hub::state::HubState>>,
+    transport: deposits_hub::nostr::HubTransport,
+    mut inbox: tokio::sync::mpsc::Receiver<deposits_hub::nostr::Inbound>,
+) -> Result<(), String> {
+    use deposits_hub::control;
+    use deposits_hub::proto::HubMessage;
+
+    eprintln!("hub: headless mode — listening for registrations");
+    let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                eprintln!("hub: shutdown signal — exiting");
+                return Ok(());
+            }
+            maybe = inbox.recv() => {
+                let Some(inbound) = maybe else {
+                    return Err("nostr inbox closed".to_string());
+                };
+                let from = inbound.from.to_hex();
+                match inbound.msg {
+                    HubMessage::Register { role, identity_pubkey, version, label } => {
+                        let mut st = state.lock().await;
+                        match control::ingest_register(
+                            &mut st, &data_dir, &from, role, identity_pubkey, version, label,
+                        ) {
+                            Ok(true) => {
+                                drop(st);
+                                control::send_already_approved_ack(&transport, &from).await;
+                            }
+                            Ok(false) => {
+                                drop(st);
+                                tracing::info!("register from {} — parked", &from[..16]);
+                                control::send_waiting_ack(&transport, &from).await;
+                            }
+                            Err(e) => tracing::warn!("ingest register: {}", e),
+                        }
+                    }
+                    HubMessage::Heartbeat { ts, .. } => {
+                        tracing::debug!("heartbeat from {} (ts={})", &from[..16], ts);
+                    }
+                    HubMessage::StatusResp { ready, summary, .. } => {
+                        tracing::info!("status from {}: ready={} summary={:?}", &from[..16], ready, summary);
+                    }
+                    HubMessage::RegisterAck { .. } | HubMessage::StatusReq => {
+                        tracing::debug!("unexpected inbound from {}", &from[..16]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn cmd_approve(args: &[String]) -> Result<(), String> {
+    let c = parse_common(args)?;
+    let data_dir = data_dir_or_default(c.data_dir);
+    let pubkey = c.pubkey.ok_or("missing --pubkey")?;
+    if c.relays.is_empty() {
+        return Err("`approve` requires at least one --relay so the ack reaches the peer".to_string());
+    }
+    let secret_path = deposits_hub::state::HubState::nostr_secret_path(&data_dir);
+    let secret_hex = std::fs::read_to_string(&secret_path)
+        .map_err(|e| format!("read hub secret: {}", e))?
+        .trim()
+        .to_string();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {}", e))?;
+    rt.block_on(async move {
+        let mut state = deposits_hub::state::HubState::load_or_init(&data_dir)
+            .map_err(|e| format!("hub state: {}", e))?;
+        let label = deposits_hub::control::approve(&mut state, &data_dir, &pubkey, None)?;
+        let transport = deposits_hub::nostr::HubTransport::connect(&secret_hex, &c.relays)
+            .await
+            .map_err(|e| format!("nostr connect: {}", e))?;
+        deposits_hub::control::send_accept_ack(&transport, &pubkey, &label).await;
+        println!("approved {} as '{}'", pubkey, label);
+        Ok::<(), String>(())
+    })
+}
+
+fn cmd_reject(args: &[String]) -> Result<(), String> {
+    let c = parse_common(args)?;
+    let data_dir = data_dir_or_default(c.data_dir);
+    let pubkey = c.pubkey.ok_or("missing --pubkey")?;
+    if c.relays.is_empty() {
+        return Err("`reject` requires at least one --relay so the ack reaches the peer".to_string());
+    }
+    let secret_path = deposits_hub::state::HubState::nostr_secret_path(&data_dir);
+    let secret_hex = std::fs::read_to_string(&secret_path)
+        .map_err(|e| format!("read hub secret: {}", e))?
+        .trim()
+        .to_string();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {}", e))?;
+    rt.block_on(async move {
+        let mut state = deposits_hub::state::HubState::load_or_init(&data_dir)
+            .map_err(|e| format!("hub state: {}", e))?;
+        deposits_hub::control::reject(&mut state, &data_dir, &pubkey)?;
+        let transport = deposits_hub::nostr::HubTransport::connect(&secret_hex, &c.relays)
+            .await
+            .map_err(|e| format!("nostr connect: {}", e))?;
+        deposits_hub::control::send_reject_ack(&transport, &pubkey).await;
+        println!("rejected {}", pubkey);
+        Ok::<(), String>(())
+    })
 }
 
 fn cmd_pubkey(args: &[String]) -> Result<(), String> {

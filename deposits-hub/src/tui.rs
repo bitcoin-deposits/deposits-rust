@@ -14,8 +14,8 @@
 //! is the source of truth across restarts.
 
 use crate::nostr::{HubTransport, Inbound};
-use crate::proto::{HubMessage, NextAction, Role};
-use crate::state::{HubState, NodeRecord, SignerRecord};
+use crate::proto::{HubMessage, Role};
+use crate::state::HubState;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -188,104 +188,48 @@ impl App {
 
     async fn approve_selected(&mut self) -> Result<(), String> {
         let cur = self.pending_cursor.selected().ok_or("no selection")?;
+        let sender_pk = self.nth_pending_pubkey(cur).await?;
         let mut st = self.state.lock().await;
-        let mut pending_iter: Vec<_> = st
-            .pending
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        pending_iter.sort_by_key(|(_, v)| v.first_seen);
-        let (sender_pk, entry) = pending_iter
-            .get(cur)
-            .cloned()
-            .ok_or_else(|| format!("no pending entry at index {}", cur))?;
-        let now = unix_secs();
-        let label = entry
-            .suggested_label
-            .clone()
-            .unwrap_or_else(|| short_pk(&sender_pk));
-        match entry.role {
-            Role::Signer => {
-                st.signers.insert(
-                    sender_pk.clone(),
-                    SignerRecord {
-                        label: label.clone(),
-                        spawned_by_hub: false,
-                        registered_at: now,
-                        last_version: entry.version.clone(),
-                    },
-                );
-            }
-            Role::Node => {
-                st.nodes.insert(
-                    sender_pk.clone(),
-                    NodeRecord {
-                        label: label.clone(),
-                        spawned_by_hub: false,
-                        registered_at: now,
-                        last_version: entry.version.clone(),
-                        signer_pubkey: None,
-                    },
-                );
-            }
-        }
-        st.pending.remove(&sender_pk);
-        st.save(&self.data_dir).map_err(|e| format!("save: {}", e))?;
+        let label = crate::control::approve(&mut st, &self.data_dir, &sender_pk, None)?;
         drop(st);
-        // Best-effort accept ack — the peer's heartbeat retry will get
-        // it anyway, but the immediate ack snaps the peer out of
-        // "waiting" state on the very next round-trip.
-        let ack = HubMessage::RegisterAck {
-            accepted: true,
-            message: format!("approved as '{}'", label),
-            next_action: NextAction::Heartbeat,
-        };
-        if let Err(e) = self.transport.send(&sender_pk, ack).await {
-            tracing::debug!("approve ack send: {}", e);
-        }
+        crate::control::send_accept_ack(&self.transport, &sender_pk, &label).await;
         self.flash(format!("approved {}", short_pk(&sender_pk)));
-        // Keep cursor sane after the list shrinks.
-        let new_len = self.state.lock().await.pending.len();
-        if new_len == 0 {
-            self.pending_cursor.select(None);
-        } else if cur >= new_len {
-            self.pending_cursor.select(Some(new_len - 1));
-        }
+        self.fix_cursor_after_shrink(cur).await;
         Ok(())
     }
 
     async fn reject_selected(&mut self) -> Result<(), String> {
         let cur = self.pending_cursor.selected().ok_or("no selection")?;
+        let sender_pk = self.nth_pending_pubkey(cur).await?;
         let mut st = self.state.lock().await;
-        let mut pending_iter: Vec<_> = st
-            .pending
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        pending_iter.sort_by_key(|(_, v)| v.first_seen);
-        let (sender_pk, _) = pending_iter
-            .get(cur)
-            .cloned()
-            .ok_or_else(|| format!("no pending entry at index {}", cur))?;
-        st.pending.remove(&sender_pk);
-        st.save(&self.data_dir).map_err(|e| format!("save: {}", e))?;
+        crate::control::reject(&mut st, &self.data_dir, &sender_pk)?;
         drop(st);
-        let ack = HubMessage::RegisterAck {
-            accepted: false,
-            message: "operator rejected this peer".to_string(),
-            next_action: NextAction::Shutdown,
-        };
-        if let Err(e) = self.transport.send(&sender_pk, ack).await {
-            tracing::debug!("reject ack send: {}", e);
-        }
+        crate::control::send_reject_ack(&self.transport, &sender_pk).await;
         self.flash(format!("rejected {}", short_pk(&sender_pk)));
+        self.fix_cursor_after_shrink(cur).await;
+        Ok(())
+    }
+
+    /// Look up the pubkey at the cursor's position in the sorted
+    /// pending list. The TUI displays pending sorted by first_seen, so
+    /// the cursor's index has the same ordering.
+    async fn nth_pending_pubkey(&self, idx: usize) -> Result<String, String> {
+        let st = self.state.lock().await;
+        let mut entries: Vec<_> = st.pending.iter().collect();
+        entries.sort_by_key(|(_, v)| v.first_seen);
+        entries
+            .get(idx)
+            .map(|(k, _)| (*k).clone())
+            .ok_or_else(|| format!("no pending entry at index {}", idx))
+    }
+
+    async fn fix_cursor_after_shrink(&mut self, prev_idx: usize) {
         let new_len = self.state.lock().await.pending.len();
         if new_len == 0 {
             self.pending_cursor.select(None);
-        } else if cur >= new_len {
+        } else if prev_idx >= new_len {
             self.pending_cursor.select(Some(new_len - 1));
         }
-        Ok(())
     }
 
     async fn absorb_inbound(&mut self, inbound: Inbound) {
@@ -297,47 +241,28 @@ impl App {
                 version,
                 label,
             } => {
-                // Same parking logic as the headless main loop; the TUI
-                // owns the state lock so we do it here directly instead
-                // of round-tripping through main.
                 let mut st = self.state.lock().await;
-                if st.signers.contains_key(&from) || st.nodes.contains_key(&from) {
-                    let ack = HubMessage::RegisterAck {
-                        accepted: true,
-                        message: "already approved".to_string(),
-                        next_action: NextAction::Heartbeat,
-                    };
-                    drop(st);
-                    let _ = self.transport.send(&from, ack).await;
-                    return;
-                }
-                let now = unix_secs();
-                let entry =
-                    st.pending
-                        .entry(from.clone())
-                        .or_insert_with(|| crate::state::PendingRegistration {
-                            role,
-                            identity_pubkey: identity_pubkey.clone(),
-                            suggested_label: label.clone(),
-                            version: version.clone(),
-                            first_seen: now,
-                            last_seen: now,
-                        });
-                entry.last_seen = now;
-                entry.version = version;
-                if entry.suggested_label.is_none() {
-                    entry.suggested_label = label;
-                }
-                if let Err(e) = st.save(&self.data_dir) {
-                    tracing::warn!("save pending: {}", e);
-                }
-                drop(st);
-                let ack = HubMessage::RegisterAck {
-                    accepted: false,
-                    message: "waiting for operator approval".to_string(),
-                    next_action: NextAction::Retry,
+                let already = match crate::control::ingest_register(
+                    &mut st,
+                    &self.data_dir,
+                    &from,
+                    role,
+                    identity_pubkey,
+                    version,
+                    label,
+                ) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        tracing::warn!("ingest register from {}: {}", from, e);
+                        return;
+                    }
                 };
-                let _ = self.transport.send(&from, ack).await;
+                drop(st);
+                if already {
+                    crate::control::send_already_approved_ack(&self.transport, &from).await;
+                } else {
+                    crate::control::send_waiting_ack(&self.transport, &from).await;
+                }
             }
             HubMessage::Heartbeat { ts, .. } => {
                 self.last_heartbeat.insert(from, ts);

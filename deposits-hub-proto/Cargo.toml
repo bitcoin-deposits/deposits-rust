@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 # and deposits-hub (full TUI) can pull it in without pain.
 nostr-sdk = { version = "0.37", features = ["nip44", "nip59"] }
 rustls = { version = "0.23", features = ["ring"] }
-tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net"] }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -19,11 +19,18 @@ tracing = "0.1"
 hex = "0.4"
 thiserror = "1.0"
 
+# Behind `test-relay` so production builds don't pull in tungstenite.
+tokio-tungstenite = { version = "0.24", optional = true }
+futures = { version = "0.3", optional = true }
+
+[features]
+# Enable the in-process test relay (deposits_hub_proto::test_relay).
+test-relay = ["tokio-tungstenite", "futures"]
+
 [dev-dependencies]
-# Tiny in-process relay for round-trip smoke tests. Version matches
-# what nostr-sdk 0.37 pulls in transitively so we share compile cache.
-tokio-tungstenite = "0.24"
-futures = "0.3"
+# The crate's own integration tests exercise test_relay, so turn the
+# feature on automatically when building tests.
+deposits-hub-proto = { path = ".", features = ["test-relay"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
 
 [lints]

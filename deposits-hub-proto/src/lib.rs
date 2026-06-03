@@ -13,3 +13,6 @@
 
 pub mod proto;
 pub mod transport;
+
+#[cfg(feature = "test-relay")]
+pub mod test_relay;
