@@ -38,6 +38,9 @@ hex = "0.4"
 thiserror = "1.0"
 dirs = "5"
 
+# Single-process lock on the hub data dir (advisory flock(2) on Unix).
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 # Enable the proto's in-process relay so the binary smoke test has

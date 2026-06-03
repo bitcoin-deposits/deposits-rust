@@ -200,6 +200,14 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("chmod data dir: {}", e))?;
     }
 
+    // Take the data-dir lock BEFORE loading state. Two concurrent runs
+    // would otherwise share `hub-nostr-secret` (dup gift wraps) and
+    // race on hub.json (lost writes). Bound to the function — drop
+    // at return releases. Kernel auto-releases on process exit too,
+    // so SIGKILL / panic don't leave a stale lock.
+    let _hub_lock = deposits_hub::lock::HubLock::acquire(&data_dir)
+        .map_err(|e| e.to_string())?;
+
     let state = deposits_hub::state::HubState::load_or_init(&data_dir)
         .map_err(|e| format!("hub state: {}", e))?;
     eprintln!("hub pubkey: {}", state.hub_pubkey_hex());
