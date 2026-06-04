@@ -175,12 +175,19 @@ fn compute_node_stats(node: &Node) -> NodeStats {
         }
     }
 
+    let next_address = node
+        .wallet
+        .peek_unused_address()
+        .ok()
+        .map(|a| a.to_string());
+
     NodeStats {
         wallet_balance_sats,
         ledger_count,
         active_ledger_count,
         quorum_member_count,
         chain_tip,
+        next_address,
     }
 }
 

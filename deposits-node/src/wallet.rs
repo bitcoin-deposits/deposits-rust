@@ -323,6 +323,17 @@ impl Wallet {
         &self.electrum_url
     }
 
+    /// Return the lowest-indexed address that hasn't received funds.
+    /// Doesn't burn through the address index — repeated calls without
+    /// a receive return the same address. Used by the hub's status
+    /// push to show a stable funding address per node without rolling
+    /// it every 30s.
+    pub fn peek_unused_address(&self) -> Result<Address, Error> {
+        let mut wallet = self.inner.lock().unwrap();
+        let info = wallet.next_unused_address(bdk_wallet::KeychainKind::External);
+        Ok(info.address)
+    }
+
     /// Get a new receiving address
     pub fn get_new_address(&self) -> Result<Address, Error> {
         let mut wallet = self.inner.lock().unwrap();

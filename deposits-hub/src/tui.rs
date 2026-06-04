@@ -62,6 +62,10 @@ pub struct App {
     /// these every 30s via unsolicited StatusResp. Memory-only; rebuilt
     /// from inbound after restart.
     node_stats: HashMap<String, NodeStats>,
+    /// When `Some`, the dashboard is overlaid with a fullscreen QR of
+    /// the indexed node's funding address. j/k cycles through nodes,
+    /// Esc/a/q exits. Index is into the label-sorted node list.
+    address_view_idx: Option<usize>,
     tab: Tab,
     pending_cursor: ListState,
     /// Transient status line (e.g., "approved", "rejected", error
@@ -84,6 +88,7 @@ impl App {
             transport,
             last_heartbeat: HashMap::new(),
             node_stats: HashMap::new(),
+            address_view_idx: None,
             tab: Tab::Dashboard,
             pending_cursor: cursor,
             flash: None,
@@ -176,6 +181,27 @@ impl App {
 
     /// Handle a keypress. Returns `true` if the app should exit.
     async fn handle_key(&mut self, k: KeyEvent) -> bool {
+        // Address overlay swallows its own keys when active. q/Esc/a
+        // exits; j/k cycles through nodes. Anything else is no-op so
+        // operators don't accidentally trigger underlying-tab actions.
+        if self.address_view_idx.is_some() {
+            match (k.code, k.modifiers) {
+                (KeyCode::Esc, _)
+                | (KeyCode::Char('a'), _)
+                | (KeyCode::Char('q'), _) => {
+                    self.address_view_idx = None;
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                    self.address_cycle(1).await;
+                }
+                (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                    self.address_cycle(-1).await;
+                }
+                _ => {}
+            }
+            return false;
+        }
+
         match (k.code, k.modifiers) {
             (KeyCode::Char('q'), _) => return true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
@@ -187,6 +213,15 @@ impl App {
             }
             (KeyCode::Char('1'), _) => self.tab = Tab::Dashboard,
             (KeyCode::Char('2'), _) => self.tab = Tab::Pending,
+            (KeyCode::Char('a'), _) if self.tab == Tab::Dashboard => {
+                // Enter address-view mode if there's at least one node.
+                let n = self.state.lock().await.nodes.len();
+                if n > 0 {
+                    self.address_view_idx = Some(0);
+                } else {
+                    self.flash("no nodes to show addresses for".to_string());
+                }
+            }
             (KeyCode::Down, _) | (KeyCode::Char('j'), _) if self.tab == Tab::Pending => {
                 self.cursor_step(1).await;
             }
@@ -206,6 +241,30 @@ impl App {
             _ => {}
         }
         false
+    }
+
+    /// Move through the label-sorted node list in the address overlay.
+    async fn address_cycle(&mut self, delta: i32) {
+        let n = self.state.lock().await.nodes.len();
+        if n == 0 {
+            self.address_view_idx = None;
+            return;
+        }
+        let cur = self.address_view_idx.unwrap_or(0) as i32;
+        let next = (cur + delta).rem_euclid(n as i32) as usize;
+        self.address_view_idx = Some(next);
+    }
+
+    /// Look up the (label, NodeStats) for the cursor in the address
+    /// overlay. None if the cursor's stale (node removed mid-view) or
+    /// there's no stats push yet.
+    async fn address_target(&self, idx: usize) -> Option<(String, Option<NodeStats>, String)> {
+        let st = self.state.lock().await;
+        let mut entries: Vec<(&String, &crate::state::NodeRecord)> = st.nodes.iter().collect();
+        entries.sort_by(|a, b| a.1.label.cmp(&b.1.label));
+        let (pk, rec) = entries.get(idx)?;
+        let stats = self.node_stats.get(*pk).cloned();
+        Some(((*rec).label.clone(), stats, (*pk).clone()))
     }
 
     async fn cursor_step(&mut self, delta: i32) {
@@ -355,10 +414,10 @@ impl App {
             Ok(st) => Some(st.clone()),
             Err(_) => None,
         };
-        match snapshot {
+        match snapshot.as_ref() {
             Some(st) => match self.tab {
-                Tab::Dashboard => self.render_dashboard(&st, chunks[1], f),
-                Tab::Pending => self.render_pending(&st, chunks[1], f),
+                Tab::Dashboard => self.render_dashboard(st, chunks[1], f),
+                Tab::Pending => self.render_pending(st, chunks[1], f),
             },
             None => {
                 let p = Paragraph::new("...");
@@ -366,10 +425,23 @@ impl App {
             }
         }
 
+        // Address overlay sits on top of the dashboard body. Centered,
+        // takes ~70% of the inner area, falls back gracefully if the
+        // terminal is too small for the QR.
+        if let Some(idx) = self.address_view_idx {
+            if let Some(st) = snapshot.as_ref() {
+                self.render_address_overlay(st, idx, chunks[1], f);
+            }
+        }
+
         // Status line
-        let hint = match self.tab {
-            Tab::Dashboard => "[1]ashboard  [2]ending  [Tab] switch  [q] quit",
-            Tab::Pending => "[a] approve  [x] reject  [j/k] move  [Tab] switch  [q] quit",
+        let hint = if self.address_view_idx.is_some() {
+            "[j/k] cycle  [Esc/a/q] close"
+        } else {
+            match self.tab {
+                Tab::Dashboard => "[a] address  [1]ashboard  [2]ending  [Tab] switch  [q] quit",
+                Tab::Pending => "[a] approve  [x] reject  [j/k] move  [Tab] switch  [q] quit",
+            }
         };
         let body = match &self.flash {
             Some(msg) => format!("{}    │    {}", msg, hint),
@@ -377,6 +449,93 @@ impl App {
         };
         let status = Paragraph::new(body).style(Style::default().fg(Color::DarkGray));
         f.render_widget(status, chunks[2]);
+    }
+
+    /// Fullscreen-ish QR popup for one node's funding address. Draws
+    /// over the dashboard body. If the focused node has no NodeStats
+    /// yet (just registered, hasn't pushed status), shows a placeholder.
+    fn render_address_overlay(
+        &self,
+        st: &HubState,
+        idx: usize,
+        area: Rect,
+        f: &mut ratatui::Frame,
+    ) {
+        // Look up the node at idx (label-sorted).
+        let mut entries: Vec<(&String, &crate::state::NodeRecord)> = st.nodes.iter().collect();
+        entries.sort_by(|a, b| a.1.label.cmp(&b.1.label));
+        let n = entries.len();
+        let (pk, rec) = match entries.get(idx) {
+            Some(e) => *e,
+            None => return,
+        };
+        let stats = self.node_stats.get(pk);
+
+        // Center an inner area at ~80% of the body. The QR's natural
+        // size depends on the address — a P2TR mainnet address is 62
+        // chars; QR fits in ~33 modules across at EC=M. Each terminal
+        // cell encodes 2 modules horizontally and 2 vertically per row
+        // (Unicode half-blocks), so the QR is ~33 cols × ~17 rows.
+        let inner = center_rect(area, 80, 80);
+        f.render_widget(Clear, inner);
+
+        let title = format!(" {} of {} — {} ", idx + 1, n, rec.label);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .style(Style::default().fg(Color::Yellow));
+        let block_inner = block.inner(inner);
+        f.render_widget(block, inner);
+
+        let mut lines: Vec<Line> = Vec::new();
+        match stats.and_then(|s| s.next_address.as_deref()) {
+            Some(addr) => {
+                // Render the QR first as a single text block, then
+                // the address line beneath. If the inner area is too
+                // small for the QR we fall back to address-only.
+                let qr = crate::qr::render(addr);
+                let qr_lines: Vec<&str> = qr.lines().collect();
+                let qr_h = qr_lines.len() as u16;
+                let qr_w = qr_lines
+                    .iter()
+                    .map(|l| l.chars().count() as u16)
+                    .max()
+                    .unwrap_or(0);
+                if qr_h + 4 <= block_inner.height && qr_w <= block_inner.width {
+                    // Pad each line to center horizontally.
+                    let pad = (block_inner.width.saturating_sub(qr_w)) / 2;
+                    let pad_str: String = std::iter::repeat(' ').take(pad as usize).collect();
+                    for l in &qr_lines {
+                        lines.push(Line::from(format!("{}{}", pad_str, l)));
+                    }
+                    lines.push(Line::from(""));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    addr.to_string(),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )));
+                if let Some(s) = stats {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(format!(
+                        "wallet: {:.4} BTC   ledgers: {}   quorums: {}",
+                        (s.wallet_balance_sats as f64) / 100_000_000.0,
+                        s.ledger_count,
+                        s.quorum_member_count,
+                    )));
+                }
+            }
+            None => {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "(awaiting status from this node — addresses arrive on the next 30s push)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+
+        let p = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(p, block_inner);
     }
 
     fn render_dashboard(&self, st: &HubState, area: Rect, f: &mut ratatui::Frame) {
@@ -555,6 +714,22 @@ impl Drop for TermGuard {
 
 #[allow(dead_code)]
 fn _silence_stdout(_: &Stdout) {}
+
+/// Center a rect within `area`, taking `pct_x`/`pct_y` percent of each
+/// dimension. Used by the address overlay; standard ratatui popup
+/// pattern.
+fn center_rect(area: Rect, pct_x: u16, pct_y: u16) -> Rect {
+    let popup_w = area.width * pct_x / 100;
+    let popup_h = area.height * pct_y / 100;
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    Rect {
+        x,
+        y,
+        width: popup_w,
+        height: popup_h,
+    }
+}
 
 fn unix_secs() -> u64 {
     std::time::SystemTime::now()

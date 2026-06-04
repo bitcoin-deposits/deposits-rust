@@ -143,6 +143,13 @@ pub struct NodeStats {
     /// Current chain tip height the node observed (informational; lets
     /// the dashboard show "behind by N blocks" if a node lags).
     pub chain_tip: u32,
+    /// Lowest-indexed receiving address that hasn't seen funds yet —
+    /// stable across status pushes until a tx arrives. The hub
+    /// dashboard renders this as a QR for phone-wallet funding.
+    /// `None` when the wallet can't materialize an address (e.g.,
+    /// not yet synced) — TUI shows "(awaiting address)" in that case.
+    #[serde(default)]
+    pub next_address: Option<String>,
 }
 
 /// What the hub asks the peer to do next after a Register. Defaults

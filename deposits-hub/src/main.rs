@@ -358,12 +358,21 @@ async fn run_headless(
                     }
                     HubMessage::StatusResp { ready, node_stats, .. } => {
                         match node_stats {
-                            Some(s) => tracing::info!(
-                                "status from {}: ready={} wallet={:.4}BTC ledgers={} active={} quorums={} tip={}",
-                                &from[..16], ready,
-                                (s.wallet_balance_sats as f64) / 100_000_000.0,
-                                s.ledger_count, s.active_ledger_count, s.quorum_member_count, s.chain_tip,
-                            ),
+                            Some(s) => {
+                                let addr_note = match s.next_address.as_deref() {
+                                    Some(a) if a.len() > 12 => {
+                                        format!(" addr={}…{}", &a[..6], &a[a.len()-4..])
+                                    }
+                                    _ => String::new(),
+                                };
+                                tracing::info!(
+                                    "status from {}: ready={} wallet={:.4}BTC ledgers={} active={} quorums={} tip={}{}",
+                                    &from[..16], ready,
+                                    (s.wallet_balance_sats as f64) / 100_000_000.0,
+                                    s.ledger_count, s.active_ledger_count, s.quorum_member_count, s.chain_tip,
+                                    addr_note,
+                                );
+                            }
                             None => tracing::info!("status from {}: ready={}", &from[..16], ready),
                         }
                     }
