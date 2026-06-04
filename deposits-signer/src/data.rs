@@ -75,11 +75,10 @@ impl DataDir {
     /// data-dir scaffolding. Optionally seed-import in the same call.
     ///
     /// When a seed is provided, the transport key is **derived** from
-    /// it at `m/87'/0'/0'/0/0` — sibling to operator (m/86') and nostr
-    /// (m/85'). This makes the entire data-dir state reproducible from
-    /// just the seed, which is what enables the hub's
-    /// `hub-master-seed → single backup` story. Without a seed, falls
-    /// back to a fresh random transport key.
+    /// it via BIP-85 (deterministic child entropy), which makes the
+    /// entire data-dir state reproducible from just the seed and
+    /// enables the hub's `hub-master-seed → single backup` story.
+    /// Without a seed, falls back to a fresh random transport key.
     pub fn init(&self, seed: Option<&[u8; 32]>) -> Result<TransportKey, DataError> {
         if self.is_initialized() {
             return Err(DataError::AlreadyInitialized(self.root.clone()));
@@ -209,20 +208,43 @@ impl DataDir {
     }
 }
 
-/// Derive the transport keypair from the operator seed at
-/// `m/87'/0'/0'/0/0`. Deterministic; lets the hub reproduce a spawned
-/// signer's entire data-dir (seed + transport) from one master backup.
+/// Derive the transport keypair deterministically from the operator
+/// seed via BIP-85 (`m/83696968'/128169'/32'/1'`).
+///
+/// Using BIP-85 with index 1 sidesteps the BIP purpose registry —
+/// `m/87'/...` (what an earlier draft used) is in the active
+/// registration zone and would collide with any future BIP-87
+/// publication. Index 0 is reserved for any future "alternate operator
+/// key from same seed" use; we use 1 here for transport.
 pub fn derive_transport_from_seed(seed: &[u8; 32]) -> Result<TransportKey, DataError> {
+    use bitcoin::bip32::ChildNumber;
+    use bitcoin::hashes::{sha512, Hash, HashEngine, Hmac, HmacEngine};
+
+    const BIP85_NAMESPACE: u32 = 83_696_968;
+    const APP_HEX: u32 = 128_169;
+    const ENTROPY_LEN: u32 = 32;
+    const TRANSPORT_INDEX: u32 = 1;
+    const HMAC_KEY: &[u8] = b"bip-entropy-from-k";
+
     let secp = Secp256k1::new();
     let xpriv = Xpriv::new_master(Network::Bitcoin, seed)
         .map_err(|e| DataError::Key(format!("xpriv: {}", e)))?;
-    let path = DerivationPath::from_str("m/87'/0'/0'/0/0")
-        .map_err(|e| DataError::Key(format!("transport path: {}", e)))?;
-    let sk = xpriv
+    let path = DerivationPath::from(vec![
+        ChildNumber::from_hardened_idx(BIP85_NAMESPACE).expect("namespace fits"),
+        ChildNumber::from_hardened_idx(APP_HEX).expect("app code fits"),
+        ChildNumber::from_hardened_idx(ENTROPY_LEN).expect("32 fits"),
+        ChildNumber::from_hardened_idx(TRANSPORT_INDEX).expect("index fits"),
+    ]);
+    let child = xpriv
         .derive_priv(&secp, &path)
-        .map_err(|e| DataError::Key(format!("derive transport: {}", e)))?
-        .private_key;
-    Ok(TransportKey::from_secret(sk))
+        .map_err(|e| DataError::Key(format!("derive bip-85 child: {}", e)))?;
+    let mut engine: HmacEngine<sha512::Hash> = HmacEngine::new(HMAC_KEY);
+    engine.input(&child.private_key.secret_bytes());
+    let mac = Hmac::<sha512::Hash>::from_engine(engine);
+    let bytes = mac.as_byte_array();
+    let transport_sk = SecretKey::from_slice(&bytes[..32])
+        .map_err(|e| DataError::Key(format!("transport sk from bip-85 entropy: {}", e)))?;
+    Ok(TransportKey::from_secret(transport_sk))
 }
 
 /// Free function so callers (the binary's `run` subcommand, tests) can use

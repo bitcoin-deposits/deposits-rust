@@ -299,33 +299,55 @@ impl HubState {
     }
 }
 
-/// Derive a signer seed deterministically from the hub master at
-/// `m/89'/<index>'`. Returns the 32-byte secret key of the derived
-/// xpriv, which the spawned signer uses as its operator/nostr-key
-/// root (the same shape as a fresh random seed). Re-derivable from
-/// just `(master, index)` — that's what makes one backup recover N
-/// signers.
+/// Derive a signer seed deterministically from the hub master using
+/// BIP-85 (deterministic entropy from a BIP-32 root key).
 ///
-/// 89 is intentionally outside any registered BIP purpose so the
-/// derivation tree doesn't collide with operator-protocol keys (which
-/// use 85/86 under each signer's own seed).
+/// Path: `m / 83696968' / 128169' / 32' / index'`
+///   * 83696968 — BIP-85 namespace constant (chosen by the spec
+///     author; far outside any plausible BIP purpose registration).
+///   * 128169 — application code for "HEX" entropy.
+///   * 32 — length of the requested entropy in bytes.
+///   * index — caller-supplied slot, allocated via
+///     [`HubState::signer_index_for`].
+///
+/// The output is `HMAC-SHA512(key="bip-entropy-from-k",
+/// msg=derived_private_key_bytes)` truncated to the first 32 bytes,
+/// per BIP-85. This is the canonical "give me reproducible child
+/// seed material for another tool" interface; using anything else
+/// risks colliding with future BIP registrations.
 pub fn derive_signer_seed(master: &[u8; 32], index: u32) -> Result<[u8; 32], StateError> {
     use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv};
+    use bitcoin::hashes::{sha512, Hash, HashEngine, Hmac, HmacEngine};
     use bitcoin::secp256k1::Secp256k1;
     use bitcoin::Network;
+
+    const BIP85_NAMESPACE: u32 = 83_696_968;
+    const APP_HEX: u32 = 128_169;
+    const ENTROPY_LEN: u32 = 32;
+    const HMAC_KEY: &[u8] = b"bip-entropy-from-k";
 
     let secp = Secp256k1::new();
     let xpriv = Xpriv::new_master(Network::Bitcoin, master)
         .map_err(|e| StateError::Hex(format!("master xpriv: {}", e)))?;
     let path = DerivationPath::from(vec![
-        ChildNumber::from_hardened_idx(89).expect("89 fits"),
+        ChildNumber::from_hardened_idx(BIP85_NAMESPACE).expect("namespace fits in 31 bits"),
+        ChildNumber::from_hardened_idx(APP_HEX).expect("app code fits"),
+        ChildNumber::from_hardened_idx(ENTROPY_LEN).expect("32 fits"),
         ChildNumber::from_hardened_idx(index)
             .map_err(|e| StateError::Hex(format!("index hardened: {}", e)))?,
     ]);
     let child = xpriv
         .derive_priv(&secp, &path)
-        .map_err(|e| StateError::Hex(format!("derive child: {}", e)))?;
-    Ok(child.private_key.secret_bytes())
+        .map_err(|e| StateError::Hex(format!("derive bip-85 child: {}", e)))?;
+
+    let mut engine: HmacEngine<sha512::Hash> = HmacEngine::new(HMAC_KEY);
+    engine.input(&child.private_key.secret_bytes());
+    let mac = Hmac::<sha512::Hash>::from_engine(engine);
+    let bytes = mac.as_byte_array();
+
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes[..32]);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -362,6 +384,44 @@ mod tests {
         // Different master → different output.
         let other = [0x99u8; 32];
         assert_ne!(a0, derive_signer_seed(&other, 0).unwrap());
+    }
+
+    /// Conformance check against the published BIP-85 HEX test vector
+    /// (length=64, index=0). Our `derive_signer_seed` is hardcoded to
+    /// length=32, but the HMAC step is identical so we exercise the
+    /// underlying derivation directly. If this breaks, the BIP-85 path
+    /// numbers, the HMAC key string, or the derived-key extraction is
+    /// off — none of which should ever change.
+    ///
+    /// Vector source: https://github.com/bitcoin/bips/blob/master/bip-0085.mediawiki
+    ///   master xprv: xprv9s21ZrQH143K2LBWUUQRFXhucrQqBpKdRRxNVq2zBqsx8HVqFk2uYo8kmbaLLHRdqtQpUm98uKfu3vca1LqdGhUtyoFnCNkfmXRyPXLjbKb
+    ///   path:        `m/83696968'/128169'/64'/0'`
+    ///   entropy:     `492db4698cf3b73a5a24998aa3e9d7fa96275d85724a91e71aa2d645442f878555d078fd1f1f67e368976f04137b1f7a0d19232136ca50c44614af72b5582a5c`
+    #[test]
+    fn bip85_conformance_64byte_hex() {
+        use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv};
+        use bitcoin::hashes::{sha512, Hash, HashEngine, Hmac, HmacEngine};
+        use bitcoin::secp256k1::Secp256k1;
+        use std::str::FromStr;
+
+        let xpriv = Xpriv::from_str(
+            "xprv9s21ZrQH143K2LBWUUQRFXhucrQqBpKdRRxNVq2zBqsx8HVqFk2uYo8kmbaLLHRdqtQpUm98uKfu3vca1LqdGhUtyoFnCNkfmXRyPXLjbKb"
+        ).unwrap();
+        let secp = Secp256k1::new();
+        // m/83696968'/128169'/64'/0'
+        let path = DerivationPath::from(vec![
+            ChildNumber::from_hardened_idx(83_696_968).unwrap(),
+            ChildNumber::from_hardened_idx(128_169).unwrap(),
+            ChildNumber::from_hardened_idx(64).unwrap(),
+            ChildNumber::from_hardened_idx(0).unwrap(),
+        ]);
+        let child = xpriv.derive_priv(&secp, &path).unwrap();
+        let mut eng: HmacEngine<sha512::Hash> = HmacEngine::new(b"bip-entropy-from-k");
+        eng.input(&child.private_key.secret_bytes());
+        let mac = Hmac::<sha512::Hash>::from_engine(eng);
+
+        let expected = "492db4698cf3b73a5a24998aa3e9d7fa96275d85724a91e71aa2d645442f878555d078fd1f1f67e368976f04137b1f7a0d19232136ca50c44614af72b5582a5c";
+        assert_eq!(hex::encode(mac.as_byte_array()), expected);
     }
 
     #[test]
