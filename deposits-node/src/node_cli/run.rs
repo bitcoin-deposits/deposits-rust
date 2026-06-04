@@ -141,6 +141,7 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 let op_pk = PublicKey::from_secret_key(&secp, &op_secret);
                 let op_pk_hex = hex::encode(op_pk.serialize());
                 let nostr_secret_hex = hex::encode(nostr_secret.secret_bytes());
+                let node_for_hub = node.clone();
                 tokio::spawn(async move {
                     if let Err(e) = crate::hub::run(
                         nostr_secret_hex,
@@ -149,6 +150,7 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                         op_pk_hex,
                         hub_label,
                         hub_signer_pk,
+                        node_for_hub,
                     )
                     .await
                     {

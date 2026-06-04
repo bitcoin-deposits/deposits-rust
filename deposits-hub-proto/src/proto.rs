@@ -94,7 +94,9 @@ pub enum HubMessage {
     /// Hub asks a peer for more detail. Optional (heartbeats already
     /// imply liveness); used for the TUI drill-down.
     StatusReq,
-    /// Detailed status reply.
+    /// Detailed status reply. Daemons also push these unsolicited
+    /// every ~30s so the hub dashboard can render current per-node
+    /// state without polling.
     StatusResp {
         identity_pubkey: String,
         /// Signers: true if a seed is installed (operator-key derivable).
@@ -112,7 +114,28 @@ pub enum HubMessage {
         /// "waiting for cosignatures", "idle 5m").
         #[serde(default)]
         summary: Option<String>,
+        /// Nodes only: live counts for the dashboard.
+        #[serde(default)]
+        node_stats: Option<NodeStats>,
     },
+}
+
+/// Per-node counts surfaced in the hub dashboard. Cheap to recompute
+/// (the node already tracks all this for its admin API); pushed every
+/// 30s alongside the heartbeat cadence.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NodeStats {
+    /// Confirmed wallet balance in satoshis.
+    pub wallet_balance_sats: u64,
+    /// Total ledgers this node tracks (operator + partner roles).
+    pub ledger_count: u32,
+    /// Ledgers where this node is the operator (subset of ledger_count).
+    pub operator_ledger_count: u32,
+    /// Ledgers in Tier 0 (active, value-moving allowed).
+    pub active_ledger_count: u32,
+    /// Current chain tip height the node observed (informational; lets
+    /// the dashboard show "behind by N blocks" if a node lags).
+    pub chain_tip: u32,
 }
 
 /// What the hub asks the peer to do next after a Register. Defaults

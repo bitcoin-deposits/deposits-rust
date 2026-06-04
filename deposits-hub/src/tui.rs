@@ -14,7 +14,7 @@
 //! is the source of truth across restarts.
 
 use crate::nostr::{HubTransport, Inbound};
-use crate::proto::{HubMessage, Role};
+use crate::proto::{HubMessage, NodeStats, Role};
 use crate::state::HubState;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -58,6 +58,10 @@ pub struct App {
     /// pubkey hex → last unix-seconds we heard from this peer. Lives
     /// in memory only — heartbeats restart at each launch.
     last_heartbeat: HashMap<String, u64>,
+    /// Node pubkey hex → most recent NodeStats snapshot. Daemons push
+    /// these every 30s via unsolicited StatusResp. Memory-only; rebuilt
+    /// from inbound after restart.
+    node_stats: HashMap<String, NodeStats>,
     tab: Tab,
     pending_cursor: ListState,
     /// Transient status line (e.g., "approved", "rejected", error
@@ -79,6 +83,7 @@ impl App {
             state,
             transport,
             last_heartbeat: HashMap::new(),
+            node_stats: HashMap::new(),
             tab: Tab::Dashboard,
             pending_cursor: cursor,
             flash: None,
@@ -299,8 +304,14 @@ impl App {
             HubMessage::Heartbeat { ts, .. } => {
                 self.last_heartbeat.insert(from, ts);
             }
-            HubMessage::StatusResp { ready, summary, .. } => {
-                tracing::debug!("status from {}: ready={} summary={:?}", from, ready, summary);
+            HubMessage::StatusResp { node_stats, .. } => {
+                // Status pushes carry liveness too — refresh hb so a
+                // node sending status but not heartbeats (because of a
+                // scheduler hiccup) still looks alive.
+                self.last_heartbeat.insert(from.clone(), unix_secs());
+                if let Some(stats) = node_stats {
+                    self.node_stats.insert(from, stats);
+                }
             }
             HubMessage::RegisterAck { .. } | HubMessage::StatusReq => {
                 // Hub doesn't expect these inbound.
@@ -357,8 +368,8 @@ impl App {
 
         // Status line
         let hint = match self.tab {
-            Tab::Dashboard => "[1]ashboard  [2]ending  [Tab] switch  [^L] redraw  [q] quit",
-            Tab::Pending => "[a] approve  [x] reject  [j/k] move  [Tab] switch  [^L] redraw  [q] quit",
+            Tab::Dashboard => "[1]ashboard  [2]ending  [Tab] switch  [q] quit",
+            Tab::Pending => "[a] approve  [x] reject  [j/k] move  [Tab] switch  [q] quit",
         };
         let body = match &self.flash {
             Some(msg) => format!("{}    │    {}", msg, hint),
@@ -429,14 +440,29 @@ impl App {
                             .unwrap_or_else(|| short_pk(sig_pk))
                     }
                 };
+                let stats = self
+                    .node_stats
+                    .get(pk)
+                    .map(|s| {
+                        format!(
+                            "wallet={:.4}BTC  ledgers={} (op={} active={})  tip={}",
+                            (s.wallet_balance_sats as f64) / 100_000_000.0,
+                            s.ledger_count,
+                            s.operator_ledger_count,
+                            s.active_ledger_count,
+                            s.chain_tip
+                        )
+                    })
+                    .unwrap_or_else(|| "(awaiting status)".to_string());
                 lines.push(Line::from(format!(
-                    "  {:<24} {}  v{}  signer={}  {}",
+                    "  {:<10} {}  v{}  signer={}  {}",
                     rec.label,
                     short_pk(pk),
                     rec.last_version,
                     signer,
                     hb
                 )));
+                lines.push(Line::from(format!("    {}", stats)));
             }
         }
         // Clear first — Paragraph renders top-down without blanking

@@ -15,12 +15,15 @@
 //! Failures are non-fatal — the daemon keeps serving operator traffic
 //! even if relays are down. A warn-level log on errors is enough.
 
-use deposits_hub_proto::proto::{HubMessage, NextAction, Role};
+use crate::Node;
+use deposits_hub_proto::proto::{HubMessage, NextAction, NodeStats, Role};
 use deposits_hub_proto::transport::{HubTransport, Inbound};
+use std::sync::Arc;
 use std::time::Duration;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const REREGISTER_INTERVAL: Duration = Duration::from_secs(300);
+const STATUS_PUSH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Run the hub registration loop. Spawn this from the daemon startup
 /// when both `hub_pubkey` and at least one `hub_relay` are set.
@@ -49,6 +52,7 @@ pub async fn run(
     operator_pubkey_hex: String,
     label: Option<String>,
     signer_pubkey_hex: Option<String>,
+    node: Arc<Node>,
 ) -> Result<(), String> {
     let transport = HubTransport::connect(&nostr_secret_hex, &relays)
         .await
@@ -80,6 +84,9 @@ pub async fn run(
     heartbeat_tick.tick().await;
     let mut reregister_tick = tokio::time::interval(REREGISTER_INTERVAL);
     reregister_tick.tick().await;
+    let mut status_tick = tokio::time::interval(STATUS_PUSH_INTERVAL);
+    // Fire the first status push immediately so the dashboard has
+    // something to show before the 30s tick rolls around.
 
     let mut accepted = false;
 
@@ -101,6 +108,20 @@ pub async fn run(
                     }
                 }
             }
+            _ = status_tick.tick() => {
+                let stats = compute_node_stats(&node);
+                let resp = HubMessage::StatusResp {
+                    identity_pubkey: operator_pubkey_hex.clone(),
+                    ready: stats.ledger_count > 0,
+                    operator_pubkey: Some(operator_pubkey_hex.clone()),
+                    allowlist: Vec::new(),
+                    summary: None,
+                    node_stats: Some(stats),
+                };
+                if let Err(e) = transport.send(&hub_pubkey_hex, resp).await {
+                    tracing::debug!("hub status push: {}", e);
+                }
+            }
             maybe = inbox.recv() => {
                 let Some(Inbound { from, msg }) = maybe else {
                     return Err("hub inbox closed".to_string());
@@ -115,6 +136,50 @@ pub async fn run(
                 handle_from_hub(msg, &mut accepted);
             }
         }
+    }
+}
+
+/// Snapshot the counts the dashboard cares about. Cheap (lock + iter
+/// over ledgers — same path the /api/lifecycle handler uses). Errors
+/// fall back to zeros so a transient wallet-sync failure doesn't
+/// drop the whole status push.
+fn compute_node_stats(node: &Node) -> NodeStats {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::cosign_threshold::{cosign_requirement, LifecycleTier};
+
+    let chain_tip = node.wallet.get_block_height().unwrap_or(0);
+    let wallet_balance_sats = node.wallet_balance().unwrap_or(0);
+
+    let probe_op = LedgerOperation::QuorumRemoveMember {
+        quorum_member: node.node_id,
+        operator_signature: [0u8; 64],
+    };
+
+    let mut ledger_count = 0u32;
+    let mut operator_ledger_count = 0u32;
+    let mut active_ledger_count = 0u32;
+
+    if let Ok(ledgers) = node.handler.ledgers.lock() {
+        for (_id, arc) in ledgers.iter() {
+            ledger_count += 1;
+            if let Ok(l) = arc.read() {
+                if l.operator_key() == node.node_id {
+                    operator_ledger_count += 1;
+                }
+                let req = cosign_requirement(&l.state, &probe_op, chain_tip);
+                if matches!(req.tier, LifecycleTier::Tier0) {
+                    active_ledger_count += 1;
+                }
+            }
+        }
+    }
+
+    NodeStats {
+        wallet_balance_sats,
+        ledger_count,
+        operator_ledger_count,
+        active_ledger_count,
+        chain_tip,
     }
 }
 

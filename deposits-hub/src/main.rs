@@ -356,8 +356,16 @@ async fn run_headless(
                     HubMessage::Heartbeat { ts, .. } => {
                         tracing::debug!("heartbeat from {} (ts={})", &from[..16], ts);
                     }
-                    HubMessage::StatusResp { ready, summary, .. } => {
-                        tracing::info!("status from {}: ready={} summary={:?}", &from[..16], ready, summary);
+                    HubMessage::StatusResp { ready, node_stats, .. } => {
+                        match node_stats {
+                            Some(s) => tracing::info!(
+                                "status from {}: ready={} wallet={:.4}BTC ledgers={} (op={} active={}) tip={}",
+                                &from[..16], ready,
+                                (s.wallet_balance_sats as f64) / 100_000_000.0,
+                                s.ledger_count, s.operator_ledger_count, s.active_ledger_count, s.chain_tip,
+                            ),
+                            None => tracing::info!("status from {}: ready={}", &from[..16], ready),
+                        }
                     }
                     HubMessage::RegisterAck { .. } | HubMessage::StatusReq => {
                         tracing::debug!("unexpected inbound from {}", &from[..16]);
