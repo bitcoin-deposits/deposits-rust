@@ -352,9 +352,14 @@ services:
     networks:
       - regtest
 
-  # Lightweight regtest block miner (~5MB alpine+curl container)
-  # Mines 1 block/sec so transfer timeouts resolve promptly after restarts.
-  # Uses JSON-RPC directly — no bitcoind binary needed.
+  # Lightweight regtest block miner (~5MB alpine+curl container).
+  # Default: 1 block/sec so transfer timeouts resolve promptly after
+  # restarts. For lifecycle / confiscation tests that need to mine
+  # past the 720-block auto-dispute grace window without grinding
+  # against the default rate, override `MINER_INTERVAL` /
+  # `MINER_BATCH_SIZE` in the environment before `docker compose up`
+  # (e.g. `MINER_INTERVAL=0.05 docker compose up -d miner` for
+  # ~20 blocks/sec). Uses JSON-RPC directly — no bitcoind binary needed.
   miner:
     image: alpine:3.21
     container_name: miner
@@ -362,6 +367,9 @@ services:
       bitcoin:
         condition: service_healthy
     entrypoint: ["/bin/sh", "/app/entrypoint.sh"]
+    environment:
+      MINER_INTERVAL: "${MINER_INTERVAL:-1}"
+      MINER_BATCH_SIZE: "${MINER_BATCH_SIZE:-1}"
     volumes:
       - ./docker/miner-entrypoint.sh:/app/entrypoint.sh:ro
     networks:
