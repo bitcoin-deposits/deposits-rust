@@ -46,6 +46,21 @@ pub struct HubState {
     /// page. Keyed by sender pubkey to dedupe rapid retries.
     #[serde(default)]
     pub pending: HashMap<String, PendingRegistration>,
+
+    /// Stable index per hub-spawned signer name, used to derive the
+    /// signer's seed from `hub-master-seed` via `m/89'/<index>'`.
+    /// Recovery: restore the master seed file, look up the name's
+    /// index here, re-derive — no per-signer backup needed.
+    #[serde(default)]
+    pub signer_indexes: HashMap<String, u32>,
+
+    /// Next index to allocate when a fresh name is spawned. Persisted
+    /// so re-spawning an already-allocated name re-uses its index
+    /// (idempotency) and a *new* name gets a never-before-used slot
+    /// even if some entries above it have been removed from
+    /// `signer_indexes`.
+    #[serde(default)]
+    pub next_signer_index: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +234,98 @@ impl HubState {
     pub fn nostr_secret_path(dir: &Path) -> PathBuf {
         dir.join("hub-nostr-secret")
     }
+
+    /// Path to the hub-wide master seed used to derive every
+    /// hub-spawned signer's seed deterministically. One file to back
+    /// up; restoring it + `hub.json` re-derives every spawned
+    /// signer's identity.
+    pub fn master_seed_path(dir: &Path) -> PathBuf {
+        dir.join("hub-master-seed")
+    }
+
+    /// Load `<dir>/hub-master-seed`, generating a fresh 32-byte seed
+    /// (mode 0600) on first use. Lazy — only called when a spawn
+    /// actually needs to derive.
+    pub fn load_or_init_master_seed(dir: &Path) -> Result<[u8; 32], StateError> {
+        let path = Self::master_seed_path(dir);
+        if path.exists() {
+            let raw = std::fs::read_to_string(&path)?;
+            let bytes = hex::decode(raw.trim())
+                .map_err(|e| StateError::Hex(format!("master seed: {}", e)))?;
+            if bytes.len() != 32 {
+                return Err(StateError::BadKeyLen(bytes.len()));
+            }
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&bytes);
+            return Ok(out);
+        }
+        use bitcoin::secp256k1::rand::rngs::OsRng;
+        use bitcoin::secp256k1::rand::RngCore;
+        let mut seed = [0u8; 32];
+        OsRng.fill_bytes(&mut seed);
+        std::fs::write(&path, hex::encode(seed))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path)?.permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(&path, perms)?;
+        }
+        tracing::warn!(
+            "hub: generated new master seed at {} — back this file up; \
+             losing it means losing every hub-spawned signer's keys",
+            path.display()
+        );
+        Ok(seed)
+    }
+
+    /// Look up or assign the BIP-32 derivation index for a signer
+    /// name. Idempotent: same name always returns the same index, even
+    /// after restart. New names get the current `next_signer_index`
+    /// which is then bumped + persisted.
+    pub fn signer_index_for(
+        &mut self,
+        name: &str,
+        dir: &Path,
+    ) -> Result<u32, StateError> {
+        if let Some(&i) = self.signer_indexes.get(name) {
+            return Ok(i);
+        }
+        let i = self.next_signer_index;
+        self.signer_indexes.insert(name.to_string(), i);
+        self.next_signer_index = i.checked_add(1).unwrap_or(u32::MAX);
+        self.save(dir)?;
+        Ok(i)
+    }
+}
+
+/// Derive a signer seed deterministically from the hub master at
+/// `m/89'/<index>'`. Returns the 32-byte secret key of the derived
+/// xpriv, which the spawned signer uses as its operator/nostr-key
+/// root (the same shape as a fresh random seed). Re-derivable from
+/// just `(master, index)` — that's what makes one backup recover N
+/// signers.
+///
+/// 89 is intentionally outside any registered BIP purpose so the
+/// derivation tree doesn't collide with operator-protocol keys (which
+/// use 85/86 under each signer's own seed).
+pub fn derive_signer_seed(master: &[u8; 32], index: u32) -> Result<[u8; 32], StateError> {
+    use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv};
+    use bitcoin::secp256k1::Secp256k1;
+    use bitcoin::Network;
+
+    let secp = Secp256k1::new();
+    let xpriv = Xpriv::new_master(Network::Bitcoin, master)
+        .map_err(|e| StateError::Hex(format!("master xpriv: {}", e)))?;
+    let path = DerivationPath::from(vec![
+        ChildNumber::from_hardened_idx(89).expect("89 fits"),
+        ChildNumber::from_hardened_idx(index)
+            .map_err(|e| StateError::Hex(format!("index hardened: {}", e)))?,
+    ]);
+    let child = xpriv
+        .derive_priv(&secp, &path)
+        .map_err(|e| StateError::Hex(format!("derive child: {}", e)))?;
+    Ok(child.private_key.secret_bytes())
 }
 
 #[cfg(test)]
@@ -240,6 +347,38 @@ mod tests {
         // Reload should give the same pubkey.
         let s2 = HubState::load_or_init(tmp.path()).unwrap();
         assert_eq!(s1.hub_pubkey, s2.hub_pubkey);
+    }
+
+    #[test]
+    fn derive_signer_seed_is_deterministic() {
+        let master = [0x42u8; 32];
+        let a0 = derive_signer_seed(&master, 0).unwrap();
+        let a1 = derive_signer_seed(&master, 1).unwrap();
+        // Same input → same output.
+        assert_eq!(a0, derive_signer_seed(&master, 0).unwrap());
+        // Different index → different bytes (otherwise the whole
+        // point of indexed derivation is moot).
+        assert_ne!(a0, a1);
+        // Different master → different output.
+        let other = [0x99u8; 32];
+        assert_ne!(a0, derive_signer_seed(&other, 0).unwrap());
+    }
+
+    #[test]
+    fn signer_index_for_is_stable_and_increments() {
+        let tmp = TempDir::new().unwrap();
+        let mut s = HubState::load_or_init(tmp.path()).unwrap();
+        let alice = s.signer_index_for("alice", tmp.path()).unwrap();
+        let bob = s.signer_index_for("bob", tmp.path()).unwrap();
+        assert_eq!(alice, 0);
+        assert_eq!(bob, 1);
+        // Re-asking returns the same index — survives a reload.
+        let s2 = HubState::load_or_init(tmp.path()).unwrap();
+        let mut s2 = s2;
+        assert_eq!(s2.signer_index_for("alice", tmp.path()).unwrap(), 0);
+        assert_eq!(s2.signer_index_for("bob", tmp.path()).unwrap(), 1);
+        // New name continues the sequence (doesn't reuse alice/bob slots).
+        assert_eq!(s2.signer_index_for("carol", tmp.path()).unwrap(), 2);
     }
 
     #[test]

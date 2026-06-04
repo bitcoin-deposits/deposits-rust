@@ -164,6 +164,50 @@ fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
     Ok(out)
 }
 
+/// Decide what seed the spawned signer should use.
+///
+///   * If the operator passed `--seed <hex>`, honor it verbatim
+///     (existing harness/test path).
+///   * Otherwise derive from the hub master + a stable per-name index
+///     allocated in hub.json. One master backup recovers every
+///     hub-spawned signer.
+///
+/// Returns `None` only if the workspace already exists — in that case
+/// `Spawner::ensure_initialized_with_seed` is a no-op and the
+/// pre-existing on-disk seed is reused regardless. (We never overwrite
+/// a workspace's seed, to preserve the signer's nostr identity.)
+fn derive_seed_if_unspecified(
+    data_dir: &PathBuf,
+    state: &mut deposits_hub::state::HubState,
+    name: &str,
+    explicit: Option<[u8; 32]>,
+) -> Result<Option<[u8; 32]>, String> {
+    if explicit.is_some() {
+        return Ok(explicit);
+    }
+    // Skip derivation if the workspace's seed already exists — the
+    // signer's identity is locked in and re-deriving would either
+    // be a no-op (ensure_initialized doesn't overwrite) or, worse,
+    // mislead the operator about which key is in effect.
+    let ws = deposits_hub::spawn::Workspace::for_name(data_dir, name);
+    if ws.data_dir.join("seed").exists() {
+        return Ok(None);
+    }
+    let master = deposits_hub::state::HubState::load_or_init_master_seed(data_dir)
+        .map_err(|e| format!("master seed: {}", e))?;
+    let index = state
+        .signer_index_for(name, data_dir)
+        .map_err(|e| format!("allocate signer index: {}", e))?;
+    let seed = deposits_hub::state::derive_signer_seed(&master, index)
+        .map_err(|e| format!("derive signer seed: {}", e))?;
+    tracing::info!(
+        "hub: derived seed for signer '{}' from master at m/89'/{}'",
+        name,
+        index
+    );
+    Ok(Some(seed))
+}
+
 fn parse_seed_arg(s: Option<&str>) -> Result<Option<[u8; 32]>, String> {
     let Some(hex_str) = s else { return Ok(None) };
     let bytes = hex::decode(hex_str.trim())
@@ -463,7 +507,7 @@ fn cmd_spawn_line(args: &[String]) -> Result<(), String> {
     }
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("create data dir {}: {}", data_dir.display(), e))?;
-    let state = deposits_hub::state::HubState::load_or_init(&data_dir)
+    let mut state = deposits_hub::state::HubState::load_or_init(&data_dir)
         .map_err(|e| format!("hub state: {}", e))?;
 
     // First-time initialization (seed + signer data-dir) so the
@@ -477,8 +521,13 @@ fn cmd_spawn_line(args: &[String]) -> Result<(), String> {
         .build()
         .map_err(|e| format!("tokio runtime: {}", e))?;
     let seed_bytes = parse_seed_arg(c.seed.as_deref())?;
+    // If --seed wasn't provided, derive deterministically from the
+    // hub master + a stable per-name index. Operator backs up
+    // `hub-master-seed` once; recovery only needs that file + the
+    // `signer_indexes` map in hub.json.
+    let effective_seed = derive_seed_if_unspecified(&data_dir, &mut state, &name, seed_bytes)?;
     let ws = rt
-        .block_on(spawner.ensure_initialized_with_seed(&data_dir, &name, seed_bytes))
+        .block_on(spawner.ensure_initialized_with_seed(&data_dir, &name, effective_seed))
         .map_err(|e| format!("init signer workspace: {}", e))?;
 
     let transport_pk = std::fs::read_to_string(ws.data_dir.join("transport_pubkey"))
@@ -521,11 +570,12 @@ fn cmd_spawn(args: &[String]) -> Result<(), String> {
     }
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("create data dir {}: {}", data_dir.display(), e))?;
-    let state = deposits_hub::state::HubState::load_or_init(&data_dir)
+    let mut state = deposits_hub::state::HubState::load_or_init(&data_dir)
         .map_err(|e| format!("hub state: {}", e))?;
     let spawner = deposits_hub::spawn::Spawner::new(state.hub_pubkey_hex().to_string(), c.relays);
 
     let seed_bytes = parse_seed_arg(c.seed.as_deref())?;
+    let effective_seed = derive_seed_if_unspecified(&data_dir, &mut state, &name, seed_bytes)?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -533,7 +583,7 @@ fn cmd_spawn(args: &[String]) -> Result<(), String> {
     rt.block_on(async move {
         // ensure_initialized first so we can honor --seed; then spawn.
         spawner
-            .ensure_initialized_with_seed(&data_dir, &name, seed_bytes)
+            .ensure_initialized_with_seed(&data_dir, &name, effective_seed)
             .await
             .map_err(|e| format!("init signer workspace: {}", e))?;
         let handle = spawner

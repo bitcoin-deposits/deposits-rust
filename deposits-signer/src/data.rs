@@ -71,8 +71,15 @@ impl DataDir {
         self.transport_secret_path().exists()
     }
 
-    /// Generate a new transport keypair and write the data-dir scaffolding.
-    /// Optionally seed-import in the same call.
+    /// Generate (or derive) the transport keypair and write the
+    /// data-dir scaffolding. Optionally seed-import in the same call.
+    ///
+    /// When a seed is provided, the transport key is **derived** from
+    /// it at `m/87'/0'/0'/0/0` — sibling to operator (m/86') and nostr
+    /// (m/85'). This makes the entire data-dir state reproducible from
+    /// just the seed, which is what enables the hub's
+    /// `hub-master-seed → single backup` story. Without a seed, falls
+    /// back to a fresh random transport key.
     pub fn init(&self, seed: Option<&[u8; 32]>) -> Result<TransportKey, DataError> {
         if self.is_initialized() {
             return Err(DataError::AlreadyInitialized(self.root.clone()));
@@ -82,7 +89,10 @@ impl DataDir {
             fs::create_dir_all(&self.root)?;
         }
 
-        let transport = TransportKey::random();
+        let transport = match seed {
+            Some(s) => derive_transport_from_seed(s)?,
+            None => TransportKey::random(),
+        };
         write_secret(&self.transport_secret_path(), &hex::encode(transport.secret_bytes()))?;
         write_public(
             &self.transport_pubkey_path(),
@@ -197,6 +207,22 @@ impl DataDir {
         write_public(&self.allowlist_path(), &(body + "\n"))?;
         Ok(true)
     }
+}
+
+/// Derive the transport keypair from the operator seed at
+/// `m/87'/0'/0'/0/0`. Deterministic; lets the hub reproduce a spawned
+/// signer's entire data-dir (seed + transport) from one master backup.
+pub fn derive_transport_from_seed(seed: &[u8; 32]) -> Result<TransportKey, DataError> {
+    let secp = Secp256k1::new();
+    let xpriv = Xpriv::new_master(Network::Bitcoin, seed)
+        .map_err(|e| DataError::Key(format!("xpriv: {}", e)))?;
+    let path = DerivationPath::from_str("m/87'/0'/0'/0/0")
+        .map_err(|e| DataError::Key(format!("transport path: {}", e)))?;
+    let sk = xpriv
+        .derive_priv(&secp, &path)
+        .map_err(|e| DataError::Key(format!("derive transport: {}", e)))?
+        .private_key;
+    Ok(TransportKey::from_secret(sk))
 }
 
 /// Free function so callers (the binary's `run` subcommand, tests) can use
