@@ -76,16 +76,20 @@ fn auto_dispute_fires_when_quorum_expires() {
         let _txid = fund_operator_key_address(op_idx, 10_000);
     }
 
-    // ── 2b. Mine past expiry ──
-    // Mine just enough to land ~100 blocks past `quorum_expiry`. On a
-    // freshly-set-up cluster that's ~1100 blocks; on a re-used cluster
-    // where the chain is already at or near expiry, it can be a handful
-    // — bitcoind under load with 10 daemon subscribers mines ~30
-    // blocks/min, so over-mining adds real wall-clock cost. Floor of
-    // 100 blocks ensures we always trigger at least one fresh esplora
-    // poll on every daemon, so they see the new tip.
+    // ── 2b. Mine past the auto-dispute grace window ──
+    // Production daemons hold off auto-dispute for
+    // `DEPOSITS_AUTO_DISPUTE_GRACE_BLOCKS` (default 720) past
+    // `quorum_expiry`, to give the operator the post-expiry Tier-0
+    // window to self-rescue via `quorum repair` before partner
+    // cosigners race to confiscate (see deposits-node/src/node/dispute.rs
+    // ::DEFAULT_GRACE_BLOCKS). The test was originally written with
+    // `+100` blocks past expiry — fine before the grace period landed,
+    // a guaranteed timeout afterward. `+800` clears the grace window
+    // with a comfortable 80-block margin. On a fresh chain that's
+    // ~30s of additional mining; on an old/bloated chain it's
+    // proportionally slower but still finite.
     let current_height = current_block_height();
-    let target = quorum_expiry + 100;
+    let target = quorum_expiry + 720 + 80;
     let to_mine = if current_height >= target {
         100
     } else {
