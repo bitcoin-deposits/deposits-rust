@@ -51,6 +51,31 @@ log_warn() { echo -e "${RED}[WARN]${NC} $*"; }
 # Config
 # ============================================================================
 
+# --fresh / --reset-chain → wipe bitcoind + electrs data volumes
+# before doing anything else. Useful after a long-running cluster has
+# accumulated 100K+ blocks, which makes `generatetoaddress` take many
+# seconds per call; lifecycle / confiscation tests that need to mine
+# the 720-block auto-dispute grace window then take minutes instead
+# of tens of minutes.
+#
+# Effect: every regtest pubkey ever derived stays the same (BIP-32
+# from operator seeds), but on-chain history is gone. Existing
+# operator wallets re-sync to the empty chain, ledger state in
+# DATA_ROOT/op* is wiped along with the daemons that owned it.
+FRESH=0
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --fresh|--reset-chain)
+            FRESH=1
+            ;;
+        *)
+            ARGS+=("$arg")
+            ;;
+    esac
+done
+set -- "${ARGS[@]}"
+
 Q="${1:-5}"
 NODE_COUNT=$((3 * Q + 1))
 LEDGERS_PER_OP="${LEDGERS_PER_OP:-3}"
@@ -391,6 +416,40 @@ stop_hub
 stop_relays
 rm -rf "$DATA_ROOT"
 mkdir -p "$DATA_ROOT" "$STATE_DIR"
+
+if [ "$FRESH" = "1" ]; then
+    # Wipe bitcoind + electrs chain state. Daemons + relays already
+    # stopped above. docker compose down --volumes targets only the
+    # bitcoind/electrs/miner stack (their volumes are named after the
+    # compose project, deposits-tools_*). After this, bitcoind comes
+    # back with an empty regtest chain — generatetoaddress drops from
+    # ~0.7 blocks/s back to ~hundreds of blocks/s, which makes
+    # auto-dispute / confiscation tests practical again.
+    log_info "[fresh] resetting bitcoind + electrs state (chain reset)"
+    pushd "$TOOLS_DIR" >/dev/null
+    docker compose stop bitcoin miner electrs >/dev/null 2>&1 || true
+    docker compose rm -f bitcoin miner electrs >/dev/null 2>&1 || true
+    # Wipe the named volumes. `down -v` would also kill prometheus/grafana
+    # state, which we want to keep — so target the chain volumes
+    # explicitly. Volume names follow `<project>_<service>_data` where
+    # <project> = the directory basename ("deposits-tools").
+    docker volume rm -f deposits-tools_bitcoin_data deposits-tools_electrs_data >/dev/null 2>&1 || true
+    docker compose up -d bitcoin >/dev/null 2>&1
+    # Wait for bitcoind RPC to be ready (healthcheck takes a few seconds).
+    fresh_waited=0
+    until bitcoin_cli getblockchaininfo >/dev/null 2>&1; do
+        sleep 1
+        fresh_waited=$((fresh_waited + 1))
+        if [ "$fresh_waited" -ge 30 ]; then
+            log_warn "[fresh] bitcoind RPC didn't come back within 30s — continuing anyway"
+            break
+        fi
+    done
+    docker compose up -d miner electrs >/dev/null 2>&1
+    popd >/dev/null
+    log_ok "[fresh] bitcoind + electrs at empty regtest chain"
+fi
+
 start_relays
 start_hub
 
