@@ -100,8 +100,13 @@ fn auto_dispute_fires_when_quorum_expires() {
         current_height, quorum_expiry, target, to_mine
     );
     mine_blocks(to_mine);
-    // Give the daemons a beat to sync the new blocks via esplora.
-    std::thread::sleep(Duration::from_secs(5));
+    // Wait for cosigner daemons to catch up. With +800 blocks and the
+    // typical fast-poll interval, fixed-sleep was too short. Poll
+    // every daemon's chain_tip via /api/lifecycle until they're past
+    // the target.
+    for op_idx in 0..10 {
+        wait_for_daemon_chain_tip(op_idx, target, Duration::from_secs(120));
+    }
 
     // ── 3. Wait for fork-branch DisputeEnter to appear on some op's
     //       data dir, carrying valid anchor evidence ──

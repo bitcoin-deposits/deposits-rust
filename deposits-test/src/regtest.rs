@@ -610,6 +610,53 @@ pub fn fund_operator_key_address(op_idx: usize, amount_sats: u64) -> bitcoin::Tx
 /// Query bitcoind for the current best-chain block height. Useful for
 /// tests that want to mine a relative number of blocks ("100 past the
 /// quorum's expiry") without over-mining on a re-used cluster.
+/// Block until daemon op_idx's view of the chain tip catches up to
+/// at least `target_height` (i.e. it has applied that many blocks via
+/// esplora). Returns the daemon's tip on success; panics on timeout.
+/// Used after `mine_blocks` for large N (~hundreds) — esplora indexing
+/// + the daemon's BDK wallet processing add real wall-clock time, and
+/// a fixed sleep is unreliable.
+///
+/// The /api/lifecycle endpoint reports chain_tip per ledger; using
+/// any one ledger's view suffices for "the daemon's wallet has
+/// caught up".
+pub fn wait_for_daemon_chain_tip(op_idx: usize, target_height: u32, timeout: Duration) -> u32 {
+    let token_path = op_data_dir(op_idx).join("admin-token");
+    let token = std::fs::read_to_string(&token_path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let url = format!("http://127.0.0.1:{}/api/lifecycle", 8765 + op_idx);
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_tip = 0u32;
+    while std::time::Instant::now() < deadline {
+        let out = Command::new("curl")
+            .args(["-s", "-H", &format!("Authorization: Bearer {}", token), &url])
+            .output();
+        if let Ok(out) = out {
+            let body = String::from_utf8_lossy(&out.stdout);
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                if let Some(arr) = v.as_array() {
+                    for entry in arr {
+                        if let Some(tip) = entry.get("chain_tip").and_then(|x| x.as_u64()) {
+                            last_tip = tip as u32;
+                            if last_tip >= target_height {
+                                return last_tip;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    panic!(
+        "daemon op{}'s chain_tip ({}) never reached target {} within {:?} — \
+         esplora/BDK sync stalled or admin API not responding",
+        op_idx, last_tip, target_height, timeout
+    );
+}
+
 pub fn current_block_height() -> u32 {
     let out = Command::new("docker")
         .args([
@@ -1031,10 +1078,31 @@ pub fn spawn_op0(extra_env: &[(&str, &str)]) {
 /// Discover op0's ledger id via `deposits-wallet discover --json`.
 /// Returns the first op0-owned ledger whose on-disk history actually
 /// contains a committed `QuorumBegin` — i.e., the quorum is active.
-/// Phase 4 of `setup.sh` is racy and may leave 1-3 of op0's ledgers
-/// stuck in the staged state; picking one of those would panic the
-/// caller looking for `quorum_expiry`.
+/// Polls for up to 30s if no ledger is yet activated: setup.sh's
+/// phase-4 prints "Quorums active" based on the operator-side
+/// publish, but op0's local daemon may need a few seconds to ingest
+/// its own QuorumBegin from the relay (esp. right after
+/// `setup.sh --fresh` returns). Earlier "fallback" path silently
+/// returned a still-staged ledger, causing the caller to panic on
+/// "ledger has no QuorumBegin" — fail loud instead.
 pub fn discover_op0_ledger() -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(id) = discover_op0_ledger_once() {
+            return id;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "no op0 ledger had a QuorumBegin in op0's local history within 30s — \
+                 daemon may be still ingesting from the relay (setup.sh --fresh just \
+                 returned?), or quorum-begin failed for every op0 ledger"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn discover_op0_ledger_once() -> Option<String> {
     use deposits_core::messages::LedgerOperation;
     use deposits_core::tlv::TlvDecode;
 
@@ -1048,7 +1116,6 @@ pub fn discover_op0_ledger() -> String {
         .expect("discover failed");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let op0_data_dir = op0_data_dir();
-    let mut fallback: Option<String> = None;
     for line in stdout.lines() {
         let v: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
@@ -1064,12 +1131,9 @@ pub fn discover_op0_ledger() -> String {
             .and_then(|x| x.as_str())
             .unwrap()
             .to_string();
-        if fallback.is_none() {
-            fallback = Some(ledger_id.clone());
-        }
-        // Inspect the local jsonl for a QuorumBegin operation. If
-        // present, this ledger is activated and usable; otherwise
-        // it's still staged and would fail downstream.
+        // Inspect the local jsonl for a QuorumBegin. If present, the
+        // quorum is activated and usable. If not on this iteration,
+        // the outer loop polls.
         let history = read_ledger_history(&op0_data_dir, &ledger_id);
         let has_quorum_begin = history.iter().any(|u| {
             matches!(
@@ -1078,10 +1142,10 @@ pub fn discover_op0_ledger() -> String {
             )
         });
         if has_quorum_begin {
-            return ledger_id;
+            return Some(ledger_id);
         }
     }
-    fallback.expect("couldn't find a ledger owned by op0")
+    None
 }
 
 /// Run `deposits-wallet open` with the given args. Returns combined

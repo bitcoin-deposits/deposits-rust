@@ -110,8 +110,13 @@ fn quorum_repair_succeeds_at_tier0_post_expiry() {
         current, target, to_mine
     );
     mine_blocks(to_mine);
-    // Let daemons sync the new tip.
-    std::thread::sleep(Duration::from_secs(5));
+    // Wait for op0's daemon to actually catch up — esplora + BDK
+    // wallet processing for several hundred blocks takes longer
+    // than a fixed 5s sleep. Without this, `quorum repair` later
+    // sees wallet balance = 0 and rejects with "insufficient ledger
+    // wallet balance".
+    let observed_tip = wait_for_daemon_chain_tip(0, target, Duration::from_secs(60));
+    eprintln!("[sync]  op0 daemon caught up to tip={}", observed_tip);
 
     // ── 3. Sanity: no fork-branch DisputeEnter for this ledger ──
     // Grace prevents auto-dispute until chain_tip >= expiry+720;
@@ -326,6 +331,8 @@ fn auto_quorum_refresh_self_rescues_past_expiry() {
         current, target, to_mine
     );
     mine_blocks(to_mine);
+    let observed_tip = wait_for_daemon_chain_tip(0, target, Duration::from_secs(60));
+    eprintln!("[sync]  op0 daemon caught up to tip={}", observed_tip);
 
     // ── Wait for the daemon's auto_quorum_refresh to land a new QuorumBegin ──
     // auto_tasks periodic cycle is ~10s with --fast-poll, so a 120s
