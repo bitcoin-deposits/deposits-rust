@@ -94,12 +94,15 @@ impl App {
         let _guard = TermGuard::enter().map_err(|e| format!("enter tty: {}", e))?;
         let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))
             .map_err(|e| format!("terminal: {}", e))?;
-        // Force a full repaint at the current size. Without this, the
-        // first frame sometimes renders with a stale size (or into the
-        // pre-alt-screen buffer) — observable as garbled chrome until
-        // the operator resizes the window, which fires a Resize event
-        // that ratatui's autoresize picks up. Clearing here is the
-        // standard workaround across SSH / tmux / mosh stacks.
+        // EnterAlternateScreen sends ESC[?1049h, but real terminals
+        // (especially over SSH/tmux/mosh) switch buffers asynchronously
+        // — if our clear() lands before the swap takes effect, we end
+        // up clearing the primary screen while subsequent draws hit
+        // the alt buffer with whatever stale content was already there
+        // (typically a previous TUI's last frame, which the alt buffer
+        // is not blanked between sessions). 50ms is enough margin for
+        // any sane terminal; invisible to the operator.
+        tokio::time::sleep(Duration::from_millis(50)).await;
         terminal
             .clear()
             .map_err(|e| format!("terminal clear: {}", e))?;
@@ -124,6 +127,14 @@ impl App {
                 maybe_evt = events.next() => {
                     match maybe_evt {
                         Some(Ok(Event::Key(k))) if k.kind == KeyEventKind::Press => {
+                            // Ctrl-L: force-redraw escape hatch. Same
+                            // semantics as in vim/less/htop — operator
+                            // can rescue a garbled screen without
+                            // having to drag the window border.
+                            if k.code == KeyCode::Char('l') && k.modifiers == KeyModifiers::CONTROL {
+                                let _ = terminal.clear();
+                                continue;
+                            }
                             if self.handle_key(k).await {
                                 return Ok(());
                             }
@@ -346,8 +357,8 @@ impl App {
 
         // Status line
         let hint = match self.tab {
-            Tab::Dashboard => "[1]ashboard  [2]ending  [Tab] switch  [q] quit",
-            Tab::Pending => "[a] approve  [x] reject  [j/k] move  [Tab] switch  [q] quit",
+            Tab::Dashboard => "[1]ashboard  [2]ending  [Tab] switch  [^L] redraw  [q] quit",
+            Tab::Pending => "[a] approve  [x] reject  [j/k] move  [Tab] switch  [^L] redraw  [q] quit",
         };
         let body = match &self.flash {
             Some(msg) => format!("{}    │    {}", msg, hint),
