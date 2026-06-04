@@ -61,6 +61,12 @@ pub struct SignerRecord {
     pub registered_at: u64,
     /// Semver of the signer binary at the most recent registration.
     pub last_version: String,
+    /// Signer's transport pubkey (the value daemons pass as
+    /// `--signer-pubkey`). Stored at approval time so the dashboard
+    /// can resolve `NodeRecord.signer_pubkey → SignerRecord.label`.
+    /// Empty string for signers approved before this field existed.
+    #[serde(default)]
+    pub transport_pubkey: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +96,11 @@ pub struct PendingRegistration {
     /// Most recent retry time. Helps the operator decide if a peer is
     /// still actively trying or has given up.
     pub last_seen: u64,
+    /// Nodes only: signer transport pubkey the node declared. Carried
+    /// from `HubMessage::Register::signer_pubkey` to `NodeRecord`
+    /// on approval.
+    #[serde(default)]
+    pub signer_pubkey: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -242,6 +253,7 @@ mod tests {
                 spawned_by_hub: true,
                 registered_at: 1_000_000,
                 last_version: "0.1.0".to_string(),
+                transport_pubkey: "02deadbeef".to_string(),
             },
         );
         s.save(tmp.path()).unwrap();

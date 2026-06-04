@@ -34,19 +34,31 @@ pub fn ingest_register(
     identity_pubkey: String,
     version: String,
     label: Option<String>,
+    signer_pubkey: Option<String>,
 ) -> Result<bool, String> {
     let already = match role {
         Role::Signer => state.signers.contains_key(sender_pk),
         Role::Node => state.nodes.contains_key(sender_pk),
     };
     if already {
+        // Re-Register from an already-approved node may carry a fresh
+        // signer_pubkey (operator paired the node with a new signer
+        // and restarted the daemon). Keep the inventory in sync.
+        if matches!(role, Role::Node) {
+            if let Some(node) = state.nodes.get_mut(sender_pk) {
+                if node.signer_pubkey != signer_pubkey {
+                    node.signer_pubkey = signer_pubkey;
+                    state.save(data_dir).map_err(|e| format!("save: {}", e))?;
+                }
+            }
+        }
         return Ok(true);
     }
     let now = unix_secs();
-    let pending_key = pending_key(role, sender_pk);
+    let pkey = pending_key(role, sender_pk);
     let entry = state
         .pending
-        .entry(pending_key)
+        .entry(pkey)
         .or_insert_with(|| PendingRegistration {
             role,
             identity_pubkey: identity_pubkey.clone(),
@@ -54,11 +66,18 @@ pub fn ingest_register(
             version: version.clone(),
             first_seen: now,
             last_seen: now,
+            signer_pubkey: signer_pubkey.clone(),
         });
     entry.last_seen = now;
     entry.version = version;
     if entry.suggested_label.is_none() {
         entry.suggested_label = label;
+    }
+    // Pin/refresh signer_pubkey on the pending entry too — a node
+    // that restarts with a different signer before being approved
+    // should reflect the new pairing.
+    if matches!(role, Role::Node) {
+        entry.signer_pubkey = signer_pubkey;
     }
     state.save(data_dir).map_err(|e| format!("save: {}", e))?;
     Ok(false)
@@ -111,6 +130,7 @@ pub fn approve(
                     spawned_by_hub: false,
                     registered_at: now,
                     last_version: entry.version.clone(),
+                    transport_pubkey: entry.identity_pubkey.clone(),
                 },
             );
         }
@@ -122,7 +142,7 @@ pub fn approve(
                     spawned_by_hub: false,
                     registered_at: now,
                     last_version: entry.version.clone(),
-                    signer_pubkey: None,
+                    signer_pubkey: entry.signer_pubkey.clone(),
                 },
             );
         }

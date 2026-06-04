@@ -38,12 +38,17 @@ const REREGISTER_INTERVAL: Duration = Duration::from_secs(300);
 ///     hub keys the node entry by in `hub.json`.
 ///   * `label` — operator-friendly name, defaults to the operator's
 ///     `--name` flag if set, else `None` (hub uses a short-pk fallback).
+///   * `signer_pubkey_hex` — transport pk of the `deposits-signer`
+///     this daemon is paired with (its `--signer-pubkey`), or `None`
+///     if running with an in-process LocalSigner. Hub stores it on
+///     approval so the dashboard can resolve each node's signer.
 pub async fn run(
     nostr_secret_hex: String,
     hub_pubkey_hex: String,
     relays: Vec<String>,
     operator_pubkey_hex: String,
     label: Option<String>,
+    signer_pubkey_hex: Option<String>,
 ) -> Result<(), String> {
     let transport = HubTransport::connect(&nostr_secret_hex, &relays)
         .await
@@ -65,6 +70,7 @@ pub async fn run(
         identity_pubkey: operator_pubkey_hex.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         label,
+        signer_pubkey: signer_pubkey_hex,
     };
     if let Err(e) = transport.send(&hub_pubkey_hex, register.clone()).await {
         tracing::warn!("hub register send: {}", e);

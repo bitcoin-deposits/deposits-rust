@@ -51,6 +51,12 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let hub_seed = config.seed;
     let hub_network = config.network;
     let hub_label = config.operator_name.clone();
+    // Signer transport pk (if any) — sent in the Node Register so the
+    // hub can render which signer this daemon is paired with.
+    let hub_signer_pk = config
+        .signer
+        .as_ref()
+        .map(|s| hex::encode(s.signer_pubkey.serialize()));
 
     // Initialize metrics if port specified
     if let Some(port) = metrics_port {
@@ -142,6 +148,7 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                         hc.relays,
                         op_pk_hex,
                         hub_label,
+                        hub_signer_pk,
                     )
                     .await
                     {

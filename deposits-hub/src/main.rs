@@ -313,10 +313,10 @@ async fn run_headless(
                 };
                 let from = inbound.from.to_hex();
                 match inbound.msg {
-                    HubMessage::Register { role, identity_pubkey, version, label } => {
+                    HubMessage::Register { role, identity_pubkey, version, label, signer_pubkey } => {
                         let mut st = state.lock().await;
                         match control::ingest_register(
-                            &mut st, &data_dir, &from, role, identity_pubkey, version, label,
+                            &mut st, &data_dir, &from, role, identity_pubkey, version, label, signer_pubkey,
                         ) {
                             Ok(true) => {
                                 drop(st);
@@ -325,7 +325,11 @@ async fn run_headless(
                             Ok(false) => {
                                 if auto_approve {
                                     // Promote pending → signers/nodes immediately + ack.
-                                    let label = match control::approve(&mut st, &data_dir, &from, None) {
+                                    // Use the role-scoped pending key so a signer+node
+                                    // pair from the same operator (same nostr identity)
+                                    // doesn't disambiguation-fail under approve().
+                                    let pkey = control::pending_key(role, &from);
+                                    let label = match control::approve(&mut st, &data_dir, &pkey, None) {
                                         Ok(l) => l,
                                         Err(e) => {
                                             tracing::warn!("auto-approve: {}", e);

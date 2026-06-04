@@ -247,6 +247,14 @@ async fn signer_registers_then_gets_approved() {
     .expect("approve never updated hub.json within 15s");
     let rec = approved_state.signers.get(&signer_nostr_pk).unwrap();
     assert_eq!(rec.label, "smoke-signer");
+    // Signer's transport pubkey should round-trip from Register
+    // through approve into SignerRecord — otherwise the TUI can't
+    // resolve `node.signer_pubkey → signer.label`.
+    assert!(
+        !rec.transport_pubkey.is_empty(),
+        "SignerRecord.transport_pubkey should be populated post-approve"
+    );
+    assert_eq!(rec.transport_pubkey.len(), 66, "expected 33-byte hex");
     assert!(!rec.last_version.is_empty());
 
     // Signer should still be alive (an accepted ack means Heartbeat

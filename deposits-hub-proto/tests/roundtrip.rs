@@ -51,6 +51,7 @@ async fn register_and_ack_round_trip() {
         identity_pubkey: "02deadbeef".repeat(6).chars().take(66).collect(),
         version: "0.1.0-test".to_string(),
         label: Some("test-signer".to_string()),
+        signer_pubkey: None,
     };
     signer
         .send(&hub_pk_hex, register.clone())

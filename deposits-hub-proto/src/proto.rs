@@ -62,6 +62,13 @@ pub enum HubMessage {
         /// can override in the TUI). Limited to 64 chars on accept.
         #[serde(default)]
         label: Option<String>,
+        /// Nodes only: transport pubkey of the `deposits-signer` this
+        /// daemon is paired with (its `--signer-pubkey` value). The
+        /// hub stores it on approval so the dashboard can resolve each
+        /// node's signer label. `None` for nodes using LocalSigner
+        /// (in-process) and always `None` for Role::Signer registrations.
+        #[serde(default)]
+        signer_pubkey: Option<String>,
     },
     /// Hub's response to a Register. `accepted = false` means the
     /// operator hasn't approved (or rejected) yet — peer should keep
@@ -133,6 +140,7 @@ mod tests {
             identity_pubkey: "0299aabbcc".repeat(6).chars().take(66).collect(),
             version: "0.1.0".to_string(),
             label: Some("test-signer".to_string()),
+            signer_pubkey: None,
         };
         let s = serde_json::to_string(&m).unwrap();
         assert!(s.contains("\"type\":\"register\""));

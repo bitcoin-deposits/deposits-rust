@@ -62,6 +62,7 @@ pub async fn run(
         identity_pubkey: transport_pubkey_hex.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         label,
+        signer_pubkey: None, // meaningless for Role::Signer
     };
     if let Err(e) = transport.send(&hub_pubkey_hex, register.clone()).await {
         tracing::warn!("hub register send: {}", e);

@@ -240,6 +240,7 @@ impl App {
                 identity_pubkey,
                 version,
                 label,
+                signer_pubkey,
             } => {
                 let mut st = self.state.lock().await;
                 let already = match crate::control::ingest_register(
@@ -250,6 +251,7 @@ impl App {
                     identity_pubkey,
                     version,
                     label,
+                    signer_pubkey,
                 ) {
                     Ok(a) => a,
                     Err(e) => {
@@ -384,11 +386,19 @@ impl App {
                     .get(pk)
                     .map(|ts| format!("hb {}s ago", now.saturating_sub(*ts)))
                     .unwrap_or_else(|| "(no heartbeat yet)".to_string());
-                let signer = rec
-                    .signer_pubkey
-                    .as_deref()
-                    .map(short_pk)
-                    .unwrap_or_else(|| "(no signer pinned)".to_string());
+                let signer = match rec.signer_pubkey.as_deref() {
+                    None => "local".to_string(),
+                    Some(sig_pk) => {
+                        // Resolve transport pk → signer label by scanning
+                        // the signers map. ~10s of entries, render is
+                        // not hot, no need to build an index.
+                        st.signers
+                            .values()
+                            .find(|s| s.transport_pubkey == sig_pk)
+                            .map(|s| s.label.clone())
+                            .unwrap_or_else(|| short_pk(sig_pk))
+                    }
+                };
                 lines.push(Line::from(format!(
                     "  {:<24} {}  v{}  signer={}  {}",
                     rec.label,
