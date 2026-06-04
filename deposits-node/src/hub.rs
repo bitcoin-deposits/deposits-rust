@@ -155,20 +155,21 @@ fn compute_node_stats(node: &Node) -> NodeStats {
         operator_signature: [0u8; 64],
     };
 
-    let mut ledger_count = 0u32;
-    let mut operator_ledger_count = 0u32;
-    let mut active_ledger_count = 0u32;
+    let mut ledger_count = 0u32; // own (operator)
+    let mut active_ledger_count = 0u32; // own + Tier 0
+    let mut quorum_member_count = 0u32; // partner positions in other ops' ledgers
 
     if let Ok(ledgers) = node.handler.ledgers.lock() {
         for (_id, arc) in ledgers.iter() {
-            ledger_count += 1;
             if let Ok(l) = arc.read() {
                 if l.operator_key() == node.node_id {
-                    operator_ledger_count += 1;
-                }
-                let req = cosign_requirement(&l.state, &probe_op, chain_tip);
-                if matches!(req.tier, LifecycleTier::Tier0) {
-                    active_ledger_count += 1;
+                    ledger_count += 1;
+                    let req = cosign_requirement(&l.state, &probe_op, chain_tip);
+                    if matches!(req.tier, LifecycleTier::Tier0) {
+                        active_ledger_count += 1;
+                    }
+                } else {
+                    quorum_member_count += 1;
                 }
             }
         }
@@ -177,8 +178,8 @@ fn compute_node_stats(node: &Node) -> NodeStats {
     NodeStats {
         wallet_balance_sats,
         ledger_count,
-        operator_ledger_count,
         active_ledger_count,
+        quorum_member_count,
         chain_tip,
     }
 }

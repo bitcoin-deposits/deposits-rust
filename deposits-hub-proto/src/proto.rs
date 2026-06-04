@@ -127,12 +127,19 @@ pub enum HubMessage {
 pub struct NodeStats {
     /// Confirmed wallet balance in satoshis.
     pub wallet_balance_sats: u64,
-    /// Total ledgers this node tracks (operator + partner roles).
+    /// Ledgers this node is the *operator* of — the ones it's
+    /// actually offering. This is the count the operator cares about
+    /// at the dashboard level.
     pub ledger_count: u32,
-    /// Ledgers where this node is the operator (subset of ledger_count).
-    pub operator_ledger_count: u32,
-    /// Ledgers in Tier 0 (active, value-moving allowed).
+    /// Of `ledger_count`, how many are in Tier 0 (active, value-moving
+    /// allowed). Lagging means an own ledger has slipped past quorum
+    /// expiry into the cascade.
     pub active_ledger_count: u32,
+    /// Ledgers where this node is a partner-role quorum member for
+    /// some other operator. Surfaced separately because they're a
+    /// different obligation kind — "people relying on me as a witness"
+    /// rather than "deposits I'm offering."
+    pub quorum_member_count: u32,
     /// Current chain tip height the node observed (informational; lets
     /// the dashboard show "behind by N blocks" if a node lags).
     pub chain_tip: u32,

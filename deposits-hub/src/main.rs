@@ -359,10 +359,10 @@ async fn run_headless(
                     HubMessage::StatusResp { ready, node_stats, .. } => {
                         match node_stats {
                             Some(s) => tracing::info!(
-                                "status from {}: ready={} wallet={:.4}BTC ledgers={} (op={} active={}) tip={}",
+                                "status from {}: ready={} wallet={:.4}BTC ledgers={} active={} quorums={} tip={}",
                                 &from[..16], ready,
                                 (s.wallet_balance_sats as f64) / 100_000_000.0,
-                                s.ledger_count, s.operator_ledger_count, s.active_ledger_count, s.chain_tip,
+                                s.ledger_count, s.active_ledger_count, s.quorum_member_count, s.chain_tip,
                             ),
                             None => tracing::info!("status from {}: ready={}", &from[..16], ready),
                         }

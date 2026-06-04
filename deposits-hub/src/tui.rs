@@ -444,12 +444,20 @@ impl App {
                     .node_stats
                     .get(pk)
                     .map(|s| {
+                        // Only show `active=N` parenthetical when not
+                        // everything's active — keeps the row terse
+                        // for the steady state.
+                        let active_note = if s.active_ledger_count == s.ledger_count {
+                            String::new()
+                        } else {
+                            format!(" (active={})", s.active_ledger_count)
+                        };
                         format!(
-                            "wallet={:.4}BTC  ledgers={} (op={} active={})  tip={}",
+                            "wallet={:.4}BTC  ledgers={}{}  quorums={}  tip={}",
                             (s.wallet_balance_sats as f64) / 100_000_000.0,
                             s.ledger_count,
-                            s.operator_ledger_count,
-                            s.active_ledger_count,
+                            active_note,
+                            s.quorum_member_count,
                             s.chain_tip
                         )
                     })
