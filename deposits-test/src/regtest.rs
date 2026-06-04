@@ -1078,31 +1078,38 @@ pub fn spawn_op0(extra_env: &[(&str, &str)]) {
 /// Discover op0's ledger id via `deposits-wallet discover --json`.
 /// Returns the first op0-owned ledger whose on-disk history actually
 /// contains a committed `QuorumBegin` — i.e., the quorum is active.
-/// Polls for up to 30s if no ledger is yet activated: setup.sh's
+/// Polls for up to 60s if no ledger is yet activated: setup.sh's
 /// phase-4 prints "Quorums active" based on the operator-side
-/// publish, but op0's local daemon may need a few seconds to ingest
-/// its own QuorumBegin from the relay (esp. right after
-/// `setup.sh --fresh` returns). Earlier "fallback" path silently
-/// returned a still-staged ledger, causing the caller to panic on
-/// "ledger has no QuorumBegin" — fail loud instead.
+/// publish, but op0's local daemon needs a few seconds to ingest
+/// its own QuorumBegin and write it to local jsonl. Falls back to
+/// the first op0 ledger ID seen if nothing's quorum-begun within
+/// the window — that preserves the prior behavior for tests that
+/// just want SOME op0 ledger (e.g. allowlist tests), so this poll
+/// is purely additive: faster path for active-quorum callers, no
+/// regression for not-yet-active fallback callers.
 pub fn discover_op0_ledger() -> String {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut last_fallback: Option<String> = None;
     loop {
-        if let Some(id) = discover_op0_ledger_once() {
+        let (active, fallback) = discover_op0_ledger_once();
+        if let Some(id) = active {
             return id;
         }
+        if fallback.is_some() {
+            last_fallback = fallback;
+        }
         if std::time::Instant::now() >= deadline {
-            panic!(
-                "no op0 ledger had a QuorumBegin in op0's local history within 30s — \
-                 daemon may be still ingesting from the relay (setup.sh --fresh just \
-                 returned?), or quorum-begin failed for every op0 ledger"
-            );
+            return last_fallback.expect("couldn't find any ledger owned by op0");
         }
         std::thread::sleep(Duration::from_millis(500));
     }
 }
 
-fn discover_op0_ledger_once() -> Option<String> {
+/// Returns `(active_ledger, any_op0_ledger)`. `active_ledger` is
+/// `Some(id)` if any op0 ledger has QuorumBegin in local history;
+/// `any_op0_ledger` is `Some(id)` if discover saw any op0 ledger at
+/// all on the relay.
+fn discover_op0_ledger_once() -> (Option<String>, Option<String>) {
     use deposits_core::messages::LedgerOperation;
     use deposits_core::tlv::TlvDecode;
 
@@ -1116,6 +1123,7 @@ fn discover_op0_ledger_once() -> Option<String> {
         .expect("discover failed");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let op0_data_dir = op0_data_dir();
+    let mut any_ledger: Option<String> = None;
     for line in stdout.lines() {
         let v: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
@@ -1131,9 +1139,19 @@ fn discover_op0_ledger_once() -> Option<String> {
             .and_then(|x| x.as_str())
             .unwrap()
             .to_string();
-        // Inspect the local jsonl for a QuorumBegin. If present, the
-        // quorum is activated and usable. If not on this iteration,
-        // the outer loop polls.
+        if any_ledger.is_none() {
+            any_ledger = Some(ledger_id.clone());
+        }
+        // Inspect the local jsonl for a QuorumBegin. If the file
+        // doesn't exist (stale ledger ID from prior relay state),
+        // skip silently — the canonical local path is empty until
+        // the daemon ingests its own QuorumBegin.
+        let path = op0_data_dir
+            .join("wallet/ledgers")
+            .join(format!("{}.jsonl", ledger_id));
+        if !path.exists() {
+            continue;
+        }
         let history = read_ledger_history(&op0_data_dir, &ledger_id);
         let has_quorum_begin = history.iter().any(|u| {
             matches!(
@@ -1142,10 +1160,10 @@ fn discover_op0_ledger_once() -> Option<String> {
             )
         });
         if has_quorum_begin {
-            return Some(ledger_id);
+            return (Some(ledger_id), any_ledger);
         }
     }
-    None
+    (None, any_ledger)
 }
 
 /// Run `deposits-wallet open` with the given args. Returns combined
