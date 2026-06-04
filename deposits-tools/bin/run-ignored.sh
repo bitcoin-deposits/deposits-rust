@@ -47,20 +47,49 @@ run_group() {
     echo "========================================================================"
     echo "GROUP: $key — $desc"
     echo "========================================================================"
-    DEPOSITS_USE_HUB=1 "$SCRIPT_DIR/setup.sh" --fresh 3 > /tmp/run-ignored-setup-"$key".log 2>&1
-    if [ $? -ne 0 ]; then
-        echo "FAIL: setup.sh --fresh failed for group $key"
-        return 1
+
+    # Disruptive groups need to be re-bootstrapped before EACH test,
+    # not just before the group — fraud_proof / cooperative_refund /
+    # auto_dispute all assume specific ledger state. Run their tests
+    # one at a time with a fresh cluster between. Cheap group can
+    # share one boot across all binaries.
+    local per_test_fresh=1
+    if [ "$key" = "cheap" ]; then
+        per_test_fresh=0
     fi
-    local cargo_args=()
-    for b in $binaries; do
-        cargo_args+=("--test" "$b")
-    done
-    (cd "$REPO_ROOT" && cargo test -p deposits-test --no-fail-fast "${cargo_args[@]}" -- --ignored 2>&1) \
-        | tee /tmp/run-ignored-"$key".log \
-        | grep -E "^test result|^test .* (FAILED|ok)"
-    local pipe_status=("${PIPESTATUS[@]}")
-    return "${pipe_status[0]}"
+
+    local group_failed=0
+
+    if [ "$per_test_fresh" = "0" ]; then
+        # One boot, parallel test binaries.
+        DEPOSITS_USE_HUB=1 "$SCRIPT_DIR/setup.sh" --fresh 3 > /tmp/run-ignored-setup-"$key".log 2>&1 \
+            || { echo "FAIL: setup.sh --fresh"; return 1; }
+        local cargo_args=()
+        for b in $binaries; do
+            cargo_args+=("--test" "$b")
+        done
+        (cd "$REPO_ROOT" && cargo test -p deposits-test --no-fail-fast "${cargo_args[@]}" -- --ignored 2>&1) \
+            | tee /tmp/run-ignored-"$key".log \
+            | grep -E "^test result|^test .* (FAILED|ok)"
+        local rc="${PIPESTATUS[0]}"
+        [ "$rc" -ne 0 ] && group_failed=1
+    else
+        # Fresh cluster + serial threads per binary. Each test gets a
+        # cluster that hasn't seen any prior Tier-3 mutation.
+        > /tmp/run-ignored-"$key".log
+        for b in $binaries; do
+            echo "  --- $b (fresh cluster) ---"
+            DEPOSITS_USE_HUB=1 "$SCRIPT_DIR/setup.sh" --fresh 3 > /tmp/run-ignored-setup-"$key"-"$b".log 2>&1 \
+                || { echo "FAIL: setup.sh --fresh for $b"; group_failed=1; continue; }
+            (cd "$REPO_ROOT" && cargo test -p deposits-test --no-fail-fast --test "$b" -- --ignored --test-threads=1 2>&1) \
+                | tee -a /tmp/run-ignored-"$key".log \
+                | grep -E "^test result|^test .* (FAILED|ok)"
+            local rc="${PIPESTATUS[0]}"
+            [ "$rc" -ne 0 ] && group_failed=1
+        done
+    fi
+
+    return "$group_failed"
 }
 
 overall_rc=0
