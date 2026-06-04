@@ -94,6 +94,15 @@ impl App {
         let _guard = TermGuard::enter().map_err(|e| format!("enter tty: {}", e))?;
         let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))
             .map_err(|e| format!("terminal: {}", e))?;
+        // Force a full repaint at the current size. Without this, the
+        // first frame sometimes renders with a stale size (or into the
+        // pre-alt-screen buffer) — observable as garbled chrome until
+        // the operator resizes the window, which fires a Resize event
+        // that ratatui's autoresize picks up. Clearing here is the
+        // standard workaround across SSH / tmux / mosh stacks.
+        terminal
+            .clear()
+            .map_err(|e| format!("terminal clear: {}", e))?;
 
         let mut events = EventStream::new();
         let mut ticker = tokio::time::interval(Duration::from_millis(500));
@@ -118,6 +127,16 @@ impl App {
                             if self.handle_key(k).await {
                                 return Ok(());
                             }
+                        }
+                        Some(Ok(Event::Resize(_, _))) => {
+                            // Drop the cached buffer so the next draw
+                            // computes the layout against the new size
+                            // from scratch. ratatui's autoresize handles
+                            // the size change on its own, but without a
+                            // clear the previous frame's chrome can
+                            // bleed through cells that the new layout
+                            // no longer covers.
+                            let _ = terminal.clear();
                         }
                         Some(Err(e)) => {
                             return Err(format!("terminal event: {}", e));
