@@ -33,7 +33,7 @@ FILTER="${1:-}"
 # Each "group" gets ONE fresh-cluster boot via `setup.sh --fresh 3`,
 # then cargo test runs the named binaries against it. Tests within a
 # group are allowed to mutate state; tests across groups are isolated.
-declare -a GROUPS=(
+declare -a TEST_GROUPS=(
     "cheap:state-independent tests:allowlist_pubkey allowlist_subkey docker_adversarial domain_allowlist_challenge domain_allowlist_nip05 domain_allowlist_proclaim lnurl_zap invoice_cosign pay_invoice_self_pay webof_trust_ringsig cross_ledger_route fuzz_protocol dispute_fork_shape equivocation_broadcast"
     "lifecycle:operator-driven self-rescue:lifecycle_self_rescue candidate_queue_swap"
     "auto-dispute:partner-driven auto-dispute past grace:auto_dispute_on_expiry"
@@ -64,7 +64,7 @@ run_group() {
 }
 
 overall_rc=0
-for entry in "${GROUPS[@]}"; do
+for entry in "${TEST_GROUPS[@]}"; do
     IFS=":" read -r key desc binaries <<< "$entry"
     if [ -n "$FILTER" ] && ! grep -q "$FILTER" <<< "$key"; then
         continue
@@ -78,7 +78,7 @@ echo
 echo "========================================================================"
 echo "SUMMARY"
 echo "========================================================================"
-for entry in "${GROUPS[@]}"; do
+for entry in "${TEST_GROUPS[@]}"; do
     IFS=":" read -r key desc binaries <<< "$entry"
     if [ -n "$FILTER" ] && ! grep -q "$FILTER" <<< "$key"; then
         continue
