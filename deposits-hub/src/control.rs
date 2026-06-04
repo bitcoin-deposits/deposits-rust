@@ -10,6 +10,47 @@ use crate::nostr::HubTransport;
 use crate::proto::{HubMessage, NextAction, Role};
 use crate::state::{HubState, NodeRecord, PendingRegistration, SignerRecord};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Gift-wrap a snapshot of the current `hub.json` (plus the master
+/// seed, if it's been generated) to the hub's own nostr pubkey. The
+/// operator's only required backup is the hub nostr secret: it
+/// decrypts these self-addressed gift wraps + re-derives identity.
+///
+/// Best-effort: if the relay is down or send fails, logs a warning
+/// and returns. Local state is always saved first; relay backup is a
+/// belt-and-suspenders convenience.
+pub async fn publish_backup(
+    transport: &HubTransport,
+    state: &HubState,
+    data_dir: &Path,
+) {
+    let hub_pk = state.hub_pubkey_hex().to_string();
+    let hub_json = match serde_json::to_string(state) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!("backup: serialize hub.json: {}", e);
+            return;
+        }
+    };
+    let master_seed = std::fs::read_to_string(HubState::master_seed_path(data_dir))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let msg = HubMessage::BackupSnapshot {
+        last_modified: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        hub_json,
+        master_seed,
+    };
+    if let Err(e) = transport.send(&hub_pk, msg).await {
+        tracing::warn!("backup: publish to relay failed: {}", e);
+    } else {
+        tracing::debug!("backup: snapshot published");
+    }
+}
 
 /// Park or refresh a Register from `sender_pk`. Returns `true` if the
 /// peer was already in inventory **for the same role** (caller should

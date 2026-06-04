@@ -41,6 +41,11 @@ dirs = "5"
 # Single-process lock on the hub data dir (advisory flock(2) on Unix).
 libc = "0.2"
 
+# Pinned rustls crypto provider — both `ring` and `aws-lc-rs` end up in
+# the workspace dep tree, so rustls' auto-detection fails. Hub's main()
+# installs ring explicitly before any wss:// connect.
+rustls = { version = "0.23", features = ["ring"] }
+
 [dev-dependencies]
 tempfile = "3"
 # Enable the proto's in-process relay so the binary smoke test has

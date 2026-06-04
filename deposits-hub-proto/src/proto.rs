@@ -118,6 +118,27 @@ pub enum HubMessage {
         #[serde(default)]
         node_stats: Option<NodeStats>,
     },
+
+    /// Self-encrypted state snapshot. The hub publishes one of these
+    /// (gift-wrapped to its own pubkey) after every hub.json mutation,
+    /// so an operator who lost their box can recover with just the
+    /// hub's nostr secret — connect to a relay, fetch self-addressed
+    /// gift-wraps, decode the latest BackupSnapshot, write the
+    /// embedded files back to disk.
+    BackupSnapshot {
+        /// Unix seconds at the time of save. Restore picks the entry
+        /// with the highest value.
+        last_modified: u64,
+        /// Serialized hub.json as a JSON string (single payload to
+        /// keep the message shape flat). Round-trips through
+        /// `serde_json::from_str` to reconstruct the full inventory.
+        hub_json: String,
+        /// Hub master seed (64-char hex) if one has been generated.
+        /// None for hubs that have never spawned a derived signer
+        /// (master is generated lazily on first spawn).
+        #[serde(default)]
+        master_seed: Option<String>,
+    },
 }
 
 /// Per-node counts surfaced in the hub dashboard. Cheap to recompute

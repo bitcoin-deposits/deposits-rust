@@ -285,8 +285,10 @@ impl App {
         let sender_pk = self.nth_pending_pubkey(cur).await?;
         let mut st = self.state.lock().await;
         let label = crate::control::approve(&mut st, &self.data_dir, &sender_pk, None)?;
+        let snapshot = st.clone();
         drop(st);
         crate::control::send_accept_ack(&self.transport, &sender_pk, &label).await;
+        crate::control::publish_backup(&self.transport, &snapshot, &self.data_dir).await;
         self.flash(format!("approved {}", short_pk(&sender_pk)));
         self.fix_cursor_after_shrink(cur).await;
         Ok(())
@@ -297,8 +299,10 @@ impl App {
         let sender_pk = self.nth_pending_pubkey(cur).await?;
         let mut st = self.state.lock().await;
         crate::control::reject(&mut st, &self.data_dir, &sender_pk)?;
+        let snapshot = st.clone();
         drop(st);
         crate::control::send_reject_ack(&self.transport, &sender_pk).await;
+        crate::control::publish_backup(&self.transport, &snapshot, &self.data_dir).await;
         self.flash(format!("rejected {}", short_pk(&sender_pk)));
         self.fix_cursor_after_shrink(cur).await;
         Ok(())
@@ -353,12 +357,14 @@ impl App {
                         return;
                     }
                 };
+                let snapshot = st.clone();
                 drop(st);
                 if already {
                     crate::control::send_already_approved_ack(&self.transport, &from).await;
                 } else {
                     crate::control::send_waiting_ack(&self.transport, &from).await;
                 }
+                crate::control::publish_backup(&self.transport, &snapshot, &self.data_dir).await;
             }
             HubMessage::Heartbeat { ts, .. } => {
                 self.last_heartbeat.insert(from, ts);
@@ -374,6 +380,11 @@ impl App {
             }
             HubMessage::RegisterAck { .. } | HubMessage::StatusReq => {
                 // Hub doesn't expect these inbound.
+            }
+            HubMessage::BackupSnapshot { .. } => {
+                // The hub's own backups echo back to it via the relay
+                // (we publish to self). Ignore at runtime; only the
+                // `restore` CLI subcommand consumes them.
             }
         }
     }

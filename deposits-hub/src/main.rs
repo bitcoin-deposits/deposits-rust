@@ -24,6 +24,13 @@ COMMANDS:
     approve --pubkey <HEX>       Move the given pending peer into the inventory and ack it.
                                   Mirror of hitting `a` in the TUI's pending tab.
     reject  --pubkey <HEX>       Drop the given pending peer and ack with Shutdown.
+    restore                      Pull the latest BackupSnapshot from the relay and write
+                                  `hub.json` + `hub-master-seed` into --data-dir. Bootstraps
+                                  a fresh box from just the hub nostr secret + a relay URL.
+    publish-backup               One-shot push of the current hub.json + master seed as a
+                                  self-encrypted BackupSnapshot. The `run` loop publishes
+                                  these automatically on each mutation; this is for manual
+                                  re-publish.
     spawn-line --name <NAME>     Print the launch command for a signer that auto-registers
                                   [--seed <HEX>]              with this hub. Creates the workspace + seed on first
                                                               use (or uses --seed if provided — for harnesses where
@@ -48,6 +55,14 @@ EXAMPLES:
 ";
 
 fn main() -> ExitCode {
+    // Install rustls' ring crypto provider explicitly. Both `ring` and
+    // `aws-lc-rs` end up in our dep tree (rustls feature + transitively
+    // via nostr-sdk), so rustls' auto-detection fails — it panics on
+    // first TLS connection rather than picking one. Install the ring
+    // provider before any wss:// connect; ignore "already installed"
+    // errors so subcommands that re-enter the runtime don't trip.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -74,6 +89,8 @@ fn main() -> ExitCode {
         "pubkey" => cmd_pubkey(rest),
         "approve" => cmd_approve(rest),
         "reject" => cmd_reject(rest),
+        "restore" => cmd_restore(rest),
+        "publish-backup" => cmd_publish_backup(rest),
         "spawn-line" => cmd_spawn_line(rest),
         "spawn" => cmd_spawn(rest),
         "qr" => cmd_qr(rest),
@@ -363,15 +380,16 @@ async fn run_headless(
                             &mut st, &data_dir, &from, role, identity_pubkey, version, label, signer_pubkey,
                         ) {
                             Ok(true) => {
+                                // No state mutation on already-approved (ingest_register
+                                // does refresh signer_pubkey on a Node re-register though,
+                                // so play it safe and backup either way).
+                                let snapshot = st.clone();
                                 drop(st);
                                 control::send_already_approved_ack(&transport, &from).await;
+                                control::publish_backup(&transport, &snapshot, &data_dir).await;
                             }
                             Ok(false) => {
                                 if auto_approve {
-                                    // Promote pending → signers/nodes immediately + ack.
-                                    // Use the role-scoped pending key so a signer+node
-                                    // pair from the same operator (same nostr identity)
-                                    // doesn't disambiguation-fail under approve().
                                     let pkey = control::pending_key(role, &from);
                                     let label = match control::approve(&mut st, &data_dir, &pkey, None) {
                                         Ok(l) => l,
@@ -381,6 +399,7 @@ async fn run_headless(
                                             continue;
                                         }
                                     };
+                                    let snapshot = st.clone();
                                     drop(st);
                                     tracing::info!(
                                         "auto-approved {} as '{}'",
@@ -388,10 +407,13 @@ async fn run_headless(
                                         label
                                     );
                                     control::send_accept_ack(&transport, &from, &label).await;
+                                    control::publish_backup(&transport, &snapshot, &data_dir).await;
                                 } else {
+                                    let snapshot = st.clone();
                                     drop(st);
                                     tracing::info!("register from {} — parked", &from[..16]);
                                     control::send_waiting_ack(&transport, &from).await;
+                                    control::publish_backup(&transport, &snapshot, &data_dir).await;
                                 }
                             }
                             Err(e) => tracing::warn!("ingest register: {}", e),
@@ -422,6 +444,14 @@ async fn run_headless(
                     }
                     HubMessage::RegisterAck { .. } | HubMessage::StatusReq => {
                         tracing::debug!("unexpected inbound from {}", &from[..16]);
+                    }
+                    HubMessage::BackupSnapshot { last_modified, .. } => {
+                        // Our own backups echo back via the relay.
+                        tracing::debug!(
+                            "backup echo from {} (ts={})",
+                            &from[..16],
+                            last_modified
+                        );
                     }
                 }
             }
@@ -454,6 +484,161 @@ fn cmd_approve(args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("nostr connect: {}", e))?;
         deposits_hub::control::send_accept_ack(&transport, &pubkey, &label).await;
         println!("approved {} as '{}'", pubkey, label);
+        Ok::<(), String>(())
+    })
+}
+
+fn cmd_publish_backup(args: &[String]) -> Result<(), String> {
+    let c = parse_common(args)?;
+    let data_dir = data_dir_or_default(c.data_dir);
+    if c.relays.is_empty() {
+        return Err("`publish-backup` requires at least one --relay".to_string());
+    }
+    let state = deposits_hub::state::HubState::load_or_init(&data_dir)
+        .map_err(|e| format!("hub state: {}", e))?;
+    let secret_hex = std::fs::read_to_string(
+        deposits_hub::state::HubState::nostr_secret_path(&data_dir),
+    )
+    .map_err(|e| format!("read hub secret: {}", e))?
+    .trim()
+    .to_string();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {}", e))?;
+    rt.block_on(async move {
+        let transport = deposits_hub::nostr::HubTransport::connect(&secret_hex, &c.relays)
+            .await
+            .map_err(|e| format!("nostr connect: {}", e))?;
+        deposits_hub::control::publish_backup(&transport, &state, &data_dir).await;
+        println!("published snapshot for hub {}", state.hub_pubkey_hex());
+        Ok::<(), String>(())
+    })
+}
+
+fn cmd_restore(args: &[String]) -> Result<(), String> {
+    let c = parse_common(args)?;
+    let data_dir = data_dir_or_default(c.data_dir);
+    if c.relays.is_empty() {
+        return Err("`restore` requires at least one --relay".to_string());
+    }
+    // The data dir must already have the hub nostr secret — that's
+    // the operator's required backup. Everything else (hub.json,
+    // master seed) gets pulled from the relay.
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| format!("create data dir {}: {}", data_dir.display(), e))?;
+    let secret_path = deposits_hub::state::HubState::nostr_secret_path(&data_dir);
+    if !secret_path.exists() {
+        return Err(format!(
+            "restore needs hub-nostr-secret at {}. Put your backed-up 32-byte hex \
+             secret there (chmod 0600) before running restore.",
+            secret_path.display()
+        ));
+    }
+    let secret_hex = std::fs::read_to_string(&secret_path)
+        .map_err(|e| format!("read hub secret: {}", e))?
+        .trim()
+        .to_string();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {}", e))?;
+    rt.block_on(async move {
+        let transport = deposits_hub::nostr::HubTransport::connect(&secret_hex, &c.relays)
+            .await
+            .map_err(|e| format!("nostr connect: {}", e))?;
+        let mut inbox = transport
+            .subscribe()
+            .await
+            .map_err(|e| format!("subscribe: {}", e))?;
+
+        eprintln!(
+            "hub: restoring from {} relay(s); collecting snapshots for 10s …",
+            c.relays.len()
+        );
+
+        // Collect BackupSnapshots for a bounded window then pick the
+        // freshest. Relays may have several historical entries (one
+        // per save); we want last_modified-max regardless of arrival
+        // order (replay ordering is unspecified).
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut best: Option<(u64, String, Option<String>)> = None;
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline - now;
+            match tokio::time::timeout(remaining, inbox.recv()).await {
+                Ok(Some(inbound)) => {
+                    if let deposits_hub::proto::HubMessage::BackupSnapshot {
+                        last_modified,
+                        hub_json,
+                        master_seed,
+                    } = inbound.msg
+                    {
+                        let take = match &best {
+                            Some((ts, _, _)) => last_modified > *ts,
+                            None => true,
+                        };
+                        if take {
+                            best = Some((last_modified, hub_json, master_seed));
+                        }
+                    }
+                }
+                Ok(None) => return Err("nostr inbox closed".to_string()),
+                Err(_) => break, // timeout
+            }
+        }
+
+        let (ts, hub_json, master_seed) = best.ok_or_else(|| {
+            "no BackupSnapshot received within 10s — relay empty, wrong secret, \
+             or this hub identity never published a snapshot"
+                .to_string()
+        })?;
+
+        // Re-pretty-print to match what `HubState::save` writes, so
+        // byte-compare against a co-running source hub matches. The
+        // backup payload itself is compact JSON (saves a few bytes
+        // per push); the operator-facing on-disk file isn't.
+        let parsed: deposits_hub::state::HubState = serde_json::from_str(&hub_json)
+            .map_err(|e| format!("parse restored hub.json: {}", e))?;
+        let pretty = serde_json::to_string_pretty(&parsed)
+            .map_err(|e| format!("pretty-print hub.json: {}", e))?;
+        let hub_json_path = data_dir.join("hub.json");
+        // Atomic write via tmp + rename to keep an existing file
+        // intact if the write somehow fails midway.
+        let tmp = hub_json_path.with_extension("json.tmp");
+        std::fs::write(&tmp, &pretty).map_err(|e| format!("write tmp hub.json: {}", e))?;
+        std::fs::rename(&tmp, &hub_json_path)
+            .map_err(|e| format!("rename hub.json: {}", e))?;
+
+        let mut wrote_master = false;
+        if let Some(seed_hex) = master_seed {
+            let mp = deposits_hub::state::HubState::master_seed_path(&data_dir);
+            std::fs::write(&mp, &seed_hex)
+                .map_err(|e| format!("write master seed: {}", e))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&mp)
+                    .map_err(|e| format!("stat master seed: {}", e))?
+                    .permissions();
+                perms.set_mode(0o600);
+                std::fs::set_permissions(&mp, perms)
+                    .map_err(|e| format!("chmod master seed: {}", e))?;
+            }
+            wrote_master = true;
+        }
+
+        println!(
+            "restored hub.json (snapshot ts={}) {} master seed{}",
+            ts,
+            if wrote_master { "+" } else { "(no" },
+            if wrote_master { "" } else { " in snapshot)" }
+        );
         Ok::<(), String>(())
     })
 }

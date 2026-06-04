@@ -17,7 +17,7 @@
 
 use crate::proto::Role;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Persisted under `<data-dir>/hub.json`. Loaded at startup,
@@ -35,24 +35,25 @@ pub struct HubState {
     /// Approved signers, keyed by their nostr pubkey (the transport
     /// pubkey daemons connect to).
     #[serde(default)]
-    pub signers: HashMap<String, SignerRecord>,
+    pub signers: BTreeMap<String, SignerRecord>,
 
     /// Approved nodes, keyed by operator pubkey.
     #[serde(default)]
-    pub nodes: HashMap<String, NodeRecord>,
+    pub nodes: BTreeMap<String, NodeRecord>,
 
     /// Peers that have sent Register messages we haven't accepted or
     /// rejected yet. Operator processes these from the TUI's approval
     /// page. Keyed by sender pubkey to dedupe rapid retries.
     #[serde(default)]
-    pub pending: HashMap<String, PendingRegistration>,
+    pub pending: BTreeMap<String, PendingRegistration>,
 
     /// Stable index per hub-spawned signer name, used to derive the
-    /// signer's seed from `hub-master-seed` via `m/89'/<index>'`.
-    /// Recovery: restore the master seed file, look up the name's
-    /// index here, re-derive — no per-signer backup needed.
+    /// signer's seed from `hub-master-seed` via the BIP-85 path
+    /// `m/83696968'/128169'/32'/<index>'`. Recovery: restore the
+    /// master seed file, look up the name's index here, re-derive —
+    /// no per-signer backup needed.
     #[serde(default)]
-    pub signer_indexes: HashMap<String, u32>,
+    pub signer_indexes: BTreeMap<String, u32>,
 
     /// Next index to allocate when a fresh name is spawned. Persisted
     /// so re-spawning an already-allocated name re-uses its index
