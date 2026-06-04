@@ -7,25 +7,27 @@
 //! operator hitting `a`/`x` in the TUI.
 
 use crate::nostr::HubTransport;
-use crate::proto::{HubMessage, NextAction, Role};
+use crate::proto::{
+    BackupPayload, HubMessage, NextAction, Role, HUB_STATE_BACKUP_D_TAG, KIND_HUB_STATE_BACKUP,
+};
 use crate::state::{HubState, NodeRecord, PendingRegistration, SignerRecord};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Gift-wrap a snapshot of the current `hub.json` (plus the master
-/// seed, if it's been generated) to the hub's own nostr pubkey. The
-/// operator's only required backup is the hub nostr secret: it
-/// decrypts these self-addressed gift wraps + re-derives identity.
+/// Publish a self-encrypted snapshot of `hub.json` (plus master seed,
+/// if present) to the relay as a parameterized-replaceable event.
+/// Each call replaces the prior snapshot on the relay — NIP-33
+/// `(pubkey, kind, d-tag)` dedup — so storage stays at one event per
+/// hub instead of accumulating one per save.
 ///
-/// Best-effort: if the relay is down or send fails, logs a warning
+/// Best-effort: if the relay is down or publish fails, logs a warning
 /// and returns. Local state is always saved first; relay backup is a
-/// belt-and-suspenders convenience.
+/// belt-and-suspenders convenience for the lost-box scenario.
 pub async fn publish_backup(
     transport: &HubTransport,
     state: &HubState,
     data_dir: &Path,
 ) {
-    let hub_pk = state.hub_pubkey_hex().to_string();
     let hub_json = match serde_json::to_string(state) {
         Ok(j) => j,
         Err(e) => {
@@ -37,7 +39,7 @@ pub async fn publish_backup(
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let msg = HubMessage::BackupSnapshot {
+    let payload = BackupPayload {
         last_modified: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -45,7 +47,17 @@ pub async fn publish_backup(
         hub_json,
         master_seed,
     };
-    if let Err(e) = transport.send(&hub_pk, msg).await {
+    let blob = match serde_json::to_string(&payload) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("backup: serialize payload: {}", e);
+            return;
+        }
+    };
+    if let Err(e) = transport
+        .publish_replaceable_to_self(KIND_HUB_STATE_BACKUP, HUB_STATE_BACKUP_D_TAG, &blob)
+        .await
+    {
         tracing::warn!("backup: publish to relay failed: {}", e);
     } else {
         tracing::debug!("backup: snapshot published");

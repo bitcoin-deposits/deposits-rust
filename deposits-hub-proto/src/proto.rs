@@ -27,6 +27,25 @@ use serde::{Deserialize, Serialize};
 /// Nostr event kind for hub control-plane DMs. See module docs.
 pub const KIND_HUB: u16 = 30420;
 
+/// Parameterized-replaceable (NIP-33) event kind for the hub's
+/// self-encrypted state snapshot. Relays keep only the latest event
+/// per `(pubkey, kind, d-tag)`, so each `publish_replaceable_to_self`
+/// call replaces the prior snapshot — storage stays at one event per
+/// hub instead of accumulating one per save (the older approach,
+/// which gift-wrapped the BackupSnapshot variant on kind:1059, was
+/// correct but wasteful).
+///
+/// Content is NIP-44-encrypted with the hub's own keypair on both
+/// sides of the conversation-key derivation. An observer of the
+/// relay sees frequency + size, not the inventory.
+pub const KIND_HUB_STATE_BACKUP: u16 = 30421;
+
+/// Single d-tag value used for the state-backup parameterized-
+/// replaceable event. A hub can technically multiplex distinct
+/// snapshots by varying this — useful if we ever split inventory
+/// from secrets — but today there's only one.
+pub const HUB_STATE_BACKUP_D_TAG: &str = "hub-state";
+
 /// Identity of a peer that registers with the hub.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -119,26 +138,29 @@ pub enum HubMessage {
         node_stats: Option<NodeStats>,
     },
 
-    /// Self-encrypted state snapshot. The hub publishes one of these
-    /// (gift-wrapped to its own pubkey) after every hub.json mutation,
-    /// so an operator who lost their box can recover with just the
-    /// hub's nostr secret — connect to a relay, fetch self-addressed
-    /// gift-wraps, decode the latest BackupSnapshot, write the
-    /// embedded files back to disk.
-    BackupSnapshot {
-        /// Unix seconds at the time of save. Restore picks the entry
-        /// with the highest value.
-        last_modified: u64,
-        /// Serialized hub.json as a JSON string (single payload to
-        /// keep the message shape flat). Round-trips through
-        /// `serde_json::from_str` to reconstruct the full inventory.
-        hub_json: String,
-        /// Hub master seed (64-char hex) if one has been generated.
-        /// None for hubs that have never spawned a derived signer
-        /// (master is generated lazily on first spawn).
-        #[serde(default)]
-        master_seed: Option<String>,
-    },
+}
+
+/// Self-encrypted hub state snapshot. Lives on the relay as a
+/// parameterized-replaceable event (kind = [`KIND_HUB_STATE_BACKUP`],
+/// d-tag = [`HUB_STATE_BACKUP_D_TAG`]), NIP-44-encrypted with the
+/// hub's own keypair on both sides. Operator restoring on a fresh
+/// box needs only `hub-nostr-secret` + relay access.
+///
+/// Not part of the gift-wrap control plane — distinct channel with
+/// its own kind so it gets NIP-33 replacement semantics (one event
+/// per hub on the relay, not one per save).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupPayload {
+    /// Unix seconds at the time of save. Diagnostic — NIP-33
+    /// replacement already keeps the newest by created_at.
+    pub last_modified: u64,
+    /// Serialized hub.json (pretty-printed by the publisher; restore
+    /// re-pretty-prints to dodge HashMap-iteration ordering quirks).
+    pub hub_json: String,
+    /// Hub master seed (64-char hex) if one has been generated.
+    /// None for hubs that haven't spawned a derived signer yet.
+    #[serde(default)]
+    pub master_seed: Option<String>,
 }
 
 /// Per-node counts surfaced in the hub dashboard. Cheap to recompute

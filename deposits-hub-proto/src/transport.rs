@@ -160,6 +160,82 @@ impl HubTransport {
         Ok(rx)
     }
 
+    /// Publish a self-encrypted parameterized-replaceable event (NIP-33
+    /// kind + NIP-44 encrypted content). The relay deduplicates by
+    /// `(pubkey, kind, d-tag)`, so each call **replaces** the prior
+    /// snapshot — exactly what state backup needs. Storage stays at
+    /// one event per hub instead of accumulating one-per-save.
+    ///
+    /// Encrypted to self: same secret on both sides of the NIP-44
+    /// conversation key, which produces a deterministic shared key
+    /// the operator can re-derive from just the hub's nostr secret.
+    /// An observer scraping the relay sees that this pubkey publishes
+    /// encrypted snapshots, but can't read content.
+    pub async fn publish_replaceable_to_self(
+        &self,
+        kind: u16,
+        d_tag: &str,
+        plaintext: &str,
+    ) -> Result<(), NostrError> {
+        let self_pk = self.keys.public_key();
+        let ciphertext = nip44::encrypt(
+            self.keys.secret_key(),
+            &self_pk,
+            plaintext,
+            nip44::Version::V2,
+        )
+        .map_err(|e| NostrError::Sdk(format!("nip44 encrypt: {}", e)))?;
+        let event = EventBuilder::new(Kind::Custom(kind), ciphertext)
+            .tags([Tag::identifier(d_tag)])
+            .sign(&self.keys)
+            .await
+            .map_err(|e| NostrError::Sdk(format!("sign: {}", e)))?;
+        self.client
+            .send_event(event)
+            .await
+            .map_err(|e| NostrError::Sdk(format!("send_event: {}", e)))?;
+        Ok(())
+    }
+
+    /// Fetch the latest self-published replaceable snapshot at
+    /// `(kind, d_tag)` and decrypt with NIP-44. Returns `None` if no
+    /// snapshot arrives within `timeout`. At most one event per relay
+    /// is served because of NIP-33 replacement semantics; if the
+    /// operator publishes to multiple relays we accept the first one
+    /// to arrive (caller can pick newest by `created_at` if needed).
+    pub async fn fetch_replaceable_from_self(
+        &self,
+        kind: u16,
+        d_tag: &str,
+        timeout: Duration,
+    ) -> Result<Option<(u64, String)>, NostrError> {
+        use nostr_sdk::SingleLetterTag;
+
+        let self_pk = self.keys.public_key();
+        let filter = Filter::new()
+            .kind(Kind::Custom(kind))
+            .author(self_pk)
+            .custom_tag(SingleLetterTag::lowercase(nostr_sdk::Alphabet::D), [d_tag]);
+
+        let events = self
+            .client
+            .fetch_events(vec![filter], Some(timeout))
+            .await
+            .map_err(|e| NostrError::Sdk(format!("fetch_events: {}", e)))?;
+
+        // Pick newest by created_at — relays SHOULD only serve one per
+        // (pubkey, kind, d), but multi-relay setups can fan in.
+        let newest = events
+            .into_iter()
+            .max_by_key(|e| e.created_at.as_u64());
+        let Some(event) = newest else {
+            return Ok(None);
+        };
+        let plaintext = nip44::decrypt(self.keys.secret_key(), &self_pk, &event.content)
+            .map_err(|e| NostrError::Sdk(format!("nip44 decrypt: {}", e)))?;
+        Ok(Some((event.created_at.as_u64(), plaintext)))
+    }
+
     /// Send a `HubMessage` to a peer via gift-wrap. Returns once the
     /// event is sent to the relay; relays may further fan-out.
     pub async fn send(

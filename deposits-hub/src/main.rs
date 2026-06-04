@@ -24,13 +24,15 @@ COMMANDS:
     approve --pubkey <HEX>       Move the given pending peer into the inventory and ack it.
                                   Mirror of hitting `a` in the TUI's pending tab.
     reject  --pubkey <HEX>       Drop the given pending peer and ack with Shutdown.
-    restore                      Pull the latest BackupSnapshot from the relay and write
-                                  `hub.json` + `hub-master-seed` into --data-dir. Bootstraps
-                                  a fresh box from just the hub nostr secret + a relay URL.
-    publish-backup               One-shot push of the current hub.json + master seed as a
-                                  self-encrypted BackupSnapshot. The `run` loop publishes
-                                  these automatically on each mutation; this is for manual
-                                  re-publish.
+    restore                      Pull the latest backup snapshot from the relay (NIP-44
+                                  decrypted from the kind-30421 replaceable event) and
+                                  write `hub.json` + `hub-master-seed` into --data-dir.
+                                  Bootstraps a fresh box from just the hub nostr secret +
+                                  a relay URL.
+    publish-backup               One-shot republish of the current state to the
+                                  parameterized-replaceable backup event on the relay.
+                                  The `run` loop does this automatically on each mutation;
+                                  this is for manual re-publish (testing, recovery flows).
     spawn-line --name <NAME>     Print the launch command for a signer that auto-registers
                                   [--seed <HEX>]              with this hub. Creates the workspace + seed on first
                                                               use (or uses --seed if provided — for harnesses where
@@ -445,14 +447,6 @@ async fn run_headless(
                     HubMessage::RegisterAck { .. } | HubMessage::StatusReq => {
                         tracing::debug!("unexpected inbound from {}", &from[..16]);
                     }
-                    HubMessage::BackupSnapshot { last_modified, .. } => {
-                        // Our own backups echo back via the relay.
-                        tracing::debug!(
-                            "backup echo from {} (ts={})",
-                            &from[..16],
-                            last_modified
-                        );
-                    }
                 }
             }
         }
@@ -548,56 +542,31 @@ fn cmd_restore(args: &[String]) -> Result<(), String> {
         let transport = deposits_hub::nostr::HubTransport::connect(&secret_hex, &c.relays)
             .await
             .map_err(|e| format!("nostr connect: {}", e))?;
-        let mut inbox = transport
-            .subscribe()
-            .await
-            .map_err(|e| format!("subscribe: {}", e))?;
 
         eprintln!(
-            "hub: restoring from {} relay(s); collecting snapshots for 10s …",
+            "hub: restoring from {} relay(s); fetching latest snapshot (up to 10s) …",
             c.relays.len()
         );
 
-        // Collect BackupSnapshots for a bounded window then pick the
-        // freshest. Relays may have several historical entries (one
-        // per save); we want last_modified-max regardless of arrival
-        // order (replay ordering is unspecified).
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut best: Option<(u64, String, Option<String>)> = None;
-        loop {
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                break;
-            }
-            let remaining = deadline - now;
-            match tokio::time::timeout(remaining, inbox.recv()).await {
-                Ok(Some(inbound)) => {
-                    if let deposits_hub::proto::HubMessage::BackupSnapshot {
-                        last_modified,
-                        hub_json,
-                        master_seed,
-                    } = inbound.msg
-                    {
-                        let take = match &best {
-                            Some((ts, _, _)) => last_modified > *ts,
-                            None => true,
-                        };
-                        if take {
-                            best = Some((last_modified, hub_json, master_seed));
-                        }
-                    }
-                }
-                Ok(None) => return Err("nostr inbox closed".to_string()),
-                Err(_) => break, // timeout
-            }
-        }
-
-        let (ts, hub_json, master_seed) = best.ok_or_else(|| {
-            "no BackupSnapshot received within 10s — relay empty, wrong secret, \
-             or this hub identity never published a snapshot"
-                .to_string()
-        })?;
+        let blob = transport
+            .fetch_replaceable_from_self(
+                deposits_hub::proto::KIND_HUB_STATE_BACKUP,
+                deposits_hub::proto::HUB_STATE_BACKUP_D_TAG,
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            .map_err(|e| format!("fetch backup: {}", e))?
+            .ok_or_else(|| {
+                "no backup found on relay — wrong secret, never-published hub identity, \
+                 or relay doesn't have a snapshot yet"
+                    .to_string()
+            })?;
+        let (_created_at, payload_json) = blob;
+        let payload: deposits_hub::proto::BackupPayload = serde_json::from_str(&payload_json)
+            .map_err(|e| format!("parse backup payload: {}", e))?;
+        let ts = payload.last_modified;
+        let hub_json = payload.hub_json;
+        let master_seed = payload.master_seed;
 
         // Re-pretty-print to match what `HubState::save` writes, so
         // byte-compare against a co-running source hub matches. The

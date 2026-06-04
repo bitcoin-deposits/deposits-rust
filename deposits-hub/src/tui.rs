@@ -381,11 +381,6 @@ impl App {
             HubMessage::RegisterAck { .. } | HubMessage::StatusReq => {
                 // Hub doesn't expect these inbound.
             }
-            HubMessage::BackupSnapshot { .. } => {
-                // The hub's own backups echo back to it via the relay
-                // (we publish to self). Ignore at runtime; only the
-                // `restore` CLI subcommand consumes them.
-            }
         }
     }
 
