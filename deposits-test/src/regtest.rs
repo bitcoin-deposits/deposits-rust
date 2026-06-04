@@ -464,21 +464,42 @@ pub fn embed_proof_hash(
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    std::thread::sleep(Duration::from_secs(3));
 
+    // Poll the peer for the embedding update. The operator's embed-hash
+    // publishes a kind:9100 update on the ledgers relay; the peer's
+    // daemon subscribes and writes the update to its own JSONL on
+    // arrival. On a busy 10-daemon cluster the relay roundtrip + the
+    // peer's `apply_signed` path can take a few seconds — a fixed 3s
+    // sleep was the test-suite-wide cause of regtest.rs:481 panics.
     use deposits_protocol::messages::LedgerOperation;
     use deposits_protocol::tlv::TlvDecode;
-    read_ledger_history(&op_data_dir(peer_op_idx), ledger_id)
-        .into_iter()
-        .rev()
-        .find(|u| {
-            LedgerOperation::tlv_decode(&u.message)
-                .ok()
-                .and_then(|op| op.embedded_hash().copied())
-                .map(|h| h == proof_hash)
-                .unwrap_or(false)
-        })
-        .expect("embedding update should be in peer's view of accused history")
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(u) = read_ledger_history(&op_data_dir(peer_op_idx), ledger_id)
+            .into_iter()
+            .rev()
+            .find(|u| {
+                LedgerOperation::tlv_decode(&u.message)
+                    .ok()
+                    .and_then(|op| op.embedded_hash().copied())
+                    .map(|h| h == proof_hash)
+                    .unwrap_or(false)
+            })
+        {
+            return u;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "embedding update with proof_hash {} should be in op{}'s view \
+                 of ledger {} within 30s — relay propagation stalled, peer \
+                 daemon down, or accused didn't actually publish",
+                hex::encode(proof_hash),
+                peer_op_idx,
+                &ledger_id[..16.min(ledger_id.len())],
+            );
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// Publish a `FraudBroadcast` as a kind:9101 Nostr event from `op_idx`'s
