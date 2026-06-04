@@ -393,6 +393,16 @@ stop_nodes() {
             kill "$(cat "$signer_pidfile")" 2>/dev/null || true
         fi
     done
+    # Belt-and-suspenders: if a prior setup.sh was interrupted before
+    # writing its pid files (e.g. SIGKILL), the per-op kill loop above
+    # misses those processes — they linger holding ports 8765+, the
+    # next setup's daemons fail to bind admin UI, and the whole cluster
+    # comes up half-dead. Kill any `deposits-node|signer run` process
+    # this user owns. The signer that the public `relay.bitcoindeposits.net`
+    # round-trip test spawned (under /tmp/) is matched by the `--data-dir`
+    # path which is independent of $DATA_ROOT, so include a $DATA_ROOT
+    # filter to spare it.
+    pkill -9 -f "deposits-(node|signer) run.*${DATA_ROOT}" 2>/dev/null || true
 }
 
 # ============================================================================
