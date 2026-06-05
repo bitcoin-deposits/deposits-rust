@@ -84,23 +84,34 @@ fn cooperative_refund_drains_and_anchors_lottery() {
 
     // ── 1. Set pause markers on every quorum-member op so DisputeEnter
     //       is the only auto-published step — no auto-arm, no
-    //       auto-confiscate.
+    //       auto-confiscate. Also pause auto_quorum_refresh on the
+    //       accused: without it, op8 self-rescues past expiry and the
+    //       cosigners' auto-dispute never fires (the rotated quorum is
+    //       fresh again).
     let pause_paths: Vec<_> = member_ops
         .iter()
         .map(|i| op_data_dir(*i).join(".pause_auto_dispute_actions"))
         .collect();
+    let refresh_pause_path = op_data_dir(ACCUSED_OP).join(".pause_auto_quorum_refresh");
     for p in &pause_paths {
         std::fs::write(p, b"cooperative_refund_e2e").expect("write pause marker");
     }
+    std::fs::write(&refresh_pause_path, b"cooperative_refund_e2e")
+        .expect("write refresh-pause marker on accused");
     let _cleanup = ScopeGuard(Box::new({
         let pause_paths = pause_paths.clone();
+        let refresh_pause_path = refresh_pause_path.clone();
         move || {
             for p in &pause_paths {
                 let _ = std::fs::remove_file(p);
             }
+            let _ = std::fs::remove_file(&refresh_pause_path);
         }
     }));
-    eprintln!("[pause]   placed .pause_auto_dispute_actions on {} ops", q);
+    eprintln!(
+        "[pause]   placed .pause_auto_dispute_actions on {} ops, .pause_auto_quorum_refresh on accused",
+        q
+    );
 
     // ── 2. Trigger DisputeEnter via a QuorumExpired fraud broadcast.
     //       Mirrors the fraud_proof_quorum_expired setup.
@@ -130,7 +141,12 @@ fn cooperative_refund_drains_and_anchors_lottery() {
         let to_mine = target - chain_tip;
         eprintln!("[setup]   mining {} blocks → tip {} (past expiry+grace)", to_mine, target);
         mine_blocks(to_mine);
-        wait_for_daemon_chain_tip(ACCUSED_OP, target, std::time::Duration::from_secs(120));
+        // Forks are published by the *cosigner* daemons (member_ops),
+        // not the accused — they're the ones whose auto-detect loop
+        // sees expiry past + grace and forks. Wait for ALL of them.
+        for &op_idx in &member_ops {
+            wait_for_daemon_chain_tip(op_idx, target, std::time::Duration::from_secs(120));
+        }
     }
     let chain_tip = current_block_height();
     if chain_tip <= quorum_expiry {
@@ -158,7 +174,15 @@ fn cooperative_refund_drains_and_anchors_lottery() {
 
     // Give the daemons time to receive the fraud, fork, publish
     // DisputeEnter, then halt at the pause marker.
-    poll_until_fork_disputed(&accused_ledger, &member_ops, Duration::from_secs(90));
+    // 400s: after a fresh-cluster burst-mine, BDK wallet sync settles
+    // unevenly across daemons and the cosigners' auto-dispute periodic
+    // cycle (~5s) may not see the new chain tip on its first wake.
+    // The cluster also churns through failed auto_quorum_refresh on
+    // *other* ledgers' expired quorums, which monopolizes the periodic
+    // loop. Empirically on a truly-fresh cluster, forks arrive
+    // ~240–245s in; a 240s budget consistently misses by single-digit
+    // seconds, so pad to 400s.
+    poll_until_fork_disputed(&accused_ledger, &member_ops, Duration::from_secs(400));
     eprintln!("[fork]    all {} ops have a fork with DisputeEnter", q);
 
     // ── 3. Drain reserves to Q P2WPKH outputs.

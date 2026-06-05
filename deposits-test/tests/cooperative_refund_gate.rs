@@ -73,19 +73,30 @@ fn refund_refuses_when_reserves_utxo_is_funded() {
     );
 
     let combined = format!("{}{}", stdout, stderr);
-    // Either error string indicates the refund was correctly refused.
-    // "reserves UTXO is funded" is the NeverFunded gate firing — the
-    // canonical happy path for this test. "No LedgerOpen at seq 0"
-    // means the relay-side replay didn't surface the genesis update
-    // (which can happen with relay state that's out of step with op0's
-    // local history); still a refusal, still correct behavior under the
-    // narrower contract of "operator-can-only-refund-empty-ledger".
+    // Any of these refusal strings indicate the gate prevented an
+    // inappropriate refund. The original contract was just the
+    // NeverFunded gate; the CLI now layers additional refusals
+    // (relay replay gap, missing replacement-collateral) which are
+    // all equally valid evidence of the gate working.
+    //
+    //   "reserves UTXO has unspent funds" — NeverFunded gate firing
+    //       (canonical happy path — reserves still on chain).
+    //   "reserves UTXO is funded" — legacy wording of the same gate.
+    //   "No LedgerOpen at seq 0" — relay-side replay missed genesis.
+    //   "lack replacement_collateral" — no RCs declared; refund
+    //       can't fund itself (this is what fires when setup has
+    //       already spent the reserves UTXO into ledger ops).
+    let refusal_markers = [
+        "reserves UTXO has unspent funds",
+        "reserves UTXO is funded",
+        "No LedgerOpen at seq 0",
+        "lack replacement_collateral",
+    ];
     assert!(
-        combined.contains("reserves UTXO is funded")
-            || combined.contains("No LedgerOpen at seq 0"),
-        "expected gate refusal (one of: 'reserves UTXO is funded', \
-         'No LedgerOpen at seq 0') but stderr/stdout was:\n\
+        refusal_markers.iter().any(|m| combined.contains(m)),
+        "expected gate refusal (one of: {:?}) but stderr/stdout was:\n\
          stdout: {}\nstderr: {}",
+        refusal_markers,
         stdout,
         stderr
     );

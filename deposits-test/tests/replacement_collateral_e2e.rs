@@ -40,6 +40,20 @@ fn replacement_collateral_round_trips_through_dispute_pipeline() {
 
     let node = build_node_with_danger();
 
+    // Pause auto_quorum_refresh on the accused before we start mining.
+    // Otherwise op1 self-rescues past expiry and the cosigners see a
+    // fresh quorum — no dispute fires. Marker is dropped via Drop guard.
+    let refresh_pause_path = op_data_dir(1).join(".pause_auto_quorum_refresh");
+    std::fs::write(&refresh_pause_path, b"replacement_collateral_e2e")
+        .expect("write refresh-pause marker on accused");
+    struct PauseGuard(std::path::PathBuf);
+    impl Drop for PauseGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _refresh_pause_guard = PauseGuard(refresh_pause_path);
+
     // ── 0. Fund each operator's op-key P2WPKH ──
     // RC6 auto-arm pulls a UTXO from this address to declare. Without
     // funding, the declaration is None and a strict cosigner (RC3)
@@ -90,7 +104,13 @@ fn replacement_collateral_round_trips_through_dispute_pipeline() {
         let to_mine = target - chain_tip;
         eprintln!("[setup]   mining {} blocks → tip {} (past expiry+grace)", to_mine, target);
         mine_blocks(to_mine);
-        wait_for_daemon_chain_tip(accused_op_idx, target, std::time::Duration::from_secs(120));
+        // Wait for all 3 daemons (accused + 2 cosigners) — the test
+        // expects fork branches from cosigners and an anchored update
+        // on the accused, both of which depend on each daemon's wallet
+        // sync catching up.
+        for op_idx in 0..3 {
+            wait_for_daemon_chain_tip(op_idx, target, std::time::Duration::from_secs(120));
+        }
     }
 
     // Re-read the ledger history — the accused's daemon should have

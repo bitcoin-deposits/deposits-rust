@@ -749,6 +749,18 @@ impl Node {
     /// (5s fast / 60s normal); the per-member RPC has its own
     /// rate-limiting so this doesn't spam offline members.
     pub async fn auto_quorum_refresh(self: &Arc<Self>) {
+        // Test/recovery hook: paired with `.pause_auto_dispute_actions`
+        // — when a Tier-3 test wants to drive the cosigner-driven
+        // dispute path, the accused operator must NOT silently
+        // self-rescue first. Drop a `.pause_auto_quorum_refresh`
+        // marker in the operator's data dir to disable refreshes
+        // without having to bring the daemon down.
+        if self.data_dir.join(".pause_auto_quorum_refresh").exists() {
+            tracing::debug!(
+                ".pause_auto_quorum_refresh marker present — skipping refresh cycle"
+            );
+            return;
+        }
         let threshold_blocks: u32 = self
             .rotate_before_expiry_days
             .saturating_mul(144);
