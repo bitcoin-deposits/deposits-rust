@@ -39,6 +39,9 @@ fn refund_refuses_when_reserves_utxo_is_funded() {
 
     let node = build_node_with_danger();
     let ledger_id = read_setup_state("ledger_0_1");
+    // Wait for op0's daemon to ingest its own QuorumBegin (race with
+    // `setup.sh` returning).
+    wait_for_quorum_begin(0, &ledger_id, std::time::Duration::from_secs(30));
 
     eprintln!(
         "[probe]   running `recovery refund` against funded ledger {}...",

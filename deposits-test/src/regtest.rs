@@ -657,6 +657,41 @@ pub fn wait_for_daemon_chain_tip(op_idx: usize, target_height: u32, timeout: Dur
     );
 }
 
+/// Block until op_idx's local jsonl for `ledger_id` contains a
+/// committed `QuorumBegin`. Same shape as the discover_op0_ledger
+/// poll, but for callers that already know which (op, ledger) they
+/// want and just need to wait for the daemon to ingest its own
+/// QuorumBegin from the relay (race with `setup.sh` returning).
+pub fn wait_for_quorum_begin(op_idx: usize, ledger_id: &str, timeout: Duration) {
+    use deposits_protocol::messages::LedgerOperation;
+    use deposits_protocol::tlv::TlvDecode;
+
+    let path = op_data_dir(op_idx)
+        .join("wallet/ledgers")
+        .join(format!("{}.jsonl", ledger_id));
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if path.exists() {
+            let updates = read_ledger_history(&op_data_dir(op_idx), ledger_id);
+            let has_qb = updates.iter().any(|u| {
+                matches!(
+                    LedgerOperation::tlv_decode(&u.message),
+                    Ok(LedgerOperation::QuorumBegin { .. })
+                )
+            });
+            if has_qb {
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    panic!(
+        "op{}'s view of ledger {} never contained QuorumBegin within {:?} — \
+         daemon may still be ingesting from the relay, or quorum-begin failed",
+        op_idx, &ledger_id[..16.min(ledger_id.len())], timeout
+    );
+}
+
 pub fn current_block_height() -> u32 {
     let out = Command::new("docker")
         .args([

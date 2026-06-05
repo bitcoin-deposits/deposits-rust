@@ -61,6 +61,9 @@ fn replacement_collateral_round_trips_through_dispute_pipeline() {
     // ── 1. Mirror the QuorumExpired setup ──
     let accused_op_idx: usize = 1;
     let accused_ledger = read_setup_state("ledger_1_3");
+    // Wait for op1's daemon to ingest its own QuorumBegin (race with
+    // `setup.sh` returning).
+    wait_for_quorum_begin(accused_op_idx, &accused_ledger, std::time::Duration::from_secs(30));
     let peer_op_idx = find_peer_with_ledger(&accused_ledger, accused_op_idx)
         .expect("no peer has op1's L3 ledger imported — quorum activation may have failed");
 

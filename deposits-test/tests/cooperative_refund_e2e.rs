@@ -61,6 +61,13 @@ fn cooperative_refund_drains_and_anchors_lottery() {
     let node = build_node_with_danger();
     let accused_ledger = read_setup_state(SETUP_LEDGER_KEY);
 
+    // Wait for the accused's daemon to ingest its own QuorumBegin
+    // before reading membership. setup.sh's phase 4 prints "30 ok"
+    // once QuorumBegin is published; the daemon then takes a beat
+    // to apply it locally. Without this poll, immediate-after-setup
+    // runs see an empty (or pre-QB) ledger file and panic.
+    wait_for_quorum_begin(ACCUSED_OP, &accused_ledger, Duration::from_secs(30));
+
     // Resolve the actual quorum membership for this ledger to op indices.
     // The setup cluster may have more ops than the quorum size, so we
     // need the *real* member subset — that's whose daemons must pause,
