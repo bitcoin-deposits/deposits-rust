@@ -81,6 +81,17 @@ fn dispute_creates_well_formed_fork_branches() {
     }
 
     let node = build_node_with_danger();
+
+    // Fund every potential cosigner's op-key P2WPKH. auto-arm pulls
+    // RC from there; without funding, every cosigner declares
+    // `replacement_collateral = None` and the test asserts that as
+    // a precondition failure. Same recipe as
+    // fraud_proof_quorum_expired / replacement_collateral_e2e.
+    for op_idx in 0..16 {
+        let _ = fund_operator_key_address(op_idx, 100_000);
+    }
+    mine_blocks(2);
+
     // Tier-3 isn't idempotent: a re-run on the same cluster picks the
     // same already-disputed ledger via `discover_op0_ledger`. Allow
     // overriding via `FORK_SHAPE_LEDGER_ID` so subsequent runs can

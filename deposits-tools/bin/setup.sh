@@ -832,7 +832,15 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
         # cosign cascade engages past quorum_expiry (legacy ledgers
         # preserve old strict-majority-fatal behavior and sit out the
         # new code path).
+        # --collateral-ratio 0.6 splits the activation TX 40% reserves /
+        # 60% collateral, matching the historical RESERVES/COLLATERAL
+        # constants at top. Without this, the daemon defaults to
+        # 100% reserves / 0% collateral and the conformance check
+        # `obligations > collateral` rejects every InvoiceCredit /
+        # OnchainCredit (e.g. pay_invoice_self_pay's deposit credit
+        # fails with "credit would exceed quorum collateral (0)").
         run_cmd "$i" quorum begin "$ledger_id" --amount-sats $ACTIVATION_SATS \
+            --collateral-ratio 0.6 \
             --protocol-version cltv-offset-v2 \
             > "$BEGIN_LOG_DIR/op${i}_l${l}.log" 2>&1 &
         begin_pids+=("$!")
