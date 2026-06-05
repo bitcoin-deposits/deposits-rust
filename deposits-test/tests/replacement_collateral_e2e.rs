@@ -81,18 +81,41 @@ fn replacement_collateral_round_trips_through_dispute_pipeline() {
     let quorum_expiry =
         quorum_expiry.expect("accused ledger has no QuorumBegin — quorum was never active");
 
-    let latest_anchor = history
-        .iter()
-        .rev()
-        .find(|u| u.block_hash != [0u8; 32])
-        .expect("accused ledger has no anchored block_hash");
-    if latest_anchor.block_height <= quorum_expiry {
-        panic!(
-            "TEST PRECONDITION not met: latest anchor at block {}, quorum_expiry {}. \
-             Mine more regtest blocks past QuorumBegin to push the chain past expiry.",
-            latest_anchor.block_height, quorum_expiry
-        );
+    // Mine past expiry + grace if the chain hasn't already been
+    // advanced. Then wait for the accused's daemon to anchor a
+    // post-expiry block to the ledger.
+    let chain_tip = current_block_height();
+    let target = quorum_expiry + 720 + 80;
+    if chain_tip < target {
+        let to_mine = target - chain_tip;
+        eprintln!("[setup]   mining {} blocks → tip {} (past expiry+grace)", to_mine, target);
+        mine_blocks(to_mine);
+        wait_for_daemon_chain_tip(accused_op_idx, target, std::time::Duration::from_secs(120));
     }
+
+    // Re-read the ledger history — the accused's daemon should have
+    // anchored a new block_hash by now (the auto-anchor task runs
+    // every ~10s in fast-poll). Poll for up to 30s.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut latest_anchor = None;
+    while std::time::Instant::now() < deadline {
+        let fresh_history = read_ledger_history(&op_data_dir(accused_op_idx), &accused_ledger);
+        if let Some(u) = fresh_history
+            .into_iter()
+            .rev()
+            .find(|u| u.block_hash != [0u8; 32] && u.block_height > quorum_expiry)
+        {
+            latest_anchor = Some(u);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    let latest_anchor = latest_anchor.unwrap_or_else(|| {
+        panic!(
+            "accused ledger has no post-expiry anchored block_hash within 30s after \
+             mining past expiry — anchor task may be stuck or daemon not synced"
+        )
+    });
     let anchor_block_hash = latest_anchor.block_hash;
     eprintln!(
         "[setup]   accused=op{}  ledger={}…  peer=op{}",

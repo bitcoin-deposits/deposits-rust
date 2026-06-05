@@ -120,11 +120,18 @@ fn cooperative_refund_drains_and_anchors_lottery() {
         })
         .expect("accused ledger has no QuorumBegin");
 
-    // Chain tip past quorum_expiry is the test precondition (the
-    // daemons' auto-dispute uses the same check). Use bitcoind directly
-    // rather than the in-ledger anchor — fresh setups haven't anchored
-    // a post-expiry block to the main ledger yet (operator stops
-    // appending after QuorumBegin under normal flow).
+    // Chain tip past quorum_expiry + grace is the test precondition
+    // (the daemons' auto-dispute uses chain_tip > expiry + 720). On a
+    // fresh cluster the chain hasn't been advanced; mine the required
+    // delta, then wait for the accused's daemon to catch up.
+    let chain_tip = current_block_height();
+    let target = quorum_expiry + 720 + 80;
+    if chain_tip < target {
+        let to_mine = target - chain_tip;
+        eprintln!("[setup]   mining {} blocks → tip {} (past expiry+grace)", to_mine, target);
+        mine_blocks(to_mine);
+        wait_for_daemon_chain_tip(ACCUSED_OP, target, std::time::Duration::from_secs(120));
+    }
     let chain_tip = current_block_height();
     if chain_tip <= quorum_expiry {
         panic!(
