@@ -412,11 +412,25 @@ impl Node {
         // can drain reserves manually before each disputant arms with
         // the received UTXO as replacement collateral. File-based so
         // it works against already-running daemons.
+        //
+        // PERSIST FIRST: the unconditional `persist_ledger_to_disk` for
+        // this fork sits at the end of the function (after the armed
+        // step). Returning here without persisting leaves the fork
+        // in-memory only — invisible to tests (and to operator tooling)
+        // that observe via the JSONL files. Force a persist here so
+        // the manual-orchestration path can see the same fork shape it
+        // would see in the unpaused flow.
         if self.data_dir.join(".pause_auto_dispute_actions").exists() {
+            if let Err(e) = self.handler.persist_ledger_to_disk(&fork_key) {
+                tracing::error!(
+                    "Failed to persist fork ledger before pause-marker return: {}",
+                    e
+                );
+            }
             tracing::info!(
                 ".pause_auto_dispute_actions marker present — skipping \
-                 auto-arm (DisputeEnter published, manual orchestration \
-                 takes over)"
+                 auto-arm (DisputeEnter published + persisted, manual \
+                 orchestration takes over)"
             );
             return Ok(());
         }

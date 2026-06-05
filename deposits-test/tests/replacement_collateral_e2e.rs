@@ -66,9 +66,14 @@ fn replacement_collateral_round_trips_through_dispute_pipeline() {
     // happens for all three potential disputants (in Q=3 only the two
     // non-accused members will actually arm, but funding all three is
     // simpler than identifying the cosigner subset upfront).
-    for op_idx in 0..3 {
-        let txid = fund_operator_key_address(op_idx, 100_000);
-        eprintln!("[fund]    op{} op-key P2WPKH funded by {}", op_idx, txid);
+    // Fund ALL cluster ops' op-key addresses, not just 0..3. The
+    // ledger's actual quorum members depend on setup.sh's assignment
+    // (Q=3 picks any 3 of the cluster's 16 ops). Any unfunded member
+    // who happens to be a cosigner declares None, and the strict RC3
+    // verifier refuses confiscation. Same pattern as
+    // fraud_proof_quorum_expired (which fund-funds 0..16).
+    for op_idx in 0..16 {
+        let _ = fund_operator_key_address(op_idx, 100_000);
     }
     mine_blocks(2);
 
@@ -95,53 +100,38 @@ fn replacement_collateral_round_trips_through_dispute_pipeline() {
     let quorum_expiry =
         quorum_expiry.expect("accused ledger has no QuorumBegin — quorum was never active");
 
-    // Mine past expiry + grace if the chain hasn't already been
-    // advanced. Then wait for the accused's daemon to anchor a
-    // post-expiry block to the ledger.
+    // Mine just past expiry+1 so the fraud-proof anchor is past
+    // expiry (the verifier requires strict >). The auto-detect path
+    // (cosigners' periodic loop) needs `expiry+720+grace`, but here
+    // we publish kind:9101 explicitly, which only requires
+    // `anchor_height > quorum_expiry`. Same pattern as
+    // fraud_proof_quorum_expired.
+    //
+    // The anchor itself comes from bitcoind directly — no need to
+    // wait for the accused's daemon to write a fresh anchored ledger
+    // update, since the verifier only checks the block_hash is in
+    // its confirmed chain (not that the ledger references it).
     let chain_tip = current_block_height();
-    let target = quorum_expiry + 720 + 80;
+    let target = quorum_expiry + 10;
     if chain_tip < target {
         let to_mine = target - chain_tip;
-        eprintln!("[setup]   mining {} blocks → tip {} (past expiry+grace)", to_mine, target);
+        eprintln!("[setup]   mining {} blocks → tip {} (past expiry+1)", to_mine, target);
         mine_blocks(to_mine);
-        // Wait for all 3 daemons (accused + 2 cosigners) — the test
-        // expects fork branches from cosigners and an anchored update
-        // on the accused, both of which depend on each daemon's wallet
-        // sync catching up.
-        for op_idx in 0..3 {
-            wait_for_daemon_chain_tip(op_idx, target, std::time::Duration::from_secs(120));
-        }
     }
-
-    // Re-read the ledger history — the accused's daemon should have
-    // anchored a new block_hash by now (the auto-anchor task runs
-    // every ~10s in fast-poll). Poll for up to 30s.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let mut latest_anchor = None;
-    while std::time::Instant::now() < deadline {
-        let fresh_history = read_ledger_history(&op_data_dir(accused_op_idx), &accused_ledger);
-        if let Some(u) = fresh_history
-            .into_iter()
-            .rev()
-            .find(|u| u.block_hash != [0u8; 32] && u.block_height > quorum_expiry)
-        {
-            latest_anchor = Some(u);
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
-    let latest_anchor = latest_anchor.unwrap_or_else(|| {
-        panic!(
-            "accused ledger has no post-expiry anchored block_hash within 30s after \
-             mining past expiry — anchor task may be stuck or daemon not synced"
-        )
-    });
-    let anchor_block_hash = latest_anchor.block_hash;
+    let chain_tip = current_block_height();
+    assert!(
+        chain_tip > quorum_expiry,
+        "chain tip {} must exceed quorum_expiry {}",
+        chain_tip,
+        quorum_expiry
+    );
+    let anchor_block_hash = get_block_hash(chain_tip);
     eprintln!(
-        "[setup]   accused=op{}  ledger={}…  peer=op{}",
+        "[setup]   accused=op{}  ledger={}…  peer=op{}  anchor={}",
         accused_op_idx,
         &accused_ledger[..16],
-        peer_op_idx
+        peer_op_idx,
+        &hex::encode(anchor_block_hash)[..16]
     );
 
     // ── 2. Build + publish the fraud proof ──
