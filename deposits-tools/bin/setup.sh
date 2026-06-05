@@ -726,6 +726,18 @@ done
 mine_blocks 6
 echo ""
 log_ok "Created + pre-funded $((NODE_COUNT * LEDGERS_PER_OP)) ledgers ($PER_LEDGER_BTC BTC each)"
+
+# Give every ledger's BDK wallet time to ingest its funding UTXO via
+# esplora before phase 4's quorum-begin storm. Without this wait,
+# whichever ledger drew the slow end of the wallet-sync interval
+# fires `quorum begin` against a BDK view that still shows 0
+# balance and gets back "Insufficient funds: 0 BTC available …".
+# fast-poll wallet sync is 30s; pad to 45s so the slowest scanner
+# has at least one full cycle to land the funding UTXO. (Setup
+# normally spends ~5–10s on phase 3 quorum-add before we'd hit
+# phase 4 anyway, so the marginal wait is small.)
+log_info "  Waiting 45s for ledger wallets to ingest funding UTXOs"
+sleep 45
 echo ""
 
 # ============================================================================

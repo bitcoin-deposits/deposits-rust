@@ -202,29 +202,20 @@ fn fraud_proof_quorum_expired_triggers_respectful_confiscation() {
     eprintln!("[publish]  kind:9101 from op{}", accused_op_idx);
     publish_fraud_broadcast(&node, accused_op_idx, &broadcast);
 
-    let op_idx = poll_confiscation_marker(&accused_ledger, Duration::from_secs(180));
+    let (op_idx, txid_str) = poll_confiscation_txid(&accused_ledger, Duration::from_secs(180));
     eprintln!(
-        "[ok] verified QuorumExpired drove confiscation: marker at op{}/confiscated_{}.marker",
-        op_idx,
-        &accused_ledger[..16]
+        "[ok] verified QuorumExpired drove confiscation: tx {} (observed via op{})",
+        &txid_str,
+        op_idx
     );
 
     // ── 7. Assert the on-chain confiscation tx is bifurcated ──
-    // Read the txid the operator wrote into the marker file, fetch the
-    // tx from esplora, and verify the output shape:
+    // Fetch the tx from esplora and verify the output shape:
     //   • exactly 2 outputs (single output = punitive, would be wrong here)
     //   • output[0].value ≥ P2WSH_DUST_LIMIT_SATS (lottery output)
     //   • output[1].script_pubkey is the original operator's P2WPKH (change)
     // For QuorumExpired with no deposits in the cluster, obligations = 0
     // so the lottery output should equal the dust floor (330 sats).
-    let marker_path = op_data_dir(op_idx).join(format!(
-        "confiscated_{}.marker",
-        &accused_ledger[..16]
-    ));
-    let txid_str = std::fs::read_to_string(&marker_path)
-        .expect("read marker")
-        .trim()
-        .to_string();
     eprintln!("[onchain]  fetching confiscation tx {}", &txid_str);
 
     let tx_url = format!("{}/tx/{}", ELECTRS_URL, txid_str);

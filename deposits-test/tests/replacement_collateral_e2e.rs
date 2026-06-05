@@ -78,25 +78,55 @@ fn replacement_collateral_round_trips_through_dispute_pipeline() {
     mine_blocks(2);
 
     // ── 1. Mirror the QuorumExpired setup ──
-    let accused_op_idx: usize = 1;
-    let accused_ledger = read_setup_state("ledger_1_3");
+    // Use op3's L3 (ledger_3_3) so we don't clash with
+    // fraud_proof_quorum_expired's use of ledger_1_3. Both tests
+    // drive a ledger to confiscation; running both against the same
+    // ledger on the same cluster fails the second one because the
+    // accused's ledger is already in a frozen dispute state and
+    // can't accept the proof-embed update.
+    let accused_op_idx: usize = 3;
+    let accused_ledger = read_setup_state("ledger_3_3");
     // Wait for op1's daemon to ingest its own QuorumBegin (race with
-    // `setup.sh` returning).
-    wait_for_quorum_begin(accused_op_idx, &accused_ledger, std::time::Duration::from_secs(30));
-    let peer_op_idx = find_peer_with_ledger(&accused_ledger, accused_op_idx)
-        .expect("no peer has op1's L3 ledger imported — quorum activation may have failed");
+    // `setup.sh` returning). 90s — fresh cluster sometimes takes
+    // longer than 30s to settle after setup.sh returns.
+    wait_for_quorum_begin(accused_op_idx, &accused_ledger, std::time::Duration::from_secs(90));
 
     let history = read_ledger_history(&op_data_dir(accused_op_idx), &accused_ledger);
     let mut quorum_expiry: Option<u32> = None;
+    let mut quorum_member_pks: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
     for u in history.iter().rev() {
         if let Ok(LedgerOperation::QuorumBegin {
-            quorum_expiry: e, ..
+            quorum_expiry: e,
+            quorum_members,
+            ..
         }) = LedgerOperation::tlv_decode(&u.message)
         {
             quorum_expiry = Some(e);
+            quorum_member_pks = quorum_members.iter().map(|m| m.pubkey).collect();
             break;
         }
     }
+
+    // Pick the embed peer from the actual quorum members.
+    // `find_peer_with_ledger` returns any op with the file on disk,
+    // which can be a non-member from earlier test runs — non-members
+    // don't subscribe to operator updates and so can't relay the
+    // freshly-embedded one back into our view.
+    use bitcoin::secp256k1::{PublicKey, Secp256k1};
+    let secp = Secp256k1::new();
+    let peer_op_idx = (0..16)
+        .find(|&i| {
+            if i == accused_op_idx {
+                return false;
+            }
+            if !op_data_dir(i).exists() {
+                return false;
+            }
+            let sk = op_operator_secret(i);
+            let pk = PublicKey::from_secret_key(&secp, &sk);
+            quorum_member_pks.iter().any(|m| m == &pk)
+        })
+        .expect("no quorum member found among ops 0..16 — cluster shape unknown");
     let quorum_expiry =
         quorum_expiry.expect("accused ledger has no QuorumBegin — quorum was never active");
 
@@ -184,22 +214,31 @@ fn replacement_collateral_round_trips_through_dispute_pipeline() {
     use deposits_core::SignedLedgerUpdate;
     let mut disputants_with_decl: Vec<(usize, deposits_core::messages::ReplacementCollateral)> =
         Vec::new();
-    for op_idx in 0..3 {
+    for op_idx in 0..16 {
         if op_idx == accused_op_idx {
             continue;
         }
         let data_dir = op_data_dir(op_idx);
-        let entries = match std::fs::read_dir(data_dir.join("wallet")) {
+        // Ledger JSONL files live at `wallet/ledgers/`, not `wallet/`.
+        let entries = match std::fs::read_dir(data_dir.join("wallet/ledgers")) {
             Ok(e) => e,
             Err(_) => continue,
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             // Compound key shape: {ledger_id}_{lvs:06}_{disputer_pk_16}.jsonl
-            if !name.starts_with(&accused_ledger) || !name.ends_with(".jsonl") {
+            // — only the fork files (length > base + 6), not the base file.
+            if !name.starts_with(&accused_ledger)
+                || !name.ends_with(".jsonl")
+                || name.len() <= accused_ledger.len() + 6
+            {
                 continue;
             }
-            // Tail-scan the JSONL for the most recent DisputeArmed.
+            // Tail-scan the JSONL for the most recent DisputeArmed with RC.
+            // SignedLedgerUpdate rows are flat with `#[serde(tag = "type")]`
+            // on the enum, so the Update's fields sit alongside
+            // `"type":"Update"` on the same object — strip the tag and
+            // deserialize directly.
             let contents = match std::fs::read_to_string(entry.path()) {
                 Ok(s) => s,
                 Err(_) => continue,
@@ -207,25 +246,23 @@ fn replacement_collateral_round_trips_through_dispute_pipeline() {
             let mut latest_armed_decl: Option<deposits_core::messages::ReplacementCollateral> =
                 None;
             for line in contents.lines() {
-                // Each line is `{"type":"Update","update":{...SignedLedgerUpdate...}}`
-                // (or similar). Parse loosely as Value and pluck `update`.
-                let v: serde_json::Value = match serde_json::from_str(line) {
+                let mut v: serde_json::Value = match serde_json::from_str(line) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                let upd_val = match v.get("update") {
-                    Some(u) => u.clone(),
-                    None => continue,
-                };
-                if let Ok(upd) = serde_json::from_value::<SignedLedgerUpdate>(upd_val) {
+                if v.get("type").and_then(|t| t.as_str()) != Some("Update") {
+                    continue;
+                }
+                if let Some(obj) = v.as_object_mut() {
+                    obj.remove("type");
+                }
+                if let Ok(upd) = serde_json::from_value::<SignedLedgerUpdate>(v) {
                     if let Ok(LedgerOperation::DisputeArmed {
-                        replacement_collateral,
+                        replacement_collateral: Some(rc),
                         ..
                     }) = LedgerOperation::tlv_decode(&upd.message)
                     {
-                        if let Some(rc) = replacement_collateral {
-                            latest_armed_decl = Some(rc);
-                        }
+                        latest_armed_decl = Some(rc);
                     }
                 }
             }

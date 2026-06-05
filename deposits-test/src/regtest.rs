@@ -820,7 +820,12 @@ pub fn poll_confiscation_marker(ledger_id: &str, timeout: Duration) -> usize {
     use deposits_protocol::messages::LedgerOperation;
     use deposits_protocol::tlv::TlvDecode;
 
-    // Find the LedgerOpen's `reserves_id` in any operator's view.
+    // The real reserves address lives in the most recent QuorumBegin
+    // (its `reserves_id` is the Taproot P2TR script that holds the
+    // activation funds). The seq-0 LedgerOpen's `reserves_id` is just
+    // the `"genesis:<pubkey>.<idx>"` placeholder — polling that
+    // address against esplora returns nothing useful, so the timeout
+    // would always fire even after a successful confiscation.
     let (observed_op, reserves_addr): (usize, String) = (0..10)
         .find_map(|op_idx| {
             let path = op_data_dir(op_idx)
@@ -830,9 +835,9 @@ pub fn poll_confiscation_marker(ledger_id: &str, timeout: Duration) -> usize {
                 return None;
             }
             let history = read_ledger_history(&op_data_dir(op_idx), ledger_id);
-            history.iter().find_map(|u| {
+            history.iter().rev().find_map(|u| {
                 let op = LedgerOperation::tlv_decode(&u.message).ok()?;
-                if let LedgerOperation::LedgerOpen { reserves_id, .. } = op {
+                if let LedgerOperation::QuorumBegin { reserves_id, .. } = op {
                     Some((op_idx, reserves_id))
                 } else {
                     None
@@ -840,7 +845,7 @@ pub fn poll_confiscation_marker(ledger_id: &str, timeout: Duration) -> usize {
             })
         })
         .unwrap_or_else(|| panic!(
-            "no LedgerOpen found anywhere for ledger {} — cannot derive reserves address",
+            "no QuorumBegin found anywhere for ledger {} — cannot derive reserves address",
             &ledger_id[..16]
         ));
 
@@ -856,6 +861,105 @@ pub fn poll_confiscation_marker(ledger_id: &str, timeout: Duration) -> usize {
          confiscation TX never landed",
         reserves_addr, &ledger_id[..16], timeout
     );
+}
+
+/// One-shot Esplora query: true iff `address_str` has no unspent
+/// outputs at all (`/scripthash/<hash>/utxo` returns `[]`). On any
+/// Like `poll_confiscation_marker`, but also returns the confiscation
+/// txid (the on-chain TX that spent the reserves UTXO). Use this when
+/// the test needs to inspect the confiscation TX shape (output count,
+/// values, change address).
+pub fn poll_confiscation_txid(ledger_id: &str, timeout: Duration) -> (usize, String) {
+    use deposits_protocol::messages::LedgerOperation;
+    use deposits_protocol::tlv::TlvDecode;
+
+    let (observed_op, reserves_addr): (usize, String) = (0..10)
+        .find_map(|op_idx| {
+            let path = op_data_dir(op_idx)
+                .join("wallet/ledgers")
+                .join(format!("{}.jsonl", ledger_id));
+            if !path.exists() {
+                return None;
+            }
+            let history = read_ledger_history(&op_data_dir(op_idx), ledger_id);
+            history.iter().rev().find_map(|u| {
+                let op = LedgerOperation::tlv_decode(&u.message).ok()?;
+                if let LedgerOperation::QuorumBegin { reserves_id, .. } = op {
+                    Some((op_idx, reserves_id))
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no QuorumBegin found anywhere for ledger {} — cannot derive reserves address",
+                &ledger_id[..16]
+            )
+        });
+
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if let Some(txid) = find_spending_txid_for_address(&reserves_addr) {
+            return (observed_op, txid);
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    panic!(
+        "reserves address {} for ledger {} not spent within {:?} — \
+         confiscation TX never landed",
+        reserves_addr,
+        &ledger_id[..16],
+        timeout
+    );
+}
+
+/// After a respectful confiscation lands, return the on-chain txid
+/// that spent `reserves_addr`. Used by tests that need to inspect
+/// the confiscation TX shape (the old `confiscated_<prefix>.marker`
+/// file the daemon used to write went away in the on-disk-state
+/// cleanup; the spending TX on chain is the equivalent record).
+///
+/// Walks `/scripthash/<h>/txs` and picks the TX where the address
+/// appears on the *input* side. Returns None if no spend has landed
+/// (test caller should poll until present, or assert via
+/// `poll_confiscation_marker` first).
+pub fn find_spending_txid_for_address(address_str: &str) -> Option<String> {
+    use bitcoin::hashes::{sha256, Hash};
+
+    let address: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+        address_str.parse().ok()?;
+    let address = address.require_network(bitcoin::Network::Regtest).ok()?;
+    let script_hex = hex::encode(address.script_pubkey().as_bytes());
+    let script_hash = sha256::Hash::hash(address.script_pubkey().as_bytes());
+    let url = format!(
+        "{}/scripthash/{}/txs",
+        ELECTRS_URL,
+        hex::encode(script_hash.to_byte_array())
+    );
+    let txs: Vec<serde_json::Value> = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?
+        .get(&url)
+        .send()
+        .ok()?
+        .json()
+        .ok()?;
+    for t in txs {
+        let vins = t.get("vin")?.as_array()?;
+        for vin in vins {
+            let prev_spk = vin
+                .get("prevout")
+                .and_then(|p| p.get("scriptpubkey"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            if prev_spk == script_hex {
+                return t.get("txid").and_then(|x| x.as_str()).map(|s| s.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// One-shot Esplora query: true iff `address_str` has no unspent
