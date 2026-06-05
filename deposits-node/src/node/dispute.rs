@@ -1789,6 +1789,15 @@ impl Node {
         // Enumerate disputes we're armed for by scanning fork-branch
         // ledgers in `DisputeState::Armed`. The fork's state is the
         // authoritative signal — no separate marker file needed.
+        //
+        // Ownership predicate: `parent_pubkey == our_pubkey`. A fork's
+        // `operator_key` is inherited from the original (the accused
+        // operator) and never changes; `parent_pubkey` is what
+        // `auto_arm_for_dispute_with_anchor` sets to the disputer's
+        // key when it publishes DisputeEnter on the fork. The same
+        // predicate is used in `inbound.rs` to detect "our fork."
+        // Using `operator_key()` here would always be false for any
+        // disputer-owned fork, silently disabling auto-confiscate.
         let armed_ledger_ids: Vec<String> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
@@ -1798,7 +1807,7 @@ impl Node {
                         return None;
                     }
                     let l = arc.read().unwrap();
-                    if l.operator_key() != our_pubkey {
+                    if l.state.parent_pubkey != our_pubkey {
                         return None;
                     }
                     if l.state.dispute_state != deposits_core::types::DisputeState::Armed {
