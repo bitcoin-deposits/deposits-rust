@@ -1129,6 +1129,11 @@ impl Node {
             deposits_core::fraud::FraudEvidence::NonConforming { sequence, .. } => {
                 sequence.saturating_sub(1)
             }
+            deposits_core::fraud::FraudEvidence::Equivocation { sequence, .. } => {
+                // Everything strictly before the double-signed seq is
+                // canonical and inherits to the fork branch.
+                sequence.saturating_sub(1)
+            }
             deposits_core::fraud::FraudEvidence::QuorumExpired { .. } => {
                 // QuorumExpired is respectful: the operator's chain is
                 // valid up to its current tip — they just stopped

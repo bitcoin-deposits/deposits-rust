@@ -73,6 +73,18 @@ pub enum FraudProofType {
     /// punitive proof. See DEP-03 §"Claim transaction (multi-input)"
     /// for the canonical claim shape.
     WinnerCollateralDeviation,
+    /// Operator double-signed: two distinct `SignedLedgerUpdate`s
+    /// at the same `(ledger_id, sequence_number)`, both bearing the
+    /// operator's BIP-340 signature, with differing `content_hash`.
+    /// Self-contained — verification needs nothing beyond the two
+    /// updates themselves; no relay fetch, no block oracle, no
+    /// cosigner ledger lookup. Punitive: a chain can have exactly
+    /// one canonical update per sequence, so the operator's signature
+    /// on two of them at the same seq is proof of misbehavior.
+    /// `last_valid_sequence` is the equivocation point minus one —
+    /// everything strictly before the double-signed seq is intact
+    /// and inherits to the fork branch.
+    Equivocation,
 }
 
 impl FraudProofType {
@@ -225,6 +237,35 @@ pub enum FraudEvidence {
         /// for explicit binding — verifier reads it from ledger state
         /// and checks it matches before consulting the chain.
         quorum_expiry: u32,
+    },
+
+    /// Two distinct cosigned updates at the same `(ledger_id, seq)`,
+    /// both signed by the operator. Carries both updates inline so
+    /// the verifier doesn't need to fetch anything — equivocation is
+    /// the only fraud type whose proof is fully self-contained.
+    ///
+    /// `sequence` is the shared `sequence_number` of both updates;
+    /// the daemon uses `sequence - 1` as `last_valid_sequence` when
+    /// driving the dispute (every update strictly before the
+    /// equivocation point remains canonical and propagates onto the
+    /// fork branch).
+    Equivocation {
+        /// Shared `sequence_number` of both updates. Carried
+        /// redundantly with the embedded updates so the daemon can
+        /// compute `last_valid_sequence` without decoding the TLV
+        /// payloads up front — encoding is bound (verifier still
+        /// checks both updates carry the same sequence).
+        sequence: u64,
+        /// First `SignedLedgerUpdate` (TLV bytes, lowercase hex).
+        /// Hex (vs base64) keeps the encoding alphabet identical to
+        /// every other on-the-wire blob in this enum and avoids
+        /// pulling base64 into deposits-protocol.
+        update_a_hex: String,
+        /// Second `SignedLedgerUpdate` (TLV bytes, lowercase hex).
+        /// Must have the same `operator_id`, `ledger_id`, and
+        /// `sequence_number` as `update_a_hex`, with a different
+        /// `content_hash` — and both signatures must verify.
+        update_b_hex: String,
     },
 }
 
@@ -717,6 +758,136 @@ pub fn verify_quorum_expired(
             "claimed quorum_expiry {} doesn't match the ledger's most \
              recent QuorumBegin's quorum_expiry {}",
             claimed_expiry, actual_expiry
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify an `Equivocation` claim.
+///
+/// The accusation: the operator double-signed — two distinct
+/// `SignedLedgerUpdate`s at the same `(ledger_id, sequence_number)`,
+/// both bearing the operator's BIP-340 signature. A canonical chain
+/// can only have one update per seq, so two operator signatures at
+/// the same seq is unrecoverable proof of misbehavior.
+///
+/// Self-contained: needs nothing beyond the two updates in the
+/// evidence. No relay fetch, no block oracle, no cosigner ledger
+/// lookup.
+///
+/// Checks:
+///   1. Both updates TLV-decode cleanly.
+///   2. Same `operator_id` (proves the operator's key signed both,
+///      not two different operators colliding).
+///   3. Same `ledger_id` (binds the equivocation to the ledger named
+///      in the proof's outer `ledger_id` field — and they match each
+///      other).
+///   4. Same `sequence_number` (matches the evidence's `sequence`
+///      field, redundancy for the daemon's LVS computation).
+///   5. Different `content_hash` (proves the updates are actually
+///      distinct — re-broadcasts of the same update don't qualify).
+///   6. Both `operator_signature`s verify (via
+///      `SignedLedgerUpdate::verify_operator_signature`). Without
+///      this anyone could fabricate "evidence" by hand.
+///   7. The proof's outer `accused` field matches both updates'
+///      `operator_id` (no impersonation: the operator named on the
+///      proof must be the one whose signature appears on both).
+pub fn verify_equivocation(proof: &FraudProof) -> Result<(), String> {
+    use crate::tlv::TlvDecode;
+
+    let FraudEvidence::Equivocation {
+        sequence,
+        update_a_hex,
+        update_b_hex,
+    } = &proof.evidence
+    else {
+        return Err("verify_equivocation: wrong evidence type".into());
+    };
+
+    // (1) Decode.
+    let bytes_a = hex::decode(update_a_hex)
+        .map_err(|e| format!("update_a hex decode: {}", e))?;
+    let bytes_b = hex::decode(update_b_hex)
+        .map_err(|e| format!("update_b hex decode: {}", e))?;
+    let update_a = crate::types::SignedLedgerUpdate::tlv_decode(&bytes_a)
+        .map_err(|e| format!("update_a TLV decode: {:?}", e))?;
+    let update_b = crate::types::SignedLedgerUpdate::tlv_decode(&bytes_b)
+        .map_err(|e| format!("update_b TLV decode: {:?}", e))?;
+
+    // (2) Same operator_id.
+    if update_a.operator_id != update_b.operator_id {
+        return Err(format!(
+            "update_a.operator_id {} ≠ update_b.operator_id {} — not the \
+             same operator double-signing",
+            hex::encode(&update_a.operator_id.serialize()[..8]),
+            hex::encode(&update_b.operator_id.serialize()[..8])
+        ));
+    }
+
+    // (3) Same ledger_id (and binds to the proof's outer ledger_id).
+    if update_a.ledger_id != update_b.ledger_id {
+        return Err(format!(
+            "update_a.ledger_id {} ≠ update_b.ledger_id {} — equivocation \
+             requires both updates on the same ledger",
+            hex::encode(&update_a.ledger_id[..8]),
+            hex::encode(&update_b.ledger_id[..8])
+        ));
+    }
+    let outer_ledger_bytes = hex::decode(&proof.ledger_id)
+        .map_err(|e| format!("outer ledger_id hex: {}", e))?;
+    if outer_ledger_bytes.len() != 32 || outer_ledger_bytes[..] != update_a.ledger_id[..] {
+        return Err(format!(
+            "outer ledger_id {} ≠ updates' ledger_id {}",
+            &proof.ledger_id[..16.min(proof.ledger_id.len())],
+            hex::encode(&update_a.ledger_id[..8])
+        ));
+    }
+
+    // (4) Same sequence_number, and matches evidence.sequence.
+    if update_a.sequence_number != update_b.sequence_number {
+        return Err(format!(
+            "update_a.seq {} ≠ update_b.seq {} — equivocation requires \
+             the same sequence number",
+            update_a.sequence_number, update_b.sequence_number
+        ));
+    }
+    if update_a.sequence_number != *sequence {
+        return Err(format!(
+            "evidence.sequence {} ≠ updates' sequence_number {} — \
+             redundancy check failed (encoding-corrupted or forged)",
+            sequence, update_a.sequence_number
+        ));
+    }
+
+    // (5) Different content_hash — re-broadcasts of the same update
+    //     are NOT equivocation. Tools that splice the same update
+    //     into both slots get rejected here.
+    if update_a.content_hash == update_b.content_hash {
+        return Err("update_a.content_hash == update_b.content_hash — \
+                    same update re-broadcast, not an equivocation"
+            .into());
+    }
+
+    // (6) Both signatures verify. Without this, anyone could
+    //     fabricate "evidence" by writing two arbitrary updates and
+    //     stuffing in zero bytes for operator_signature.
+    update_a
+        .verify_operator_signature()
+        .map_err(|e| format!("update_a signature verification: {}", e))?;
+    update_b
+        .verify_operator_signature()
+        .map_err(|e| format!("update_b signature verification: {}", e))?;
+
+    // (7) Accused matches the operator that signed.
+    let accused_bytes = hex::decode(&proof.accused)
+        .map_err(|e| format!("accused hex: {}", e))?;
+    if accused_bytes != update_a.operator_id.serialize() {
+        return Err(format!(
+            "outer accused {} ≠ updates' operator_id {} — impersonation \
+             check",
+            &proof.accused[..16.min(proof.accused.len())],
+            hex::encode(&update_a.operator_id.serialize()[..8])
         ));
     }
 
@@ -1251,6 +1422,11 @@ pub fn verify_fraud_broadcast(
             // directly. Top-level broadcast verification accepts at this
             // layer; daemon enforcement is upstream.
         }
+        FraudProofType::Equivocation => {
+            // Self-contained — both updates are inline in the evidence,
+            // no relay/oracle/cosigner-ledger lookup needed.
+            verify_equivocation(proof)?;
+        }
     }
 
     Ok(())
@@ -1328,6 +1504,7 @@ impl FraudProofType {
             Self::NonConformingUpdate => 5,
             Self::QuorumExpired => 6,
             Self::WinnerCollateralDeviation => 7,
+            Self::Equivocation => 8,
         }
     }
 }
@@ -1412,6 +1589,23 @@ impl FraudEvidence {
                 out.extend_from_slice(winner_armed_update_hex.as_bytes());
                 out.extend_from_slice(claim_txid.as_bytes());
                 out.extend_from_slice(claim_block_hash);
+            }
+            Self::Equivocation {
+                sequence,
+                update_a_hex,
+                update_b_hex,
+            } => {
+                out.extend_from_slice(&sequence.to_le_bytes());
+                // Hash the two updates in sort order so the proof_hash
+                // is stable regardless of which update the prover
+                // happened to put first.
+                let (lo, hi) = if update_a_hex <= update_b_hex {
+                    (update_a_hex, update_b_hex)
+                } else {
+                    (update_b_hex, update_a_hex)
+                };
+                out.extend_from_slice(lo.as_bytes());
+                out.extend_from_slice(hi.as_bytes());
             }
         }
         out

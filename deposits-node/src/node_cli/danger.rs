@@ -240,6 +240,14 @@ async fn danger_fork_update(args: &[String]) -> Result<(), Box<dyn std::error::E
     println!("U_A chain_hash={}", hex::encode(update_a.chain_hash()));
     println!("U_B content_hash={}", hex::encode(update_b.content_hash));
     println!("U_B chain_hash={}", hex::encode(update_b.chain_hash()));
+    // Full TLV bytes (hex) for both updates. The equivocation
+    // fraud-proof test reads these from stdout to build the
+    // `FraudEvidence::Equivocation` payload — fetching them back off
+    // the relay isn't reliable because cosigners only persist the
+    // first one that applies and reject the second at the
+    // ledger_actor edge (it never makes it to disk).
+    println!("U_A tlv_hex={}", hex::encode(update_a.tlv_encode()));
+    println!("U_B tlv_hex={}", hex::encode(update_b.tlv_encode()));
 
     let transport = NostrTransportBuilder::new(operator_secret)
         .relay(&relay_url)
