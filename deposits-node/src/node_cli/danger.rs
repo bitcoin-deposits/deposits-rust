@@ -22,12 +22,226 @@ pub async fn danger_command(args: &[String]) -> Result<(), Box<dyn std::error::E
         "publish-invalid" => danger_publish_invalid(&args[1..]).await,
         "forge-stale-cosig" => danger_forge_stale_cosig(&args[1..]).await,
         "fork-update" => danger_fork_update(&args[1..]).await,
+        "forge-non-conforming-cosig" => danger_forge_non_conforming_cosig(&args[1..]).await,
         cmd => {
             eprintln!("Unknown danger subcommand: {}", cmd);
-            eprintln!("Available: publish-invalid, forge-stale-cosig, fork-update");
+            eprintln!(
+                "Available: publish-invalid, forge-stale-cosig, fork-update, \
+                 forge-non-conforming-cosig"
+            );
             Ok(())
         }
     }
+}
+
+/// Mint one `SignedLedgerUpdate` that's non-conforming under the
+/// active ruleset — operator-signed plus forged cosignatures from
+/// passed-in seeds. Witness for
+/// `FraudProofType::NonConformingCosignature`.
+///
+/// In production a cosigner runs check_conformance and refuses to
+/// sign anything that fires a `ConformanceViolation`. This command
+/// short-circuits that gate by forging cosigs directly; the resulting
+/// update is exactly the artifact the cosigners *should* have
+/// refused but (per the fraud-proof framing) didn't.
+///
+/// The forged op is an `InvoiceLock { amount: 0, deposit_id:
+/// dummy, … }`. Either path lands fraud:
+///   - apply succeeds → conformance flags `ZeroAmount`.
+///   - apply fails (dummy deposit_id unknown) → state machine
+///     refuses outright; the verifier treats apply-Err as fraud
+///     since the cosigners signed an unapplyable op.
+///
+/// Usage: `danger forge-non-conforming-cosig <reserves_id>
+///         [--cosigner-seed <hex>]+`
+async fn danger_forge_non_conforming_cosig(
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::nostr::NostrTransportBuilder;
+    use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::types::CosignEntry;
+    use deposits_core::SignedLedgerUpdate;
+    use deposits_core::TlvEncode;
+    use sha2::{Digest, Sha256};
+
+    if args.is_empty() {
+        eprintln!(
+            "Usage: deposits-node danger forge-non-conforming-cosig \
+             <reserves_id> [--cosigner-seed <hex>]+"
+        );
+        return Ok(());
+    }
+
+    let reserves_id = &args[0];
+
+    // Pull --cosigner-seed values out separately from config args.
+    let mut cosigner_seeds: Vec<[u8; 32]> = Vec::new();
+    let mut config_args = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--cosigner-seed" && i + 1 < args.len() {
+            let raw = hex::decode(&args[i + 1])
+                .map_err(|e| format!("--cosigner-seed must be 64-char hex: {}", e))?;
+            let arr: [u8; 32] = raw
+                .try_into()
+                .map_err(|_| "--cosigner-seed must be 32 bytes")?;
+            cosigner_seeds.push(arr);
+            i += 2;
+            continue;
+        }
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            config_args.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let config = parse_config(&config_args)?;
+    let relay_url = config
+        .relays
+        .first()
+        .ok_or("No relay configured")?
+        .clone();
+
+    let secp = Secp256k1::new();
+    let operator_secret = super::derive_operator_secret(&config.seed, config.network)?;
+    let operator_keypair = Keypair::from_secret_key(&secp, &operator_secret);
+    let operator_pubkey = operator_keypair.public_key();
+
+    let node = Node::new(config).await?;
+    let (_ledger_id_hex, ledger) = node
+        .get_ledger_with_id(reserves_id)
+        .ok_or_else(|| format!("Ledger not found: {}", reserves_id))?;
+    let last = ledger.history.last().ok_or("Ledger has no history")?.clone();
+    let next_seq = last.sequence_number + 1;
+    let prev_chain_hash = last.chain_hash();
+
+    let active_member_pks: Vec<bitcoin::secp256k1::PublicKey> = ledger
+        .state
+        .quorum_members
+        .iter()
+        .map(|m| m.pubkey)
+        .collect();
+    let threshold = (active_member_pks.len() / 2) + 1;
+
+    let mut active_cosigners: Vec<(Keypair, bitcoin::secp256k1::PublicKey)> = Vec::new();
+    for seed in &cosigner_seeds {
+        let sk = super::derive_operator_secret(seed, bitcoin::Network::Regtest)?;
+        let kp = Keypair::from_secret_key(&secp, &sk);
+        let pk = kp.public_key();
+        if active_member_pks.contains(&pk) {
+            active_cosigners.push((kp, pk));
+        }
+    }
+    if active_cosigners.len() < threshold {
+        return Err(format!(
+            "need {} cosigner-seed(s) matching the ledger's {} quorum members; \
+             got {} matching seeds",
+            threshold,
+            active_member_pks.len(),
+            active_cosigners.len()
+        )
+        .into());
+    }
+    active_cosigners.truncate(threshold);
+
+    // Build the non-conforming InvoiceLock. amount=0 trips ZeroAmount
+    // if apply succeeds; otherwise the dummy deposit_id makes apply
+    // fail outright (also a fraud verdict in the verifier).
+    let dummy_deposit_id = deposits_core::types::DepositId::from([0u8; 16]);
+    let bad_op = LedgerOperation::InvoiceLock {
+        deposit_id: dummy_deposit_id,
+        amount: 0,
+        payment_id: [0xCD; 32],
+        sequence_number: next_seq,
+        nonce: 1,
+        expiry: u32::MAX,
+        witness: deposits_core::DescriptorWitness::default(),
+    };
+    let message = bad_op.tlv_encode();
+    let message_type = LedgerOperation::message_type_from_bytes(&message);
+
+    // cosign_data = seq || prev_hash || message
+    let mut cosign_data = Vec::new();
+    cosign_data.extend_from_slice(&next_seq.to_le_bytes());
+    cosign_data.extend_from_slice(&prev_chain_hash);
+    cosign_data.extend_from_slice(&message);
+    let cosign_msg_hash = Sha256::digest(&cosign_data);
+    let cosign_msg = Message::from_digest(cosign_msg_hash.into());
+
+    let mut entries: Vec<CosignEntry> = active_cosigners
+        .iter()
+        .map(|(kp, pk)| CosignEntry {
+            cosigner_pubkey: *pk,
+            cosign_signature: secp
+                .sign_schnorr_no_aux_rand(&cosign_msg, kp)
+                .serialize(),
+            member_ledger_hash: [0u8; 32],
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        a.cosigner_pubkey
+            .serialize()
+            .cmp(&b.cosigner_pubkey.serialize())
+    });
+
+    let mut update = SignedLedgerUpdate {
+        message,
+        message_type,
+        operator_id: operator_pubkey,
+        ledger_id: ledger.state.ledger_id,
+        sequence_number: next_seq,
+        previous_hash: prev_chain_hash,
+        content_hash: [0u8; 32],
+        block_height: 0,
+        block_hash: [0u8; 32],
+        cosign_signature: [0u8; 64],
+        operator_signature: [0u8; 64],
+        cosigner_pubkey: None,
+        member_ledger_hash: None,
+        cosignatures: entries,
+    };
+    update.content_hash = update.compute_hash();
+
+    let signing_data = update.operator_signing_data();
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&Sha256::digest(&signing_data));
+    let op_msg = Message::from_digest(h);
+    update.operator_signature = secp
+        .sign_schnorr_no_aux_rand(&op_msg, &operator_keypair)
+        .serialize();
+
+    println!(
+        "Forged non-conforming update at seq={} prev_hash={}",
+        next_seq,
+        hex::encode(prev_chain_hash)
+    );
+    println!("U content_hash={}", hex::encode(update.content_hash));
+    // Full TLV bytes for the test's NonConformingCosignature evidence
+    // builder (the cosigner daemons will reject this update at apply
+    // time, so reading it back off disk doesn't work — the relay
+    // does carry it; we surface it here for the test's convenience).
+    println!("U tlv_hex={}", hex::encode(update.tlv_encode()));
+    for (_, pk) in &active_cosigners {
+        println!("Forged cosig from pubkey={}", hex::encode(pk.serialize()));
+    }
+
+    let transport = NostrTransportBuilder::new(operator_secret)
+        .relay(&relay_url)
+        .build()
+        .await?;
+    let event_id = transport.broadcast_ledger_update(&update).await?;
+    println!("Broadcast forged update: {}", event_id);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    transport.disconnect().await;
+
+    Ok(())
 }
 
 /// Mint two `SignedLedgerUpdate`s at the same `{sequence, previous_hash}`

@@ -977,6 +977,15 @@ impl Node {
         for link in &broadcast.causal_chain {
             needed.insert(link.ledger_id.clone());
         }
+        // NonConformingCosignature names a *separate* fault ledger
+        // inside the evidence; verify_non_conforming_cosignature
+        // needs its history to replay state. Add it to gap-fill set.
+        if let deposits_core::fraud::FraudEvidence::NonConformingCosignature {
+            fault_ledger_id, ..
+        } = &broadcast.proof.evidence
+        {
+            needed.insert(fault_ledger_id.clone());
+        }
         for lid in &needed {
             let have = {
                 let ledgers = self.handler.ledgers.lock().unwrap();
@@ -1133,6 +1142,18 @@ impl Node {
                 // Everything strictly before the double-signed seq is
                 // canonical and inherits to the fork branch.
                 sequence.saturating_sub(1)
+            }
+            deposits_core::fraud::FraudEvidence::NonConformingCosignature { .. } => {
+                // Disputed ledger is the accused's *own* (cross-ledger
+                // contagion). Their own ledger's chain is intact up to
+                // its current tip — they just put their key on bad
+                // work elsewhere. Fork at "right now," same as
+                // QuorumExpired's framing.
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(ledger_id)
+                    .map(|arc| arc.read().unwrap().next_sequence().saturating_sub(1))
+                    .unwrap_or(0)
             }
             deposits_core::fraud::FraudEvidence::QuorumExpired { .. } => {
                 // QuorumExpired is respectful: the operator's chain is
