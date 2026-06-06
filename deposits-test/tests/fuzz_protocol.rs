@@ -2758,19 +2758,26 @@ impl ProtocolSim {
                 .count();
             let threshold = members.len() / 2 + 1;
 
+            // Saturating arithmetic: pathological fuzz inputs occasionally
+            // drive total_deposit_balance close to u64::MAX (the runaway-
+            // adversary case). `over as i64` then wraps negative, and the
+            // subsequent `+=` panics in debug builds. Bound at i64::MAX —
+            // any aggregate "stolen" that overflows i64 is already off
+            // any reasonable invariant we'd care to measure.
+            let delta = over.min(i64::MAX as u64) as i64;
             if self.adversary.contains(&i) && adv_signers >= threshold {
-                stolen += over as i64;
+                stolen = stolen.saturating_add(delta);
                 profitable_ops.push(i);
             } else if adv_signers >= threshold {
                 // Honest operator on an adversary-majority quorum — shouldn't
                 // be over-reserved unless they themselves proposed it (they
                 // won't). Count as stolen from user funds.
-                stolen += over as i64;
+                stolen = stolen.saturating_add(delta);
                 profitable_ops.push(i);
             } else {
                 // Honest majority allowed non-conforming state — this should
                 // be impossible under correct co-signing.
-                slashed += over as i64;
+                slashed = slashed.saturating_add(delta);
             }
         }
 
@@ -3081,7 +3088,7 @@ fn explore_10node_q3_4adv_placements() {
             let profit = sim.evaluate_profit();
             if profit.net > 0 {
                 profitable_seeds += 1;
-                total_stolen += profit.net;
+                total_stolen = total_stolen.saturating_add(profit.net);
             }
         }
 

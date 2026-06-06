@@ -310,7 +310,38 @@ impl Node {
             }
             "offer_status" => self.process_offer_status_request(&request).await,
             "balance_query" => self.process_balance_query_request(&request).await,
-            "delivery_embed" => self.process_delivery_embed_request(&request).await,
+            "delivery_embed" => {
+                // delivery_embed extends the member's own ledger — only
+                // the ledger's operator can sign that extension. The
+                // wallet broadcasts the request, and every daemon that
+                // subscribes to the ledger's kind picks it up; the
+                // non-operator daemons would otherwise commit-and-fail
+                // with `bad_operator_signature` (they sign with their
+                // own key but the update's operator_id is fixed at the
+                // ledger's original operator). The wallet sees
+                // whichever response arrives first, so a cosigner's
+                // doomed failure typically wins over the operator's
+                // success. Drop silently here so only the actual
+                // operator responds. Mirrors the "DROP cosign_failed"
+                // pattern just above.
+                let is_operator = self
+                    .handler
+                    .ledgers
+                    .lock()
+                    .unwrap()
+                    .get(&request.ledger_id)
+                    .map(|arc| arc.read().unwrap().state.operator_key == self.node_id)
+                    .unwrap_or(false);
+                if !is_operator {
+                    tracing::info!(
+                        "DROP delivery_embed: not operator of ledger {}... — \
+                         the actual operator will respond",
+                        &request.ledger_id[..16.min(request.ledger_id.len())]
+                    );
+                    return;
+                }
+                self.process_delivery_embed_request(&request).await
+            }
             "make_invoice" => self.process_make_invoice_request(&request).await,
             "pay_invoice" => self.process_pay_invoice_request(&request).await,
             "ledger_open" => self.process_ledger_open_request(&request).await,

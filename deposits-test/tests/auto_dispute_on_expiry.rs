@@ -206,24 +206,15 @@ fn auto_dispute_fires_when_quorum_expires() {
         last_valid_sequence
     );
 
-    // ── 5. Wait for confiscation marker (full pipeline) ──
-    let marker_name = format!("confiscated_{}.marker", prefix);
-    let deadline = Instant::now() + Duration::from_secs(180);
-    while Instant::now() < deadline {
-        for op in 0..10 {
-            if op_data_dir(op).join(&marker_name).exists() {
-                eprintln!(
-                    "[ok]    confiscation completed: marker at op{}/{}",
-                    op, marker_name
-                );
-                return;
-            }
-        }
-        std::thread::sleep(Duration::from_secs(3));
-    }
-    panic!(
-        "no `{}` marker on any op's data dir within 180s — \
-         auto-arm fired but confiscation pipeline didn't complete",
-        marker_name
+    // ── 5. Wait for confiscation TX on chain (full pipeline) ──
+    // The old `confiscated_<prefix>.marker` files went away in the
+    // on-disk-state cleanup. The authoritative signal is now the
+    // reserves UTXO being spent on-chain — `poll_confiscation_marker`
+    // polls esplora for exactly that.
+    let _ = prefix; // kept for log context above
+    let observed_op = poll_confiscation_marker(&ledger, Duration::from_secs(180));
+    eprintln!(
+        "[ok]    confiscation TX confirmed on chain (observed via op{})",
+        observed_op
     );
 }
