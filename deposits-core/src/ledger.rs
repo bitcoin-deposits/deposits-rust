@@ -1306,52 +1306,36 @@ impl Ledger {
                 });
             }
 
-            // Each declared member must have given consent — either via
-            // a fresh `QuorumAddMember` (sitting in `next_quorum_members`
-            // waiting for promotion) OR by being a current
-            // `quorum_members` entry (consent already vetted on a prior
-            // rotation that promoted them out of next_quorum_members).
+            // Each declared member must have an existing QuorumAddMember
+            // consent in next_quorum_members. The operator can only rotate
+            // to members who have explicitly consented; QuorumBegin is not
+            // a unilateral "anyone I name is now a cosigner" lever.
             //
-            // The "current quorum_members count as consented" branch is
-            // load-bearing for DEP-05 §Lifecycle self-rescue via
-            // `quorum repair` past `quorum_expiry`: the operator
-            // re-establishes the SAME quorum to extend the deadline.
-            // Those members consented once when added; requiring fresh
-            // QuorumAddMember on every repair would force the operator
-            // through a full staging round for membership that's
-            // already in place, which defeats the purpose of repair as
-            // a single-op self-rescue lever.
+            // Operator can shorten the set (drop members) by omission, or
+            // formally remove via QuorumRemoveMember. Adding a new member
+            // without prior consent is rejected here.
             //
-            // Adding a brand-new member (not in either set) is still
-            // rejected — that's what QuorumAddMember-then-QuorumBegin
-            // is for. Operator can shorten the set (drop members) by
-            // omission, or formally remove via QuorumRemoveMember.
+            // Note: a member's prior consent (a QuorumAddMember that was
+            // promoted to active by a previous QuorumBegin) does NOT carry
+            // forward as standing consent for future rotations. Each new
+            // QuorumBegin needs fresh staging. Self-rescue via
+            // `quorum repair` past quorum_expiry must re-stage every
+            // member it wants to keep.
             let staged: std::collections::HashMap<_, _> = self
                 .state
                 .next_quorum_members
                 .iter()
                 .map(|m| (m.pubkey, m))
                 .collect();
-            let current_quorum_pks: std::collections::HashSet<_> = self
-                .state
-                .quorum_members
-                .iter()
-                .map(|m| m.pubkey)
-                .collect();
             for declared in quorum_members {
-                let consented = staged.contains_key(&declared.pubkey)
-                    || current_quorum_pks.contains(&declared.pubkey);
-                if !consented {
+                if !staged.contains_key(&declared.pubkey) {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "quorum_member_unstaged".to_string(),
                         details: format!(
                             "QuorumBegin declares member {} who has no \
                              corresponding QuorumAddMember consent in \
-                             next_quorum_members and is not a current \
-                             quorum_members entry either. Operator must \
-                             record consent (or be re-establishing an \
-                             existing member) before including a member \
-                             in a rotation.",
+                             next_quorum_members. Operator must record consent \
+                             before including a member in a rotation.",
                             declared.pubkey
                         ),
                     });
