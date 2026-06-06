@@ -45,6 +45,12 @@ fn fraud_proof_stale_cosig_triggers_confiscation() {
 
     let node = build_node_with_danger();
 
+    // ── 0. Fund op-key P2WPKHs for RC declarations. ──
+    for op_idx in 0..16 {
+        let _ = fund_operator_key_address(op_idx, 100_000);
+    }
+    mine_blocks(2);
+
     // ── 1. Discover op0's L1 ledger and op1's collateral ledger ──
     let accused_ledger = discover_op0_ledger();
     let member_ledger = read_setup_state("ledger_1_1");

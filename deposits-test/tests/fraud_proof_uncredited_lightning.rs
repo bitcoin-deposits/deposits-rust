@@ -47,6 +47,12 @@ fn fraud_proof_uncredited_lightning_triggers_confiscation() {
 
     let node = build_node_with_danger();
 
+    // ── 0. Fund op-key P2WPKHs for RC declarations. ──
+    for op_idx in 0..16 {
+        let _ = fund_operator_key_address(op_idx, 100_000);
+    }
+    mine_blocks(2);
+
     // ── 1. Pick op0's L2 ledger and read it from a quorum member's view ──
     // L1 (`ledger_0_1`) may already be disputed by a previous fraud-test
     // run on the same cluster; using L2 keeps tests independent so they
@@ -55,6 +61,14 @@ fn fraud_proof_uncredited_lightning_triggers_confiscation() {
     let accused_ledger = read_setup_state("ledger_0_2");
     let peer_op_idx = find_peer_with_ledger(&accused_ledger, 0)
         .expect("no peer has op0's L2 ledger imported — quorum activation may have failed");
+
+    // Extend the chain past QB — see fraud_proof_uncredited_onchain
+    // for the rationale. Cosigners require a QuorumBegin at-or-before
+    // LVS=proof_seq-1; fresh setup has QB at the tip, so an anchor
+    // picked from the visible chain leaves LVS pre-QB and refusals
+    // follow.
+    let _tip = extend_chain_past_qb(&accused_ledger, peer_op_idx, 3);
+
     let accused_history = read_ledger_history(&op_data_dir(peer_op_idx), &accused_ledger);
     assert!(
         accused_history.len() >= 2,

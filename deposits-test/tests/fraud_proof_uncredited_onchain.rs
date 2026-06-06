@@ -35,10 +35,30 @@ fn fraud_proof_uncredited_onchain_triggers_confiscation() {
 
     let node = build_node_with_danger();
 
+    // ── 0. Fund every op's op-key P2WPKH — auto-arm pulls RC from
+    //       there; unfunded → DisputeArmed declares None → cosigners
+    //       refuse confiscation. Same recipe as fraud_proof_quorum_
+    //       expired + replacement_collateral_e2e.
+    for op_idx in 0..16 {
+        let _ = fund_operator_key_address(op_idx, 100_000);
+    }
+    mine_blocks(2);
+
     // ── 1. Pick op0's L3 ledger (untouched by other fraud tests) ──
     let accused_ledger = read_setup_state("ledger_0_3");
     let peer_op_idx = find_peer_with_ledger(&accused_ledger, 0)
         .expect("no peer has op0's L3 ledger imported — quorum activation may have failed");
+
+    // Extend the chain past QuorumBegin. Fresh-setup ledgers have QB
+    // at the tip (seq 4 with Q=3), so an anchor picked from the
+    // visible chain lands AT QB and the daemon's
+    // `LVS = proof_sequence - 1` falls BEFORE QB → cosigners refuse
+    // "no QuorumBegin observed at or before last_valid_sequence".
+    // Drop a few `DepositOpen` updates past QB so the proof can cite
+    // something post-rotation.
+    let tip_seq = extend_chain_past_qb(&accused_ledger, peer_op_idx, 3);
+    eprintln!("[extend]  chain extended to tip seq {}", tip_seq);
+
     let accused_history = read_ledger_history(&op_data_dir(peer_op_idx), &accused_ledger);
     assert!(
         accused_history.len() >= 3,

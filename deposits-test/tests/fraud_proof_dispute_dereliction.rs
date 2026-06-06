@@ -40,11 +40,25 @@ fn fraud_proof_inactive_quorum_triggers_confiscation() {
 
     let node = build_node_with_danger();
 
+    // ── 0. Fund op-key P2WPKHs for RC declarations. ──
+    for op_idx in 0..16 {
+        let _ = fund_operator_key_address(op_idx, 100_000);
+    }
+    mine_blocks(2);
+
     // ── 1. Pick op1's L3 ledger — accused = op1, ledger = ledger_1_3 ──
     let accused_op_idx: usize = 1;
     let accused_ledger = read_setup_state("ledger_1_3");
     let peer_op_idx = find_peer_with_ledger(&accused_ledger, accused_op_idx)
         .expect("no peer has op1's L3 ledger imported — quorum activation may have failed");
+
+    // Extend the chain past QB. The LVS dispatch for
+    // DisputeDereliction falls through to `next_sequence-1` on the
+    // accused ledger, which on fresh setup equals the QB seq. The
+    // cosigner check wants a QB at-or-before LVS; since LVS=QB-1,
+    // that fails. A few `DepositOpen` updates push the chain forward
+    // so LVS ends up past QB.
+    let _tip = extend_chain_past_qb(&accused_ledger, peer_op_idx, 3);
 
     // Read from op1's own data dir — op1 is the operator and has full
     // history. We could read from peer too, but op1's view is canonical.

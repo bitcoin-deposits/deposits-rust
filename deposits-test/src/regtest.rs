@@ -1334,6 +1334,66 @@ pub fn wallet_open(
     (out.status.success(), combined)
 }
 
+/// Open `n` throwaway deposits on `ledger_id` so the chain advances
+/// past whatever sequence the caller cares about. Used by the
+/// fraud-proof tests whose evidence cites a `proof_sequence` past
+/// `QuorumBegin` — fresh setup ledgers have QB at the tip, so a
+/// proof_sequence picked from the visible chain lands AT QB, and the
+/// daemon's `LVS = proof_sequence - 1` falls BEFORE QB; cosigners
+/// then refuse with "no QuorumBegin observed at or before
+/// last_valid_sequence." Open a few deposits to shove the chain
+/// past QB and the proof can cite something post-rotation.
+///
+/// Each open lands one update (a `DepositOpen` that gets cosigned).
+/// Returns the new chain tip sequence as observed from the
+/// `peer_op_idx` (any quorum member of `ledger_id` works).
+pub fn extend_chain_past_qb(
+    ledger_id: &str,
+    peer_op_idx: usize,
+    n: usize,
+) -> u64 {
+    use std::time::Instant;
+
+    let wdir = tempdir();
+    let (sec_hex, _xonly) = keygen();
+    let nsec = wdir.join("wallet.nsec");
+    std::fs::write(&nsec, &sec_hex).expect("write wallet nsec");
+
+    for i in 0..n {
+        let alias = format!("chain-ext-{}", i);
+        let (ok, out) = wallet_open(ledger_id, &alias, &nsec, &wdir, &[]);
+        if !ok {
+            // Don't abort the test — even a partial extension may be
+            // enough to push past QB. Just log and continue.
+            eprintln!(
+                "[extend_chain_past_qb] wallet open #{} failed; continuing:\n{}",
+                i, out
+            );
+        }
+    }
+
+    // Poll for the chain to actually catch up on the peer's view.
+    // wallet_open returns once the operator commits, but the peer's
+    // ledger_actor needs a moment to apply the broadcast update.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last_tip = 0u64;
+    while Instant::now() < deadline {
+        let h = read_ledger_history(&op_data_dir(peer_op_idx), ledger_id);
+        if let Some(u) = h.last() {
+            last_tip = u.sequence_number;
+        }
+        // Heuristic: stop polling once we've seen at least `n` more
+        // updates than were present before extension (or after 30s).
+        if last_tip > 0 {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if Instant::now() + Duration::from_secs(5) >= deadline {
+            break;
+        }
+    }
+    last_tip
+}
+
 /// Publish a DEP-04 Kind 10301 subkey attestation: `account_nsec`
 /// attests that `subkey_xonly` is delegated to it. Returns the signature
 /// hex that wallets bake into their `va` tag.
