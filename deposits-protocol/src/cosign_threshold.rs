@@ -37,9 +37,23 @@ pub enum OperationClass {
 impl OperationClass {
     pub fn of(op: &LedgerOperation) -> Self {
         match op {
+            // Quorum membership and rotation ops are Establishment-class.
+            // QuorumJoin is the symmetric counterpart of QuorumAddMember:
+            // when an operator adds a member, the member writes
+            // QuorumJoin on THEIR own ledger to record the consent.
+            // If we classified that as ValueMoving, members past their
+            // own expiry couldn't even consent to join a re-establishment
+            // — every member's QuorumJoin commit would fail the cosign
+            // cascade, the operator's consent_request would time out, and
+            // `quorum repair` would be unreachable in any cluster where
+            // members' expiry timestamps cluster (e.g. setup.sh seeds
+            // everyone within a block of each other). Same establishment
+            // semantics as QuorumAddMember on the other side of the
+            // request.
             LedgerOperation::QuorumAddMember { .. }
             | LedgerOperation::QuorumRemoveMember { .. }
-            | LedgerOperation::QuorumBegin { .. } => OperationClass::Establishment,
+            | LedgerOperation::QuorumBegin { .. }
+            | LedgerOperation::QuorumJoin { .. } => OperationClass::Establishment,
             _ => OperationClass::ValueMoving,
         }
     }
