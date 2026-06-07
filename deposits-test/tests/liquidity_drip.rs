@@ -145,6 +145,143 @@ fn drip_self_liquidity_opens_funds_and_drains() {
     );
 }
 
+/// Verify `--interval-fuzz-sec` actually jitters tick spacing.
+///
+/// Approach: open a plan with a known fuzz, sample the rolled delay
+/// (`next_tick_unix - last_tick_unix`) from the registry as each tick
+/// completes. Reading from the registry (not wall-clock deltas)
+/// sidesteps the polling-loop slop that would otherwise dominate
+/// short intervals.
+///
+/// Assertions:
+///   - Every rolled delay falls in `[interval - fuzz, interval + fuzz]`.
+///   - At least one rolled delay differs from the strict interval —
+///     proves the jitter is non-zero. With fuzz=8 on a 17-value domain,
+///     P(all 4 samples == 15) ≈ (1/17)^4 ≈ 1.2e-5, so flakes are rare.
+#[test]
+#[ignore]
+fn drip_interval_fuzz_jitters_tick_spacing() {
+    if !cluster_available() {
+        eprintln!("skipping: cluster not running — start with ./bin/setup.sh 3");
+        return;
+    }
+
+    let node = build_node_with_danger();
+    let ledger_id = discover_op0_ledger();
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let alias = format!("fuzz-{}", suffix);
+
+    let initial_sats: u64 = 10_000;
+    let decrement_sats: u64 = 1_000;
+    let interval_sec: u64 = 15;
+    let fuzz_sec: u64 = 8;
+    // Plenty of headroom so 5 ticks complete within the deadline.
+    let want_samples: u64 = 4;
+
+    eprintln!(
+        "[create] '{}' interval={}s ± {}s fuzz, target={} sats",
+        alias, interval_sec, fuzz_sec, initial_sats
+    );
+    let out = Command::new(&node)
+        .args(["liquidity", "drip-create", &alias, &ledger_id])
+        .args(["--initial-sats", &initial_sats.to_string()])
+        .args(["--decrement-sats", &decrement_sats.to_string()])
+        .args(["--interval-sec", &interval_sec.to_string()])
+        .args(["--interval-fuzz-sec", &fuzz_sec.to_string()])
+        .args(["--seed", OP0_SEED])
+        .args(["--data-dir", op0_data_dir().to_str().unwrap()])
+        .args(["--network", "regtest"])
+        .output()
+        .expect("invoke deposits-node liquidity drip-create");
+    assert!(
+        out.status.success(),
+        "drip-create failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Poll the registry, snapshotting the rolled delay each time
+    // ticks_completed advances. Capture (last_tick_unix, next_tick_unix)
+    // pairs so we can compute the rolled delay even after the plan's
+    // state mutates on the following tick.
+    let mut samples: Vec<u64> = Vec::new();
+    let mut last_seen_ticks: u64 = 0;
+    let deadline = Instant::now()
+        + Duration::from_secs(
+            // open + fund + want_samples ticks at worst-case (interval+fuzz) each + polling slop
+            120 + want_samples * (interval_sec + fuzz_sec + 10),
+        );
+    while samples.len() < want_samples as usize && Instant::now() < deadline {
+        if let Some((ticks, last, next)) = plan_tick_state(&alias) {
+            if ticks > last_seen_ticks && last > 0 && next > last {
+                let rolled = next - last;
+                samples.push(rolled);
+                eprintln!(
+                    "[sample] tick {} rolled delay = {}s (last={} next={})",
+                    ticks, rolled, last, next
+                );
+                last_seen_ticks = ticks;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    assert!(
+        samples.len() >= want_samples as usize,
+        "only collected {} of {} samples within budget — daemon may be slow ticking or fuzz not wiring",
+        samples.len(),
+        want_samples
+    );
+
+    // Bounds check — every rolled delay must be in the configured window.
+    let lo = interval_sec.saturating_sub(fuzz_sec).max(1);
+    let hi = interval_sec + fuzz_sec;
+    for (i, &s) in samples.iter().enumerate() {
+        assert!(
+            (lo..=hi).contains(&s),
+            "sample {} = {}s outside [{}, {}] — bounds check failed",
+            i, s, lo, hi,
+        );
+    }
+
+    // Variance check — at least one sample differs from the strict
+    // interval. Proves fuzz is actually active (not silently zero).
+    let varied = samples.iter().any(|&s| s != interval_sec);
+    assert!(
+        varied,
+        "all {} samples equal interval ({}s) — fuzz isn't taking effect. Samples: {:?}",
+        samples.len(), interval_sec, samples,
+    );
+
+    eprintln!(
+        "[pass]   fuzz active: {} samples in [{}, {}]s, range [{}, {}]s",
+        samples.len(), lo, hi,
+        samples.iter().min().unwrap(), samples.iter().max().unwrap()
+    );
+}
+
+/// Read `(ticks_completed, last_tick_unix, next_tick_unix)` for the
+/// named plan. Returns `None` if the plan or any field is missing.
+fn plan_tick_state(alias: &str) -> Option<(u64, u64, u64)> {
+    let path = op0_data_dir().join("operator_drips.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let plans = v.get("plans")?.as_array()?;
+    for plan in plans {
+        if plan.get("alias").and_then(|x| x.as_str()) == Some(alias) {
+            return Some((
+                plan.get("ticks_completed").and_then(|x| x.as_u64()).unwrap_or(0),
+                plan.get("last_tick_unix").and_then(|x| x.as_u64()).unwrap_or(0),
+                plan.get("next_tick_unix").and_then(|x| x.as_u64()).unwrap_or(0),
+            ));
+        }
+    }
+    None
+}
+
 /// Block until `predicate` returns true or `timeout` elapses. Returns
 /// whether the predicate ever fired.
 fn wait_for(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
