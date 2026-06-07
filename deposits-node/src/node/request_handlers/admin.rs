@@ -279,12 +279,18 @@ impl Node {
             index as u32,
             deposits_signer_api::SigPurpose::PaymentAuthorization,
         );
-        let lock_sig = match self.handler.signer.bip340_sign(&lock_ctx, &lock_preimage) {
+        // Dep16Authorizer verifies ECDSA over the dep-17 sighash
+        // (matches the wallet's `sign_op`). Previously this path
+        // called `bip340_sign` and the cosigners rejected the
+        // resulting Schnorr sigs with "witness does not satisfy
+        // deposit descriptor" — bug never surfaced because no
+        // test exercised this admin endpoint past sig verification.
+        let lock_sig = match self.handler.signer.ecdsa_sign_sighash(&lock_ctx, &lock_preimage) {
             Ok(s) => s,
             Err(e) => return (false, None, Some(format!("lock sign: {}", e))),
         };
         let lock_witness = deposits_core::types::DescriptorWitness {
-            stack: vec![lock_sig.to_vec()],
+            stack: vec![lock_sig.serialize_compact().to_vec()],
         };
         // Fulfill carries the same witness shape: signature over the lock's
         // dep-17 preimage. Conformance re-verifies it on fulfill — no

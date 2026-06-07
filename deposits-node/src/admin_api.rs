@@ -107,6 +107,7 @@ pub async fn serve(config: AdminConfig, node: Arc<Node>) -> Result<(), Error> {
             get(get_candidate_queue).post(post_candidate_queue),
         )
         .route("/candidate-queue/:pubkey", delete(delete_candidate_queue_entry))
+        .route("/liquidity-drips", get(get_liquidity_drips))
         .with_state(node)
         .route_layer(middleware::from_fn_with_state(
             config.token.clone(),
@@ -588,6 +589,84 @@ async fn delete_candidate_queue_entry(
         removed,
         queue_size: queue.entries.len(),
     }))
+}
+
+// ──────────────────────────────────────────────────────────────────
+// /api/liquidity-drips — operator-side drip plans
+//
+// Read-only. The CLI (`deposits-node liquidity drip-create/...`)
+// owns mutation by editing `operator_drips.json` directly; the
+// daemon re-reads on each periodic tick, so the admin UI surface
+// is a snapshot view that the auto-task picks up automatically.
+// ──────────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct DripPlanView {
+    alias: String,
+    ledger_id: String,
+    target_deposit_sats: u64,
+    decrement_sats: u64,
+    interval_sec: u64,
+    paused: bool,
+    deposit_id: Option<String>,
+    ticks_completed: u64,
+    /// Seconds until the next scheduled tick. `None` if paused, the
+    /// plan hasn't been opened yet, or its interval-budget has
+    /// already elapsed (in which case the tick fires immediately on
+    /// the next auto-task cycle).
+    next_tick_in_sec: Option<u64>,
+    /// Pipeline stage derived from in-registry state:
+    ///   - "paused"
+    ///   - "pending-open" (no deposit_id yet)
+    ///   - "active" (deposit opened, ticking)
+    stage: &'static str,
+}
+
+async fn get_liquidity_drips(
+    State(node): State<Arc<Node>>,
+) -> Json<Vec<DripPlanView>> {
+    let registry = crate::operator_drips::DripRegistry::load(node.data_dir())
+        .unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(registry.plans.len());
+    for p in &registry.plans {
+        let stage = if p.paused {
+            "paused"
+        } else if p.deposit_id.is_none() {
+            "pending-open"
+        } else {
+            "active"
+        };
+        let next_tick_in_sec = if p.paused || p.deposit_id.is_none() {
+            None
+        } else if p.last_tick_unix == 0 {
+            None
+        } else {
+            let elapsed = now.saturating_sub(p.last_tick_unix);
+            if elapsed >= p.interval_sec {
+                Some(0)
+            } else {
+                Some(p.interval_sec - elapsed)
+            }
+        };
+        out.push(DripPlanView {
+            alias: p.alias.clone(),
+            ledger_id: p.ledger_id.clone(),
+            target_deposit_sats: p.target_deposit_sats,
+            decrement_sats: p.decrement_sats,
+            interval_sec: p.interval_sec,
+            paused: p.paused,
+            deposit_id: p.deposit_id.clone(),
+            ticks_completed: p.ticks_completed,
+            next_tick_in_sec,
+            stage,
+        });
+    }
+    out.sort_by(|a, b| a.alias.cmp(&b.alias));
+    Json(out)
 }
 
 #[cfg(test)]
