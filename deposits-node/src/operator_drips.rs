@@ -56,6 +56,18 @@ pub struct DripPlan {
     /// operator-side scheduling.
     pub interval_sec: u64,
 
+    /// Optional ± jitter on the interval, in seconds. When > 0, each
+    /// successful tick rolls a fresh delay of
+    /// `interval_sec + uniform(-interval_fuzz_sec, +interval_fuzz_sec)`
+    /// (clamped to at least 1 sec) and stores the resulting absolute
+    /// `next_tick_unix`. Makes the release schedule unpredictable to
+    /// an attacker who's watching balances — they can no longer assume
+    /// "next release lands at last_tick + interval."
+    ///
+    /// 0 (default) means strict periodic, no fuzz.
+    #[serde(default)]
+    pub interval_fuzz_sec: u64,
+
     /// BIP-32 child index used to derive the depositor key for this
     /// drip's self-deposit (via `KeyPath::Deposit { index }`). Assigned
     /// at plan-creation time from the `DRIP_INDEX_BASE` (2_000_000+)
@@ -72,10 +84,20 @@ pub struct DripPlan {
     pub created_unix: u64,
 
     /// Unix timestamp of the last successful tick (seconds). 0 means
-    /// "never ticked"; the auto-task uses this to decide if the
-    /// `interval_sec` budget has elapsed.
+    /// "never ticked." Surfaced via the admin API for ops visibility;
+    /// the actual due-time decision uses `next_tick_unix` so the fuzz
+    /// schedule survives daemon restarts.
     #[serde(default)]
     pub last_tick_unix: u64,
+
+    /// Absolute unix timestamp when the next tick should fire. Rolled
+    /// at each successful tick from `now + interval_sec + fuzz`. 0
+    /// means "never rolled" — first tick fires immediately on the next
+    /// auto-task cycle. Persisting it (rather than recomputing) keeps
+    /// the fuzz schedule stable across daemon restarts so an attacker
+    /// can't force a fresh roll by triggering a restart.
+    #[serde(default)]
+    pub next_tick_unix: u64,
 
     /// Deposit ID of the self-deposit, once opened. Populated by the
     /// auto-task on first tick. `None` means the plan is registered
@@ -90,14 +112,33 @@ pub struct DripPlan {
 }
 
 impl DripPlan {
-    /// True if the configured interval has elapsed since the last
-    /// tick (or this is the first tick). Caller still has to check
-    /// `paused` and deposit balance separately.
+    /// True if the next scheduled tick is due (or none has been
+    /// scheduled yet — first tick fires immediately). Caller still
+    /// has to check `paused` and deposit balance separately.
     pub fn is_due(&self, now_unix: u64) -> bool {
-        if self.last_tick_unix == 0 {
+        if self.next_tick_unix == 0 {
             return true;
         }
-        now_unix.saturating_sub(self.last_tick_unix) >= self.interval_sec
+        now_unix >= self.next_tick_unix
+    }
+
+    /// Roll the next-tick timestamp from `now` using the configured
+    /// interval + ± fuzz. Caller passes a 64-bit random source so the
+    /// jitter is real entropy, not predictable from plan state.
+    /// Clamps the actual delay to at least 1 second so a (large fuzz,
+    /// small interval) combo can't produce zero or negative waits.
+    pub fn next_tick_at(&self, now_unix: u64, random_u64: u64) -> u64 {
+        let delay = if self.interval_fuzz_sec == 0 {
+            self.interval_sec
+        } else {
+            let span = self.interval_fuzz_sec.saturating_mul(2).saturating_add(1);
+            let offset = random_u64 % span;
+            // offset ∈ [0, 2*fuzz]; subtract fuzz so jitter ∈ [-fuzz, +fuzz]
+            let jitter = offset as i128 - self.interval_fuzz_sec as i128;
+            let raw = self.interval_sec as i128 + jitter;
+            raw.max(1) as u64
+        };
+        now_unix.saturating_add(delay)
     }
 }
 
@@ -195,10 +236,12 @@ mod tests {
             target_deposit_sats: 10_000_000,
             decrement_sats: 1_000,
             interval_sec: 60,
+            interval_fuzz_sec: 0,
             key_index: DRIP_INDEX_BASE,
             paused: false,
             created_unix: 1_700_000_000,
             last_tick_unix: 0,
+            next_tick_unix: 0,
             deposit_id: None,
             ticks_completed: 0,
         }
@@ -226,12 +269,45 @@ mod tests {
     }
 
     #[test]
-    fn is_due_respects_interval() {
+    fn is_due_respects_next_tick() {
         let mut p = sample_plan("x");
-        p.last_tick_unix = 1_000;
+        p.next_tick_unix = 1_060;
         assert!(!p.is_due(1_030));
         assert!(p.is_due(1_060));
         assert!(p.is_due(1_120));
+    }
+
+    #[test]
+    fn next_tick_at_with_zero_fuzz_is_strict() {
+        let p = sample_plan("x");
+        assert_eq!(p.next_tick_at(100, 12345), 160);
+        assert_eq!(p.next_tick_at(100, 99999), 160);
+    }
+
+    #[test]
+    fn next_tick_at_with_fuzz_stays_in_range() {
+        let mut p = sample_plan("x");
+        p.interval_fuzz_sec = 10; // ±10s on a 60s interval → [50, 70]
+        for r in [0u64, 1, 5, 10, 11, 20, 21, u64::MAX] {
+            let t = p.next_tick_at(100, r);
+            assert!(
+                (100 + 50..=100 + 70).contains(&t),
+                "rand={} produced t={}, outside [150, 170]",
+                r,
+                t
+            );
+        }
+    }
+
+    #[test]
+    fn next_tick_at_clamps_below_one_second() {
+        let mut p = sample_plan("x");
+        p.interval_sec = 5;
+        p.interval_fuzz_sec = 100; // would underflow without the clamp
+        for r in 0u64..50 {
+            let t = p.next_tick_at(100, r);
+            assert!(t >= 101, "rand={} produced t={}, below now+1", r, t);
+        }
     }
 
     #[test]

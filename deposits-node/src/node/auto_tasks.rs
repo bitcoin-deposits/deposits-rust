@@ -1307,16 +1307,24 @@ impl Node {
                 .await
             {
                 Ok(new_balance) => {
+                    use bitcoin::secp256k1::rand::rngs::OsRng;
+                    use bitcoin::secp256k1::rand::RngCore;
                     plan.last_tick_unix = now;
                     plan.ticks_completed += 1;
+                    // Roll the next-tick time using fresh OS entropy so
+                    // the timing is unpredictable to anyone watching
+                    // balances. When `interval_fuzz_sec == 0`, this
+                    // degenerates to strict `now + interval_sec`.
+                    plan.next_tick_unix = plan.next_tick_at(now, OsRng.next_u64());
                     dirty = true;
                     tracing::info!(
                         "auto_drip_self_liquidity: drained {} sats from plan '{}' \
-                         (tick {}, balance now {} msats)",
+                         (tick {}, balance now {} msats, next in {}s)",
                         plan.decrement_sats,
                         plan.alias,
                         plan.ticks_completed,
                         new_balance,
+                        plan.next_tick_unix.saturating_sub(now),
                     );
                 }
                 Err(e) => {

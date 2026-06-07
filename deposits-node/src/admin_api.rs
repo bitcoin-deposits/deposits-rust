@@ -607,13 +607,15 @@ struct DripPlanView {
     target_deposit_sats: u64,
     decrement_sats: u64,
     interval_sec: u64,
+    /// ± jitter (seconds) applied to each tick's delay. 0 = strict
+    /// periodic schedule.
+    interval_fuzz_sec: u64,
     paused: bool,
     deposit_id: Option<String>,
     ticks_completed: u64,
-    /// Seconds until the next scheduled tick. `None` if paused, the
-    /// plan hasn't been opened yet, or its interval-budget has
-    /// already elapsed (in which case the tick fires immediately on
-    /// the next auto-task cycle).
+    /// Seconds until the next scheduled tick. `None` if paused or
+    /// the plan hasn't been ticked yet (first tick fires immediately
+    /// on the next auto-task cycle once the deposit is funded).
     next_tick_in_sec: Option<u64>,
     /// Pipeline stage derived from in-registry state:
     ///   - "paused"
@@ -640,17 +642,12 @@ async fn get_liquidity_drips(
         } else {
             "active"
         };
-        let next_tick_in_sec = if p.paused || p.deposit_id.is_none() {
+        let next_tick_in_sec = if p.paused || p.next_tick_unix == 0 {
             None
-        } else if p.last_tick_unix == 0 {
-            None
+        } else if now >= p.next_tick_unix {
+            Some(0)
         } else {
-            let elapsed = now.saturating_sub(p.last_tick_unix);
-            if elapsed >= p.interval_sec {
-                Some(0)
-            } else {
-                Some(p.interval_sec - elapsed)
-            }
+            Some(p.next_tick_unix - now)
         };
         out.push(DripPlanView {
             alias: p.alias.clone(),
@@ -658,6 +655,7 @@ async fn get_liquidity_drips(
             target_deposit_sats: p.target_deposit_sats,
             decrement_sats: p.decrement_sats,
             interval_sec: p.interval_sec,
+            interval_fuzz_sec: p.interval_fuzz_sec,
             paused: p.paused,
             deposit_id: p.deposit_id.clone(),
             ticks_completed: p.ticks_completed,

@@ -34,11 +34,17 @@ fn print_usage() {
     eprintln!("Usage: deposits-node liquidity <drip-create|drip-list|drip-pause|drip-resume|drip-remove>");
     eprintln!();
     eprintln!("  drip-create <alias> <ledger_id> --initial-sats N --decrement-sats M \\");
-    eprintln!("              --interval-sec S");
+    eprintln!("              --interval-sec S [--interval-fuzz-sec F]");
     eprintln!("      Register a drip plan. Opens a self-deposit of size N on the");
     eprintln!("      given ledger, then drains M sats per S seconds back to the");
     eprintln!("      operator's free reserves (synthetic InvoiceLock/Fulfill — no");
     eprintln!("      on-chain or external LDK movement).");
+    eprintln!();
+    eprintln!("      --interval-fuzz-sec F (optional): add \u{00b1}F seconds of");
+    eprintln!("        jitter per tick so an attacker watching balances can't");
+    eprintln!("        predict the next release. Each successful tick rolls a");
+    eprintln!("        fresh delay from OS entropy. Default 0 (strict periodic).");
+    eprintln!();
     eprintln!("      First open happens on the daemon's next auto-task tick.");
     eprintln!();
     eprintln!("  drip-list");
@@ -63,6 +69,7 @@ async fn drip_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let mut initial_sats: Option<u64> = None;
     let mut decrement_sats: Option<u64> = None;
     let mut interval_sec: Option<u64> = None;
+    let mut interval_fuzz_sec: u64 = 0;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -80,6 +87,11 @@ async fn drip_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             }
             "--interval-sec" if i + 1 < args.len() => {
                 interval_sec = Some(args[i + 1].parse()?);
+                i += 2;
+                continue;
+            }
+            "--interval-fuzz-sec" if i + 1 < args.len() => {
+                interval_fuzz_sec = args[i + 1].parse()?;
                 i += 2;
                 continue;
             }
@@ -135,10 +147,12 @@ async fn drip_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         target_deposit_sats: initial_sats,
         decrement_sats,
         interval_sec,
+        interval_fuzz_sec,
         key_index,
         paused: false,
         created_unix: now_unix(),
         last_tick_unix: 0,
+        next_tick_unix: 0,
         deposit_id: None,
         ticks_completed: 0,
     };
@@ -150,7 +164,14 @@ async fn drip_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!("Registered drip plan '{}'", alias);
     println!("  Ledger:    {}…", &ledger_id[..16.min(ledger_id.len())]);
     println!("  Initial:   {} sats", initial_sats);
-    println!("  Decrement: {} sats every {} sec", decrement_sats, interval_sec);
+    if interval_fuzz_sec > 0 {
+        println!(
+            "  Decrement: {} sats every {} sec (\u{00b1}{} sec jitter)",
+            decrement_sats, interval_sec, interval_fuzz_sec
+        );
+    } else {
+        println!("  Decrement: {} sats every {} sec", decrement_sats, interval_sec);
+    }
     println!(
         "  Lifetime:  ~{} ticks (~{} min total at full pace)",
         ticks,
@@ -183,15 +204,12 @@ async fn drip_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         };
         let next_in = if p.paused {
             "—".to_string()
-        } else if p.last_tick_unix == 0 {
+        } else if p.next_tick_unix == 0 {
+            "due".to_string()
+        } else if now >= p.next_tick_unix {
             "due".to_string()
         } else {
-            let elapsed = now.saturating_sub(p.last_tick_unix);
-            if elapsed >= p.interval_sec {
-                "due".to_string()
-            } else {
-                format!("{}s", p.interval_sec - elapsed)
-            }
+            format!("{}s", p.next_tick_unix - now)
         };
         println!(
             "{:<12} {:<18} {:>12} {:>10} {:>6}s {:>10} {:>10} {}",
