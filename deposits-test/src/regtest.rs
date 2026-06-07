@@ -1642,3 +1642,271 @@ fn restore_file(path: &Path, backup: Option<&[u8]>) {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Per-test fresh-victim helpers
+//
+// Tests that need a known-healthy ledger to drive a specific
+// failure mode (fraud_proof_*, lifecycle_self_rescue) can't lean
+// on setup.sh-provisioned ledgers — once other tests in the same
+// `cargo test` run mine past expiry or fork-dispute a ledger, the
+// state is unreachable from a hardcoded `ledger_X_Y` pick.
+//
+// These helpers open a fresh victim ledger on a chosen operator,
+// add Q healthy cosigners, activate the quorum with a configurable
+// `--quorum-expiry-blocks`, and return enough handles for the
+// caller's downstream forge / dispute work.
+// ─────────────────────────────────────────────────────────────────
+
+/// Build the standard CLI arg block for invoking `deposits-node`
+/// against operator `i`'s data dir + seed.
+pub fn op_cli_args(i: usize) -> Vec<String> {
+    vec![
+        "--seed".into(), op_seed(i),
+        "--name".into(), format!("op{}", i),
+        "--data-dir".into(), op_data_dir(i).to_string_lossy().into_owned(),
+        "--network".into(), "regtest".into(),
+        "--esplora".into(), ELECTRS_URL.into(),
+        "--relay".into(), relay_ledgers().to_string(),
+        "--relay".into(), relay_messaging().to_string(),
+    ]
+}
+
+/// Invoke `deposits-node <args>` against operator `i`. Returns
+/// stdout on success, panics on non-zero with stdout+stderr.
+pub fn run_op_node(node: &Path, op_idx: usize, subcmd_args: &[&str]) -> String {
+    let mut cmd = Command::new(node);
+    for a in subcmd_args {
+        cmd.arg(a);
+    }
+    for a in op_cli_args(op_idx) {
+        cmd.arg(a);
+    }
+    cmd.env("RUST_LOG", "warn");
+    let out = cmd.output().expect("deposits-node invocation failed to spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        panic!(
+            "deposits-node {:?} on op{} exited {}: stdout={} stderr={}",
+            subcmd_args, op_idx, out.status, stdout, stderr
+        );
+    }
+    stdout
+}
+
+/// Send `amount_sats` from the regtest faucet to `address`.
+/// Mirrors `setup.sh`'s `bitcoin_cli ... sendtoaddress`.
+pub fn faucet_send(address: &str, amount_sats: u64) -> String {
+    let btc_str = format!("{}.{:08}", amount_sats / 100_000_000, amount_sats % 100_000_000);
+    let out = Command::new("docker")
+        .args([
+            "exec", "bitcoind", "bitcoin-cli", "-regtest",
+            "-rpcwallet=faucet",
+            "-rpcuser=user", "-rpcpassword=pass",
+            "sendtoaddress", address, &btc_str,
+        ])
+        .output()
+        .expect("docker exec bitcoin-cli sendtoaddress");
+    assert!(
+        out.status.success(),
+        "faucet sendtoaddress failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Scan operators `1..upper` for ones whose own primary ledger
+/// (`ledger_<i>_1`) is still inside its quorum window with at
+/// least `min_headroom` blocks of cushion. Returns up to `wanted`
+/// `(op_idx, member_pk, member_ledger_id)` triples — the data
+/// `quorum add` needs to register them as cosigners.
+///
+/// Excludes `exclude_op` from the candidate set (the victim's own
+/// operator shouldn't be a cosigner on its own ledger).
+pub fn find_healthy_members(wanted: usize, exclude_op: usize) -> Vec<(usize, String, String)> {
+    let mut found = Vec::new();
+    for op_idx in 1..10 {
+        if found.len() >= wanted {
+            break;
+        }
+        if op_idx == exclude_op {
+            continue;
+        }
+        let pk_path = repo_root().join("deposits-tools/data/state").join(format!("node_id_{}", op_idx));
+        let lid_path = repo_root().join("deposits-tools/data/state").join(format!("ledger_{}_1", op_idx));
+        let (Ok(pk), Ok(lid)) = (std::fs::read_to_string(&pk_path), std::fs::read_to_string(&lid_path)) else {
+            continue;
+        };
+        let pk = pk.trim().to_string();
+        let lid = lid.trim().to_string();
+        let Some((tip, exp)) = lifecycle_expiry(op_idx, &lid) else {
+            continue;
+        };
+        // Need real cushion — quorum-begin on the victim mines a
+        // confirmation block, the funding wait elapses, etc.
+        if tip + 50 < exp {
+            found.push((op_idx, pk, lid));
+        }
+    }
+    found
+}
+
+/// Result of [`open_victim_quorum_ledger`].
+pub struct VictimQuorum {
+    /// The freshly-opened victim ledger ID.
+    pub victim_ledger: String,
+    /// Members added to the victim's quorum: `(op_idx, member_pk, member_ledger_id)`.
+    pub members: Vec<(usize, String, String)>,
+    /// The block height at which `quorum begin` activated the victim's quorum.
+    pub activation_tip: u32,
+    /// The `quorum_expiry` recorded on the victim's `QuorumBegin`.
+    pub quorum_expiry: u32,
+}
+
+/// Open + fund + activate a fresh victim ledger on operator
+/// `owner_op_idx`. Q members are pulled from
+/// [`find_healthy_members`] (any op other than `owner_op_idx`
+/// whose own primary ledger is still healthy). The activated
+/// quorum gets `expiry_blocks` of life (call sites pick this
+/// based on test intent: short for "I want to expire this within
+/// the test," long for "I want this stable through the whole
+/// test").
+///
+/// Returns `None` if Q healthy members can't be found — caller
+/// should skip with a "rerun against `setup.sh --fresh 3`"
+/// message rather than panic.
+///
+/// Cost: ~80–120s end-to-end (mostly the funding-sync wait
+/// + activation mining). Lift the victim to a `OnceLock`-style
+/// per-process cache if a single test file needs many fresh
+/// victims.
+pub fn open_victim_quorum_ledger(
+    node: &Path,
+    owner_op_idx: usize,
+    expiry_blocks: u32,
+    member_count: usize,
+) -> Option<VictimQuorum> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tlv::TlvDecode;
+    use std::time::Instant;
+
+    // ── 1. Open the victim ──
+    let open_out = run_op_node(node, owner_op_idx, &["ledger", "open"]);
+    let victim = open_out
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("  Ledger ID: ")
+                .or_else(|| l.strip_prefix("Ledger ID: "))
+                .map(str::to_string)
+        })?;
+    eprintln!("[victim] op{} opened victim ledger: {}…", owner_op_idx, &victim[..16]);
+
+    // ── 2. Fund the victim's per-ledger wallet ──
+    let address_out = run_op_node(node, owner_op_idx, &["ledger", "address", &victim]);
+    let address = address_out
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())?
+        .trim()
+        .to_string();
+    eprintln!("[victim] funding {}…  → {}", &victim[..16], address);
+    let _ = faucet_send(&address, 100_000_000);
+    mine_blocks(6);
+    let funding_tip = current_block_height();
+    let _ = wait_for_daemon_chain_tip(owner_op_idx, funding_tip, Duration::from_secs(60));
+    // BDK wallet poller can lag the chain tip; give it one fast-poll
+    // cycle to ingest the new UTXO.
+    std::thread::sleep(Duration::from_secs(45));
+    let _ = run_op_node(node, owner_op_idx, &[
+        "ledger", "advertise",
+        "--name", &format!("op{}", owner_op_idx),
+        "--advertise-relay", relay_ledgers(),
+    ]);
+
+    // ── 3. Add Q healthy cosigners ──
+    let members = find_healthy_members(member_count, owner_op_idx);
+    if members.len() < member_count {
+        eprintln!(
+            "[victim] only found {} healthy members (need {}); aborting victim setup",
+            members.len(),
+            member_count
+        );
+        return None;
+    }
+    for (op_idx, member_pk, member_ledger) in &members {
+        run_op_node(node, owner_op_idx, &[
+            "quorum", "add", &victim, member_pk, member_ledger,
+        ]);
+        eprintln!("[victim] op{} added as cosigner", op_idx);
+    }
+
+    // ── 4. Activate quorum with the requested expiry ──
+    eprintln!(
+        "[victim] quorum begin --quorum-expiry-blocks {} on victim",
+        expiry_blocks
+    );
+    let mut begin_cmd = Command::new(node);
+    begin_cmd.args(["quorum", "begin", &victim])
+        .args(["--amount-sats", "99999000"])
+        .args(["--collateral-ratio", "0.6"])
+        .args(["--protocol-version", "cltv-offset-v2"])
+        .args(["--quorum-expiry-blocks", &expiry_blocks.to_string()]);
+    for a in op_cli_args(owner_op_idx) {
+        begin_cmd.arg(a);
+    }
+    begin_cmd.env("RUST_LOG", "warn");
+    let mut begin_child = begin_cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("quorum begin spawn");
+    // Mine periodic blocks so the rotation TX gets a confirmation
+    // — mirrors setup.sh Phase 4.
+    let begin_deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        if begin_child.try_wait().expect("try_wait").is_some() {
+            break;
+        }
+        if Instant::now() > begin_deadline {
+            let _ = begin_child.kill();
+            panic!("quorum begin did not exit within 180s");
+        }
+        mine_blocks(1);
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    let begin_out = begin_child.wait_with_output().expect("wait_with_output");
+    if !begin_out.status.success() {
+        panic!(
+            "quorum begin failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&begin_out.stdout),
+            String::from_utf8_lossy(&begin_out.stderr),
+        );
+    }
+
+    // ── 5. Read activation block + expiry from local history ──
+    let history = read_ledger_history(&op_data_dir(owner_op_idx), &victim);
+    let mut quorum_expiry: Option<u32> = None;
+    for u in history.iter().rev() {
+        if let Ok(LedgerOperation::QuorumBegin { quorum_expiry: qe, .. }) =
+            LedgerOperation::tlv_decode(&u.message)
+        {
+            quorum_expiry = Some(qe);
+            break;
+        }
+    }
+    let quorum_expiry = quorum_expiry?;
+    let activation_tip = current_block_height();
+    eprintln!(
+        "[victim] activated at tip={} with quorum_expiry={}",
+        activation_tip, quorum_expiry
+    );
+
+    Some(VictimQuorum {
+        victim_ledger: victim,
+        members,
+        activation_tip,
+        quorum_expiry,
+    })
+}

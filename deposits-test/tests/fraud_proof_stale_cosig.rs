@@ -51,20 +51,43 @@ fn fraud_proof_stale_cosig_triggers_confiscation() {
     }
     mine_blocks(2);
 
-    // ── 1. Discover op0's L1 ledger and op1's collateral ledger ──
-    let accused_ledger = discover_op0_ledger();
-    let member_ledger = read_setup_state("ledger_1_1");
+    // ── 1. Open a fresh victim ledger on op0 + add 3 cosigners ──
+    //
+    // Previously this test discovered op0's first setup ledger
+    // (`discover_op0_ledger`) and used `ledger_1_1` as the member
+    // collateral. That worked on a freshly-bootstrapped cluster but
+    // broke once cluster-aging tests (auto_dispute_on_expiry,
+    // candidate_queue_swap) mined past expiry: peers fork-disputed
+    // op0's ledgers, the forged update stopped propagating to their
+    // canonical chains, and the read at step 4 timed out.
+    //
+    // Long expiry (10_000 blocks) keeps the victim healthy through
+    // the whole forge → broadcast → confiscation pipeline (~30s).
+    let victim = match open_victim_quorum_ledger(&node, 0, 10_000, 3) {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "skipping: couldn't open a fresh victim — Q=3 healthy \
+                 members not available on this cluster. Rerun against \
+                 `setup.sh --fresh 3`."
+            );
+            return;
+        }
+    };
+    let accused_ledger = victim.victim_ledger.clone();
+    // Use the first cosigner as the "member" whose chain we cite as
+    // staler than op0's cosignature claim.
+    let (member_op_idx, _member_pk, member_ledger) = victim.members[0].clone();
     eprintln!(
-        "[setup] accused={}…  member={}…",
+        "[setup] accused={}…  member={}… (op{})",
         &accused_ledger[..16],
-        &member_ledger[..16]
+        &member_ledger[..16],
+        member_op_idx,
     );
 
-    // ── 2. Pick a stale member_ledger_hash from op1's history ──
-    // Op1's ledger lives in op1's own data dir — it's their collateral
-    // ledger. (Consent piggyback flows the other way: when op0 asks op1
-    // to join op0's quorum, op1 imports op0's ledger, not the reverse.)
-    let member_history = read_ledger_history(&op_data_dir(1), &member_ledger);
+    // ── 2. Pick a stale member_ledger_hash from member's history ──
+    // The member's collateral ledger lives in its own data dir.
+    let member_history = read_ledger_history(&op_data_dir(member_op_idx), &member_ledger);
     assert!(
         member_history.len() >= 3,
         "member ledger needs at least 3 updates to find a 'stale' hash + evidence of advancement (got {})",
@@ -133,8 +156,9 @@ fn fraud_proof_stale_cosig_triggers_confiscation() {
     // Op0's own daemon deliberately skips inbound updates for its own
     // ledger (`handle_ledger_update` returns early when
     // operator_key == self.node_id). Quorum members process the forged
-    // update normally; op1 has it via consent-piggyback import.
-    let accused_history = read_ledger_history(&op_data_dir(1), &accused_ledger);
+    // update normally; the cosigner we just enrolled has it via the
+    // consent-piggyback import that fires during `quorum add`.
+    let accused_history = read_ledger_history(&op_data_dir(member_op_idx), &accused_ledger);
     let forged = accused_history
         .iter()
         .rev()
@@ -171,7 +195,7 @@ fn fraud_proof_stale_cosig_triggers_confiscation() {
     eprintln!("[proof] hash={}…", &hex::encode(proof_hash)[..16]);
 
     // ── 6. Embed the proof_hash via DeliveryEmbed on op0's ledger ──
-    let embed_update = embed_proof_hash(&node, 0, 1, &accused_ledger, proof_hash);
+    let embed_update = embed_proof_hash(&node, 0, member_op_idx, &accused_ledger, proof_hash);
     let embed_seq = embed_update.sequence_number;
     let embed_content = embed_update.content_hash;
     eprintln!(

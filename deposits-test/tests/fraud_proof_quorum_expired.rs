@@ -79,30 +79,27 @@ fn fraud_proof_quorum_expired_triggers_respectful_confiscation() {
         let _ = fund_operator_key_address(op_idx, 10_000);
     }
 
-    // ── 1. Pick op1's L3 ledger — accused = op1, ledger = ledger_1_3 ──
-    let accused_op_idx: usize = 1;
-    let accused_ledger = read_setup_state("ledger_1_3");
-    let peer_op_idx = find_peer_with_ledger(&accused_ledger, accused_op_idx)
-        .expect("no peer has op1's L3 ledger imported — quorum activation may have failed");
-
-    // Read from op1's own data dir — op1 is the operator and has full
-    // history.
-    let history = read_ledger_history(&op_data_dir(accused_op_idx), &accused_ledger);
-
-    // ── 2. Find the most recent QuorumBegin's declared quorum_expiry ──
-    // Iterate the history backwards; the verifier reads the same value.
-    let mut quorum_expiry: Option<u32> = None;
-    for u in history.iter().rev() {
-        if let Ok(LedgerOperation::QuorumBegin {
-            quorum_expiry: e, ..
-        }) = LedgerOperation::tlv_decode(&u.message)
-        {
-            quorum_expiry = Some(e);
-            break;
+    // ── 1. Open a fresh victim ledger with a SHORT expiry ──
+    //
+    // QuorumExpired needs anchor_height > quorum_expiry. Pick a
+    // short expiry override so we don't have to mine 1000+ blocks
+    // to get there.
+    let accused_op_idx: usize = 0;
+    let victim = match open_victim_quorum_ledger(&node, accused_op_idx, 100, 3) {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "skipping: couldn't open a fresh victim — Q=3 healthy \
+                 members not available. Rerun against `setup.sh --fresh 3`."
+            );
+            return;
         }
-    }
-    let quorum_expiry =
-        quorum_expiry.expect("accused ledger has no QuorumBegin — quorum was never active");
+    };
+    let accused_ledger = victim.victim_ledger.clone();
+    // First cosigner doubles as embed peer.
+    let peer_op_idx = victim.members[0].0;
+    let history = read_ledger_history(&op_data_dir(accused_op_idx), &accused_ledger);
+    let quorum_expiry = victim.quorum_expiry;
 
     // ── 3. Pick a confirmed anchor block past the expiry ──
     // The verifier requires `anchor_height > quorum_expiry`. Prefer the

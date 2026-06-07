@@ -68,55 +68,34 @@ fn fraud_proof_equivocation_drives_confiscation() {
     }
     mine_blocks(2);
 
-    // ── 1. Pick op0's active ledger and resolve its quorum ──
+    // ── 1. Open a fresh victim ledger on op0 + 3 healthy cosigners ──
+    //
+    // Why not reuse a setup.sh ledger: by the time this test runs
+    // (alphabetically after auto_dispute_on_expiry / candidate_queue_swap),
+    // peers have auto-disputed every setup ledger and the forged
+    // equivocation never reaches their canonical chain.
     let accused_op_idx: usize = 0;
-    let accused_ledger = discover_op0_ledger();
-    eprintln!("[setup] accused=op{}  ledger={}…", accused_op_idx, &accused_ledger[..16]);
-
+    let victim = match open_victim_quorum_ledger(&node, accused_op_idx, 10_000, 3) {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "skipping: couldn't open a fresh victim — Q=3 healthy \
+                 members not available on this cluster. Rerun against \
+                 `setup.sh --fresh 3`."
+            );
+            return;
+        }
+    };
+    let accused_ledger = victim.victim_ledger.clone();
     let history = read_ledger_history(&op_data_dir(accused_op_idx), &accused_ledger);
     let accused_pubkey_hex = hex::encode(history[0].operator_id.serialize());
 
-    // Read the current quorum's members. We need every cosigner's
-    // seed to drive `danger fork-update` (it builds the multi-cosig
-    // entries itself).
-    let mut quorum_member_pks: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
-    for u in history.iter().rev() {
-        if let Ok(LedgerOperation::QuorumBegin { quorum_members, .. }) =
-            LedgerOperation::tlv_decode(&u.message)
-        {
-            quorum_member_pks = quorum_members.iter().map(|m| m.pubkey).collect();
-            break;
-        }
-    }
-    assert!(
-        !quorum_member_pks.is_empty(),
-        "accused ledger has no QuorumBegin — setup didn't activate the quorum"
-    );
-
-    // Map quorum-member pubkeys → op indices so we can pull their
-    // seeds. setup.sh's seeds are deterministic.
-    use bitcoin::secp256k1::{PublicKey, Secp256k1};
-    let secp = Secp256k1::new();
-    let mut cosigner_op_indices: Vec<usize> = Vec::new();
-    for member_pk in &quorum_member_pks {
-        for i in 0..16 {
-            if !op_data_dir(i).exists() {
-                break;
-            }
-            let sk = op_operator_secret(i);
-            let pk = PublicKey::from_secret_key(&secp, &sk);
-            if &pk == member_pk {
-                cosigner_op_indices.push(i);
-                break;
-            }
-        }
-    }
-    assert_eq!(
-        cosigner_op_indices.len(),
-        quorum_member_pks.len(),
-        "couldn't map every quorum member pubkey back to an op index — \
-         cluster shape mismatch"
-    );
+    // `danger fork-update` needs every cosigner's seed. The victim
+    // helper already enrolled the cosigners we picked, so use those
+    // op indices directly.
+    let cosigner_op_indices: Vec<usize> =
+        victim.members.iter().map(|(op_idx, _, _)| *op_idx).collect();
+    eprintln!("[setup] accused=op{}  ledger={}…", accused_op_idx, &accused_ledger[..16]);
     eprintln!("[setup] cosigner ops: {:?}", cosigner_op_indices);
 
     // ── 2. Run `danger fork-update` with all cosigner seeds ──

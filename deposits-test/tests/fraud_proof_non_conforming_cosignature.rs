@@ -63,70 +63,71 @@ fn fraud_proof_non_conforming_cosignature_drives_cross_ledger_confiscation() {
     }
     mine_blocks(2);
 
-    // ── 1. Pick op0's active ledger as the FAULT ledger ──
+    // ── 1. Open a fresh FAULT ledger on op0 + 3 healthy cosigners ──
+    //
+    // Why fresh: same cluster-poisoning issue as the rest of the
+    // fraud_proof_* family — by the time this test runs, peers have
+    // auto-disputed every setup ledger and the forged update can't
+    // reach their canonical view.
     let fault_op_idx: usize = 0;
-    let fault_ledger_id = discover_op0_ledger();
-    eprintln!(
-        "[setup]  fault_op=op{}  fault_ledger={}…",
-        fault_op_idx,
-        &fault_ledger_id[..16]
-    );
-
+    let fault_victim = match open_victim_quorum_ledger(&node, fault_op_idx, 10_000, 3) {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "skipping: couldn't open a fresh fault victim — Q=3 healthy \
+                 members not available. Rerun against `setup.sh --fresh 3`."
+            );
+            return;
+        }
+    };
+    let fault_ledger_id = fault_victim.victim_ledger.clone();
     let fault_history = read_ledger_history(&op_data_dir(fault_op_idx), &fault_ledger_id);
 
-    // Resolve the most recent QuorumBegin: members + its seq for
-    // governing_quorumbegin_seq.
-    let mut quorum_member_pks: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
+    // The most-recent QuorumBegin's sequence = governing_qb_seq.
     let mut governing_qb_seq: u64 = 0;
     for u in fault_history.iter().rev() {
-        if let Ok(LedgerOperation::QuorumBegin { quorum_members, .. }) =
+        if let Ok(LedgerOperation::QuorumBegin { .. }) =
             LedgerOperation::tlv_decode(&u.message)
         {
-            quorum_member_pks = quorum_members.iter().map(|m| m.pubkey).collect();
             governing_qb_seq = u.sequence_number;
             break;
         }
     }
     assert!(
-        !quorum_member_pks.is_empty(),
-        "fault ledger has no QuorumBegin"
+        governing_qb_seq > 0,
+        "fault victim ledger has no QuorumBegin",
     );
 
-    // Map cosigner pubkeys → op indices.
+    let cosigner_op_indices: Vec<usize> =
+        fault_victim.members.iter().map(|(op_idx, _, _)| *op_idx).collect();
     use bitcoin::secp256k1::{PublicKey, Secp256k1};
     let secp = Secp256k1::new();
-    let mut cosigner_op_indices: Vec<usize> = Vec::new();
-    for member_pk in &quorum_member_pks {
-        for i in 0..16 {
-            if !op_data_dir(i).exists() {
-                break;
-            }
-            let sk = op_operator_secret(i);
-            let pk = PublicKey::from_secret_key(&secp, &sk);
-            if &pk == member_pk {
-                cosigner_op_indices.push(i);
-                break;
-            }
-        }
-    }
-    assert_eq!(cosigner_op_indices.len(), quorum_member_pks.len());
-    eprintln!("[setup]  cosigner ops: {:?}", cosigner_op_indices);
+    eprintln!(
+        "[setup]  fault_op=op{}  fault_ledger={}…  cosigners={:?}",
+        fault_op_idx,
+        &fault_ledger_id[..16],
+        cosigner_op_indices
+    );
 
-    // ── 2. Pick the ACCUSED (a cosigner) and resolve their disputed
-    //      ledger (one of their OWN ledgers, NOT the fault ledger) ──
+    // ── 2. Open a fresh DISPUTED ledger on the accused cosigner ──
+    //
+    // The accused (one of the fault ledger's cosigners) gets a
+    // separate own-ledger that the fraud broadcast targets for
+    // confiscation. Pick the first cosigner; open a fresh victim
+    // ledger on them so it's also undisputed.
     let accused_op_idx = cosigner_op_indices[0];
-    // Pick the accused's L1 ledger from setup-state — that's their
-    // own ledger, distinct from the fault ledger.
-    let disputed_ledger_id = read_setup_state(&format!("ledger_{}_1", accused_op_idx));
-    assert_ne!(
-        disputed_ledger_id, fault_ledger_id,
-        "disputed and fault ledgers must differ — test framing demands cross-ledger contagion"
-    );
-    wait_for_quorum_begin(
-        accused_op_idx,
-        &disputed_ledger_id,
-        Duration::from_secs(90),
-    );
+    let disputed_victim = match open_victim_quorum_ledger(&node, accused_op_idx, 10_000, 3) {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "skipping: couldn't open a fresh disputed victim on op{} — \
+                 Q=3 healthy members not available.",
+                accused_op_idx
+            );
+            return;
+        }
+    };
+    let disputed_ledger_id = disputed_victim.victim_ledger.clone();
     let accused_pubkey_hex = hex::encode(
         op_operator_secret(accused_op_idx)
             .public_key(&secp)
@@ -219,18 +220,9 @@ fn fraud_proof_non_conforming_cosignature_drives_cross_ledger_confiscation() {
     // ── 6. Embed proof_hash on a peer of the DISPUTED ledger ──
     // Peer-of-disputed (a cosigner of the accused's ledger), not
     // peer-of-fault — embedding must live on the same ledger we're
-    // disputing.
-    let disputed_member_pks = read_quorum_members_of(&disputed_ledger_id, accused_op_idx);
-    let peer_op = (0..16)
-        .find(|&i| {
-            if i == accused_op_idx {
-                return false;
-            }
-            let sk = op_operator_secret(i);
-            let pk = PublicKey::from_secret_key(&secp, &sk);
-            disputed_member_pks.contains(&pk)
-        })
-        .expect("disputed ledger must have at least one cosigner besides accused");
+    // disputing. We just enrolled disputed_victim.members[0] as a
+    // cosigner of the disputed ledger, so use them directly.
+    let peer_op = disputed_victim.members[0].0;
     eprintln!("[embed]  peer=op{} (cosigner of disputed ledger)", peer_op);
 
     let embed_update = embed_proof_hash(

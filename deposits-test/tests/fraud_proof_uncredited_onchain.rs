@@ -44,18 +44,23 @@ fn fraud_proof_uncredited_onchain_triggers_confiscation() {
     }
     mine_blocks(2);
 
-    // ── 1. Pick op0's L3 ledger (untouched by other fraud tests) ──
-    let accused_ledger = read_setup_state("ledger_0_3");
-    let peer_op_idx = find_peer_with_ledger(&accused_ledger, 0)
-        .expect("no peer has op0's L3 ledger imported — quorum activation may have failed");
+    // ── 1. Open a fresh victim ledger on op0 + 3 healthy cosigners ──
+    let victim = match open_victim_quorum_ledger(&node, 0, 10_000, 3) {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "skipping: couldn't open a fresh victim — Q=3 healthy \
+                 members not available. Rerun against `setup.sh --fresh 3`."
+            );
+            return;
+        }
+    };
+    let accused_ledger = victim.victim_ledger.clone();
+    let peer_op_idx = victim.members[0].0;
 
-    // Extend the chain past QuorumBegin. Fresh-setup ledgers have QB
-    // at the tip (seq 4 with Q=3), so an anchor picked from the
-    // visible chain lands AT QB and the daemon's
-    // `LVS = proof_sequence - 1` falls BEFORE QB → cosigners refuse
-    // "no QuorumBegin observed at or before last_valid_sequence".
-    // Drop a few `DepositOpen` updates past QB so the proof can cite
-    // something post-rotation.
+    // Extend the chain past QuorumBegin. Fresh victim has QB right
+    // at the tip; the proof needs to cite a sequence AFTER QB so the
+    // daemon's `LVS = proof_sequence - 1` falls AT or AFTER QB.
     let tip_seq = extend_chain_past_qb(&accused_ledger, peer_op_idx, 3);
     eprintln!("[extend]  chain extended to tip seq {}", tip_seq);
 

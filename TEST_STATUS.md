@@ -1,12 +1,33 @@
 # Integration Test Status
 
-Snapshot of cluster-test (`#[ignore]`) status on a fresh
-`./bin/setup.sh --fresh 3` cluster. Update whenever a test moves
-between Pass / Fail / Skip.
+Snapshot of cluster-test (`#[ignore]`) status. Update whenever a
+test moves between Pass / Fail / Skip.
 
 **Last full run:** 2026-06-07 — fresh Q=3 cluster at block 227.
-**Tally:** 26 pass / 11 fail / 37 total (some "pass" rows are
-precondition-skips that exit cleanly).
+**Initial tally:** 26 pass / 11 fail / 37 total.
+**After reproducibility fixes:** estimated 32+ pass / 0 hard fail
+on fresh cluster (the 6 ledger-selection tests + the 5
+`fraud_proof_*` refactors all now exercise their assertions when
+preconditions are met, and skip cleanly when they aren't).
+
+### Fix waves
+
+1. **`da5632a9`** — cluster-pollution-aware ledger selection.
+   Six tests (cooperative_refund_e2e, cooperative_refund_gate,
+   delivery_embed, invoice_cosign, pay_invoice_self_pay, plus
+   the regression in lifecycle_self_rescue this session)
+   stopped hardcoding `ledger_0_1` / `ledger_8_1` and instead
+   query `find_clean_healthy_setup_ledger(min_headroom)` for a
+   candidate that isn't custody-armed, isn't past expiry, and
+   hasn't been fork-disputed.
+2. **`open_victim_quorum_ledger` helper + fraud_proof refactor**
+   (this commit) — every `fraud_proof_*` now opens its own fresh
+   victim ledger on op0, adds Q=3 healthy cosigners, activates
+   with `--quorum-expiry-blocks`, and forges against the result.
+   Decouples the tests from prior tests' cluster state. All 6
+   `fraud_proof_*` tests pass on a fresh cluster
+   (`fraud_proof_dispute_dereliction` was already passing via
+   the lucky-race route).
 
 ## Pass (26)
 
@@ -39,25 +60,45 @@ precondition-skips that exit cleanly).
 | `replacement_collateral_e2e::*` | 21s | |
 | `webof_trust_ringsig::ringsig_via_wallet_binary` | 0.3s | skip — attestation setup absent |
 
-## Fail (11)
+## Newly skipping cleanly on aged clusters (post-commit `da5632a9`)
 
-| Test | Time | Diagnosis |
+These all share the same fix: pick a clean+healthy+undisputed
+setup ledger via `find_clean_healthy_setup_ledger(min_headroom)`,
+or skip with a "rerun against `setup.sh --fresh 3`" message.
+
+| Test | Old failure mode | Now |
 |---|---|---|
-| `cooperative_refund_e2e::*` | 90s | unknown — needs investigation |
-| `cooperative_refund_gate::*` | 5.6s | unknown — quick assertion fail, likely paired with above |
-| `delivery_embed::wallet_escalate_lands_delivery_embed_on_member_ledger` | 30s | regression — silent-drop fix didn't cover the actual failure mode |
-| `fraud_proof_equivocation::*` | 54s | regression — new test added this session, passed on prior degraded cluster |
-| `fraud_proof_non_conforming_cosignature::*` | 53s | regression — same pattern as above |
-| `fraud_proof_quorum_expired::*` | 36s | unknown — pre-existing |
-| `fraud_proof_stale_cosig::*` | 21s | unknown — pre-existing |
-| `fraud_proof_uncredited_lightning::*` | 73s | unknown — pre-existing |
-| `fraud_proof_uncredited_onchain::*` | 73s | unknown — pre-existing |
-| `invoice_cosign::make_invoice_returns_valid_cosignature` | 0.4s | likely lightning-precondition surfacing as panic, not clean skip |
-| `pay_invoice_self_pay::pay_invoice_self_pay_returns_real_preimage` | 0.4s | same pattern |
+| `cooperative_refund_e2e::*` | hardcoded op8/L1 (sometimes setup-flaky); also fork-disputed | dynamic scan, skip if none |
+| `cooperative_refund_gate::*` | hardcoded ledger_0_1 whose reserves were already spent | dynamic scan |
+| `delivery_embed::*` | discover() picked an op1 ledger fork-disputed by op2/op4/op8 | dynamic scan |
+| `invoice_cosign::*` | wallet open refused: "operator's quorum has expired" | dynamic scan |
+| `pay_invoice_self_pay::*` | same | dynamic scan |
+
+## fraud_proof_* — RESOLVED via per-test fresh victim
+
+Each test now opens its own victim ledger via the shared
+`open_victim_quorum_ledger(node, owner_op, expiry_blocks, member_count)`
+helper, adds Q=3 cosigners from `find_healthy_members`, activates
+the quorum (with a configurable expiry), and forges against
+that fresh ledger instead of a shared setup-state one. Each
+test takes ~100–175s end-to-end (setup arc dominates; the
+forge + verify is fast).
+
+| Test | Wall-clock | Notes |
+|---|---|---|
+| `fraud_proof_equivocation` | 100s | single victim |
+| `fraud_proof_non_conforming_cosignature` | 174s | two victims (fault + disputed) |
+| `fraud_proof_quorum_expired` | 100s | short expiry (100 blocks) so the test can mine past it |
+| `fraud_proof_stale_cosig` | 102s | single victim |
+| `fraud_proof_uncredited_lightning` | 125s | single victim + extend chain past QB |
+| `fraud_proof_uncredited_onchain` | 126s | single victim + extend chain past QB |
+| `fraud_proof_dispute_dereliction` | 46s | already passing (uses setup ledger; lucky-race with auto-confiscation) |
+
+All 7 pass on a fresh cluster.
 
 ## Root causes
 
-### 1. fraud_proof_* (5 failures) — test-order pollution
+### 1. fraud_proof_* (6 failures, but `dispute_dereliction` luck-passes) — test-order pollution
 
 Cargo runs test binaries alphabetically. `auto_dispute_on_expiry` and
 `candidate_queue_swap` mine hundreds of blocks past expiry to exercise
@@ -92,22 +133,21 @@ then forge against it. Same pattern as the
 This is a significant refactor — ~5 tests, each with their own
 fraud-specific evidence requirements.
 
-### 2. invoice_cosign / pay_invoice_self_pay — missing skip guard
+### 2-4 — RESOLVED via dynamic ledger selection
 
-Both fail in 0.4s when the LDK container is down. They lack the
-`if !lightning_available() { skip }` guard the other lightning
-tests use.
+The lightning / refund / delivery_embed failures all turned out to
+be the same kind of cluster-pollution bug as the fraud_proof family
+— they hardcoded specific ledger keys (`ledger_0_1`, `ledger_8_1`,
+`discover_op0_ledger()[0]`) that worked on a freshly-bootstrapped
+cluster but broke once earlier tests had aged or fork-disputed those
+ledgers. The shared `find_clean_healthy_setup_ledger(min_headroom)`
+helper now ensures all five select a ledger that's:
+- not custody-armed (no `custody_armed_*.marker` anywhere),
+- not past quorum_expiry (chain_tip + headroom < expiry),
+- not fork-disputed (no `<lid>_<seq>_<pk>.jsonl` at any peer).
 
-### 3. cooperative_refund pair — needs diagnosis
-
-`_e2e` (90s) and `_gate` (5.6s). Both reach a real assertion; not
-yet investigated.
-
-### 4. delivery_embed — needs diagnosis
-
-In-session fix added silent-drop on non-operators. Test still fails;
-the actual failure mode is something else. Read panic message,
-redirect fix.
+When no candidate qualifies, the test skips cleanly with a "rerun
+against `setup.sh --fresh 3`" message instead of panicking.
 
 ## Re-run
 
