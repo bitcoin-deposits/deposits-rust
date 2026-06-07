@@ -727,6 +727,7 @@ impl Node {
         collateral_bps: Option<u16>,
         amount_sats: Option<u64>,
         requested_ruleset: Option<&str>,
+        expiry_blocks_override: Option<u32>,
     ) -> Result<RotateReservesResult, Error> {
         // --- Phase 1: snapshot membership + ledger state ---
         let ledger_arc = {
@@ -764,7 +765,11 @@ impl Node {
             let lids: Vec<String> = source.iter().map(|m| m.ledger_id.clone()).collect();
 
             let current_block = self.wallet.get_block_height().unwrap_or(0);
-            let default_expiry = current_block + 1000; // ~1 week
+            // Caller-supplied override wins (used by tests that need a
+            // short-lived quorum); otherwise the standard ~1-week
+            // window.
+            let default_expiry = current_block
+                + expiry_blocks_override.unwrap_or(1000);
 
             // TODO: Get actual expiries from quorum member info in ledger
             let expiries: Vec<u32> = members.iter().map(|_| default_expiry).collect();

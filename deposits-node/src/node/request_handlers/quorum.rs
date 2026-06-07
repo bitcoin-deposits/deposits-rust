@@ -797,12 +797,21 @@ impl Node {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // Optional expiry_blocks override. None → daemon picks
+        // a sensible default (currently `current_block + 1000`).
+        let expiry_blocks = request
+            .params
+            .get("expiry_blocks")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
         match self
             .rotate_reserves_to_quorum(
                 &ledger_id,
                 collateral_bps,
                 amount_sats,
                 protocol_version.as_deref(),
+                expiry_blocks,
             )
             .await
         {

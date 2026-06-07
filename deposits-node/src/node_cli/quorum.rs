@@ -56,6 +56,7 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let mut collateral_bps: Option<u32> = None;
     let mut amount_sats: Option<u64> = None;
     let mut protocol_version: Option<String> = None;
+    let mut expiry_blocks: Option<u32> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
@@ -87,6 +88,17 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 }
                 "--protocol-version" if i + 1 < args.len() => {
                     protocol_version = Some(args[i + 1].clone());
+                    i += 1;
+                }
+                "--quorum-expiry-blocks" if i + 1 < args.len() => {
+                    let raw = &args[i + 1];
+                    let v: u32 = raw.parse().map_err(|_| {
+                        format!(
+                            "Invalid --quorum-expiry-blocks value: {} (expected positive integer)",
+                            raw
+                        )
+                    })?;
+                    expiry_blocks = Some(v);
                     i += 1;
                 }
                 _ => {
@@ -137,6 +149,10 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     if let Some(ref pv) = protocol_version {
         println!("  Protocol version: {}", pv);
         params.insert("protocol_version".to_string(), serde_json::json!(pv));
+    }
+    if let Some(n) = expiry_blocks {
+        println!("  Quorum expiry: current_block + {} blocks (override)", n);
+        params.insert("expiry_blocks".to_string(), serde_json::json!(n));
     }
     let result = send_daemon_request(
         &config,
