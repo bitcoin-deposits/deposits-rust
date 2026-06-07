@@ -1164,6 +1164,328 @@ impl Node {
             }
         }
     }
+
+    /// Operator-side liquidity-drip ticker.
+    ///
+    /// Loads `<data_dir>/operator_drips.json`, iterates each active
+    /// plan, and advances each one's state machine by at most one
+    /// step per cycle:
+    ///
+    ///   1. If the plan has no `deposit_id` yet → open the self-deposit
+    ///      (derive depositor key via `KeyPath::Deposit{plan.key_index}`,
+    ///      build `pk(<pubkey>)` descriptor, commit DepositOpen).
+    ///   2. Else if the deposit has zero balance and was just opened →
+    ///      fund it via a synthetic InvoiceCredit (no real LDK payment
+    ///      — same trick `admin/buffer-fill` uses).
+    ///   3. Else if the interval has elapsed → drain `decrement_sats`
+    ///      via synthetic InvoiceLock + Fulfill, signed with the
+    ///      depositor key. Frees that much operator reserve capacity
+    ///      back to the pool.
+    ///
+    /// One step per plan per cycle keeps the periodic budget bounded.
+    /// Disable via `.pause_auto_drip_self_liquidity` marker.
+    pub async fn auto_drip_self_liquidity(self: &Arc<Self>) {
+        if self.data_dir.join(".pause_auto_drip_self_liquidity").exists() {
+            tracing::debug!(
+                ".pause_auto_drip_self_liquidity marker present — skipping cycle"
+            );
+            return;
+        }
+        let mut registry = match crate::operator_drips::DripRegistry::load(&self.data_dir) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("auto_drip_self_liquidity: load registry failed: {}", e);
+                return;
+            }
+        };
+        if registry.plans.is_empty() {
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let mut dirty = false;
+        for plan in registry.plans.iter_mut() {
+            if plan.paused {
+                continue;
+            }
+
+            // ── Step 1: open the self-deposit if we haven't yet ──
+            if plan.deposit_id.is_none() {
+                match self.drip_open_deposit(plan).await {
+                    Ok(deposit_id_hex) => {
+                        plan.deposit_id = Some(deposit_id_hex.clone());
+                        dirty = true;
+                        tracing::info!(
+                            "auto_drip_self_liquidity: opened deposit {}… for plan '{}' \
+                             on ledger {}…",
+                            &deposit_id_hex[..16.min(deposit_id_hex.len())],
+                            plan.alias,
+                            &plan.ledger_id[..16.min(plan.ledger_id.len())],
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "auto_drip_self_liquidity: open failed for plan '{}': {}",
+                            plan.alias,
+                            e,
+                        );
+                    }
+                }
+                // One step per cycle — pick up funding next tick.
+                continue;
+            }
+
+            let deposit_id_hex = plan.deposit_id.clone().unwrap();
+            let deposit_id_bytes = match decode_deposit_id(&deposit_id_hex) {
+                Some(b) => b,
+                None => {
+                    tracing::warn!(
+                        "auto_drip_self_liquidity: plan '{}' has malformed deposit_id, skipping",
+                        plan.alias,
+                    );
+                    continue;
+                }
+            };
+
+            // ── Step 2: initial fund — credit if balance still 0 ──
+            let current_balance_msats = self
+                .read_deposit_balance(&plan.ledger_id, &deposit_id_bytes)
+                .unwrap_or(0);
+            if current_balance_msats == 0 && plan.ticks_completed == 0 {
+                let target_msats = plan
+                    .target_deposit_sats
+                    .saturating_mul(1_000);
+                match self
+                    .drip_fund_deposit(&plan.ledger_id, deposit_id_bytes, target_msats, &plan.alias)
+                    .await
+                {
+                    Ok(new_balance) => {
+                        tracing::info!(
+                            "auto_drip_self_liquidity: funded plan '{}' with {} sats \
+                             (balance now {} msats)",
+                            plan.alias,
+                            plan.target_deposit_sats,
+                            new_balance,
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "auto_drip_self_liquidity: fund failed for plan '{}': {}",
+                            plan.alias,
+                            e,
+                        );
+                    }
+                }
+                continue;
+            }
+
+            // ── Step 3: drip drain on interval ──
+            if !plan.is_due(now) {
+                continue;
+            }
+            let decrement_msats = plan.decrement_sats.saturating_mul(1_000);
+            if current_balance_msats < decrement_msats {
+                tracing::info!(
+                    "auto_drip_self_liquidity: plan '{}' underfunded ({} < {} msats); \
+                     stopping ticks",
+                    plan.alias,
+                    current_balance_msats,
+                    decrement_msats,
+                );
+                continue;
+            }
+            match self
+                .drip_drain_deposit(
+                    &plan.ledger_id,
+                    deposit_id_bytes,
+                    plan.key_index,
+                    decrement_msats,
+                )
+                .await
+            {
+                Ok(new_balance) => {
+                    plan.last_tick_unix = now;
+                    plan.ticks_completed += 1;
+                    dirty = true;
+                    tracing::info!(
+                        "auto_drip_self_liquidity: drained {} sats from plan '{}' \
+                         (tick {}, balance now {} msats)",
+                        plan.decrement_sats,
+                        plan.alias,
+                        plan.ticks_completed,
+                        new_balance,
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "auto_drip_self_liquidity: drain failed for plan '{}': {}",
+                        plan.alias,
+                        e,
+                    );
+                }
+            }
+        }
+
+        if dirty {
+            if let Err(e) = registry.save(&self.data_dir) {
+                tracing::warn!("auto_drip_self_liquidity: persist registry failed: {}", e);
+            }
+        }
+    }
+
+    /// Open the self-deposit for a drip plan. Derives the depositor
+    /// pubkey via the signer at `KeyPath::Deposit{plan.key_index}`,
+    /// builds a `pk(<pubkey>)` descriptor, and commits the DepositOpen
+    /// op directly via `Node::open_deposit`. Returns the new
+    /// deposit_id as hex. Mirrors `process_admin_buffer_open_request`.
+    async fn drip_open_deposit(
+        self: &Arc<Self>,
+        plan: &crate::operator_drips::DripPlan,
+    ) -> Result<String, String> {
+        let pk = self
+            .handler
+            .signer
+            .pubkey_at(deposits_signer_api::KeyPath::Deposit { index: plan.key_index })
+            .map_err(|e| {
+                format!(
+                    "signer pubkey_at(Deposit{{index:{}}}): {}",
+                    plan.key_index, e
+                )
+            })?;
+        let descriptor = format!("pk({})", hex::encode(pk.serialize()));
+        let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+        // Zero fees — self-deposit, charging yourself is meaningless.
+        // receive_requires_sig=false so subsequent synthetic credits
+        // don't need an attached DEP-16 witness.
+        let fees = deposits_core::FeeStructure {
+            annualized_msats: 0,
+            annualized_bps: 0,
+            frequency_blocks: 2016,
+        };
+        self.open_deposit(&plan.ledger_id, &descriptor, Some(fees), None, false)
+            .await
+            .map_err(|e| format!("open_deposit: {}", e))?;
+        Ok(hex::encode(deposit_id))
+    }
+
+    /// Synthetic credit for the initial fund step. Same trick as
+    /// `process_admin_buffer_fill_request`: a random invoice_id +
+    /// payment_hash, no real LDK invoice ever existed. Cosigners
+    /// validate the operator's signed update against the reserves
+    /// invariant; they don't independently look up the payment.
+    async fn drip_fund_deposit(
+        self: &Arc<Self>,
+        ledger_id: &str,
+        deposit_id: deposits_core::types::DepositId,
+        amount_msats: u64,
+        plan_alias: &str,
+    ) -> Result<u64, String> {
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::rand::rngs::OsRng;
+        use bitcoin::secp256k1::rand::RngCore;
+        let mut nonce = [0u8; 16];
+        OsRng.fill_bytes(&mut nonce);
+        let invoice_id = format!("drip-fund-{}-{}", plan_alias, hex::encode(nonce));
+        let _payment_hash = sha256::Hash::hash(invoice_id.as_bytes()).to_byte_array();
+        self.credit_deposit(ledger_id, deposit_id, amount_msats, _payment_hash, invoice_id)
+            .await
+            .map_err(|e| format!("credit_deposit: {}", e))
+    }
+
+    /// Synthetic drain — drives the deposit balance down by
+    /// `amount_msats` via InvoiceLock + InvoiceFulfill, both signed
+    /// with the depositor's drip key via the signer. Mirrors
+    /// `process_admin_buffer_drain_request`.
+    async fn drip_drain_deposit(
+        self: &Arc<Self>,
+        ledger_id: &str,
+        deposit_id: deposits_core::types::DepositId,
+        key_index: u32,
+        amount_msats: u64,
+    ) -> Result<u64, String> {
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::rand::rngs::OsRng;
+        use bitcoin::secp256k1::rand::RngCore;
+        let mut preimage = [0u8; 32];
+        OsRng.fill_bytes(&mut preimage);
+        let payment_id = sha256::Hash::hash(&preimage).to_byte_array();
+
+        let op_nonce = deposits_core::signing::fresh_op_nonce();
+        let op_expiry = u32::MAX;
+        let lock_proto = deposits_core::messages::LedgerOperation::InvoiceLock {
+            deposit_id,
+            amount: amount_msats,
+            payment_id,
+            sequence_number: 0,
+            nonce: op_nonce,
+            expiry: op_expiry,
+            witness: deposits_core::types::DescriptorWitness::new(),
+        };
+        let lock_preimage = deposits_core::dep16::operations::operation_sighash(&lock_proto)
+            .ok_or_else(|| "dep-16 lock sighash failed".to_string())?;
+        let lock_ctx = deposits_signer_api::SignContext::deposit(
+            key_index,
+            deposits_signer_api::SigPurpose::PaymentAuthorization,
+        );
+        let lock_sig = self
+            .handler
+            .signer
+            .bip340_sign(&lock_ctx, &lock_preimage)
+            .map_err(|e| format!("lock sign: {}", e))?;
+        let lock_witness = deposits_core::types::DescriptorWitness {
+            stack: vec![lock_sig.to_vec()],
+        };
+        let fulfill_witness = lock_witness.clone();
+
+        self.lock_invoice_payment(
+            ledger_id,
+            deposit_id,
+            amount_msats,
+            payment_id,
+            op_nonce,
+            op_expiry,
+            lock_witness,
+        )
+        .await
+        .map_err(|e| format!("lock_invoice_payment: {}", e))?;
+        self.fulfill_invoice_payment(
+            ledger_id,
+            deposit_id,
+            amount_msats,
+            payment_id,
+            preimage,
+            fulfill_witness,
+        )
+        .await
+        .map_err(|e| format!("fulfill_invoice_payment: {}", e))
+    }
+
+    /// Read the current balance (msats) of `deposit_id` on `ledger_id`.
+    /// Returns `None` if the deposit isn't found.
+    fn read_deposit_balance(
+        &self,
+        ledger_id: &str,
+        deposit_id: &deposits_core::types::DepositId,
+    ) -> Option<u64> {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        let arc = ledgers.get(ledger_id)?;
+        let ledger = arc.read().unwrap();
+        ledger.state.deposits.get(deposit_id).map(|d| d.balance)
+    }
+}
+
+/// Decode a 32-char hex deposit_id into the 16-byte array shape.
+fn decode_deposit_id(hex_str: &str) -> Option<deposits_core::types::DepositId> {
+    let bytes = hex::decode(hex_str).ok()?;
+    if bytes.len() != 16 {
+        return None;
+    }
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&bytes);
+    Some(id)
 }
 
 /// Snapshot of one ledger's quorum state, captured by the periodic

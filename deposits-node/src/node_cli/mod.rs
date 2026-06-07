@@ -15,6 +15,7 @@ pub mod health;
 pub mod keys;
 pub mod ledger;
 pub mod lightning;
+pub mod liquidity;
 pub mod nostr_commands;
 pub mod quorum;
 pub mod recovery;

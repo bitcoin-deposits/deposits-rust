@@ -1247,6 +1247,10 @@ impl Node {
                         timed_periodic!("auto_collect_fees", node.auto_collect_fees());
                         timed_periodic!("auto_timeout_transfers", node.auto_timeout_transfers());
                         timed_periodic!("auto_quorum_refresh", node.auto_quorum_refresh());
+                        timed_periodic!(
+                            "auto_drip_self_liquidity",
+                            node.auto_drip_self_liquidity()
+                        );
 
                         // Auto-expire old deposit offers
                         if let Ok(expired) = node.check_expired_offers() {

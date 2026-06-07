@@ -64,6 +64,7 @@ pub mod node_cli;
 /// don't have to depend on the daemon. Existing `crate::nostr::…`
 /// paths inside deposits-node still resolve through this re-export.
 pub use deposits_nostr as nostr;
+pub mod operator_drips;
 pub mod operator_policy;
 pub mod remote_signer;
 // deposits-node/src/cli was split: nostr_commands + recovery moved to

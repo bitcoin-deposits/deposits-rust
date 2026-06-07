@@ -105,6 +105,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "deposit" => node_cli::deposit::deposit_command(&args[2..]).await?,
         "withdraw" => node_cli::withdraw::withdraw_command(&args[2..]).await?,
         "lightning" | "ln" => node_cli::lightning::lightning_command(&args[2..]).await?,
+        "liquidity" => node_cli::liquidity::liquidity_command(&args[2..]).await?,
         "nostr" => nostr_commands::nostr_command(&args[2..]).await?,
         "recovery" => recovery::recovery_command(&args[2..]).await?,
         "disputes" => node_cli::disputes::disputes_command(&args[2..]).await?,
