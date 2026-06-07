@@ -1424,8 +1424,13 @@ impl Node {
             expiry: op_expiry,
             witness: deposits_core::types::DescriptorWitness::new(),
         };
-        let lock_preimage = deposits_core::dep16::operations::operation_sighash(&lock_proto)
+        let lock_sighash = deposits_core::dep16::operations::operation_sighash(&lock_proto)
             .ok_or_else(|| "dep-16 lock sighash failed".to_string())?;
+        // Dep16Authorizer verifies ECDSA (matches `wallet sign_op`), not
+        // BIP-340 — the `bip340_sign` path the existing `admin/buffer-drain`
+        // handler uses produces sigs the authorizer rejects with
+        // "witness does not satisfy deposit descriptor". Sign ECDSA over
+        // the same dep-17 sighash.
         let lock_ctx = deposits_signer_api::SignContext::deposit(
             key_index,
             deposits_signer_api::SigPurpose::PaymentAuthorization,
@@ -1433,10 +1438,10 @@ impl Node {
         let lock_sig = self
             .handler
             .signer
-            .bip340_sign(&lock_ctx, &lock_preimage)
+            .ecdsa_sign_sighash(&lock_ctx, &lock_sighash)
             .map_err(|e| format!("lock sign: {}", e))?;
         let lock_witness = deposits_core::types::DescriptorWitness {
-            stack: vec![lock_sig.to_vec()],
+            stack: vec![lock_sig.serialize_compact().to_vec()],
         };
         let fulfill_witness = lock_witness.clone();
 
