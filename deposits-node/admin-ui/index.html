@@ -297,6 +297,7 @@
       <button data-tab="quorum">quorum</button>
       <button data-tab="lifecycle">lifecycle</button>
       <button data-tab="candidates">candidates</button>
+      <button data-tab="liquidity">liquidity</button>
       <button data-tab="activity">activity</button>
       <button data-tab="signer">signer</button>
     </div>
@@ -401,6 +402,25 @@
         </div>
       </div>
       <div id="cand-feed"><div class="loading">loading…</div></div>
+    </section>
+
+    <!-- liquidity drips -->
+    <section data-pane="liquidity" style="display:none">
+      <h1 class="section-title">liquidity drips</h1>
+      <div class="card" style="margin-bottom:1rem">
+        <div class="card-body">
+          <div style="color:var(--fg-muted);font-size:0.85rem;line-height:1.5">
+            Self-owned deposits that lock reserves and release them gradually,
+            capping how fast any single depositor can pull liquidity.
+            Each tick drains <span class="mono">decrement_sats</span>; the
+            <span class="mono">±fuzz</span> column (when non-zero) jitters
+            the cadence so the schedule isn't predictable. Manage with
+            <span class="mono">deposits-node liquidity drip-create / pause / resume / remove</span>;
+            persisted at <span class="mono">&lt;data-dir&gt;/operator_drips.json</span>.
+          </div>
+        </div>
+      </div>
+      <div id="drips-feed"><div class="loading">loading…</div></div>
     </section>
 
     <!-- activity -->
@@ -703,6 +723,59 @@ async function dropCandidate(pubkey) {
   }
 }
 
+async function loadLiquidityDrips() {
+  const items = await api('/liquidity-drips');
+  if (!items) return;
+  const el = document.getElementById('drips-feed');
+  if (!items.length) {
+    el.innerHTML = '<div class="empty">No drip plans registered. Create one with <span class="mono">deposits-node liquidity drip-create &lt;alias&gt; &lt;ledger_id&gt; --initial-sats N --decrement-sats M --interval-sec S [--interval-fuzz-sec F]</span>.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="card"><table class="feed"><thead><tr>' +
+    '<th>alias</th><th>ledger</th><th>stage</th><th>ticks</th>' +
+    '<th>target&nbsp;sats</th><th>decrement</th><th>every</th><th>±fuzz</th>' +
+    '<th>next&nbsp;tick</th><th>deposit</th>' +
+    '</tr></thead><tbody>' +
+    items.map(d => {
+      // Stage chip — colorized by state.
+      let stageColor = 'var(--fg-muted)';
+      if (d.stage === 'active') stageColor = 'var(--green)';
+      else if (d.stage === 'paused') stageColor = 'var(--red)';
+      const stageBadge =
+        `<span style="color:${stageColor};font-weight:600">${d.stage}</span>`;
+      const nextTick = d.paused
+        ? '—'
+        : (d.next_tick_in_sec === null || d.next_tick_in_sec === undefined)
+          ? 'due'
+          : (d.next_tick_in_sec === 0 ? 'due' : `${d.next_tick_in_sec}s`);
+      const depShort = d.deposit_id
+        ? `<span class="mono">${d.deposit_id.slice(0, 16)}…</span>`
+        : '<span style="color:var(--fg-muted)">—</span>';
+      const fuzz = d.interval_fuzz_sec > 0 ? `±${d.interval_fuzz_sec}s` : '—';
+      return `
+        <tr>
+          <td class="mono">${escapeHtml(d.alias)}</td>
+          <td class="mono">${d.ledger_id.slice(0, 14)}…</td>
+          <td>${stageBadge}</td>
+          <td>${d.ticks_completed.toLocaleString()}</td>
+          <td>${d.target_deposit_sats.toLocaleString()}</td>
+          <td>${d.decrement_sats.toLocaleString()}</td>
+          <td>${d.interval_sec}s</td>
+          <td>${fuzz}</td>
+          <td>${nextTick}</td>
+          <td>${depShort}</td>
+        </tr>`;
+    }).join('') + '</tbody></table></div>';
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 async function loadActivity() {
   const acts = await api('/activity');
   if (!acts) return;
@@ -763,9 +836,18 @@ async function init() {
   try {
     await loadStatus();
     await loadSigner();      // populates nav-right + signer pane
-    await Promise.all([loadLedgers(), loadQuorum(), loadLifecycle(), loadCandidates(), loadActivity()]);
-    // refresh status + signer every 10s
-    setInterval(() => { loadStatus(); loadSigner(); }, 10_000);
+    await Promise.all([
+      loadLedgers(), loadQuorum(), loadLifecycle(),
+      loadCandidates(), loadLiquidityDrips(), loadActivity()
+    ]);
+    // refresh status + signer + drips every 10s — drips have a live
+    // countdown (next_tick_in_sec) so periodic refresh keeps it
+    // honest without a manual page reload.
+    setInterval(() => {
+      loadStatus();
+      loadSigner();
+      loadLiquidityDrips();
+    }, 10_000);
   } catch (e) {
     console.error(e);
     document.querySelector('main').innerHTML =
