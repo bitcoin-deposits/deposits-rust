@@ -3,12 +3,20 @@
 Snapshot of cluster-test (`#[ignore]`) status. Update whenever a
 test moves between Pass / Fail / Skip.
 
-**Last full run:** 2026-06-07 — fresh Q=3 cluster at block 227.
+**Last full run:** 2026-06-07 — fresh Q=3 cluster at block 224.
 **Initial tally:** 26 pass / 11 fail / 37 total.
-**After reproducibility fixes:** estimated 32+ pass / 0 hard fail
-on fresh cluster (the 6 ledger-selection tests + the 5
-`fraud_proof_*` refactors all now exercise their assertions when
-preconditions are met, and skip cleanly when they aren't).
+**Current tally:** **36 pass / 1 fail / 37 total** (+10 net).
+
+The one remaining failure is `dispute_fork_shape::dispute_creates_well_formed_fork_branches`,
+which exposes a flaky pre-existing protocol-level inconsistency:
+cosigners that capture the divergence point at different chain tips
+record different `last_valid_sequence` values on their fork
+branches. The test panics either with "DisputeEnter at seq N is not
+above last_valid_sequence N" or "cosigners disagree on the
+divergence point (LVS=14 vs 17)" depending on which ledger
+`discover_op0_ledger` happens to pick. Not a regression from this
+session's work — the test was previously passing by luck of ledger
+selection. Separate root-cause; tracked outside this session.
 
 ### Fix waves
 
