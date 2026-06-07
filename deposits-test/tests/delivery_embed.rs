@@ -80,17 +80,45 @@ fn wallet_escalate_lands_delivery_embed_on_member_ledger() {
         return;
     }
 
-    // ── 1. Discover op0 (the operator being escalated against) and
-    //      op1 (the quorum member who will accept the embed). ───────
-    let (op0_ledger, op0_pubkey) = discover_ledger_for_operator("op0");
-    let (op1_ledger, _op1_pubkey) = discover_ledger_for_operator("op1");
-    eprintln!("[setup] op0 ledger: {}…", &op0_ledger[..16]);
-    eprintln!("[setup] op0 pubkey: {}…", &op0_pubkey[..16]);
-    eprintln!("[setup] op1 ledger (embed target): {}…", &op1_ledger[..16]);
+    // ── 1. Pick a clean+healthy+undisputed ledger to embed on.
+    //      Once a peer auto-disputes the member's ledger, the member's
+    //      cosign round for the new DeliveryEmbed times out (peers
+    //      won't ingest new updates past their dispute-fork sequence).
+    //      Then pick any *other* op via discover as the target the
+    //      wallet is "escalating against" (only its pubkey + ledger_id
+    //      are referenced in the embed payload — target doesn't need
+    //      to be healthy). ───────────────────────────────────────────
+    let (member_op_idx, member_ledger) = match find_clean_healthy_setup_ledger(100) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "skipping: no clean+healthy+undisputed setup ledger available — \
+                 rerun against `setup.sh --fresh 3`."
+            );
+            return;
+        }
+    };
+    let target_op_name = if member_op_idx == 0 { "op1" } else { "op0" };
+    let (target_ledger, target_pubkey) = discover_ledger_for_operator(target_op_name);
+    eprintln!("[setup] target ({}) ledger: {}…", target_op_name, &target_ledger[..16]);
+    eprintln!("[setup] target pubkey: {}…", &target_pubkey[..16]);
+    eprintln!(
+        "[setup] member (op{}) ledger (embed target): {}…",
+        member_op_idx,
+        &member_ledger[..16]
+    );
+
+    // Keep the legacy names so the rest of the test (which queries
+    // `op0_ledger`, `op0_pubkey`, `op1_ledger`) stays untouched —
+    // the var names are now semantic stand-ins for "complaint target"
+    // and "embed host", not literally op0/op1.
+    let op0_ledger = target_ledger;
+    let op0_pubkey = target_pubkey;
+    let op1_ledger = member_ledger;
+    let op1_data = op_data_dir(member_op_idx);
 
     // ── 2. Capture op1's ledger sequence BEFORE the embed so we can
     //      identify the new update unambiguously. ──────────────────
-    let op1_data = op_data_dir(1);
     let pre_count = read_ledger_history(&op1_data, &op1_ledger).len();
     eprintln!("[setup] op1 ledger pre-embed update count: {}", pre_count);
 

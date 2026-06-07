@@ -127,40 +127,9 @@ fn faucet_send(address: &str, amount_sats: u64) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// Query op_idx's /api/lifecycle for the chain-tip and the latest
-/// quorum_expiry observed on `ledger_id`. Returns
-/// `Some((chain_tip, expiry))` if both are available. Used to pick
-/// "healthy" members at test start — a member whose own ledger has
-/// already expired can't cosign the QuorumJoin that `quorum add`
-/// requires of them (it's value-moving under the cascade).
-fn lifecycle_expiry(op_idx: usize, ledger_id: &str) -> Option<(u32, u32)> {
-    let token_path = op_data_dir(op_idx).join("admin-token");
-    let token = std::fs::read_to_string(&token_path).ok()?.trim().to_string();
-    let url = format!("http://127.0.0.1:{}/api/lifecycle", 8765 + op_idx);
-    let out = Command::new("curl")
-        .args(["-s", "-H", &format!("Authorization: Bearer {}", token), &url])
-        .output()
-        .ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    let arr = v.as_array()?;
-    let prefix = &ledger_id[..16];
-    let mut best: Option<(u32, u32)> = None;
-    for entry in arr {
-        let lid = entry.get("ledger_id").and_then(|x| x.as_str()).unwrap_or("");
-        // /api/lifecycle truncates the ledger_id to 16 hex chars.
-        if !(lid == ledger_id || lid == prefix) {
-            continue;
-        }
-        let tip = entry.get("chain_tip").and_then(|x| x.as_u64())? as u32;
-        let exp = entry.get("quorum_expiry").and_then(|x| x.as_u64())? as u32;
-        // Take the row with the highest expiry — duplicates can
-        // appear when /api/lifecycle reports both canonical + fork views.
-        if best.map_or(true, |(_, prev_exp)| exp > prev_exp) {
-            best = Some((tip, exp));
-        }
-    }
-    best
-}
+// `lifecycle_expiry` lives in `deposits_test::regtest` (used by
+// invoice_cosign / pay_invoice_self_pay / find_clean_healthy_setup_ledger).
+// Imported via the wildcard `use deposits_test::regtest::*`.
 
 /// Find up to `wanted` cluster members (from `op1..op9`) whose own
 /// primary ledger is *still healthy* (chain_tip < quorum_expiry).

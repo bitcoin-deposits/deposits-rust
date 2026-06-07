@@ -34,33 +34,11 @@ use deposits_core::types::compute_deposit_id;
 use deposits_node::nostr::NostrTransportBuilder;
 use deposits_test::regtest::*;
 
-/// Pick a ledger from `setup_state` that no operator has custody-armed.
-/// Fraud-proof tests dispute ledgers and leave a `custody_armed_*.marker`
-/// behind; new deposit_open requests on those ledgers fail. Returns
-/// `None` if every candidate is poisoned (cluster needs re-init).
-fn find_clean_setup_ledger() -> Option<(usize, String)> {
-    let state_dir = repo_root().join("deposits-tools/data/state");
-    for op in 0..16 {
-        for idx in 1..=3 {
-            let path = state_dir.join(format!("ledger_{}_{}", op, idx));
-            if !path.exists() {
-                continue;
-            }
-            let ledger_id = std::fs::read_to_string(&path).ok()?.trim().to_string();
-            if ledger_id.len() != 64 {
-                continue;
-            }
-            // Markers can live on the operator's OR any quorum member's
-            // data dir, so scan them all.
-            let marker = format!("custody_armed_{}.marker", &ledger_id[..16]);
-            let any_armed = (0..16).any(|i| op_data_dir(i).join(&marker).exists());
-            if !any_armed {
-                return Some((op, ledger_id));
-            }
-        }
-    }
-    None
-}
+// Uses the shared `find_clean_healthy_setup_ledger` helper from
+// `deposits_test::regtest` — see that helper's docs for the
+// custody-armed and quorum-expiry constraints. Requiring >100 blocks
+// of headroom keeps the test from picking a ledger that the dispute
+// tests have aged to within minutes of expiry.
 
 #[tokio::test]
 #[ignore]
@@ -77,17 +55,18 @@ async fn make_invoice_returns_valid_cosignature() {
         return;
     }
 
-    // ── 1. Pick a non-disputed ledger and open a fresh deposit on it ──
+    // ── 1. Pick a clean + healthy ledger and open a fresh deposit on it ──
     //
-    // Fraud-proof tests dispute ledgers and leave `custody_armed_*.marker`
-    // files behind that disable further deposit_open requests. Iterate
-    // until we find one that's clean.
-    let (op_idx, ledger_id) = match find_clean_setup_ledger() {
+    // Custody-armed ledgers refuse new deposit_open; expired-quorum
+    // ledgers refuse with "operator's quorum has expired." Iterate
+    // setup state until we find one that's both.
+    let (op_idx, ledger_id) = match find_clean_healthy_setup_ledger(100) {
         Some(p) => p,
         None => {
             eprintln!(
-                "skipping: every ledger in setup_state is custody-armed — \
-                 this cluster's been chewed on by fraud-proof tests, re-run setup.sh"
+                "skipping: no clean+healthy setup ledger available — \
+                 cluster is either custody-armed or aged past every \
+                 quorum_expiry. Rerun against `setup.sh --fresh 3`."
             );
             return;
         }

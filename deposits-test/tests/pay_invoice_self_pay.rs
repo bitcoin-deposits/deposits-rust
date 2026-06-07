@@ -42,30 +42,9 @@ use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
 use deposits_node::nostr::NostrTransportBuilder;
 use deposits_test::regtest::*;
 
-/// Same clean-ledger picker used by `invoice_cosign.rs`. Avoids ledgers
-/// that fraud-proof tests have left in `custody_armed` state — those
-/// reject `deposit_open` outright.
-fn find_clean_setup_ledger() -> Option<(usize, String)> {
-    let state_dir = repo_root().join("deposits-tools/data/state");
-    for op in 0..16 {
-        for idx in 1..=3 {
-            let path = state_dir.join(format!("ledger_{}_{}", op, idx));
-            if !path.exists() {
-                continue;
-            }
-            let ledger_id = std::fs::read_to_string(&path).ok()?.trim().to_string();
-            if ledger_id.len() != 64 {
-                continue;
-            }
-            let marker = format!("custody_armed_{}.marker", &ledger_id[..16]);
-            let any_armed = (0..16).any(|i| op_data_dir(i).join(&marker).exists());
-            if !any_armed {
-                return Some((op, ledger_id));
-            }
-        }
-    }
-    None
-}
+// Uses the shared `find_clean_healthy_setup_ledger` helper from
+// `deposits_test::regtest` — avoids custody-armed AND expired-quorum
+// ledgers, both of which refuse `deposit_open`.
 
 #[tokio::test]
 #[ignore]
@@ -82,13 +61,14 @@ async fn pay_invoice_self_pay_returns_real_preimage() {
         return;
     }
 
-    // ── Pick a clean ledger; both deposits live here ──────────────────
-    let (op_idx, ledger_id) = match find_clean_setup_ledger() {
+    // ── Pick a clean + healthy ledger; both deposits live here ────────
+    let (op_idx, ledger_id) = match find_clean_healthy_setup_ledger(100) {
         Some(p) => p,
         None => {
             eprintln!(
-                "skipping: every ledger in setup_state is custody-armed — \
-                 re-run setup.sh"
+                "skipping: no clean+healthy setup ledger available — \
+                 every ledger is either custody-armed or past quorum_expiry. \
+                 Rerun against `setup.sh --fresh 3`."
             );
             return;
         }

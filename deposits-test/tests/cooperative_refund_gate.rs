@@ -38,23 +38,41 @@ fn refund_refuses_when_reserves_utxo_is_funded() {
     }
 
     let node = build_node_with_danger();
-    let ledger_id = read_setup_state("ledger_0_1");
-    // Wait for op0's daemon to ingest its own QuorumBegin (race with
+    // Pick any clean+healthy setup ledger — the prior hardcoded
+    // `ledger_0_1` works on a freshly-bootstrapped cluster, but once
+    // auto_quorum_refresh has rotated op0's reserves (which happens
+    // any time op0's lifecycle tasks tick), the test's premise
+    // ("reserves UTXO IS funded") no longer holds for that ledger.
+    // Iterate setup state to find one that hasn't been touched.
+    let (op_idx, ledger_id) = match find_clean_healthy_setup_ledger(100) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "skipping: no clean+healthy setup ledger available — \
+                 rerun against `setup.sh --fresh 3`."
+            );
+            return;
+        }
+    };
+    let seed = op_seed(op_idx);
+    let op_name = format!("op{}", op_idx);
+    // Wait for the owning daemon to ingest its own QuorumBegin (race with
     // `setup.sh` returning).
-    wait_for_quorum_begin(0, &ledger_id, std::time::Duration::from_secs(30));
+    wait_for_quorum_begin(op_idx, &ledger_id, std::time::Duration::from_secs(30));
 
     eprintln!(
-        "[probe]   running `recovery refund` against funded ledger {}...",
-        &ledger_id[..16]
+        "[probe]   running `recovery refund` against funded ledger {}... (op{})",
+        &ledger_id[..16],
+        op_idx
     );
 
     let out = Command::new(&node)
         .args(["recovery", "refund", &ledger_id])
         .args(["--timeout", "5"])
-        .args(["--seed", OP0_SEED])
-        .args(["--name", "op0"])
+        .args(["--seed", &seed])
+        .args(["--name", &op_name])
         .args(["--network", "regtest"])
-        .args(["--data-dir", op_data_dir(0).to_str().unwrap()])
+        .args(["--data-dir", op_data_dir(op_idx).to_str().unwrap()])
         .args(["--esplora", ELECTRS_URL])
         .args(["--relay", relay_ledgers()])
         .output()

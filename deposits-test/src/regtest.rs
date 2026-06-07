@@ -692,6 +692,117 @@ pub fn wait_for_quorum_begin(op_idx: usize, ledger_id: &str, timeout: Duration) 
     );
 }
 
+/// Query op_idx's /api/lifecycle for the latest expiry seen for
+/// `ledger_id`. Returns `Some((chain_tip, expiry))` when both are
+/// known. Used by tests that need to avoid acting on a ledger whose
+/// quorum has already expired (deposit_open / quorum_add / etc. will
+/// refuse). Returns `None` if the daemon isn't responding, the
+/// ledger isn't in its lifecycle view, or the entry hasn't yet
+/// learned its expiry.
+pub fn lifecycle_expiry(op_idx: usize, ledger_id: &str) -> Option<(u32, u32)> {
+    let token_path = op_data_dir(op_idx).join("admin-token");
+    let token = std::fs::read_to_string(&token_path).ok()?.trim().to_string();
+    let url = format!("http://127.0.0.1:{}/api/lifecycle", 8765 + op_idx);
+    let out = Command::new("curl")
+        .args(["-s", "-H", &format!("Authorization: Bearer {}", token), &url])
+        .output()
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let arr = v.as_array()?;
+    let prefix = &ledger_id[..16];
+    let mut best: Option<(u32, u32)> = None;
+    for entry in arr {
+        let lid = entry.get("ledger_id").and_then(|x| x.as_str()).unwrap_or("");
+        // /api/lifecycle truncates the ledger_id to 16 hex chars.
+        if !(lid == ledger_id || lid == prefix) {
+            continue;
+        }
+        let tip = entry.get("chain_tip").and_then(|x| x.as_u64())? as u32;
+        let exp = entry.get("quorum_expiry").and_then(|x| x.as_u64())? as u32;
+        // Duplicate rows can appear when fork-branches surface in the
+        // lifecycle view — take the highest expiry the daemon knows.
+        if best.map_or(true, |(_, prev_exp)| exp > prev_exp) {
+            best = Some((tip, exp));
+        }
+    }
+    best
+}
+
+/// Walk `setup.sh`-provisioned ledgers and return the first
+/// `(op_idx, ledger_id)` that is:
+///   - Not custody-armed by any operator (fraud tests poison ledgers
+///     via `custody_armed_*.marker`, after which `deposit_open` is
+///     refused).
+///   - Still in its healthy quorum window (chain_tip + headroom < expiry).
+///     Tests that mine past expiry to exercise auto-dispute leave
+///     setup ledgers stranded; lightning / cosign tests that try to
+///     `deposit_open` on those get back "operator's quorum has expired."
+///   - Not auto-disputed by any peer (no `<lid>_<seq>_<pk>.jsonl`
+///     fork-branch file anywhere in the cluster). When a peer fires
+///     `DisputeEnter`, that peer's canonical view of the ledger is
+///     frozen at the fork sequence — subsequent updates from the
+///     operator never reach the peer's canonical chain, so cosign
+///     rounds (delivery_embed, invoice cosign, etc.) time out.
+///
+/// Returns `None` when no clean+healthy+undisputed ledger is left —
+/// caller should skip rather than fail, and rerun against
+/// `setup.sh --fresh`.
+pub fn find_clean_healthy_setup_ledger(min_headroom_blocks: u32) -> Option<(usize, String)> {
+    let state_dir = repo_root().join("deposits-tools/data/state");
+    for op in 0..16 {
+        for idx in 1..=3 {
+            let path = state_dir.join(format!("ledger_{}_{}", op, idx));
+            if !path.exists() {
+                continue;
+            }
+            let ledger_id = std::fs::read_to_string(&path)
+                .ok()?
+                .trim()
+                .to_string();
+            if ledger_id.len() != 64 {
+                continue;
+            }
+            // Custody-armed check.
+            let marker = format!("custody_armed_{}.marker", &ledger_id[..16]);
+            let any_armed = (0..16).any(|i| op_data_dir(i).join(&marker).exists());
+            if any_armed {
+                continue;
+            }
+            // Quorum-healthy check — query the owning op's daemon.
+            let Some((tip, exp)) = lifecycle_expiry(op, &ledger_id) else {
+                continue;
+            };
+            if tip + min_headroom_blocks >= exp {
+                continue;
+            }
+            // No fork-branch file on this ledger at any peer. Fork
+            // names are `<lid:64>_<seq:06>_<pk16>.jsonl` (94 chars);
+            // canonical is `<lid>.jsonl` (70 chars).
+            let fork_name_len = ledger_id.len() + 1 + 6 + 1 + 16 + ".jsonl".len();
+            let mut any_disputed = false;
+            for peer in 0..16 {
+                let ledgers_dir = op_data_dir(peer).join("wallet/ledgers");
+                let Ok(entries) = std::fs::read_dir(&ledgers_dir) else { continue };
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with(&ledger_id[..]) && name.len() == fork_name_len {
+                        any_disputed = true;
+                        break;
+                    }
+                }
+                if any_disputed {
+                    break;
+                }
+            }
+            if any_disputed {
+                continue;
+            }
+            return Some((op, ledger_id));
+        }
+    }
+    None
+}
+
 pub fn current_block_height() -> u32 {
     let out = Command::new("docker")
         .args([
