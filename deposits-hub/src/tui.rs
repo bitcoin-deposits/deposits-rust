@@ -40,6 +40,7 @@ use tokio::sync::Mutex;
 enum Tab {
     Dashboard,
     Pending,
+    Setup,
 }
 
 impl Tab {
@@ -47,7 +48,123 @@ impl Tab {
         match self {
             Tab::Dashboard => "Dashboard",
             Tab::Pending => "Pending",
+            Tab::Setup => "Setup",
         }
+    }
+}
+
+/// Bootstrap-wizard stages. Persisted in `wizard.json` so the
+/// operator can pause and resume without losing progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum WizardStage {
+    /// Pick cosigner operators from the discovered Kind 39100 ads.
+    PickPeers,
+    /// Tune the liquidity-drip parameters (rate, decrement, fuzz).
+    TuneDrip,
+    /// Display the Docker invocation; wait for the signer + daemon to
+    /// register with the hub.
+    SpawnSigner,
+    /// Display the next-step CLI for opening a ledger.
+    OpenLedger,
+    /// Display the funding QR for the ledger; wait for it to be funded.
+    FundLedger,
+    /// Display the next-step CLI for adding quorum members + begin.
+    ActivateQuorum,
+    /// Wizard complete — show summary.
+    Done,
+}
+
+impl WizardStage {
+    /// Display label for the wizard's breadcrumb strip.
+    fn label(self) -> &'static str {
+        match self {
+            WizardStage::PickPeers => "1. peers",
+            WizardStage::TuneDrip => "2. drip",
+            WizardStage::SpawnSigner => "3. signer",
+            WizardStage::OpenLedger => "4. ledger",
+            WizardStage::FundLedger => "5. fund",
+            WizardStage::ActivateQuorum => "6. quorum",
+            WizardStage::Done => "✓ done",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            WizardStage::PickPeers => WizardStage::TuneDrip,
+            WizardStage::TuneDrip => WizardStage::SpawnSigner,
+            WizardStage::SpawnSigner => WizardStage::OpenLedger,
+            WizardStage::OpenLedger => WizardStage::FundLedger,
+            WizardStage::FundLedger => WizardStage::ActivateQuorum,
+            WizardStage::ActivateQuorum => WizardStage::Done,
+            WizardStage::Done => WizardStage::Done,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            WizardStage::PickPeers => WizardStage::PickPeers,
+            WizardStage::TuneDrip => WizardStage::PickPeers,
+            WizardStage::SpawnSigner => WizardStage::TuneDrip,
+            WizardStage::OpenLedger => WizardStage::SpawnSigner,
+            WizardStage::FundLedger => WizardStage::OpenLedger,
+            WizardStage::ActivateQuorum => WizardStage::FundLedger,
+            WizardStage::Done => WizardStage::ActivateQuorum,
+        }
+    }
+}
+
+/// Persisted wizard state. Lives in `<data_dir>/wizard.json`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WizardState {
+    pub stage: WizardStage,
+    /// Operator pubkeys (hex) the user multiselected as cosigner
+    /// candidates. Empty until stage 1 commits.
+    #[serde(default)]
+    pub selected_peer_pubkeys: Vec<String>,
+    /// Drip-rate parameters chosen at stage 2.
+    #[serde(default)]
+    pub drip_decrement_sats: u64,
+    #[serde(default)]
+    pub drip_interval_sec: u64,
+    #[serde(default)]
+    pub drip_fuzz_sec: u64,
+    /// Signer name picked at stage 3 (default "vault").
+    #[serde(default)]
+    pub signer_name: String,
+}
+
+impl Default for WizardState {
+    fn default() -> Self {
+        Self {
+            stage: WizardStage::PickPeers,
+            selected_peer_pubkeys: Vec::new(),
+            drip_decrement_sats: 100_000,
+            drip_interval_sec: 600,
+            drip_fuzz_sec: 60,
+            signer_name: "vault".into(),
+        }
+    }
+}
+
+impl WizardState {
+    pub fn path(dir: &std::path::Path) -> PathBuf {
+        dir.join("wizard.json")
+    }
+
+    pub fn load(dir: &std::path::Path) -> Self {
+        let path = Self::path(dir);
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let raw = serde_json::to_string_pretty(self).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+        })?;
+        std::fs::write(Self::path(dir), raw)
     }
 }
 
@@ -80,6 +197,21 @@ pub struct App {
     /// blocks the rest of the UI — operator should not proceed without
     /// a backup).
     mnemonic_overlay: Option<Result<String, String>>,
+    /// Persisted bootstrap-wizard state — survives restarts so the
+    /// operator can pause and resume.
+    wizard: WizardState,
+    /// Discovered peers from the most recent `peers::discover_peers`
+    /// fetch. `None` until the operator first opens the Setup tab.
+    /// Refreshed via the [r]efresh keybinding inside the wizard.
+    discovered_peers: Option<Vec<crate::peers::PeerInfo>>,
+    /// Whether a discovery fetch is currently in flight. Renders a
+    /// "discovering…" placeholder until the result lands.
+    discovering: bool,
+    /// Cursor position in the peer multiselect list (PickPeers stage).
+    peer_cursor: usize,
+    /// Network the wizard targets (passed to discovery). For now
+    /// hardcoded to the hub's launch-time argument; future: TUI toggle.
+    wizard_network: String,
 }
 
 impl App {
@@ -106,6 +238,7 @@ impl App {
                 Some(HubState::master_seed_mnemonic(&data_dir).map_err(|e| e.to_string()))
             }
         };
+        let wizard = WizardState::load(&data_dir);
         Self {
             data_dir,
             state,
@@ -118,6 +251,11 @@ impl App {
             flash: None,
             flash_ttl: 0,
             mnemonic_overlay,
+            wizard,
+            discovered_peers: None,
+            discovering: false,
+            peer_cursor: 0,
+            wizard_network: "regtest".into(),
         }
     }
 
@@ -261,11 +399,13 @@ impl App {
             (KeyCode::Tab, _) | (KeyCode::Char('\t'), _) => {
                 self.tab = match self.tab {
                     Tab::Dashboard => Tab::Pending,
-                    Tab::Pending => Tab::Dashboard,
+                    Tab::Pending => Tab::Setup,
+                    Tab::Setup => Tab::Dashboard,
                 };
             }
             (KeyCode::Char('1'), _) => self.tab = Tab::Dashboard,
             (KeyCode::Char('2'), _) => self.tab = Tab::Pending,
+            (KeyCode::Char('3'), _) => self.tab = Tab::Setup,
             (KeyCode::Char('a'), _) if self.tab == Tab::Dashboard => {
                 // Enter address-view mode if there's at least one node.
                 let n = self.state.lock().await.nodes.len();
@@ -285,6 +425,56 @@ impl App {
                 if let Err(e) = self.approve_selected().await {
                     self.flash(format!("approve: {}", e));
                 }
+            }
+            // ── Setup wizard keys ──
+            (KeyCode::Char('r'), _) if self.tab == Tab::Setup => {
+                self.refresh_discovered_peers().await;
+            }
+            (KeyCode::Char('n'), _) if self.tab == Tab::Setup => {
+                self.wizard.stage = self.wizard.stage.next();
+                let _ = self.wizard.save(&self.data_dir);
+                return false;
+            }
+            (KeyCode::Char('p'), _) if self.tab == Tab::Setup => {
+                self.wizard.stage = self.wizard.stage.prev();
+                let _ = self.wizard.save(&self.data_dir);
+                return false;
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('j'), _)
+                if self.tab == Tab::Setup
+                    && self.wizard.stage == WizardStage::PickPeers =>
+            {
+                let n = self.discovered_peers.as_ref().map(|p| p.len()).unwrap_or(0);
+                if n > 0 {
+                    self.peer_cursor = (self.peer_cursor + 1).min(n - 1);
+                }
+                return false;
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), _)
+                if self.tab == Tab::Setup
+                    && self.wizard.stage == WizardStage::PickPeers =>
+            {
+                self.peer_cursor = self.peer_cursor.saturating_sub(1);
+                return false;
+            }
+            (KeyCode::Char(' '), _)
+                if self.tab == Tab::Setup
+                    && self.wizard.stage == WizardStage::PickPeers =>
+            {
+                if let Some(peers) = self.discovered_peers.as_ref() {
+                    if let Some(peer) = peers.get(self.peer_cursor) {
+                        let pk = peer.operator_pubkey.clone();
+                        if let Some(pos) =
+                            self.wizard.selected_peer_pubkeys.iter().position(|p| *p == pk)
+                        {
+                            self.wizard.selected_peer_pubkeys.remove(pos);
+                        } else {
+                            self.wizard.selected_peer_pubkeys.push(pk);
+                        }
+                        let _ = self.wizard.save(&self.data_dir);
+                    }
+                }
+                return false;
             }
             (KeyCode::Char('x'), _) if self.tab == Tab::Pending => {
                 if let Err(e) = self.reject_selected().await {
@@ -443,6 +633,24 @@ impl App {
         self.flash_ttl = 6;
     }
 
+    /// Re-run peer discovery against the configured network. Synchronous
+    /// from the key-handler caller's perspective — we await the fetch.
+    /// 10s timeout inside `discover_peers` keeps the worst case bounded.
+    async fn refresh_discovered_peers(&mut self) {
+        self.discovering = true;
+        match crate::peers::discover_peers(&self.transport, &self.wizard_network).await {
+            Ok(peers) => {
+                self.discovered_peers = Some(peers);
+                self.flash("refreshed peer list".into());
+            }
+            Err(e) => {
+                self.flash(format!("discover failed: {}", e));
+            }
+        }
+        self.discovering = false;
+        self.peer_cursor = 0;
+    }
+
     fn render(&mut self, area: Rect, f: &mut ratatui::Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -454,11 +662,15 @@ impl App {
             .split(area);
 
         // Header: tab strip
-        let titles: Vec<Line> = [Tab::Dashboard, Tab::Pending]
+        let titles: Vec<Line> = [Tab::Dashboard, Tab::Pending, Tab::Setup]
             .iter()
             .map(|t| Line::from(t.title()))
             .collect();
-        let selected = if self.tab == Tab::Dashboard { 0 } else { 1 };
+        let selected = match self.tab {
+            Tab::Dashboard => 0,
+            Tab::Pending => 1,
+            Tab::Setup => 2,
+        };
         let tabs = Tabs::new(titles)
             .block(Block::default().borders(Borders::ALL).title(" deposits-hub "))
             .select(selected)
@@ -477,6 +689,7 @@ impl App {
             Some(st) => match self.tab {
                 Tab::Dashboard => self.render_dashboard(st, chunks[1], f),
                 Tab::Pending => self.render_pending(st, chunks[1], f),
+                Tab::Setup => self.render_setup(st, chunks[1], f),
             },
             None => {
                 let p = Paragraph::new("...");
@@ -506,8 +719,12 @@ impl App {
             "[j/k] cycle  [Esc/a/q] close"
         } else {
             match self.tab {
-                Tab::Dashboard => "[a] address  [1]ashboard  [2]ending  [Tab] switch  [q] quit",
+                Tab::Dashboard => "[a] address  [1]ashboard  [2]ending  [3]etup  [Tab] switch  [q] quit",
                 Tab::Pending => "[a] approve  [x] reject  [j/k] move  [Tab] switch  [q] quit",
+                Tab::Setup => match self.wizard.stage {
+                    WizardStage::PickPeers => "[j/k] move  [space] toggle  [r] refresh  [n] next  [Tab] switch  [q] quit",
+                    _ => "[n] next  [p] prev  [Tab] switch  [q] quit",
+                },
             }
         };
         let body = match &self.flash {
@@ -685,6 +902,334 @@ impl App {
 
         let p = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
         f.render_widget(p, block_inner);
+    }
+
+    /// Setup wizard tab. Renders a breadcrumb strip across the top,
+    /// then delegates to a per-stage view in the body.
+    fn render_setup(&self, _st: &HubState, area: Rect, f: &mut ratatui::Frame) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(area);
+
+        // Breadcrumb strip
+        let stages = [
+            WizardStage::PickPeers,
+            WizardStage::TuneDrip,
+            WizardStage::SpawnSigner,
+            WizardStage::OpenLedger,
+            WizardStage::FundLedger,
+            WizardStage::ActivateQuorum,
+            WizardStage::Done,
+        ];
+        let breadcrumb: Vec<Span> = stages
+            .iter()
+            .flat_map(|s| {
+                let label = s.label();
+                let style = if *s == self.wizard.stage {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                vec![
+                    Span::styled(label.to_string(), style),
+                    Span::raw("  "),
+                ]
+            })
+            .collect();
+        let crumbs = Paragraph::new(Line::from(breadcrumb))
+            .block(Block::default().borders(Borders::ALL).title(" bootstrap "));
+        f.render_widget(crumbs, chunks[0]);
+
+        // Body — per-stage view
+        match self.wizard.stage {
+            WizardStage::PickPeers => self.render_stage_pick_peers(chunks[1], f),
+            WizardStage::TuneDrip => self.render_stage_tune_drip(chunks[1], f),
+            WizardStage::SpawnSigner => self.render_stage_spawn_signer(chunks[1], f),
+            WizardStage::OpenLedger => self.render_stage_open_ledger(chunks[1], f),
+            WizardStage::FundLedger => self.render_stage_fund_ledger(chunks[1], f),
+            WizardStage::ActivateQuorum => self.render_stage_activate_quorum(chunks[1], f),
+            WizardStage::Done => self.render_stage_done(chunks[1], f),
+        }
+    }
+
+    fn render_stage_pick_peers(&self, area: Rect, f: &mut ratatui::Frame) {
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!(
+                "select cosigner peers from the {} relay",
+                self.wizard_network
+            ),
+            Style::default().fg(Color::White),
+        )));
+        lines.push(Line::from(""));
+        match (&self.discovered_peers, self.discovering) {
+            (_, true) => {
+                lines.push(Line::from(Span::styled(
+                    "discovering…",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            (None, false) => {
+                lines.push(Line::from(Span::styled(
+                    "press [r] to fetch the peer directory",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            (Some(peers), false) if peers.is_empty() => {
+                lines.push(Line::from(Span::styled(
+                    "no peers found on this network — check relay connectivity",
+                    Style::default().fg(Color::Red),
+                )));
+            }
+            (Some(peers), false) => {
+                for (i, p) in peers.iter().enumerate() {
+                    let selected =
+                        self.wizard.selected_peer_pubkeys.contains(&p.operator_pubkey);
+                    let marker = if selected { "[x]" } else { "[ ]" };
+                    let cursor = if i == self.peer_cursor { ">" } else { " " };
+                    let name = p
+                        .operator_name
+                        .clone()
+                        .unwrap_or_else(|| format!("op-{}…", &p.operator_pubkey[..8]));
+                    let short_name = if name.len() > 24 {
+                        format!("{}…", &name[..23])
+                    } else {
+                        name.clone()
+                    };
+                    let row = format!(
+                        "{} {} {:<24}  {} ledgers   fee {:.2}%   {}…",
+                        cursor,
+                        marker,
+                        short_name,
+                        p.ledger_count,
+                        p.annual_fee_bps.unwrap_or(0) as f64 / 100.0,
+                        &p.operator_pubkey[..16.min(p.operator_pubkey.len())],
+                    );
+                    let style = if selected {
+                        Style::default().fg(Color::Green)
+                    } else if i == self.peer_cursor {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    lines.push(Line::from(Span::styled(row, style)));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{} selected — when ready, [n] continues to drip tuning",
+                        self.wizard.selected_peer_pubkeys.len()
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+        let p = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" peers "));
+        f.render_widget(p, area);
+    }
+
+    fn render_stage_tune_drip(&self, area: Rect, f: &mut ratatui::Frame) {
+        let lines = vec![
+            Line::from(Span::styled(
+                "liquidity drip — how fast does your reserve un-lock?",
+                Style::default().fg(Color::White),
+            )),
+            Line::from(""),
+            Line::from(format!(
+                "  decrement_sats:    {}",
+                self.wizard.drip_decrement_sats
+            )),
+            Line::from(format!(
+                "  interval_sec:      {}",
+                self.wizard.drip_interval_sec
+            )),
+            Line::from(format!(
+                "  interval_fuzz_sec: ±{}",
+                self.wizard.drip_fuzz_sec
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "(in-tab edit not implemented — set via `deposits-node liquidity drip-create` after bootstrap)",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "[n] continue   [p] back",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        let p = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" drip "));
+        f.render_widget(p, area);
+    }
+
+    fn render_stage_spawn_signer(&self, area: Rect, f: &mut ratatui::Frame) {
+        let lines = vec![
+            Line::from(Span::styled(
+                "spawn the signer subprocess",
+                Style::default().fg(Color::White),
+            )),
+            Line::from(""),
+            Line::from("Run this on the host that should hold the signer keys:"),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!(
+                    "  deposits-hub spawn-line --name {} --relay <hub-relay-url> --docker",
+                    self.wizard.signer_name
+                ),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "(or omit --docker for a bash launch line)",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(
+                "When the signer registers with the hub, accept it on the Pending tab.",
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "[n] continue once accepted   [p] back",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        let p = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" signer "));
+        f.render_widget(p, area);
+    }
+
+    fn render_stage_open_ledger(&self, area: Rect, f: &mut ratatui::Frame) {
+        let lines = vec![
+            Line::from(Span::styled(
+                "open the operator's first ledger",
+                Style::default().fg(Color::White),
+            )),
+            Line::from(""),
+            Line::from("On the daemon's host:"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  deposits-node ledger open",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(
+                "The daemon's NodeStats push will reflect the new ledger on the dashboard.",
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "[n] continue when the ledger appears   [p] back",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        let p = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" ledger "));
+        f.render_widget(p, area);
+    }
+
+    fn render_stage_fund_ledger(&self, area: Rect, f: &mut ratatui::Frame) {
+        let lines = vec![
+            Line::from(Span::styled(
+                "fund the ledger",
+                Style::default().fg(Color::White),
+            )),
+            Line::from(""),
+            Line::from(
+                "Switch to the Dashboard tab and press [a] to display the funding address QR for your new ledger.",
+            ),
+            Line::from(""),
+            Line::from("Pay the QR with any Bitcoin wallet."),
+            Line::from(""),
+            Line::from(Span::styled(
+                "[n] continue when paid   [p] back",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        let p = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" fund "));
+        f.render_widget(p, area);
+    }
+
+    fn render_stage_activate_quorum(&self, area: Rect, f: &mut ratatui::Frame) {
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "activate the quorum",
+                Style::default().fg(Color::White),
+            )),
+            Line::from(""),
+            Line::from(format!(
+                "{} peers selected. On the daemon's host, run:",
+                self.wizard.selected_peer_pubkeys.len()
+            )),
+            Line::from(""),
+        ];
+        for pk in &self.wizard.selected_peer_pubkeys {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  deposits-node quorum add <ledger> {} <their_ledger>",
+                    &pk[..16.min(pk.len())]
+                ),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  deposits-node quorum begin <ledger> --amount-sats <N> \\",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "      --collateral-ratio 0.6 --protocol-version cltv-offset-v2",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "[n] mark done   [p] back",
+            Style::default().fg(Color::DarkGray),
+        )));
+        let p = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" quorum "));
+        f.render_widget(p, area);
+    }
+
+    fn render_stage_done(&self, area: Rect, f: &mut ratatui::Frame) {
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "✓ bootstrap complete",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(
+                "Your hub is paired with a signer, your daemon owns at least one ledger,",
+            ),
+            Line::from("and your quorum is activating on-chain."),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Switch to the Dashboard tab to watch the lifecycle.",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Set up a liquidity-drip plan with:",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "  deposits-node liquidity drip-create <alias> <ledger> \\\n      --initial-sats <N> --decrement-sats {} --interval-sec {} --interval-fuzz-sec {}",
+                    self.wizard.drip_decrement_sats,
+                    self.wizard.drip_interval_sec,
+                    self.wizard.drip_fuzz_sec,
+                ),
+                Style::default().fg(Color::Yellow),
+            )),
+        ];
+        let p = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" done "));
+        f.render_widget(p, area);
     }
 
     fn render_dashboard(&self, st: &HubState, area: Rect, f: &mut ratatui::Frame) {
