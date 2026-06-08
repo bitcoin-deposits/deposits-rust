@@ -83,6 +83,15 @@ impl HubTransport {
         self.keys.public_key()
     }
 
+    /// The underlying nostr-sdk `Client`. Exposed so callers in the
+    /// hub crate can run ad-hoc queries (e.g., peer discovery via
+    /// Kind 39100 advertisements) without needing a parallel client
+    /// connection. Read-only by intent — mutation should still flow
+    /// through the typed methods on this transport.
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
     /// Subscribe to inbound gift wraps for the hub pubkey. The returned
     /// receiver yields decoded `HubMessage`s as they arrive. The
     /// background pump runs until the transport is dropped.

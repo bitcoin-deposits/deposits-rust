@@ -27,6 +27,12 @@ qrcode = "0.14"
 # signer is derived. Matches the version pinned in deposits-node.
 bip39 = "2"
 
+# Direct dep on nostr-sdk (also a transitive dep through hub-proto)
+# so the peers module can build typed Filter/Kind/etc directly without
+# round-tripping through hub-proto's wire types. Version pinned to
+# match hub-proto's lock.
+nostr-sdk = { version = "0.37", default-features = false }
+
 # Async runtime + process supervision
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "signal", "io-util", "sync", "time", "fs"] }
 
