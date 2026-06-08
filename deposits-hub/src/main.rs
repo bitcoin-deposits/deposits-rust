@@ -351,7 +351,12 @@ async fn run_async(
     if headless {
         run_headless(data_dir, state, transport, inbox, auto_approve).await
     } else {
-        let app = deposits_hub::tui::App::new(data_dir, state, transport);
+        let app = deposits_hub::tui::App::new_with_relays(
+            data_dir,
+            state,
+            transport,
+            relays.clone(),
+        );
         app.run(inbox).await
     }
 }

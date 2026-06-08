@@ -212,6 +212,14 @@ pub struct App {
     /// Network the wizard targets (passed to discovery). For now
     /// hardcoded to the hub's launch-time argument; future: TUI toggle.
     wizard_network: String,
+    /// Live spawned-signer handles. Each `[s]` press on the wizard's
+    /// signer stage appends one. Dropped when the App drops
+    /// (kill_on_drop is set on the underlying Command), so closing the
+    /// TUI cleans up child processes automatically.
+    spawned_signers: Vec<crate::spawn::SpawnHandle>,
+    /// Relays the hub was launched with — passed to the Spawner so the
+    /// spawned signer knows where to find the hub.
+    hub_relays: Vec<String>,
 }
 
 impl App {
@@ -219,6 +227,18 @@ impl App {
         data_dir: PathBuf,
         state: Arc<Mutex<HubState>>,
         transport: HubTransport,
+    ) -> Self {
+        Self::new_with_relays(data_dir, state, transport, Vec::new())
+    }
+
+    /// Same as [`new`], plus the relay URLs the hub was launched with.
+    /// The wizard's signer-spawn flow needs these so the spawned signer
+    /// knows where to talk to the hub.
+    pub fn new_with_relays(
+        data_dir: PathBuf,
+        state: Arc<Mutex<HubState>>,
+        transport: HubTransport,
+        hub_relays: Vec<String>,
     ) -> Self {
         let mut cursor = ListState::default();
         cursor.select(Some(0));
@@ -256,6 +276,8 @@ impl App {
             discovering: false,
             peer_cursor: 0,
             wizard_network: "regtest".into(),
+            spawned_signers: Vec::new(),
+            hub_relays,
         }
     }
 
@@ -427,6 +449,13 @@ impl App {
                 }
             }
             // ── Setup wizard keys ──
+            (KeyCode::Char('s'), _)
+                if self.tab == Tab::Setup
+                    && self.wizard.stage == WizardStage::SpawnSigner =>
+            {
+                self.spawn_signer_in_process().await;
+                return false;
+            }
             (KeyCode::Char('r'), _) if self.tab == Tab::Setup => {
                 self.refresh_discovered_peers().await;
             }
@@ -631,6 +660,88 @@ impl App {
         self.flash = Some(s);
         // 6 ticks × 500ms = 3 seconds visible.
         self.flash_ttl = 6;
+    }
+
+    /// Auto-spawn the wizard's signer in-process via the existing
+    /// `Spawner`. Same flow `deposits-hub spawn` uses from the CLI,
+    /// just reachable from the wizard's [s] keybinding so the operator
+    /// doesn't need a second terminal.
+    ///
+    /// The hub seed derives a stable per-name signer index, so re-
+    /// spawning the same name re-uses its identity (idempotent).
+    /// The child is held in `self.spawned_signers` with `kill_on_drop`,
+    /// so closing the TUI cleans up the process.
+    async fn spawn_signer_in_process(&mut self) {
+        let name = self.wizard.signer_name.clone();
+        if self
+            .spawned_signers
+            .iter()
+            .any(|h| h.name == name)
+        {
+            self.flash(format!("signer '{}' already spawned", name));
+            return;
+        }
+        if self.hub_relays.is_empty() {
+            self.flash(
+                "can't spawn — hub launched without --relay; restart with one".into(),
+            );
+            return;
+        }
+        // Look up the hub pubkey for the Spawner config.
+        let hub_pubkey_hex = {
+            let st = self.state.lock().await;
+            st.hub_pubkey.clone()
+        };
+        let spawner = crate::spawn::Spawner::new(hub_pubkey_hex, self.hub_relays.clone());
+        // Stable per-name seed derivation so re-spawn keeps identity.
+        // `signer_index_for` persists the new index allocation itself.
+        // Hold the lock just long enough to allocate the index, then
+        // drop it before any error-path `self.flash(...)` (which would
+        // re-borrow self).
+        let idx_result = {
+            let mut st = self.state.lock().await;
+            st.signer_index_for(&name, &self.data_dir)
+        };
+        let idx = match idx_result {
+            Ok(i) => i,
+            Err(e) => {
+                self.flash(format!("allocate signer index: {}", e));
+                return;
+            }
+        };
+        let master = match crate::state::HubState::load_or_init_master_seed(&self.data_dir) {
+            Ok(m) => m,
+            Err(e) => {
+                self.flash(format!("load master seed: {}", e));
+                return;
+            }
+        };
+        let seed_opt = match crate::state::derive_signer_seed(&master, idx) {
+            Ok(seed) => Some(seed),
+            Err(e) => {
+                self.flash(format!("derive seed: {}", e));
+                return;
+            }
+        };
+        if let Err(e) = spawner
+            .ensure_initialized_with_seed(&self.data_dir, &name, seed_opt)
+            .await
+        {
+            self.flash(format!("init signer workspace: {}", e));
+            return;
+        }
+        match spawner.spawn(&self.data_dir, &name).await {
+            Ok(handle) => {
+                let pk = handle.transport_pubkey_hex.clone();
+                self.spawned_signers.push(handle);
+                self.flash(format!(
+                    "spawned signer '{}' (transport pk {}…)",
+                    name,
+                    &pk[..16.min(pk.len())]
+                ));
+            }
+            Err(e) => self.flash(format!("spawn failed: {}", e)),
+        }
     }
 
     /// Re-run peer discovery against the configured network. Synchronous
@@ -1068,36 +1179,75 @@ impl App {
     }
 
     fn render_stage_spawn_signer(&self, area: Rect, f: &mut ratatui::Frame) {
-        let lines = vec![
+        let mut lines = vec![
             Line::from(Span::styled(
                 "spawn the signer subprocess",
                 Style::default().fg(Color::White),
             )),
             Line::from(""),
-            Line::from("Run this on the host that should hold the signer keys:"),
-            Line::from(""),
-            Line::from(Span::styled(
-                format!(
-                    "  deposits-hub spawn-line --name {} --relay <hub-relay-url> --docker",
-                    self.wizard.signer_name
-                ),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "(or omit --docker for a bash launch line)",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(""),
-            Line::from(
-                "When the signer registers with the hub, accept it on the Pending tab.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "[n] continue once accepted   [p] back",
-                Style::default().fg(Color::DarkGray),
-            )),
         ];
+
+        // Option A: in-process spawn (local).
+        lines.push(Line::from(Span::styled(
+            format!(
+                "[s] spawn '{}' locally — hub forks the signer as a child process",
+                self.wizard.signer_name
+            ),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        )));
+        if let Some(h) = self
+            .spawned_signers
+            .iter()
+            .find(|h| h.name == self.wizard.signer_name)
+        {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "    ✓ running — transport pk {}…  logs at {}",
+                    &h.transport_pubkey_hex[..16.min(h.transport_pubkey_hex.len())],
+                    h.workspace.root.display()
+                ),
+                Style::default().fg(Color::Green),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "    (not yet spawned)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.push(Line::from(""));
+
+        // Option B: copy docker invocation (remote host).
+        lines.push(Line::from(Span::styled(
+            "OR run the signer on a different host:",
+            Style::default().fg(Color::White),
+        )));
+        let relay_for_display = self
+            .hub_relays
+            .first()
+            .map(String::as_str)
+            .unwrap_or("<hub-relay-url>");
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  deposits-hub spawn-line --name {} --relay {} --docker",
+                self.wizard.signer_name, relay_for_display
+            ),
+            Style::default().fg(Color::Yellow),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  (run on the signer host; emits a `docker run` invocation)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+
+        lines.push(Line::from(
+            "When the signer registers, it appears under the Dashboard tab (and Pending if not auto-approved).",
+        ));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "[s] spawn locally   [n] continue once registered   [p] back",
+            Style::default().fg(Color::DarkGray),
+        )));
+
         let p = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(" signer "));
         f.render_widget(p, area);
