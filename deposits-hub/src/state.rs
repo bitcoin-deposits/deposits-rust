@@ -62,6 +62,14 @@ pub struct HubState {
     /// `signer_indexes`.
     #[serde(default)]
     pub next_signer_index: u32,
+
+    /// True once the operator has confirmed they wrote down the
+    /// BIP-39 mnemonic of `hub-master-seed`. The first-launch view
+    /// in the TUI gates everything else on this flag — losing the
+    /// mnemonic means losing every spawned signer's keys, so we
+    /// refuse to proceed until the operator explicitly acknowledges.
+    #[serde(default)]
+    pub mnemonic_acknowledged: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +137,8 @@ pub enum StateError {
     Hex(String),
     #[error("invalid nostr secret length: expected 32 bytes, got {0}")]
     BadKeyLen(usize),
+    #[error("bip39 mnemonic conversion: {0}")]
+    Bip39(String),
 }
 
 impl HubState {
@@ -278,6 +288,28 @@ impl HubState {
             path.display()
         );
         Ok(seed)
+    }
+
+    /// Convert the 32-byte master seed into a 24-word BIP-39 mnemonic.
+    /// Used by the first-launch TUI view so the operator can write
+    /// down a recoverable backup before any signer is derived.
+    ///
+    /// Returns the canonical space-separated phrase. Errors only on
+    /// truly broken entropy (the bip39 crate's check) — should be
+    /// infallible for any 32 bytes that came from a CSPRNG.
+    pub fn master_seed_mnemonic(dir: &Path) -> Result<String, StateError> {
+        let seed = Self::load_or_init_master_seed(dir)?;
+        let mnemonic = bip39::Mnemonic::from_entropy(&seed)
+            .map_err(|e| StateError::Bip39(e.to_string()))?;
+        Ok(mnemonic.to_string())
+    }
+
+    /// Mark the operator as having acknowledged the BIP-39 mnemonic.
+    /// One-way flag — once set, the first-launch overlay never shows
+    /// again (the seed is what it is; re-confirming after the fact
+    /// adds no value).
+    pub fn acknowledge_mnemonic(&mut self) {
+        self.mnemonic_acknowledged = true;
     }
 
     /// Look up or assign the BIP-32 derivation index for a signer
@@ -460,5 +492,29 @@ mod tests {
         let s2 = HubState::load_or_init(tmp.path()).unwrap();
         assert_eq!(s2.signers.len(), 1);
         assert_eq!(s2.signers.values().next().unwrap().label, "test");
+    }
+
+    #[test]
+    fn mnemonic_is_24_words_and_stable() {
+        let tmp = TempDir::new().unwrap();
+        let _ = HubState::load_or_init(tmp.path()).unwrap();
+        let phrase = HubState::master_seed_mnemonic(tmp.path()).unwrap();
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        // 32 bytes of entropy → 24-word BIP-39 phrase.
+        assert_eq!(words.len(), 24, "expected 24 words, got {}: {}", words.len(), phrase);
+        // Repeated calls return the same phrase (seed file is stable).
+        let phrase2 = HubState::master_seed_mnemonic(tmp.path()).unwrap();
+        assert_eq!(phrase, phrase2);
+    }
+
+    #[test]
+    fn acknowledge_mnemonic_round_trips() {
+        let tmp = TempDir::new().unwrap();
+        let mut s = HubState::load_or_init(tmp.path()).unwrap();
+        assert!(!s.mnemonic_acknowledged);
+        s.acknowledge_mnemonic();
+        s.save(tmp.path()).unwrap();
+        let s2 = HubState::load_or_init(tmp.path()).unwrap();
+        assert!(s2.mnemonic_acknowledged);
     }
 }

@@ -22,6 +22,11 @@ futures = "0.3"
 # QR codes for the funding-address view
 qrcode = "0.14"
 
+# BIP-39 mnemonic encoding of the hub master seed — first-launch UI
+# shows the 24-word phrase so the operator can back it up before any
+# signer is derived. Matches the version pinned in deposits-node.
+bip39 = "2"
+
 # Async runtime + process supervision
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "signal", "io-util", "sync", "time", "fs"] }
 

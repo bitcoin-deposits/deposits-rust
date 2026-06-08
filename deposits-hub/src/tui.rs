@@ -72,6 +72,14 @@ pub struct App {
     /// messages). Cleared after a few render ticks.
     flash: Option<String>,
     flash_ttl: u8,
+    /// First-launch view: shows the BIP-39 mnemonic of `hub-master-seed`
+    /// and blocks all other input until the operator presses Enter to
+    /// acknowledge. Sourced from the on-disk seed at startup; cleared
+    /// once `state.mnemonic_acknowledged == true`. Errors during seed
+    /// load surface as an inline message inside the overlay (still
+    /// blocks the rest of the UI — operator should not proceed without
+    /// a backup).
+    mnemonic_overlay: Option<Result<String, String>>,
 }
 
 impl App {
@@ -82,6 +90,22 @@ impl App {
     ) -> Self {
         let mut cursor = ListState::default();
         cursor.select(Some(0));
+        // Decide up front whether to show the mnemonic overlay. If the
+        // operator has already acknowledged, skip — re-prompting after
+        // the fact buys nothing. Otherwise compute the phrase (or
+        // capture the error to surface in the overlay).
+        let mnemonic_overlay = {
+            let already_ack = state
+                .try_lock()
+                .ok()
+                .map(|s| s.mnemonic_acknowledged)
+                .unwrap_or(false);
+            if already_ack {
+                None
+            } else {
+                Some(HubState::master_seed_mnemonic(&data_dir).map_err(|e| e.to_string()))
+            }
+        };
         Self {
             data_dir,
             state,
@@ -93,6 +117,7 @@ impl App {
             pending_cursor: cursor,
             flash: None,
             flash_ttl: 0,
+            mnemonic_overlay,
         }
     }
 
@@ -181,6 +206,34 @@ impl App {
 
     /// Handle a keypress. Returns `true` if the app should exit.
     async fn handle_key(&mut self, k: KeyEvent) -> bool {
+        // Mnemonic overlay pre-empts everything else. Only Enter
+        // (acknowledge) and q/Ctrl-C (quit) get through — the
+        // operator must explicitly confirm they've backed up the
+        // seed before the rest of the UI is reachable.
+        if self.mnemonic_overlay.is_some() {
+            match (k.code, k.modifiers) {
+                (KeyCode::Enter, _) => {
+                    // Persist the ack before clearing the overlay so a
+                    // crash mid-confirmation doesn't re-prompt forever.
+                    let save_err = {
+                        let mut st = self.state.lock().await;
+                        st.acknowledge_mnemonic();
+                        st.save(&self.data_dir).err()
+                    };
+                    if let Some(e) = save_err {
+                        tracing::warn!("persist mnemonic ack: {}", e);
+                        self.flash(format!("save failed: {}", e));
+                        return false;
+                    }
+                    self.mnemonic_overlay = None;
+                    self.flash("mnemonic acknowledged".to_string());
+                    return false;
+                }
+                (KeyCode::Char('q'), _) => return true,
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => return true,
+                _ => return false,
+            }
+        }
         // Address overlay swallows its own keys when active. q/Esc/a
         // exits; j/k cycles through nodes. Anything else is no-op so
         // operators don't accidentally trigger underlying-tab actions.
@@ -440,8 +493,16 @@ impl App {
             }
         }
 
+        // Mnemonic overlay pre-empts everything else on first launch.
+        // Rendered last so it sits on top of any other UI.
+        if self.mnemonic_overlay.is_some() {
+            self.render_mnemonic_overlay(chunks[1], f);
+        }
+
         // Status line
-        let hint = if self.address_view_idx.is_some() {
+        let hint = if self.mnemonic_overlay.is_some() {
+            "[Enter] I've written these down  [q] quit"
+        } else if self.address_view_idx.is_some() {
             "[j/k] cycle  [Esc/a/q] close"
         } else {
             match self.tab {
@@ -538,6 +599,88 @@ impl App {
                     Style::default().fg(Color::DarkGray),
                 )));
             }
+        }
+
+        let p = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(p, block_inner);
+    }
+
+    /// First-launch view: the BIP-39 mnemonic of `hub-master-seed`,
+    /// laid out 4-per-row, framed in a fixed-color border, with a
+    /// terse "write this down, then press Enter" prompt. Pre-empts
+    /// every other UI element.
+    fn render_mnemonic_overlay(&self, area: Rect, f: &mut ratatui::Frame) {
+        let inner = center_rect(area, 90, 80);
+        f.render_widget(Clear, inner);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" back up your hub seed ")
+            .style(Style::default().fg(Color::Yellow));
+        let block_inner = block.inner(inner);
+        f.render_widget(block, inner);
+
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "These 24 words derive every signer this hub will ever spawn.",
+            Style::default().fg(Color::White),
+        )));
+        lines.push(Line::from(Span::styled(
+            "Lose them and you lose every signer's private key.",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Write the words on paper. Store offline. Do not screenshot.",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+
+        match &self.mnemonic_overlay {
+            Some(Ok(phrase)) => {
+                // Lay out 4 per row, numbered, monospace-friendly.
+                // BIP-39 24-word phrase → 6 rows of 4.
+                let words: Vec<&str> = phrase.split_whitespace().collect();
+                for chunk in words.chunks(4) {
+                    let chunk_start = words
+                        .iter()
+                        .position(|w| std::ptr::eq(*w, chunk[0]))
+                        .unwrap_or(0);
+                    let mut spans: Vec<Span> = Vec::new();
+                    for (offset, w) in chunk.iter().enumerate() {
+                        let idx = chunk_start + offset + 1;
+                        spans.push(Span::styled(
+                            format!("{:>2}. ", idx),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                        spans.push(Span::styled(
+                            format!("{:<10}", w),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        spans.push(Span::raw("  "));
+                    }
+                    lines.push(Line::from(spans));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "After you've written them down, press [Enter] to continue.",
+                    Style::default().fg(Color::Green),
+                )));
+            }
+            Some(Err(e)) => {
+                lines.push(Line::from(Span::styled(
+                    format!("error loading seed: {}", e),
+                    Style::default().fg(Color::Red),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "[q] quit  — investigate the data dir and retry.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            None => {}
         }
 
         let p = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
