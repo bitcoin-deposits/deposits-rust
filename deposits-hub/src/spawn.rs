@@ -268,6 +268,72 @@ impl Spawner {
         }
         parts.join(" ")
     }
+
+    /// Docker variant of [`launch_line`]: emit a `docker run` invocation
+    /// that mounts the workspace into the container and runs the same
+    /// signer args inside.
+    ///
+    /// The workspace dir is mounted at `/workspace` in the container;
+    /// `--data-dir` and `--socket` point to paths underneath. Network
+    /// is `host` so the signer can reach a localhost relay without
+    /// extra port-forwarding ceremony (production deployments using
+    /// public relays can drop `--network host` and rely on the
+    /// container's default bridge network).
+    ///
+    /// The container image defaults to `deposits-signer:dev` —
+    /// matches `deploy/systemd/` conventions for a locally-built
+    /// image. Operators publishing under a different name can pass
+    /// the image as `image_override`.
+    pub fn launch_line_docker(
+        &self,
+        hub_data_dir: &Path,
+        name: &str,
+        image_override: Option<&str>,
+    ) -> String {
+        let ws = Workspace::for_name(hub_data_dir, name);
+        let image = image_override.unwrap_or("deposits-signer:dev");
+        let ws_host = ws
+            .data_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| ws.data_dir.clone());
+        // Compute container-relative paths for --data-dir and --socket
+        // by replacing the workspace prefix with /workspace.
+        let rel = |p: &Path| -> String {
+            match p.strip_prefix(&ws_host) {
+                Ok(suffix) => format!("/workspace/{}", suffix.display()),
+                Err(_) => format!("{}", p.display()),
+            }
+        };
+        let mut parts = vec![
+            "docker".to_string(),
+            "run".to_string(),
+            "--rm".to_string(),
+            "-it".to_string(),
+            "--network".to_string(),
+            "host".to_string(),
+            "--name".to_string(),
+            format!("deposits-signer-{}", name),
+            "-v".to_string(),
+            format!("{}:/workspace", ws_host.display()),
+            image.to_string(),
+            // ── signer args inside the container ──
+            "run".to_string(),
+            "--data-dir".to_string(),
+            rel(&ws.data_dir),
+            "--socket".to_string(),
+            rel(&ws.socket),
+            "--hub-pubkey".to_string(),
+            self.hub_pubkey.clone(),
+            "--hub-label".to_string(),
+            name.to_string(),
+        ];
+        for r in &self.relays {
+            parts.push("--hub-relay".to_string());
+            parts.push(r.clone());
+        }
+        parts.join(" ")
+    }
 }
 
 fn write_random_seed(path: &Path) -> std::io::Result<()> {
@@ -347,5 +413,38 @@ mod tests {
         assert!(ws.root.ends_with("spawned/vault-1"));
         assert!(ws.data_dir.ends_with("spawned/vault-1/data-dir"));
         assert!(ws.socket.ends_with("spawned/vault-1/signer.sock"));
+    }
+
+    #[test]
+    fn launch_line_docker_mounts_workspace_and_rewrites_paths() {
+        let s = Spawner::new("abc123".to_string(), vec!["wss://r1".to_string()])
+            .with_bin(PathBuf::from("/opt/deposits-signer"));
+        let line = s.launch_line_docker(Path::new("/var/lib/hub"), "op-alice", None);
+        // Frame
+        assert!(line.starts_with("docker run --rm -it"));
+        assert!(line.contains("--network host"));
+        assert!(line.contains("--name deposits-signer-op-alice"));
+        // Workspace mount + rewritten paths
+        assert!(line.contains("-v /var/lib/hub/spawned/op-alice:/workspace"));
+        assert!(line.contains("--data-dir /workspace/data-dir"));
+        assert!(line.contains("--socket /workspace/signer.sock"));
+        // Default image
+        assert!(line.contains("deposits-signer:dev"));
+        // Signer args passed through
+        assert!(line.contains("--hub-pubkey abc123"));
+        assert!(line.contains("--hub-relay wss://r1"));
+        assert!(line.contains("--hub-label op-alice"));
+    }
+
+    #[test]
+    fn launch_line_docker_honours_image_override() {
+        let s = Spawner::new("abc123".to_string(), vec!["wss://r1".to_string()]);
+        let line = s.launch_line_docker(
+            Path::new("/var/lib/hub"),
+            "op-alice",
+            Some("ghcr.io/example/deposits-signer:v2"),
+        );
+        assert!(line.contains("ghcr.io/example/deposits-signer:v2"));
+        assert!(!line.contains("deposits-signer:dev"));
     }
 }

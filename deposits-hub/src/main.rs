@@ -122,6 +122,8 @@ struct CommonArgs {
     headless: bool,
     auto_approve: bool,
     steal: bool,
+    docker: bool,
+    docker_image: Option<String>,
 }
 
 fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
@@ -176,6 +178,18 @@ fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
             "--steal" => {
                 out.steal = true;
                 i += 1;
+            }
+            "--docker" => {
+                out.docker = true;
+                i += 1;
+            }
+            "--docker-image" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or("--docker-image requires a value")?
+                    .to_string();
+                out.docker_image = Some(v);
+                i += 2;
             }
             unknown => return Err(format!("unknown option: {}", unknown)),
         }
@@ -694,7 +708,15 @@ fn cmd_spawn_line(args: &[String]) -> Result<(), String> {
     println!("# hub pubkey:            {}", state.hub_pubkey_hex());
     println!("# data dir:              {}", ws.data_dir.display());
     println!();
-    println!("{}", spawner.launch_line(&data_dir, &name));
+    if c.docker {
+        println!("# docker variant — workspace mounted at /workspace in the container.");
+        println!(
+            "{}",
+            spawner.launch_line_docker(&data_dir, &name, c.docker_image.as_deref())
+        );
+    } else {
+        println!("{}", spawner.launch_line(&data_dir, &name));
+    }
     Ok(())
 }
 
