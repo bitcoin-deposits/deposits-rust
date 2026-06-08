@@ -45,6 +45,8 @@ A rule lives in exactly one of these layers (sometimes mirrored across two for f
 | `QuorumBegin.quorum_expiry ≤ min(membership_until)` over members | 4 | (search did not surface a hard check; documented intent) | **Status uncertain** — needs verification. |
 | Cosigners refuse to co-sign past `quorum_expiry` | 3-ish | `ledger.rs:631-648` (`validate_for_cosign`) | Cosigner-side refusal. The operator alone can still publish post-expiry updates, but they won't gather signatures, so layer 2 rejects them via `missing_cosignature`. |
 | `QuorumJoin` membership ratchet (expiry only increases) | 2 | incoming-update validation (`quorum_join_ratchet`) | Hard reject of regressions. |
+| `QuorumJoin` is classified **value-moving** by `cosign_threshold::operation_class` | 3-ish | `deposits-protocol/src/cosign_threshold.rs` | Past a member's own `quorum_expiry`, cosigners on the *member's* ledger refuse to cosign new `QuorumJoin` updates (`post_expiry_cosign_refused`). Operationally this means: when the member's ledger has aged past its rotation window, they can't accept new quorum-add invitations from peers. The member must self-rescue (rotate their own ledger via `quorum repair`) first. Discovered during the `lifecycle_self_rescue` and `consent_request routing` investigations earlier; correct by design — a member with an expired ledger shouldn't make new commitments. |
+| Cosign cascade tier classification per op (`Establishment` vs `ValueMoving` vs `Confiscation`) | 3-ish | `deposits-protocol/src/cosign_threshold.rs::operation_class` + `cosign_requirement` | `Establishment` (e.g. `QuorumBegin`) is cosignable post-expiry under the cltv-offset-v2 ruleset so the operator can self-rescue via `quorum repair`. `ValueMoving` (e.g. `InvoiceLock`, `OnchainLock`, `TransferLock`, `QuorumJoin`) is refused post-expiry. `Confiscation`-tier ops use a separate threshold cascade (DEP-06). |
 
 ---
 
@@ -74,6 +76,45 @@ All witnesses are verified inside `LedgerState::check_conformance` (layer 3). Th
 | `DepositKeyRotate` | `ledger_state.rs:912-935` | Witness satisfies the **old** descriptor (read from `pre_state`), then `next.deposits[id].descriptor` is the new one |
 
 These are layer 3 because the Bitcoin Deposits design uses them as *fraud evidence* — a published bad witness is the canonical case for a `NonConforming` fraud proof. `apply` deliberately does *not* reject; the watcher produces the proof.
+
+### Signature scheme: **ECDSA**, not Schnorr
+
+All witness signatures are verified by `Dep16Authorizer` (`deposits-core/src/dep16/authorizer.rs`) which is wired to `miniscript::calculus::EcdsaVerifier`. The wire format is 64-byte ECDSA compact, low-s-only (high-s rejected to close malleability — `secp.rs:54-61`).
+
+The signing message is the dep-17 operation sighash: `operation_sighash(operation_preimage(op))`. The preimage commits to op_type + args + nonce + expiry + deposit_id, so a signature isn't replayable across deposits, op types, nonces, or expiries.
+
+The wallet's `deposits_core::signing::sign_op` produces these via `secp.sign_ecdsa(...)`. Signer-side, daemon code that needs to mint a witness for an operator-owned deposit calls `signer.ecdsa_sign_sighash(SignContext::deposit(idx, ...), &sighash)`.
+
+> **Bug history:** the admin `buffer-drain` handler (`request_handlers/admin.rs`) and the original drip auto-task both called `signer.bip340_sign(...)` instead — produced Schnorr sigs that `EcdsaVerifier::verify_signature` rejected with "witness does not satisfy deposit descriptor." Fixed in commits `4be74027` (drip) and `8a423b44` (buffer-drain). No test exercised buffer-drain past sig verification, so the bug stayed hidden in production code for some time.
+
+X-only / BIP-340 / tr-key-path support is reserved for future descriptor variants — see the v1-scope note in `dep16/authorizer.rs:18-21`.
+
+---
+
+## Synthetic / operator-only operations (no Lightning oracle)
+
+Cosigners verify that a ledger operation is *internally consistent* (signature checks out, hash chain matches, reserves invariant holds, conformance passes), but they have **no oracle** for whether the corresponding Lightning movement actually happened. This is what makes operator-owned "buffer" deposits and the liquidity-drip auto-task possible: they commit lightning-shaped ops with synthesized values and the protocol accepts them.
+
+| Op | Synthetic field(s) | What cosigners verify | What they can't check |
+|---|---|---|---|
+| `InvoiceCredit` | `invoice_id` (any string), `payment_hash = sha256(invoice_id)` | Reserves invariant after credit | Whether LDK actually settled an invoice with this `payment_hash` |
+| `InvoiceLock` + `InvoiceFulfill` (paired) | `payment_id = sha256(preimage)`, both fields locally-generated | Lock witness over the deposit descriptor (ECDSA, dep-17 sighash); fulfill's `SHA256(preimage) == payment_id` | Whether the lock was triggered by a real BOLT11 payment request, or whether the fulfill represents an actual settled Lightning hop |
+
+**Operator-owned ("buffer") deposits.** Persisted in `<data_dir>/buffer_indices.json`. Each entry: `{ index: u32, ledger_id, deposit_pubkey }`. Index range starts at 1_000_000 to leave 0..1M for customer wallet keys derived from the same seed. Depositor key derives via `signer.pubkey_at(KeyPath::Deposit { index })` → `pk(<pubkey>)` descriptor.
+
+Three admin/internal entry points (all in `node/request_handlers/admin.rs`):
+
+| Method | Result |
+|---|---|
+| `internal_buffer_open(ledger?, index?) → BufferOpenOutcome` | Commits `DepositOpen` with `pk(<derived_pubkey>)`. Appends to `buffer_indices.json`. |
+| `internal_buffer_fill(index, amount_msats) → new_balance` | Commits `InvoiceCredit` with a random `invoice_id` and the corresponding `payment_hash`. No LDK call. |
+| `internal_buffer_drain(index, amount_msats) → new_balance` | Commits `InvoiceLock` + `InvoiceFulfill` paired: random preimage, ECDSA-signed lock witness via `signer.ecdsa_sign_sighash`. No LDK call. |
+
+The matching admin RPC handlers (`process_admin_buffer_open_request` etc.) are thin auth + param-parse wrappers around these. The drip auto-task (`auto_drip_self_liquidity`) calls them too.
+
+**Liquidity drip** (`deposits-node/src/operator_drips.rs` + `auto_tasks.rs::auto_drip_self_liquidity`). Operator-side defense against single-depositor liquidity exhaustion. Persists drip plans in `<data_dir>/operator_drips.json`; each plan references a `buffer_index` (allocated on first tick via `internal_buffer_open`). Periodic auto-task fills the buffer once (`internal_buffer_fill`) and then drains it `decrement_sats` per tick (`internal_buffer_drain`), optionally with `±interval_fuzz_sec` jitter rolled per-tick from `OsRng` so the schedule isn't predictable to a counterparty watching balances.
+
+> **Implication:** an operator who can derive deposit keys can move arbitrary amounts of their *own* reserve capacity around without touching Lightning. This is by design — they're trading against themselves. The protocol's invariant (`total_obligations ≤ reserves`) still holds because the operator's own deposit balance is part of `total_obligations`. They can't use this to credit a *customer*'s deposit without that customer's witness, since `InvoiceCredit` doesn't have a witness gate (any `payment_hash` is accepted) but the customer doesn't see funds they could draw against unless the operator also credits *their* deposit — and that just adds to `total_obligations` against the same reserve pool.
 
 ---
 
@@ -145,6 +186,21 @@ These are deliberately external — the protocol crate is `no_std`-friendly and 
 
 ---
 
+## Cooperative refund gate (recovery refund)
+
+`deposits-node recovery refund <ledger>` is the manual NeverFunded recovery path. It gates aggressively to avoid running on a healthy ledger:
+
+| Refusal reason | Source | When |
+|---|---|---|
+| `"reserves UTXO has unspent funds"` / `"reserves UTXO is funded"` | `node_cli/recovery.rs` (NeverFunded gate) | Canonical block — the reserves UTXO is still on-chain unspent, so by definition we're not in NeverFunded territory. |
+| `"No LedgerOpen at seq 0"` | recovery flow's relay-side replay | Relay-side replay missed genesis. Indicates an incomplete replay rather than a valid refund target. |
+| `"lack replacement_collateral"` | recovery flow's RC-readiness check | No quorum members have declared `replacement_collateral` via `DisputeArmed`; refund can't fund its own miner fees + outputs. Fires when the reserves UTXO has already been spent into ledger ops (normal post-setup state). |
+| `"missing signatures for inputs: …"` | cooperative-refund-sign request timeout | At least one quorum member's daemon didn't respond to the `cooperative_refund_sign` request within the configured `--timeout`. Treated as a soft failure — the gate worked, the refund just couldn't gather majority. |
+
+Any of these refusals are evidence the gate fired correctly. Tests assert the exit is non-zero AND that one of these markers appears in stdout/stderr.
+
+---
+
 ## Replacement-collateral declarations (DEP-03)
 
 | Rule | Layer | Source |
@@ -161,17 +217,51 @@ The fraud-verifier path (`WinnerCollateralDeviation`) is the enforcement mechani
 ```
 deposits-protocol/src/types/ledger_state.rs    layer 1 (apply) + layer 3 (check_conformance)
 deposits-protocol/src/types/conformance.rs     layer 3 violation enum
+deposits-core/src/dep16/authorizer.rs          layer 3 ECDSA witness verifier (Dep16Authorizer)
 deposits-core/src/ledger.rs                    layer 2 (validate_incoming_update,
                                                         validate_for_cosign, checked_apply)
 deposits-core/src/operation_validation.rs      layer 4 pure per-op checks
 deposits-core/src/message_validation.rs        layer 4 message-level (currently dispatches
                                                         per-op to operation_validation)
 deposits-core/src/validation.rs                layer 4 reserves/balance/business-rule helpers
-deposits-node/src/node/request_handlers/**     layer 4 operator-side gating
+deposits-node/src/node/request_handlers/**     layer 4 operator-side gating; admin auth
+deposits-node/src/node/auto_tasks.rs           layer 4 9 periodic auto-tasks
+                                                        (see "Auto-task family" below)
 deposits-node/src/node/ledger_queries.rs       layer 4 rotate_reserves_to_quorum
 deposits-node/src/operator_policy.rs           layer 4 advertisement-vs-proposal matching
+deposits-node/src/operator_drips.rs            layer 4 drip plan registry
 deposits-tools/src/bin/validate-relay.rs       external on-chain coupling
 ```
+
+---
+
+## Admin authentication
+
+| Check | Source | Notes |
+|---|---|---|
+| `check_admin_authorized` accepts the request iff its inner-rumor `pubkey` equals either the operator's xonly pubkey or the configured admin pubkey | `request_handlers/mod.rs:118-143` | Used by every `process_admin_*_request` handler. Non-admin requests are rejected with `"admin request must be gift-wrapped"` or signature-mismatch. |
+| Admin pubkey loaded from `<data_dir>/admin.npub` (bech32 or 64-char hex) at daemon startup | `node/init.rs:358-379` | Optional. Missing file = no admin delegation; only the operator's own key authorizes admin ops. Reload requires daemon restart. |
+| Hub-side admin RPC (`deposits-hub/src/admin_client.rs`) builds the same gift-wrapped Kind 20101 envelope, signed with the hub's nostr secret | `admin_client.rs::send_admin_request` | The hub's pubkey is what the operator drops into `admin.npub`. Wire shape mirrors `deposits-node`'s `send_admin_daemon_request`. |
+
+---
+
+## Auto-task family
+
+`auto_tasks.rs` defines a family of periodic tasks dispatched from `node/main_loop.rs:1203-1282` every 5–60 seconds (5s in `--fast-poll`, 60s otherwise). Each runs under a 10-second `timed_periodic!()` budget; long-running tasks (e.g. `auto_quorum_refresh`) spawn detached background work.
+
+| Task | Pause marker | What it commits |
+|---|---|---|
+| `auto_complete_deposits` | — | Wallet poll → signed deposit-offer completion |
+| `auto_credit_received_payments` | — | LDK invoice settled → `InvoiceCredit` (this is the *only* path that requires LDK) |
+| `auto_complete_outbound_payments` | — | LDK payment result → `InvoiceFulfill` / `InvoiceFail` |
+| `auto_complete_withdrawals` | — | Broadcasts locked withdrawals; commits `OnchainFulfill` |
+| `auto_collect_fees` | — | Per-deposit `FeeCollect` at the configured period |
+| `auto_timeout_transfers` | — | Expired `TransferLock` → `TransferFail` (rate-limited) |
+| `auto_quorum_refresh` | `.pause_auto_quorum_refresh` | Rotates the quorum when expiry looms; spawns per-ledger refresh |
+| `auto_dispute_expired_quorums` | `.pause_auto_dispute_actions` | Fork-branch `DisputeEnter` past expiry + grace |
+| `auto_drip_self_liquidity` | `.pause_auto_drip_self_liquidity` | Opens/funds/drains operator buffer deposits per drip plan |
+
+Pause markers are file-presence-based so operators can disable a task without restarting the daemon. Test/recovery flows lean heavily on these.
 
 ---
 
@@ -186,3 +276,9 @@ These are observations from the audit, not fixes. Listed for follow-up triage; e
 5. **`QuorumBegin.quorum_expiry` vs members' `membership_until`** — no hard layer-1 check found.
 6. **`QuorumAddMember.member_response` integrity is layer 4.** A hand-rolled `QuorumAddMember` with a bogus blob (or no blob) bypasses the binding; the resulting `QuorumMember.supported_rulesets` is whatever the operator wrote. Layer 1 only enforces the *consequence* (the ruleset gate at `QuorumBegin`).
 7. **`message_validation.rs` carries a TODO for "demo-specific fake invoice check"** — documented misplacement.
+8. **Cosigners can't distinguish synthetic from real Lightning settlements.** `InvoiceCredit` accepts any `payment_hash`; `InvoiceLock`+`Fulfill` accepts any `(preimage, payment_id)` pair where `SHA256(preimage) == payment_id`. This is what enables operator-owned buffer deposits and the liquidity-drip auto-task. By design — see the synthetic-ops section above — but worth restating here so it doesn't surprise an auditor.
+
+## Closed gaps (resolved during recent work)
+
+- **Drip and buffer-deposit infra were parallel.** Two registries (`buffer_indices.json` at 1M+, `operator_drips.json` at 2M+), two impls of open/credit/drain — `auto_drip_self_liquidity` duplicated `process_admin_buffer_*_request` bodies. Refactored (commit `d1214f92`) so drip plans reference a `buffer_index` and call shared `internal_buffer_open/fill/drain/balance_msats` helpers. One registry, one code path.
+- **`admin/buffer-drain` produced sigs the authorizer rejected.** Handler called `signer.bip340_sign(...)` (Schnorr) but `Dep16Authorizer` uses ECDSA. No test exercised the path past sig verification so the bug stayed hidden. Fixed in commit `8a423b44`; the same bug had snuck into the drip's drain step (fixed in `4be74027`).
