@@ -456,6 +456,13 @@ impl App {
                 self.spawn_signer_in_process().await;
                 return false;
             }
+            (KeyCode::Char('o'), _)
+                if self.tab == Tab::Setup
+                    && self.wizard.stage == WizardStage::OpenLedger =>
+            {
+                self.admin_ledger_open().await;
+                return false;
+            }
             (KeyCode::Char('r'), _) if self.tab == Tab::Setup => {
                 self.refresh_discovered_peers().await;
             }
@@ -741,6 +748,52 @@ impl App {
                 ));
             }
             Err(e) => self.flash(format!("spawn failed: {}", e)),
+        }
+    }
+
+    /// Call the daemon's `ledger_open` admin RPC. Proof-of-concept
+    /// for hub → daemon admin actions over Nostr; the same pattern
+    /// will drive every other wizard stage once it's plumbed.
+    async fn admin_ledger_open(&mut self) {
+        let Some((daemon_pk, _label)) = self.first_registered_daemon() else {
+            self.flash("no daemon registered yet".into());
+            return;
+        };
+        if self.hub_relays.is_empty() {
+            self.flash("hub has no relays — restart with --relay".into());
+            return;
+        }
+        // Hub secret lives next to hub.json at <data_dir>/hub-nostr-secret.
+        let secret_path = self.data_dir.join("hub-nostr-secret");
+        let secret_hex = match std::fs::read_to_string(&secret_path) {
+            Ok(s) => s.trim().to_string(),
+            Err(e) => {
+                self.flash(format!("read hub secret: {}", e));
+                return;
+            }
+        };
+        self.flash("calling ledger_open on daemon…".into());
+        let result = crate::admin_client::send_admin_request(
+            &secret_hex,
+            &self.hub_relays,
+            &daemon_pk,
+            &daemon_pk, // non-ledger-scoped — recipient pk is the #l sentinel
+            "ledger_open",
+            serde_json::json!({}),
+            crate::admin_client::DEFAULT_TIMEOUT_MS,
+        )
+        .await;
+        match result {
+            Ok(v) => {
+                let lid = v
+                    .get("ledger_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("<no ledger_id in result>");
+                self.flash(format!("✓ ledger opened: {}…", &lid[..16.min(lid.len())]));
+            }
+            Err(e) => {
+                self.flash(format!("ledger_open failed: {}", e));
+            }
         }
     }
 
@@ -1243,6 +1296,38 @@ impl App {
             "When the signer registers, it appears under the Dashboard tab (and Pending if not auto-approved).",
         ));
         lines.push(Line::from(""));
+
+        // ── admin.npub setup — the operator must authorize the hub
+        //    on the daemon side before any wizard stage can drive
+        //    admin RPCs. We display the hub pubkey here so the
+        //    operator can copy it into <daemon-data-dir>/admin.npub.
+        lines.push(Line::from(Span::styled(
+            "── one-time daemon trust setup ──",
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        let hub_pk = self
+            .state
+            .try_lock()
+            .ok()
+            .map(|s| s.hub_pubkey.clone())
+            .unwrap_or_default();
+        lines.push(Line::from(
+            "On the daemon host, drop the hub's pubkey into admin.npub:",
+        ));
+        lines.push(Line::from(Span::styled(
+            format!("  echo {} > <data-dir>/admin.npub", hub_pk),
+            Style::default().fg(Color::Yellow),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  # then restart the daemon so it picks up the trust",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(
+            "Once set, the hub can drive ledger_open / quorum_add / quorum_begin / etc. directly.",
+        ));
+        lines.push(Line::from(""));
+
         lines.push(Line::from(Span::styled(
             "[s] spawn locally   [n] continue once registered   [p] back",
             Style::default().fg(Color::DarkGray),
@@ -1254,31 +1339,66 @@ impl App {
     }
 
     fn render_stage_open_ledger(&self, area: Rect, f: &mut ratatui::Frame) {
-        let lines = vec![
+        let registered_daemon = self.first_registered_daemon();
+        let mut lines = vec![
             Line::from(Span::styled(
                 "open the operator's first ledger",
                 Style::default().fg(Color::White),
             )),
             Line::from(""),
-            Line::from("On the daemon's host:"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  deposits-node ledger open",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(
-                "The daemon's NodeStats push will reflect the new ledger on the dashboard.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "[n] continue when the ledger appears   [p] back",
-                Style::default().fg(Color::DarkGray),
-            )),
         ];
+        match registered_daemon {
+            Some((pk, label)) => {
+                lines.push(Line::from(Span::styled(
+                    format!("daemon: {} ({}…)", label, &pk[..16.min(pk.len())]),
+                    Style::default().fg(Color::Green),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "[o] call ledger_open on the daemon (hub admin RPC)",
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "    Requires the daemon to trust this hub's pubkey via admin.npub —",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "    see the signer stage for the one-time setup.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            None => {
+                lines.push(Line::from(Span::styled(
+                    "no daemon registered yet — go back to the signer stage",
+                    Style::default().fg(Color::Red),
+                )));
+            }
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Alternative: run on the daemon host:",
+            Style::default().fg(Color::White),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  deposits-node ledger open",
+            Style::default().fg(Color::Yellow),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "[o] open via admin RPC   [n] continue   [p] back",
+            Style::default().fg(Color::DarkGray),
+        )));
         let p = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(" ledger "));
         f.render_widget(p, area);
+    }
+
+    /// First node registered with the hub, returned as `(operator_pk, label)`.
+    /// Used by wizard stages that need a daemon to drive admin RPCs against.
+    fn first_registered_daemon(&self) -> Option<(String, String)> {
+        let st = self.state.try_lock().ok()?;
+        let (pk, rec) = st.nodes.iter().next()?;
+        Some((pk.clone(), rec.label.clone()))
     }
 
     fn render_stage_fund_ledger(&self, area: Rect, f: &mut ratatui::Frame) {

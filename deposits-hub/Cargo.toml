@@ -33,6 +33,14 @@ bip39 = "2"
 # match hub-proto's lock.
 nostr-sdk = { version = "0.37", default-features = false }
 
+# Full nostr transport (gift-wrap, NIP-04, response correlation) — the
+# hub's admin client reuses the exact machinery deposits-node's CLI
+# uses to send gift-wrapped Kind 20101 admin requests to a daemon.
+# `default-features = false` drops the `signer` feature (which would
+# pull in deposits-signer-api) — the hub never needs operator-key
+# signs.
+deposits-nostr = { path = "../deposits-nostr", default-features = false }
+
 # Async runtime + process supervision
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "signal", "io-util", "sync", "time", "fs"] }
 
