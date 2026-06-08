@@ -734,7 +734,7 @@ async function loadLiquidityDrips() {
   el.innerHTML = '<div class="card"><table class="feed"><thead><tr>' +
     '<th>alias</th><th>ledger</th><th>stage</th><th>ticks</th>' +
     '<th>target&nbsp;sats</th><th>decrement</th><th>every</th><th>±fuzz</th>' +
-    '<th>next&nbsp;tick</th><th>deposit</th>' +
+    '<th>next&nbsp;tick</th><th>buffer</th>' +
     '</tr></thead><tbody>' +
     items.map(d => {
       // Stage chip — colorized by state.
@@ -748,8 +748,8 @@ async function loadLiquidityDrips() {
         : (d.next_tick_in_sec === null || d.next_tick_in_sec === undefined)
           ? 'due'
           : (d.next_tick_in_sec === 0 ? 'due' : `${d.next_tick_in_sec}s`);
-      const depShort = d.deposit_id
-        ? `<span class="mono">${d.deposit_id.slice(0, 16)}…</span>`
+      const bufShort = (d.buffer_index !== null && d.buffer_index !== undefined)
+        ? `<span class="mono">#${d.buffer_index}</span>`
         : '<span style="color:var(--fg-muted)">—</span>';
       const fuzz = d.interval_fuzz_sec > 0 ? `±${d.interval_fuzz_sec}s` : '—';
       return `

@@ -611,7 +611,9 @@ struct DripPlanView {
     /// periodic schedule.
     interval_fuzz_sec: u64,
     paused: bool,
-    deposit_id: Option<String>,
+    /// Allocated buffer-deposit index (see `buffer_indices.json`).
+    /// `None` until the auto-task's first tick opens the buffer.
+    buffer_index: Option<u32>,
     ticks_completed: u64,
     /// Seconds until the next scheduled tick. `None` if paused or
     /// the plan hasn't been ticked yet (first tick fires immediately
@@ -619,8 +621,8 @@ struct DripPlanView {
     next_tick_in_sec: Option<u64>,
     /// Pipeline stage derived from in-registry state:
     ///   - "paused"
-    ///   - "pending-open" (no deposit_id yet)
-    ///   - "active" (deposit opened, ticking)
+    ///   - "pending-open" (no buffer_index yet)
+    ///   - "active" (buffer opened, ticking)
     stage: &'static str,
 }
 
@@ -637,7 +639,7 @@ async fn get_liquidity_drips(
     for p in &registry.plans {
         let stage = if p.paused {
             "paused"
-        } else if p.deposit_id.is_none() {
+        } else if p.buffer_index.is_none() {
             "pending-open"
         } else {
             "active"
@@ -657,7 +659,7 @@ async fn get_liquidity_drips(
             interval_sec: p.interval_sec,
             interval_fuzz_sec: p.interval_fuzz_sec,
             paused: p.paused,
-            deposit_id: p.deposit_id.clone(),
+            buffer_index: p.buffer_index,
             ticks_completed: p.ticks_completed,
             next_tick_in_sec,
             stage,

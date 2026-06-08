@@ -4,8 +4,8 @@
 //! `ticks_completed` counter as the end-to-end success signal:
 //!
 //!   1. Plan registered via `deposits-node liquidity drip-create`.
-//!   2. Daemon's `auto_drip_self_liquidity` opens the self-deposit
-//!      on its next tick (`deposit_id` is populated).
+//!   2. Daemon's `auto_drip_self_liquidity` opens a buffer deposit
+//!      on its next tick (`buffer_index` is populated).
 //!   3. Subsequent tick credits target_deposit_sats (no direct
 //!      observability — confirmed implicitly by the next step).
 //!   4. Subsequent ticks drain `decrement_sats` each. The auto-task
@@ -85,18 +85,18 @@ fn drip_self_liquidity_opens_funds_and_drains() {
         String::from_utf8_lossy(&out.stderr),
     );
 
-    // ── 2. Wait for the daemon to open the self-deposit ──
-    eprintln!("[open]   waiting for daemon to open the self-deposit");
-    let opened = wait_for(STAGE_TIMEOUT, || plan_deposit_id(&alias).is_some());
-    let deposit_id_hex = plan_deposit_id(&alias)
-        .expect("daemon never populated deposit_id within 180s");
+    // ── 2. Wait for the daemon to open the buffer deposit ──
+    eprintln!("[open]   waiting for daemon to allocate buffer_index");
+    let opened = wait_for(STAGE_TIMEOUT, || plan_buffer_index(&alias).is_some());
+    let buffer_index = plan_buffer_index(&alias)
+        .expect("daemon never populated buffer_index within 180s");
     assert!(
         opened,
-        "daemon never opened the self-deposit (alias={}, ledger={}…)",
+        "daemon never opened the buffer deposit (alias={}, ledger={}…)",
         alias,
         &ledger_id[..16]
     );
-    eprintln!("[open]   ✓ opened deposit {}…", &deposit_id_hex[..16]);
+    eprintln!("[open]   ✓ allocated buffer #{}", buffer_index);
 
     // ── 3+4. Wait for at least 2 drain ticks. ticks_completed only
     //         advances after fund landed (drain has an underfunded
@@ -295,9 +295,10 @@ fn wait_for(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
     false
 }
 
-/// Read op0's `operator_drips.json` and pull the deposit_id (if
-/// populated) for the named plan.
-fn plan_deposit_id(alias: &str) -> Option<String> {
+/// Read op0's `operator_drips.json` and pull the allocated
+/// buffer_index for the named plan (`None` until the auto-task's
+/// first cycle opens the buffer).
+fn plan_buffer_index(alias: &str) -> Option<u32> {
     let path = op0_data_dir().join("operator_drips.json");
     let raw = std::fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -305,9 +306,9 @@ fn plan_deposit_id(alias: &str) -> Option<String> {
     for plan in plans {
         if plan.get("alias").and_then(|x| x.as_str()) == Some(alias) {
             return plan
-                .get("deposit_id")
-                .and_then(|x| x.as_str())
-                .map(str::to_string);
+                .get("buffer_index")
+                .and_then(|x| x.as_u64())
+                .map(|n| n as u32);
         }
     }
     None

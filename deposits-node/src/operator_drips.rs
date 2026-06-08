@@ -2,11 +2,18 @@
 //! `<data_dir>/operator_drips.json`.
 //!
 //! A drip is a defense against single-depositor liquidity exhaustion.
-//! The operator opens a self-owned deposit (sized so it ties up a chunk
-//! of their reserves as obligation), then progressively withdraws from
-//! it at a configured cadence. Every tick frees that much reserve
-//! capacity back to the operator's general pool — slow enough that no
-//! single counterparty can race in and claim it all in one go.
+//! The operator opens an operator-owned buffer deposit (sized so it
+//! ties up a chunk of their reserves as obligation), then progressively
+//! drains it at a configured cadence. Every tick frees that much
+//! reserve capacity back to the operator's general pool — slow enough
+//! that no single counterparty can race in and claim it all in one go.
+//!
+//! The deposit + open/fill/drain operations are the existing
+//! "buffer-deposit" admin infra (`process_admin_buffer_*_request`
+//! / `internal_buffer_*`). A drip plan is just a scheduler on top:
+//! it owns a `buffer_index` that points into `buffer_indices.json`,
+//! and the periodic auto-task fires the open/fill/drain calls at
+//! the configured cadence.
 //!
 //! Driven by `auto_drip_self_liquidity` in the periodic main loop.
 //! Plans live in a thin JSON file alongside `operator_policy.json` so
@@ -18,12 +25,6 @@ use std::path::Path;
 
 /// File name within `data_dir`. Public so tests can reference it.
 pub const DRIPS_FILENAME: &str = "operator_drips.json";
-
-/// First BIP-32 child index used for drip-plan deposit keys. Chosen so
-/// drip indices never collide with customer wallet deposits (0..) or
-/// buffer deposits (1_000_000..). See
-/// `request_handlers::admin::next_buffer_index` for the buffer base.
-pub const DRIP_INDEX_BASE: u32 = 2_000_000;
 
 /// A single liquidity-drip plan. Identified by `alias` (the plan-level
 /// human-readable name); the operator-as-depositor's deposit gets the
@@ -68,12 +69,13 @@ pub struct DripPlan {
     #[serde(default)]
     pub interval_fuzz_sec: u64,
 
-    /// BIP-32 child index used to derive the depositor key for this
-    /// drip's self-deposit (via `KeyPath::Deposit { index }`). Assigned
-    /// at plan-creation time from the `DRIP_INDEX_BASE` (2_000_000+)
-    /// range to avoid collisions with both customer wallet keys
-    /// (0..1M) and buffer-deposit keys (1M..2M).
-    pub key_index: u32,
+    /// Buffer-deposit index this plan ticks against. `None` until the
+    /// auto-task's first cycle, which calls `internal_buffer_open` to
+    /// allocate one from the shared buffer registry
+    /// (`buffer_indices.json`). Persisted so subsequent ticks reuse
+    /// the same buffer rather than opening a new one.
+    #[serde(default)]
+    pub buffer_index: Option<u32>,
 
     /// When true, the auto-task skips this plan. Set via
     /// `liquidity drip-pause`; cleared via `drip-resume`.
@@ -98,12 +100,6 @@ pub struct DripPlan {
     /// can't force a fresh roll by triggering a restart.
     #[serde(default)]
     pub next_tick_unix: u64,
-
-    /// Deposit ID of the self-deposit, once opened. Populated by the
-    /// auto-task on first tick. `None` means the plan is registered
-    /// but the deposit hasn't been opened yet.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deposit_id: Option<String>,
 
     /// Number of successful withdraw ticks fired since plan creation.
     /// Surfaced via the admin API for ops visibility.
@@ -194,20 +190,6 @@ impl DripRegistry {
         self.plans.iter_mut().find(|p| p.alias == alias)
     }
 
-    /// Next unused key index in the drip range. Picks
-    /// `max(DRIP_INDEX_BASE, max_used + 1)` so removed-and-recreated
-    /// plans don't re-derive an old key (avoids accidentally re-using
-    /// a depositor identity whose deposit_id is still on the ledger).
-    pub fn next_key_index(&self) -> u32 {
-        let max_used = self
-            .plans
-            .iter()
-            .map(|p| p.key_index)
-            .filter(|&i| i >= DRIP_INDEX_BASE)
-            .max();
-        max_used.map(|i| i + 1).unwrap_or(DRIP_INDEX_BASE)
-    }
-
     /// Insert a new plan. Returns `Err` if the alias is already taken.
     pub fn insert(&mut self, plan: DripPlan) -> Result<(), String> {
         if self.find(&plan.alias).is_some() {
@@ -237,29 +219,13 @@ mod tests {
             decrement_sats: 1_000,
             interval_sec: 60,
             interval_fuzz_sec: 0,
-            key_index: DRIP_INDEX_BASE,
+            buffer_index: None,
             paused: false,
             created_unix: 1_700_000_000,
             last_tick_unix: 0,
             next_tick_unix: 0,
-            deposit_id: None,
             ticks_completed: 0,
         }
-    }
-
-    #[test]
-    fn next_key_index_starts_at_base() {
-        let r = DripRegistry::default();
-        assert_eq!(r.next_key_index(), DRIP_INDEX_BASE);
-    }
-
-    #[test]
-    fn next_key_index_advances_past_max() {
-        let mut r = DripRegistry::default();
-        let mut p = sample_plan("a");
-        p.key_index = DRIP_INDEX_BASE + 5;
-        r.insert(p).unwrap();
-        assert_eq!(r.next_key_index(), DRIP_INDEX_BASE + 6);
     }
 
     #[test]

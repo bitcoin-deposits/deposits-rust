@@ -140,7 +140,6 @@ async fn drip_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let data_dir = &config.data_dir;
 
     let mut registry = DripRegistry::load(data_dir)?;
-    let key_index = registry.next_key_index();
     let plan = DripPlan {
         alias: alias.clone(),
         ledger_id: ledger_id.clone(),
@@ -148,12 +147,11 @@ async fn drip_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         decrement_sats,
         interval_sec,
         interval_fuzz_sec,
-        key_index,
+        buffer_index: None,
         paused: false,
         created_unix: now_unix(),
         last_tick_unix: 0,
         next_tick_unix: 0,
-        deposit_id: None,
         ticks_completed: 0,
     };
     registry.insert(plan).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -197,7 +195,7 @@ async fn drip_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     for p in &registry.plans {
         let state = if p.paused {
             "paused".to_string()
-        } else if p.deposit_id.is_none() {
+        } else if p.buffer_index.is_none() {
             "pending-open".to_string()
         } else {
             "active".to_string()
