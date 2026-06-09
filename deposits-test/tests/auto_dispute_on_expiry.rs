@@ -28,9 +28,11 @@
 //!     `funding-precondition doc` in `dispute_fork_shape.rs`)
 //!
 //! Requires the cluster's quorum_expiry to be reachable by mining a
-//! reasonable number of blocks. With setup.sh's default
-//! `quorum_expiry = current_block + 1000`, this test mines ~1010
-//! blocks. On a freshly-set-up regtest cluster that takes <5s.
+//! reasonable number of blocks. With the production default
+//! `quorum_expiry = current_block + 4320` (~30 days), this test
+//! mines ~4330 blocks plus the 720-block grace = ~5050 blocks total.
+//! On a freshly-set-up regtest cluster, mining is ~5–10s; the
+//! daemon's wallet sync afterward adds more.
 
 use deposits_core::messages::LedgerOperation;
 use deposits_core::tlv::TlvDecode;

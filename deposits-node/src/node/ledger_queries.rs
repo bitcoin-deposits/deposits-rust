@@ -114,7 +114,7 @@ impl Node {
 
         // Build new Taproot reserves with quorum
         let current_block = self.wallet.get_block_height().unwrap_or(0);
-        let expiry_block = current_block + 1000; // 1000 blocks expiry
+        let expiry_block = current_block + crate::node::DEFAULT_QUORUM_EXPIRY_BLOCKS;
 
         // Build voter set - we are tie-breaker, others are additional voters
         let other_voters: Vec<bitcoin::secp256k1::PublicKey> = quorum_members
@@ -766,10 +766,9 @@ impl Node {
 
             let current_block = self.wallet.get_block_height().unwrap_or(0);
             // Caller-supplied override wins (used by tests that need a
-            // short-lived quorum); otherwise the standard ~1-week
-            // window.
+            // short-lived quorum); otherwise the standard 30-day window.
             let default_expiry = current_block
-                + expiry_blocks_override.unwrap_or(1000);
+                + expiry_blocks_override.unwrap_or(crate::node::DEFAULT_QUORUM_EXPIRY_BLOCKS);
 
             // TODO: Get actual expiries from quorum member info in ledger
             let expiries: Vec<u32> = members.iter().map(|_| default_expiry).collect();

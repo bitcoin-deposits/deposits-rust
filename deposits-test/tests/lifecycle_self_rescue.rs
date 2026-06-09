@@ -19,8 +19,8 @@
 //! ## Why the victim ledger is purpose-built, not discovered
 //!
 //! `setup.sh` activates every ledger in the cluster at roughly the
-//! same chain height with the same default expiry window (~1000
-//! blocks). Mining past one ledger's expiry mines past every other
+//! same chain height with the same default expiry window (~4320
+//! blocks ≈ 30 days). Mining past one ledger's expiry mines past every other
 //! ledger's expiry — which means every member ledger we'd lean on
 //! for cosigns is *also* expired. `QuorumJoin` (a value-moving op
 //! under the cascade) gets refused by a member whose own ledger has
@@ -31,7 +31,7 @@
 //!
 //! The fix: open a dedicated victim ledger on op0 with an explicit
 //! short `--quorum-expiry-blocks` override, mine past *just* its
-//! expiry (the member ledgers are still in their ~1000-block window),
+//! expiry (the member ledgers are still in their ~4320-block window),
 //! then run `quorum repair`. The members' own ledgers are healthy,
 //! so they accept the repair cosign request.
 //!
@@ -43,7 +43,7 @@
 //!   3. Run `quorum begin --quorum-expiry-blocks 100` — the victim
 //!      activates with an expiry only 100 blocks out.
 //!   4. Mine ~110 blocks — the victim is now Tier-0 post-expiry while
-//!      member ledgers (~1000-block expiry from setup) stay healthy.
+//!      member ledgers (~4320-block expiry from setup) stay healthy.
 //!   5. Run `quorum repair --yes` against op0. Members' loosened
 //!      post-expiry gate accepts the QuorumBegin; rotation TX broadcasts.
 //!   6. Verify a NEW `QuorumBegin` lands on op0's victim ledger with

@@ -23,9 +23,10 @@
 //!      triggers from a node with full ledger view.
 //!   3. Read the most recent QuorumBegin's `quorum_expiry` from history.
 //!   4. Pick a confirmed anchor block whose height > quorum_expiry.
-//!      (Cluster setup defaults the expiry to current_block + 1000,
-//!      so this test needs either a fast-forwarded regtest or a
-//!      short-expiry test setup. See `// TEST PRECONDITIONS` below.)
+//!      (Production default is current_block + 4320 ≈ 30 days; this
+//!      test sidesteps the long wait by opening a fresh victim ledger
+//!      with `--quorum-expiry-blocks 100` via the shared
+//!      `open_victim_quorum_ledger` helper.)
 //!   5. Build FraudProof. Embed proof_hash via `recovery embed-hash`
 //!      from op1 (the accused operator embeds the proof on their own
 //!      ledger — same pattern as dispute_dereliction).

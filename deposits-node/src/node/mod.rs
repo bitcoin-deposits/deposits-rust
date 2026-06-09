@@ -40,6 +40,18 @@ use crate::Error;
 /// Beyond this limit, add_quorum_member requests will be rejected.
 pub const MAX_QUORUM_MEMBERS: usize = 8;
 
+/// Default `quorum_expiry` window applied by `quorum begin` when the
+/// operator doesn't pass `--quorum-expiry-blocks`. 4320 blocks ≈ 30
+/// days at Bitcoin's 10-minute target. Long enough that routine
+/// operation never hits the lifecycle cascade unintentionally; short
+/// enough that an abandoned ledger lands in `auto_dispute_expired_quorums`
+/// territory before customer funds get stuck.
+///
+/// Operators with stronger uptime can override per-rotation via the
+/// CLI flag; tests that need a short-lived quorum (e.g.
+/// `lifecycle_self_rescue`) also use the override.
+pub const DEFAULT_QUORUM_EXPIRY_BLOCKS: u32 = 4320;
+
 /// Configuration for the deposits-node node
 #[derive(Clone)]
 pub struct NodeConfig {
