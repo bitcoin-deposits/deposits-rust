@@ -121,10 +121,61 @@ Operators publish NIP-33 replaceable events advertising their terms. The `d` tag
 - Access-control flags (whether `deposit_open` requires an attestation; allowed lightning-address domains)
 - Relay URL
 - Operator's observed Bitcoin chain tip at publish time (informational; clients that need a fresh tip SHOULD prefer the Kind 39101 price-oracle stream — see §Price Oracle below)
+- `guarantees` — *(optional)* a machine-readable guarantee matrix that wallets route on. See §Guarantee Matrix below.
 
 Earlier drafts also carried `total_obligations` and `available_headroom`. Both were dropped — the operator can trivially inflate them with self-paid Lightning invoices, so they're not reliable trust signals. Wallets that need capacity information should either discover a courier already holding funds on this ledger, or trust the protocol invariant `reserves ≥ obligations` enforced by the quorum's co-signers.
 
 Wallets discover operators by fetching Kind 39100 events from ledger relays.
+
+### Guarantee Matrix
+
+A guarantee matrix is a list of `(regime, amount-range, shape, honesty, time-profile)` rows. Wallets pick the row that matches the operation they're about to perform and route accordingly: an "online receive" path may demand `settlement_atomic`, falling back to `deterrence` only when nothing stronger is offered for the amount.
+
+```jsonc
+"guarantees": [
+  {
+    "regime": "transfer_internal",
+    "min_msats": 0,
+    "max_msats": 18446744073709551615,
+    "shape": "settlement_atomic",
+    "honesty": "operator_and_quorum",
+    "time_profile": { "happy_path_blocks": 1, "worst_case_blocks": 6 }
+  },
+  {
+    "regime": "invoice_receive",
+    "min_msats": 0,
+    "max_msats": 18446744073709551615,
+    "shape": "deterrence",
+    "honesty": "operator_and_quorum_and_ln",
+    "time_profile": { "happy_path_blocks": 1, "worst_case_blocks": 720 }
+  }
+]
+```
+
+**Canonical regime names** (controlled vocabulary, open-ended for forward compatibility):
+
+| Regime | Meaning |
+|---|---|
+| `onchain_credit` | Wallet sends bitcoin on-chain; operator credits the deposit after confirmations. |
+| `onchain_withdraw` | Wallet asks the operator to broadcast a withdrawal to a wallet-controlled address. |
+| `invoice_receive` | Wallet receives a Lightning payment via an operator-issued invoice. |
+| `invoice_pay` | Wallet pays a Lightning invoice via the operator's LN node. |
+| `transfer_internal` | Transfer between two deposits on the same ledger. |
+| `transfer_courier` | Cross-ledger transfer via an HTLC/PTLC courier. |
+
+**Shape** is one of:
+
+- `settlement_atomic` — a quorum cosignature is required before the operator's commit; the credit and the receipt are tied together in a single signed update. Fraud requires a quorum collusion.
+- `deterrence` — the operator commits unilaterally and the wallet's recourse is the fraud proof; uncredited-payment evidence triggers slashing post-hoc. One confirmed theft costs the operator their entire collateral, so the upside of stealing a single payment is bounded by what the payment alone produced.
+- `advisory` — no protocol-level enforcement; reputation only. Used for operations the protocol doesn't otherwise gate (e.g. routing-policy choices on outbound Lightning payments).
+
+**Honesty** is one of `operator_only`, `operator_and_quorum`, `operator_and_quorum_and_ln`, `operator_and_courier`.
+
+**Time profile** carries `happy_path_blocks` (expected wait under normal conditions) and `worst_case_blocks` (bounded wait under the degraded conditions this regime tolerates).
+
+**Defaults and forward compatibility.** Operators MAY publish multiple rows for the same regime over disjoint amount ranges (e.g., `settlement_atomic` up to 1 BTC, `deterrence` above). Wallets MUST treat absence of the `guarantees` field as *"no commitment"* rather than *"no protection"* — older daemons published advertisements before this field existed. A wallet that doesn't recognize a regime name SHOULD skip the row and continue rather than abort. Adding new regime names is a non-breaking codec change.
+
+**Trust path.** The matrix is signed by the operator's Nostr event signature, so a wallet who trusts `operator_pubkey` for the advertisement trusts the matrix. The matrix is a *promise*, not a *proof* — the protocol-level guarantees come from the deposit script, the quorum, and the slashing economics. A misadvertised matrix that an operator then fails to honor is itself a reputational signal but not directly slashable.
 
 ## Operator → Delegate Delegation
 

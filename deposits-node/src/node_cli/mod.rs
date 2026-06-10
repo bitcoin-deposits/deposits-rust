@@ -1010,6 +1010,11 @@ pub async fn auto_advertise_ledger(
     ad.reserves_amount_msats = ledger.reserves_amount();
     ad.collateral_amount_msats = ledger.state.collateral_amount;
     ad.max_deposit_balance_msats = node.max_deposit_balance_msats();
+    // Publish the canonical-case guarantee matrix (DEP-04 §"Guarantee
+    // matrix"). Operators with a non-default shape (e.g. settlement-atomic
+    // invoice receive once #172 lands) should override the relevant rows
+    // before publishing rather than ship these defaults unchanged.
+    ad.guarantees = LedgerAdvertisement::default_guarantees();
 
     // Apply fee schedule from CLI flags
     if let Some(bps) = fee_schedule.annual_fee_bps {
@@ -1179,6 +1184,12 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
         ad.current_block = last_block;
         ad.quorum_state = q_state;
         ad.quorum_members = q_members;
+        // Refresh the guarantee matrix from the canonical defaults so a
+        // republish doesn't lose the matrix if the old cached ad on disk
+        // was written before the field existed.
+        if ad.guarantees.is_empty() {
+            ad.guarantees = crate::nostr::LedgerAdvertisement::default_guarantees();
+        }
 
         // Refresh runtime-settable fields from the live node config so
         // an operator who set NODE_NAME (or MAX_DEPOSIT_BALANCE_MSATS)

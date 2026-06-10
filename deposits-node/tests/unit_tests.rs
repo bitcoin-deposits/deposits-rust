@@ -880,3 +880,120 @@ fn test_pubkey() -> bitcoin::secp256k1::PublicKey {
     let sk = SecretKey::from_slice(&[0x01; 32]).unwrap();
     sk.public_key(&secp)
 }
+
+// ============================================================================
+// Guarantee matrix (DEP-04 §"Guarantee matrix")
+// ============================================================================
+
+#[test]
+fn guarantee_matrix_default_covers_six_canonical_regimes() {
+    use deposits_node::nostr::guarantee_regimes::*;
+    let matrix = LedgerAdvertisement::default_guarantees();
+    let names: Vec<&str> = matrix.iter().map(|r| r.regime.as_str()).collect();
+    for expected in [
+        ONCHAIN_CREDIT,
+        ONCHAIN_WITHDRAW,
+        INVOICE_RECEIVE,
+        INVOICE_PAY,
+        TRANSFER_INTERNAL,
+        TRANSFER_COURIER,
+    ] {
+        assert!(
+            names.contains(&expected),
+            "canonical matrix must include `{}`, got {:?}",
+            expected,
+            names
+        );
+    }
+}
+
+#[test]
+fn guarantee_matrix_default_rows_have_valid_ranges() {
+    let matrix = LedgerAdvertisement::default_guarantees();
+    for row in &matrix {
+        assert!(
+            row.min_msats <= row.max_msats,
+            "regime `{}`: min_msats {} > max_msats {}",
+            row.regime,
+            row.min_msats,
+            row.max_msats
+        );
+        assert!(
+            row.time_profile.happy_path_blocks <= row.time_profile.worst_case_blocks,
+            "regime `{}`: happy_path {} > worst_case {}",
+            row.regime,
+            row.time_profile.happy_path_blocks,
+            row.time_profile.worst_case_blocks
+        );
+    }
+}
+
+#[test]
+fn guarantee_matrix_internal_transfer_is_settlement_atomic() {
+    use deposits_node::nostr::{guarantee_regimes::TRANSFER_INTERNAL, GuaranteeShape, HonestyAssumption};
+    let matrix = LedgerAdvertisement::default_guarantees();
+    let row = matrix
+        .iter()
+        .find(|r| r.regime == TRANSFER_INTERNAL)
+        .expect("transfer_internal regime present");
+    // Same-ledger transfers commit through a single quorum-cosigned update,
+    // so the contract should be SettlementAtomic / OperatorAndQuorum.
+    assert_eq!(row.shape, GuaranteeShape::SettlementAtomic);
+    assert_eq!(row.honesty, HonestyAssumption::OperatorAndQuorum);
+}
+
+#[test]
+fn guarantee_matrix_invoice_receive_is_deterrence_today() {
+    use deposits_node::nostr::{guarantee_regimes::INVOICE_RECEIVE, GuaranteeShape};
+    let matrix = LedgerAdvertisement::default_guarantees();
+    let row = matrix
+        .iter()
+        .find(|r| r.regime == INVOICE_RECEIVE)
+        .expect("invoice_receive regime present");
+    // Pre-#172 invoice receive is deterrence-only; lock the default so the
+    // upgrade to settlement-atomic (task #172) requires an explicit change.
+    assert_eq!(row.shape, GuaranteeShape::Deterrence);
+}
+
+#[test]
+fn guarantee_matrix_roundtrips_through_json() {
+    let mut ad = LedgerAdvertisement::new(
+        "abc".into(),
+        "02deadbeef".into(),
+        "bc1q".into(),
+        "regtest".into(),
+    );
+    ad.guarantees = LedgerAdvertisement::default_guarantees();
+    let json = serde_json::to_string(&ad).expect("serialize");
+    let parsed: LedgerAdvertisement = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(parsed.guarantees.len(), ad.guarantees.len());
+    for (a, b) in ad.guarantees.iter().zip(parsed.guarantees.iter()) {
+        assert_eq!(a, b, "regime row drifted through round-trip");
+    }
+}
+
+#[test]
+fn guarantee_matrix_legacy_ad_without_field_decodes_to_empty() {
+    // An advertisement published before this field existed must still decode
+    // — the field is `#[serde(default)]`. Wallets MUST treat empty as "no
+    // commitment" rather than "no protection," per DEP-04.
+    let legacy_json = r#"{
+        "ledger_id": "abc",
+        "operator_pubkey": "02deadbeef",
+        "reserves_address": "bc1q",
+        "annual_fee_bps": 0,
+        "annualized_fixed_msats": 0,
+        "deposit_fee_bps": 0,
+        "withdrawal_fee_bps": 0,
+        "invoice_fee_bps": 0,
+        "max_deposit_msats": 1000,
+        "min_deposit_msats": 0,
+        "reserves_amount_msats": 0,
+        "network": "regtest"
+    }"#;
+    let ad: LedgerAdvertisement = serde_json::from_str(legacy_json).expect("decode legacy ad");
+    assert!(
+        ad.guarantees.is_empty(),
+        "legacy ad without `guarantees` field decodes to empty vec"
+    );
+}

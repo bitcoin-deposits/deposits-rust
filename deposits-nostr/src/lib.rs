@@ -680,6 +680,110 @@ fn nip04_decrypt_with_shared_key(
     String::from_utf8(plaintext_bytes).map_err(|_| "NIP-04: plaintext not UTF-8")
 }
 
+/// The shape of a per-regime guarantee. See `GuaranteeRegime`.
+///
+/// Serialized as a string tag so old wallets can interpret it as opaque text
+/// without dropping the regime entirely, and so future shapes (`PtlcAtomic`,
+/// quorum-signed-with-tier-N) can be added without breaking the codec.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuaranteeShape {
+    /// A quorum cosignature is required before the operator's commit. The
+    /// credit and the receipt are tied together in a single signed update;
+    /// fraud requires a quorum collusion. Used for transfers between
+    /// deposits on the same ledger and (when wallet is online) for receive
+    /// regimes that pre-cosign with the operator.
+    SettlementAtomic,
+    /// The operator commits unilaterally and the wallet's recourse is the
+    /// fraud proof: uncredited-payment evidence triggers slashing post-hoc.
+    /// One confirmed theft costs the operator their entire collateral, so
+    /// the upside of stealing a single payment is bounded by what the
+    /// payment alone produced. Default for offline receive.
+    Deterrence,
+    /// No protocol-level enforcement. The operation succeeds or fails by
+    /// operator discretion; the wallet's only recourse is reputation /
+    /// off-platform action. Used for advisory-only operations the protocol
+    /// doesn't otherwise gate (e.g. routing-policy choices on outbound
+    /// Lightning payments).
+    Advisory,
+}
+
+/// The honesty assumption a regime depends on.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HonestyAssumption {
+    /// The operator alone — used when the slashing-deterrent is the entire
+    /// trust story (Deterrence shapes).
+    OperatorOnly,
+    /// Operator plus a strict majority of the quorum. Standard for
+    /// `SettlementAtomic` shapes; settlement requires the quorum to cosign
+    /// the same update the operator did.
+    OperatorAndQuorum,
+    /// Operator + quorum + the Lightning routing network. Lightning send/
+    /// receive paths add LN as a trust layer beyond the deposits protocol
+    /// itself.
+    OperatorAndQuorumAndLn,
+    /// Operator + an HTLC/PTLC courier (and the courier's own honesty for
+    /// the leg the courier carries). Cross-ledger transfers.
+    OperatorAndCourier,
+}
+
+/// Time profile for a regime, in blocks.
+///
+/// `happy_path_blocks` is the wallet's expected wait under normal conditions
+/// (quorum responsive, LN routes available). `worst_case_blocks` is the
+/// bounded wait the protocol guarantees even under the degraded conditions
+/// this regime tolerates — for `Deterrence` shapes that's the dispute /
+/// confiscation window, for `SettlementAtomic` it's bounded by the cosig
+/// deadline alone.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TimeProfile {
+    pub happy_path_blocks: u32,
+    pub worst_case_blocks: u32,
+}
+
+/// A single (operation-class, amount-range) → guarantee row. Operators
+/// advertise a list of these so wallets can route by expected guarantee.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GuaranteeRegime {
+    /// Canonical operation-class name. See the `guarantee_regimes` module
+    /// for the controlled vocabulary (`onchain_credit`, `invoice_receive`,
+    /// `transfer_internal`, etc.). Stored as `String` for forward-compat
+    /// so future regimes can be added without breaking old decoders.
+    pub regime: String,
+    /// Lower bound on the amount this row applies to (msats, inclusive).
+    pub min_msats: u64,
+    /// Upper bound (msats, inclusive). `u64::MAX` for unbounded.
+    pub max_msats: u64,
+    /// The shape of the guarantee for amounts in this range.
+    pub shape: GuaranteeShape,
+    /// What honesty the wallet must assume.
+    pub honesty: HonestyAssumption,
+    /// Bounded time-to-resolution.
+    pub time_profile: TimeProfile,
+}
+
+/// Canonical operation-class names for `GuaranteeRegime::regime`. Wallets key
+/// off these to surface per-operation confidence. Open vocabulary — new
+/// regimes can be added without breaking the codec, but wallets that don't
+/// recognize a name will skip the row.
+pub mod guarantee_regimes {
+    /// Wallet sends bitcoin on-chain; operator credits the deposit after
+    /// confirmations.
+    pub const ONCHAIN_CREDIT: &str = "onchain_credit";
+    /// Wallet asks operator to broadcast an on-chain withdrawal to a
+    /// wallet-controlled address.
+    pub const ONCHAIN_WITHDRAW: &str = "onchain_withdraw";
+    /// Wallet receives a Lightning payment via an operator-issued invoice.
+    pub const INVOICE_RECEIVE: &str = "invoice_receive";
+    /// Wallet pays a Lightning invoice via the operator's LN node.
+    pub const INVOICE_PAY: &str = "invoice_pay";
+    /// Transfer between two deposits on the same ledger.
+    pub const TRANSFER_INTERNAL: &str = "transfer_internal";
+    /// Cross-ledger transfer via an HTLC/PTLC courier.
+    pub const TRANSFER_COURIER: &str = "transfer_courier";
+}
+
 /// A ledger advertisement (operator terms and limits)
 /// Published as a NIP-33 parameterized replaceable event.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -833,6 +937,18 @@ pub struct LedgerAdvertisement {
     /// — quorum membership is public chain state, not a secret.
     #[serde(default)]
     pub quorum_members: Vec<String>,
+
+    /// Per-regime guarantee matrix. Each row maps an operation class
+    /// (`onchain_credit`, `invoice_receive`, `transfer_internal`, ...)
+    /// over an amount range to a `(shape, honesty, time_profile)` triple.
+    /// Wallets route on this: an "online receive" path may demand
+    /// `SettlementAtomic`, fall back to `Deterrence` only when nothing
+    /// stronger is offered for the amount. See [`GuaranteeRegime`] and
+    /// the canonical regime names in [`guarantee_regimes`]. Empty for
+    /// operators who haven't published their matrix yet; wallets MUST
+    /// treat absence as "no commitment" rather than "no protection."
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guarantees: Vec<GuaranteeRegime>,
 
     /// Version of the advertisement format
     #[serde(default = "default_version")]
@@ -1088,10 +1204,94 @@ impl LedgerAdvertisement {
             current_block: 0,
             quorum_state: String::new(),
             quorum_members: Vec::new(),
+            guarantees: Vec::new(),
             version: 1,
             event_id: String::new(),
             timestamp: 0,
         }
+    }
+
+    /// The canonical-case guarantee matrix for a typical deposits operator
+    /// running this protocol as-of today (no PTLC, deterrence-only invoice
+    /// receive, settlement-atomic on-ledger transfers, slashing-deterred
+    /// on-chain and Lightning). Use it to fill `self.guarantees` on
+    /// ad construction:
+    ///
+    /// ```ignore
+    /// let mut ad = LedgerAdvertisement::new(ledger_id, op_pk, addr, "regtest".into());
+    /// ad.guarantees = LedgerAdvertisement::default_guarantees();
+    /// ```
+    ///
+    /// Operators with a different shape (e.g. settlement-atomic invoice
+    /// receive via online cosign, see task #172) should override the
+    /// relevant rows rather than ship the canonical defaults unchanged.
+    pub fn default_guarantees() -> Vec<GuaranteeRegime> {
+        use guarantee_regimes::*;
+        vec![
+            // On-chain credit: operator credits after confirmations. The
+            // wallet has fraud-proof recourse (uncredited-onchain) if the
+            // operator sees N confirmations but doesn't credit.
+            GuaranteeRegime {
+                regime: ONCHAIN_CREDIT.into(),
+                min_msats: 0,
+                max_msats: u64::MAX,
+                shape: GuaranteeShape::Deterrence,
+                honesty: HonestyAssumption::OperatorOnly,
+                time_profile: TimeProfile { happy_path_blocks: 6, worst_case_blocks: 720 },
+            },
+            // On-chain withdrawal: operator broadcasts; deterrence-only.
+            GuaranteeRegime {
+                regime: ONCHAIN_WITHDRAW.into(),
+                min_msats: 0,
+                max_msats: u64::MAX,
+                shape: GuaranteeShape::Deterrence,
+                honesty: HonestyAssumption::OperatorOnly,
+                time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 720 },
+            },
+            // Invoice receive: today's protocol is deterrence-only. Wallets
+            // hold the payer's preimage as evidence; one uncredited payment
+            // is a slashable fraud proof. Task #172 will add a SettlementAtomic
+            // path for online wallets.
+            GuaranteeRegime {
+                regime: INVOICE_RECEIVE.into(),
+                min_msats: 0,
+                max_msats: u64::MAX,
+                shape: GuaranteeShape::Deterrence,
+                honesty: HonestyAssumption::OperatorAndQuorumAndLn,
+                time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 720 },
+            },
+            // Invoice pay: operator-routed through their LN node. Advisory
+            // outcome (success / fail / stuck), Deterrence on the debit
+            // accounting (operator can't double-debit without a fraud proof).
+            GuaranteeRegime {
+                regime: INVOICE_PAY.into(),
+                min_msats: 0,
+                max_msats: u64::MAX,
+                shape: GuaranteeShape::Deterrence,
+                honesty: HonestyAssumption::OperatorAndQuorumAndLn,
+                time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 144 },
+            },
+            // Same-ledger transfer: settlement-atomic — both deposits are
+            // updated in a single quorum-cosigned ledger update.
+            GuaranteeRegime {
+                regime: TRANSFER_INTERNAL.into(),
+                min_msats: 0,
+                max_msats: u64::MAX,
+                shape: GuaranteeShape::SettlementAtomic,
+                honesty: HonestyAssumption::OperatorAndQuorum,
+                time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 6 },
+            },
+            // Cross-ledger via courier: HTLC-style (PTLC after #171), so
+            // the courier's commitment timeout bounds worst-case loss.
+            GuaranteeRegime {
+                regime: TRANSFER_COURIER.into(),
+                min_msats: 0,
+                max_msats: u64::MAX,
+                shape: GuaranteeShape::Deterrence,
+                honesty: HonestyAssumption::OperatorAndCourier,
+                time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 144 },
+            },
+        ]
     }
 
     /// Convert advertisement fees to FeeStructure for new deposits.
