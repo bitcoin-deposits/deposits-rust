@@ -1529,3 +1529,182 @@ fn armer_share_output_exposes_both_leaves() {
         &sweep_bytes[..4.min(sweep_bytes.len())]
     );
 }
+
+// ============================================================================
+// Forfeit-sweep TX construction (DEP-06 §"Sweep recipients: pro-rata to revealers")
+// ============================================================================
+
+use deposits_core::tapscript_reserves::{build_forfeit_sweep_tx, revealers_from_claim_witness};
+
+fn fake_outpoint() -> bitcoin::OutPoint {
+    bitcoin::OutPoint {
+        txid: bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::all_zeros()),
+        vout: 0,
+    }
+}
+
+#[test]
+fn sweep_tx_pays_pro_rata_to_revealers() {
+    let revealers: Vec<XOnlyPublicKey> = (10..13).map(|i| pk(i as u8)).collect(); // 3 revealers
+    let tx = build_forfeit_sweep_tx(
+        fake_outpoint(),
+        100_000, // slice value
+        &revealers,
+        1_000, // fee
+        None,
+        Network::Regtest,
+    )
+    .expect("sweep tx must build");
+
+    assert_eq!(tx.input.len(), 1, "exactly one input (the armer-share UTXO)");
+    assert_eq!(tx.output.len(), 3, "one P2TR per revealer");
+    // (100_000 - 1_000) / 3 = 33_000; dust 0 (it divides evenly)
+    for o in &tx.output {
+        assert_eq!(o.value.to_sat(), 33_000);
+    }
+}
+
+#[test]
+fn sweep_tx_sets_csv_compatible_sequence_and_version() {
+    let revealers: Vec<XOnlyPublicKey> = vec![pk(10)];
+    let tx = build_forfeit_sweep_tx(
+        fake_outpoint(),
+        10_000,
+        &revealers,
+        500,
+        None,
+        Network::Regtest,
+    )
+    .expect("sweep tx must build");
+
+    // Version 2 required for BIP-68 relative-locktime semantics.
+    assert_eq!(tx.version, bitcoin::transaction::Version::TWO);
+    // Sequence must equal the CSV value so OP_CSV passes.
+    let seq_val = tx.input[0].sequence.0 & 0xFFFF;
+    assert_eq!(seq_val, ARMER_SHARE_SWEEP_CSV_BLOCKS);
+}
+
+#[test]
+fn sweep_tx_orders_recipients_deterministically() {
+    // Pass revealers in random order; the output ordering must be sorted
+    // by xonly bytes so every honest sweeper produces the same TX.
+    let in_order: Vec<XOnlyPublicKey> = vec![pk(7), pk(1), pk(5), pk(3)];
+    let tx = build_forfeit_sweep_tx(
+        fake_outpoint(),
+        100_000,
+        &in_order,
+        1_000,
+        None,
+        Network::Regtest,
+    )
+    .expect("sweep tx must build");
+
+    let mut expected = in_order.clone();
+    expected.sort_by_key(|k| k.serialize());
+    for (i, e) in expected.iter().enumerate() {
+        let secp = Secp256k1::new();
+        let expected_addr = bitcoin::Address::p2tr(&secp, *e, None, Network::Regtest);
+        assert_eq!(
+            tx.output[i].script_pubkey,
+            expected_addr.script_pubkey(),
+            "output {} must address sorted revealer #{}",
+            i,
+            i
+        );
+    }
+}
+
+#[test]
+fn sweep_tx_zero_revealers_falls_back_to_operator() {
+    let fallback = pk(42);
+    let tx = build_forfeit_sweep_tx(
+        fake_outpoint(),
+        50_000,
+        &[], // N_revealers == 0
+        500,
+        Some(&fallback),
+        Network::Regtest,
+    )
+    .expect("sweep tx with fallback must build");
+
+    assert_eq!(tx.output.len(), 1, "single output to fallback");
+    assert_eq!(tx.output[0].value.to_sat(), 49_500); // slice - fee
+    let secp = Secp256k1::new();
+    let expected_addr = bitcoin::Address::p2tr(&secp, fallback, None, Network::Regtest);
+    assert_eq!(tx.output[0].script_pubkey, expected_addr.script_pubkey());
+}
+
+#[test]
+fn sweep_tx_zero_revealers_no_fallback_errors() {
+    let result = build_forfeit_sweep_tx(
+        fake_outpoint(),
+        50_000,
+        &[],
+        500,
+        None, // no fallback
+        Network::Regtest,
+    );
+    assert!(
+        result.is_err(),
+        "must refuse to construct a TX with no honest payee"
+    );
+}
+
+#[test]
+fn sweep_tx_uneconomical_fee_errors() {
+    let revealers: Vec<XOnlyPublicKey> = vec![pk(10)];
+    let result = build_forfeit_sweep_tx(
+        fake_outpoint(),
+        1_000,
+        &revealers,
+        2_000, // fee > slice
+        None,
+        Network::Regtest,
+    );
+    assert!(result.is_err(), "fee >= slice is rejected");
+}
+
+#[test]
+fn revealers_from_claim_witness_identifies_revealing_armers() {
+    // Build (armer_pubkey, commitment_hash) pairs for 4 armers; construct
+    // a synthetic witness containing 3 of their preimages (not the 4th).
+    let mut armers: Vec<(XOnlyPublicKey, [u8; 20])> = Vec::new();
+    let mut preimages: Vec<Vec<u8>> = Vec::new();
+    for i in 1..=4u8 {
+        let preimage = vec![i; 17 + (i as usize - 1)]; // legal length 17..=20
+        let commit = hash160::Hash::hash(&preimage).to_byte_array();
+        armers.push((pk(i), commit));
+        preimages.push(preimage);
+    }
+
+    // Witness includes preimages for armers 1, 2, 4 (not 3), plus some
+    // non-preimage clutter the function must skip.
+    let mut wit = bitcoin::Witness::new();
+    wit.push([0xABu8; 64]); // signature — wrong length, skipped
+    wit.push(&preimages[0]); // armer 1 revealed
+    wit.push(&preimages[1]); // armer 2 revealed
+    wit.push(&preimages[3]); // armer 4 revealed
+    wit.push([0xCDu8; 100]); // leaf script — too long, skipped
+
+    let revealers = revealers_from_claim_witness(&wit, &armers);
+    let expected: Vec<XOnlyPublicKey> = {
+        let mut v = vec![pk(1), pk(2), pk(4)];
+        v.sort_by_key(|k| k.serialize());
+        v
+    };
+    assert_eq!(revealers, expected);
+}
+
+#[test]
+fn revealers_empty_when_no_witness_items_match() {
+    let preimage = vec![0x42u8; 17];
+    let commit = hash160::Hash::hash(&preimage).to_byte_array();
+    let armers = vec![(pk(1), commit)];
+
+    // Witness with a *different* 17-byte item — won't match the commitment.
+    let mut wit = bitcoin::Witness::new();
+    wit.push(vec![0xFFu8; 17]);
+
+    let revealers = revealers_from_claim_witness(&wit, &armers);
+    assert!(revealers.is_empty());
+}

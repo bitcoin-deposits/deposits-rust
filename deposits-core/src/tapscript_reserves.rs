@@ -1845,6 +1845,135 @@ pub fn build_armer_share_output(
     })
 }
 
+/// Identify the revealer set from a lottery output's claim TX witness.
+///
+/// Both the primary-lottery claim and the partial-reveal claims expose every
+/// participating armer's preimage in the witness stack. Walk the stack,
+/// HASH160 each item that could be a preimage, and match against the
+/// known `armers` list (by commitment_hash). Return the matched armer
+/// pubkeys, sorted by xonly bytes for determinism — every honest sweeper
+/// constructing the same TX will agree byte-for-byte.
+///
+/// Items in the witness that aren't preimages (the winner's signature,
+/// the leaf script, the control block) won't HASH160 to any commitment,
+/// so they're silently skipped.
+///
+/// Used by `build_forfeit_sweep_tx`'s callers to compute the recipient list
+/// per DEP-06 §"Sweep recipients: pro-rata to revealers".
+pub fn revealers_from_claim_witness(
+    claim_witness: &bitcoin::Witness,
+    armers: &[(XOnlyPublicKey, [u8; 20])],
+) -> Vec<XOnlyPublicKey> {
+    use bitcoin::hashes::{hash160, Hash};
+
+    let mut revealers: Vec<XOnlyPublicKey> = Vec::new();
+    for item in claim_witness.iter() {
+        // The legal preimage length range is `17..=16+N` per CUSTODY_LOTTERY.md.
+        // N is at most MAX_DISPUTANTS = 15, so the upper bound is 31. Skip items
+        // outside this range to avoid hashing the signature (64), leaf script
+        // (variable larger), or control block (33+).
+        if item.len() < 17 || item.len() > 16 + crate::constants::MAX_DISPUTANTS {
+            continue;
+        }
+        let h = hash160::Hash::hash(item).to_byte_array();
+        for (armer_pk, commit) in armers {
+            if *commit == h && !revealers.contains(armer_pk) {
+                revealers.push(*armer_pk);
+            }
+        }
+    }
+    revealers.sort_by_key(|k| k.serialize());
+    revealers
+}
+
+/// Build the unsigned sweep TX that spends a forfeited armer-share output
+/// pro-rata to the revealers, per DEP-06 §"Sweep recipients: pro-rata to
+/// revealers".
+///
+/// The returned TX is unsigned — the caller is responsible for collecting
+/// `recovery_threshold` BIP-340 signatures from the recovery-voter set,
+/// building the CHECKSIGADD witness in the same shape `LotteryScriptBuilder::
+/// build_recovery_script` produces, and broadcasting.
+///
+/// Layout:
+/// - **One input**: the armer-share UTXO at `armer_share_outpoint`. `nSequence`
+///   is set to `ARMER_SHARE_SWEEP_CSV_BLOCKS` so the sweep leaf's `OP_CSV`
+///   passes; `nVersion` is 2 (required for BIP-68 relative-locktime semantics).
+/// - **N outputs** for `N = revealers.len()` revealers: each gets
+///   `(slice_value - fee) / N` to a P2TR keyed by `armer.pubkey` (the
+///   `XOnlyPublicKey`). Recipients are sorted by xonly bytes for determinism.
+/// - **Edge case `N == 0`**: a single output for `slice_value - fee` to
+///   `fallback_recipient` (typically the original operator's xonly key, mirroring
+///   the respectful-confiscation change output). If `fallback_recipient` is None,
+///   returns an error rather than producing an output the script couldn't agree
+///   on. The lottery already failed if no one revealed, so this branch is
+///   degenerate-but-defined.
+pub fn build_forfeit_sweep_tx(
+    armer_share_outpoint: bitcoin::OutPoint,
+    slice_value_sats: u64,
+    revealers: &[XOnlyPublicKey],
+    fee_sats: u64,
+    fallback_recipient: Option<&XOnlyPublicKey>,
+    network: Network,
+) -> DepositsResult<bitcoin::Transaction> {
+    use bitcoin::{Amount, Sequence, Transaction, TxIn, TxOut, Witness};
+
+    if fee_sats >= slice_value_sats {
+        return Err(DepositsError::InvalidState(format!(
+            "Sweep fee {} >= slice value {}; sweep is uneconomical",
+            fee_sats, slice_value_sats
+        )));
+    }
+    let spendable = slice_value_sats - fee_sats;
+
+    let mut outs: Vec<TxOut> = Vec::new();
+    let secp = Secp256k1::new();
+    if revealers.is_empty() {
+        let dest = fallback_recipient.ok_or_else(|| {
+            DepositsError::InvalidState(
+                "No revealers and no fallback recipient — refusing to construct \
+                 a sweep TX with no honest payee. Pass the original operator's \
+                 xonly key as fallback per DEP-06."
+                    .to_string(),
+            )
+        })?;
+        let addr = bitcoin::Address::p2tr(&secp, *dest, None, network);
+        outs.push(TxOut {
+            value: Amount::from_sat(spendable),
+            script_pubkey: addr.script_pubkey(),
+        });
+    } else {
+        let n = revealers.len() as u64;
+        let per_revealer = spendable / n;
+        // Dust (spendable % n) is silently absorbed into the miner fee, same
+        // convention the punitive-split confiscation TX uses.
+        let mut sorted = revealers.to_vec();
+        sorted.sort_by_key(|k| k.serialize());
+        for r in &sorted {
+            let addr = bitcoin::Address::p2tr(&secp, *r, None, network);
+            outs.push(TxOut {
+                value: Amount::from_sat(per_revealer),
+                script_pubkey: addr.script_pubkey(),
+            });
+        }
+    }
+
+    Ok(Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: armer_share_outpoint,
+            script_sig: bitcoin::ScriptBuf::new(),
+            // Relative-locktime sequence: nSequence = CSV value satisfies the
+            // sweep leaf's OP_CSV. Type bit 22 is clear (block-height), bits
+            // 31-25 reserved, low bits carry the value.
+            sequence: Sequence::from_height(ARMER_SHARE_SWEEP_CSV_BLOCKS as u16),
+            witness: Witness::default(),
+        }],
+        output: outs,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
