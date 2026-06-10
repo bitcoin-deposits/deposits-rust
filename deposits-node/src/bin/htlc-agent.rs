@@ -75,6 +75,52 @@ struct LedgerFees {
     fee_out_rate_bps: u64,
 }
 
+/// What sort of release condition the inbound lock carries. The courier needs
+/// to know this to:
+///   1. choose the right Leg 2 completion_script (`sha256(H)` vs `pointlock(P)`)
+///   2. interpret the witness on Leg 2 claim (preimage bytes vs scalar bytes)
+///   3. transform the witness for Leg 1 claim (PTLC: add the courier's
+///      blinding scalar `t` to the revealed `s` to produce `s + t`)
+#[derive(Debug, Clone)]
+enum LockKind {
+    Htlc {
+        /// The 32-byte sha256 image both legs commit to.
+        hash: [u8; 32],
+    },
+    Ptlc {
+        /// The wallet's blinded leg-1 point, `P_b = P + G·t` (33 bytes compressed).
+        /// The courier verifies this matches its stored route data before locking
+        /// Leg 2.
+        point_p_b: [u8; 33],
+    },
+}
+
+/// The witness material revealed when a lock is satisfied.
+#[derive(Debug, Clone, Copy)]
+enum WitnessMaterial {
+    /// HTLC: the preimage of the `sha256(H)` lock.
+    Preimage([u8; 32]),
+    /// PTLC: the scalar `s` satisfying `pointlock(P)`. The courier transforms
+    /// this to `s + t` before claiming Leg 1 — see [`PendingRoute::Ptlc`].
+    Scalar([u8; 32]),
+}
+
+/// Compute the 32-byte route-lookup key for a lock. Routes are keyed in the
+/// pending-routes table by this value; for HTLC it's the hash itself, for
+/// PTLC it's `sha256(P_b)` (a deterministic per-lock identifier with the
+/// right type — no protocol meaning).
+fn lock_kind_route_key(kind: &LockKind) -> [u8; 32] {
+    use bitcoin::hashes::{sha256, Hash, HashEngine};
+    match kind {
+        LockKind::Htlc { hash } => *hash,
+        LockKind::Ptlc { point_p_b } => {
+            let mut e = sha256::Hash::engine();
+            e.input(point_p_b);
+            sha256::Hash::from_engine(e).to_byte_array()
+        }
+    }
+}
+
 /// An inbound TransferLock targeting one of our deposits.
 #[derive(Debug, Clone)]
 struct InboundLock {
@@ -84,7 +130,14 @@ struct InboundLock {
     destination_deposit_id: [u8; 16],
     amount_msats: u64,
     fee_msats: u64,
-    hash: [u8; 32], // extracted from completion_script "sha256(<hex>)"
+    /// Route-lookup key for matching against pending_routes. HTLC: the lock's
+    /// `sha256(H)` hash. PTLC: `sha256(P_b)` for the lock's `pointlock(P_b)`.
+    /// Display code that wants the user-visible "what was locked" should
+    /// inspect `lock_kind` instead.
+    hash: [u8; 32],
+    /// The actual lock material — drives Leg 2 completion_script construction
+    /// and Leg 1 witness transformation.
+    lock_kind: LockKind,
     timeout_height: u32,
     detected_at: Instant,
 }
@@ -98,7 +151,15 @@ enum Route {
         outbound_deposit_id_hex: String,
         dest_deposit_id_hex: String,
         outbound_transfer_id: Option<[u8; 32]>,
-        preimage: Option<[u8; 32]>,
+        /// Witness revealed on the outbound (Leg 2) claim. Used to satisfy
+        /// the inbound (Leg 1) lock — directly for HTLC, transformed by
+        /// `s + t` for PTLC.
+        witness: Option<WitnessMaterial>,
+        /// PTLC-only: the courier's blinding scalar t and the route's P,
+        /// captured from the pending route at inbound-match time. The witness
+        /// handler reads `blinding_t` to tweak Leg 2's revealed `s` into the
+        /// Leg 1 claim scalar `s + t`. None for HTLC routes.
+        ptlc: Option<PtlcRouteState>,
         status: RouteStatus,
     },
     Lightning {
@@ -143,7 +204,10 @@ impl Route {
                 status,
                 ..
             } => RouteSnapshot {
-                kind: "cross_ledger".into(),
+                kind: match inbound.lock_kind {
+                    LockKind::Htlc { .. } => "cross_ledger_htlc".into(),
+                    LockKind::Ptlc { .. } => "cross_ledger_ptlc".into(),
+                },
                 status: status.clone(),
                 inbound_ledger: inbound.ledger_id[..16].to_string(),
                 inbound_transfer_id: hex::encode(inbound.transfer_id),
@@ -186,10 +250,26 @@ struct Config {
     api_port: u16,
 }
 
+/// PTLC-specific state the courier remembers from a route request — the
+/// wallet's payment point `P` and the courier's chosen blinding scalar `t`
+/// (kept secret; G·t was disclosed to the wallet in the route response).
+#[derive(Debug, Clone)]
+struct PtlcRouteState {
+    /// Sender's payment point P = G·s (33 bytes compressed). Used to build
+    /// Leg 2's `pointlock(P)` and to verify the inbound Leg 1's `P_b`
+    /// equals `P + G·t`.
+    point_p: [u8; 33],
+    /// Courier's blinding scalar t (32 bytes). Never exposed; added to the
+    /// revealed Leg 2 scalar `s` to produce the Leg 1 claim scalar `s + t`.
+    blinding_t: [u8; 32],
+}
+
 /// A pending route request from a wallet (before the inbound lock arrives).
 #[derive(Debug, Clone)]
 struct PendingRoute {
-    /// Hash the wallet will use in the transfer_lock
+    /// Route-lookup key: HTLC = hash; PTLC = sha256(P_b).
+    /// Inbound locks find their pending route by hashing the lock's material
+    /// the same way (see [`lock_kind_route_key`]).
     hash: [u8; 32],
     /// Where the agent should forward funds on the outbound ledger
     dest_deposit_id: [u8; 16],
@@ -197,6 +277,8 @@ struct PendingRoute {
     dest_ledger_id: String,
     /// Amount the wallet is sending (inbound)
     amount_msats: u64,
+    /// PTLC bookkeeping when the route is point-locked; None for HTLC.
+    ptlc: Option<PtlcRouteState>,
     /// When this request was created (for expiry)
     created_at: Instant,
 }
@@ -476,11 +558,13 @@ impl AgentTransport {
 enum UpdateEvent {
     /// A TransferLock where destination is one of our deposits
     InboundLock(InboundLock),
-    /// A TransferComplete for a transfer we're tracking (preimage revealed)
-    PreimageRevealed {
+    /// A TransferComplete for a transfer we're tracking. Carries whichever
+    /// witness material the lock used — preimage (HTLC) or scalar (PTLC).
+    /// The downstream handler matches the route's lock_kind to interpret it.
+    WitnessRevealed {
         ledger_id: String,
         transfer_id: [u8; 32],
-        preimage: [u8; 32],
+        material: WitnessMaterial,
     },
     /// A route request from a wallet (via Nostr)
     RouteRequest {
@@ -538,8 +622,11 @@ fn decode_update_event(event: &Event, our_deposit_ids: &[String]) -> Option<Upda
                 return None;
             }
 
-            // Extract hash from completion_script: "sha256(<64hex>)"
-            let hash = extract_hash_from_script(&completion_script)?;
+            // Extract the lock kind: HTLC has `sha256(<64hex>)`, PTLC has
+            // `pointlock(<66hex>)`. Locks with any other shape are not for
+            // this courier — return None and let them flow through.
+            let lock_kind = extract_lock_kind_from_script(&completion_script)?;
+            let hash = lock_kind_route_key(&lock_kind);
 
             Some(UpdateEvent::InboundLock(InboundLock {
                 ledger_id,
@@ -549,6 +636,7 @@ fn decode_update_event(event: &Event, our_deposit_ids: &[String]) -> Option<Upda
                 amount_msats: amount,
                 fee_msats: fee,
                 hash,
+                lock_kind,
                 timeout_height,
                 detected_at: Instant::now(),
             }))
@@ -557,34 +645,57 @@ fn decode_update_event(event: &Event, our_deposit_ids: &[String]) -> Option<Upda
             transfer_id,
             script_witness,
         } => {
-            // Extract preimage from witness stack[0]
-            let preimage_bytes = script_witness.stack.first()?;
-            if preimage_bytes.len() != 32 {
+            // Witness stack[0] is 32 bytes for both HTLC preimage and PTLC
+            // scalar — same shape on the wire, different downstream meaning.
+            // We can't tell which it is at decode time without consulting the
+            // original lock's completion_script, which we don't have here.
+            // Default to Preimage; the route-handler below disambiguates by
+            // matching against the route's recorded lock_kind.
+            let bytes = script_witness.stack.first()?;
+            if bytes.len() != 32 {
                 return None;
             }
-            let mut preimage = [0u8; 32];
-            preimage.copy_from_slice(preimage_bytes);
+            let mut buf = [0u8; 32];
+            buf.copy_from_slice(bytes);
 
-            Some(UpdateEvent::PreimageRevealed {
+            Some(UpdateEvent::WitnessRevealed {
                 ledger_id,
                 transfer_id,
-                preimage,
+                material: WitnessMaterial::Preimage(buf),
             })
         }
         _ => None,
     }
 }
 
-fn extract_hash_from_script(script: &str) -> Option<[u8; 32]> {
-    // "sha256(abcdef...)" → parse the hex inside parens
-    let inner = script.strip_prefix("sha256(")?.strip_suffix(')')?;
-    let bytes = hex::decode(inner).ok()?;
-    if bytes.len() != 32 {
-        return None;
+fn extract_lock_kind_from_script(script: &str) -> Option<LockKind> {
+    // "sha256(abcdef...)" → HTLC; "pointlock(abcdef...)" → PTLC.
+    if let Some(inner) = script.strip_prefix("sha256(").and_then(|s| s.strip_suffix(')')) {
+        let bytes = hex::decode(inner).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&bytes);
+        return Some(LockKind::Htlc { hash });
     }
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&bytes);
-    Some(hash)
+    if let Some(inner) = script
+        .strip_prefix("pointlock(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        let bytes = hex::decode(inner).ok()?;
+        if bytes.len() != 33 {
+            return None;
+        }
+        // Sanity-check: must be a valid compressed secp point. A pointlock
+        // descriptor with a bogus key would be rejected at admission anyway,
+        // but checking here keeps malformed routes out of our pending table.
+        bitcoin::secp256k1::PublicKey::from_slice(&bytes).ok()?;
+        let mut point = [0u8; 33];
+        point.copy_from_slice(&bytes);
+        return Some(LockKind::Ptlc { point_p_b: point });
+    }
+    None
 }
 
 // ─── Key Derivation (same as transfer-simulator) ────────────────────────────
@@ -815,9 +926,16 @@ async fn publish_agent_advertisement(
 
     let agent_pubkey = keys.public_key().to_hex();
 
+    // The courier binary supports both htlc_routing and ptlc_routing as
+    // courier-side capabilities. Per-hop operator capability for `pointlock`
+    // is the wallet's responsibility to verify against Kind 39100 ads
+    // (DEP-04 §"Capabilities"). A `services` list in content lets newer
+    // wallets discover the full set in one read; the legacy `service` field
+    // remains for back-compat with wallets that only look for the string.
     let content = serde_json::json!({
         "agent_pubkey": agent_pubkey,
         "service": "htlc_routing",
+        "services": ["htlc_routing", "ptlc_routing"],
         "ledgers": ledger_entries,
         "network": network,
     });
@@ -851,6 +969,7 @@ async fn publish_agent_advertisement(
             [&agent_pubkey],
         ))
         .tag(Tag::custom(TagKind::custom("service"), ["htlc_routing"]))
+        .tag(Tag::custom(TagKind::custom("service"), ["ptlc_routing"]))
         .tag(Tag::custom(TagKind::SingleLetter(TAG_SEQUENCE), [network]));
 
     let signed = event
@@ -879,6 +998,19 @@ async fn publish_agent_advertisement(
 
 // ─── Transfer Execution ─────────────────────────────────────────────────────
 
+/// Build the Leg 2 completion_script the courier locks against. For HTLC,
+/// reuses the same `sha256(H)` the wallet committed to on Leg 1 — the
+/// receiver claims by revealing the preimage. For PTLC, uses `pointlock(P)`
+/// where P is the *unblinded* sender point; the wallet's Leg 1 used
+/// `pointlock(P + T)`, so the two scripts publish unlinked points (the
+/// privacy property the spec promises).
+fn leg2_completion_script(out_kind: &LockKind) -> String {
+    match out_kind {
+        LockKind::Htlc { hash } => format!("sha256({})", hex::encode(hash)),
+        LockKind::Ptlc { point_p_b } => format!("pointlock({})", hex::encode(point_p_b)),
+    }
+}
+
 async fn execute_transfer_lock(
     transport: &AgentTransport,
     secp: &Secp256k1<secp256k1::All>,
@@ -886,7 +1018,7 @@ async fn execute_transfer_lock(
     dest_deposit_id: &[u8; 16],
     amount_msats: u64,
     fee_msats: u64,
-    hash: &[u8; 32],
+    out_kind: &LockKind,
     timeout_height: u32,
 ) -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
     let mut rng = OsRng;
@@ -895,7 +1027,7 @@ async fn execute_transfer_lock(
     let mut transfer_id = [0u8; 32];
     rng.fill_bytes(&mut transfer_id);
 
-    let completion_script = format!("sha256({})", hex::encode(hash));
+    let completion_script = leg2_completion_script(out_kind);
 
     let op_nonce = deposits_core::signing::fresh_op_nonce();
     let op_expiry = u32::MAX; // TODO: tighter window via chain_tip + margin
@@ -956,12 +1088,18 @@ async fn execute_transfer_complete(
     transport: &AgentTransport,
     ledger_id: &str,
     transfer_id: &[u8; 32],
-    preimage: &[u8; 32],
+    material: &WitnessMaterial,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let params = serde_json::json!({
-        "transfer_id": hex::encode(transfer_id),
-        "preimage": hex::encode(preimage),
-    });
+    let params = match material {
+        WitnessMaterial::Preimage(p) => serde_json::json!({
+            "transfer_id": hex::encode(transfer_id),
+            "preimage": hex::encode(p),
+        }),
+        WitnessMaterial::Scalar(s) => serde_json::json!({
+            "transfer_id": hex::encode(transfer_id),
+            "scalar": hex::encode(s),
+        }),
+    };
 
     let (_, rx) = transport
         .send_request(ledger_id, "transfer_complete", params)
@@ -1406,6 +1544,7 @@ fn handle_request_route(request: &str, state: &SharedState) -> (&'static str, St
                 dest_deposit_id,
                 dest_ledger_id: dest_ledger,
                 amount_msats,
+                ptlc: None, // HTTP/REST route is HTLC-only; PTLC routes go through process_route_request
                 created_at: Instant::now(),
             },
         );
@@ -1874,9 +2013,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &out_dep.ledger_id[..16],
                     );
 
-                    // Look up pending route request by hash for the destination deposit_id.
-                    // Wallet calls POST /request-route before locking, which stores
-                    // the destination info keyed by hash.
+                    // Look up the pending route by route_key. Wallet POSTed
+                    // /request-route before locking; that call stored the
+                    // destination info keyed by sha256(P_b) (PTLC) or hash (HTLC).
                     let pending = shared.pending_routes.lock().unwrap().remove(&lock.hash);
                     let dest_on_outbound = if let Some(pr) = &pending {
                         eprintln!(
@@ -1889,13 +2028,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         lock.source_deposit_id
                     };
 
+                    // For PTLC, the Leg 2 lock uses `pointlock(P)` — the
+                    // *unblinded* sender point — which only the route's
+                    // pending state knows. Without a matched pending route,
+                    // we can't construct Leg 2; the inbound lock is left to
+                    // time out (no funds are at risk yet — the wallet still
+                    // controls `s`). The HTLC fallback works without pending
+                    // state because both legs share the same hash, which we
+                    // already extracted from the inbound script.
+                    let out_kind: LockKind = match &lock.lock_kind {
+                        LockKind::Htlc { hash } => LockKind::Htlc { hash: *hash },
+                        LockKind::Ptlc { point_p_b } => {
+                            let Some(ref pr) = pending else {
+                                eprintln!(
+                                    "  [SKIP] PTLC inbound with no matching pending route — \
+                                     cannot construct Leg 2 (P unknown)"
+                                );
+                                continue;
+                            };
+                            let Some(ref ps) = pr.ptlc else {
+                                eprintln!(
+                                    "  [SKIP] PTLC inbound matched an HTLC pending route — \
+                                     wallet/courier disagree on lock_type"
+                                );
+                                continue;
+                            };
+                            // Sanity check: the inbound P_b MUST equal P + T,
+                            // else the wallet built the lock against different
+                            // route state and Leg 1 won't be claimable with
+                            // the t we picked. Treat mismatch as a routing
+                            // error rather than locking Leg 2 against state
+                            // we can't recover from.
+                            let secp_v = bitcoin::secp256k1::Secp256k1::new();
+                            let p = match bitcoin::secp256k1::PublicKey::from_slice(&ps.point_p) {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    eprintln!("  [SKIP] stored P is not a valid point");
+                                    continue;
+                                }
+                            };
+                            let t = match bitcoin::secp256k1::SecretKey::from_slice(&ps.blinding_t) {
+                                Ok(t) => t,
+                                Err(_) => {
+                                    eprintln!("  [SKIP] stored t is not a valid scalar");
+                                    continue;
+                                }
+                            };
+                            let expected_pb = match p.combine(&t.public_key(&secp_v)) {
+                                Ok(pb) => pb,
+                                Err(_) => {
+                                    eprintln!("  [SKIP] P + T degenerate");
+                                    continue;
+                                }
+                            };
+                            if expected_pb.serialize() != *point_p_b {
+                                eprintln!(
+                                    "  [SKIP] inbound P_b does not match P + T for this route"
+                                );
+                                continue;
+                            }
+                            // Leg 2 locks against P (the unblinded sender point).
+                            LockKind::Ptlc { point_p_b: ps.point_p }
+                        }
+                    };
+
                     let transport_c = transport.clone();
                     let routes_c = routes.clone();
                     let stats_c = stats.clone();
-                    let hash = lock.hash;
                     let _transfer_id_inbound = lock.transfer_id;
                     let _inbound_ledger = lock.ledger_id.clone();
                     let secp_c = secp.clone();
+                    let out_kind_for_spawn = out_kind.clone();
+                    // Capture the PTLC route state so the witness handler can
+                    // tweak Leg 2's revealed `s` into Leg 1's `s + t`. None
+                    // for HTLC. We removed the pending route from the table
+                    // above, so this is the only place this state survives.
+                    let route_ptlc = pending.as_ref().and_then(|p| p.ptlc.clone());
 
                     tokio::spawn(async move {
                         match execute_transfer_lock(
@@ -1905,7 +2113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &dest_on_outbound,
                             forward_amount,
                             transfer_fee,
-                            &hash,
+                            &out_kind_for_spawn,
                             outbound_timeout,
                         )
                         .await
@@ -1922,7 +2130,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     outbound_deposit_id_hex: out_dep.deposit_id_hex.clone(),
                                     dest_deposit_id_hex: hex::encode(dest_on_outbound),
                                     outbound_transfer_id: Some(outbound_tid),
-                                    preimage: None,
+                                    witness: None,
+                                    ptlc: route_ptlc,
                                     status: RouteStatus::OutboundLocked,
                                 });
                                 stats_c
@@ -1944,13 +2153,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            UpdateEvent::PreimageRevealed {
+            UpdateEvent::WitnessRevealed {
                 ledger_id,
                 transfer_id,
-                preimage,
+                material,
             } => {
                 eprintln!(
-                    "[PREIMAGE] transfer {}... on ledger {}...",
+                    "[WITNESS] transfer {}... on ledger {}...",
                     hex::encode(&transfer_id[..8]),
                     &ledger_id[..16],
                 );
@@ -1970,15 +2179,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(Route::CrossLedger {
                     inbound,
                     status,
-                    preimage: ref mut p,
+                    witness: ref mut w,
+                    ptlc: ref route_ptlc,
                     ..
                 }) = route
                 {
-                    *p = Some(preimage);
+                    // Reinterpret the 32-byte revealed value based on the
+                    // inbound lock's kind. The decoder always emits Preimage
+                    // (it can't disambiguate at decode time); for PTLC we
+                    // treat the bytes as a scalar and add the courier's
+                    // blinding `t` to produce the Leg 1 claim scalar `s + t`.
+                    // For HTLC we pass the bytes through as a preimage.
+                    let raw = match material {
+                        WitnessMaterial::Preimage(b) | WitnessMaterial::Scalar(b) => b,
+                    };
+                    let inbound_material = match &inbound.lock_kind {
+                        LockKind::Htlc { .. } => WitnessMaterial::Preimage(raw),
+                        LockKind::Ptlc { .. } => {
+                            // PTLC routes carry their blinding scalar t on
+                            // Route::CrossLedger.ptlc (populated at inbound
+                            // match time from the pending route). Missing it
+                            // here would be a routing bug — the inbound lock
+                            // matched a PTLC inbound kind but the Route was
+                            // constructed without state.
+                            let Some(ps) = route_ptlc else {
+                                eprintln!(
+                                    "  [BUG] PTLC route missing ptlc state — cannot claim Leg 1"
+                                );
+                                drop(routes_guard);
+                                continue;
+                            };
+                            // s + t mod n via SecretKey::add_tweak. The tweak
+                            // is `t` interpreted as a 32-byte scalar (the same
+                            // format we stored in PtlcRouteState.blinding_t).
+                            let s_key = match bitcoin::secp256k1::SecretKey::from_slice(&raw) {
+                                Ok(k) => k,
+                                Err(e) => {
+                                    eprintln!("  [SKIP] revealed scalar invalid: {}", e);
+                                    drop(routes_guard);
+                                    continue;
+                                }
+                            };
+                            let tweak = bitcoin::secp256k1::Scalar::from_be_bytes(ps.blinding_t)
+                                .expect(
+                                    "blinding_t was stored from a valid SecretKey, so its bytes \
+                                     are in range",
+                                );
+                            let sum = match s_key.add_tweak(&tweak) {
+                                Ok(k) => k,
+                                Err(e) => {
+                                    eprintln!("  [SKIP] s + t failed (degenerate): {}", e);
+                                    drop(routes_guard);
+                                    continue;
+                                }
+                            };
+                            WitnessMaterial::Scalar(sum.secret_bytes())
+                        }
+                    };
+                    *w = Some(inbound_material);
                     *status = RouteStatus::Completing;
                     let inbound_ledger = inbound.ledger_id.clone();
                     let inbound_tid = inbound.transfer_id;
-                    let preimage_copy = preimage;
                     let transport_c = transport.clone();
                     let stats_c = stats.clone();
 
@@ -1990,7 +2251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &transport_c,
                             &inbound_ledger,
                             &inbound_tid,
-                            &preimage_copy,
+                            &inbound_material,
                         )
                         .await
                         {
@@ -2061,18 +2322,7 @@ fn process_route_request(params: &serde_json::Value, state: &SharedState) -> ser
         Some(a) if a > 0 => a,
         _ => return serde_json::json!({"success": false, "error": "missing or zero amount_msats"}),
     };
-    let hash_hex = match params["hash"].as_str() {
-        Some(s) if s.len() == 64 => s.to_string(),
-        _ => return serde_json::json!({"success": false, "error": "hash must be 64 hex chars"}),
-    };
-    let hash: [u8; 32] = match hex::decode(&hash_hex) {
-        Ok(b) if b.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&b);
-            arr
-        }
-        _ => return serde_json::json!({"success": false, "error": "invalid hash"}),
-    };
+
     let dest_deposit_id: [u8; 16] = match hex::decode(&dest_deposit_id_hex) {
         Ok(b) if b.len() == 16 => {
             let mut arr = [0u8; 16];
@@ -2080,6 +2330,108 @@ fn process_route_request(params: &serde_json::Value, state: &SharedState) -> ser
             arr
         }
         _ => return serde_json::json!({"success": false, "error": "invalid dest_deposit_id"}),
+    };
+
+    // Branch on lock_type. Default is HTLC if the field is absent — back-compat
+    // with wallets that haven't been updated.
+    let lock_type = params["lock_type"].as_str().unwrap_or("htlc");
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let mut rng = OsRng;
+
+    // Parse lock material (hash for HTLC, point P for PTLC) and build the
+    // route_key + PTLC bookkeeping the inbound-lock handler will later look up.
+    let (route_key, ptlc_state, response_extras): (
+        [u8; 32],
+        Option<PtlcRouteState>,
+        serde_json::Map<String, serde_json::Value>,
+    ) = match lock_type {
+        "htlc" => {
+            let hash_hex = match params["hash"].as_str() {
+                Some(s) if s.len() == 64 => s.to_string(),
+                _ => return serde_json::json!({"success": false, "error": "hash must be 64 hex chars"}),
+            };
+            let hash: [u8; 32] = match hex::decode(&hash_hex) {
+                Ok(b) if b.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&b);
+                    arr
+                }
+                _ => return serde_json::json!({"success": false, "error": "invalid hash"}),
+            };
+            let mut extras = serde_json::Map::new();
+            extras.insert("lock_type".to_string(), serde_json::Value::String("htlc".into()));
+            extras.insert("hash".to_string(), serde_json::Value::String(hash_hex));
+            (hash, None, extras)
+        }
+        "ptlc" => {
+            let point_p_hex = match params["point_p"].as_str() {
+                Some(s) if s.len() == 66 => s.to_string(),
+                _ => return serde_json::json!({"success": false, "error": "point_p must be 66 hex chars (33-byte compressed secp point)"}),
+            };
+            let point_p_bytes = match hex::decode(&point_p_hex) {
+                Ok(b) if b.len() == 33 => b,
+                _ => return serde_json::json!({"success": false, "error": "point_p not 33 bytes"}),
+            };
+            let point_p = match bitcoin::secp256k1::PublicKey::from_slice(&point_p_bytes) {
+                Ok(p) => p,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("point_p is not a valid compressed secp point: {}", e),
+                    })
+                }
+            };
+            let mut point_p_arr = [0u8; 33];
+            point_p_arr.copy_from_slice(&point_p_bytes);
+
+            // Pick the blinding scalar t. SecretKey::new rejects zero/oor and
+            // resamples internally — the returned scalar is in [1, n-1].
+            let t = bitcoin::secp256k1::SecretKey::new(&mut rng);
+            let t_point = t.public_key(&secp);
+            let blinding_point_hex = hex::encode(t_point.serialize());
+
+            // Compute P_b = P + T locally so we can key the pending route by
+            // sha256(P_b) and verify the inbound lock matches.
+            let p_b = match point_p.combine(&t_point) {
+                Ok(p) => p,
+                Err(e) => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("P + T failed (degenerate t?): {}", e),
+                    })
+                }
+            };
+            let lock_kind = LockKind::Ptlc {
+                point_p_b: {
+                    let mut a = [0u8; 33];
+                    a.copy_from_slice(&p_b.serialize());
+                    a
+                },
+            };
+            let route_key = lock_kind_route_key(&lock_kind);
+
+            let mut extras = serde_json::Map::new();
+            extras.insert("lock_type".to_string(), serde_json::Value::String("ptlc".into()));
+            extras.insert("point_p".to_string(), serde_json::Value::String(point_p_hex));
+            extras.insert(
+                "blinding_point".to_string(),
+                serde_json::Value::String(blinding_point_hex),
+            );
+            (
+                route_key,
+                Some(PtlcRouteState {
+                    point_p: point_p_arr,
+                    blinding_t: t.secret_bytes(),
+                }),
+                extras,
+            )
+        }
+        other => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!("unknown lock_type {:?} (expected \"htlc\" or \"ptlc\")", other),
+            });
+        }
     };
 
     // Validate agent has deposits on both ledgers
@@ -2119,33 +2471,47 @@ fn process_route_request(params: &serde_json::Value, state: &SharedState) -> ser
         let mut pending = state.pending_routes.lock().unwrap();
         pending.retain(|_, r| r.created_at.elapsed() < Duration::from_secs(600));
         pending.insert(
-            hash,
+            route_key,
             PendingRoute {
-                hash,
+                hash: route_key,
                 dest_deposit_id,
                 dest_ledger_id: dest_ledger,
                 amount_msats,
+                ptlc: ptlc_state,
                 created_at: Instant::now(),
             },
         );
     }
 
     eprintln!(
-        "  Route registered: {} → agent deposit {}, fee={}, forward={}",
+        "  Route registered ({}): {} → agent deposit {}, fee={}, forward={}",
+        lock_type,
         &source_ledger[..8],
         agent_in.deposit_id,
         total_fee,
         forward_amount
     );
 
+    let mut result = serde_json::Map::new();
+    result.insert(
+        "courier_deposit_id".to_string(),
+        serde_json::Value::String(agent_in.deposit_id.clone()),
+    );
+    result.insert(
+        "fee_msats".to_string(),
+        serde_json::Value::Number(total_fee.into()),
+    );
+    result.insert(
+        "forward_amount_msats".to_string(),
+        serde_json::Value::Number(forward_amount.into()),
+    );
+    for (k, v) in response_extras {
+        result.insert(k, v);
+    }
+
     serde_json::json!({
         "success": true,
-        "result": {
-            "courier_deposit_id": agent_in.deposit_id,
-            "hash": hash_hex,
-            "fee_msats": total_fee,
-            "forward_amount_msats": forward_amount,
-        }
+        "result": result,
     })
 }
 

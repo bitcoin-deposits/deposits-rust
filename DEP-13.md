@@ -58,7 +58,7 @@ Couriers advertise their services via NIP-33 replaceable events on the ledger re
 |---|---|---|
 | `d` | courier pubkey (hex) | Stable identifier for NIP-33 replacement |
 | `service` | `htlc_routing` | Hash-locked routing service (always present) |
-| `service` | `ptlc_routing` | Point-locked routing service (present iff every advertised ledger's operator advertises the `pointlock` capability in its Kind 39100 ad). May appear alongside `htlc_routing` as a second `service` tag. |
+| `service` | `ptlc_routing` | Point-locked routing service. Present when the courier's binary supports PTLC routing — a courier-side capability assertion independent of which operators it carries hops on. The wallet pre-flights per-hop operator support by checking each ledger's Kind 39100 `capabilities.obligations` for `pointlock` (DEP-04 §"Capabilities"); a route succeeds only when both the courier's `ptlc_routing` tag and both hop operators' `pointlock` capability are present. May appear alongside `htlc_routing` as a second `service` tag. |
 | `n` | network name | `bitcoin`, `testnet`, `signet`, or `regtest` |
 
 **Content** (JSON):
