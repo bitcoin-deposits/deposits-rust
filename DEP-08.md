@@ -40,13 +40,13 @@ The deposit starts with zero balance. Funds are added via on-chain offers, light
 
 ## Witness Verification
 
-All deposit operations are authorized by providing a `DescriptorWitness` — a stack of byte arrays that satisfies the deposit's miniscript descriptor against a message hash.
+All deposit operations are authorized by providing a `DescriptorWitness` — a keyed bundle of signatures, preimages, scalars, and attestations that discharges the deposit descriptor's proof obligations against the operation's canonical signing message (DEP-17).
 
-For `pk()` descriptors, the witness is a single 64-byte Schnorr signature. For more complex descriptors, the witness contains multiple signatures and/or preimages as required by the policy.
+For `pk()` descriptors, the witness is a single 64-byte Schnorr signature. Richer descriptors discharge multiple obligations: `hashlock` consumes a preimage, `pointlock` (DEP-16 §obligations, used by the PTLC courier pattern in DEP-13) consumes a 32-byte scalar `s` with `G·s == P`, `attest` consumes an oracle attestation. See DEP-16 §evaluation for the full evaluator semantics.
 
 Verification:
-1. If the descriptor is `pk(<hex>)`, fast path: verify the single Schnorr signature against the pubkey
-2. Otherwise, parse the descriptor as miniscript, extract keys, verify each signature in the witness stack
+1. If the descriptor is `pk(<hex>)`, fast path: verify the single Schnorr signature against the pubkey.
+2. Otherwise, evaluate the descriptor under DEP-16: each proof obligation is discharged by the witness entry under the appropriate key. Operators that haven't advertised a given obligation kind in their capability set refuse such descriptors at admission rather than at spend time.
 
 The message hash varies by operation:
 - **Transfer lock**: `transfer_lock_signing_message(nonce, src, dst, amount, fee, script, timeout)`
@@ -107,3 +107,5 @@ This allows wallet restoration from seed alone, without requiring a remote state
 - [DEP-09](DEP-09.md): Transfers (two-phase transfer protocol)
 - [DEP-10](DEP-10.md): Payment channels (on-chain and lightning funding)
 - [DEP-12](DEP-12.md): Certified delivery (escalation for unprocessed deposit operations)
+- [DEP-16](DEP-16.md): Descriptor language (the calculus deposit witnesses discharge)
+- [DEP-17](DEP-17.md): Canonical encodings (operation preimage, descriptor commitment, witness encoding)

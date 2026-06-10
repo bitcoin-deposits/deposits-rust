@@ -22,7 +22,7 @@ ledgers have a single active operator, but are cooperatively maintained by the m
 
 ## deposits
 
-a deposit is a stable account that can send and receive funds, controlled by miniscript. at opening a fee schedule is established, as well as whether receiving funds requires a wallet signed request. an operator must allow transfers between deposits on the same ledger as well as on-chain exits. they should allow deposits to pay lightning invoices
+a deposit is a stable account that can send and receive funds, controlled by a descriptor — the dep-16 calculus generalizes miniscript with state predicates, proof obligations like ptlc point-locks, and operation-type routing, so a single descriptor can express both spending conditions and policy guards in one language. at opening a fee schedule is established, as well as whether receiving funds requires a wallet signed request. an operator must allow transfers between deposits on the same ledger as well as on-chain exits. they should allow deposits to pay lightning invoices
 
 it is in the operator's discretion to create on-chain funding offers or lightning invoices on behalf of a deposit. if they do, these should be co-signed by a quorum member, and the wallet should verify this signature. offers and invoices are not part of the ledger, so it is the wallet's responsibility to verify signatures and retain them as evidence
 
@@ -32,7 +32,7 @@ transfers between deposits, on-chain, and through lightning have fees paid to th
 
 ## transfers
 
-the basic form of transfer is a two phased operation between two deposits on the same ledger: a deposit issues a request to send funds. if there are sufficient funds available, a lock on the funds with a spending condition is appended to the ledger. if the spending condition is fulfilled before a timeout, funds move from the sender to recipient minus the operator's fee. if the timeout is reached, the lock is released, minus a smaller operator fee. with miniscript spending conditions, this is sufficient to allow any deposit to provide bridges and liquidity services to other deposits on the same ledger
+the basic form of transfer is a two phased operation between two deposits on the same ledger: a deposit issues a request to send funds. if there are sufficient funds available, a lock on the funds with a spending condition is appended to the ledger. if the spending condition is fulfilled before a timeout, funds move from the sender to recipient minus the operator's fee. if the timeout is reached, the lock is released, minus a smaller operator fee. spending conditions are expressed in the dep-16 descriptor language, which is sufficient to allow any deposit to provide bridges and liquidity services to other deposits on the same ledger — including ptlc-based privacy-preserving courier hops
 
 ## lightning
 
@@ -114,4 +114,4 @@ one straightforward attack is to form islands of colluding operators. after buil
 
 ## conclusion
 
-we propose a collateral network that requires collusion to steal, but collusion increases the collateral at risk faster than it increases the value to be stolen. each operator's utxo contains both reserves and collateral, controlled by their quorum. multiple ledgers with independent quorums make simultaneous compromise exponentially unlikely. we use this network to secure cryptographic ledgers backed by full reserves. these ledgers service accounts on behalf of offline wallets in exchange for pre-negotiated fees. ledger primitives support miniscript spending conditions sufficient for basic smart contracts. the network scales close to linearly, allowing a large network to provide billions of wallets and transaction volume in excess of traditional payment networks
+we propose a collateral network that requires collusion to steal, but collusion increases the collateral at risk faster than it increases the value to be stolen. each operator's utxo contains both reserves and collateral, controlled by their quorum. multiple ledgers with independent quorums make simultaneous compromise exponentially unlikely. we use this network to secure cryptographic ledgers backed by full reserves. these ledgers service accounts on behalf of offline wallets in exchange for pre-negotiated fees. ledger primitives support a descriptor language (dep-16) that generalizes miniscript with state predicates, point-locks for ptlc-based privacy, and operation-type routing — sufficient for the smart-contract patterns this network needs. the network scales close to linearly, allowing a large network to provide billions of wallets and transaction volume in excess of traditional payment networks

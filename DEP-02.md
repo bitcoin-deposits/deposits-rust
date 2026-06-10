@@ -120,7 +120,7 @@ The operator signs after collecting the required majority of co-signatures. This
 
 ## Operations
 
-The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte discriminant. Deposit operations authorize via miniscript descriptor witnesses -- `pk()` is the common case but any valid miniscript is supported.
+The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte discriminant. Deposit operations authorize via the dep-16 descriptor language — `pk()` is the common case, but the calculus generalizes miniscript with state predicates, proof obligations, and operation-type routing. See DEP-16 for the full grammar and admission rules; DEP-17 for the canonical encodings the fraud-proof system replays against.
 
 ### Discriminants
 
@@ -333,6 +333,8 @@ Each inner op is encoded as a standalone TLV-LedgerOperation; the outer Batch's 
 - [DEP-08](DEP-08.md): Deposits
 - [DEP-09](DEP-09.md): Transfers
 - [DEP-10](DEP-10.md): Payment channels
+- [DEP-16](DEP-16.md): Self-modifying ledger-aware descriptors (the calculus deposit operations authorize against)
+- [DEP-17](DEP-17.md): Canonical encodings (operation preimage, descriptor commitment, witness encoding)
 
 ## References
 

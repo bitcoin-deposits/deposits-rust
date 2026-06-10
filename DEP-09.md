@@ -45,14 +45,15 @@ On failure: the lock on the source (`amount + fee`) is released; the source reco
 
 ## Completion Scripts
 
-The `completion_script` is a miniscript policy that determines how the transfer can be completed. Common patterns:
+The `completion_script` is a dep-16 descriptor (see DEP-16 for the full language) that determines how the transfer can be completed. Common patterns:
 
 - **HTLC**: `sha256(H)` — recipient provides the preimage. This is the basis for cross-ledger and lightning-compatible transfers.
-- **Signature**: `pk(recipient_key)` — recipient signs the transfer_id
-- **Timelock**: `and(pk(key), after(N))` — key + minimum block height
-- **Multi-party**: `multi(2, key1, key2)` — requires multiple signers
+- **PTLC**: `pointlock(P)` — recipient provides a scalar `s` with `G·s == P`. The privacy-preserving variant used by the courier protocol's PTLC pattern (DEP-13 §"Courier PTLC pattern"). Requires the operator to advertise `pointlock` in their capability set (DEP-16 §capability) — operators that don't refuse such descriptors at admission.
+- **Signature**: `pk(recipient_key)` — recipient signs the transfer_id.
+- **Timelock**: `and(pk(key), after(N))` — key + minimum block height.
+- **Multi-party**: `multi(2, key1, key2)` — requires multiple signers.
 
-Any valid miniscript is supported. The witness stack must satisfy the policy.
+Any descriptor admitted by the operator's capability set is supported. The witness must discharge every proof obligation in the script.
 
 ## Fee Validation
 
@@ -90,4 +91,5 @@ The `timeout_height` must not be more than `max_transfer_timeout_blocks` beyond 
 - [DEP-02](DEP-02.md): Wire format (TransferLock, TransferComplete, TransferFail fields)
 - [DEP-07](DEP-07.md): Fee schedules (TransferFeeSchedule)
 - [DEP-08](DEP-08.md): Deposits (descriptor witnesses, receive_requires_sig)
-- [DEP-13](DEP-13.md): Couriers (cross-ledger transfers via HTLC intermediaries)
+- [DEP-13](DEP-13.md): Couriers (cross-ledger transfers via HTLC or PTLC intermediaries)
+- [DEP-16](DEP-16.md): Descriptor language (the grammar `completion_script` is written in)
