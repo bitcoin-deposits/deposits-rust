@@ -214,6 +214,27 @@ nothing in dep-16's evaluation algorithm changes; this dep only removes the "tre
 - **exposing nonce/expiry to the evaluator.** deferred; noted above.
 - **canonical encoding of attestation payloads — deferred to a substantive separate dep, not a footnote.** this dep encodes the `schema` (its registered kind id and payload), but not the attestation itself. an attestation is a signed oracle message, and its canonical encoding determines what the oracle signs and therefore what `attest(K, schema)` verifies against; it carries its own canonicalization surface — the oracle message format, the rule pairing a schema with a conforming payload, and how a multi-field schema's fields combine into the signed message. that is the subject of the attestation/oracle dep; until it lands, `attest` is specified here only down to the schema, and the dep-16 reference implementation treats attestation discharge as attestor presence.
 
+## conformance vectors
+
+a corpus of canonical-byte test vectors lives under `third_party/rust-miniscript/tests/calculus_vectors/`, one json file per scenario. each vector carries the byte streams `encode_descriptor`, `operation_preimage`, `encode_snapshot`, and `encode_witness` produce, together with the expected `evaluate()` verdict:
+
+```jsonc
+{
+  "name": "...",
+  "description": "...",
+  "descriptor_text": "...",        // informational
+  "descriptor_hex": "...",         // canonical encoding (this dep)
+  "operation_hex": "...",          // canonical preimage (this dep)
+  "snapshot_hex": "...",
+  "witness_hex": "...",
+  "expected_verdict": true
+}
+```
+
+the replay harness (`tests/calculus_conformance.rs::replay_all_vectors`) decodes each vector, runs `evaluate()` under `EcdsaVerifier`, and asserts the verdict matches. an independent implementation in any language can consume the same json files and confirm bit-for-bit agreement — this is the substrate that closes the "no second implementation" verification gap.
+
+the starter corpus covers `pk` (valid + wrong-signer), `hashlock` satisfied, and `pointlock` satisfied. extending the corpus is purely additive: new scenarios are added to the generator (`tests/calculus_conformance.rs::generate_vectors`, gated `#[ignore]`), the generator is re-run to refresh the on-disk json, and the replay test picks them up automatically.
+
 ## summary
 
-dep-17 fixes the four encodings dep-16 leaves opaque — values, descriptors, operations, and state snapshots — under one set of principles: canonical (decoders reject non-canonical input), tagged and length-prefixed, domain-separated via BIP-340 tagged hashes, versioned, and fixed-width-integer. operations encode to a signing preimage that binds the deposit, type, arguments, nonce, and expiry; descriptors encode to the bytes that ast operations compare and the commitment hashes; snapshots encode to the bytes state predicates read. with these fixed, dep-16's determinism and signature-binding claims become unconditional, and the single fraud-proof shape replays identically across implementations.
+dep-17 fixes the four encodings dep-16 leaves opaque — values, descriptors, operations, and state snapshots — under one set of principles: canonical (decoders reject non-canonical input), tagged and length-prefixed, domain-separated via BIP-340 tagged hashes, versioned, and fixed-width-integer. operations encode to a signing preimage that binds the deposit, type, arguments, nonce, and expiry; descriptors encode to the bytes that ast operations compare and the commitment hashes; snapshots encode to the bytes state predicates read. with these fixed, dep-16's determinism and signature-binding claims become unconditional, and the single fraud-proof shape replays identically across implementations — verifiable against the conformance corpus described above.
