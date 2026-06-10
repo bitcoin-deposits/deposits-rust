@@ -159,8 +159,9 @@ A guarantee matrix is a list of `(regime, amount-range, shape, honesty, time-pro
 |---|---|
 | `onchain_credit` | Wallet sends bitcoin on-chain; operator credits the deposit after confirmations. |
 | `onchain_withdraw` | Wallet asks the operator to broadcast a withdrawal to a wallet-controlled address. |
-| `invoice_receive` | Wallet receives a Lightning payment via an operator-issued invoice. |
-| `invoice_pay` | Wallet pays a Lightning invoice via the operator's LN node. |
+| `invoice_receive` | Wallet receives a Lightning payment via the HTLC-bridge model (DEP-10 §Receive): wallet picks the preimage, operator issues a hold invoice for the wallet's hash, the on-ledger `TransferLock` is structurally bound to the upstream HTLC. Always `shape: settlement_atomic`, `honesty: operator_only` — the operator cannot claim upstream without the wallet revealing the preimage in a cosigned ledger record. |
+| `invoice_receive_legacy_deterrence` | Wallet receives a Lightning payment via the operator-held-preimage path (DEP-10 §"Offline receive"): operator's LN node holds the preimage and commits `InvoiceCredit` unilaterally. `shape: deterrence`, `honesty: operator_only`. Provided for offline-receive use cases (LNURL gateways, permanent-cold-storage deposits) where the wallet cannot come online during the HTLC window. Wallets seeking the atomic path MUST refuse operators that only advertise this row. |
+| `invoice_pay` | Wallet pays a Lightning invoice via the operator's LN node, using the pre-flight quote model (DEP-10 §Pay). The wallet's `InvoiceLock` carries the operator's signed quote, cosigners verify the signature and that the locked amount equals the quote total. `shape: settlement_atomic` for the locking step; actual payment outcome still subject to LN reachability (`InvoiceFail` if no route fits the cap). |
 | `transfer_internal` | Transfer between two deposits on the same ledger. |
 | `transfer_courier` | Cross-ledger transfer via an HTLC/PTLC courier. |
 
