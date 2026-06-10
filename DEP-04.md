@@ -34,6 +34,7 @@ Wallets connect to both: operator relays for requests, ledger relays for reading
 | 39100 | Advertisement | Replaceable | deposits-node | Operator terms, fees, reserves (JSON, NIP-33, `d`=ledger ID) |
 | 39101 | Price Oracle | Replaceable | deposits-node | BTC/USD price (JSON, NIP-33, `d`=`btcusd`) |
 | 39102 | Courier Advertisement | Replaceable | deposits-node | Cross-ledger routing capacity and fees (JSON, NIP-33, see DEP-13) |
+| 39103 | Bridge Advertisement | Replaceable | any deposit holder with an LN node | Lightning ↔ ledger bridging capacity and fees (JSON, NIP-33, see DEP-10) |
 
 ### Identity Verification (wallet ↔ lightning-verifier ↔ operator)
 
@@ -159,9 +160,9 @@ A guarantee matrix is a list of `(regime, amount-range, shape, honesty, time-pro
 |---|---|
 | `onchain_credit` | Wallet sends bitcoin on-chain; operator credits the deposit after confirmations. |
 | `onchain_withdraw` | Wallet asks the operator to broadcast a withdrawal to a wallet-controlled address. |
-| `invoice_receive` | Wallet receives a Lightning payment via the HTLC-bridge model (DEP-10 §Receive): wallet picks the preimage, operator issues a hold invoice for the wallet's hash, the on-ledger `TransferLock` is structurally bound to the upstream HTLC. Always `shape: settlement_atomic`, `honesty: operator_only` — the operator cannot claim upstream without the wallet revealing the preimage in a cosigned ledger record. |
+| `invoice_receive` | Wallet receives a Lightning payment via the HTLC-bridge model (DEP-10 §Receive). The wallet picks any bridge offering this service (the operator itself, or any third-party deposit holder with an LN node), generates the preimage, hands the bridge only the hash. The bridge issues a hold invoice; the on-ledger `TransferLock` is structurally bound to the upstream HTLC. Always `shape: settlement_atomic`, `honesty: bridge_only` — the bridge cannot claim upstream without revealing the preimage in a cosigned ledger record. The operator advertising this row asserts that their ledger supports the bridge mechanic (timeout-ordering cosigner rules, BOLT-11 correlation against cosigned invoice records); it does NOT mean the operator itself is the bridge. |
 | `invoice_receive_legacy_deterrence` | Wallet receives a Lightning payment via the operator-held-preimage path (DEP-10 §"Offline receive"): operator's LN node holds the preimage and commits `InvoiceCredit` unilaterally. `shape: deterrence`, `honesty: operator_only`. Provided for offline-receive use cases (LNURL gateways, permanent-cold-storage deposits) where the wallet cannot come online during the HTLC window. Wallets seeking the atomic path MUST refuse operators that only advertise this row. |
-| `invoice_pay` | Wallet pays a Lightning invoice via the operator's LN node, using the pre-flight quote model (DEP-10 §Pay). The wallet's `InvoiceLock` carries the operator's signed quote, cosigners verify the signature and that the locked amount equals the quote total. `shape: settlement_atomic` for the locking step; actual payment outcome still subject to LN reachability (`InvoiceFail` if no route fits the cap). |
+| `invoice_pay` | Wallet pays a Lightning invoice via a bridge (DEP-10 §Pay). The wallet locks the (invoice amount + bridge service fee) to the bridge's deposit via a standard `TransferLock`; the bridge pays the invoice via LDK and `TransferCompletes` revealing the preimage. `shape: settlement_atomic` for the locking step; actual payment outcome still subject to LN reachability (lock times out and refunds if the bridge fails to route). Bridges set their own service fees per invoice or per published schedule; this DEP-04 row asserts the operator's ledger supports the bridge mechanic, not that the operator itself runs a bridge. |
 | `transfer_internal` | Transfer between two deposits on the same ledger. |
 | `transfer_courier` | Cross-ledger transfer via an HTLC/PTLC courier. |
 
@@ -233,6 +234,45 @@ NIP-26 delegated event signing and the existing DEP-04 subkey-attestation patter
 ### Backwards compatibility
 
 Older wallets that don't read `delegate_pubkey` will treat the advertisement's event author as the operator's messaging identity. This works as long as the daemon's `self.keys` is the operator key (operator-key-for-everything mode). Once the daemon switches to delegate-key-for-Nostr (this commit's follow-up), the advertisement still authors as `operator_pubkey` (signed by signer), but Kind 9100 events author as `delegate_pubkey`. Older wallets filtering Kind 9100 by `author=operator_pubkey` will miss them and need to follow the delegation. Operators rolling forward should publish a transition advertisement with both keys' addresses available before flipping.
+
+## Bridge Advertisements (Kind 39103)
+
+Lightning ↔ ledger bridges advertise via NIP-33 replaceable events on the ledger relay, mirroring the courier advertisement pattern (Kind 39102). The `d` tag is the bridge's pubkey, enabling per-bridge replacement.
+
+```json
+{
+  "bridge_pubkey": "<hex>",
+  "network": "bitcoin",
+  "ledgers": [
+    {
+      "ledger_id": "<64 hex>",
+      "deposit_id": "<32 hex>",
+      "balance_msats": 500000000,
+      "lock_type": ["htlc", "ptlc"],
+      "receive": {
+        "fee_fixed_msats": 100,
+        "fee_rate_bps": 30,
+        "min_amount_msats": 10000,
+        "max_amount_msats": 100000000
+      },
+      "pay": {
+        "fee_fixed_msats": 200,
+        "fee_rate_bps": 50,
+        "quote_endpoint": "<optional Nostr DM action>"
+      }
+    }
+  ]
+}
+```
+
+- `ledgers` — one entry per ledger the bridge can service. The bridge holds a deposit on each.
+- `receive` — pricing for inbound bridging on that ledger (wallet receives via bridge's BOLT-11 → bridge's TransferLock). `fee_*` is the bridge's service margin, captured via the BOLT-11 spread; published as a flat schedule for amounts in `[min_amount_msats, max_amount_msats]`.
+- `pay` — pricing for outbound bridging on that ledger (wallet TransferLocks to bridge → bridge pays the BOLT-11). `fee_*` is the bridge's published baseline. If the bridge prefers per-invoice quoting (because routing variance is high), `quote_endpoint` names a Nostr-DM action wallets can hit to request a fresh quote per BOLT-11 — analogous to `request_route` for couriers (DEP-13).
+- `lock_type` — `htlc` always; `ptlc` only when both the bridge's deposit operator and the wallet's operator advertise the `pointlock` capability in Kind 39100. Wallets that need PTLC privacy MUST verify the capability on both ledgers before selecting a `ptlc`-advertising bridge.
+
+The protocol does NOT enforce that a bridge's published `receive`/`pay` schedule is honored — bridges are peer services, not protocol-attested ones. A bridge that publishes one price and quotes another loses business, but the wallet's only protocol-level recourse is the timeout-and-refund failure mode of any unanswered `TransferLock`. Wallets SHOULD prefer bridges with consistent published schedules over those that always per-invoice-quote (lower trust friction), and SHOULD aggregate reputation signals across multiple bridges per ledger.
+
+The cosigning quorum's role on bridge ops is structural (timeout-ordering, BOLT-11 correlation against cosigned invoice records, standard TransferLock conformance — see DEP-10 §"Bridge cosigner rules") — they do NOT verify the bridge's published prices against the lock, since prices are market-set and not part of the protocol fee surface.
 
 ## Price Oracle (Kind 39101)
 

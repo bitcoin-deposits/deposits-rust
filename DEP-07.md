@@ -57,72 +57,11 @@ The right shape for both `FeeStructure` and `TransferFeeSchedule` is:
 
 Both halves serve a structural purpose. Dropping the fixed component would require either subsidizing micropayments (operator unstable) or refusing them (defeats the use case). Keep both, keep `fixed_msats` low.
 
-## Lightning Bridge Fees
+### Bridge transfers
 
-The Lightning bridge (DEP-10 §Lightning) is the cross-domain HTLC connecting BOLT-11 payments to deposits-ledger TransferLocks/InvoiceLocks. Both directions have an operator-margin component and a Lightning-cost component, but the two compose differently and are advertised on separate schedules.
-
-### Inbound (receive) — `InvoiceReceiveFeeSchedule`
-
-The wallet asks for receive amount `X`. The operator publishes a BOLT-11 for `X + bridge_fee` and emits a `TransferLock` from its self-deposit with `amount = X` and `fee = bridge_fee`. The operator's self-deposit is debited by `X + bridge_fee`; the wallet's deposit receives `X`; `fees_accumulated` grows by `bridge_fee`. The operator's upstream LN claim collects the same `X + bridge_fee` from the payer, replenishing the self-deposit's outflow.
-
-Crucially, the bridge_fee flows through `fees_accumulated` — not around it — so quorum-member compensation (DEP-05) applies to bridge revenue the same way it applies to intra-ledger transfer revenue. Operators who wanted to bypass quorum compensation would have to publish a special "bridge fees stay with operator" carve-out, which the protocol explicitly does not allow.
-
-Schedule:
-
-- **fixed_msats**: per-op cost floor for the bridge (cosig coordination, validation, BOLT-11 hold-invoice liquidity tied up for the CLTV window)
-- **rate_bps**: proportional component covering operator capital cost and channel-rebalancing exposure
-
-Fee calculation (operator quotes, wallet inspects the BOLT-11 before sharing with payer):
-
-    bridge_fee = fixed_msats + (X * rate_bps / 10000)
-    bolt11_amount = X + bridge_fee
-
-Operators publish these on Kind 39100 as `invoice_receive_fee_fixed_msats` and `invoice_receive_fee_rate_bps`. Existing daemons that don't publish them advertise the legacy InvoiceCredit-based deterrence receive path only (DEP-10 §"Offline receive"), and wallets seeking HTLC-bridge receive MUST filter operators by the presence of these fields.
-
-The Lightning routing fee on the inbound side is paid by the **payer's** node, not the operator's — the operator is the terminal hop, so there's no routing-fee variance to bound. The `invoice_receive_fee_*` schedule is the operator's full take.
-
-**Self-deposit liquidity requirement.** The operator MUST maintain a self-deposit balance of at least `X + bridge_fee` per outstanding bridge receive. Without it the `TransferLock` would underflow and cosigners would refuse. Operators sizing self-deposit liquidity should follow the same drip/replenish patterns used for couriers (DEP-13).
-
-### Outbound (pay) — `InvoicePayFeeSchedule` + per-payment quote
-
-The outbound direction has two distinct cost components that the cosigning quorum can verify differently:
-
-1. **Operator margin** — declared on Kind 39100 as `invoice_pay_fee_fixed_msats` + `invoice_pay_fee_rate_bps`. This is the operator's profit floor for taking on the routing job. Cosigners can verify the operator's signed quote includes at least this margin against the invoice amount.
-2. **Max routing-fee buffer** — quoted per-payment by the operator at quote-negotiation time, based on the operator's LN graph view at that moment. Cosigners cannot independently probe LN routes; they accept whatever the operator signed in the quote because the operator's signature is the binding artifact, and the operator's risk is that LDK exceeds the cap and the payment fails (operator collects only the per-op `fixed_msats` per the Fee on Failure rule, eating the routing-probe work for no margin).
-
-The quote dance is specified in DEP-10 §Pay. The cosigner conformance rule binds `InvoiceLock.amount` to the signed quote total; the wallet's commitment is exactly that amount.
-
-Fee calculation (operator runs internally before responding to `quote_invoice`):
-
-    operator_margin_msats   = invoice_pay_fee_fixed_msats + (invoice_amount * invoice_pay_fee_rate_bps / 10000)
-    max_routing_fee_msats   = <LDK routing probe with safety multiplier, operator-chosen>
-    quote_total_msats       = invoice_amount + operator_margin_msats + max_routing_fee_msats
-
-Routing-fee variance the operator takes on is bounded by `max_routing_fee_msats`. On success they collect `operator_margin_msats + (max_routing_fee_msats − actual_routing_fee_msats)`. On failure they collect only the per-op `fixed_msats` floor from the deposit's `TransferFeeSchedule` per the Fee on Failure rule.
-
-### Cosigner conformance rules
-
-Each direction has rules the cosigning quorum verifies before signing:
-
-**Inbound (TransferLock-as-bridge):**
-
-- The cosigner checks `TransferLock.amount + TransferLock.fee == correlated BOLT-11.amount`, where the BOLT-11 is supplied by the wallet (or read off the cosigned invoice record).
-- `TransferLock.fee == invoice_receive_bridge_fee(TransferLock.amount)` per the operator's published `invoice_receive_fee_*` schedule — the operator can't widen the fee mid-quote.
-- `TransferLock.timeout_height + Δ ≤ BOLT-11.cltv_expiry_block` — see DEP-10 §"Bridge cosigner rules" for the Δ rules.
-- The source deposit MUST be one of the operator's declared self-deposits on the same ledger (so the bridge_fee flows into `fees_accumulated` for quorum payout, not into an opaque operator pocket).
-
-**Outbound (InvoiceLock with quote):**
-
-- The cosigner verifies `quote_signature` against the operator's published key.
-- `current_ledger_tip < quote_expiry`.
-- `InvoiceLock.amount == quote_total_msats`.
-- `operator_margin_msats >= invoice_pay_fee_fixed_msats + (invoice_amount * invoice_pay_fee_rate_bps / 10000)` — operator cannot undercut their advertised floor mid-quote.
-
-A non-conforming lock fails cosigner verification; the operator cannot commit it. This is the structural enforcement that prevents the operator from silently widening either direction's fee.
+Lightning bridge ops (DEP-10 §Lightning) use the same `TransferFeeSchedule` as any other transfer — a bridge's `TransferLock` pays the standard `fixed_msats + rate_bps` fee to `fees_accumulated` like every other lock, regardless of which deposit holder is acting as the bridge. The bridge's own service fee (its margin for taking on Lightning routing risk) is captured externally via the difference between the BOLT-11 amount and the on-ledger transfer amount — it's market-priced, set by the bridge competitively, and never touches the protocol fee surface. This DEP says nothing about how bridges price their service; bridge advertisements (DEP-04) are the relevant venue. The protocol just ensures that whoever cosigns the bridge's `TransferLock` is paid the standard transfer-fee compensation.
 
 ## Fee on Failure
-
-Lock-then-resolve operations (`TransferLock`/`Complete`/`Fail`, `InvoiceLock`/`Fulfill`/`Fail`, `OnchainLock`/`Fulfill`/`Fail`) charge a fee even when the resolution is a failure. Rationale: the operator did real work holding the lock and coordinating the attempt. On the failure path:
 
 Lock-then-resolve operations (`TransferLock`/`Complete`/`Fail`, `InvoiceLock`/`Fulfill`/`Fail`, `OnchainLock`/`Fulfill`/`Fail`) charge a fee even when the resolution is a failure. Rationale: the operator did real work holding the lock and coordinating the attempt. On the failure path:
 
@@ -139,15 +78,14 @@ Every ledger carries a monotonically non-decreasing `fees_accumulated: u64` coun
 | Op | Amount added |
 |---|---|
 | `FeeCollect` | `amount` |
-| `TransferComplete` | `pending.fee` (fixed + proportional; covers intra-ledger transfers AND inbound bridge receives — the bridge's `bridge_fee` rides on `TransferLock.fee` per §"Lightning Bridge Fees") |
+| `TransferComplete` | `pending.fee` (fixed + proportional; covers intra-ledger transfers AND bridge `TransferLock` ops — bridges pay the standard `TransferFeeSchedule` like any other transfer) |
 | `TransferFail` | `source.transfer_fees.fixed_msats` |
-| `InvoiceFulfill` (with quote) | `locked_amount - invoice_amount - actual_routing_fee_msats` (outbound bridge — operator's advertised margin plus any unused routing buffer; recorded by the operator and re-checked by replayers reading the LDK-reported routing fee from the operation) |
 | `InvoiceFail` | `deposit.transfer_fees.fixed_msats` |
 | `OnchainFail` | `deposit.transfer_fees.fixed_msats` |
 
-`OnchainLock.fee_sats` is a **miner** fee and is NOT accumulated on success or failure. `OnchainFulfill` does not contribute today (no operator-fee model on the withdrawal-success path).
+`OnchainLock.fee_sats` is a **miner** fee and is NOT accumulated on success or failure. Successful `InvoiceFulfill` and `OnchainFulfill` do not contribute (no operator-fee model on those paths today — `InvoiceLock`/`InvoiceFulfill` is the legacy operator-runs-the-LN-node pay path, kept around for back-compat; the modern bridge-mediated pay flow uses `TransferLock`/`TransferComplete` whose fee is captured under `TransferComplete` above).
 
-The legacy `InvoiceCredit` op (deterrence-mode receive — DEP-10 §"Offline receive") also doesn't contribute, since the operator's fee on that path is collected entirely outside the ledger via the spread between LN routing/margin and what they choose to credit. Operators offering this path SHOULD price it conservatively given the lack of cosigner-enforced fee transparency.
+The legacy `InvoiceCredit` op (deterrence-mode receive — DEP-10 §"Offline receive") also doesn't contribute to `fees_accumulated`, since the operator's fee on that path is collected entirely outside the ledger via the spread between LN routing/margin and what they choose to credit. Operators offering this path SHOULD price it conservatively given the lack of cosigner-enforced fee transparency.
 
 `fees_accumulated` is serde-defaulted so pre-accumulator ledgers load with 0, and it is the substrate a future payout operation will debit against when distributing quorum-member compensation (see DEP-05).
 
