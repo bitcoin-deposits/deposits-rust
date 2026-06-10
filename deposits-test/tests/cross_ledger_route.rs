@@ -149,3 +149,118 @@ fn cross_ledger_route_via_htlc_agent() {
     );
     eprintln!("[ok] route completed end-to-end");
 }
+
+/// PTLC variant of `cross_ledger_route_via_htlc_agent`: the same dance but
+/// each leg locks with `pointlock(P)` instead of `sha256(H)`, and the
+/// witness shared between legs is a 32-byte scalar (`s` on Leg 2,
+/// transformed to `s + t` by the courier for Leg 1) instead of a preimage.
+///
+/// The structural privacy property — Leg 1's `pointlock(P + T)` and Leg 2's
+/// `pointlock(P)` use unrelated curve points — comes from the protocol; we
+/// verify the route completes and the wallet reports the PTLC branch ran.
+/// Per-leg script inspection is left to a follow-up test that decodes Kind
+/// 9100 updates directly.
+///
+/// Requires the same setup as the HTLC variant, plus operators publishing
+/// pointlock in their Kind 39100 capabilities — automatic when the daemon
+/// uses `operator_policy::default_advertised_capabilities()` (every fresh
+/// `./bin/setup.sh` does).
+#[test]
+#[ignore]
+fn cross_ledger_route_via_htlc_agent_ptlc() {
+    if !cluster_available() {
+        eprintln!("skipping: cluster not running — start with ./bin/setup.sh 3");
+        return;
+    }
+    if !htlc_agent_available() {
+        eprintln!("skipping: htlc-agent not running — start with ./bin/setup-htlc-agent.sh");
+        return;
+    }
+
+    let from_ledger = read_setup_state("ledger_2_1");
+    let to_ledger = read_setup_state("ledger_3_1");
+    eprintln!(
+        "[setup]   from_ledger={}…  to_ledger={}…",
+        &from_ledger[..16],
+        &to_ledger[..16]
+    );
+
+    let wdir = tempdir();
+    let (sec, _xonly) = keygen();
+    let nsec = wdir.join("wallet.nsec");
+    std::fs::write(&nsec, &sec).unwrap();
+
+    let (ok, out) = wallet_open(&from_ledger, "src", &nsec, &wdir, &[]);
+    assert!(
+        ok && (out.contains("Deposit account created") || out.contains("already exists")),
+        "open src failed:\n{}",
+        out
+    );
+    let (ok, out) = wallet_open(&to_ledger, "dst", &nsec, &wdir, &[]);
+    assert!(
+        ok && (out.contains("Deposit account created") || out.contains("already exists")),
+        "open dst failed:\n{}",
+        out
+    );
+
+    let (src_pubkey, _) =
+        wallet_lookup_deposit(&wdir, "src").expect("src deposit not in deposits.json");
+    let (_dst_pubkey, _) =
+        wallet_lookup_deposit(&wdir, "dst").expect("dst deposit not in deposits.json");
+    eprintln!(
+        "[deposits] src_pubkey={}…  dst_pubkey={}…",
+        &src_pubkey[..16],
+        &_dst_pubkey[..16]
+    );
+
+    std::thread::sleep(Duration::from_secs(8));
+
+    // Fresh nonce per run so InvoiceCredit's payment_hash never duplicates
+    // across re-runs (operators refuse duplicate hashes).
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    let fund_msats: u64 = 1_000_000;
+    operator_credit_deposit(
+        2,
+        &from_ledger,
+        &src_pubkey,
+        fund_msats,
+        &format!("fund-src-ptlc-{}", nonce),
+    );
+    let agent_dst_pubkey = htlc_agent_deposit_pubkey(&to_ledger)
+        .expect("htlc-agent has no deposit on dst ledger — bridge unavailable");
+    operator_credit_deposit(
+        3,
+        &to_ledger,
+        &agent_dst_pubkey,
+        fund_msats,
+        &format!("fund-agent-dst-ptlc-{}", nonce),
+    );
+
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(wallet_sync(&wdir, &nsec), "wallet sync failed");
+
+    // ── Drive the PTLC route ────────────────────────────────────────
+    let route_amount_sats: u64 = 500;
+    eprintln!("[route]   {} sats: src → dst via PTLC pattern", route_amount_sats);
+    let (ok, out) = wallet_route_ptlc(&wdir, &nsec, "src", "dst", route_amount_sats);
+    if !ok {
+        panic!("wallet route --ptlc failed:\n{}", out);
+    }
+    assert!(
+        out.contains("Routed transfer complete"),
+        "PTLC route did not report completion:\n{}",
+        out
+    );
+    // The wallet's PTLC branch prints "Revealing scalar..." (HTLC prints
+    // "Revealing preimage..."). Distinguishes the branches in the output.
+    assert!(
+        out.contains("Revealing scalar"),
+        "wallet did not exercise the PTLC scalar-witness path:\n{}",
+        out
+    );
+    eprintln!("[ok] PTLC route completed end-to-end");
+}

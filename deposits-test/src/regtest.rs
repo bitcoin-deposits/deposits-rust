@@ -292,13 +292,41 @@ pub fn wallet_route(
     to_alias: &str,
     amount_sats: u64,
 ) -> (bool, String) {
-    let out = Command::new(wallet_bin())
-        .args([
-            "route",
-            from_alias,
-            to_alias,
-            &amount_sats.to_string(),
-        ])
+    wallet_route_inner(data_dir, nsec_path, from_alias, to_alias, amount_sats, false)
+}
+
+/// `wallet route --ptlc` — point-locked variant (DEP-13 §"Courier PTLC pattern").
+/// Pre-flights operator capabilities; both hop operators must advertise
+/// `pointlock` in their Kind 39100 ads. Otherwise behaves the same way.
+pub fn wallet_route_ptlc(
+    data_dir: &Path,
+    nsec_path: &Path,
+    from_alias: &str,
+    to_alias: &str,
+    amount_sats: u64,
+) -> (bool, String) {
+    wallet_route_inner(data_dir, nsec_path, from_alias, to_alias, amount_sats, true)
+}
+
+fn wallet_route_inner(
+    data_dir: &Path,
+    nsec_path: &Path,
+    from_alias: &str,
+    to_alias: &str,
+    amount_sats: u64,
+    ptlc: bool,
+) -> (bool, String) {
+    let mut cmd = Command::new(wallet_bin());
+    cmd.args([
+        "route",
+        from_alias,
+        to_alias,
+        &amount_sats.to_string(),
+    ]);
+    if ptlc {
+        cmd.arg("--ptlc");
+    }
+    let out = cmd
         .args(["--nsec-file", nsec_path.to_str().unwrap()])
         .args(["--data-dir", data_dir.to_str().unwrap()])
         .args(["--relay", relay_ledgers()])
