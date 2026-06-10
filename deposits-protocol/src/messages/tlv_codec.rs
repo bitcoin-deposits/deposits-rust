@@ -154,6 +154,13 @@ mod ledger_op_tlv {
     /// DEP-07 §"Tiered receive" and the `invoice_receive` row of the
     /// Kind-39100 guarantee matrix (DEP-04).
     pub const INVOICE_CREDIT_WALLET_AUTH: u64 = 296; // [u8; 64]
+
+    /// Batch operation payload: a single bytes blob containing a u16 BE
+    /// count followed by `count` length-prefixed (u32 BE) inner-op TLV
+    /// encodings. The bytes-field framing keeps Batch's wire shape
+    /// recognizable to old decoders (they see one unknown TLV field and
+    /// skip it without crashing).
+    pub const BATCH_OPS: u64 = 298; // var-length bytes
 }
 
 impl TlvEncode for LedgerOperation {
@@ -610,6 +617,18 @@ impl TlvEncode for LedgerOperation {
             }
             Self::DisputeYield => {}
             Self::LedgerClose => {}
+            Self::Batch(ops) => {
+                // u16 BE count + repeated (u32 BE length-prefix, inner TLV bytes)
+                let mut blob: Vec<u8> = Vec::new();
+                let len = ops.len() as u16;
+                blob.extend_from_slice(&len.to_be_bytes());
+                for inner in ops {
+                    let inner_bytes = inner.tlv_encode();
+                    blob.extend_from_slice(&(inner_bytes.len() as u32).to_be_bytes());
+                    blob.extend_from_slice(&inner_bytes);
+                }
+                builder = builder.bytes_field(BATCH_OPS, &blob);
+            }
         }
 
         builder.build()
@@ -869,6 +888,73 @@ impl TlvDecode for LedgerOperation {
                 target_operator: reader.read_pubkey(TARGET_OPERATOR)?,
             }),
             60 => Ok(Self::LedgerClose),
+            90 => {
+                use crate::messages::types::MAX_BATCH_OPS;
+                let blob: &[u8] = reader.read_raw(BATCH_OPS)?;
+                if blob.len() < 2 {
+                    return Err(TlvError::InvalidFieldValue {
+                        field_type: BATCH_OPS,
+                        reason: "Batch blob too short for count header".into(),
+                    });
+                }
+                let count = u16::from_be_bytes([blob[0], blob[1]]) as usize;
+                if count > MAX_BATCH_OPS {
+                    return Err(TlvError::InvalidFieldValue {
+                        field_type: BATCH_OPS,
+                        reason: format!(
+                            "Batch op count {} exceeds MAX_BATCH_OPS={}",
+                            count, MAX_BATCH_OPS
+                        ),
+                    });
+                }
+                let mut ops = Vec::with_capacity(count);
+                let mut cursor = 2usize;
+                for _ in 0..count {
+                    if cursor + 4 > blob.len() {
+                        return Err(TlvError::InvalidFieldValue {
+                            field_type: BATCH_OPS,
+                            reason: "truncated inner-op length prefix".into(),
+                        });
+                    }
+                    let inner_len = u32::from_be_bytes([
+                        blob[cursor],
+                        blob[cursor + 1],
+                        blob[cursor + 2],
+                        blob[cursor + 3],
+                    ]) as usize;
+                    cursor += 4;
+                    if cursor + inner_len > blob.len() {
+                        return Err(TlvError::InvalidFieldValue {
+                            field_type: BATCH_OPS,
+                            reason: "truncated inner-op body".into(),
+                        });
+                    }
+                    let inner = Self::tlv_decode(&blob[cursor..cursor + inner_len])?;
+                    // Flat-Batch invariant — reject nested Batch at decode
+                    // time so the apply path doesn't need a recursive guard.
+                    if matches!(inner, Self::Batch(_)) {
+                        return Err(TlvError::InvalidFieldValue {
+                            field_type: BATCH_OPS,
+                            reason: "nested Batch is forbidden".into(),
+                        });
+                    }
+                    cursor += inner_len;
+                    ops.push(inner);
+                }
+                if cursor != blob.len() {
+                    return Err(TlvError::InvalidFieldValue {
+                        field_type: BATCH_OPS,
+                        reason: "trailing bytes after declared count".into(),
+                    });
+                }
+                if ops.is_empty() {
+                    return Err(TlvError::InvalidFieldValue {
+                        field_type: BATCH_OPS,
+                        reason: "empty Batch is forbidden".into(),
+                    });
+                }
+                Ok(Self::Batch(ops))
+            }
             d => Err(TlvError::InvalidFieldValue {
                 field_type: DISCRIMINANT,
                 reason: format!("unknown LedgerOperation discriminant: {}", d),

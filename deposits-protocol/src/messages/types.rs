@@ -649,7 +649,32 @@ pub enum LedgerOperation {
     // ========== Lifecycle (1) ==========
     /// Close the ledger
     LedgerClose,
+
+    // ========== Batch ==========
+    /// Apply a sequence of inner operations as one signed update.
+    ///
+    /// Transactional: applies each inner op in order; if any fails
+    /// validation or state-application, the entire batch is rejected and
+    /// the ledger is left unchanged. Reduces the per-operation cosignature
+    /// + relay overhead the agent-commerce workload generates.
+    ///
+    /// Constraints (enforced at admission):
+    /// - Non-empty: zero inner ops is rejected.
+    /// - Bounded: at most `MAX_BATCH_OPS` (=64) inner ops.
+    /// - Flat: nested `Batch` inside `Batch` is rejected (prevents
+    ///   recursion and bounds total complexity).
+    ///
+    /// See DEP-02 §"Batch" for the full rules and fraud-proof semantics
+    /// (fraud scanners recurse into Batch contents).
+    Batch(Vec<LedgerOperation>),
 }
+
+/// Maximum inner operations in a single [`LedgerOperation::Batch`]. The
+/// cap exists to bound both per-update validation cost and the
+/// fraud-proof scanner's recursion depth — even though Batch nesting is
+/// forbidden, a single deep batch could still pathologically inflate
+/// scan time.
+pub const MAX_BATCH_OPS: usize = 64;
 
 impl LedgerOperation {
     /// Return the 32-byte hash this operation embeds in its causally-
@@ -705,6 +730,7 @@ impl LedgerOperation {
             Self::DisputeArmed { .. } => 57, // Pre-commitment, transitions to READY
             Self::DeliveryEmbed { .. } => 80,
             Self::LedgerClose => 60,
+            Self::Batch(_) => 90,
         }
     }
 
@@ -739,6 +765,7 @@ impl LedgerOperation {
             Self::DisputeArmed { .. } => consts::LEDGER_UPDATE,
             Self::DeliveryEmbed { .. } => consts::LEDGER_UPDATE,
             Self::LedgerClose => consts::LEDGER_CLOSE,
+            Self::Batch(_) => consts::BATCH,
         }
     }
 
@@ -1489,6 +1516,31 @@ impl BinaryCodec for LedgerOperation {
             }
             Self::DisputeYield => {}
             Self::LedgerClose => {}
+            Self::Batch(ops) => {
+                // Legacy fixed-shape encoder: emit a u16 count followed by
+                // each inner op's recursive write_to encoding, length-
+                // prefixed so the decoder can frame them. The TLV codec
+                // (tlv_codec.rs) is the canonical path; this legacy form
+                // exists so the codec round-trip stays total.
+                let len = ops.len();
+                if len > u16::MAX as usize {
+                    return Err(CodecError::InvalidData(
+                        "Batch too large for legacy codec".to_string(),
+                    ));
+                }
+                w.write_all(&(len as u16).to_be_bytes())?;
+                for inner in ops {
+                    let mut buf = Vec::new();
+                    inner.write_to(&mut buf)?;
+                    if buf.len() > u32::MAX as usize {
+                        return Err(CodecError::InvalidData(
+                            "inner op too large for legacy codec".to_string(),
+                        ));
+                    }
+                    w.write_all(&(buf.len() as u32).to_be_bytes())?;
+                    w.write_all(&buf)?;
+                }
+            }
         }
         Ok(())
     }
@@ -1863,6 +1915,23 @@ impl BinaryCodec for LedgerOperation {
             }),
             // Close operations (60)
             60 => Ok(Self::LedgerClose),
+            // Batch (90)
+            90 => {
+                let mut count_bytes = [0u8; 2];
+                r.read_exact(&mut count_bytes)?;
+                let count = u16::from_be_bytes(count_bytes) as usize;
+                let mut ops = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mut len_bytes = [0u8; 4];
+                    r.read_exact(&mut len_bytes)?;
+                    let inner_len = u32::from_be_bytes(len_bytes) as usize;
+                    let mut inner_buf = vec![0u8; inner_len];
+                    r.read_exact(&mut inner_buf)?;
+                    let mut inner_cursor = &inner_buf[..];
+                    ops.push(Self::read_from(&mut inner_cursor)?);
+                }
+                Ok(Self::Batch(ops))
+            }
             _ => Err(CodecError::InvalidDiscriminant(discriminant)),
         }
     }

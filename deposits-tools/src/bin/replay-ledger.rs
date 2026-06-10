@@ -307,6 +307,7 @@ fn format_op(op: &LedgerOperation) -> String {
         LedgerOperation::DeliveryEmbed { request_hash, .. } => {
             format!("DeliveryEmbed  req={}", short_hex(request_hash))
         }
+        LedgerOperation::Batch(ops) => format!("Batch  ({} inner ops)", ops.len()),
     }
 }
 

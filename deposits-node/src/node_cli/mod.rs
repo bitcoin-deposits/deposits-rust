@@ -1509,6 +1509,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     format!("target_ledger={}...", &hex::encode(target_ledger_id)[..16]),
                 ),
                 LedgerOperation::LedgerClose => ("LedgerClose", String::new()),
+                LedgerOperation::Batch(ops) => ("Batch", format!("{} inner ops", ops.len())),
                 LedgerOperation::TransferLock {
                     source_deposit_id,
                     destination_deposit_id,

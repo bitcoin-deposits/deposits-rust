@@ -621,7 +621,38 @@ pub fn verify_uncredited_lightning(
         })?;
 
     // (3) no InvoiceCredit / InvoiceFulfill for this payment_hash
-    //     anywhere at seq ≤ proof_sequence.
+    //     anywhere at seq ≤ proof_sequence. Recurses into Batch contents
+    //     so a batched credit isn't hidden from the scanner.
+    fn check_op(
+        op: &LedgerOperation,
+        seq: u64,
+        payment_hash_bytes: [u8; 32],
+    ) -> Result<(), String> {
+        match op {
+            LedgerOperation::InvoiceCredit {
+                payment_hash: ph, ..
+            } if *ph == payment_hash_bytes => Err(format!(
+                "InvoiceCredit found at seq {} — operator did credit, not fraud",
+                seq
+            )),
+            LedgerOperation::InvoiceFulfill {
+                preimage: ff_preimage,
+                ..
+            } if sha256::Hash::hash(ff_preimage).to_byte_array() == payment_hash_bytes => {
+                Err(format!(
+                    "InvoiceFulfill found at seq {} — operator fulfilled, not fraud",
+                    seq
+                ))
+            }
+            LedgerOperation::Batch(inner_ops) => {
+                for inner in inner_ops {
+                    check_op(inner, seq, payment_hash_bytes)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
     for u in accused_history
         .iter()
         .filter(|u| u.sequence_number <= *proof_sequence)
@@ -629,28 +660,7 @@ pub fn verify_uncredited_lightning(
         let Ok(op) = LedgerOperation::tlv_decode(&u.message) else {
             continue;
         };
-        match op {
-            LedgerOperation::InvoiceCredit {
-                payment_hash: ph, ..
-            } if ph == payment_hash_bytes => {
-                return Err(format!(
-                    "InvoiceCredit found at seq {} — operator did credit, not fraud",
-                    u.sequence_number
-                ));
-            }
-            // InvoiceFulfill carries a `preimage` field rather than a
-            // payment_hash — match by hashing preimage.
-            LedgerOperation::InvoiceFulfill {
-                preimage: ff_preimage,
-                ..
-            } if sha256::Hash::hash(&ff_preimage).to_byte_array() == payment_hash_bytes => {
-                return Err(format!(
-                    "InvoiceFulfill found at seq {} — operator fulfilled, not fraud",
-                    u.sequence_number
-                ));
-            }
-            _ => {}
-        }
+        check_op(&op, u.sequence_number, payment_hash_bytes)?;
     }
 
     Ok(())
@@ -1418,6 +1428,31 @@ pub fn verify_uncredited_onchain(
     }
 
     // (4) no OnchainCredit for this (txid, vout) at seq ≤ proof_sequence.
+    //     Recurses into Batch so a batched credit isn't hidden.
+    fn check_op(
+        op: &LedgerOperation,
+        seq: u64,
+        txid_bytes: [u8; 32],
+        vout: u32,
+    ) -> Result<(), String> {
+        match op {
+            LedgerOperation::OnchainCredit {
+                txid: credit_txid,
+                vout: credit_vout,
+                ..
+            } if *credit_txid == txid_bytes && *credit_vout == vout => Err(format!(
+                "OnchainCredit found at seq {} — operator did credit, not fraud",
+                seq
+            )),
+            LedgerOperation::Batch(inner_ops) => {
+                for inner in inner_ops {
+                    check_op(inner, seq, txid_bytes, vout)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
     for u in accused_history
         .iter()
         .filter(|u| u.sequence_number <= *proof_sequence)
@@ -1425,19 +1460,7 @@ pub fn verify_uncredited_onchain(
         let Ok(op) = LedgerOperation::tlv_decode(&u.message) else {
             continue;
         };
-        if let LedgerOperation::OnchainCredit {
-            txid: credit_txid,
-            vout: credit_vout,
-            ..
-        } = op
-        {
-            if credit_txid == txid_bytes && credit_vout == *vout {
-                return Err(format!(
-                    "OnchainCredit found at seq {} — operator did credit, not fraud",
-                    u.sequence_number
-                ));
-            }
-        }
+        check_op(&op, u.sequence_number, txid_bytes, *vout)?;
     }
 
     Ok(())

@@ -1265,6 +1265,34 @@ impl Ledger {
 
     /// Validate an operation before applying.
     fn validate_operation(&self, operation: &LedgerOperation) -> DepositsResult<()> {
+        // Batch admission gates (DEP-02 §"Batch"): reject empty, oversized,
+        // or nested batches before any inner op is touched. Validation of
+        // each inner op happens when the applier recurses through it.
+        if let LedgerOperation::Batch(ops) = operation {
+            if ops.is_empty() {
+                return Err(DepositsError::ProtocolViolation {
+                    violation_type: "batch_empty".to_string(),
+                    details: "Batch operation MUST contain at least one inner op".to_string(),
+                });
+            }
+            if ops.len() > deposits_protocol::messages::MAX_BATCH_OPS {
+                return Err(DepositsError::ProtocolViolation {
+                    violation_type: "batch_oversized".to_string(),
+                    details: format!(
+                        "Batch contains {} inner ops; MAX_BATCH_OPS = {}",
+                        ops.len(),
+                        deposits_protocol::messages::MAX_BATCH_OPS
+                    ),
+                });
+            }
+            if ops.iter().any(|o| matches!(o, LedgerOperation::Batch(_))) {
+                return Err(DepositsError::ProtocolViolation {
+                    violation_type: "batch_nested".to_string(),
+                    details: "Batch operations MUST NOT contain another Batch".to_string(),
+                });
+            }
+        }
+
         // Check dispute state allows this operation type
         let discriminant = operation.discriminant();
         if !self.state.dispute_state.allows_operation(discriminant) {

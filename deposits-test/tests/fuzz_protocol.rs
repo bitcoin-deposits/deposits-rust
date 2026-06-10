@@ -651,6 +651,7 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::DisputeYield => "DisputeYield",
         LedgerOperation::DeliveryEmbed { .. } => "DeliveryEmbed",
         LedgerOperation::LedgerClose => "LedgerClose",
+        LedgerOperation::Batch(_) => "Batch",
     }
 }
 

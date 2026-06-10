@@ -112,6 +112,12 @@ pub mod consts {
     pub const RECOVERY_CLAIM_REQUEST: u16 = 0x8091;
     pub const RECOVERY_CLAIM_SIGNATURE: u16 = 0x8093;
     pub const RECOVERY_CLAIM_COMPLETE: u16 = 0x8095;
+
+    /// Batched operations: one signed update carries up to `MAX_BATCH_OPS`
+    /// inner operations applied transactionally (DEP-02 §"Batch"). Reduces
+    /// the per-operation cosignature + relay overhead the agent-commerce
+    /// workload generates.
+    pub const BATCH: u16 = 0x8097;
 }
 
 pub use consts::*;

@@ -765,6 +765,20 @@ impl LedgerState {
             LedgerOperation::DeliveryEmbed { .. } => {
                 // No state changes — causal ordering only.
             }
+            LedgerOperation::Batch(ops) => {
+                // Transactional apply: each inner op is applied against the
+                // running `next` state. If any inner op fails, this `?`
+                // returns Err and the *outer* function's `next` (the local
+                // clone created at the top) is dropped — `self` is
+                // unchanged. So failure leaves the original state intact.
+                //
+                // Validation (empty/oversize/nested-Batch) happens in
+                // `validate_operation`; by the time we get here every
+                // inner op is structurally permitted.
+                for inner in ops {
+                    next = next.apply(inner)?;
+                }
+            }
         }
         Ok(next)
     }
