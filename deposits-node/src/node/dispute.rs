@@ -223,12 +223,14 @@ impl Node {
     /// fork-creation step short-circuits if the marker (or fork ledger)
     /// already exists.
     pub(crate) async fn auto_dispute_expired_quorums(&self) {
-        let current_height = match self.wallet.get_block_height() {
-            Ok(h) => h,
-            Err(_) => return,
-        };
-        let current_hash = match self.wallet.get_block_hash() {
-            Ok(h) => h,
+        // Live chain query, not the wallet's cached height. BDK's
+        // background sync can lag far behind the live tip during
+        // burst-mining; reading the cache would (a) gate the auto-task
+        // on a stale view and (b) record a stale anchor on the fork-
+        // branch DisputeEnter we publish. Both the grace-period guard
+        // below and the persisted anchor must reflect the live chain.
+        let (current_height, current_hash) = match self.wallet.fetch_block_info() {
+            Ok(pair) => pair,
             Err(_) => return,
         };
 

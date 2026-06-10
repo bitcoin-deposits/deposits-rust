@@ -908,9 +908,20 @@ impl Node {
         );
 
         // Auto-arm with FRESH anchor evidence from our own block oracle
-        // — don't echo the disputer's; commit to what we observe.
-        let our_height = self.wallet.get_block_height().unwrap_or(0);
-        let our_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+        // — don't echo the disputer's; commit to what we observe. Use
+        // `fetch_block_info()` (live chain query) rather than
+        // `get_block_height()` (returns the wallet's cached value),
+        // because BDK's background sync lags far behind the live tip
+        // during burst-mining: the daemon's chain_backend may already
+        // confirm the disputer's anchor (live) while the wallet cache is
+        // still hundreds of blocks behind. Recording the stale cached
+        // height as our own anchor produces an anchor < quorum_expiry —
+        // the very predicate we just verified the disputer's anchor
+        // satisfies — and peers refuse to arm against our fork.
+        let (our_height, our_hash) = self
+            .wallet
+            .fetch_block_info()
+            .unwrap_or((0, [0u8; 32]));
         match self
             .auto_arm_for_dispute_with_anchor(
                 ledger_id,
