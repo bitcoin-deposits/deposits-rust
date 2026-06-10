@@ -1294,6 +1294,47 @@ impl LedgerAdvertisement {
         ]
     }
 
+    /// As `default_guarantees`, but replaces the `invoice_receive` row with
+    /// a settlement-atomic regime — for operators that have wired the
+    /// tiered-receive path (DEP-07 §"Tiered receive") and accept
+    /// `InvoiceCredit.wallet_authorization` to gate the credit.
+    ///
+    /// The atomic path requires the wallet to pre-cosign before the payment
+    /// arrives, so it's only available to online wallets. Operators SHOULD
+    /// publish BOTH the atomic and deterrence rows so wallets that can
+    /// pre-cosign get the stronger guarantee and offline wallets still see
+    /// the deterrence fallback. This builder returns both: it overrides the
+    /// canonical `invoice_receive` row with the atomic one, then appends the
+    /// deterrence row tagged via the `min/max_msats` split so a single
+    /// `regime` name carries two regimes.
+    pub fn default_guarantees_with_atomic_invoice_receive() -> Vec<GuaranteeRegime> {
+        use guarantee_regimes::*;
+        let mut rows: Vec<GuaranteeRegime> = Self::default_guarantees()
+            .into_iter()
+            .filter(|r| r.regime != INVOICE_RECEIVE)
+            .collect();
+        // Settlement-atomic row first (preferred by routing wallets when
+        // they're online).
+        rows.push(GuaranteeRegime {
+            regime: INVOICE_RECEIVE.into(),
+            min_msats: 0,
+            max_msats: u64::MAX,
+            shape: GuaranteeShape::SettlementAtomic,
+            honesty: HonestyAssumption::OperatorAndQuorum,
+            time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 6 },
+        });
+        // Deterrence fallback for offline wallets that can't pre-cosign.
+        rows.push(GuaranteeRegime {
+            regime: INVOICE_RECEIVE.into(),
+            min_msats: 0,
+            max_msats: u64::MAX,
+            shape: GuaranteeShape::Deterrence,
+            honesty: HonestyAssumption::OperatorAndQuorumAndLn,
+            time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 720 },
+        });
+        rows
+    }
+
     /// Convert advertisement fees to FeeStructure for new deposits.
     /// Both halves of the result map directly: `annualized_fixed_msats`
     /// → `annualized_msats`, `annual_fee_bps` → `annualized_bps`.

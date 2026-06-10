@@ -2719,6 +2719,8 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
             amount: 50000 + (op_num as u64 * 10000),
             invoice_id: format!("post-recovery-{}", op_num + 1),
             sequence_number: latest.sequence_number + 1,
+            // Recovery-path crediting is operator-driven; deterrence only.
+            wallet_authorization: None,
         };
 
         let message_bytes = operation.tlv_encode();

@@ -63,6 +63,7 @@ fn deposit_duplicate_credit_rejected() {
         amount: 100_000,
         invoice_id: "dup".to_string(),
         sequence_number: 99,
+        wallet_authorization: None,
     };
     let result = net.op_mut("alice").ledger.apply_operation(&op);
     assert!(result.is_err());

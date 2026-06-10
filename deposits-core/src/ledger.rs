@@ -2342,6 +2342,7 @@ mod tests {
                 amount: 50_000,
                 invoice_id: "inv1".to_string(),
                 sequence_number: 1,
+                wallet_authorization: None,
             })
             .unwrap();
 

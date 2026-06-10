@@ -337,6 +337,7 @@ fn fee_collect_applies_pending_change_at_effective_block() {
             amount: 1_000_000,
             invoice_id: "fund".to_string(),
             sequence_number: 1,
+            wallet_authorization: None,
         })
         .unwrap();
 
@@ -539,6 +540,7 @@ fn pending_fee_change_survives_multiple_fee_collects_before_effective() {
             amount: 1_000_000,
             invoice_id: "fund".to_string(),
             sequence_number: 1,
+            wallet_authorization: None,
         })
         .unwrap();
 

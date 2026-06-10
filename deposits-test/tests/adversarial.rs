@@ -110,6 +110,7 @@ fn attack_double_credit_same_payment() {
             amount: 500_000,
             invoice_id: "dup".to_string(),
             sequence_number: 99,
+            wallet_authorization: None,
         });
 
     assert!(result.is_err(), "Double credit must be rejected");
@@ -232,6 +233,7 @@ fn attack_operate_during_dispute() {
             amount: 500_000,
             invoice_id: "steal".to_string(),
             sequence_number: 99,
+            wallet_authorization: None,
         });
     assert!(result.is_err(), "Credits must be blocked during dispute");
 
@@ -399,6 +401,7 @@ fn attack_replay_old_credit() {
             amount: 100_000,
             invoice_id: "replay".to_string(),
             sequence_number: 999, // different sequence
+            wallet_authorization: None,
         });
 
     assert!(

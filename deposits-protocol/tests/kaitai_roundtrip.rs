@@ -184,6 +184,7 @@ fn invoice_credit() {
         amount: 10_000_000,
         invoice_id: "bolt11:test".into(),
         sequence_number: 42,
+        wallet_authorization: None,
     });
 }
 

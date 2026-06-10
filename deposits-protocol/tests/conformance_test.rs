@@ -62,6 +62,7 @@ fn credit_within_reserves_is_conforming() {
                 amount: 500_000, // half of reserves
                 invoice_id: "test".to_string(),
                 sequence_number: 1,
+                wallet_authorization: None,
             },
             &AllowAll,
             0,
@@ -90,6 +91,7 @@ fn credit_exceeding_reserves_is_non_conforming() {
                 amount: 2_000_000, // double the reserves
                 invoice_id: "test".to_string(),
                 sequence_number: 1,
+                wallet_authorization: None,
             },
             &AllowAll,
             0,
@@ -158,6 +160,7 @@ fn multiple_credits_accumulate_correctly() {
                 amount: 600_000,
                 invoice_id: "inv1".to_string(),
                 sequence_number: 1,
+                wallet_authorization: None,
             },
             &AllowAll,
             0,
@@ -174,6 +177,7 @@ fn multiple_credits_accumulate_correctly() {
                 amount: 600_000,
                 invoice_id: "inv2".to_string(),
                 sequence_number: 2,
+                wallet_authorization: None,
             },
             &AllowAll,
             0,
@@ -236,6 +240,7 @@ fn fee_collect_is_conforming() {
             amount: 100_000,
             invoice_id: "test".to_string(),
             sequence_number: 1,
+            wallet_authorization: None,
         })
         .unwrap();
 

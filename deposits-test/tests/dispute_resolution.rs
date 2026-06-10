@@ -240,6 +240,7 @@ fn normal_operations_rejected_during_dispute() {
         amount: 50_000,
         invoice_id: "test".to_string(),
         sequence_number: 99,
+        wallet_authorization: None,
     };
     let result = net.op_mut("alice").ledger.apply_operation(&credit_op);
     assert!(

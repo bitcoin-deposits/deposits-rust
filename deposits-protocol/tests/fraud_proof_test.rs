@@ -988,6 +988,7 @@ mod dispatch {
             amount: 1000,
             invoice_id: "x".into(),
             sequence_number: 30,
+            wallet_authorization: None,
         };
         let id = broadcast.embedding.ledger_id.clone();
         let v = histories.get_mut(&id).unwrap();
@@ -1626,6 +1627,7 @@ mod uncredited_lightning {
             amount: 1000,
             invoice_id: "test".to_string(),
             sequence_number: 30,
+            wallet_authorization: None,
         };
         let history = vec![
             fixture_update(30, credit_op),
@@ -1690,6 +1692,7 @@ mod uncredited_lightning {
             amount: 1000,
             invoice_id: "test".to_string(),
             sequence_number: 60,
+            wallet_authorization: None,
         };
         let history = vec![
             fixture_update(50, dummy_op()),

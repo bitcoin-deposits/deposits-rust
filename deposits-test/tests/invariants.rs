@@ -52,6 +52,7 @@ fn invariant_e1_reserve_backing() {
                 amount: 200_000,
                 invoice_id: "x".into(),
                 sequence_number: 9,
+                wallet_authorization: None,
             },
             &deposits_protocol::types::AllowAll,
             0,
@@ -254,6 +255,7 @@ fn invariant_c1_witness_validity() {
             amount: 500_000,
             invoice_id: "x".into(),
             sequence_number: 1,
+            wallet_authorization: None,
         })
         .unwrap();
 
@@ -333,6 +335,7 @@ fn invariant_c2_payment_uniqueness() {
             amount: 100_000,
             invoice_id: "dup".into(),
             sequence_number: 99,
+            wallet_authorization: None,
         });
 
     log.record(AttackResult {
@@ -479,6 +482,7 @@ fn invariant_s1_dispute_state_gate() {
                 amount: 50_000,
                 invoice_id: "x".into(),
                 sequence_number: 99,
+                wallet_authorization: None,
             },
         ),
         (

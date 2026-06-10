@@ -316,13 +316,37 @@ pub enum LedgerOperation {
         witness: DescriptorWitness,
     },
     // ========== Invoice Operations (4) ==========
-    /// Credit a received invoice payment to a deposit
+    /// Credit a received invoice payment to a deposit.
+    ///
+    /// `wallet_authorization` distinguishes two receive regimes:
+    ///
+    /// - `None` (deterrence): the operator commits unilaterally. If they
+    ///   received the payment (preimage proof) but never credited, that's
+    ///   a slashable `Uncredited Lightning` fraud proof. Wallets that were
+    ///   offline during the receive window land here by default.
+    ///
+    /// - `Some(sig)` (settlement-atomic): a BIP-340 signature by the
+    ///   depositor's authorization key over the canonical credit preimage
+    ///   `domain_tag || deposit_id || payment_hash || amount`. The wallet
+    ///   pre-authorized this credit; the operator can only commit when
+    ///   they have both the preimage AND the wallet's authorization in
+    ///   hand, so the credit is atomic with respect to the wallet's
+    ///   consent. Verifiers REJECT the credit if the signature doesn't
+    ///   match — this is not advisory, it's a hard validity rule.
+    ///
+    /// Operators advertise which path they support via the
+    /// `invoice_receive` row of the Kind-39100 guarantee matrix (DEP-04
+    /// §"Guarantee Matrix"). Wallets that need settlement-atomic MUST
+    /// filter operator candidates by capability and pre-cosign before
+    /// the payment arrives. See DEP-07 §"Tiered receive" for the full flow.
     InvoiceCredit {
         payment_hash: [u8; 32],
         deposit_id: DepositId,
         amount: u64,
         invoice_id: String,
         sequence_number: u64,
+        /// Optional wallet pre-authorization; see the variant docstring.
+        wallet_authorization: Option<[u8; 64]>,
     },
     /// Lock funds for an outgoing invoice payment
     InvoiceLock {
@@ -1149,6 +1173,11 @@ impl BinaryCodec for LedgerOperation {
                 amount,
                 invoice_id,
                 sequence_number,
+                // `wallet_authorization` is settlement-atomic metadata; it
+                // doesn't fit the legacy fixed-shape encoder. The TLV codec
+                // (tlv_codec.rs) carries it; legacy consumers see the same
+                // shape they always did.
+                wallet_authorization: _,
             } => {
                 write_32(w, payment_hash)?;
                 let mut legacy_bytes = [0u8; 33];
@@ -1579,6 +1608,10 @@ impl BinaryCodec for LedgerOperation {
                     amount: read_u64(r)?,
                     invoice_id: read_string(r)?,
                     sequence_number: read_u64(r)?,
+                    // Legacy decoder: `wallet_authorization` is TLV-only;
+                    // a credit decoded via the legacy path has no atomic
+                    // authorization (it's by definition pre-tiered).
+                    wallet_authorization: None,
                 })
             }
             31 => {

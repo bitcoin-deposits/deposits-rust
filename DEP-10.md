@@ -43,7 +43,25 @@ The wallet retains the invoice, cosignature, and co-signer pubkey as evidence.
 
 ### Credit (disc 30)
 
-When the operator's lightning node receives payment (obtains the preimage), they append `InvoiceCredit` with the payment_hash, deposit_id, amount, invoice_id, and sequence_number.
+When the operator's lightning node receives payment (obtains the preimage), they append `InvoiceCredit` with the payment_hash, deposit_id, amount, invoice_id, sequence_number, and (optionally) a wallet pre-authorization signature.
+
+### Tiered receive
+
+`InvoiceCredit` supports two regimes, distinguished by the optional `wallet_authorization` field:
+
+- **Deterrence** (legacy default — `wallet_authorization = None`). The operator commits unilaterally upon receiving the preimage. If they got the payment but never credited, the wallet's recourse is the `Uncredited Lightning` fraud proof: payer-provided preimage + absent credit on the operator's ledger = slashable misbehavior. Wallets that were offline during the receive window land here by default.
+
+- **Settlement-atomic** (`wallet_authorization = Some(sig)`). The wallet pre-cosigns a 64-byte BIP-340 signature over
+
+      tag    = SHA256("deposits/invoice_credit_auth")
+      data   = deposit_id || payment_hash || amount_msat_le64
+      digest = SHA256(tag || tag || data)
+
+  before the payment is broadcast. The operator stores the signature; when the preimage arrives, they commit `InvoiceCredit` containing both the preimage (proof of payment receipt) and the wallet's authorization (proof of consent). Verifiers REJECT the credit if `wallet_authorization` is present but doesn't verify against the deposit's authorization key — this is a hard validity rule, not advisory. Pre-cosign requires the wallet to be online during the receive window (or to delegate the pre-cosign to a hot-key proxy).
+
+The `sequence_number` and `invoice_id` are intentionally NOT in the wallet's signing digest: the operator picks the sequence at commit time and the invoice_id is derived from the payment_hash. The wallet's authorization commits to *what gets credited*, not *when* — so a single signature is reusable across operator retries within the same invoice.
+
+Operators declare which regime they support via the `invoice_receive` row of the Kind-39100 guarantee matrix (DEP-04 §"Guarantee Matrix"). Operators offering settlement-atomic SHOULD publish both rows — atomic and deterrence — so wallets that can pre-cosign get the stronger guarantee and offline wallets still see the deterrence fallback. Wallets that need settlement-atomic MUST filter operator candidates by the matrix and pre-cosign during invoice negotiation.
 
 ### Payment
 

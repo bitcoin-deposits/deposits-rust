@@ -60,6 +60,7 @@ fn attack_fee_overflow() {
             amount: u64::MAX / 2,
             invoice_id: "big".into(),
             sequence_number: 1,
+            wallet_authorization: None,
         })
         .unwrap();
 

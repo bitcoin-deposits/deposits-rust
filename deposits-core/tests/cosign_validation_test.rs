@@ -54,6 +54,7 @@ fn credit_deposit(ledger: &mut Ledger, deposit_id: [u8; 16], amount: u64) {
             payment_hash: [0u8; 32],
             invoice_id: "test".to_string(),
             sequence_number: 0,
+            wallet_authorization: None,
         })
         .unwrap();
 }

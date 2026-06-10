@@ -146,6 +146,7 @@ impl Operator {
             amount,
             invoice_id: hex::encode(&payment_hash[..8]),
             sequence_number: self.ledger.state.sequence + 1,
+            wallet_authorization: None,
         };
         self.ledger.append_operation(op).unwrap();
     }

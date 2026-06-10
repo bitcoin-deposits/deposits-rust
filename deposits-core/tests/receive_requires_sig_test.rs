@@ -249,6 +249,7 @@ fn transfer_lock_to_guarded_deposit_applies_state() {
             amount: 100_000,
             invoice_id: "fund".to_string(),
             sequence_number: 1,
+            wallet_authorization: None,
         })
         .unwrap();
 

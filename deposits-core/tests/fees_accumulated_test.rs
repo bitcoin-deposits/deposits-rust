@@ -73,6 +73,7 @@ fn credit(ledger: &mut Ledger, deposit_id: [u8; 16], amount: u64, seq: u64) {
             amount,
             invoice_id: format!("inv-{}", seq),
             sequence_number: seq,
+            wallet_authorization: None,
         })
         .unwrap();
 }

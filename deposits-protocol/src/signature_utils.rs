@@ -85,3 +85,105 @@ pub fn offer_cosign_signing_message(
     tagged.extend_from_slice(cosigner_ledger_hash);
     sha256::Hash::hash(&tagged).to_byte_array()
 }
+
+/// Build the 32-byte digest a wallet signs to pre-authorize a settlement-
+/// atomic `InvoiceCredit` (DEP-07 §"Tiered receive"). The wallet signs this
+/// digest with the deposit-authorization key; the operator stores the
+/// signature and embeds it in `InvoiceCredit.wallet_authorization` when
+/// the payment arrives.
+///
+/// Format: BIP-340 tagged hash with tag `deposits/invoice_credit_auth` over
+/// `deposit_id || payment_hash || amount_msat (LE)`.
+///
+/// `sequence_number` and `invoice_id` are intentionally NOT in the digest:
+/// the operator picks the sequence at commit time, and the invoice_id is
+/// derived from the payment_hash. The wallet's authorization commits to
+/// *what gets credited*, not *when* — so the operator can commit at any
+/// sequence as long as the credit terms match.
+pub fn invoice_credit_auth_signing_message(
+    deposit_id: &crate::types::DepositId,
+    payment_hash: &[u8; 32],
+    amount_msat: u64,
+) -> [u8; 32] {
+    let mut data = Vec::with_capacity(16 + 32 + 8);
+    data.extend_from_slice(deposit_id);
+    data.extend_from_slice(payment_hash);
+    data.extend_from_slice(&amount_msat.to_le_bytes());
+
+    let tag = b"deposits/invoice_credit_auth";
+    let tag_hash = sha256::Hash::hash(tag);
+    let mut tagged = Vec::with_capacity(64 + data.len());
+    tagged.extend_from_slice(tag_hash.as_byte_array());
+    tagged.extend_from_slice(tag_hash.as_byte_array());
+    tagged.extend_from_slice(&data);
+    sha256::Hash::hash(&tagged).to_byte_array()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::DepositId;
+
+    /// The signing-message digest is deterministic: same inputs → same bytes.
+    #[test]
+    fn invoice_credit_auth_digest_is_deterministic() {
+        let deposit_id: DepositId = [0x11; 16];
+        let payment_hash = [0x22u8; 32];
+        let amount = 12_345_678u64;
+        let a = invoice_credit_auth_signing_message(&deposit_id, &payment_hash, amount);
+        let b = invoice_credit_auth_signing_message(&deposit_id, &payment_hash, amount);
+        assert_eq!(a, b);
+    }
+
+    /// Each input field affects the digest — no field can be silently
+    /// swapped at commit time without invalidating the wallet's signature.
+    #[test]
+    fn invoice_credit_auth_digest_changes_with_each_input() {
+        let deposit_id: DepositId = [0x11; 16];
+        let payment_hash = [0x22u8; 32];
+        let amount = 12_345_678u64;
+        let base = invoice_credit_auth_signing_message(&deposit_id, &payment_hash, amount);
+
+        // Different deposit_id → different digest.
+        let mut other_id = deposit_id;
+        other_id[0] ^= 0x01;
+        assert_ne!(
+            base,
+            invoice_credit_auth_signing_message(&other_id, &payment_hash, amount)
+        );
+
+        // Different payment_hash → different digest.
+        let mut other_hash = payment_hash;
+        other_hash[0] ^= 0x01;
+        assert_ne!(
+            base,
+            invoice_credit_auth_signing_message(&deposit_id, &other_hash, amount)
+        );
+
+        // Different amount → different digest.
+        assert_ne!(
+            base,
+            invoice_credit_auth_signing_message(&deposit_id, &payment_hash, amount + 1)
+        );
+    }
+
+    /// Domain-separation: the same `(deposit_id, payment_hash, amount_msat)`
+    /// triple under a different tag yields a different digest. This is the
+    /// safety property tagged hashes exist to provide — an attacker can't
+    /// reuse a signature meant for one purpose to authorize another.
+    #[test]
+    fn invoice_credit_auth_is_domain_separated_from_invoice_cosign() {
+        let deposit_id: DepositId = [0x11; 16];
+        let payment_hash = [0x22u8; 32];
+        let amount = 1000u64;
+        let auth = invoice_credit_auth_signing_message(&deposit_id, &payment_hash, amount);
+        let cosign = invoice_cosign_signing_message(
+            "ledger_id_string",
+            &payment_hash,
+            &deposit_id,
+            amount,
+            &[0u8; 32], // cosigner_ledger_hash
+        );
+        assert_ne!(auth, cosign);
+    }
+}

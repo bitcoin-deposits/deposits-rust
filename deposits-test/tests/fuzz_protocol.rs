@@ -567,6 +567,7 @@ impl ProtocolSim {
             amount,
             invoice_id: format!("wallet_{}_{}", proposer, depositor_seed),
             sequence_number: self.operators[proposer].ledger.state.sequence + 1,
+            wallet_authorization: None,
         };
 
         if self.propose(proposer, credit_op) != Outcome::Applied {
@@ -1592,6 +1593,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             amount,
             invoice_id: format!("h_{}_{}", proposer, op.ledger.state.sequence),
             sequence_number: op.ledger.state.sequence + 1,
+            wallet_authorization: None,
         };
         Some(GeneratedOp {
             op: o,
@@ -2027,6 +2029,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             amount,
             invoice_id: format!("a_{}_{}", proposer, op.ledger.state.sequence),
             sequence_number: op.ledger.state.sequence + 1,
+            wallet_authorization: None,
         };
         Some(GeneratedOp {
             op: o,
@@ -2173,6 +2176,7 @@ fn step1_honest_cosigners_block_over_reserve_credit() {
         amount: 4_000_000, // 10× reserves_amount of 400k
         invoice_id: "over_credit".to_string(),
         sequence_number: sim.operators[0].ledger.state.sequence + 1,
+        wallet_authorization: None,
     };
 
     // Op 0's quorum = [1, 2, 3]. Member 1 is adversary, 2 & 3 are honest.
@@ -2474,6 +2478,7 @@ fn credit_lock_credit_fail_stays_within_reserves() {
             amount: 100_000,
             invoice_id: "c1".to_string(),
             sequence_number: ledger.state.sequence + 1,
+            wallet_authorization: None,
         })
         .unwrap();
     assert_eq!(ledger.state.total_deposit_balance(), 100_000);
@@ -2501,6 +2506,7 @@ fn credit_lock_credit_fail_stays_within_reserves() {
             amount: reserves_amount - 100_000,
             invoice_id: "c2".to_string(),
             sequence_number: ledger.state.sequence + 1,
+            wallet_authorization: None,
         })
         .unwrap();
     assert_eq!(ledger.state.total_deposit_balance(), reserves_amount);

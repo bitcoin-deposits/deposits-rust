@@ -143,6 +143,17 @@ mod ledger_op_tlv {
     /// dispute. Both Some or both None.
     pub const DISPUTE_ANCHOR_BLOCK_HASH: u64 = 292; // [u8; 32]
     pub const DISPUTE_ANCHOR_BLOCK_HEIGHT: u64 = 294; // u32
+
+    /// InvoiceCredit settlement-atomic authorization: BIP-340 signature by
+    /// the depositor's authorization key over the canonical credit
+    /// preimage `(deposit_id || payment_hash || amount)`. Present means
+    /// the wallet pre-authorized this credit and the resulting operation
+    /// is settlement-atomic — verifiers REJECT the credit if the
+    /// signature doesn't match. Absent reverts to the legacy deterrence
+    /// path (operator credits unilaterally; fraud-proof recourse). See
+    /// DEP-07 §"Tiered receive" and the `invoice_receive` row of the
+    /// Kind-39100 guarantee matrix (DEP-04).
+    pub const INVOICE_CREDIT_WALLET_AUTH: u64 = 296; // [u8; 64]
 }
 
 impl TlvEncode for LedgerOperation {
@@ -290,6 +301,7 @@ impl TlvEncode for LedgerOperation {
                 amount,
                 invoice_id,
                 sequence_number,
+                wallet_authorization,
             } => {
                 builder = builder
                     .bytes_field(PAYMENT_HASH, payment_hash)
@@ -297,6 +309,9 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(AMOUNT, *amount)
                     .string_field(INVOICE_ID, invoice_id)
                     .u64_field(SEQUENCE_NUMBER, *sequence_number);
+                if let Some(sig) = wallet_authorization {
+                    builder = builder.bytes_field(INVOICE_CREDIT_WALLET_AUTH, sig);
+                }
             }
             Self::InvoiceLock {
                 deposit_id,
@@ -699,6 +714,7 @@ impl TlvDecode for LedgerOperation {
                 amount: reader.read_u64(AMOUNT)?,
                 invoice_id: reader.read_string(INVOICE_ID)?,
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
+                wallet_authorization: reader.read_bytes_opt(INVOICE_CREDIT_WALLET_AUTH)?,
             }),
             31 => Ok(Self::InvoiceLock {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
@@ -1917,6 +1933,7 @@ mod tests {
                 amount: 50000,
                 invoice_id: "inv123".to_string(),
                 sequence_number: 1,
+                wallet_authorization: None,
             },
             LedgerOperation::LedgerClose,
         ];
@@ -2139,6 +2156,7 @@ mod tests {
                     amount: 100000,
                     invoice_id: "inv123".to_string(),
                     sequence_number: 1,
+                    wallet_authorization: None,
                 },
                 sequence_number: 1,
                 previous_hash: [0xBB; 32],

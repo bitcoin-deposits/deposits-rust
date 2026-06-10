@@ -601,6 +601,12 @@ impl Node {
                     amount: amount_msat,
                     invoice_id: pending.invoice.clone(),
                     sequence_number: credit_sequence,
+                    // Settlement-atomic wallet auth (DEP-07 §"Tiered receive")
+                    // is pre-cosigned by the wallet during the receive
+                    // negotiation, not synthesized here. Until that wallet
+                    // flow lands (task #177), every operator-side credit is
+                    // deterrence-only — fraud-proof recourse covers it.
+                    wallet_authorization: None,
                 };
 
                 if let Err(e) = self.commit_operation(ledger_id, credit_operation).await {

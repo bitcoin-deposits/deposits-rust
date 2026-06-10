@@ -350,6 +350,7 @@ fn state_with_descriptor(seed: u8) -> (LedgerState, [u8; 16], bitcoin::secp256k1
             amount: 1_000_000,
             invoice_id: "seed".into(),
             sequence_number: 1,
+            wallet_authorization: None,
         })
         .unwrap();
     (state, did, sk)

@@ -75,6 +75,7 @@ fn scaling_reserve_backing() {
                     amount: 400_000,
                     invoice_id: "over".into(),
                     sequence_number: 99,
+                    wallet_authorization: None,
                 },
                 &deposits_protocol::types::AllowAll,
                 0,
@@ -184,6 +185,7 @@ fn scaling_dispute_state_gate() {
                 amount: 50_000,
                 invoice_id: "x".into(),
                 sequence_number: 99,
+                wallet_authorization: None,
             })
             .is_err();
 

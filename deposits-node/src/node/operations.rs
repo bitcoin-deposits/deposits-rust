@@ -607,6 +607,8 @@ impl Node {
             amount: amount_msats,
             invoice_id,
             sequence_number,
+            // Deterrence-only until the wallet-cosign flow lands (#177).
+            wallet_authorization: None,
         };
 
         self.commit_operation(ledger_id, operation).await?;
