@@ -105,9 +105,9 @@ pub fn print_usage(program: &str) {
     eprintln!("  pay_invoice <alias> <bolt11>     Pay a BOLT11 from a deposit");
     eprintln!("  send <alias> <amt> --to <dst>    Happy-path intra-ledger transfer");
     eprintln!("  transfer <alias> <amt>           Lock funds for conditional transfer (HTLC)");
-    eprintln!("  transfer_complete <id>           Complete a locked transfer with preimage");
+    eprintln!("  transfer_complete <id>           Complete a locked transfer (--preimage hex | --scalar hex)");
     eprintln!("  withdraw <alias> <amt> --to <dst> On-chain withdrawal");
-    eprintln!("  route <from> <to> <amt>          Send across ledgers via a courier");
+    eprintln!("  route <from> <to> <amt>          Send across ledgers via a courier (add --ptlc for PTLC)");
     eprintln!();
     eprintln!("Swaps:");
     eprintln!("  swap-advertise <alias> <sats>    Publish an open swap offer");

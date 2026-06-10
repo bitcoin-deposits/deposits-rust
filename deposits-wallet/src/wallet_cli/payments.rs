@@ -436,10 +436,13 @@ pub async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Er
     }
 }
 
-/// Complete a transfer by revealing the preimage
+/// Complete a transfer by revealing the lock material.
+/// `--preimage <hex>` for HTLC (sha256 lock) or `--scalar <hex>` for PTLC
+/// (pointlock); supply exactly one.
 pub async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut transfer_id_hex: Option<String> = None;
     let mut preimage_hex: Option<String> = None;
+    let mut scalar_hex: Option<String> = None;
     let mut ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
 
@@ -448,6 +451,10 @@ pub async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error
         match args[i].as_str() {
             "--preimage" if i + 1 < args.len() => {
                 preimage_hex = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--scalar" if i + 1 < args.len() => {
+                scalar_hex = Some(args[i + 1].clone());
                 i += 1;
             }
             "--ledger" if i + 1 < args.len() => {
@@ -471,9 +478,13 @@ pub async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error
     }
 
     let transfer_id_hex = transfer_id_hex.ok_or(
-        "Usage: deposits-wallet transfer_complete <transfer_id> --preimage <hex> --ledger <id> --relay <url>"
+        "Usage: deposits-wallet transfer_complete <transfer_id> (--preimage <hex> | --scalar <hex>) --ledger <id> --relay <url>"
     )?;
-    let preimage_hex = preimage_hex.ok_or("Missing preimage. Use --preimage <hex>")?;
+    if preimage_hex.is_some() && scalar_hex.is_some() {
+        return Err(
+            "Supply --preimage (HTLC) OR --scalar (PTLC), not both — the lock obligation determines which is needed.".into(),
+        );
+    }
     let ledger_id = ledger_id.ok_or("Missing ledger. Use --ledger <ledger_id>")?;
     let config = parse_config(&config_args)?;
 
@@ -489,17 +500,44 @@ pub async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error
     let mut transfer_id = [0u8; 32];
     transfer_id.copy_from_slice(&transfer_bytes);
 
-    // Parse preimage
-    let preimage_bytes = hex::decode(&preimage_hex)?;
-    if preimage_bytes.len() != 32 {
-        return Err("Preimage must be 64 hex chars (32 bytes)".into());
-    }
-
-    println!("Transfer Complete Request");
-    println!("=========================");
-    println!("  Transfer ID: {}...", &transfer_id_hex[..16]);
-    println!("  Preimage:    {}...", &preimage_hex[..16]);
-    println!();
+    // Parse + validate whichever lock material was supplied.
+    let request_params = if let Some(ref preimage_hex) = preimage_hex {
+        let preimage_bytes = hex::decode(preimage_hex)?;
+        if preimage_bytes.len() != 32 {
+            return Err("Preimage must be 64 hex chars (32 bytes)".into());
+        }
+        println!("Transfer Complete Request (HTLC)");
+        println!("================================");
+        println!("  Transfer ID: {}...", &transfer_id_hex[..16]);
+        println!("  Preimage:    {}...", &preimage_hex[..16]);
+        println!();
+        serde_json::json!({
+            "transfer_id": transfer_id_hex,
+            "preimage": preimage_hex,
+        })
+    } else if let Some(ref scalar_hex) = scalar_hex {
+        let scalar_bytes = hex::decode(scalar_hex)?;
+        if scalar_bytes.len() != 32 {
+            return Err("Scalar must be 64 hex chars (32 bytes)".into());
+        }
+        // Reject obviously invalid scalars (zero, or ≥ secp curve order). A
+        // malformed scalar from the user would be rejected later by the
+        // operator's calculus check anyway, but failing here costs no
+        // round-trip and produces a clearer error.
+        bitcoin::secp256k1::SecretKey::from_slice(&scalar_bytes)
+            .map_err(|e| format!("Scalar is not a valid secp256k1 scalar (must be in [1, n-1]): {}", e))?;
+        println!("Transfer Complete Request (PTLC)");
+        println!("================================");
+        println!("  Transfer ID: {}...", &transfer_id_hex[..16]);
+        println!("  Scalar:      {}...", &scalar_hex[..16]);
+        println!();
+        serde_json::json!({
+            "transfer_id": transfer_id_hex,
+            "scalar": scalar_hex,
+        })
+    } else {
+        return Err("Missing lock material. Use --preimage <hex> (HTLC) or --scalar <hex> (PTLC).".into());
+    };
 
     // Connect to relay
     let nostr_key = config.nostr_key()?;
@@ -510,11 +548,6 @@ pub async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error
 
     // Set response filter for relay-side #l tag filtering (reduces fan-out)
     transport.set_response_ledger_filter(vec![ledger_id.clone()]);
-
-    let request_params = serde_json::json!({
-        "transfer_id": transfer_id_hex,
-        "preimage": preimage_hex,
-    });
 
     println!("Sending transfer complete request...");
 
@@ -577,9 +610,15 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
     }
 
     let from_alias =
-        from_alias.ok_or("Usage: deposits-wallet route <from> <to> <amount_sats> --relay <url>")?;
+        from_alias.ok_or("Usage: deposits-wallet route <from> <to> <amount_sats> --relay <url> [--ptlc]")?;
     let to_alias = to_alias.ok_or("Missing destination alias")?;
     let amount_sats = amount_sats.ok_or("Missing amount")?;
+
+    // `--ptlc` is a boolean (it carries no value), so the generic flag-and-value
+    // collector above slurps it as a standalone arg with no following value.
+    // Pull it out before parse_config sees the slice.
+    let use_ptlc = config_args.iter().any(|s| s == "--ptlc");
+    let config_args: Vec<String> = config_args.into_iter().filter(|s| s != "--ptlc").collect();
     let config = parse_config(&config_args)?;
 
     if config.relays.is_empty() {
@@ -664,6 +703,29 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
         }
     }
 
+    // PTLC capability pre-flight (DEP-13 §"Courier PTLC pattern" §Capability requirement):
+    // both hop operators must advertise `pointlock` in their Kind 39100 capability set, else
+    // the lock would be refused at admission and the wallet would burn capital on a doomed
+    // TransferLock. Fail fast with a message that points the user at the HTLC fallback.
+    if use_ptlc {
+        for (which, ledger_id) in [("source", from_ledger), ("destination", to_ledger)] {
+            let ad = op_ads.iter().find(|a| a.ledger_id == ledger_id).ok_or_else(|| {
+                format!(
+                    "--ptlc requires advertised capabilities, but no Kind 39100 ad found for {} ledger {}",
+                    which,
+                    &ledger_id[..16],
+                )
+            })?;
+            if !ad.capabilities.supports_obligation("pointlock") {
+                return Err(format!(
+                    "--ptlc requires the {} operator to advertise the `pointlock` capability; their Kind 39100 ad on ledger {} does not. Re-run without --ptlc to use HTLC, or pick a different operator.",
+                    which,
+                    &ledger_id[..16],
+                ).into());
+            }
+        }
+    }
+
     // Step 1: Find a courier that bridges both ledgers
     println!("Finding courier...");
     let agent_ads = transport.fetch_agent_advertisements(network_str).await?;
@@ -704,26 +766,64 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
     println!("  Forward:  {} msats ({} sats)", forward, forward / 1000);
     println!();
 
-    // Step 2: Generate preimage and request route
+    // Step 2: Generate lock material and request route.
+    //
+    // HTLC variant: pick a random 32-byte preimage `x`, hash it to `H = sha256(x)`,
+    //   lock both legs with `sha256(H)`. The wallet reveals `x` at completion time.
+    //
+    // PTLC variant (DEP-13 §"Courier PTLC pattern"): pick a random scalar `s`,
+    //   compute the point `P = G·s`, send `P` to the courier. The courier returns
+    //   `T = G·t` for a courier-chosen blinding `t`. The wallet computes
+    //   `P_b = P + T` and uses `pointlock(P_b)` for the Leg 1 lock; the courier
+    //   uses `pointlock(P)` for the Leg 2 lock. The wallet reveals `s` at
+    //   completion time; the courier observes `s` and computes `s + t` to claim
+    //   Leg 1, never disclosing `t` to anyone.
     println!("Requesting route...");
     let mut rng = OsRng;
-    let mut preimage = [0u8; 32];
-    rng.fill_bytes(&mut preimage);
-    let hash: [u8; 32] = {
-        use bitcoin::hashes::{sha256, Hash, HashEngine};
-        let mut engine = sha256::Hash::engine();
-        engine.input(&preimage);
-        sha256::Hash::from_engine(engine).to_byte_array()
-    };
-    let hash_hex = hex::encode(hash);
 
-    let route_req = serde_json::json!({
-        "source_ledger": from_ledger,
-        "dest_ledger": to_ledger,
-        "dest_deposit_id": to_deposit_id_hex,
-        "amount_msats": amount_msats,
-        "hash": hash_hex,
-    });
+    // PreimageOrScalar: the wallet's secret half of the lock. For HTLC it's the
+    // preimage of the hash both legs commit to; for PTLC it's the scalar `s`
+    // such that `G·s == P`. The wallet uses whichever matches the route's
+    // lock_type at transfer_complete time.
+    let mut preimage = [0u8; 32]; // HTLC: random preimage; PTLC: re-derived from `s`
+    let mut hash_hex: String = String::new();         // HTLC
+    let mut point_p_hex: String = String::new();      // PTLC: P = G·s, compressed
+    let mut scalar_s: Option<[u8; 32]> = None;        // PTLC: kept for transfer_complete
+    let mut point_pb_hex: String = String::new();     // PTLC: P + T, the Leg 1 lock point
+    let route_req = if use_ptlc {
+        // Generate a uniformly-random scalar in `[1, n-1]`. SecretKey::new rejects
+        // zero and out-of-range bytes by resampling, so we get a valid scalar
+        // with no further rejection sampling.
+        let s = bitcoin::secp256k1::SecretKey::new(&mut rng);
+        let p = s.public_key(&secp);
+        scalar_s = Some(s.secret_bytes());
+        point_p_hex = hex::encode(p.serialize());
+        serde_json::json!({
+            "source_ledger": from_ledger,
+            "dest_ledger": to_ledger,
+            "dest_deposit_id": to_deposit_id_hex,
+            "amount_msats": amount_msats,
+            "lock_type": "ptlc",
+            "point_p": point_p_hex,
+        })
+    } else {
+        rng.fill_bytes(&mut preimage);
+        let hash: [u8; 32] = {
+            use bitcoin::hashes::{sha256, Hash, HashEngine};
+            let mut engine = sha256::Hash::engine();
+            engine.input(&preimage);
+            sha256::Hash::from_engine(engine).to_byte_array()
+        };
+        hash_hex = hex::encode(hash);
+        serde_json::json!({
+            "source_ledger": from_ledger,
+            "dest_ledger": to_ledger,
+            "dest_deposit_id": to_deposit_id_hex,
+            "amount_msats": amount_msats,
+            "lock_type": "htlc",
+            "hash": hash_hex,
+        })
+    };
 
     let req_id = transport
         .send_agent_request(&courier.agent_pubkey, "request_route", route_req)
@@ -749,6 +849,30 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
     }
     let mut dest_id = [0u8; 16];
     dest_id.copy_from_slice(&courier_deposit_id);
+
+    // PTLC: receive the courier's blinding point T = G·t and compute P_b = P + T
+    // locally. The courier MUST send only the point T, never the scalar t — if
+    // they leaked t we could derive s+t from our own knowledge of s and front-run
+    // their Leg 1 claim. We do not verify here that they kept t secret (we can't);
+    // we just use the T they sent. A misbehaving courier who sends a bogus T
+    // produces a P_b that won't match the Leg 2 scalar they later reveal, but
+    // by then they've locked Leg 2 with `pointlock(P)` against our deposit, so
+    // we can still claim Leg 2 regardless and they grief themselves on Leg 1.
+    if use_ptlc {
+        let blinding_hex = result["blinding_point"]
+            .as_str()
+            .ok_or("PTLC route response missing blinding_point")?;
+        let blinding_bytes = hex::decode(blinding_hex)?;
+        let t_pt = bitcoin::secp256k1::PublicKey::from_slice(&blinding_bytes)
+            .map_err(|e| format!("blinding_point is not a valid compressed secp point: {}", e))?;
+        let p_pt = bitcoin::secp256k1::PublicKey::from_slice(
+            &hex::decode(&point_p_hex).expect("point_p_hex was just hex::encoded"),
+        )?;
+        let pb = p_pt
+            .combine(&t_pt)
+            .map_err(|e| format!("P + T failed (point at infinity?): {}", e))?;
+        point_pb_hex = hex::encode(pb.serialize());
+    }
 
     println!("  Courier deposit: {}", courier_deposit_id_hex);
     println!();
@@ -788,7 +912,14 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
             .saturating_add(amount_msats.saturating_mul(default.rate_bps as u64) / 10_000)
     };
 
-    let completion_script = format!("sha256({})", hash_hex);
+    // Leg 1 lock: HTLC uses sha256(H) against the hash both legs commit to;
+    // PTLC uses pointlock(P_b) where P_b = P + T is the wallet-computed
+    // blinded point.
+    let completion_script = if use_ptlc {
+        format!("pointlock({})", point_pb_hex)
+    } else {
+        format!("sha256({})", hash_hex)
+    };
     let mut transfer_nonce = [0u8; 32];
     rng.fill_bytes(&mut transfer_nonce);
     let mut transfer_id = [0u8; 32];
@@ -845,10 +976,15 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
     );
     println!();
 
-    // Step 4: Wait for courier to forward on destination ledger
+    // Step 4: Wait for courier to forward on destination ledger.
+    //
+    // Match by destination_deposit_id and by a substring of completion_script
+    // that identifies our lock: the hash (HTLC) or the unblinded sender point P
+    // (PTLC, since Leg 2's completion_script is `pointlock(P)`).
     println!("Waiting for courier to forward...");
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(90);
     let mut outbound_transfer_id = None;
+    let leg2_marker: &str = if use_ptlc { &point_p_hex } else { &hash_hex };
 
     while tokio::time::Instant::now() < deadline {
         // Fetch recent TransferLock updates on the destination ledger
@@ -863,7 +999,7 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
                     ..
                 } = op
                 {
-                    if destination_deposit_id == to_deposit_id && script.contains(&hash_hex) {
+                    if destination_deposit_id == to_deposit_id && script.contains(leg2_marker) {
                         outbound_transfer_id = Some(*tid);
                         break;
                     }
@@ -885,12 +1021,23 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
     );
     println!();
 
-    // Step 5: Complete by revealing preimage
-    println!("Revealing preimage...");
-    let complete_params = serde_json::json!({
-        "transfer_id": hex::encode(outbound_tid),
-        "preimage": hex::encode(preimage),
-    });
+    // Step 5: Complete by revealing the lock material.
+    // HTLC: reveal the preimage. PTLC: reveal the scalar `s`. The courier
+    // observes the revealed value on Leg 2 and uses it to claim Leg 1 (for
+    // PTLC it adds the courier's secret blinding `t` first, producing `s+t`).
+    let complete_params = if use_ptlc {
+        println!("Revealing scalar...");
+        serde_json::json!({
+            "transfer_id": hex::encode(outbound_tid),
+            "scalar": hex::encode(scalar_s.expect("scalar_s populated in PTLC branch")),
+        })
+    } else {
+        println!("Revealing preimage...");
+        serde_json::json!({
+            "transfer_id": hex::encode(outbound_tid),
+            "preimage": hex::encode(preimage),
+        })
+    };
     let complete_req_id = transport
         .send_ledger_request(to_ledger, "transfer_complete", complete_params)
         .await?;
