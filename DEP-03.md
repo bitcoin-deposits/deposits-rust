@@ -118,10 +118,10 @@ When a ledger becomes contested (dispute), quorum members compete for custody vi
 
 The lottery output's tapscript tree contains:
 
-- **Leaf 0 — Primary lottery claim.** Verifies all N preimages, computes `sum mod N`, dispatches to the matching pubkey via `OP_CHECKSIG`. Three dispatch regimes by N:
+- **Leaf 0 — Primary lottery claim.** Verifies all N preimages, enforces per-preimage size bounds (`17 <= LEN(preimage_i) <= 16+N` via `OP_SIZE OP_DUP <17> OP_GREATERTHANOREQUAL OP_VERIFY OP_DUP <16+N> OP_LESSTHANOREQUAL OP_VERIFY` immediately after each `OP_EQUALVERIFY`), computes `sum mod N`, dispatches to the matching pubkey via `OP_CHECKSIG`. The size bounds reject a committer who hashed an out-of-range preimage — without them, a malicious committer could reveal a preimage of any length, the hash check would pass (it matches what they committed to), and `contribution = LEN - 16` would take an arbitrary value that shifts `sum mod N` and corrupts the draw for the entire quorum. Three dispatch regimes by N:
   - **Linear** (N=2..=5 and N=11..=15): repeated conditional subtraction for `sum mod N`, then linear `if/elif` cascade on the index
   - **CombinedTable** (N=6..=10): skip the modulo; emit one dispatch arm per integer sum value in `[N, N²]` directly routing to `pubkey_(s mod N)`
-- **Leaves 1..=N** (only for N≥11): K=1 partial-reveal claim leaves, one per missing-disputant index, prefixed with `OP_PUSHNUM_72 OP_CSV OP_DROP`. Each is a sub-lottery for the (N-1) revealers excluding that index, picking its own dispatch regime by N-1.
+- **Leaves 1..=N** (for N≥3): K=1 partial-reveal claim leaves, one per missing-disputant index, prefixed with `OP_PUSHNUM_72 OP_CSV OP_DROP`. Each is a sub-lottery for the (N-1) revealers excluding that index, picking its own dispatch regime by N-1. The per-preimage size bounds inside each sub-leaf use the *parent* N (`17..=16+N`), not `N-1` — surviving disputants committed under the parent contract and their valid preimages may legitimately extend to length `16+N`. The floor is `N=3` because the sub-lottery needs at least 2 participants; at `N=2` a single non-revealer leaves only one possible spender, making "lottery" degenerate.
 - **Long-tail recovery cascade**: `<csv> OP_CSV OP_DROP <threshold> <pubkeys> OP_CHECKMULTISIG` at CSV 144 / 1008 / 4032 with descending thresholds T / T-1 / T-2 (where T is the recovery threshold computed at confiscation time).
 - **Timeout-recovery escape hatch**: CSV 8064 (~8 weeks) with threshold 1 — any single recovery voter can sweep if all else has failed.
 
@@ -135,7 +135,7 @@ For the primary claim leaf, the witness is:
 
 with the signature at the bottom of the stack. The script consumes preimages in disputant order, accumulates contributions on the altstack, computes the dispatch index, and verifies the signer's pubkey matches `pubkey_(sum mod N)`.
 
-For partial-reveal leaves (N≥11): identical layout, but only the `N-1` revealer preimages, and the spending input must have `nSequence >= 72`.
+For partial-reveal leaves (N≥3): identical layout, but only the `N-1` revealer preimages, and the spending input must have `nSequence >= 72`.
 
 For recovery leaves: standard tapscript multisig — `K` of `N` signature slots filled (with empty pushes for unused slots), and `nSequence >= csv_blocks`.
 

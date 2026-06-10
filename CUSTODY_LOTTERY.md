@@ -40,6 +40,12 @@ winner_index   = total mod N
 
 The 17-byte minimum ensures ~136 bits of preimage entropy, preventing HASH160 collision grinding to swap a preimage for one of a different length post-commitment.
 
+### Why the script enforces the size bounds
+
+`HASH160(preimage)` does not constrain `LEN(preimage)`. A committer who hashes a 5-byte or 10,000-byte string still produces a 20-byte hash and the hash check at reveal time still passes (they revealed the very bytes they committed to). If the script only verified the hash, a single bad-faith committer could reveal a preimage of any length, contribute an arbitrary value to the sum, and shift `sum mod N` to a winner of their choosing — corrupting the draw for the entire quorum.
+
+To prevent that, the claim leaf enforces `17 <= LEN(preimage_i) <= 16+N` per participant in script (`OP_SIZE` + range-check + `OP_VERIFY`, applied immediately after each `OP_EQUALVERIFY`). A committer who chose an out-of-range preimage cannot spend the leaf at all; their bad commitment becomes their own problem rather than the quorum's. The partial-reveal sub-leaves enforce the same bounds against the *parent* `N`, not `N-1`, so a surviving disputant who chose a length of `16+N` (legal under the parent contract) can still spend the sub-leaf when one peer fails to reveal.
+
 ### Why this is fair
 
 The construction has the standard commit-reveal randomness-extraction property:
@@ -211,20 +217,22 @@ This regime requires the **K=1 partial-reveal leaves** described in [Failure Mod
 
 ### Taproot structure
 
-For N ≥ 11, the partial-reveal path is implemented as **N additional leaves**, one per possible "missing" disputant index. Each is a CSV-72-prefixed (N−1)-party lottery among the remaining disputants. This is the idiomatic Tapscript answer to polymorphic dispatch: rather than branching on a bitmap inside one leaf, encode each shape as its own leaf and let the spender pick.
+For N ≥ 3, the partial-reveal path is implemented as **N additional leaves**, one per possible "missing" disputant index. Each is a CSV-72-prefixed (N−1)-party lottery among the remaining disputants. This is the idiomatic Tapscript answer to polymorphic dispatch: rather than branching on a bitmap inside one leaf, encode each shape as its own leaf and let the spender pick. The floor is `N = 3` — the sub-lottery needs at least 2 participants, which the lottery script itself requires; at `N = 2` a single non-revealer collapses the choice to one possible spender, which is no longer a lottery.
+
+(Historical note: the floor was originally 11 on probabilistic grounds — `P(all reveal)` was high enough at small N that the recovery long-tail was thought sufficient. Under the production policy cap `MAX_QUORUM_SIZE_POLICY = 7`, that left every deployable `Q ∈ {3, 5, 7}` with no partial-reveal path at all, which made the dominant K=1 failure mode collapse straight to CSV-144. The floor was dropped to 3 so every supported Q has the fast partial-reveal path.)
 
 ```
 Lottery Output (Taproot):
 ├── Key path: NUMS (disabled)
 ├── Leaf 0: Lottery claim — preimage reveal + winner sig (all N reveal)
-├── Leaves 1..N (N ≥ 11 only): K=1 partial-reveal — CSV 72 prefix +
+├── Leaves 1..N (N ≥ 3): K=1 partial-reveal — CSV 72 prefix +
 │              (N−1)-party lottery, one leaf per excluded index j ∈ [0, N)
 ├── Leaf N+1: Recovery — quorum minus disputants, threshold T,   CSV 144
 ├── Leaf N+2: Recovery — quorum minus disputants, threshold T−1, CSV 1008
 └── Leaf N+3: Recovery — quorum minus disputants, threshold T−2, CSV 4032
 ```
 
-Total leaf count: 4 (for N ≤ 10) or N+4 (for N ≥ 11). At N=15 that's 19 leaves — well within the practical taptree size, with Merkle path overhead of ⌈log₂ 19⌉ = 5 levels (~160 B added to the witness for the control block).
+Total leaf count: 4 (for N = 2) or N+4 (for N ≥ 3). At N=15 that's 19 leaves — well within the practical taptree size, with Merkle path overhead of ⌈log₂ 19⌉ = 5 levels (~160 B added to the witness for the control block).
 
 Each partial-reveal leaf is structured as:
 
@@ -233,7 +241,7 @@ Each partial-reveal leaf is structured as:
 <lottery script for (N−1)-party lottery excluding disputant j>
 ```
 
-The (N−1)-party lottery uses the regime appropriate for N−1, **not N**. So at N=15 each partial leaf is a Regime C (linear-after-mod) lottery for 14 parties; at N=11 each partial leaf is a Regime B (combined table) lottery for 10 parties. The `LotteryScriptBuilder` handles this correctly when called with `N−1`.
+The (N−1)-party lottery uses the regime appropriate for N−1, **not N**, with two exceptions: the per-preimage size bounds and the `sum mod N` arithmetic both stay on the *parent* N (commitments were chosen under the parent-N contract). So at N=15 each partial leaf is a Regime C (linear-after-mod) lottery for 14 parties; at N=11 each partial leaf is a Regime B (combined table) lottery for 10 parties; at N=3..6 each partial leaf is a Regime A (linear) lottery for 2..5 parties.
 
 Disputants are excluded from all recovery paths. They lost the dispute by failing to maintain custody (or failing to reveal), so they should not have a vote in retrieving the funds.
 
@@ -309,9 +317,9 @@ pub struct DisputeAcquire {
 
 If a disputant does not reveal within the reveal timeout, the protocol has three escalating recovery paths:
 
-1. **Collateral slash**: the non-revealer's bond is forfeit, distributed to other disputants. The bond ratios in the [summary table](#summary-table) keep this slash large enough that defection-by-silence is irrational.
+1. **Collateral slash + slashing-share forfeiture**: the non-revealer loses two things. First, their own bond stays in the operator's confiscated UTXO and gets distributed via the lottery / per-armer split, not refunded. Second, their per-armer slashing-share output (the slice they would have received from the punitive split — see DEP-06 §"Arm-and-reveal forfeiture") is gated on revealing the same preimage they committed to in `DisputeArmed`; if they don't reveal within `ARMER_SHARE_SWEEP_CSV_BLOCKS = 144` blocks, the recovery quorum sweeps the slice and pays it **pro-rata to the revealers** — armers whose preimage was published either on-chain via the lottery claim or off-chain via a Kind 9106 `CustodyLotteryReveal`. The slice doesn't return to the non-revealer, doesn't go to the operator, and doesn't get burned: it concentrates value among the cosigners who actually participated. The bond ratios in the [summary table](#summary-table) keep the slash large enough that defection-by-silence is irrational, and the revealer-concentration of forfeited slices puts a second price on "arm-then-withhold."
 
-2. **K=1 partial-reveal claim** (N ≥ 11): after CSV 72 (~12 hours), if exactly one disputant has failed to reveal, the remaining N−1 disputants can spend through the partial-reveal leaf corresponding to the missing index. This is a fair (N−1)-party lottery using the same commit-reveal mechanics. The non-revealer is simply excluded from the entropy pool and the dispatch.
+2. **K=1 partial-reveal claim** (N ≥ 3): after CSV 72 (~12 hours), if exactly one disputant has failed to reveal, the remaining N−1 disputants can spend through the partial-reveal leaf corresponding to the missing index. This is a fair (N−1)-party lottery using the same commit-reveal mechanics. The non-revealer is simply excluded from the entropy pool and the dispatch.
 
 3. **Quorum recovery**: after CSV 144 (~24 hours), the quorum-minus-disputants can spend the lottery output back to reserves and start a new dispute round with the remaining disputants. This is the fallback for "2+ missing" cases and for situations where no partial leaf applies.
 
@@ -390,7 +398,7 @@ For applications requiring N > 15, switch construction: a tournament bracket of 
 - [x] Enforce `MAX_DISPUTANTS = 15` in `DisputeEnter` handler
 - [x] Enforce bond ratio per regime in `DisputeArmed` handler
 - [x] Enforce economic precondition (`disputed_value` vs. `claim_fee`)
-- [x] Implement K=1 partial-reveal leaves for N ≥ 11 (N additional leaves at CSV 72, each an (N−1)-party lottery excluding one disputant index)
+- [x] Implement K=1 partial-reveal leaves for N ≥ 3 (N additional leaves at CSV 72, each an (N−1)-party lottery excluding one disputant index) — originally floored at N ≥ 11; dropped to N ≥ 3 so every deployable Q ∈ {3, 5, 7} has the fast partial path
 - [ ] (Future) K=2 partial-reveal leaves if production reveal reliability < 0.95
 - [x] Bound retry depth to `⌊N/2⌋`
 - [x] Golden test vectors at regime boundaries: N=5, N=6, N=10, N=11

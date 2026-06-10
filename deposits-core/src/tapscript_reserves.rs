@@ -797,15 +797,36 @@ impl LotteryParticipant {
 pub const MIN_ECONOMIC_FEE_MULTIPLE: u64 = 5;
 
 /// Smallest N at which we add partial-reveal claim leaves to the lottery
-/// Taproot output. Below this, P(all reveal) is high enough that the
-/// CSV-144 quorum recovery path is sufficient as a fallback.
-pub const PARTIAL_REVEAL_MIN_N: usize = 11;
+/// Taproot output. The technical floor is `N = 3` — a single-non-revealer
+/// sub-lottery needs `N - 1 >= 2` participants, which the lottery script
+/// itself requires. Below the floor, the single-non-revealer case collapses
+/// straight to the CSV-144 quorum-recovery cascade.
+///
+/// Historically this was `11`, on the reasoning that `P(all reveal)` was
+/// high enough at small N that the recovery long-tail covered the rare
+/// stall. Under the production policy cap `MAX_QUORUM_SIZE_POLICY = 7`
+/// (see `constants.rs`) that left every deployable Q ∈ {3, 5, 7} with
+/// *no* partial-reveal path at all — `K = 1` non-revealers (the dominant
+/// failure mode per `CUSTODY_LOTTERY.md`) had no fast claim, so a single
+/// withholding loser forced the entire quorum onto the CSV-144 cascade.
+/// Dropping the floor to `3` makes the partial-reveal path available at
+/// every supported Q.
+pub const PARTIAL_REVEAL_MIN_N: usize = 3;
 
 /// CSV block delay before the partial-reveal claim leaves become
 /// spendable. Short enough to give honest revealers a faster path than
 /// the CSV-144 recovery, but long enough that genuine reveals have time
 /// to all land on chain first.
 pub const PARTIAL_REVEAL_CSV_BLOCKS: u32 = 72;
+
+/// CSV block delay before an armer's slashing-share output can be
+/// swept by the recovery quorum as forfeited (because the armer never
+/// revealed their preimage). The armer keeps their slice by spending
+/// the reveal-claim leaf within this window; after the window, others
+/// can sweep. Matches the existing recovery long-tail floor of 144
+/// blocks (~1 day) so the timing is consistent with the lottery's own
+/// recovery cascade.
+pub const ARMER_SHARE_SWEEP_CSV_BLOCKS: u32 = 144;
 
 /// Per-regime bond ratio: the lower bound on `bond / disputed_value`
 /// required to keep defection-and-eat-the-slash irrational.
@@ -889,12 +910,16 @@ pub fn check_bond_ratio_precondition(
 /// Builder for lottery Tapscript outputs used in custody dispute resolution.
 ///
 /// The lottery mechanism uses preimage-size entropy:
-/// 1. Each participant commits HASH160(preimage) where preimage is 17-20 bytes
-/// 2. When revealing, the SIZE of each preimage contributes entropy (size - 16 = 1-4)
-/// 3. Sum of all contributions mod N determines the winner
-/// 4. Only the winner can spend with their signature + all preimages
+/// 1. Each participant commits HASH160(preimage) where preimage is `17..=16+N` bytes.
+/// 2. When revealing, the SIZE of each preimage contributes entropy
+///    (`size - 16` yields a value in `1..=N`).
+/// 3. Sum of all contributions mod N determines the winner.
+/// 4. Only the winner can spend with their signature + all preimages.
 ///
-/// The script verifies all preimages and checks the signer is the entropy-selected winner.
+/// The script verifies all preimages, enforces `LEN(preimage) ∈ [17, 16+N]`
+/// per-participant (so a committer who chose an out-of-range preimage cannot
+/// poison the sum-mod-N draw for the rest of the quorum), and checks the
+/// signer is the entropy-selected winner.
 pub struct LotteryScriptBuilder {
     participants: Vec<LotteryParticipant>,
     network: Network,
@@ -925,11 +950,26 @@ impl LotteryScriptBuilder {
     ///
     /// Script logic:
     /// 1. Verify each preimage: HASH160(preimage) == committed_hash
-    /// 2. Extract size contribution: SIZE - 16 (gives 1-4 for 17-20 byte preimages)
-    /// 3. Sum all contributions
-    /// 4. Calculate winner index: sum mod N
-    /// 5. Branch to winner's pubkey and verify signature
+    /// 2. Enforce per-preimage size bounds: `17 <= LEN(preimage) <= 16+N`
+    ///    (rejects out-of-range commitments that would skew sum-mod-N)
+    /// 3. Extract size contribution: `LEN - 16` (yields a value in `1..=N`)
+    /// 4. Sum all contributions
+    /// 5. Calculate winner index: `sum mod N`
+    /// 6. Branch to winner's pubkey and verify signature
     pub fn build_lottery_script(&self) -> DepositsResult<ScriptBuf> {
+        let n = self.participants.len();
+        self.build_lottery_script_with_bounds_n(n)
+    }
+
+    /// Build the lottery claim script with explicit preimage-length
+    /// bounds. The bounds are `17..=16+bounds_n`. Primary lotteries pass
+    /// `bounds_n = participants.len()`; partial-reveal sub-lotteries pass
+    /// the *parent* `N` so commitments that are valid under the parent
+    /// contract continue to spend the sub-leaf.
+    fn build_lottery_script_with_bounds_n(
+        &self,
+        bounds_n: usize,
+    ) -> DepositsResult<ScriptBuf> {
         let n = self.participants.len();
         if n < 2 {
             return Err(DepositsError::InvalidState(
@@ -943,6 +983,15 @@ impl LotteryScriptBuilder {
                 crate::constants::MAX_DISPUTANTS
             )));
         }
+        if bounds_n < n || bounds_n > crate::constants::MAX_DISPUTANTS {
+            return Err(DepositsError::InvalidState(format!(
+                "bounds_n {} must satisfy participants.len() ({}) \
+                 <= bounds_n <= MAX_DISPUTANTS ({})",
+                bounds_n,
+                n,
+                crate::constants::MAX_DISPUTANTS
+            )));
+        }
 
         let mut builder = Builder::new();
 
@@ -950,6 +999,19 @@ impl LotteryScriptBuilder {
         // Stack starts with: <sig> <preimage_n> ... <preimage_1>
         // After processing preimage_1: altstack has contribution_1
 
+        // Per-participant bounds for the revealed preimage. The committer
+        // chose `commitment_hash = HASH160(preimage)` at arming time; the
+        // hash check below pins which preimage they must reveal, but it
+        // does NOT constrain how long that preimage is — the committer
+        // could have hashed a 1-byte or 10_000-byte string and the hash
+        // check would still pass at reveal. We use `LEN(preimage) - 16`
+        // as the per-participant contribution to the winner-selection
+        // sum, so an out-of-range LEN poisons the lottery for the entire
+        // quorum (the attacker shifts `sum mod N` to a winner of their
+        // choosing). Force `LEN(preimage) ∈ [17, 16+N]` in script so the
+        // reveal fails on the attacker's leaf rather than corrupting the
+        // shared draw.
+        let max_len: i64 = 16 + (bounds_n as i64);
         for (i, participant) in self.participants.iter().enumerate() {
             // Stack: ... <preimage_i>
             // Duplicate for hash check
@@ -963,11 +1025,22 @@ impl LotteryScriptBuilder {
             // Get size
             builder = builder.push_opcode(OP_SIZE);
             // Stack: ... <preimage_i> <size>
+            // Bounds: size >= 17 (so contribution >= 1)
+            builder = builder.push_opcode(OP_DUP);
+            builder = builder.push_int(17);
+            builder = builder.push_opcode(OP_GREATERTHANOREQUAL);
+            builder = builder.push_opcode(OP_VERIFY);
+            // Bounds: size <= 16+N (so contribution <= N)
+            builder = builder.push_opcode(OP_DUP);
+            builder = builder.push_int(max_len);
+            builder = builder.push_opcode(OP_LESSTHANOREQUAL);
+            builder = builder.push_opcode(OP_VERIFY);
+            // Stack: ... <preimage_i> <size>
             // Swap and drop the preimage (we only need the size)
             builder = builder.push_opcode(OP_SWAP);
             builder = builder.push_opcode(OP_DROP);
             // Stack: ... <size>
-            // Subtract 16 to get contribution (1-4)
+            // Subtract 16 to get contribution (1..=N)
             builder = builder.push_int(16);
             builder = builder.push_opcode(OP_SUB);
             // Stack: ... <contribution_i>
@@ -1079,7 +1152,8 @@ impl LotteryScriptBuilder {
     /// Returns one leaf per disputant index `j` in `0..N`, each prefixed
     /// with `<PARTIAL_REVEAL_CSV_BLOCKS> OP_CSV OP_DROP` and followed by
     /// a regular lottery script over the `N-1` revealers excluding `j`.
-    /// Empty `Vec` for `N < PARTIAL_REVEAL_MIN_N`.
+    /// Empty `Vec` for `N < PARTIAL_REVEAL_MIN_N` (= 3) — the sub-lottery
+    /// needs at least 2 participants to dispatch.
     ///
     /// This covers the dominant partial-reveal failure mode (one
     /// disputant fails to reveal) while preserving lottery randomness.
@@ -1089,8 +1163,9 @@ impl LotteryScriptBuilder {
     /// warrants it; no protocol or message changes needed.
     ///
     /// Note that the sub-lottery's regime is determined by `N-1`, not N:
-    /// at N=11 the partial leaves are 10-disputant CombinedTable; at
-    /// N=12..=15 they are 11..=14-disputant Linear-after-mod.
+    /// at N=3..=6 the partial leaves are 2..=5-disputant Linear; at
+    /// N=7..=11 they are 6..=10-disputant CombinedTable; at N=12..=15
+    /// they are 11..=14-disputant Linear-after-mod.
     pub fn build_partial_reveal_leaves(&self) -> DepositsResult<Vec<ScriptBuf>> {
         let n = self.participants.len();
         if n < PARTIAL_REVEAL_MIN_N {
@@ -1112,7 +1187,12 @@ impl LotteryScriptBuilder {
                 self.recovery_threshold,
                 self.network,
             );
-            let inner = sub_builder.build_lottery_script()?;
+            // Use the parent `N` for size bounds: each surviving
+            // participant's commitment was chosen under the parent-N
+            // contract (preimage length in `17..=16+N`), so the
+            // sub-lottery must accept the same range even though its own
+            // participant count is `N-1`.
+            let inner = sub_builder.build_lottery_script_with_bounds_n(n)?;
 
             let prefix = Builder::new()
                 .push_int(PARTIAL_REVEAL_CSV_BLOCKS as i64)
@@ -1193,8 +1273,9 @@ impl LotteryScriptBuilder {
     /// - Timeout recovery: CSV 8064, threshold 1 (escape hatch for
     ///   retry-depth exhaustion or total operator absence)
     ///
-    /// Total leaves: 5 for `N < PARTIAL_REVEAL_MIN_N`, `5 + N` otherwise.
-    /// At N=15 that's 20 leaves → Merkle depth `⌈log₂ 20⌉ = 5`.
+    /// Total leaves: 5 for `N = 2` (below `PARTIAL_REVEAL_MIN_N = 3`),
+    /// `5 + N` otherwise. At N=15 that's 20 leaves → Merkle depth
+    /// `⌈log₂ 20⌉ = 5`.
     pub fn build(&self) -> DepositsResult<LotteryOutput> {
         let secp = Secp256k1::new();
 
@@ -1306,7 +1387,7 @@ pub struct LotteryOutput {
     /// The lottery claim script
     pub lottery_script: ScriptBuf,
     /// Partial-reveal claim scripts, indexed by the missing disputant.
-    /// Empty for `N < PARTIAL_REVEAL_MIN_N`. `partial_reveal_scripts[j]`
+    /// Empty for `N < PARTIAL_REVEAL_MIN_N` (= 3). `partial_reveal_scripts[j]`
     /// is the leaf used when disputant `j` failed to reveal.
     pub partial_reveal_scripts: Vec<ScriptBuf>,
     /// Recovery voters (quorum minus disputed operator)
@@ -1565,6 +1646,203 @@ impl LotteryOutput {
 
         Ok(witness)
     }
+}
+
+// ============================================================================
+// Armer share output (DEP-06 §"Arm-and-reveal forfeiture")
+// ============================================================================
+//
+// Each armer in a punitive confiscation receives their slashed-value
+// slice in a small per-armer Taproot output that gates the spend on
+// the armer revealing the same preimage they committed to in their
+// `DisputeArmed`. The output has two leaves:
+//
+//   Leaf 0 — reveal-claim: `OP_HASH160 <commitment_hash> OP_EQUALVERIFY
+//            <armer_xonly> OP_CHECKSIG`. The armer spends by pushing
+//            their preimage plus a Schnorr signature.
+//
+//   Leaf 1 — sweep: `<ARMER_SHARE_SWEEP_CSV_BLOCKS> OP_CSV OP_DROP`
+//            followed by the standard CHECKSIGADD threshold pattern over
+//            the recovery quorum. After the CSV delay, if the armer
+//            never spent the reveal-claim leaf, the recovery quorum
+//            sweeps the slice as forfeited.
+//
+// The output's value is `remainder / N_armers` (integer division; the
+// residue is silently absorbed into the miner fee, same dust-handling
+// convention the lottery's main confiscation TX uses). Non-armers get
+// no slice at all — arming is the gate to a share, and revealing is
+// the gate to keeping it.
+//
+// Operational notes:
+//   - Both reveal-claim and sweep are tapscript spends; the internal
+//     key is the standard NUMS point so the key path is unspendable.
+//   - The recovery_voters set passed in is identical to the lottery's
+//     recovery_voters ("quorum minus original_operator"), so each armer
+//     remains in the set that can sweep their own slice — but they need
+//     `recovery_threshold` cooperation to do so, which they're unlikely
+//     to get if their non-reveal is what stranded the lottery.
+
+/// A per-armer slashing-share output. Built once per armer at
+/// confiscation time and embedded in the confiscation TX as a P2TR
+/// output of value `remainder / N_armers`.
+#[derive(Clone, Debug)]
+pub struct ArmerShareOutput {
+    /// P2TR address — what the confiscation TX pays into.
+    pub address: Address,
+    /// Taproot spend info — needed to construct either spend witness.
+    pub spend_info: TaprootSpendInfo,
+    /// The reveal-claim leaf script (Leaf 0).
+    pub reveal_script: ScriptBuf,
+    /// The recovery-sweep leaf script (Leaf 1).
+    pub sweep_script: ScriptBuf,
+}
+
+impl ArmerShareOutput {
+    /// `script_pubkey` for embedding in a `TxOut`.
+    pub fn script_pubkey(&self) -> ScriptBuf {
+        self.address.script_pubkey()
+    }
+
+    /// Control block for the reveal-claim leaf.
+    pub fn reveal_control_block(&self) -> Option<bitcoin::taproot::ControlBlock> {
+        self.spend_info
+            .control_block(&(self.reveal_script.clone(), LeafVersion::TapScript))
+    }
+
+    /// Control block for the sweep leaf.
+    pub fn sweep_control_block(&self) -> Option<bitcoin::taproot::ControlBlock> {
+        self.spend_info
+            .control_block(&(self.sweep_script.clone(), LeafVersion::TapScript))
+    }
+}
+
+/// Build the reveal-claim leaf for an armer's share output.
+///
+/// Script (executes against witness `[<armer_sig>, <preimage>]`, top of stack on the right):
+///
+/// ```text
+/// OP_HASH160 <commitment_hash> OP_EQUALVERIFY
+/// <armer_xonly> OP_CHECKSIG
+/// ```
+///
+/// Stack walkthrough:
+/// - witness pushes `armer_sig`, then `preimage` on top
+/// - `OP_HASH160` hashes `preimage` → `<armer_sig> <hash>`
+/// - `<commitment_hash> OP_EQUALVERIFY` checks the hash matches the
+///   commitment from the armer's `DisputeArmed`, then drops both →
+///   `<armer_sig>`
+/// - `<armer_xonly> OP_CHECKSIG` consumes the sig and pushes the
+///   verify result.
+pub fn build_armer_reveal_leaf(
+    commitment_hash: &[u8; 20],
+    armer_xonly: &XOnlyPublicKey,
+) -> ScriptBuf {
+    Builder::new()
+        .push_opcode(OP_HASH160)
+        .push_slice(commitment_hash)
+        .push_opcode(OP_EQUALVERIFY)
+        .push_x_only_key(armer_xonly)
+        .push_opcode(OP_CHECKSIG)
+        .into_script()
+}
+
+/// Build the recovery-sweep leaf for an armer's share output.
+///
+/// Mirrors `LotteryScriptBuilder::build_recovery_script` exactly so the
+/// signing pattern (sorted keys, first key CHECKSIG, rest CHECKSIGADD,
+/// final threshold check) is shared with the lottery's own recovery
+/// long-tail. CSV is fixed at `ARMER_SHARE_SWEEP_CSV_BLOCKS`.
+pub fn build_armer_sweep_leaf(
+    recovery_voters: &[XOnlyPublicKey],
+    recovery_threshold: usize,
+) -> DepositsResult<ScriptBuf> {
+    if recovery_voters.len() < recovery_threshold {
+        return Err(DepositsError::InvalidState(format!(
+            "Armer-share sweep: not enough recovery voters ({}) for threshold ({})",
+            recovery_voters.len(),
+            recovery_threshold
+        )));
+    }
+    if recovery_threshold == 0 {
+        return Err(DepositsError::InvalidState(
+            "Armer-share sweep: recovery_threshold must be >= 1".to_string(),
+        ));
+    }
+
+    let mut sorted_keys = recovery_voters.to_vec();
+    sorted_keys.sort_by_key(|a| a.serialize());
+
+    let mut builder = Builder::new()
+        .push_int(ARMER_SHARE_SWEEP_CSV_BLOCKS as i64)
+        .push_opcode(OP_CSV)
+        .push_opcode(OP_DROP);
+
+    if recovery_threshold == 1 {
+        builder = builder
+            .push_x_only_key(&sorted_keys[0])
+            .push_opcode(OP_CHECKSIG);
+    } else {
+        builder = builder
+            .push_x_only_key(&sorted_keys[0])
+            .push_opcode(OP_CHECKSIG);
+        for key in sorted_keys.iter().skip(1) {
+            builder = builder.push_x_only_key(key).push_opcode(OP_CHECKSIGADD);
+        }
+        builder = builder
+            .push_int(recovery_threshold as i64)
+            .push_opcode(OP_GREATERTHANOREQUAL);
+    }
+
+    Ok(builder.into_script())
+}
+
+/// Build a per-armer slashing-share Taproot output. Used by the
+/// punitive confiscation TX in place of a bare P2TR per cosigner — see
+/// the module-level docstring above and DEP-06 §"Punitive split".
+pub fn build_armer_share_output(
+    armer_xonly: &XOnlyPublicKey,
+    commitment_hash: &[u8; 20],
+    recovery_voters: &[XOnlyPublicKey],
+    recovery_threshold: usize,
+    network: Network,
+) -> DepositsResult<ArmerShareOutput> {
+    let reveal_script = build_armer_reveal_leaf(commitment_hash, armer_xonly);
+    let sweep_script = build_armer_sweep_leaf(recovery_voters, recovery_threshold)?;
+
+    // NUMS internal key — same constant the LotteryScriptBuilder uses.
+    let nums_point = XOnlyPublicKey::from_slice(&TAPROOT_NUMS_POINT)
+        .map_err(|_| DepositsError::InvalidState("Invalid NUMS point".to_string()))?;
+
+    // 2-leaf tree → depth 1 for both leaves.
+    let builder = TaprootBuilder::new()
+        .add_leaf(1, reveal_script.clone())
+        .map_err(|e| {
+            DepositsError::InvalidState(format!(
+                "Failed to add armer reveal leaf: {:?}",
+                e
+            ))
+        })?
+        .add_leaf(1, sweep_script.clone())
+        .map_err(|e| {
+            DepositsError::InvalidState(format!(
+                "Failed to add armer sweep leaf: {:?}",
+                e
+            ))
+        })?;
+
+    let secp = Secp256k1::new();
+    let spend_info = builder.finalize(&secp, nums_point).map_err(|e| {
+        DepositsError::InvalidState(format!("Failed to finalize armer-share tree: {:?}", e))
+    })?;
+
+    let address = Address::p2tr(&secp, nums_point, spend_info.merkle_root(), network);
+
+    Ok(ArmerShareOutput {
+        address,
+        spend_info,
+        reveal_script,
+        sweep_script,
+    })
 }
 
 #[cfg(test)]
@@ -2085,29 +2363,30 @@ mod tests {
 
     #[test]
     fn test_partial_reveal_leaves_skipped_below_threshold() {
-        // N=10 is below PARTIAL_REVEAL_MIN_N. The output should still
-        // build cleanly with the legacy 4-leaf shape.
-        let builder = make_lottery_builder(10);
+        // PARTIAL_REVEAL_MIN_N is 3 (the sub-lottery needs `N-1 >= 2`
+        // participants). At N=2 the partial-reveal builder must return
+        // empty; the output still builds with the bare 4-leaf shape.
+        let builder = make_lottery_builder(2);
         let leaves = builder
             .build_partial_reveal_leaves()
-            .expect("partial-reveal builder should not error at N<11");
+            .expect("partial-reveal builder should not error at N=2");
         assert!(
             leaves.is_empty(),
-            "expected no partial-reveal leaves at N=10, got {}",
+            "expected no partial-reveal leaves at N=2, got {}",
             leaves.len()
         );
 
-        let output = builder.build().expect("N=10 lottery output should build");
+        let output = builder.build().expect("N=2 lottery output should build");
         assert!(
             output.partial_reveal_scripts.is_empty(),
-            "LotteryOutput should expose empty partial_reveal_scripts at N=10"
+            "LotteryOutput should expose empty partial_reveal_scripts at N=2"
         );
     }
 
     #[test]
     fn test_partial_reveal_leaf_count_matches_n() {
-        // At N=11, expect 11 partial-reveal leaves.
-        // At N=15, expect 15.
+        // For every N >= PARTIAL_REVEAL_MIN_N (=3), expect `N` partial-
+        // reveal leaves — one per missing-disputant index.
         for n in PARTIAL_REVEAL_MIN_N..=15 {
             let builder = make_lottery_builder(n);
             let leaves = builder
@@ -2145,7 +2424,10 @@ mod tests {
                 builder.recovery_threshold,
                 builder.network,
             );
-            let inner = sub_builder.build_lottery_script().unwrap();
+            // Mirror build_partial_reveal_leaves: bounds_n is the
+            // *parent* N (commitments were chosen under the parent
+            // contract), not the sub-lottery's participant count.
+            let inner = sub_builder.build_lottery_script_with_bounds_n(n).unwrap();
 
             let prefix = Builder::new()
                 .push_int(PARTIAL_REVEAL_CSV_BLOCKS as i64)
@@ -2298,15 +2580,18 @@ mod tests {
 
     #[test]
     fn test_lottery_output_shape_at_n5() {
-        // For N=5 (no partial-reveal) we expect 5 leaves total:
-        // 1 lottery + 0 partial + 3 long-tail recovery + 1 timeout-recovery
-        // (CSV 8064, threshold 1).
-        // Tree depth ⌈log₂ 5⌉ = 3 for the deeper leaves; the primary
-        // lottery leaf is added first and lands at the d_max depth.
+        // At N=5 we expect 10 leaves total: 1 primary lottery + 5 partial-
+        // reveal (one per missing-disputant index) + 3 long-tail recovery
+        // + 1 timeout-recovery (CSV 8064, threshold 1). Tree depth
+        // ⌈log₂ 10⌉ = 4.
         let output = make_lottery_builder(5)
             .build()
             .expect("N=5 lottery output should build");
-        assert!(output.partial_reveal_scripts.is_empty());
+        assert_eq!(
+            output.partial_reveal_scripts.len(),
+            5,
+            "expected one partial-reveal leaf per disputant at N=5"
+        );
 
         let cb = output
             .spend_info
@@ -2316,10 +2601,11 @@ mod tests {
             ))
             .expect("primary lottery leaf must have a control block");
 
-        assert_eq!(
-            cb.serialize().len(),
-            33 + 32 * 3,
-            "N=5 primary lottery leaf should land at depth-3 in the 5-leaf tree"
+        let cb_len = cb.serialize().len();
+        assert!(
+            cb_len == 33 + 32 * 3 || cb_len == 33 + 32 * 4,
+            "N=5 primary lottery leaf should land at depth 3 or 4 in the 10-leaf tree, got control-block len {}",
+            cb_len
         );
     }
 

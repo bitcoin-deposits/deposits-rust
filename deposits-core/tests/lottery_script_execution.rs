@@ -255,6 +255,12 @@ impl Interp {
                 let a = self.pop_int()?;
                 self.push_int(if a >= b { 1 } else { 0 });
             }
+            // OP_LESSTHANOREQUAL
+            0xa1 => {
+                let b = self.pop_int()?;
+                let a = self.pop_int()?;
+                self.push_int(if a <= b { 1 } else { 0 });
+            }
             // OP_CHECKSIG (stubbed): stack is [..., sig, pubkey] with
             // pubkey on top. An empty sig means "this slot didn't
             // sign" — push 0. A non-empty sig is treated as valid for
@@ -500,6 +506,100 @@ fn primary_lottery_rejects_wrong_preimage() {
         result.is_err()
             && result.as_ref().unwrap_err().contains("OP_EQUALVERIFY"),
         "expected EQUALVERIFY failure, got: {:?}",
+        result
+    );
+}
+
+/// A malicious committer chooses a preimage outside the legal length
+/// range (`17..=16+N`). The hash check passes (we revealed the very
+/// thing we committed to), but the in-script bounds check must reject
+/// the spend so the bad contribution cannot poison the sum-mod-N draw
+/// for the rest of the quorum.
+#[test]
+fn primary_lottery_rejects_undersized_preimage() {
+    // N=3 → legal range is [17, 19]. Attacker commits and reveals a
+    // 5-byte preimage (contribution would be 5 - 16 = -11, scrambling
+    // any sum-mod-N draw the other revealers' contributions land on).
+    let n = 3usize;
+    let mut participants = Vec::new();
+    let mut preimages: Vec<Vec<u8>> = Vec::new();
+    for i in 0..n {
+        let (p, pre) = participant((i + 1) as u8, 1);
+        participants.push(p);
+        preimages.push(pre);
+    }
+    // Replace participant_0's commitment with HASH160 of a 5-byte
+    // attacker-chosen preimage. The hash check at reveal time will
+    // pass because we hashed *the same bytes* we'll reveal.
+    let bad_preimage = vec![0xCDu8; 5];
+    let bad_commit = hash160::Hash::hash(&bad_preimage).to_byte_array();
+    participants[0] =
+        LotteryParticipant::new(pk(1), bad_commit, "bcrt1p...".to_string());
+    preimages[0] = bad_preimage;
+
+    let script = LotteryScriptBuilder::new(
+        participants,
+        standard_recovery_voters(),
+        3,
+        Network::Regtest,
+    )
+    .build_lottery_script()
+    .unwrap();
+
+    let sig = vec![0xAAu8; 64];
+    let mut witness = vec![sig];
+    for p in preimages.iter().rev() {
+        witness.push(p.clone());
+    }
+    let mut interp = Interp::new(witness);
+    let result = interp.run(&script);
+    assert!(
+        result.is_err()
+            && result.as_ref().unwrap_err().contains("OP_VERIFY failed"),
+        "expected OP_VERIFY failure on undersized preimage, got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn primary_lottery_rejects_oversized_preimage() {
+    // N=3 → legal range is [17, 19]. Attacker reveals a 50-byte
+    // preimage; contribution would be 50 - 16 = 34, an arbitrary value
+    // that shifts the winner selection.
+    let n = 3usize;
+    let mut participants = Vec::new();
+    let mut preimages: Vec<Vec<u8>> = Vec::new();
+    for i in 0..n {
+        let (p, pre) = participant((i + 1) as u8, 1);
+        participants.push(p);
+        preimages.push(pre);
+    }
+    let bad_preimage = vec![0xCDu8; 50];
+    let bad_commit = hash160::Hash::hash(&bad_preimage).to_byte_array();
+    participants[0] =
+        LotteryParticipant::new(pk(1), bad_commit, "bcrt1p...".to_string());
+    preimages[0] = bad_preimage;
+
+    let script = LotteryScriptBuilder::new(
+        participants,
+        standard_recovery_voters(),
+        3,
+        Network::Regtest,
+    )
+    .build_lottery_script()
+    .unwrap();
+
+    let sig = vec![0xAAu8; 64];
+    let mut witness = vec![sig];
+    for p in preimages.iter().rev() {
+        witness.push(p.clone());
+    }
+    let mut interp = Interp::new(witness);
+    let result = interp.run(&script);
+    assert!(
+        result.is_err()
+            && result.as_ref().unwrap_err().contains("OP_VERIFY failed"),
+        "expected OP_VERIFY failure on oversized preimage, got: {:?}",
         result
     );
 }
@@ -772,8 +872,10 @@ fn create_partial_reveal_witness_rejects_invalid_inputs() {
 
 #[test]
 fn create_partial_reveal_witness_rejected_when_n_too_small() {
-    // N=10 has no partial-reveal leaves. The helper must refuse.
-    let n = 10usize;
+    // Only N=2 is below PARTIAL_REVEAL_MIN_N (=3) — the sub-lottery
+    // would have N-1=1 participant, below the lottery script's `n >= 2`
+    // minimum. The helper must refuse.
+    let n = 2usize;
     let mut participants = Vec::new();
     let mut preimages = Vec::new();
     for i in 0..n {
@@ -799,7 +901,7 @@ fn create_partial_reveal_witness_rejected_when_n_too_small() {
         .unwrap_err();
     let msg = format!("{}", err);
     assert!(
-        msg.contains("PARTIAL_REVEAL_MIN_N") || msg.contains("11") || msg.contains("only exist"),
+        msg.contains("PARTIAL_REVEAL_MIN_N") || msg.contains("3") || msg.contains("only exist"),
         "expected error to mention the threshold, got: {}",
         msg
     );
@@ -1245,5 +1347,185 @@ fn high_q_timeout_recovery_rejects_empty_signature() {
     assert!(
         !read_scriptbool(top),
         "timeout-recovery with empty sig must return FALSE"
+    );
+}
+
+// ============================================================================
+// Armer share output (DEP-06 §"Arm-and-reveal forfeiture")
+// ============================================================================
+
+use deposits_core::tapscript_reserves::{
+    build_armer_reveal_leaf, build_armer_share_output, build_armer_sweep_leaf,
+    ARMER_SHARE_SWEEP_CSV_BLOCKS,
+};
+
+/// The reveal-claim leaf accepts a valid `(preimage, signature)`: the
+/// preimage's HASH160 matches the commitment, then the armer's CHECKSIG
+/// verifies the signature.
+#[test]
+fn armer_reveal_leaf_accepts_valid_reveal() {
+    let preimage = vec![0x42u8; 17];
+    let commitment = hash160::Hash::hash(&preimage).to_byte_array();
+    let armer_xonly = pk(1);
+
+    let leaf = build_armer_reveal_leaf(&commitment, &armer_xonly);
+
+    // Witness order (bottom→top): sig, preimage. The script consumes
+    // preimage first via OP_HASH160, then sig via OP_CHECKSIG.
+    let sig = vec![0xAAu8; 64];
+    let stack_inputs: Vec<Vec<u8>> = vec![sig, preimage];
+
+    let mut interp = Interp::new(stack_inputs);
+    interp.run(&leaf).expect("reveal-claim should accept valid reveal");
+
+    let top = interp.stack.last().expect("non-empty stack");
+    assert!(
+        read_scriptbool(top),
+        "reveal-claim should leave TRUE on stack, got: {:?}",
+        interp.stack
+    );
+    let pk_bytes = interp
+        .last_checked_pubkey
+        .expect("OP_CHECKSIG must execute");
+    let recorded = XOnlyPublicKey::from_slice(&pk_bytes).unwrap();
+    assert_eq!(recorded, armer_xonly, "recorded pubkey must match armer");
+}
+
+/// An attacker who knows the commitment but not the preimage cannot
+/// satisfy the reveal-claim leaf — any preimage they provide that
+/// differs from the committed one fails HASH160 / EQUALVERIFY.
+#[test]
+fn armer_reveal_leaf_rejects_wrong_preimage() {
+    let real_preimage = vec![0x42u8; 17];
+    let commitment = hash160::Hash::hash(&real_preimage).to_byte_array();
+    let armer_xonly = pk(1);
+
+    let leaf = build_armer_reveal_leaf(&commitment, &armer_xonly);
+
+    // Witness uses a *different* preimage — same length, different content.
+    let wrong_preimage = vec![0xFFu8; 17];
+    let sig = vec![0xAAu8; 64];
+    let stack_inputs: Vec<Vec<u8>> = vec![sig, wrong_preimage];
+
+    let mut interp = Interp::new(stack_inputs);
+    let result = interp.run(&leaf);
+    assert!(
+        result.is_err()
+            && result.as_ref().unwrap_err().contains("OP_EQUALVERIFY"),
+        "wrong preimage must fail EQUALVERIFY, got: {:?}",
+        result
+    );
+}
+
+/// An attacker with the right preimage but the wrong key (or no sig)
+/// cannot spend — the CHECKSIG step pushes FALSE, leaving the stack at
+/// the bottom of the script as a falsy value (no signature, no spend).
+#[test]
+fn armer_reveal_leaf_rejects_missing_signature() {
+    let preimage = vec![0x42u8; 17];
+    let commitment = hash160::Hash::hash(&preimage).to_byte_array();
+    let armer_xonly = pk(1);
+
+    let leaf = build_armer_reveal_leaf(&commitment, &armer_xonly);
+
+    // Empty sig — `Interp::CHECKSIG` (stubbed) treats this as "no
+    // signature provided" and pushes 0.
+    let empty_sig: Vec<u8> = vec![];
+    let stack_inputs: Vec<Vec<u8>> = vec![empty_sig, preimage];
+
+    let mut interp = Interp::new(stack_inputs);
+    interp
+        .run(&leaf)
+        .expect("script should execute (HASH160 path passes), even if it pushes FALSE");
+    let top = interp.stack.last().expect("non-empty stack");
+    assert!(
+        !read_scriptbool(top),
+        "missing-sig reveal must push FALSE, got: {:?}",
+        interp.stack
+    );
+}
+
+/// The recovery-sweep leaf requires the CSV-checked threshold of
+/// recovery-voter signatures. Build the leaf, supply a sufficient sig
+/// set, and verify the script accepts.
+#[test]
+fn armer_sweep_leaf_accepts_threshold_signatures() {
+    // 4 voters, threshold 3.
+    let voters: Vec<XOnlyPublicKey> = (10..14).map(|i| pk(i as u8)).collect();
+    let threshold = 3usize;
+    let leaf = build_armer_sweep_leaf(&voters, threshold).unwrap();
+
+    // The script sorts keys before encoding. Sort our local copy the
+    // same way so we can put signatures in the matching slots.
+    let mut sorted = voters.clone();
+    sorted.sort_by_key(|k| k.serialize());
+
+    // 3-of-4 sigs: first three slots non-empty, last empty.
+    // Witness layout for CHECKSIG/CHECKSIGADD pattern (bottom→top):
+    //   sig_last, sig_..., sig_first  (script consumes sig_first first)
+    // i.e., sigs in REVERSE of the key order.
+    let nonempty: Vec<u8> = vec![0xAAu8; 64];
+    let empty: Vec<u8> = vec![];
+    let sigs_in_key_order: Vec<Vec<u8>> = vec![
+        nonempty.clone(), // sig for sorted[0]
+        nonempty.clone(), // sig for sorted[1]
+        nonempty.clone(), // sig for sorted[2]
+        empty,            // no sig for sorted[3]
+    ];
+    let stack_inputs: Vec<Vec<u8>> =
+        sigs_in_key_order.iter().rev().cloned().collect();
+
+    let mut interp = Interp::new(stack_inputs);
+    interp
+        .run(&leaf)
+        .expect("sweep leaf should accept threshold sigs");
+    let top = interp.stack.last().expect("non-empty stack");
+    assert!(
+        read_scriptbool(top),
+        "sweep leaf should leave TRUE: {:?}",
+        interp.stack
+    );
+}
+
+/// `build_armer_share_output` produces a Taproot output with two leaves
+/// (reveal + sweep), each reachable via its own control block. The
+/// internal key is NUMS so the key path is unspendable.
+#[test]
+fn armer_share_output_exposes_both_leaves() {
+    let preimage = vec![0x42u8; 17];
+    let commitment = hash160::Hash::hash(&preimage).to_byte_array();
+    let armer_xonly = pk(1);
+    let voters: Vec<XOnlyPublicKey> = (10..14).map(|i| pk(i as u8)).collect();
+    let threshold = 3usize;
+
+    let out = build_armer_share_output(
+        &armer_xonly,
+        &commitment,
+        &voters,
+        threshold,
+        Network::Regtest,
+    )
+    .expect("armer-share output should build");
+
+    // Both leaves must be reachable.
+    let reveal_cb = out
+        .reveal_control_block()
+        .expect("reveal leaf must have a control block");
+    let sweep_cb = out
+        .sweep_control_block()
+        .expect("sweep leaf must have a control block");
+
+    // 2-leaf tree → depth 1 for both → control block is 33 + 32 bytes.
+    assert_eq!(reveal_cb.serialize().len(), 33 + 32);
+    assert_eq!(sweep_cb.serialize().len(), 33 + 32);
+
+    // The sweep leaf's CSV must match the constant.
+    let sweep_bytes = out.sweep_script.as_bytes();
+    assert!(
+        sweep_bytes[0] == bitcoin::opcodes::all::OP_PUSHBYTES_2.to_u8()
+            && (sweep_bytes[1] as u32 | ((sweep_bytes[2] as u32) << 8))
+                == ARMER_SHARE_SWEEP_CSV_BLOCKS,
+        "sweep leaf must start with `OP_PUSH2 <ARMER_SHARE_SWEEP_CSV_BLOCKS>`, got opening bytes {:?}",
+        &sweep_bytes[..4.min(sweep_bytes.len())]
     );
 }

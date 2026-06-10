@@ -98,7 +98,7 @@ After the arm window closes, the recovery quorum (quorum members minus the dispu
 Its tapscript tree contains:
 
 - A primary lottery claim leaf that dispatches to the `(sum mod N)`-th disputant on full reveal
-- For N≥11, K=1 partial-reveal leaves at CSV 72 (one per missing disputant) that handle the dominant single-non-revealer case
+- For N≥3, K=1 partial-reveal leaves at CSV 72 (one per missing disputant) that handle the dominant single-non-revealer case
 - A long-tail recovery cascade at CSV 144 / 1008 / 4032 with thresholds T / T-1 / T-2
 - A timeout-recovery escape hatch at CSV 8064 with threshold 1
 
@@ -140,14 +140,46 @@ The script supports up to N=15 disputants, but the operational policy in this re
   Tier 1, a single cosigner at Tier 2.
 
 **Punitive** (proven non-conformance):
-- The full UTXO (reserves + collateral) goes to the winner
-- The winner inherits deposit obligations and retains the collateral as compensation
-- Excess reserves (above obligations) are split equally among quorum members
+- The amount covering the ledger's obligations goes to the lottery output (the winner inherits those obligations against that backing)
+- The remainder (excess reserves + full collateral) is split equally across the **armers** (DisputeArmed participants), one per-armer slashing-share output. Non-armers get no slice — arming is the gate to a share, revealing is the gate to keeping it (see §"Arm-and-reveal forfeiture" below).
 - If the operator runs multiple ledgers, proof of non-conformance on one ledger can be presented to the other ledgers' quorums, triggering slashing there as well
 - Punitive disputes operate at strict majority; they do not cascade
   through the lifecycle tiers because the misbehaviour is provable
   *now* — the protocol does not wait for cosigners to vanish before
   acting on a non-conforming update.
+
+##### Arm-and-reveal forfeiture
+
+Each armer's slashing-share output is a P2TR with two tapscript leaves:
+
+- **Reveal-claim** (`OP_HASH160 <commitment_hash> OP_EQUALVERIFY <armer_xonly> OP_CHECKSIG`): the armer spends by revealing the same preimage they committed to in their `DisputeArmed` plus a Schnorr signature. Spending this leaf publishes the preimage on-chain — if the armer somehow missed the Nostr reveal window, the on-chain spend doubles as a reveal that other observers can use.
+
+- **Sweep** (`<ARMER_SHARE_SWEEP_CSV_BLOCKS> OP_CSV OP_DROP` + recovery-voter threshold CHECKSIGADD pattern): after `ARMER_SHARE_SWEEP_CSV_BLOCKS = 144` blocks (~1 day, matching the lottery's recovery long-tail floor), the recovery quorum (= quorum minus original operator) can sweep the slice as forfeited.
+
+The internal key is the standard NUMS point so the key path is unspendable. The recovery_voters set for the sweep leaf matches the main lottery's recovery_voters — same set, same threshold — so the two outputs' sweep semantics are in lockstep. An armer remains in the recovery set that can sweep their own slice, but the threshold requires cooperation from other cosigners, which a non-revealing armer is unlikely to get.
+
+The "abort option" — armer arms (so the dispute proceeds and the confiscation TX names them in the per-armer outputs), then withholds their reveal — now carries a real cost: their slice falls to the sweep after the CSV expires. See `tapscript_reserves::build_armer_share_output` for the implementation and the `armer_*` tests in `lottery_script_execution.rs` for the witness paths.
+
+##### Sweep recipients: pro-rata to revealers
+
+The sweep leaf permits the recovery quorum to spend the slice; the leaf does NOT constrain where the funds go (tapscript has no general output-commitment opcode). The protocol-defined contract for honest sweepers is:
+
+> **The sweep TX MUST pay the slice (less fee) pro-rata to the set of revealers, split into one P2TR output per revealer keyed by `armer.pubkey`.**
+
+A *revealer* is an armer whose preimage appears in the lottery output's claim TX witness OR in a published `CustodyLotteryReveal` event before the sweep TX is constructed. Equivalently: an armer who satisfied either the primary lottery leaf, a partial-reveal leaf, or signed a Kind 9106 reveal that the sweepers can verify against the on-chain `commitment_hash`. The set of revealers is derivable from public evidence (chain + relay) at sweep time; sweepers are expected to compute it deterministically and agree on the resulting recipient list before cosigning the sweep TX.
+
+Math for a single sweep:
+```
+slice_value = <per-armer share from the confiscation TX>
+fee         = <sweep TX fee estimate>
+per_revealer = (slice_value - fee) / N_revealers
+dust         = (slice_value - fee) - (per_revealer * N_revealers)   // absorbed as additional fee
+```
+Order recipients by sorted `armer.pubkey` so the constructed TX is deterministic and reproducible by every honest signer.
+
+Edge case — `N_revealers == 0`: no one revealed at all (the lottery itself fell through to its recovery cascade). In that case the sweep TX has no honest recipient set; the recovery quorum may sweep the slice into a single output for whichever recovery destination they normally direct lottery-recovery funds to (typically the original operator's pubkey, mirroring the respectful-confiscation change output). This case is degenerate — if no one revealed, the whole lottery already failed — but the sweep path still needs SOME defined destination.
+
+Honest-sweeper enforcement: a sweep TX whose outputs deviate from this pro-rata-to-revealers contract is publicly observable. Sweepers who construct a deviating TX are themselves cosigners of the same ledger, and the deviation is a form of provable misbehavior. A `MaliciousSweep` fraud-proof type may be added later; for now the contract is enforced by recovery-quorum honesty and the social/reputational cost of public deviation. This is no stronger an honesty assumption than the recovery-quorum already requires for the lottery's own recovery long-tail.
 
 ### Race: Re-establishment vs Confiscation
 

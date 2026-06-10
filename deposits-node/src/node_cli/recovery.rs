@@ -3125,35 +3125,62 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
             },
         ]
     } else {
-        // Punitive: obligations to lottery + Q equal slices to cosigners.
-        // Cosigner ordering is by xonly pubkey (matches the recovery
-        // voter ordering convention used elsewhere) so the tx is
-        // deterministic and reproducible by every quorum member.
-        let q = quorum_members.len() as u64;
+        // Punitive: obligations → lottery output, remainder split into
+        // per-armer slashing-share outputs. Each armer's share is a
+        // Taproot output with two leaves:
+        //   - reveal-claim: armer spends by revealing the same preimage
+        //     they committed to in DisputeArmed + signing
+        //   - sweep: after ARMER_SHARE_SWEEP_CSV_BLOCKS, recovery quorum
+        //     sweeps the slice as forfeited
+        // See `tapscript_reserves::build_armer_share_output` and DEP-06
+        // §"Arm-and-reveal forfeiture" for the design rationale.
+        //
+        // Recipient set is the *armers* (DisputeArmed participants), NOT
+        // the full quorum: non-armers get no slice because arming is the
+        // gate to participation. Non-revealers (those who armed but
+        // failed to reveal their preimage on time) lose their slice to
+        // the sweep leaf, making the "abort option" carry a real cost.
+        //
+        // Armer order is by xonly pubkey — matches the participant order
+        // the lottery script and recovery_voters already use, so the TX
+        // is deterministic and reproducible by every honest signer.
+        let mut armers_sorted: Vec<LotteryParticipant> = participants.clone();
+        armers_sorted.sort_by_key(|p| p.pubkey.serialize());
+        let q = armers_sorted.len() as u64;
         if q == 0 {
-            return Err("Punitive confiscation: zero quorum members — \
+            return Err("Punitive confiscation: zero armers — \
                        nowhere to send the slashed value."
                 .into());
         }
-        let per_cosigner = remainder / q;
-        let dust = remainder - (per_cosigner * q);
-        let mut cosigners_sorted: Vec<PublicKey> = quorum_members.clone();
-        cosigners_sorted.sort_by_key(|pk| pk.x_only_public_key().0.serialize());
+        let per_armer = remainder / q;
+        let dust = remainder - (per_armer * q);
         println!(
             "  Punitive split: lottery={} sats (obligations), \
-             {} sats × {} cosigners ({} sats dust → fee)",
-            obligations, per_cosigner, q, dust
+             {} sats × {} armer-share outputs ({} sats dust → fee)",
+            obligations, per_armer, q, dust
         );
         let mut outs = vec![TxOut {
             value: Amount::from_sat(obligations),
             script_pubkey: lottery_output.script_pubkey(),
         }];
-        for pk in &cosigners_sorted {
-            let xonly = pk.x_only_public_key().0;
-            let addr = bitcoin::Address::p2tr(&secp_local, xonly, None, config.network);
+        // Recovery voters for the per-armer sweep leaf: same set used by
+        // the main lottery's recovery long-tail (quorum minus original
+        // operator). Pulled off the LotteryOutput so the two outputs'
+        // sweep semantics are in lockstep.
+        let recovery_voters = lottery_output.recovery_voters.clone();
+        let recovery_threshold = lottery_output.recovery_threshold;
+        for armer in &armers_sorted {
+            let share = deposits_core::tapscript_reserves::build_armer_share_output(
+                &armer.pubkey,
+                &armer.commitment_hash,
+                &recovery_voters,
+                recovery_threshold,
+                config.network,
+            )
+            .map_err(|e| format!("Failed to build armer-share output: {:?}", e))?;
             outs.push(TxOut {
-                value: Amount::from_sat(per_cosigner),
-                script_pubkey: addr.script_pubkey(),
+                value: Amount::from_sat(per_armer),
+                script_pubkey: share.script_pubkey(),
             });
         }
         outs
