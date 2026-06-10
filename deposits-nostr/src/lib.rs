@@ -784,6 +784,57 @@ pub mod guarantee_regimes {
     pub const TRANSFER_COURIER: &str = "transfer_courier";
 }
 
+/// The wire-side projection of a DEP-16 `CapabilitySet` for inclusion in a
+/// `LedgerAdvertisement`. Names match the spec text in DEP-16 §capability:
+/// obligations are spelled `pk`, `pk_h`, `pk_any`, `pk_threshold`, `hashlock`,
+/// `pointlock`, `attest`; state predicates use the lowercase form of the
+/// `StatePred` enum variant (`older`, `after`, `amount_at_most`, …); value
+/// functions use the lowercase form of `ValueFn`. The three lists are flat
+/// and unordered (BTreeSet semantics on the operator side; wallets compare
+/// by `contains`).
+///
+/// An empty `AdvertisedCapabilities` (the `Default::default()` shape) means
+/// "operator did not publish capabilities" — wallets MUST treat it as the
+/// protocol-mandated minimum (`pk`, `pk_h`, `hashlock`, `older`, `after`),
+/// matching `CapabilitySet::minimum()`. Operators that opt into `pointlock`
+/// (PTLC) or other extensions populate the relevant list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdvertisedCapabilities {
+    /// Proof-obligation forms the operator implements.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub obligations: Vec<String>,
+    /// State predicates the operator implements.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state_preds: Vec<String>,
+    /// Value functions the operator implements.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub value_fns: Vec<String>,
+}
+
+impl AdvertisedCapabilities {
+    /// True iff every list is empty — the wire-default that means "operator
+    /// did not publish capabilities; assume the protocol-mandated minimum."
+    /// Used as the serde `skip_serializing_if` predicate on the field.
+    pub fn is_empty(&self) -> bool {
+        self.obligations.is_empty()
+            && self.state_preds.is_empty()
+            && self.value_fns.is_empty()
+    }
+
+    /// Whether the operator has advertised support for the named obligation
+    /// (matched case-insensitively against the spec spelling — `"pointlock"`,
+    /// `"hashlock"`, `"pk_threshold"`, …). Empty `obligations` returns true
+    /// only for names in the protocol-mandated minimum set.
+    pub fn supports_obligation(&self, name: &str) -> bool {
+        if self.obligations.is_empty() {
+            return matches!(name, "pk" | "pk_h" | "hashlock" | "older" | "after");
+        }
+        self.obligations
+            .iter()
+            .any(|o| o.eq_ignore_ascii_case(name))
+    }
+}
+
 /// A ledger advertisement (operator terms and limits)
 /// Published as a NIP-33 parameterized replaceable event.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -949,6 +1000,17 @@ pub struct LedgerAdvertisement {
     /// treat absence as "no commitment" rather than "no protection."
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guarantees: Vec<GuaranteeRegime>,
+
+    /// Operator's advertised DEP-16 capability set. Wallets MUST treat the
+    /// `Default::default()` value (all three lists empty) as "operator did
+    /// not publish capabilities" and assume the protocol-mandated minimum
+    /// (`pk`, `pk_h`, `hashlock`, `older`, `after`). Operators that opt
+    /// into extended primitives — most notably `pointlock` for PTLC routes
+    /// (DEP-13 §"Courier PTLC pattern") — populate the relevant list.
+    /// Couriers compose this signal across both hop operators when deciding
+    /// whether to advertise the `ptlc_routing` service tag (DEP-13).
+    #[serde(default, skip_serializing_if = "AdvertisedCapabilities::is_empty")]
+    pub capabilities: AdvertisedCapabilities,
 
     /// Version of the advertisement format
     #[serde(default = "default_version")]
@@ -1205,6 +1267,7 @@ impl LedgerAdvertisement {
             quorum_state: String::new(),
             quorum_members: Vec::new(),
             guarantees: Vec::new(),
+            capabilities: AdvertisedCapabilities::default(),
             version: 1,
             event_id: String::new(),
             timestamp: 0,

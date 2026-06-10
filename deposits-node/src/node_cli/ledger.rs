@@ -1120,6 +1120,7 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
             .iter()
             .map(|m| m.pubkey.to_string())
             .collect();
+        ad.capabilities = crate::operator_policy::default_advertised_capabilities();
 
         println!("Publishing ledger advertisement...");
         println!("  Ledger ID: {}...", &ledger_id[..16]);

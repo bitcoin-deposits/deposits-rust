@@ -1015,6 +1015,7 @@ pub async fn auto_advertise_ledger(
     // invoice receive once #172 lands) should override the relevant rows
     // before publishing rather than ship these defaults unchanged.
     ad.guarantees = LedgerAdvertisement::default_guarantees();
+    ad.capabilities = crate::operator_policy::default_advertised_capabilities();
 
     // Apply fee schedule from CLI flags
     if let Some(bps) = fee_schedule.annual_fee_bps {
@@ -1189,6 +1190,9 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
         // was written before the field existed.
         if ad.guarantees.is_empty() {
             ad.guarantees = crate::nostr::LedgerAdvertisement::default_guarantees();
+        }
+        if ad.capabilities.is_empty() {
+            ad.capabilities = crate::operator_policy::default_advertised_capabilities();
         }
 
         // Refresh runtime-settable fields from the live node config so

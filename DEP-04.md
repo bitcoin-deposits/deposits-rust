@@ -122,6 +122,7 @@ Operators publish NIP-33 replaceable events advertising their terms. The `d` tag
 - Relay URL
 - Operator's observed Bitcoin chain tip at publish time (informational; clients that need a fresh tip SHOULD prefer the Kind 39101 price-oracle stream — see §Price Oracle below)
 - `guarantees` — *(optional)* a machine-readable guarantee matrix that wallets route on. See §Guarantee Matrix below.
+- `capabilities` — *(optional)* the operator's advertised DEP-16 capability set. See §Capabilities below.
 
 Earlier drafts also carried `total_obligations` and `available_headroom`. Both were dropped — the operator can trivially inflate them with self-paid Lightning invoices, so they're not reliable trust signals. Wallets that need capacity information should either discover a courier already holding funds on this ledger, or trust the protocol invariant `reserves ≥ obligations` enforced by the quorum's co-signers.
 
@@ -176,6 +177,24 @@ A guarantee matrix is a list of `(regime, amount-range, shape, honesty, time-pro
 **Defaults and forward compatibility.** Operators MAY publish multiple rows for the same regime over disjoint amount ranges (e.g., `settlement_atomic` up to 1 BTC, `deterrence` above). Wallets MUST treat absence of the `guarantees` field as *"no commitment"* rather than *"no protection"* — older daemons published advertisements before this field existed. A wallet that doesn't recognize a regime name SHOULD skip the row and continue rather than abort. Adding new regime names is a non-breaking codec change.
 
 **Trust path.** The matrix is signed by the operator's Nostr event signature, so a wallet who trusts `operator_pubkey` for the advertisement trusts the matrix. The matrix is a *promise*, not a *proof* — the protocol-level guarantees come from the deposit script, the quorum, and the slashing economics. A misadvertised matrix that an operator then fails to honor is itself a reputational signal but not directly slashable.
+
+### Capabilities
+
+The `capabilities` field projects the operator's DEP-16 capability set (see DEP-16 §capability) to three flat lists, so wallets can filter operators by the descriptor primitives they implement without reaching for the calculus directly.
+
+```jsonc
+"capabilities": {
+  "obligations":  ["pk", "pk_h", "pk_any", "pk_threshold", "hashlock", "pointlock", "attest"],
+  "state_preds":  ["older", "after", "amount_at_most", "destination_is", "balance_at_least", ...],
+  "value_fns":    ["add", "sub", "mul", "div", "min", "max", "pct", "bps", "deposit_balance", ...]
+}
+```
+
+Names use the canonical lowercase spec spelling — `pk_threshold` for the n-of-m signature obligation, `pointlock` for the PTLC primitive, `hashlock` for the four-hash HTLC obligation. Wallets compare with `contains`.
+
+**Default semantics.** An empty `capabilities` (or its absence) means *"operator did not publish capabilities"*. Wallets MUST then assume only the protocol-mandated minimum (`pk`, `pk_h`, `hashlock`, `older`, `after`), in line with `CapabilitySet::minimum()` in the calculus. Wallets that need an extended primitive — most notably `pointlock` for PTLC courier routes (DEP-13 §"Courier PTLC pattern") — MUST verify the capability is advertised by every operator on the route before constructing descriptors that use it. Operators that don't advertise the capability refuse such descriptors at admission, so probing without checking burns capital on doomed locks.
+
+**Trust path.** Same as `guarantees`: the operator's Nostr event signature attests the capability list. A misadvertised capability that the operator then rejects at admission is a wallet-side error that recovers gracefully (the wallet falls back to HTLC, or picks a different operator); the protocol-level safety isn't at risk.
 
 ## Operator → Delegate Delegation
 

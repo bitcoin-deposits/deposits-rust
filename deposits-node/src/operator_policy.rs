@@ -18,6 +18,29 @@ use std::path::Path;
 /// File name within `data_dir`. Public so tests can reference the same path.
 pub const POLICY_FILENAME: &str = "operator_policy.json";
 
+/// The DEP-16 capability set this build of the node advertises in Kind 39100,
+/// projected to its wire shape ([`deposits_nostr::AdvertisedCapabilities`]).
+///
+/// Source of truth: `CapabilitySet::everything()` (every primitive the calculus
+/// in `third_party/rust-miniscript` implements) → string-projected via
+/// [`deposits_core::dep16::capability_set_to_wire_strings`]. As the calculus
+/// grows new primitives, this helper grows with it — no manual list-keeping.
+///
+/// Operators who want to advertise a subset (e.g., omit `attest` until their
+/// attestor infrastructure is ready) can construct a custom
+/// `AdvertisedCapabilities` and assign it to the ad directly after calling
+/// `LedgerAdvertisement::new`. This helper is the default.
+pub fn default_advertised_capabilities() -> deposits_nostr::AdvertisedCapabilities {
+    let set = deposits_core::dep16::CapabilitySet::everything();
+    let (obligations, state_preds, value_fns) =
+        deposits_core::dep16::capability_set_to_wire_strings(&set);
+    deposits_nostr::AdvertisedCapabilities {
+        obligations,
+        state_preds,
+        value_fns,
+    }
+}
+
 /// Operator-side advertised policy. Mirrors the subset of `LedgerAdvertisement`
 /// fields the operator chooses (everything else on the ad is derived from
 /// ledger state or wallet state). All optional so a partial policy is valid.

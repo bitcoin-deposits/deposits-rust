@@ -41,6 +41,24 @@ pub use miniscript::calculus::{replay, FraudProof, ReplayOutcome};
 /// produced by a modification (see PLAN phases 4 and 5).
 pub use miniscript::calculus::{admit, AdmissionError, CapabilitySet};
 
+/// Project a [`CapabilitySet`] to three string lists, suitable for inclusion in a Kind 39100
+/// `LedgerAdvertisement` (DEP-04 §"capabilities"). Names are the canonical lowercase
+/// spec-spellings from DEP-16: obligations use `"pk"`, `"pk_h"`, `"pk_any"`, `"pk_threshold"`,
+/// `"hashlock"`, `"pointlock"`, `"attest"`; state predicates and value functions use the
+/// `name()` method on their respective enums.
+///
+/// Returns `(obligations, state_preds, value_fns)`. Each list is sorted by the underlying
+/// `BTreeSet` order (the enum's `Ord` derive) for deterministic output across operators that
+/// advertise the same set.
+pub fn capability_set_to_wire_strings(
+    c: &CapabilitySet,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let obligations = c.obligations.iter().map(|k| k.name().to_string()).collect();
+    let state_preds = c.state_preds.iter().map(|p| p.name().to_string()).collect();
+    let value_fns = c.value_fns.iter().map(|f| f.name().to_string()).collect();
+    (obligations, state_preds, value_fns)
+}
+
 /// Real-crypto verifiers — both ECDSA (33-byte compressed secp keys) and BIP-340 Schnorr (32-byte
 /// x-only keys). The evaluator is generic over [`Verifier`], so an integration test that doesn't
 /// want real crypto can substitute a mock.
