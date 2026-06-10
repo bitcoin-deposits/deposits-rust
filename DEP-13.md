@@ -19,6 +19,32 @@ A courier holds deposits on multiple ledgers. When a wallet wants to move funds 
 
 This is a standard HTLC (Hash Time-Locked Contract) pattern. The courier earns a fee for providing liquidity; no trust is required beyond the timeout guarantees already enforced by operators (DEP-11).
 
+### Courier PTLC pattern
+
+The HTLC pattern above leaks the payment hash on the relay: an observer who sees both legs can match the hashes and link them as the same in-flight payment, even without knowing the parties involved. The PTLC variant uses `pointlock(P)` (DEP-16) in place of `sha256(H)` and a blinding scalar to break the link.
+
+Setup:
+
+1. **Wallet** picks a base scalar `s` and computes `P = G·s`.
+2. **Wallet ↔ Courier** agree on a blinding scalar `t` (the courier picks it; the wallet receives it over the negotiation channel).
+3. **Courier** computes `P_b = P + G·t` for the sender→courier leg.
+
+Locks:
+
+- **Leg 1 (Sender → Courier)** uses `completion_script = "pointlock(P_b)"` — the courier completes it by revealing `s + t`.
+- **Leg 2 (Courier → Receiver)** uses `completion_script = "pointlock(P)"` — the receiver completes it by revealing `s`.
+
+Settlement:
+
+1. **Receiver** reveals `s` on Leg 2, claiming the funds.
+2. **Courier** observes `s`, computes `s + t`, reveals it on Leg 1, claiming its funds.
+
+An observer on either relay sees two unrelated points (`P` and `P_b`). Without knowing `t`, they cannot conclude the legs belong to the same payment. The privacy property is the same one Lightning's PTLC migration provides.
+
+**Capability requirement.** Courier-PTLC requires every hop's operator to advertise the `pointlock` capability (DEP-16 §capability). Wallets that need PTLC privacy MUST filter courier candidates by the capabilities of the operators on both legs; couriers SHOULD advertise both their HTLC and PTLC support so wallets can pick. Operators that haven't enabled `pointlock` still serve HTLC hops; the privacy property is unavailable for those.
+
+**Failure modes.** If the courier reveals `s + t` but Leg 2 never settles (receiver never reveals `s`), Leg 1 still settles correctly for the courier — the courier's claim is independent of Leg 2's outcome. If Leg 2 settles but Leg 1 times out, the courier learns `s` but loses their leg-1 stake; standard HTLC timeout-vs-revelation logic applies with `timeout_height` from `TransferLock` (DEP-09).
+
 ## Courier Advertisement (Kind 39102)
 
 Couriers advertise their services via NIP-33 replaceable events on the ledger relay.
