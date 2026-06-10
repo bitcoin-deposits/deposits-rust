@@ -37,6 +37,26 @@ The same wide-integer requirement applies: `amount_msats * rate_bps` can overflo
 
 The sender must provide the exact expected fee in the `TransferLock` request. The operator rejects mismatches.
 
+### Why two components, not bps-only
+
+External reviewers periodically propose collapsing fees to basis-points-only on the grounds that a flat per-op fee "taxes the behaviors agent commerce runs on." That framing is wrong, and the protocol explicitly rejects it.
+
+Per-operation cost is real and *not* amount-proportional. Each ledger update costs the operator and its quorum:
+
+- a cosignature round-trip (one network RTT per cosigner, signature CPU)
+- validation work (decode, replay against state, conformance check)
+- storage (the signed update lives forever on the operator's relay and propagates to peers)
+- bandwidth (gossip to the durable relay, the messaging relay, and any subscribed wallets)
+
+A 1-sat micropayment imposes the same per-op cost on the operator as a 1-BTC settlement; only the *risk* component scales with amount. Bps-only fees would force the operator to subsidize every small operation out of large-operation revenue — a model that's unstable under volume mix shifts and creates an obvious griefing surface (flood the operator with sub-dust transfers; the operator either rejects them or runs at a loss).
+
+The right shape for both `FeeStructure` and `TransferFeeSchedule` is:
+
+- **`fixed_msats` covers the per-op cost floor.** Operators should set it as low as their actual operational cost permits — measured in msats, comfortably under common micropayment values. A reasonable target is "the operator's marginal cost per operation, plus a small margin," not "what the market will bear." Wallets should distrust operators whose fixed components are large relative to their bps components.
+- **`*_bps` covers the value-proportional risk-and-capital cost** — the operator's exposure scales with the amount under management or in flight, and bps captures that cleanly.
+
+Both halves serve a structural purpose. Dropping the fixed component would require either subsidizing micropayments (operator unstable) or refusing them (defeats the use case). Keep both, keep `fixed_msats` low.
+
 ### Fee on Failure
 
 Lock-then-resolve operations (`TransferLock`/`Complete`/`Fail`, `InvoiceLock`/`Fulfill`/`Fail`, `OnchainLock`/`Fulfill`/`Fail`) charge a fee even when the resolution is a failure. Rationale: the operator did real work holding the lock and coordinating the attempt. On the failure path:
