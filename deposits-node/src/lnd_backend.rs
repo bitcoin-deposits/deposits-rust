@@ -515,6 +515,7 @@ impl LightningBackend for LndBackend {
         payment_hash_hex: &str,
         description: &str,
         expiry_secs: u32,
+        cltv_expiry_delta: Option<u16>,
     ) -> Result<String, Error> {
         let hash_bytes = hex::decode(payment_hash_hex)
             .map_err(|e| Error::Wallet(format!("LND hold hash hex decode: {}", e)))?;
@@ -525,12 +526,17 @@ impl LightningBackend for LndBackend {
             )));
         }
         use base64::{engine::general_purpose::STANDARD, Engine as _};
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "hash": STANDARD.encode(&hash_bytes),
             "value_msat": amount_msat.to_string(),
             "memo": description,
             "expiry": expiry_secs.to_string(),
         });
+        // LND honors a requested hold window via cltv_expiry (the invoice's
+        // min_final_cltv_expiry_delta). String-typed per grpc-gateway.
+        if let Some(delta) = cltv_expiry_delta {
+            body["cltv_expiry"] = serde_json::Value::String(delta.to_string());
+        }
         let resp: LndAddHoldInvoiceResp = self.post("/v2/invoices/hodl", &body)?;
         Ok(resp.payment_request)
     }

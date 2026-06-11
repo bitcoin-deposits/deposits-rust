@@ -123,7 +123,7 @@ fn cln_hold_invoice_settle_and_cancel() {
     let preimage_hex = hex::encode(preimage);
 
     let bolt11 = backend
-        .create_hold_invoice(250_000, &hash_hex, "cln-hold-test", 3600)
+        .create_hold_invoice(250_000, &hash_hex, "cln-hold-test", 3600, None)
         .expect("create_hold_invoice");
     assert!(
         bolt11.starts_with("lnbcrt"),
@@ -181,7 +181,7 @@ fn cln_hold_invoice_settle_and_cancel() {
     let (_, hash2) = rand_preimage();
     let hash2_hex = hex::encode(hash2);
     let bolt11_2 = backend
-        .create_hold_invoice(150_000, &hash2_hex, "cln-hold-cancel-test", 3600)
+        .create_hold_invoice(150_000, &hash2_hex, "cln-hold-cancel-test", 3600, None)
         .expect("create second hold invoice");
 
     let pay2_handle = spawn_payer_pay(&payer_socket, &bolt11_2);

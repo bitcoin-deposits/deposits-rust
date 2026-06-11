@@ -109,8 +109,11 @@ fn lnd_hold_invoice_settle_and_cancel() {
     let hash_hex = hex::encode(hash);
     let preimage_hex = hex::encode(preimage);
 
+    // Request a 200-block hold window (LND honors cltv_expiry — #205).
+    // The Accepted assertion below verifies the request was applied by
+    // measuring the actual HTLC expiry against the chain tip.
     let bolt11 = backend
-        .create_hold_invoice(250_000, &hash_hex, "lnd-hold-test", 3600)
+        .create_hold_invoice(250_000, &hash_hex, "lnd-hold-test", 3600, Some(200))
         .expect("create_hold_invoice");
     assert!(
         bolt11.starts_with("lnbcrt"),
@@ -137,7 +140,22 @@ fn lnd_hold_invoice_settle_and_cancel() {
         }
         other => panic!("expected Accepted while payer blocks, got {:?}", other),
     };
-    eprintln!("[hold]    HTLCs parked, expiry_height={}", expiry);
+    // Verify the requested 200-block window was honored: measured headroom
+    // should be ~200 (payer shaves a few blocks in flight; the regtest miner
+    // adds a few while we poll). Well above LND's default (~80-144) proves
+    // the cltv_expiry request took effect.
+    let tip = backend
+        .get_node_info()
+        .expect("get_node_info")
+        .current_best_block_height
+        .expect("LND reports block height");
+    let headroom = expiry.saturating_sub(tip);
+    assert!(
+        (160..=220).contains(&headroom),
+        "requested 200-block hold window, measured headroom {} (expiry {} - tip {})",
+        headroom, expiry, tip
+    );
+    eprintln!("[hold]    HTLCs parked, expiry_height={} (headroom {} of 200 requested)", expiry, headroom);
 
     backend
         .settle_hold_invoice(&preimage_hex)
@@ -163,7 +181,7 @@ fn lnd_hold_invoice_settle_and_cancel() {
     let (_, hash2) = rand_preimage();
     let hash2_hex = hex::encode(hash2);
     let bolt11_2 = backend
-        .create_hold_invoice(150_000, &hash2_hex, "lnd-hold-cancel-test", 3600)
+        .create_hold_invoice(150_000, &hash2_hex, "lnd-hold-cancel-test", 3600, None)
         .expect("create second hold invoice");
 
     let pay2_handle = spawn_payer_pay(&payer_socket, &bolt11_2);

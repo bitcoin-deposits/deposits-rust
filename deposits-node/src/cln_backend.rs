@@ -578,6 +578,7 @@ impl LightningBackend for ClnBackend {
         payment_hash_hex: &str,
         _description: &str,
         _expiry_secs: u32,
+        _cltv_expiry_delta: Option<u16>,
     ) -> Result<String, Error> {
         // Boltz hold RPC takes exactly (payment_hash, amount-in-msat).
         // Description and expiry are only settable via the plugin's gRPC

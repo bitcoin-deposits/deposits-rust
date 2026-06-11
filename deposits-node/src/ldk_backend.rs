@@ -550,6 +550,10 @@ impl LightningBackend for LdkBackend {
         payment_hash_hex: &str,
         description: &str,
         expiry_secs: u32,
+        // ldk-node's receive_for_hash has no CLTV parameter — the window is
+        // fixed at min_final_cltv (24) minus LDK's fail-back buffer (~18
+        // usable blocks). Measured via lookup, per the trait contract.
+        _cltv_expiry_delta: Option<u16>,
     ) -> Result<String, Error> {
         let amount_arg = format!("{}msat", amount_msat);
         let expiry_arg = expiry_secs.to_string();

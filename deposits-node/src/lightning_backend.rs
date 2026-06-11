@@ -127,12 +127,23 @@ pub trait LightningBackend: Send + Sync {
     /// `expiry_secs` is the BOLT-11 invoice expiry (how long the payer has
     /// to start paying) — NOT the HTLC hold window, which is governed by the
     /// HTLC's own CLTV and surfaced via [`Self::lookup_hold_invoice`].
+    ///
+    /// `cltv_expiry_delta` REQUESTS a hold window (the invoice's
+    /// `min_final_cltv_expiry_delta`). Backend support varies — LND honors
+    /// it, CLN's hold-plugin RPC and LDK's `receive_for_hash` ignore it —
+    /// so the bridge MUST still treat the window as measured, not assumed:
+    /// read the actual expiry from [`Self::lookup_hold_invoice`]'s
+    /// `Accepted::htlc_expiry_height` after HTLCs park (DEP-10 §"Hold
+    /// windows"). Keep requests ≤ ~288: payer wallets cap total route CLTV
+    /// (CLN's `pay` maxdelay defaults to 2016 across the whole route) and
+    /// refuse invoices demanding extreme final deltas.
     fn create_hold_invoice(
         &self,
         _amount_msat: u64,
         _payment_hash_hex: &str,
         _description: &str,
         _expiry_secs: u32,
+        _cltv_expiry_delta: Option<u16>,
     ) -> Result<String, Error> {
         Err(Error::Protocol(
             "hold invoices not supported by this Lightning backend".to_string(),
