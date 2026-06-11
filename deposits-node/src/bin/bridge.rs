@@ -172,28 +172,48 @@ struct PendingReceive {
     state: ReceiveState,
 }
 
-/// Pay-direction state machine (DEP-10 §Pay). Quotes are ephemeral
-/// (in-memory only); a crash before the lock arrives just means the wallet
-/// re-quotes.
-#[derive(Debug)]
+/// Pay-direction state machine (DEP-10 §Pay). Persisted alongside the
+/// receive table: a crash between "paid the invoice" and "claimed the lock"
+/// would otherwise eat the payment — the lock refunds, the sats are gone.
+/// On restart, LockSeen/Paying entries are re-driven through `execute_pay`,
+/// which checks for an existing preimage before paying (LN nodes dedup by
+/// payment_hash, so the retry can't double-spend).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct QuotedPay {
+    #[serde(with = "hex32")]
     payment_hash: [u8; 32],
     bolt11: String,
     ledger_id: String,
     invoice_amount_msats: u64,
     service_fee_msats: u64,
-    quoted_at: Instant,
+    /// Unix seconds (Instant doesn't survive a restart).
+    quoted_at_unix: u64,
     state: PayState,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl QuotedPay {
+    fn age(&self) -> Duration {
+        Duration::from_secs(now_unix().saturating_sub(self.quoted_at_unix))
+    }
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 enum PayState {
     Quoted,
     LockSeen {
         transfer_id: [u8; 32],
         amount_msats: u64,
     },
-    Paying,
+    Paying {
+        transfer_id: [u8; 32],
+    },
     Completed,
     Failed(String),
 }
@@ -227,11 +247,14 @@ struct Config {
 }
 
 /// On-disk state file format (`<data_dir>/bridge-state.json`):
-/// `{ "seen_hashes": ["<64 hex>", ...], "receives": [PendingReceive, ...] }`
+/// `{ "seen_hashes": [...], "receives": [...], "pays": [...] }`
+/// (`pays` added later — default tolerates older files).
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct PersistedState {
     seen_hashes: Vec<String>,
     receives: Vec<PendingReceive>,
+    #[serde(default)]
+    pays: Vec<QuotedPay>,
 }
 
 #[derive(Default)]
@@ -255,8 +278,9 @@ struct SharedState {
 }
 
 impl SharedState {
-    /// Write the receive table + seen-hash set to the state file. Called on
-    /// every receive-side transition (crash recovery: reload + resume).
+    /// Write the receive table + pay table + seen-hash set to the state
+    /// file. Called on every state transition (crash recovery: reload +
+    /// resume).
     fn persist(&self) {
         let doc = PersistedState {
             seen_hashes: self
@@ -267,6 +291,7 @@ impl SharedState {
                 .map(hex::encode)
                 .collect(),
             receives: self.receives.lock().unwrap().clone(),
+            pays: self.pays.lock().unwrap().values().cloned().collect(),
         };
         let json = match serde_json::to_string_pretty(&doc) {
             Ok(j) => j,
@@ -1330,7 +1355,7 @@ fn handle_quote_invoice(state: &Arc<SharedState>, params: &serde_json::Value) ->
     {
         let mut pays = state.pays.lock().unwrap();
         // Evict stale quotes (and finished entries past retention).
-        pays.retain(|_, q| !quote_expired(q.quoted_at.elapsed()));
+        pays.retain(|_, q| !quote_expired(q.age()));
         pays.insert(
             payment_hash,
             QuotedPay {
@@ -1339,11 +1364,12 @@ fn handle_quote_invoice(state: &Arc<SharedState>, params: &serde_json::Value) ->
                 ledger_id,
                 invoice_amount_msats,
                 service_fee_msats,
-                quoted_at: Instant::now(),
+                quoted_at_unix: now_unix(),
                 state: PayState::Quoted,
             },
         );
     }
+    state.persist();
 
     eprintln!(
         "[PAY] quoted: hash={}... amount={} sf={}",
@@ -1699,36 +1725,68 @@ async fn execute_pay(
         if let Some(q) = state.pays.lock().unwrap().get_mut(&payment_hash) {
             q.state = PayState::Failed(reason);
         }
+        state.persist();
         state
             .stats
             .pays_failed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     };
 
-    // LockSeen → Paying: about to hand the BOLT-11 to the LN node.
+    // LockSeen → Paying: about to hand the BOLT-11 to the LN node. Persisted
+    // BEFORE paying — if we crash past this point, restart recovery re-enters
+    // here and the preimage check below makes the retry idempotent.
     if let Some(q) = state.pays.lock().unwrap().get_mut(&payment_hash) {
-        q.state = PayState::Paying;
+        q.state = PayState::Paying { transfer_id };
+    }
+    state.persist();
+
+    // Recovery-safe ordering: a crash-restart may re-run this for an invoice
+    // we ALREADY paid. Check for the preimage first; only pay when absent.
+    let mut preimage: Option<[u8; 32]> = ln_get_payment_preimage(&ln, hash_hex.clone())
+        .await
+        .ok()
+        .flatten();
+
+    if preimage.is_none() {
+        if let Err(e) = ln_pay_invoice(&ln, bolt11).await {
+            // "already paid"/"in flight" from the LN node's payment-hash
+            // dedup is success-shaped here — fall through to the poll.
+            let msg = e.to_lowercase();
+            if !(msg.contains("already") || msg.contains("in flight") || msg.contains("in-flight"))
+            {
+                fail(&state, format!("pay_invoice failed: {}", e));
+                return;
+            }
+            eprintln!(
+                "[PAY] {}... pay_invoice says '{}' — treating as paid/in-flight, polling preimage",
+                &hash_hex[..16],
+                e
+            );
+        }
     }
 
-    if let Err(e) = ln_pay_invoice(&ln, bolt11).await {
-        fail(&state, format!("pay_invoice failed: {}", e));
-        return;
+    // Test hook: simulate the worst-case crash window — invoice paid,
+    // lock not yet claimed. Used by the restart drill.
+    if std::env::var("BRIDGE_CRASH_AFTER_PAY").is_ok() {
+        eprintln!("[CRASH-HOOK] BRIDGE_CRASH_AFTER_PAY set — exiting after pay, before claim");
+        std::process::exit(42);
     }
 
     // Payment may settle async on some backends — poll for the preimage.
-    let mut preimage: Option<[u8; 32]> = None;
-    for _ in 0..30 {
-        match ln_get_payment_preimage(&ln, hash_hex.clone()).await {
-            Ok(Some(p)) => {
-                preimage = Some(p);
-                break;
+    if preimage.is_none() {
+        for _ in 0..30 {
+            match ln_get_payment_preimage(&ln, hash_hex.clone()).await {
+                Ok(Some(p)) => {
+                    preimage = Some(p);
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[PAY] {}... preimage lookup error: {}", &hash_hex[..16], e);
+                }
             }
-            Ok(None) => {}
-            Err(e) => {
-                eprintln!("[PAY] {}... preimage lookup error: {}", &hash_hex[..16], e);
-            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
     let Some(preimage) = preimage else {
@@ -1756,6 +1814,7 @@ async fn execute_pay(
             if let Some(q) = state.pays.lock().unwrap().get_mut(&payment_hash) {
                 q.state = PayState::Completed;
             }
+            state.persist();
             state
                 .stats
                 .pays_completed
@@ -1834,7 +1893,10 @@ async fn run_api_server(port: u16, state: Arc<SharedState>) {
                     let active = pays
                         .values()
                         .filter(|q| {
-                            matches!(q.state, PayState::LockSeen { .. } | PayState::Paying)
+                            matches!(
+                                q.state,
+                                PayState::LockSeen { .. } | PayState::Paying { .. }
+                            )
                         })
                         .count();
                     (quotes, active)
@@ -2172,10 +2234,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|d| (d.ledger_id.clone(), d.clone()))
         .collect();
 
+    let pays_map: HashMap<[u8; 32], QuotedPay> = persisted
+        .pays
+        .into_iter()
+        .filter(|q| {
+            // Drop quotes that expired while we were down; keep everything
+            // in-flight or finished (retention pruning handles the rest).
+            !(q.state == PayState::Quoted && quote_expired(q.age()))
+        })
+        .map(|q| (q.payment_hash, q))
+        .collect();
+    let recoverable: Vec<QuotedPay> = pays_map
+        .values()
+        .filter(|q| {
+            matches!(
+                q.state,
+                PayState::LockSeen { .. } | PayState::Paying { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    if !recoverable.is_empty() {
+        eprintln!(
+            "Resuming {} in-flight pay(s) from {}",
+            recoverable.len(),
+            state_file.display()
+        );
+    }
+
     let shared = Arc::new(SharedState {
         deposits: deposits.clone(),
         receives: Mutex::new(persisted.receives),
-        pays: Mutex::new(HashMap::new()),
+        pays: Mutex::new(pays_map),
         seen_hashes: Mutex::new(seen_hashes),
         state_file,
         stats: BridgeStats::default(),
@@ -2186,6 +2276,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // HTTP status endpoint
     tokio::spawn(run_api_server(config.api_port, shared.clone()));
+
+    // Crash recovery for in-flight pays: re-drive each through execute_pay.
+    // Its preimage-before-pay ordering makes the retry idempotent — if the
+    // pre-crash payment went through, we claim with the found preimage; if
+    // it didn't, we pay now (the LN node dedups by payment_hash either way).
+    for q in recoverable {
+        let (transfer_id, label) = match q.state {
+            PayState::LockSeen { transfer_id, .. } => (transfer_id, "lock-seen"),
+            PayState::Paying { transfer_id } => (transfer_id, "paying"),
+            _ => unreachable!("recoverable filter"),
+        };
+        eprintln!(
+            "[RECOVER] pay {}... ({}) — resuming",
+            &hex::encode(q.payment_hash)[..16],
+            label
+        );
+        tokio::spawn(execute_pay(
+            shared.clone(),
+            transport.clone(),
+            ln.clone(),
+            q.payment_hash,
+            q.bolt11,
+            q.ledger_id,
+            transfer_id,
+        ));
+    }
 
     // Kind 39104 advertisement, now + every AD_REPUBLISH_SECS
     let net = network_str(config.network);
@@ -2347,7 +2463,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let quote = {
                     let pays = shared.pays.lock().unwrap();
                     pays.get(&lock.hash).and_then(|q| {
-                        if q.state == PayState::Quoted && !quote_expired(q.quoted_at.elapsed()) {
+                        if q.state == PayState::Quoted && !quote_expired(q.age()) {
                             Some((
                                 q.bolt11.clone(),
                                 q.ledger_id.clone(),
@@ -2414,6 +2530,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                     }
                 }
+                shared.persist();
 
                 eprintln!(
                     "  [PAY] lock accepted from {} — paying invoice ({} msats)",
@@ -2540,6 +2657,17 @@ mod tests {
                     },
                 },
             ],
+            pays: vec![QuotedPay {
+                payment_hash: [6u8; 32],
+                bolt11: "lnbcrt9...".to_string(),
+                ledger_id: "cc".repeat(32),
+                invoice_amount_msats: 1_000_000,
+                service_fee_msats: 5_200,
+                quoted_at_unix: 1_700_000_000,
+                state: PayState::Paying {
+                    transfer_id: [8u8; 32],
+                },
+            }],
         };
         let json = serde_json::to_string(&doc).unwrap();
         // Byte arrays persist as hex strings.
@@ -2547,6 +2675,18 @@ mod tests {
         assert!(json.contains(&hex::encode([5u8; 32])));
         let back: PersistedState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.receives.len(), 2);
+        assert_eq!(back.pays.len(), 1);
+        assert_eq!(back.pays[0].payment_hash, [6u8; 32]);
+        assert_eq!(
+            back.pays[0].state,
+            PayState::Paying {
+                transfer_id: [8u8; 32]
+            }
+        );
+        // Older state files (no `pays` key) still load.
+        let legacy: PersistedState =
+            serde_json::from_str(r#"{"seen_hashes":[],"receives":[]}"#).unwrap();
+        assert!(legacy.pays.is_empty());
         assert_eq!(back.receives[0].payment_hash, [1u8; 32]);
         assert_eq!(back.receives[0].state, ReceiveState::AwaitingHtlc);
         assert_eq!(

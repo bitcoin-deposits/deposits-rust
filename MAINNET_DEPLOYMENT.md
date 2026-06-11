@@ -250,6 +250,12 @@ Diff vs `setup.sh`'s regtest invocation:
 - `--metrics-port 9100`: bind to localhost only via firewall, never expose externally.
 - `--seed-file` (not `--seed <hex>` from setup.sh) — never put the seed on the command line; ps shows it.
 
+> **Known bug (#96):** `deposits-node quorum repair` queries the wrong
+> chain tip when `--esplora` is unset — it falls back to the public
+> mempool.space default instead of your node. Quorum repair is an
+> incident-response tool; **always pass `--esplora <your-node>`
+> explicitly** when invoking it on mainnet.
+
 **First-run sequence per operator:**
 
 ```sh
