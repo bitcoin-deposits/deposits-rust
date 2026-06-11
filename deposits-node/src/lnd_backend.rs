@@ -147,11 +147,13 @@ impl LndBackend {
     /// LND identifies invoices by `payment_addr`-less r_hash (the payment_hash
     /// in hex). Our trait's `payment_id` carries that same hex.
     fn lookup_invoice(&self, r_hash_hex: &str) -> Result<Option<LndInvoice>, Error> {
-        // LookupInvoice expects URL-safe base64 of the r_hash. Convert.
-        let r_hash_bytes = hex::decode(r_hash_hex)
+        // The /v1/invoice/{r_hash} path parameter is HEX — verified live
+        // against LND v0.19 (URL-safe base64 here returns 500
+        // "encoding/hex: invalid byte"). Validate the hex before
+        // interpolating into the URL.
+        hex::decode(r_hash_hex)
             .map_err(|e| Error::Wallet(format!("LND r_hash hex decode: {}", e)))?;
-        let r_hash_b64 = url_safe_b64(&r_hash_bytes);
-        let url = format!("/v1/invoice/{}", r_hash_b64);
+        let url = format!("/v1/invoice/{}", r_hash_hex);
         // 404 → None; other non-2xx errors propagate.
         let full_url = format!("{}{}", self.base_url, url);
         let resp = self
@@ -182,13 +184,6 @@ fn check_status(
         )));
     }
     Ok(resp)
-}
-
-/// URL-safe base64 without padding — LND's REST gateway uses this for
-/// path-segment-embedded byte fields (r_hash, payment_hash).
-fn url_safe_b64(bytes: &[u8]) -> String {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 // -- REST response types ---------------------------------------------------
