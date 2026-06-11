@@ -1058,6 +1058,14 @@ if (typeof window !== 'undefined' &&
     maybeBuildReceiveWitness: (d, t) => maybeBuildReceiveWitness(d, t),
     deriveSecretKey: (seed, i) => deriveSecretKey(seed, i),
     getCompressedPubkey: (sk) => getCompressedPubkey(sk),
+    // Live-drill surface (tests/browser/bridge-live.spec.mjs): drive the
+    // DEP-10 bridge flows against a real cluster + bridge daemon.
+    connect: () => connect(),
+    socketsConnected: () => sockets.filter((s) => s.connected).length,
+    syncAll: () => syncAll(),
+    discoverBridges: (l) => discoverBridges(l),
+    bridgeRecvLightning: (d, a, b) => bridgeRecvLightning(d, a, b),
+    bridgePayInvoice: (d, i, b) => bridgePayInvoice(d, i, b),
   };
 }
 
@@ -3669,19 +3677,9 @@ window.doWalletTransfer = async function() {
   const destId = computeDepositId(destPubkey);
   const destHex = bytesToHex(destId);
 
-  // Get fee from advertisement (all in msats)
+  // Operator transfer fee (ad schedule, or protocol default when omitted)
   const amountMsats = amount * 1000;
-  let fee = 2;
-  try {
-    const adFilter = { kinds: [39100], '#d': [ledgerTag(deposit.ledger_id)] };
-    const adEvents = await fetchEvents(adFilter, 5000);
-    if (adEvents.length > 0) {
-      const ad = JSON.parse(adEvents[0].content);
-      const fixed = ad.transfer_fee_fixed_msats || 0;
-      const bps = ad.transfer_fee_rate_bps || 0;
-      fee = fixed + Math.floor(amountMsats * bps / 10000);
-    }
-  } catch {}
+  const fee = await ledgerTransferFee(deposit.ledger_id, amountMsats);
 
   await syncAll();
   if (cachedBlockHeight === 0) { log('Block height unknown — sync failed', 'error'); return; }
@@ -3765,6 +3763,20 @@ window.doWalletRecvLightning = async function() {
   if (!amount) { log('Missing amount', 'error'); return; }
 
   try {
+    // Prefer an HTLC bridge (DEP-10): we hold the preimage, so the credit
+    // is atomic with the payer's HTLC. Fall back to the operator path
+    // when no bridge advertises this ledger.
+    try {
+      const bridges = await discoverBridges(deposit.ledger_id);
+      if (bridges.length > 0) {
+        await bridgeRecvLightning(deposit, amount, bridges[0]);
+        return;
+      }
+      log('No bridge advertises this ledger — using operator invoice');
+    } catch (be) {
+      log(`Bridge receive failed: ${be.message}`, 'error');
+      return;
+    }
     log(`Creating Lightning invoice for ₿${amount}...`);
     const ident = depositIdentity(deposit);
     if (!ident) { log('Deposit record missing descriptor/pubkey', 'error'); return; }
@@ -3921,7 +3933,23 @@ window.doWalletPayInvoice = async function() {
   if (!bolt11) { log('Missing invoice', 'error'); return; }
 
   try {
+    // Prefer an HTLC bridge (DEP-10 §Pay): the bridge's on-ledger claim
+    // doubles as proof of payment. Fall back to the operator path when no
+    // bridge advertises this ledger (or the invoice is amountless).
     const { paymentHash, amountMsat } = decodeBolt11(bolt11);
+    if (amountMsat > 0) {
+      const bridges = await discoverBridges(deposit.ledger_id);
+      if (bridges.length > 0) {
+        try {
+          await bridgePayInvoice(deposit, bolt11, bridges[0]);
+          document.getElementById('wallet-send-bolt11').value = '';
+        } catch (be) {
+          log(`Bridge pay failed: ${be.message}`, 'error');
+        }
+        return;
+      }
+      log('No bridge advertises this ledger — using operator pay');
+    }
     const keyIndex = deposit.key_index || 0;
     const secretKey = deriveSecretKey(state.seed, keyIndex);
     const pubkey = getCompressedPubkey(secretKey);
@@ -5267,6 +5295,238 @@ async function waitForTransferLock(ledgerId, destDepositIdHex, hashHex, timeoutM
     await new Promise(r => setTimeout(r, 2000));
   }
   return null;
+}
+
+// ─── Lightning bridge (DEP-10) ──────────────────────────────────────────────
+//
+// Bridges are deposit holders with LN nodes (Kind 39104 ads). Receive: WE
+// pick the preimage; the bridge can only settle the payer's HTLC after our
+// on-ledger credit is claimed. Pay: we lock invoice+fee gated on the
+// invoice's payment_hash; the bridge's claim witness IS proof of payment.
+
+/// Operator transfer fee for `amountMsats` on `ledgerId`.
+///
+/// Ads are #d-tagged with the FULL ledger id (the 16-char `ledgerTag`
+/// form predates them) — query both. An ad with both fee fields zero
+/// means "schedule omitted": operators then enforce the PROTOCOL DEFAULT
+/// (2 msats + 20 bps, TransferFeeSchedule::default()), same fallback the
+/// CLI wallet and bridge use.
+async function ledgerTransferFee(ledgerId, amountMsats) {
+  let fixed = 0, bps = 0;
+  try {
+    const adEvents = await fetchEvents(
+      { kinds: [39100], '#d': [ledgerId, ledgerTag(ledgerId)] }, 5000);
+    if (adEvents.length > 0) {
+      const ad = JSON.parse(adEvents[0].content);
+      fixed = ad.transfer_fee_fixed_msats || 0;
+      bps = ad.transfer_fee_rate_bps || 0;
+    }
+  } catch {}
+  if (fixed === 0 && bps === 0) { fixed = 2; bps = 20; } // protocol default
+  return fixed + Math.floor(amountMsats * bps / 10000);
+}
+
+/// Fetch Kind 39104 bridge ads; return entries serving `ledgerId`
+/// (newest ad per bridge wins).
+async function discoverBridges(ledgerId) {
+  const events = await fetchEvents({ kinds: [39104] }, 5000);
+  events.sort((a, b) => b.created_at - a.created_at);
+  const seen = new Set();
+  const out = [];
+  for (const ev of events) {
+    try {
+      const ad = JSON.parse(ev.content);
+      const pk = ad.bridge_pubkey || ev.pubkey;
+      if (seen.has(pk)) continue;
+      seen.add(pk);
+      for (const l of (ad.ledgers || [])) {
+        if (l.ledger_id === ledgerId) out.push({ bridge_pubkey: pk, ...l });
+      }
+    } catch {}
+  }
+  return out;
+}
+
+/// Wait for the TransferComplete claiming `transferIdHex`. Returns the
+/// witness stack[0] hex (the revealed preimage) or null on timeout.
+async function waitForTransferComplete(ledgerId, transferIdHex, timeoutMs) {
+  const target = transferIdHex.toLowerCase();
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const events = await fetchEvents({
+        kinds: [9100],
+        '#d': [ledgerTag(ledgerId)],
+        '#t': ['71'], // TransferComplete op type
+        limit: 20,
+      }, 5000);
+      for (const ev of events) {
+        try {
+          const raw = Uint8Array.from(atob(ev.content), c => c.charCodeAt(0));
+          const outer = parseTlv(raw);
+          const msgBytes = outer.find(r => r.type === 8)?.value; // MESSAGE
+          if (!msgBytes) continue;
+          const inner = parseTlv(msgBytes);
+          const tid = inner.find(r => r.type === 220)?.value; // transfer_id
+          if (!tid || bytesToHex(tid) !== target) continue;
+          const wit = inner.find(r => r.type === 224)?.value; // script_witness
+          if (!wit || !wit.length) continue;
+          // varint(count) || (varint(len) || element)* — readVarint is
+          // the wallet's existing [value, nextOffset] helper.
+          const [count, p1] = readVarint(wit, 0);
+          if (count < 1) continue;
+          const [len, p2] = readVarint(wit, p1);
+          return bytesToHex(wit.slice(p2, p2 + len));
+        } catch {}
+      }
+    } catch {}
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  return null;
+}
+
+/// DEP-10 §Receive via bridge: r is OURS; the BOLT-11 commits to sha256(r).
+async function bridgeRecvLightning(deposit, amountSats, bridge) {
+  const amountMsats = amountSats * 1000;
+  const preimage = new Uint8Array(32);
+  crypto.getRandomValues(preimage);
+  const hashHex = bytesToHex(sha256(preimage));
+
+  const keyIndex = deposit.key_index || 0;
+  const secretKey = deriveSecretKey(state.seed, keyIndex);
+  const depositIdHex = bytesToHex(computeDepositId(getCompressedPubkey(secretKey)));
+
+  log(`Requesting hold invoice from bridge ${bridge.bridge_pubkey.slice(0, 12)}...`);
+  const resp = await sendAgentRequest(bridge.bridge_pubkey, 'issue_hold_invoice', {
+    ledger_id: deposit.ledger_id,
+    deposit_id: depositIdHex,
+    amount_msats: amountMsats,
+    lock_type: 'htlc',
+    payment_hash: hashHex,
+  }, 30000);
+  if (!resp.success) throw new Error(`Bridge refused: ${resp.error || 'unknown'}`);
+  const r = resp.result || resp;
+  if (!r.bolt11) throw new Error('Bridge response missing bolt11');
+
+  // The invoice must ask exactly X + declared fees, gated on OUR hash —
+  // otherwise our reveal cannot settle it (or we overpay the bridge).
+  const dec = decodeBolt11(r.bolt11);
+  const sf = r.service_fee_msats || 0, tf = r.transfer_fee_msats || 0;
+  if (dec.amountMsat !== amountMsats + sf + tf) {
+    throw new Error(`Bridge invoice amount ${dec.amountMsat} != ${amountMsats} + fees ${sf}+${tf}`);
+  }
+  if (bytesToHex(dec.paymentHash) !== hashHex) {
+    throw new Error('Bridge invoice payment_hash is not ours');
+  }
+
+  showRecvResult(r.bolt11);
+  try { await navigator.clipboard.writeText(r.bolt11); } catch {}
+  log(`Bridge invoice ready (payer sends ${dec.amountMsat} msats; service fee ${sf}, transfer fee ${tf}). Keep this page open — waiting for the payer, then the bridge's lock...`, 'success');
+
+  const lock = await waitForTransferLock(deposit.ledger_id, depositIdHex, hashHex, 180000);
+  if (!lock) {
+    throw new Error('Bridge lock did not appear — preimage NOT revealed; the payer refunds when the HTLC expires');
+  }
+  log(`Bridge locked (transfer ${lock.transfer_id.slice(0, 12)}...) — revealing preimage...`);
+
+  const done = await sendRequest(deposit.ledger_id, 'transfer_complete', {
+    transfer_id: lock.transfer_id,
+    preimage: bytesToHex(preimage),
+  }, 15000);
+  if (!done.success) throw new Error(`transfer_complete failed: ${done.error}`);
+  log(`Bridge receive complete: +₿${amountSats} on ${deposit.alias}`, 'success');
+  syncAll();
+}
+
+/// DEP-10 §Pay via bridge: lock invoice+fee on the INVOICE's hash; the
+/// bridge's claim reveals the preimage = cryptographic proof of payment.
+async function bridgePayInvoice(deposit, bolt11, bridge) {
+  const { paymentHash, amountMsat } = decodeBolt11(bolt11);
+  if (!amountMsat) throw new Error('Amountless invoices not supported by bridges');
+  const hashHex = bytesToHex(paymentHash);
+
+  log(`Quoting invoice with bridge ${bridge.bridge_pubkey.slice(0, 12)}...`);
+  const quote = await sendAgentRequest(bridge.bridge_pubkey, 'quote_invoice', {
+    ledger_id: deposit.ledger_id,
+    bolt11,
+  }, 20000);
+  if (!quote.success) throw new Error(`Bridge refused quote: ${quote.error || 'unknown'}`);
+  const q = quote.result || quote;
+  const sf = q.service_fee_msats || 0;
+  const minWindow = q.min_lock_window_blocks || 18;
+  if (!q.bridge_deposit_id) throw new Error('Quote missing bridge_deposit_id');
+  const destId = hexToBytes(q.bridge_deposit_id);
+  const lockMsats = amountMsat + sf;
+  log(`Quote: invoice ${amountMsat} + service fee ${sf} = lock ${lockMsats} msats`);
+
+  // Operator transfer fee (separate from the bridge's service fee).
+  const fee = await ledgerTransferFee(deposit.ledger_id, lockMsats);
+
+  // Chain tip: prefer the operator's advertised current_block (same
+  // source the CLI uses) — syncAll can early-return while a connect-time
+  // sync is still in flight, leaving cachedBlockHeight at 0.
+  let tip = 0;
+  try {
+    const adEvents = await fetchEvents(
+      { kinds: [39100], '#d': [deposit.ledger_id, ledgerTag(deposit.ledger_id)] }, 5000);
+    if (adEvents.length > 0) tip = JSON.parse(adEvents[0].content).current_block || 0;
+  } catch {}
+  if (!tip) { await syncAll(); tip = cachedBlockHeight; }
+  if (!tip) throw new Error('Chain tip unknown — no advertisement and sync failed');
+  // The bridge refuses locks closing sooner than its window past the LN
+  // tip; pad so propagation cannot undercut it.
+  const timeout = tip + minWindow + 12;
+
+  const keyIndex = deposit.key_index || 0;
+  const secretKey = deriveSecretKey(state.seed, keyIndex);
+  const sourceId = computeDepositId(getCompressedPubkey(secretKey));
+  const completionScript = `sha256(${hashHex})`;
+  const transferNonce = new Uint8Array(32);
+  crypto.getRandomValues(transferNonce);
+  const transferId = new Uint8Array(32);
+  crypto.getRandomValues(transferId);
+  const opNonce = dep17.freshOpNonce();
+  const opExpiry = 0xffffffff;
+
+  const witness = dep17.signOpAsWitness(
+    dep17.buildTransferLockOp({
+      transfer_nonce: transferNonce,
+      source_deposit_id: sourceId,
+      destination_deposit_id: destId,
+      amount_msats: lockMsats,
+      fee_msats: fee,
+      completion_script: completionScript,
+      timeout_height: timeout,
+      transfer_id: transferId,
+      nonce: opNonce, expiry: opExpiry,
+    }),
+    secretKey,
+  );
+
+  const lockResponse = await sendRequest(deposit.ledger_id, 'transfer_lock', {
+    transfer_nonce: bytesToHex(transferNonce),
+    source_deposit_id: bytesToHex(sourceId),
+    destination_deposit_id: q.bridge_deposit_id,
+    amount: lockMsats, fee,
+    completion_script: completionScript,
+    timeout_height: timeout,
+    transfer_id: bytesToHex(transferId),
+    op_nonce: opNonce,
+    op_expiry: opExpiry,
+    signature: witness.stack[0],
+  }, 15000);
+  if (!lockResponse.success) throw new Error(`transfer_lock rejected: ${lockResponse.error}`);
+  log('Locked. Waiting for the bridge to pay and claim (its claim reveals the preimage)...');
+
+  const proofHex = await waitForTransferComplete(deposit.ledger_id, bytesToHex(transferId), 120000);
+  if (!proofHex) {
+    throw new Error(`Bridge did not claim — invoice may be unpaid; the lock refunds at block ${timeout}`);
+  }
+  if (bytesToHex(sha256(hexToBytes(proofHex))) !== hashHex) {
+    throw new Error('Claim witness does not hash to the invoice payment_hash');
+  }
+  log(`Invoice paid via bridge. Proof of payment: ${proofHex}`, 'success');
+  syncAll();
 }
 
 // ─── Agent advertisements ───────────────────────────────────────────────────
