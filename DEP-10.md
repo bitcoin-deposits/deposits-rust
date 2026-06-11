@@ -46,18 +46,34 @@ The flow is a standard cross-domain HTLC with the deposits ledger as the final h
 
 1. **Invoice issuance.** Wallet generates a 32-byte preimage `r` locally, computes `H = sha256(r)`, sends `H` (and the desired receive amount `X`) to the bridge over the existing peer-messaging channel (`issue_hold_invoice` — DEP-04). Bridge's LN node issues a BOLT-11 *hold invoice* with `payment_hash = H` and amount `X + service_fee + transfer_fee`, where `service_fee` is the bridge's own margin and `transfer_fee` is what the bridge will pay on the upcoming on-ledger `TransferLock`. The bridge returns the BOLT-11 to the wallet, which checks the amount math before handing it to the payer. **Only the wallet knows `r`**; bridge and payer know only `H`.
 2. **HTLC arrival.** Payer routes a Lightning payment to the bridge's node with `payment_hash = H`, amount `X + service_fee + transfer_fee`, CLTV expiry `T_ln`. The bridge's node **holds** the HTLC — it cannot settle without `r`. The upstream funds are parked, claimable by no one.
-3. **Hash-locked credit.** Bridge appends `TransferLock` from its own deposit to the wallet's deposit, with:
+3. **Hash-locked credit.** Once the HTLC is parked, the bridge reads the held HTLC's actual CLTV expiry from its LN node (the **measured hold window** — see §"Hold windows" below) and appends `TransferLock` from its own deposit to the wallet's deposit, with:
     - `amount = X`
     - `fee = transfer_fee` — the standard `TransferFeeSchedule` cost paid to `fees_accumulated`
     - `completion_script = "sha256(H_hex)"`
-    - `timeout_height = T_ledger` where `T_ledger + Δ < T_ln`
-   The bridge attaches the BOLT-11 (and the observed HTLC expiry) as auxiliary data in the cosignature request, so cosigners can verify the timeout ordering on its behalf alongside the standard `TransferLock` conformance rules (see §"Bridge cosigner rules" below).
+    - `timeout_height = T_ledger = htlc_expiry_height − Δ`, where `htlc_expiry_height` is the earliest CLTV among the held HTLCs and Δ is the bridge's scrape-reveal-and-settle margin (default 6 blocks)
+   The bridge attaches the BOLT-11 and the observed `htlc_expiry_height` as auxiliary data in the cosignature request, so cosigners can verify the timeout ordering on its behalf alongside the standard `TransferLock` conformance rules (see §"Bridge cosigner rules" below).
 4. **Claim.** Wallet observes the cosigned `TransferLock` on the relay, verifies the timeout margin and the script, appends `TransferComplete` with a script witness revealing `r`. Cosigned, applied; balance credited to the wallet's deposit (`X`). The preimage is now public on the relay, inside a quorum-attested record.
 5. **Upstream settlement.** Bridge's daemon scrapes `r` off its own Kind 9100 stream, hands it to its LN node, settles the inbound HTLC, claims `X + service_fee + transfer_fee`. The `Δ` margin guarantees the bridge has time to do so even if the wallet revealed `r` at the last block of `T_ledger` — same CLTV-delta discipline as any LN routing hop. The bridge has now exchanged its on-ledger deposit balance of `X + transfer_fee` (debited from its deposit at TransferLock time) for `X + service_fee + transfer_fee` on Lightning, netting `service_fee` minus its LN-side routing costs.
 
 **Why this is atomic.** The bridge's only path to the upstream money runs through a cosigned, claimable credit existing on the ledger first. The bridge cannot collect upstream without `r` being public, and `r` cannot become public except through a quorum-cosigned credit to the wallet's deposit. The order of operations is enforced by the hash, not by deterrence. The wallet's recourse for theft is structural ("the bridge can't claim without crediting me") rather than evidentiary ("they claimed but didn't credit, here's the preimage"). The `Uncredited Lightning` fraud proof remains in the codec for legacy InvoiceCredit-based receives but the bridge flow doesn't produce them.
 
 **PTLC variant.** Substitute `r` with a scalar `s` and `H` with `P = G·s`; the BOLT-11 becomes a PTLC-style hold (subject to LN-side PTLC availability — separate spec), and the on-ledger lock becomes `pointlock(P)`. Same flow, no on-ledger relay leak of `r` correlatable with the LN leg. The descriptor calculus supports `pointlock(P)` today (DEP-16 §capability, DEP-13 §"Courier PTLC pattern"); operators advertise the capability per DEP-04's capability set, and wallets filter bridges by whether both the bridge's operator and the wallet's operator advertise it.
+
+### Hold windows
+
+The hold window — how long parked HTLCs stay claimable, and therefore how long the wallet has to reveal `r` on-ledger — is set by the LN side, not by the bridge or the ledger. The bridge MUST treat it as **measured, not assumed**: read the held HTLC's actual CLTV expiry after acceptance and derive `T_ledger` from it. Live-measured windows across the implementations the reference backends drive (regtest, defaults):
+
+| Bridge's LN node | Typical window (blocks) | Window configurable? |
+|---|---|---|
+| LND (`invoicesrpc`) | ~125 | Yes — `AddHoldInvoice.cltv_expiry` |
+| CLN + BoltzExchange/hold | ~124 | Via the plugin's gRPC interface only |
+| LDK (ldk-node `receive_for_hash`) | **~18** | No — fixed `min_final_cltv_expiry_delta` (24) minus LDK's internal fail-back buffer (6) |
+
+Consequences:
+
+- **The wallet's reveal window is short** — minutes to hours, not days. An LDK-backed bridge gives roughly 18 blocks (~3 hours). This is acceptable *because the HTLC-bridge premise is an online receive*: the wallet initiated the flow and is waiting to reveal. Permanently-offline receive stays on the legacy path (§"Offline receive").
+- **Bridges SHOULD advertise their typical hold window** (`receive.hold_window_blocks` in the Kind 39103 ad — DEP-04) so wallets can pick a bridge whose window matches their reveal latency. A wallet on a slow connection should prefer an LND/CLN bridge over an LDK one.
+- **Δ is small.** The bridge's margin between `T_ledger` and the HTLC expiry only needs to cover scraping `r` off the relay and submitting the LN-side settle — single-digit blocks. Default 6. It is NOT the courier's 144-block `timeout_margin_blocks`: a courier sets both legs' timeouts and pays for safety with wall-clock; a bridge inherits LN's hold physics, and a 144-block margin would leave a negative lock window on every measured backend.
 
 ### Pay
 
@@ -92,7 +108,7 @@ A bridge `TransferLock` is, on the wire, indistinguishable from any other hash-l
 **When-supplied BOLT-11 checks.** The lock's submitter MAY attach the corresponding BOLT-11 string as auxiliary data in the cosignature-request envelope (DEP-04 — it is NOT a field on the ledger operation; the wire format is unchanged). When present, cosigners decode it and enforce:
 
 - **Completion-script binding.** `TransferLock.completion_script` is `sha256(H_hex)` or `pointlock(P_hex)` where `H` (resp. `P`) matches the BOLT-11's `payment_hash` (resp. `payment_point`). A mismatch is non-conforming.
-- **Timeout-ordering rule (receive only).** `TransferLock.timeout_height + Δ ≤` the inbound HTLC's CLTV height, where Δ is the cosigner's local minimum margin (default 144 blocks, MUST be at least the operator's `timeout_margin_blocks` declared on the ledger). The BOLT-11's `min_final_cltv_expiry` plus current chain tip gives the floor for the inbound HTLC's expiry; the bridge SHOULD also state the actual observed HTLC expiry in the aux data once the HTLC has arrived.
+- **Timeout-ordering rule (receive only).** `TransferLock.timeout_height + Δ ≤` the inbound HTLC's CLTV height as stated in the aux data, where Δ is the cosigner's local minimum margin (default 6 blocks — see §"Hold windows" for why this is NOT the courier's 144-block margin). The cosigner additionally sanity-checks the stated HTLC expiry against the BOLT-11's `min_final_cltv_expiry` + current tip (the floor the payer's HTLC must clear); a stated expiry below that floor is non-conforming aux data.
 - **Receive-side amount bound.** `TransferLock.amount + TransferLock.fee ≤ BOLT-11.amount`. The bridge MAY retain a spread (the service fee), but a lock exceeding what the BOLT-11 pays the bridge is a self-inflicted loss the cosigner flags.
 
 **Who these rules protect.** Walk the receive flow: every check above protects the *bridge from its own mistakes*, not the wallet. The wallet's safety is structural — it does not reveal `r` until a cosigned `TransferLock` paying it `X` exists on the relay, and if the lock is missing, mis-scripted, or mis-timed, the wallet stays silent, both sides time out, and the payer is refunded. This is why when-supplied enforcement is sound: a bridge that skips the aux data only endangers its own funds. Bridges SHOULD always supply it; cosigner enforcement converts bridge-side bugs into refused locks instead of lost liquidity.

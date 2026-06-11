@@ -253,7 +253,8 @@ Lightning ↔ ledger bridges advertise via NIP-33 replaceable events on the ledg
         "fee_fixed_msats": 100,
         "fee_rate_bps": 30,
         "min_amount_msats": 10000,
-        "max_amount_msats": 100000000
+        "max_amount_msats": 100000000,
+        "hold_window_blocks": 120
       },
       "pay": {
         "fee_fixed_msats": 200,
@@ -266,7 +267,7 @@ Lightning ↔ ledger bridges advertise via NIP-33 replaceable events on the ledg
 ```
 
 - `ledgers` — one entry per ledger the bridge can service. The bridge holds a deposit on each.
-- `receive` — pricing for inbound bridging on that ledger (wallet receives via bridge's BOLT-11 → bridge's TransferLock). `fee_*` is the bridge's service margin, captured via the BOLT-11 spread; published as a flat schedule for amounts in `[min_amount_msats, max_amount_msats]`.
+- `receive` — pricing for inbound bridging on that ledger (wallet receives via bridge's BOLT-11 → bridge's TransferLock). `fee_*` is the bridge's service margin, captured via the BOLT-11 spread; published as a flat schedule for amounts in `[min_amount_msats, max_amount_msats]`. `hold_window_blocks` is the bridge's typical hold window — how long the wallet has to reveal the preimage on-ledger before the parked HTLCs (and the bridge's TransferLock) time out. Set by the bridge's LN implementation (DEP-10 §"Hold windows": LND/CLN bridges ~120+, LDK bridges ~18); wallets MUST pick a bridge whose window comfortably exceeds their expected reveal latency.
 - `pay` — pricing for outbound bridging on that ledger (wallet TransferLocks to bridge → bridge pays the BOLT-11). `fee_*` is the bridge's published baseline. If the bridge prefers per-invoice quoting (because routing variance is high), `quote_endpoint` names a Nostr-DM action wallets can hit to request a fresh quote per BOLT-11 — analogous to `request_route` for couriers (DEP-13).
 - `lock_type` — `htlc` always; `ptlc` only when both the bridge's deposit operator and the wallet's operator advertise the `pointlock` capability in Kind 39100. Wallets that need PTLC privacy MUST verify the capability on both ledgers before selecting a `ptlc`-advertising bridge.
 
