@@ -2364,10 +2364,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 };
 
-                if lock.ledger_id != quote_ledger {
+                // Kind 9100 `#l` tags are truncated (16 chars); resolve the
+                // lock's ledger against the full ids we hold deposits on
+                // before comparing — `e8ae…` IS `e8ae…<48 more>`.
+                let lock_ledger_full = shared
+                    .deposits
+                    .iter()
+                    .map(|d| &d.ledger_id)
+                    .find(|l| l.starts_with(&lock.ledger_id))
+                    .cloned()
+                    .unwrap_or_else(|| lock.ledger_id.clone());
+                if lock_ledger_full != quote_ledger {
                     eprintln!(
-                        "  [REFUSE] lock arrived on ledger {}... but quote was for {}...",
-                        &lock.ledger_id[..16],
+                        "  [REFUSE] lock arrived on ledger {} but quote was for {}...",
+                        lock.ledger_id,
                         &quote_ledger[..16]
                     );
                     continue;
@@ -2416,7 +2426,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ln.clone(),
                     lock.hash,
                     bolt11,
-                    lock.ledger_id.clone(),
+                    lock_ledger_full,
                     lock.transfer_id,
                 ));
             }

@@ -68,6 +68,33 @@ print(e['deposit_id'])")
     --data-dir "$OP2_DATA" --esplora http://localhost:3102 \
     --relay "$RELAY" 2>&1 | tail -2
 
+echo "[2b/4] ensuring bridge LND has outbound liquidity (pay direction)…"
+# LND can't SEND until its local balance clears the channel reserve
+# (1% of capacity = 50k sats on the 0.05 BTC channel). Push 150k from
+# cln-payer via a plain invoice if we're below 80k.
+LND_MAC=$(xxd -p -c2000 /tmp/lnd-hold-test/data/chain/bitcoin/regtest/admin.macaroon)
+LND_LOCAL=$(curl -sk -H "Grpc-Metadata-macaroon: $LND_MAC" \
+    https://localhost:8180/v1/balance/channels \
+    | python3 -c "import json,sys; print(json.load(sys.stdin).get('local_balance',{}).get('sat','0'))" 2>/dev/null || echo 0)
+if [[ "${LND_LOCAL:-0}" -lt 80000 ]]; then
+    PAYREQ=$(curl -sk -X POST -H "Grpc-Metadata-macaroon: $LND_MAC" \
+        https://localhost:8180/v1/invoices \
+        -d '{"value": "150000", "memo": "bridge outbound liquidity"}' \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['payment_request'])")
+    python3 - "$PAYREQ" <<'PYEOF'
+import socket, json, sys
+s = socket.socket(socket.AF_UNIX); s.connect("/tmp/cln-payer-test/regtest/lightning-rpc"); s.settimeout(60)
+s.sendall((json.dumps({"jsonrpc":"2.0","id":1,"method":"pay","params":{"bolt11":sys.argv[1]}})+"\n").encode())
+buf = b""
+while not buf.endswith(b"\n"): buf += s.recv(65536)
+r = json.loads(buf)
+status = r.get("result",{}).get("status") or r.get("error")
+print(f"  liquidity push: {status}")
+PYEOF
+else
+    echo "  LND local balance ${LND_LOCAL} sats — sufficient"
+fi
+
 echo "[3/4] starting deposits-bridge (LN backend: lnd-hold-test)…"
 LIGHTNING_BACKEND=lnd \
 LND_REST_URL=https://localhost:8180 \

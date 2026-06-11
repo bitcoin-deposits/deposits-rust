@@ -2392,3 +2392,274 @@ pub async fn bridge_receive(args: &[String]) -> Result<(), Box<dyn std::error::E
     println!("Bridge receive complete: +{} sats on '{}'", amount_sats, alias);
     Ok(())
 }
+
+/// Pay a BOLT-11 invoice via an HTLC bridge (DEP-10 §Pay).
+///
+/// The wallet locks invoice_amount + service_fee to the bridge's deposit,
+/// gated on the INVOICE's payment_hash — the bridge can only claim the lock
+/// by revealing the preimage, which it only learns by actually paying the
+/// invoice. If the bridge never pays, the lock times out and refunds.
+///
+///   1. quote_invoice to the bridge → bridge_deposit_id + service_fee
+///   2. TransferLock (invoice + fee) to the bridge, sha256(payment_hash)
+///   3. wait for the bridge's TransferComplete — its witness IS the
+///      preimage, i.e. cryptographic proof of payment
+pub async fn bridge_pay(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::rand::{rngs::OsRng, RngCore};
+    use deposits_core::types::compute_deposit_id;
+
+    let mut alias: Option<String> = None;
+    let mut bolt11_arg: Option<String> = None;
+    let mut bridge_pk: Option<String> = None;
+    let mut timeout_secs: u64 = 120;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bridge" if i + 1 < args.len() => {
+                bridge_pk = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--timeout-secs" if i + 1 < args.len() => {
+                timeout_secs = args[i + 1].parse()?;
+                i += 1;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if alias.is_none() {
+                    alias = Some(args[i].clone());
+                } else if bolt11_arg.is_none() {
+                    bolt11_arg = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let alias = alias.ok_or(
+        "Usage: deposits-wallet bridge-pay <alias> <bolt11> --bridge <pubkey> --relay <url>",
+    )?;
+    let bolt11 = bolt11_arg.ok_or("Missing BOLT-11 invoice")?;
+    let bridge_pk = bridge_pk.ok_or("Missing --bridge <bridge_pubkey_hex>")?;
+    let config = parse_config(&config_args)?;
+    if config.relays.is_empty() {
+        return Err("No relay specified. Use --relay <url>".into());
+    }
+
+    // The invoice fixes the hash and the amount; the bridge can't change either.
+    let invoice: lightning_invoice::Bolt11Invoice = bolt11
+        .parse()
+        .map_err(|e| format!("Invalid BOLT-11: {:?}", e))?;
+    let payment_hash: [u8; 32] = *invoice.payment_hash().as_ref();
+    let hash_hex = hex::encode(payment_hash);
+    let invoice_msats = invoice
+        .amount_milli_satoshis()
+        .ok_or("Amountless invoices not supported")?;
+
+    // Load the paying deposit.
+    let deposits_file = config.data_dir.join("deposits.json");
+    let data = std::fs::read_to_string(&deposits_file)?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+    let dep = deposits
+        .iter()
+        .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
+        .ok_or_else(|| format!("No deposit '{}'", alias))?;
+    let ledger_id = dep["ledger_id"].as_str().ok_or("Missing ledger_id")?.to_string();
+    let key_index = dep.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let src_sk = derive_secret_key_at_index(&config.seed, config.network, key_index)?;
+    let src_pk = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &src_sk).public_key();
+    let src_descriptor = format!("pk({})", hex::encode(src_pk.serialize()));
+    let source_id = compute_deposit_id(&src_descriptor);
+
+    // Connect.
+    let nostr_key = config.nostr_key()?;
+    let mut transport = NostrTransportBuilder::new(nostr_key);
+    for r in &config.relays {
+        transport = transport.relay(r);
+    }
+    let transport = transport.build().await?;
+    transport.set_response_ledger_filter(vec![ledger_id.clone()]);
+
+    // 1. quote_invoice (DEP-04 §Bridge request envelopes).
+    println!(
+        "Quoting invoice with bridge {}…",
+        &bridge_pk[..16.min(bridge_pk.len())]
+    );
+    let req = serde_json::json!({
+        "ledger_id": ledger_id,
+        "bolt11": bolt11,
+    });
+    let req_id = transport
+        .send_agent_request_on_ledger(&bridge_pk, &ledger_id, "quote_invoice", req)
+        .await?;
+    let resp = transport.wait_for_response(&req_id, 20000).await?;
+    if !resp.success {
+        return Err(format!("Bridge refused: {}", resp.error.unwrap_or_default()).into());
+    }
+    let result = resp.result.ok_or("Missing result")?;
+    let bridge_deposit_hex = result["bridge_deposit_id"]
+        .as_str()
+        .ok_or("Missing bridge_deposit_id")?
+        .to_string();
+    let service_fee = result["service_fee_msats"].as_u64().unwrap_or(0);
+    let min_lock_window = result["min_lock_window_blocks"].as_u64().unwrap_or(18) as u32;
+
+    let dest_id: [u8; 16] = {
+        let bytes = hex::decode(&bridge_deposit_hex)?;
+        bytes
+            .try_into()
+            .map_err(|_| "bridge_deposit_id must be 16 bytes (32 hex chars)")?
+    };
+
+    let amount_msats = invoice_msats + service_fee;
+    println!(
+        "  invoice {} msats + bridge service fee {} = lock {} msats",
+        invoice_msats, service_fee, amount_msats
+    );
+
+    // Operator transfer fee (separate from the bridge's service fee).
+    let fee_msats = {
+        let default = deposits_core::types::TransferFeeSchedule::default();
+        default
+            .fixed_msats
+            .saturating_add(amount_msats.saturating_mul(default.rate_bps as u64) / 10_000)
+    };
+
+    // Timeout: the bridge refuses locks closing sooner than its minimum
+    // window past the LN tip; pad a little so propagation can't undercut it.
+    let ad = transport
+        .fetch_ledger_advertisement(&ledger_id)
+        .await?
+        .ok_or_else(|| format!("No advertisement for ledger {}", &ledger_id[..16]))?;
+    if ad.current_block == 0 {
+        return Err("Operator did not advertise a chain tip; cannot pick timeout.".into());
+    }
+    let timeout_height = ad.current_block + min_lock_window + 12;
+
+    // 2. TransferLock gated on the invoice's payment_hash.
+    let completion_script = format!("sha256({})", hash_hex);
+    let mut transfer_nonce = [0u8; 32];
+    OsRng.fill_bytes(&mut transfer_nonce);
+    let mut transfer_id = [0u8; 32];
+    OsRng.fill_bytes(&mut transfer_id);
+
+    let op_nonce = deposits_core::signing::fresh_op_nonce();
+    let op_expiry = u32::MAX;
+    let proto = deposits_core::messages::LedgerOperation::TransferLock {
+        transfer_nonce,
+        source_deposit_id: source_id,
+        destination_deposit_id: dest_id,
+        amount: amount_msats,
+        fee: fee_msats,
+        completion_script: completion_script.clone(),
+        timeout_height,
+        transfer_id,
+        nonce: op_nonce,
+        expiry: op_expiry,
+        witness: deposits_core::types::DescriptorWitness::new(),
+    };
+    let signed = deposits_core::signing::sign_op(proto, &src_sk)
+        .ok_or("sign_op failed: unsignable variant")?;
+    let signature_bytes = match &signed {
+        deposits_core::messages::LedgerOperation::TransferLock { witness, .. } => {
+            witness.stack[0].clone()
+        }
+        _ => unreachable!("sign_op preserves variant"),
+    };
+
+    let lock_params = serde_json::json!({
+        "transfer_nonce": hex::encode(transfer_nonce),
+        "source_deposit_id": hex::encode(source_id),
+        "destination_deposit_id": bridge_deposit_hex,
+        "amount": amount_msats,
+        "fee": fee_msats,
+        "completion_script": completion_script,
+        "timeout_height": timeout_height,
+        "transfer_id": hex::encode(transfer_id),
+        "op_nonce": op_nonce,
+        "op_expiry": op_expiry,
+        "signature": hex::encode(&signature_bytes),
+    });
+
+    println!("Locking {} msats to the bridge (timeout block {})…", amount_msats, timeout_height);
+    let lock_req_id = transport
+        .send_ledger_request(&ledger_id, "transfer_lock", lock_params)
+        .await?;
+    let lock_resp = transport
+        .wait_for_response(&lock_req_id, 10_000)
+        .await
+        .map_err(|e| format!("Timeout waiting for lock response: {}", e))?;
+    if !lock_resp.success {
+        let err = lock_resp.error.as_deref().unwrap_or("unknown");
+        return Err(format!("transfer_lock rejected: {}", err).into());
+    }
+    println!("  locked. transfer_id {}…", hex::encode(&transfer_id[..8]));
+    println!("Waiting for the bridge to pay and claim (reveals the preimage)…");
+
+    // 3. The bridge's claim IS the proof of payment: TransferComplete's
+    //    witness stack[0] must hash to the invoice's payment_hash.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
+    let mut proof: Option<[u8; 32]> = None;
+    while tokio::time::Instant::now() < deadline {
+        let updates = transport.fetch_ledger_updates(&ledger_id).await?;
+        for update in &updates {
+            use deposits_core::{LedgerOperation, TlvDecode};
+            if let Ok(LedgerOperation::TransferComplete {
+                transfer_id: ref tid,
+                ref script_witness,
+            }) = LedgerOperation::tlv_decode(&update.message)
+            {
+                if *tid == transfer_id {
+                    if let Some(bytes) = script_witness.stack.first() {
+                        if bytes.len() == 32 {
+                            let mut buf = [0u8; 32];
+                            buf.copy_from_slice(bytes);
+                            proof = Some(buf);
+                        }
+                    }
+                }
+            }
+        }
+        if proof.is_some() {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        eprint!(".");
+    }
+    eprintln!();
+    let proof = proof.ok_or(
+        "Bridge did not claim before timeout — invoice may be unpaid; \
+         the lock refunds at its timeout height",
+    )?;
+
+    // Verify the proof against the invoice's hash.
+    let check: [u8; 32] = {
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
+        let mut engine = sha256::Hash::engine();
+        engine.input(&proof);
+        sha256::Hash::from_engine(engine).to_byte_array()
+    };
+    if check != payment_hash {
+        return Err(format!(
+            "Bridge claim witness does not hash to the invoice payment_hash \
+             (got {}, want {}) — ledger accepted an invalid completion?!",
+            hex::encode(check),
+            hash_hex
+        )
+        .into());
+    }
+
+    println!();
+    println!("Bridge pay complete: invoice paid via '{}'", alias);
+    println!("  proof of payment (preimage): {}", hex::encode(proof));
+    Ok(())
+}

@@ -467,31 +467,54 @@ impl LightningBackend for LndBackend {
         &self,
         payment_id_hex: &str,
     ) -> Result<Option<[u8; 32]>, Error> {
-        // Trait's `get_payment_preimage` is "given a payment_hash, give me the
-        // preimage" — used on the self-pay path where the daemon settles an
-        // invoice it issued itself. For LND, that's LookupInvoice (NOT
-        // ListPayments, which is outbound-only).
-        let invoice = match self.lookup_invoice(payment_id_hex)? {
-            Some(i) => i,
-            None => return Ok(None),
-        };
-        if !invoice.settled || invoice.r_preimage.is_empty() {
-            return Ok(None);
+        // Trait's `get_payment_preimage` is "given a payment_hash, give me
+        // the preimage". Two places it can live in LND:
+        //   - inbound (self-pay: an invoice WE issued got settled) →
+        //     LookupInvoice, r_preimage base64
+        //   - outbound (bridge pay path: a payment WE made) →
+        //     ListPayments, payment_preimage hex
+        // Try inbound first, then scan outbound payments.
+        if let Some(invoice) = self.lookup_invoice(payment_id_hex)? {
+            if invoice.settled && !invoice.r_preimage.is_empty() {
+                // LND emits r_preimage as base64; decode and pack.
+                use base64::{engine::general_purpose::STANDARD, Engine as _};
+                let bytes = STANDARD
+                    .decode(&invoice.r_preimage)
+                    .map_err(|e| Error::Wallet(format!("LND r_preimage base64: {}", e)))?;
+                if bytes.len() != 32 {
+                    return Err(Error::Wallet(format!(
+                        "LND r_preimage wrong length: {} bytes",
+                        bytes.len()
+                    )));
+                }
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&bytes);
+                return Ok(Some(out));
+            }
         }
-        // LND emits r_preimage as base64; decode and pack.
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
-        let bytes = STANDARD
-            .decode(&invoice.r_preimage)
-            .map_err(|e| Error::Wallet(format!("LND r_preimage base64: {}", e)))?;
-        if bytes.len() != 32 {
-            return Err(Error::Wallet(format!(
-                "LND r_preimage wrong length: {} bytes",
-                bytes.len()
-            )));
+
+        // Outbound fallback (payments are hex-encoded in /v1/payments).
+        for p in self.list_payments()? {
+            if p.id.eq_ignore_ascii_case(payment_id_hex)
+                && p.status == PaymentStatus::Succeeded
+            {
+                if let Some(preimage_hex) = p.preimage_hex {
+                    let bytes = hex::decode(&preimage_hex).map_err(|e| {
+                        Error::Wallet(format!("LND payment_preimage hex: {}", e))
+                    })?;
+                    if bytes.len() != 32 {
+                        return Err(Error::Wallet(format!(
+                            "LND payment_preimage wrong length: {} bytes",
+                            bytes.len()
+                        )));
+                    }
+                    let mut out = [0u8; 32];
+                    out.copy_from_slice(&bytes);
+                    return Ok(Some(out));
+                }
+            }
         }
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&bytes);
-        Ok(Some(out))
+        Ok(None)
     }
 
     // ── Hold invoices — native invoicesrpc support ──────────────────────────
