@@ -490,6 +490,14 @@ pub struct LedgerRequest {
     /// Sourced from `["va", "<hex>"]`.
     #[serde(skip)]
     pub subkey_attestation: Option<String>,
+
+    /// `#p` tag, if present — the specific agent this request is addressed
+    /// to (xonly hex). Set by `send_agent_request*` (bridge / courier
+    /// envelopes, DEP-04 §"Bridge request envelopes"); plain ledger
+    /// requests carry no `#p`. Daemons that are NOT the addressee must
+    /// stay silent — the addressee responds.
+    #[serde(skip)]
+    pub addressee: Option<String>,
 }
 
 /// A ledger response (reply to a request)
@@ -1759,6 +1767,40 @@ impl NostrTransport {
     /// Get our nostr public key
     pub fn nostr_pubkey(&self) -> nostr_sdk::PublicKey {
         self.keys.public_key()
+    }
+
+    /// Is a `#p` addressee one of OUR identities? Wallets may address an
+    /// agent by whichever pubkey they discovered: the daemon's Nostr key,
+    /// the secp256k1 node ID (x-only form), the operator protocol key, or
+    /// the advertised delegate key. Accepts 64-hex x-only or 66-hex
+    /// compressed input.
+    pub fn is_self_addressed(&self, addressee_hex: &str) -> bool {
+        let xonly = if addressee_hex.len() == 66 {
+            &addressee_hex[2..]
+        } else {
+            addressee_hex
+        };
+        if self.keys.public_key().to_hex() == xonly {
+            return true;
+        }
+        // Node ID is compressed secp256k1; compare x coordinate only.
+        let node_id_hex = self.our_pubkey.to_string();
+        if node_id_hex.len() == 66 && &node_id_hex[2..] == xonly {
+            return true;
+        }
+        if let Some(op) = *self.operator_pubkey.lock().unwrap() {
+            if op.to_hex() == xonly {
+                return true;
+            }
+        }
+        if let Some(del) = *self.delegate_pubkey.lock().unwrap() {
+            // Delegate is compressed secp256k1; compare x coordinate only.
+            let del_hex = del.to_string();
+            if del_hex.len() == 66 && &del_hex[2..] == xonly {
+                return true;
+            }
+        }
+        false
     }
 
     /// Convert a secp256k1 pubkey to nostr pubkey
@@ -5052,6 +5094,17 @@ impl NostrTransport {
             is_wrapped,
         );
 
+        // `#p` addressee (agent-targeted requests). For gift-wrapped
+        // requests the outer wrap already enforced addressing (only the
+        // recipient can decrypt), so a missing rumor `#p` is fine.
+        let addressee = tags.iter().find_map(|tag| {
+            if tag.kind() == TagKind::SingleLetter(TAG_PUBKEY) {
+                tag.content().map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
+
         Ok(LedgerRequest {
             action,
             ledger_id,
@@ -5062,6 +5115,7 @@ impl NostrTransport {
             gift_wrap_sender: if is_wrapped { Some(real_sender) } else { None },
             subkey_account,
             subkey_attestation,
+            addressee,
         })
     }
 

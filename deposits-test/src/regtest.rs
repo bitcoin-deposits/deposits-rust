@@ -50,12 +50,19 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Binary paths honor the same env overrides as deposits-tools/bin/*.sh
+/// (`DEPOSITS_NODE` / `DEPOSITS_WALLET`), so a cluster running debug
+/// binaries can be tested without a release build present.
 pub fn node_bin() -> PathBuf {
-    repo_root().join("target/release/deposits-node")
+    std::env::var("DEPOSITS_NODE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo_root().join("target/release/deposits-node"))
 }
 
 pub fn wallet_bin() -> PathBuf {
-    repo_root().join("target/release/deposits-wallet")
+    std::env::var("DEPOSITS_WALLET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo_root().join("target/release/deposits-wallet"))
 }
 
 pub fn op0_data_dir() -> PathBuf {

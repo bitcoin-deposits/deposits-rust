@@ -57,6 +57,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "swap-request" => wallet_cli::swap::swap_request(&args[2..]).await,
         "swap-listen" => wallet_cli::swap::swap_listen(&args[2..]).await,
         "route" => wallet_cli::payments::route_transfer(&args[2..]).await,
+        "bridge_receive" | "bridge-receive" => {
+            wallet_cli::payments::bridge_receive(&args[2..]).await
+        }
         "spread" => wallet_cli::payments::spread_deposits(&args[2..]).await,
         "batch" => wallet_cli::batch::batch_mode(&args[2..]).await,
         "make_invoice" => wallet_cli::payments::make_invoice(&args[2..]).await,

@@ -969,6 +969,7 @@ impl Node {
                     gift_wrap_sender: None,
                     subkey_account: None,
                     subkey_attestation: None,
+                    addressee: None,
                 };
                 let (success, _, error) = self.process_quorum_add_request(&req).await;
                 if success {
@@ -1034,6 +1035,7 @@ impl Node {
                         gift_wrap_sender: None,
                         subkey_account: None,
                         subkey_attestation: None,
+                        addressee: None,
                     };
                     let (cs, _, cerr) =
                         self.process_quorum_add_request(&candidate_req).await;
@@ -1058,6 +1060,7 @@ impl Node {
                             gift_wrap_sender: None,
                             subkey_account: None,
                             subkey_attestation: None,
+                            addressee: None,
                         };
                         let (rs, _, rerr) =
                             self.process_quorum_remove_request(&remove_req).await;
@@ -1147,6 +1150,7 @@ impl Node {
                 gift_wrap_sender: None,
                 subkey_account: None,
                 subkey_attestation: None,
+                addressee: None,
             };
             let (success, _, error) =
                 self.process_quorum_begin_request(&begin_req).await;

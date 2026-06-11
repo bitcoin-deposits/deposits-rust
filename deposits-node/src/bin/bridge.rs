@@ -386,6 +386,9 @@ enum UpdateEvent {
     /// An issue_hold_invoice / quote_invoice request addressed to us.
     BridgeRequest {
         event_id: String,
+        /// `#l` tag from the request — echoed on the response so wallets
+        /// with a per-ledger response filter (relay-side `#l`) see it.
+        ledger_id: String,
         action: String,
         params: serde_json::Value,
     },
@@ -532,12 +535,26 @@ impl AgentTransport {
                             });
                             if let Some(action) = action {
                                 if action == "issue_hold_invoice" || action == "quote_invoice" {
+                                    let ledger_id = event
+                                        .tags
+                                        .iter()
+                                        .find_map(|tag| {
+                                            if tag.kind()
+                                                == TagKind::SingleLetter(TAG_LEDGER_REQ)
+                                            {
+                                                tag.content().map(|s| s.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .unwrap_or_default();
                                     if let Ok(params) =
                                         serde_json::from_str::<serde_json::Value>(&event.content)
                                     {
                                         let _ = update_tx
                                             .send(UpdateEvent::BridgeRequest {
                                                 event_id: event.id.to_hex(),
+                                                ledger_id,
                                                 action,
                                                 params,
                                             })
@@ -598,18 +615,30 @@ impl AgentTransport {
         Ok((event_id, rx))
     }
 
-    /// Send a response to a request event (Kind 20102 with #e tag)
+    /// Send a response to a request event (Kind 20102 with #e tag).
+    ///
+    /// Echoes the request's `#l` tag: wallets configure a per-ledger
+    /// response filter (`subscribe_to_response` with relay-side `#l`),
+    /// so an untagged response never reaches them.
     async fn send_response(
         &self,
         request_event_id: &str,
+        ledger_id: &str,
         response: serde_json::Value,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let content = serde_json::to_string(&response)?;
-        let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_RESPONSE), &content)
+        let mut builder = EventBuilder::new(Kind::Custom(KIND_LEDGER_RESPONSE), &content)
             .tag(Tag::custom(
                 TagKind::SingleLetter(TAG_EVENT_REF),
                 [request_event_id],
-            ))
+            ));
+        if !ledger_id.is_empty() {
+            builder = builder.tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
+                [ledger_id],
+            ));
+        }
+        let event = builder
             .sign_with_keys(&self.keys)
             .map_err(|e| format!("Sign failed: {}", e))?;
 
@@ -2056,9 +2085,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!();
 
-    // Lightning backend (env-selected). Probe hold-invoice support once —
-    // issue_hold_invoice refuses cleanly when the backend can't hold.
-    let ln: Arc<dyn LightningBackend> = Arc::from(lightning_backend::from_env());
+    // Lightning backend (env-selected). Construction happens off the async
+    // runtime: the blocking HTTP client inside (reqwest::blocking) creates
+    // and drops its own mini-runtime, which panics inside a tokio context.
+    let ln: Arc<dyn LightningBackend> =
+        tokio::task::spawn_blocking(|| Arc::from(lightning_backend::from_env())).await?;
     let holds_supported = {
         let ln_c = ln.clone();
         tokio::task::spawn_blocking(move || ln_c.supports_hold_invoices())
@@ -2134,6 +2165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (transport, mut update_rx) =
         AgentTransport::new(nostr_key, &relay_urls, &deposit_id_hexes, &ledger_ids).await?;
     let transport = Arc::new(transport);
+    eprintln!("bridge pubkey: {}", transport.keys.public_key().to_hex());
 
     let deposits_by_ledger: HashMap<String, AgentDeposit> = deposits
         .iter()
@@ -2216,6 +2248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match evt {
             UpdateEvent::BridgeRequest {
                 event_id,
+                ledger_id,
                 action,
                 params,
             } => {
@@ -2231,7 +2264,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "quote_invoice" => handle_quote_invoice(&state_c, &params),
                         _ => err_response(format!("unknown action {:?}", action)),
                     };
-                    if let Err(e) = transport_c.send_response(&event_id, response).await {
+                    if let Err(e) = transport_c
+                        .send_response(&event_id, &ledger_id, response)
+                        .await
+                    {
                         eprintln!("  Failed to send response: {}", e);
                     }
                 });

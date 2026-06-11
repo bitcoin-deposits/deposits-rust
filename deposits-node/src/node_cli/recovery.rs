@@ -6141,6 +6141,7 @@ pub async fn recovery_confiscate_plan(
         gift_wrap_sender: None,
         subkey_account: None,
         subkey_attestation: None,
+        addressee: None,
     };
     match node
         .verify_proposed_confiscation_tx(&mock_request, &sighash_bytes)

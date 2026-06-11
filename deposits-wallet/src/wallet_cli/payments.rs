@@ -2189,3 +2189,206 @@ pub async fn send(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+/// Receive over Lightning via an HTLC bridge (DEP-10 §Receive).
+///
+/// The wallet picks the preimage; the bridge can never claim the upstream
+/// payment without the wallet first being credited on-ledger. Flow:
+///   1. generate r, H = sha256(r)
+///   2. issue_hold_invoice to the bridge → BOLT-11 (printed for the payer)
+///   3. wait for the bridge's TransferLock paying our deposit, gated on H
+///   4. transfer_complete revealing r → deposit credited
+///
+/// Usage: deposits-wallet bridge-receive <alias> <amount_sats>
+///          --bridge <bridge_pubkey_hex> --relay <url> [--timeout-secs N]
+pub async fn bridge_receive(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::secp256k1::rand::{rngs::OsRng, RngCore};
+    use deposits_core::types::compute_deposit_id;
+
+    let mut alias: Option<String> = None;
+    let mut amount_sats: Option<u64> = None;
+    let mut bridge_pk: Option<String> = None;
+    let mut timeout_secs: u64 = 180;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bridge" if i + 1 < args.len() => {
+                bridge_pk = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--timeout-secs" if i + 1 < args.len() => {
+                timeout_secs = args[i + 1].parse()?;
+                i += 1;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if alias.is_none() {
+                    alias = Some(args[i].clone());
+                } else if amount_sats.is_none() {
+                    amount_sats = Some(args[i].parse()?);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let alias = alias.ok_or(
+        "Usage: deposits-wallet bridge-receive <alias> <amount_sats> --bridge <pubkey> --relay <url>",
+    )?;
+    let amount_sats = amount_sats.ok_or("Missing amount")?;
+    let bridge_pk = bridge_pk.ok_or("Missing --bridge <bridge_pubkey_hex>")?;
+    let config = parse_config(&config_args)?;
+    if config.relays.is_empty() {
+        return Err("No relay specified. Use --relay <url>".into());
+    }
+
+    // Load the receiving deposit.
+    let deposits_file = config.data_dir.join("deposits.json");
+    let data = std::fs::read_to_string(&deposits_file)?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+    let dep = deposits
+        .iter()
+        .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
+        .ok_or_else(|| format!("No deposit '{}'", alias))?;
+    let ledger_id = dep["ledger_id"].as_str().ok_or("Missing ledger_id")?.to_string();
+    let key_index = dep.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let secret = derive_secret_key_at_index(&config.seed, config.network, key_index)?;
+    let pubkey = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret).public_key();
+    let descriptor = format!("pk({})", hex::encode(pubkey.serialize()));
+    let deposit_id = compute_deposit_id(&descriptor);
+    let deposit_id_hex = hex::encode(deposit_id);
+
+    let amount_msats = amount_sats * 1000;
+
+    // 1. Preimage — only we ever know r.
+    let mut rng = OsRng;
+    let mut preimage = [0u8; 32];
+    rng.fill_bytes(&mut preimage);
+    let hash: [u8; 32] = {
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
+        let mut engine = sha256::Hash::engine();
+        engine.input(&preimage);
+        sha256::Hash::from_engine(engine).to_byte_array()
+    };
+    let hash_hex = hex::encode(hash);
+
+    // Connect.
+    let nostr_key = config.nostr_key()?;
+    let mut transport = NostrTransportBuilder::new(nostr_key);
+    for r in &config.relays {
+        transport = transport.relay(r);
+    }
+    let transport = transport.build().await?;
+    transport.set_response_ledger_filter(vec![ledger_id.clone()]);
+
+    // 2. issue_hold_invoice (DEP-04 §Bridge request envelopes).
+    println!("Requesting hold invoice from bridge {}…", &bridge_pk[..16.min(bridge_pk.len())]);
+    let req = serde_json::json!({
+        "ledger_id": ledger_id,
+        "deposit_id": deposit_id_hex,
+        "amount_msats": amount_msats,
+        "lock_type": "htlc",
+        "payment_hash": hash_hex,
+    });
+    let req_id = transport
+        .send_agent_request_on_ledger(&bridge_pk, &ledger_id, "issue_hold_invoice", req)
+        .await?;
+    let resp = transport.wait_for_response(&req_id, 20000).await?;
+    if !resp.success {
+        return Err(format!("Bridge refused: {}", resp.error.unwrap_or_default()).into());
+    }
+    let result = resp.result.ok_or("Missing result")?;
+    let bolt11 = result["bolt11"].as_str().ok_or("Missing bolt11")?.to_string();
+    let service_fee = result["service_fee_msats"].as_u64().unwrap_or(0);
+    let transfer_fee = result["transfer_fee_msats"].as_u64().unwrap_or(0);
+
+    // Sanity: the invoice must ask for exactly X + fees the bridge declared.
+    let parsed: lightning_invoice::Bolt11Invoice = bolt11.parse()
+        .map_err(|e| format!("Bridge returned an unparseable BOLT-11: {:?}", e))?;
+    let inv_msats = parsed.amount_milli_satoshis().ok_or("Amountless invoice from bridge")?;
+    let expected = amount_msats + service_fee + transfer_fee;
+    if inv_msats != expected {
+        return Err(format!(
+            "Bridge invoice amount {} != expected {} (X {} + service {} + transfer {})",
+            inv_msats, expected, amount_msats, service_fee, transfer_fee
+        ).into());
+    }
+    // The invoice must commit to OUR hash — otherwise our reveal won't settle it.
+    if hex::encode(parsed.payment_hash()) != hash_hex {
+        return Err("Bridge invoice payment_hash does not match ours".into());
+    }
+
+    println!();
+    println!("BOLT11: {}", bolt11);
+    println!();
+    println!(
+        "  receive {} sats (payer sends {} msats; bridge service fee {} + transfer fee {})",
+        amount_sats, inv_msats, service_fee, transfer_fee
+    );
+    println!("Waiting for the payer, then for the bridge's on-ledger lock…");
+
+    // 3. Wait for the bridge's TransferLock paying us, gated on H.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
+    let mut lock_tid: Option<[u8; 32]> = None;
+    while tokio::time::Instant::now() < deadline {
+        let updates = transport.fetch_ledger_updates(&ledger_id).await?;
+        for update in &updates {
+            use deposits_core::{LedgerOperation, TlvDecode};
+            if let Ok(LedgerOperation::TransferLock {
+                destination_deposit_id,
+                completion_script: ref script,
+                transfer_id: ref tid,
+                amount,
+                ..
+            }) = LedgerOperation::tlv_decode(&update.message)
+            {
+                if destination_deposit_id == deposit_id && script.contains(&hash_hex) {
+                    if amount != amount_msats {
+                        eprintln!(
+                            "  [WARN] bridge locked {} msats, expected {} — refusing to reveal",
+                            amount, amount_msats
+                        );
+                        continue;
+                    }
+                    lock_tid = Some(*tid);
+                    break;
+                }
+            }
+        }
+        if lock_tid.is_some() {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        eprint!(".");
+    }
+    eprintln!();
+    let lock_tid = lock_tid.ok_or("Bridge lock did not appear before timeout — preimage NOT revealed; payer will be refunded when the HTLC expires")?;
+    println!("  Bridge locked! transfer_id {}…", hex::encode(&lock_tid[..8]));
+
+    // 4. Reveal r — this credits us AND (only then) lets the bridge settle upstream.
+    let complete_params = serde_json::json!({
+        "transfer_id": hex::encode(lock_tid),
+        "preimage": hex::encode(preimage),
+    });
+    let req_id = transport
+        .send_ledger_request(&ledger_id, "transfer_complete", complete_params)
+        .await?;
+    let resp = transport.wait_for_response(&req_id, 20000).await?;
+    if !resp.success {
+        return Err(format!("transfer_complete failed: {}", resp.error.unwrap_or_default()).into());
+    }
+
+    println!();
+    println!("Bridge receive complete: +{} sats on '{}'", amount_sats, alias);
+    Ok(())
+}

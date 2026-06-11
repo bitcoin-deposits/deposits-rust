@@ -29,6 +29,23 @@ impl Node {
             return;
         }
 
+        // Requests carrying a `#p` addressee target a specific agent —
+        // bridges and couriers ride the same Kind 20101 + `#l` pipeline
+        // (DEP-04 §"Bridge request envelopes"), so we see their requests
+        // on ledgers we subscribe to. If it isn't us, stay silent: the
+        // addressee responds, and an eager "Unknown action" error from a
+        // bystander would race (and beat) the real reply.
+        if let Some(addressee) = &request.addressee {
+            if !self.nostr.is_self_addressed(addressee) {
+                tracing::debug!(
+                    "DROP not_addressee: action={}, p={}...",
+                    request.action,
+                    &addressee[..16.min(addressee.len())]
+                );
+                return;
+            }
+        }
+
         // Check if this request is for a ledger we own or have joined
         let is_our_ledger = self.has_ledger(&request.ledger_id)
             || self.has_ledger_by_reserves_key(&request.ledger_id);
