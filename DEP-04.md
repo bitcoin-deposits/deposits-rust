@@ -100,6 +100,8 @@ Wallets send ephemeral Kind 20101 events to operator relays. The content is JSON
 | request_route | Request cross-ledger route from courier | DEP-13 |
 | confiscation_sign | Request co-signature on a confiscation TX (dispute) | DEP-06 |
 | forfeit_sweep_sign | Request co-signature on a forfeit-sweep TX (arm-and-reveal forfeiture) | DEP-06 |
+| issue_hold_invoice | Ask a bridge for a hold invoice against a wallet-supplied hash | DEP-10 |
+| quote_invoice | Ask a bridge for a per-invoice pay quote | DEP-10 |
 
 ### Response Format
 
@@ -276,6 +278,63 @@ Lightning ↔ ledger bridges advertise via NIP-33 replaceable events on the ledg
 The protocol does NOT enforce that a bridge's published `receive`/`pay` schedule is honored — bridges are peer services, not protocol-attested ones. A bridge that publishes one price and quotes another loses business, but the wallet's only protocol-level recourse is the timeout-and-refund failure mode of any unanswered `TransferLock`. Wallets SHOULD prefer bridges with consistent published schedules over those that always per-invoice-quote (lower trust friction), and SHOULD aggregate reputation signals across multiple bridges per ledger.
 
 The cosigning quorum's role on bridge ops is structural (standard TransferLock conformance always; timeout-ordering and completion-script binding when the submitter attaches the BOLT-11 as aux data in the cosignature request — see DEP-10 §"Bridge cosigner rules") — they do NOT verify the bridge's published prices against the lock, since prices are market-set and not part of the protocol fee surface.
+
+### Bridge request envelopes
+
+Bridges are addressed the same way couriers are: Kind 20101 requests with a `p` tag carrying the bridge's pubkey, answered by Kind 20102 tagged with the request event ID. Two actions:
+
+**`issue_hold_invoice`** (wallet → bridge, receive direction — DEP-10 §Receive step 1):
+
+```json
+{
+  "ledger_id": "<64 hex>",
+  "deposit_id": "<32 hex>",          // wallet's deposit to credit
+  "amount_msats": 250000,            // X — what the wallet wants to receive
+  "lock_type": "htlc",               // or "ptlc"
+  "payment_hash": "<64 hex>"         // H = sha256(r); wallet keeps r
+}
+```
+
+For `lock_type: "ptlc"`, `payment_point` (66 hex, compressed) replaces `payment_hash`. Response:
+
+```json
+{
+  "success": true,
+  "result": {
+    "bolt11": "<invoice for X + service_fee + transfer_fee>",
+    "service_fee_msats": 1300,
+    "transfer_fee_msats": 600,
+    "hold_window_blocks": 120        // measured/typical; informational
+  }
+}
+```
+
+The wallet checks the amount math against the bridge's advertised schedule before handing the BOLT-11 to the payer. The bridge MUST refuse hashes it has seen before (re-using `H` across invoices would let an old on-ledger reveal settle a new HTLC).
+
+**`quote_invoice`** (wallet → bridge, pay direction — DEP-10 §Pay step 1):
+
+```json
+{
+  "ledger_id": "<64 hex>",
+  "bolt11": "<the external invoice the wallet wants paid>"
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "result": {
+    "bridge_deposit_id": "<32 hex>",   // lock destination
+    "service_fee_msats": 2100,          // bridge margin incl. expected routing
+    "quote_expiry_secs": 120,
+    "min_lock_window_blocks": 18        // bridge ignores locks with shorter T_ledger
+  }
+}
+```
+
+The quote is advisory (the bridge's signature is not on it — see DEP-10 §Pay: the bridge's risk is its own routing exposure, and a wallet that locks a different total simply won't be served). Carrying the BOLT-11 in the request is what later lets the bridge recognize the lock: it indexes pending quotes by the invoice's payment hash and matches the arriving `TransferLock.completion_script` against it.
 
 ## Price Oracle (Kind 39101)
 
