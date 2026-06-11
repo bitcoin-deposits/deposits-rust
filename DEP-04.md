@@ -34,7 +34,7 @@ Wallets connect to both: operator relays for requests, ledger relays for reading
 | 39100 | Advertisement | Replaceable | deposits-node | Operator terms, fees, reserves (JSON, NIP-33, `d`=ledger ID) |
 | 39101 | Price Oracle | Replaceable | deposits-node | BTC/USD price (JSON, NIP-33, `d`=`btcusd`) |
 | 39102 | Courier Advertisement | Replaceable | deposits-node | Cross-ledger routing capacity and fees (JSON, NIP-33, see DEP-13) |
-| 39103 | Bridge Advertisement | Replaceable | any deposit holder with an LN node | Lightning ↔ ledger bridging capacity and fees (JSON, NIP-33, see DEP-10) |
+| 39104 | Bridge Advertisement | Replaceable | any deposit holder with an LN node | Lightning ↔ ledger bridging capacity and fees (JSON, NIP-33, see DEP-10) |
 
 ### Identity Verification (wallet ↔ lightning-verifier ↔ operator)
 
@@ -239,7 +239,7 @@ NIP-26 delegated event signing and the existing DEP-04 subkey-attestation patter
 
 Older wallets that don't read `delegate_pubkey` will treat the advertisement's event author as the operator's messaging identity. This works as long as the daemon's `self.keys` is the operator key (operator-key-for-everything mode). Once the daemon switches to delegate-key-for-Nostr (this commit's follow-up), the advertisement still authors as `operator_pubkey` (signed by signer), but Kind 9100 events author as `delegate_pubkey`. Older wallets filtering Kind 9100 by `author=operator_pubkey` will miss them and need to follow the delegation. Operators rolling forward should publish a transition advertisement with both keys' addresses available before flipping.
 
-## Bridge Advertisements (Kind 39103)
+## Bridge Advertisements (Kind 39104)
 
 Lightning ↔ ledger bridges advertise via NIP-33 replaceable events on the ledger relay, mirroring the courier advertisement pattern (Kind 39102). The `d` tag is the bridge's pubkey, enabling per-bridge replacement.
 
