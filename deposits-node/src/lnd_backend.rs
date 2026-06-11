@@ -33,7 +33,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::lightning_backend::{
-    Balances, ChannelInfo, LightningBackend, NodeInfo, PaymentInfo, PaymentStatus,
+    Balances, ChannelInfo, HoldInvoiceState, LightningBackend, NodeInfo, PaymentInfo,
+    PaymentStatus,
 };
 use crate::Error;
 
@@ -306,7 +307,36 @@ struct LndInvoice {
     /// Settled bool. Set when the invoice was actually paid.
     #[serde(default)]
     settled: bool,
+    /// Invoice lifecycle state: "OPEN" | "SETTLED" | "CANCELED" | "ACCEPTED".
+    /// ACCEPTED is the hold-invoice "HTLCs parked, awaiting settle/cancel"
+    /// state the bridge polls for. Older LND emits the numeric enum
+    /// (0..=3 in the same order); handle both via the string the REST
+    /// gateway produces (modern gateways emit the name).
+    #[serde(default)]
+    state: String,
+    /// Per-HTLC detail; populated once HTLCs arrive. `expiry_height` is the
+    /// CLTV height at which the HTLC times out — the bridge's upper bound
+    /// for its on-ledger lock timeout.
+    #[serde(default)]
+    htlcs: Vec<LndInvoiceHtlc>,
 }
+
+#[derive(Deserialize)]
+struct LndInvoiceHtlc {
+    #[serde(default)]
+    expiry_height: u32,
+}
+
+/// `/v2/invoices/hodl` response — same shape as AddInvoice.
+#[derive(Deserialize)]
+struct LndAddHoldInvoiceResp {
+    payment_request: String,
+}
+
+/// `/v2/invoices/settle` and `/v2/invoices/cancel` return empty objects on
+/// success; deserialize into this to confirm valid JSON came back.
+#[derive(Deserialize)]
+struct LndEmptyResp {}
 
 // -- LightningBackend impl -------------------------------------------------
 
@@ -467,6 +497,101 @@ impl LightningBackend for LndBackend {
         let mut out = [0u8; 32];
         out.copy_from_slice(&bytes);
         Ok(Some(out))
+    }
+
+    // ── Hold invoices — native invoicesrpc support ──────────────────────────
+    //
+    // LND ships hold invoices in stock release builds via the invoicesrpc
+    // subserver. REST surface:
+    //   POST /v2/invoices/hodl      AddHoldInvoice (external hash → BOLT-11)
+    //   GET  /v1/invoice/{r_hash}   state OPEN|ACCEPTED|SETTLED|CANCELED + htlcs
+    //   POST /v2/invoices/settle    SettleInvoice (preimage)
+    //   POST /v2/invoices/cancel    CancelInvoice (payment_hash)
+    // Byte fields are standard base64 in POST bodies (grpc-gateway), and the
+    // invoice macaroon (or admin) covers all four.
+
+    fn supports_hold_invoices(&self) -> bool {
+        true
+    }
+
+    fn create_hold_invoice(
+        &self,
+        amount_msat: u64,
+        payment_hash_hex: &str,
+        description: &str,
+        expiry_secs: u32,
+    ) -> Result<String, Error> {
+        let hash_bytes = hex::decode(payment_hash_hex)
+            .map_err(|e| Error::Wallet(format!("LND hold hash hex decode: {}", e)))?;
+        if hash_bytes.len() != 32 {
+            return Err(Error::Wallet(format!(
+                "LND hold hash wrong length: {} bytes",
+                hash_bytes.len()
+            )));
+        }
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let body = serde_json::json!({
+            "hash": STANDARD.encode(&hash_bytes),
+            "value_msat": amount_msat.to_string(),
+            "memo": description,
+            "expiry": expiry_secs.to_string(),
+        });
+        let resp: LndAddHoldInvoiceResp = self.post("/v2/invoices/hodl", &body)?;
+        Ok(resp.payment_request)
+    }
+
+    fn lookup_hold_invoice(
+        &self,
+        payment_hash_hex: &str,
+    ) -> Result<HoldInvoiceState, Error> {
+        let invoice = self.lookup_invoice(payment_hash_hex)?.ok_or_else(|| {
+            Error::Wallet(format!(
+                "LND hold invoice not found for hash {}…",
+                &payment_hash_hex[..16.min(payment_hash_hex.len())]
+            ))
+        })?;
+        // Modern REST gateways emit the enum name; some older ones emit the
+        // numeric value as a bare integer (which our String field would fail
+        // to capture — those versions also predate widespread hold-invoice
+        // REST use, so the name-match is the practical surface).
+        match invoice.state.as_str() {
+            "SETTLED" => Ok(HoldInvoiceState::Settled),
+            "CANCELED" => Ok(HoldInvoiceState::Canceled),
+            "ACCEPTED" => Ok(HoldInvoiceState::Accepted {
+                htlc_expiry_height: invoice
+                    .htlcs
+                    .iter()
+                    .map(|h| h.expiry_height)
+                    .filter(|&h| h > 0)
+                    .min(),
+            }),
+            // "OPEN", "", or anything unrecognized: no HTLCs parked yet.
+            _ => Ok(HoldInvoiceState::Open),
+        }
+    }
+
+    fn settle_hold_invoice(&self, preimage_hex: &str) -> Result<(), Error> {
+        let preimage_bytes = hex::decode(preimage_hex)
+            .map_err(|e| Error::Wallet(format!("LND settle preimage hex decode: {}", e)))?;
+        if preimage_bytes.len() != 32 {
+            return Err(Error::Wallet(format!(
+                "LND settle preimage wrong length: {} bytes",
+                preimage_bytes.len()
+            )));
+        }
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let body = serde_json::json!({ "preimage": STANDARD.encode(&preimage_bytes) });
+        let _: LndEmptyResp = self.post("/v2/invoices/settle", &body)?;
+        Ok(())
+    }
+
+    fn cancel_hold_invoice(&self, payment_hash_hex: &str) -> Result<(), Error> {
+        let hash_bytes = hex::decode(payment_hash_hex)
+            .map_err(|e| Error::Wallet(format!("LND cancel hash hex decode: {}", e)))?;
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let body = serde_json::json!({ "payment_hash": STANDARD.encode(&hash_bytes) });
+        let _: LndEmptyResp = self.post("/v2/invoices/cancel", &body)?;
+        Ok(())
     }
 }
 

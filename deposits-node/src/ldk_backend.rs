@@ -309,6 +309,33 @@ impl LdkBackend {
         out.copy_from_slice(&bytes);
         Ok(Some(out))
     }
+
+    // ── Hold invoices — via the fork's for-hash command set ─────────────────
+    //
+    // Requires an ldk-server built from our fork (or upstream ≥ the rev that
+    // added the for-hash commands + GetClaimableDetails). The probe below
+    // detects an older sidecar and degrades to no-hold-support instead of
+    // failing at first use.
+
+    /// Probe: does the installed ldk-server-cli know the for-hash command
+    /// set? `--help` on a subcommand exits 0 iff clap recognizes it; no
+    /// server round-trip involved.
+    pub fn probe_hold_invoice_support(&self) -> bool {
+        let out = std::process::Command::new(&self.config.cli_path)
+            .args(["bolt11-receive-for-hash", "--help"])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => true,
+            _ => {
+                tracing::info!(
+                    "ldk-server-cli lacks bolt11-receive-for-hash — hold invoices \
+                     disabled. Rebuild ldk-server from the deposits fork to enable \
+                     bridge-receive."
+                );
+                false
+            }
+        }
+    }
 }
 
 // -- Status deserializer (handles both u8 and string formats) --
@@ -417,8 +444,9 @@ pub struct PaymentInfo {
 // don't break; the trait impl just forwards and converts.
 
 use crate::lightning_backend::{
-    Balances as BackendBalances, ChannelInfo as BackendChannelInfo, LightningBackend,
-    NodeInfo as BackendNodeInfo, PaymentInfo as BackendPaymentInfo, PaymentStatus,
+    Balances as BackendBalances, ChannelInfo as BackendChannelInfo, HoldInvoiceState,
+    LightningBackend, NodeInfo as BackendNodeInfo, PaymentInfo as BackendPaymentInfo,
+    PaymentStatus,
 };
 
 impl LightningBackend for LdkBackend {
@@ -508,6 +536,101 @@ impl LightningBackend for LdkBackend {
         payment_id_hex: &str,
     ) -> Result<Option<[u8; 32]>, Error> {
         LdkBackend::get_payment_preimage(self, payment_id_hex)
+    }
+
+    // ── Hold invoices ───────────────────────────────────────────────────────
+
+    fn supports_hold_invoices(&self) -> bool {
+        self.probe_hold_invoice_support()
+    }
+
+    fn create_hold_invoice(
+        &self,
+        amount_msat: u64,
+        payment_hash_hex: &str,
+        description: &str,
+        expiry_secs: u32,
+    ) -> Result<String, Error> {
+        let amount_arg = format!("{}msat", amount_msat);
+        let expiry_arg = expiry_secs.to_string();
+        let output = self.run_command(&[
+            "bolt11-receive-for-hash",
+            payment_hash_hex,
+            &amount_arg,
+            "--description",
+            description,
+            "--expiry-secs",
+            &expiry_arg,
+        ])?;
+        let v: serde_json::Value = serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!(
+                "Failed to parse bolt11-receive-for-hash: {} (output: {})",
+                e, output
+            ))
+        })?;
+        v.get("invoice")
+            .and_then(|i| i.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                Error::Protocol(format!(
+                    "bolt11-receive-for-hash response missing invoice: {}",
+                    output
+                ))
+            })
+    }
+
+    fn lookup_hold_invoice(
+        &self,
+        payment_hash_hex: &str,
+    ) -> Result<HoldInvoiceState, Error> {
+        // Terminal states come from the payment record; the held/accepted
+        // distinction comes from the fork's GetClaimableDetails (the
+        // PaymentClaimable event tracking — PaymentDetails alone reports
+        // Pending for both "unpaid" and "HTLCs parked").
+        let details = self.run_command(&["get-payment-details", payment_hash_hex]);
+        if let Ok(output) = details {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&output) {
+                match v
+                    .pointer("/payment/status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_ascii_uppercase()
+                    .as_str()
+                {
+                    "SUCCEEDED" => return Ok(HoldInvoiceState::Settled),
+                    "FAILED" => return Ok(HoldInvoiceState::Canceled),
+                    _ => {}
+                }
+            }
+        }
+
+        let output = self.run_command(&["get-claimable-details", payment_hash_hex])?;
+        let v: serde_json::Value = serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!(
+                "Failed to parse get-claimable-details: {} (output: {})",
+                e, output
+            ))
+        })?;
+        if v.get("claimable").and_then(|c| c.as_bool()).unwrap_or(false) {
+            Ok(HoldInvoiceState::Accepted {
+                htlc_expiry_height: v
+                    .get("claim_deadline")
+                    .and_then(|d| d.as_u64())
+                    .map(|d| d as u32),
+            })
+        } else {
+            Ok(HoldInvoiceState::Open)
+        }
+    }
+
+    fn settle_hold_invoice(&self, preimage_hex: &str) -> Result<(), Error> {
+        let _ = self.run_command(&["bolt11-claim-for-hash", preimage_hex])?;
+        Ok(())
+    }
+
+    fn cancel_hold_invoice(&self, payment_hash_hex: &str) -> Result<(), Error> {
+        let _ = self.run_command(&["bolt11-fail-for-hash", payment_hash_hex])?;
+        Ok(())
     }
 }
 

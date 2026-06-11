@@ -94,6 +94,106 @@ pub trait LightningBackend: Send + Sync {
         &self,
         payment_id_hex: &str,
     ) -> Result<Option<[u8; 32]>, Error>;
+
+    // ── Hold invoices (Lightning bridge — DEP-10 §Receive) ─────────────────
+    //
+    // A hold invoice is a BOLT-11 for an EXTERNALLY-supplied payment hash:
+    // the node doesn't know the preimage, so arriving HTLCs are parked
+    // ("accepted") rather than settled, until the caller either settles with
+    // the preimage or cancels and releases the HTLCs back to the payer.
+    //
+    // This is the LN-side half of the HTLC bridge: the wallet holds the
+    // preimage, the bridge issues the hold invoice, the on-ledger reveal is
+    // what unlocks the upstream settlement. Backend support varies — see
+    // `supports_hold_invoices` — and a bridge daemon MUST consult the probe
+    // before advertising `invoice_receive` (bridge-pay needs none of this
+    // and works on every backend).
+
+    /// Whether this backend can do hold invoices.
+    ///
+    /// - LND: `true` — native `invoicesrpc` support, in stock release builds.
+    /// - LDK: `true` against an ldk-server built with the hold-invoice
+    ///   commands; `false` against an older sidecar (probe at construction).
+    /// - CLN: `true` iff the `holdinvoice` plugin is loaded
+    ///   (github.com/daywalker90/holdinvoice); core CLN has no hold support.
+    fn supports_hold_invoices(&self) -> bool {
+        false
+    }
+
+    /// Create a BOLT-11 invoice for an externally-supplied payment hash.
+    /// HTLCs paying it are held unsettled until [`Self::settle_hold_invoice`]
+    /// or [`Self::cancel_hold_invoice`]. Returns the bech32 invoice string.
+    ///
+    /// `expiry_secs` is the BOLT-11 invoice expiry (how long the payer has
+    /// to start paying) — NOT the HTLC hold window, which is governed by the
+    /// HTLC's own CLTV and surfaced via [`Self::lookup_hold_invoice`].
+    fn create_hold_invoice(
+        &self,
+        _amount_msat: u64,
+        _payment_hash_hex: &str,
+        _description: &str,
+        _expiry_secs: u32,
+    ) -> Result<String, Error> {
+        Err(Error::Protocol(
+            "hold invoices not supported by this Lightning backend".to_string(),
+        ))
+    }
+
+    /// Current state of a hold invoice previously created with
+    /// [`Self::create_hold_invoice`], keyed by its payment hash.
+    ///
+    /// `Accepted` is the bridge's gate: HTLCs are parked, and
+    /// `htlc_expiry_height` (when the backend surfaces it) is the earliest
+    /// CLTV among the held HTLCs — the bridge derives its on-ledger
+    /// `TransferLock.timeout_height` from this, minus the safety margin Δ.
+    fn lookup_hold_invoice(
+        &self,
+        _payment_hash_hex: &str,
+    ) -> Result<HoldInvoiceState, Error> {
+        Err(Error::Protocol(
+            "hold invoices not supported by this Lightning backend".to_string(),
+        ))
+    }
+
+    /// Settle the held HTLCs with the preimage (learned from the on-ledger
+    /// `TransferComplete` reveal). Idempotent on already-settled invoices
+    /// where the backend allows it; otherwise returns the backend's error.
+    fn settle_hold_invoice(&self, _preimage_hex: &str) -> Result<(), Error> {
+        Err(Error::Protocol(
+            "hold invoices not supported by this Lightning backend".to_string(),
+        ))
+    }
+
+    /// Cancel the hold invoice and release any held HTLCs back to the payer
+    /// (used when the on-ledger lock timed out without a reveal).
+    fn cancel_hold_invoice(&self, _payment_hash_hex: &str) -> Result<(), Error> {
+        Err(Error::Protocol(
+            "hold invoices not supported by this Lightning backend".to_string(),
+        ))
+    }
+}
+
+/// Lifecycle of a hold invoice. The bridge's receive loop polls
+/// [`LightningBackend::lookup_hold_invoice`] and acts on transitions:
+/// `Open → Accepted` triggers the on-ledger `TransferLock`;
+/// ledger reveal triggers settle; ledger timeout triggers cancel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HoldInvoiceState {
+    /// Invoice issued; no HTLCs have arrived yet.
+    Open,
+    /// HTLC(s) arrived and are being held unsettled. Safe to lock on-ledger.
+    Accepted {
+        /// Earliest CLTV expiry height among the held HTLCs, when the
+        /// backend surfaces it (LND: `htlcs[].expiry_height`; LDK:
+        /// `claim_deadline`). `None` means the backend accepted but didn't
+        /// report a height — the bridge MUST then derive a conservative
+        /// bound from the BOLT-11's `min_final_cltv_expiry` + chain tip.
+        htlc_expiry_height: Option<u32>,
+    },
+    /// Preimage was provided; HTLCs settled; upstream funds claimed.
+    Settled,
+    /// Invoice canceled; held HTLCs released back to the payer.
+    Canceled,
 }
 
 #[derive(Debug, Clone)]

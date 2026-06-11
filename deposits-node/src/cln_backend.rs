@@ -21,15 +21,43 @@
 //! Default is `~/.lightning/bitcoin/lightning-rpc` (mainnet) or
 //! `~/.lightning/regtest/lightning-rpc` (regtest). Operators that put
 //! `lightning-dir` elsewhere set `CLN_SOCKET_PATH` explicitly.
+//!
+//! ## Hold invoices (Lightning bridge receive)
+//!
+//! Core CLN cannot issue an invoice for an externally-supplied payment hash
+//! — `invoice` accepts an optional *preimage* (which the node then knows,
+//! defeating the hold), never a bare hash. Hold support therefore requires a
+//! plugin built on the `htlc_accepted` hook, which can park HTLCs and later
+//! resolve them with a preimage supplied at settle time.
+//!
+//! The known implementation is the `holdinvoice` plugin
+//! (<https://github.com/daywalker90/holdinvoice>). This backend calls the
+//! plugin's RPC surface — `holdinvoice` (with external `payment_hash`),
+//! `holdinvoicelookup`, `holdinvoicesettle` (with `preimage`),
+//! `holdinvoicecancel` — and `supports_hold_invoices` probes for the
+//! methods at runtime, so a CLN node without the plugin cleanly reports
+//! no-hold-support and a bridge daemon on top of it advertises pay-only.
+//!
+//! Operator setup for bridge-receive on CLN:
+//!   1. install the holdinvoice plugin into CLN's plugin dir (or
+//!      `--plugin=/path/to/holdinvoice`)
+//!   2. restart CLN; verify `lightning-cli help holdinvoice` resolves
+//!   3. the deposits bridge daemon picks it up automatically via the probe
+//!
+//! If the installed plugin version doesn't accept an external
+//! `payment_hash` on create or `preimage` on settle, calls fail with CLN's
+//! parameter error naming the missing field — upgrade the plugin.
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::lightning_backend::{
-    Balances, ChannelInfo, LightningBackend, NodeInfo, PaymentInfo, PaymentStatus,
+    Balances, ChannelInfo, HoldInvoiceState, LightningBackend, NodeInfo, PaymentInfo,
+    PaymentStatus,
 };
 use crate::Error;
 
@@ -39,6 +67,10 @@ pub struct ClnBackend {
     /// Read/write timeout on each RPC call. CLN typically responds in
     /// milliseconds; the timeout exists to surface stuck sockets quickly.
     timeout: Duration,
+    /// Cached result of the holdinvoice-plugin probe. Probed once on first
+    /// `supports_hold_invoices` call; plugin loads require a CLN restart, so
+    /// the answer can't change mid-process.
+    hold_probe: OnceLock<bool>,
 }
 
 impl ClnBackend {
@@ -46,6 +78,7 @@ impl ClnBackend {
         Self {
             socket_path: socket_path.into(),
             timeout: Duration::from_secs(30),
+            hold_probe: OnceLock::new(),
         }
     }
 
@@ -243,6 +276,24 @@ struct ClnInvoice {
     status: String,
     #[serde(default)]
     payment_preimage: Option<String>,
+}
+
+/// `holdinvoice` plugin response. Only the invoice string is consumed; the
+/// plugin also returns payment_hash and expiry which we already know.
+#[derive(Deserialize)]
+struct ClnHoldInvoiceResp {
+    bolt11: String,
+}
+
+/// `holdinvoicelookup` plugin response.
+#[derive(Deserialize)]
+struct ClnHoldLookupResp {
+    /// "open" | "accepted" | "settled" | "canceled"
+    state: String,
+    /// CLTV height of the held HTLC(s), surfaced by plugin versions that
+    /// report it (the htlc_accepted hook receives the HTLC's cltv_expiry).
+    #[serde(default)]
+    htlc_expiry: Option<u32>,
 }
 
 // -- LightningBackend impl -------------------------------------------------
@@ -451,6 +502,87 @@ impl LightningBackend for ClnBackend {
         let mut out = [0u8; 32];
         out.copy_from_slice(&bytes);
         Ok(Some(out))
+    }
+
+    // ── Hold invoices — via the holdinvoice plugin (see module docs) ────────
+
+    fn supports_hold_invoices(&self) -> bool {
+        *self.hold_probe.get_or_init(|| {
+            // `help` with a specific command errors if the command is
+            // unknown; resolves with usage text when the plugin is loaded.
+            // serde_json::Value because we only care about success/failure.
+            let probe: Result<serde_json::Value, Error> =
+                self.call("help", serde_json::json!({ "command": "holdinvoice" }));
+            match probe {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::info!(
+                        "CLN holdinvoice plugin not detected ({}). Bridge-receive \
+                         disabled; bridge-pay unaffected. To enable: install \
+                         github.com/daywalker90/holdinvoice and restart CLN.",
+                        e
+                    );
+                    false
+                }
+            }
+        })
+    }
+
+    fn create_hold_invoice(
+        &self,
+        amount_msat: u64,
+        payment_hash_hex: &str,
+        description: &str,
+        expiry_secs: u32,
+    ) -> Result<String, Error> {
+        // Unique label per call, same convention as create_invoice.
+        let label = format!("deposits-hold-{}-{}", now_nanos(), &payment_hash_hex[..8]);
+        let resp: ClnHoldInvoiceResp = self.call(
+            "holdinvoice",
+            serde_json::json!({
+                "amount_msat": amount_msat,
+                "description": description,
+                "label": label,
+                "expiry": expiry_secs,
+                "payment_hash": payment_hash_hex,
+            }),
+        )?;
+        Ok(resp.bolt11)
+    }
+
+    fn lookup_hold_invoice(
+        &self,
+        payment_hash_hex: &str,
+    ) -> Result<HoldInvoiceState, Error> {
+        let resp: ClnHoldLookupResp = self.call(
+            "holdinvoicelookup",
+            serde_json::json!({ "payment_hash": payment_hash_hex }),
+        )?;
+        // Plugin states: "open" | "accepted" | "settled" | "canceled".
+        match resp.state.to_ascii_lowercase().as_str() {
+            "settled" => Ok(HoldInvoiceState::Settled),
+            "canceled" | "cancelled" => Ok(HoldInvoiceState::Canceled),
+            "accepted" => Ok(HoldInvoiceState::Accepted {
+                htlc_expiry_height: resp.htlc_expiry,
+            }),
+            _ => Ok(HoldInvoiceState::Open),
+        }
+    }
+
+    fn settle_hold_invoice(&self, preimage_hex: &str) -> Result<(), Error> {
+        let _: serde_json::Value = self.call(
+            "holdinvoicesettle",
+            serde_json::json!({ "preimage": preimage_hex }),
+        )?;
+        Ok(())
+    }
+
+    fn cancel_hold_invoice(&self, payment_hash_hex: &str) -> Result<(), Error> {
+        let _: serde_json::Value = self.call(
+            "holdinvoicecancel",
+            serde_json::json!({ "payment_hash": payment_hash_hex }),
+        )?;
+        Ok(())
     }
 }
 
