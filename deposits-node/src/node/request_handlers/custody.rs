@@ -375,6 +375,561 @@ impl Node {
         (true, Some(result.to_string()), None)
     }
 
+    /// Cosign a forfeit-sweep TX spending a CSV-expired armer-share
+    /// output (DEP-06 §"Arm-and-reveal forfeiture").
+    ///
+    /// Mirror of `process_confiscation_sign_request` for the post-
+    /// confiscation cleanup phase. The sweep TX is fully deterministic
+    /// (`build_forfeit_sweep_tx`), so verification is reconstruction:
+    ///
+    ///   1. The ledger is in a disputed/confiscated state per local
+    ///      records (our fork's dispute_state, with the relay history's
+    ///      DisputeArmed set as fallback for recovery voters who never
+    ///      armed and so hold no fork).
+    ///   2. Rebuild the named armer's share output from the ledger
+    ///      history (armers + commitment hashes + recovery voters) and
+    ///      confirm the on-chain confiscation TX output's script_pubkey
+    ///      matches — proves the request points at a real share.
+    ///   3. The share output is unspent and past the CSV window (the
+    ///      armer actually forfeited).
+    ///   4. Recompute `build_forfeit_sweep_tx` from the request's
+    ///      revealers + fee and require a byte-for-byte match with the
+    ///      proposed unsigned TX.
+    ///   5. Verify the claimed revealers against the lottery claim TX's
+    ///      witness if our chain backend can see it; otherwise fall back
+    ///      to the structural guarantee from (4) — outputs pay ONLY the
+    ///      claimed revealers — and log a warning.
+    ///   6. Recompute the sweep-leaf sighash and compare before signing.
+    pub(crate) async fn process_forfeit_sweep_sign_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        use bitcoin::secp256k1::XOnlyPublicKey;
+        use bitcoin::sighash::{SighashCache, TapSighashType};
+        use bitcoin::taproot::{LeafVersion, TapLeafHash};
+        use bitcoin::{Amount, OutPoint, Transaction, TxOut};
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tapscript_reserves::{
+            build_armer_share_output, build_forfeit_sweep_tx, revealers_from_claim_witness,
+            ARMER_SHARE_SWEEP_CSV_BLOCKS,
+        };
+        use deposits_core::TlvDecode;
+        use deposits_signer_api::{SigPurpose, SignContext};
+
+        let ledger_prefix = &request.ledger_id[..16.min(request.ledger_id.len())];
+        tracing::info!(
+            "Processing forfeit_sweep_sign request for ledger {}...",
+            ledger_prefix
+        );
+
+        // -- Extract and parse parameters ---------------------------------
+        let sighash_hex = match request.params.get("sighash").and_then(|v| v.as_str()) {
+            Some(h) => h.to_string(),
+            None => return (false, None, Some("Missing sighash parameter".to_string())),
+        };
+        let sighash_bytes: [u8; 32] = match hex::decode(&sighash_hex) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                arr
+            }
+            _ => return (false, None, Some("Invalid sighash format".to_string())),
+        };
+
+        let unsigned_tx_hex = match request.params.get("unsigned_tx").and_then(|v| v.as_str()) {
+            Some(h) => h.to_string(),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing unsigned_tx parameter".to_string()),
+                )
+            }
+        };
+        let proposed_tx: Transaction = match hex::decode(&unsigned_tx_hex)
+            .ok()
+            .and_then(|b| bitcoin::consensus::encode::deserialize(&b).ok())
+        {
+            Some(t) => t,
+            None => return (false, None, Some("Invalid unsigned_tx".to_string())),
+        };
+        if proposed_tx.input.len() != 1 {
+            return (
+                false,
+                None,
+                Some(format!(
+                    "sweep tx must have exactly 1 input, got {}",
+                    proposed_tx.input.len()
+                )),
+            );
+        }
+
+        let confiscation_txid: bitcoin::Txid = match request
+            .params
+            .get("confiscation_txid")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+        {
+            Some(t) => t,
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing or invalid confiscation_txid".to_string()),
+                )
+            }
+        };
+        let share_vout: u32 = match request.params.get("share_vout").and_then(|v| v.as_u64()) {
+            Some(v) if v >= 1 => v as u32,
+            Some(_) => {
+                return (
+                    false,
+                    None,
+                    Some("share_vout 0 is the lottery output, not a share".to_string()),
+                )
+            }
+            None => return (false, None, Some("Missing share_vout".to_string())),
+        };
+        let fee_sats: u64 = match request.params.get("fee_sats").and_then(|v| v.as_u64()) {
+            Some(f) => f,
+            None => return (false, None, Some("Missing fee_sats".to_string())),
+        };
+        let claimed_revealers: Vec<XOnlyPublicKey> = match request
+            .params
+            .get("revealers")
+            .and_then(|v| v.as_array())
+        {
+            Some(arr) => {
+                let mut out = Vec::new();
+                for v in arr {
+                    match v.as_str().and_then(|s| s.parse().ok()) {
+                        Some(pk) => out.push(pk),
+                        None => {
+                            return (
+                                false,
+                                None,
+                                Some("Invalid revealer pubkey in request".to_string()),
+                            )
+                        }
+                    }
+                }
+                out
+            }
+            None => return (false, None, Some("Missing revealers".to_string())),
+        };
+        let fallback_recipient: Option<XOnlyPublicKey> = match request
+            .params
+            .get("fallback_recipient")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => match s.parse() {
+                Ok(pk) => Some(pk),
+                Err(_) => {
+                    return (
+                        false,
+                        None,
+                        Some("Invalid fallback_recipient".to_string()),
+                    )
+                }
+            },
+            None => None,
+        };
+
+        // -- 1. Local dispute-state gate -----------------------------------
+        // Our fork's dispute_state is authoritative when we armed. A
+        // recovery voter who never armed holds no fork; for them the
+        // DisputeArmed set in the relay history (required below anyway)
+        // plus the on-chain share-script match in step 2 carry the
+        // evidence that a punitive confiscation really happened.
+        let fork_disputed = match self.handler.find_our_fork(&request.ledger_id) {
+            Some(key) => {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(&key)
+                    .map(|arc| {
+                        arc.read().unwrap().state.dispute_state
+                            != deposits_core::types::DisputeState::Normal
+                    })
+                    .unwrap_or(false)
+            }
+            None => false,
+        };
+
+        // -- 2. Rebuild recovery state from the ledger history -------------
+        let updates = self
+            .fetch_all_ledger_updates_paginated(&request.ledger_id)
+            .await;
+        if updates.is_empty() {
+            return (
+                false,
+                None,
+                Some("fetch updates: relay returned no events".to_string()),
+            );
+        }
+
+        let mut participants: Vec<(XOnlyPublicKey, [u8; 20])> = Vec::new();
+        let mut quorum_members: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
+        let mut original_operator: Option<bitcoin::secp256k1::PublicKey> = None;
+        let mut saw_dispute_enter = false;
+        for u in &updates {
+            if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
+                match op {
+                    LedgerOperation::LedgerOpen { operator_id, .. } => {
+                        original_operator = Some(operator_id);
+                    }
+                    LedgerOperation::QuorumAddMember { quorum_member, .. } => {
+                        if !quorum_members.contains(&quorum_member) {
+                            quorum_members.push(quorum_member);
+                        }
+                    }
+                    LedgerOperation::DisputeEnter { .. } => {
+                        saw_dispute_enter = true;
+                    }
+                    LedgerOperation::DisputeArmed {
+                        commitment_hash, ..
+                    } => {
+                        let xonly = u.operator_id.x_only_public_key().0;
+                        if !participants.iter().any(|(pk, _)| *pk == xonly) {
+                            participants.push((xonly, commitment_hash));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if !fork_disputed && !saw_dispute_enter {
+            return (
+                false,
+                None,
+                Some("Ledger is not in a disputed state per local records".to_string()),
+            );
+        }
+        if participants.len() < 2 {
+            return (
+                false,
+                None,
+                Some(format!(
+                    "only {} DisputeArmed participants found",
+                    participants.len()
+                )),
+            );
+        }
+        let original_operator = match original_operator {
+            Some(op) => op,
+            None => return (false, None, Some("no LedgerOpen found".to_string())),
+        };
+
+        // Sorted-armer order — must match the confiscation TX's vout
+        // layout (vouts 1..=N in xonly-sorted order).
+        participants.sort_by_key(|(pk, _)| pk.serialize());
+
+        let recovery_voters: Vec<XOnlyPublicKey> = quorum_members
+            .iter()
+            .filter(|pk| **pk != original_operator)
+            .map(|pk| pk.x_only_public_key().0)
+            .collect();
+        let recovery_threshold = (recovery_voters.len() / 2) + 1;
+
+        let armer_index = (share_vout - 1) as usize;
+        let (armer_xonly, commitment_hash) = match participants.get(armer_index) {
+            Some(p) => *p,
+            None => {
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "share_vout {} has no matching armer (only {} armers)",
+                        share_vout,
+                        participants.len()
+                    )),
+                )
+            }
+        };
+
+        let share = match build_armer_share_output(
+            &armer_xonly,
+            &commitment_hash,
+            &recovery_voters,
+            recovery_threshold,
+            self.wallet.network(),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("rebuild armer-share output: {:?}", e)),
+                )
+            }
+        };
+
+        // On-chain confirmation that the confiscation TX really carries
+        // this share at this vout.
+        let confiscation_tx = match self.wallet.get_transaction(confiscation_txid) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                return (
+                    false,
+                    None,
+                    Some("confiscation tx not found on-chain".to_string()),
+                )
+            }
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("confiscation tx lookup: {}", e)),
+                )
+            }
+        };
+        let onchain_out = match confiscation_tx.output.get(share_vout as usize) {
+            Some(o) => o,
+            None => {
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "confiscation tx has no vout {} ({} outputs)",
+                        share_vout,
+                        confiscation_tx.output.len()
+                    )),
+                )
+            }
+        };
+        if onchain_out.script_pubkey != share.script_pubkey() {
+            return (
+                false,
+                None,
+                Some(format!(
+                    "armer-share vout {} script mismatch: on-chain output is not \
+                     the share we derive from local state",
+                    share_vout
+                )),
+            );
+        }
+        let share_value_sats = onchain_out.value.to_sat();
+
+        // -- 3. The armer actually forfeited: unspent + CSV mature ---------
+        let backend = crate::chain_backend::from_env(self.wallet.electrum_url());
+        match backend.is_output_unspent(&confiscation_txid, share_vout) {
+            Ok(Some(true)) => {}
+            Ok(Some(false)) => {
+                return (
+                    false,
+                    None,
+                    Some("share output already spent — nothing to sweep".to_string()),
+                )
+            }
+            Ok(None) => {
+                return (
+                    false,
+                    None,
+                    Some("backend does not know the share outpoint".to_string()),
+                )
+            }
+            Err(e) => return (false, None, Some(format!("share outpoint query: {}", e))),
+        }
+        let confiscation_height = match backend.get_tx_block_height(&confiscation_txid) {
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                return (
+                    false,
+                    None,
+                    Some("confiscation tx not confirmed".to_string()),
+                )
+            }
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("confiscation height lookup: {}", e)),
+                )
+            }
+        };
+        let tip_height = match backend.get_tip_height() {
+            Ok(h) => h,
+            Err(e) => return (false, None, Some(format!("tip height lookup: {}", e))),
+        };
+        let confirmations = tip_height.saturating_sub(confiscation_height) + 1;
+        if confirmations < ARMER_SHARE_SWEEP_CSV_BLOCKS {
+            return (
+                false,
+                None,
+                Some(format!(
+                    "CSV not mature: {}/{} confirmations — the armer hasn't \
+                     forfeited yet",
+                    confirmations, ARMER_SHARE_SWEEP_CSV_BLOCKS
+                )),
+            );
+        }
+
+        // -- 4. Deterministic reconstruction of the sweep TX ---------------
+        let share_outpoint = OutPoint::new(confiscation_txid, share_vout);
+        let expected_tx = match build_forfeit_sweep_tx(
+            share_outpoint,
+            share_value_sats,
+            &claimed_revealers,
+            fee_sats,
+            fallback_recipient.as_ref(),
+            self.wallet.network(),
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("rebuild sweep tx: {:?}", e)),
+                )
+            }
+        };
+        if bitcoin::consensus::encode::serialize(&expected_tx)
+            != bitcoin::consensus::encode::serialize(&proposed_tx)
+        {
+            return (
+                false,
+                None,
+                Some(
+                    "proposed sweep tx differs from the deterministic \
+                     reconstruction — refusing"
+                        .to_string(),
+                ),
+            );
+        }
+
+        // -- 5. Verify the claimed revealers against the claim witness -----
+        // The lottery claim TX (spender of confiscation vout 0) exposes
+        // every revealed preimage in its witness. If our backend can see
+        // it, the revealer set MUST match exactly. If it can't, step 4
+        // already guarantees the structural property — the TX pays ONLY
+        // the claimed revealers, pro-rata — so we sign with a warning.
+        let lottery_outpoint = OutPoint::new(confiscation_txid, 0);
+        let lottery_spk = match confiscation_tx.output.first() {
+            Some(o) => o.script_pubkey.clone(),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("confiscation tx has no outputs".to_string()),
+                )
+            }
+        };
+        match backend.find_spending_tx(&lottery_outpoint, &lottery_spk, confiscation_height) {
+            Ok(Some(claim_tx)) => {
+                let claim_input = claim_tx
+                    .input
+                    .iter()
+                    .find(|inp| inp.previous_output == lottery_outpoint);
+                let observed = match claim_input {
+                    Some(inp) => revealers_from_claim_witness(&inp.witness, &participants),
+                    None => Vec::new(),
+                };
+                let mut claimed_sorted = claimed_revealers.clone();
+                claimed_sorted.sort_by_key(|k| k.serialize());
+                if observed != claimed_sorted {
+                    return (
+                        false,
+                        None,
+                        Some(format!(
+                            "revealer set mismatch: request claims {} revealers, \
+                             lottery claim witness shows {}",
+                            claimed_sorted.len(),
+                            observed.len()
+                        )),
+                    );
+                }
+            }
+            Ok(None) => {
+                if claimed_revealers.is_empty() {
+                    // Zero-revealer fallback sweep: nothing on-chain to
+                    // cross-check the (degenerate) recipient against.
+                    // Step 4 pinned the TX to pay exactly the declared
+                    // fallback; flag it for the operator log.
+                    tracing::warn!(
+                        "forfeit_sweep_sign {}: ZERO revealers — entire slice \
+                         pays the requester-declared fallback {:?}. Signing on \
+                         structural check only.",
+                        ledger_prefix,
+                        fallback_recipient.map(|f| f.to_string())
+                    );
+                } else {
+                    tracing::warn!(
+                        "forfeit_sweep_sign {}: could not locate the lottery \
+                         claim tx to verify the revealer set; signing on the \
+                         structural check (outputs pay only the {} claimed \
+                         revealers, pro-rata).",
+                        ledger_prefix,
+                        claimed_revealers.len()
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "forfeit_sweep_sign {}: claim-tx lookup failed ({}); signing \
+                     on the structural check only.",
+                    ledger_prefix,
+                    e
+                );
+            }
+        }
+
+        // -- 6. Recompute the sweep-leaf sighash ----------------------------
+        let leaf_hash = TapLeafHash::from_script(&share.sweep_script, LeafVersion::TapScript);
+        let prevouts = vec![TxOut {
+            value: Amount::from_sat(share_value_sats),
+            script_pubkey: share.script_pubkey(),
+        }];
+        let mut sighash_cache = SighashCache::new(&proposed_tx);
+        let derived = match sighash_cache.taproot_script_spend_signature_hash(
+            0,
+            &bitcoin::sighash::Prevouts::All(&prevouts),
+            leaf_hash,
+            TapSighashType::Default,
+        ) {
+            Ok(s) => s,
+            Err(e) => return (false, None, Some(format!("compute sighash: {}", e))),
+        };
+        let derived_bytes: [u8; 32] = *derived.as_ref();
+        if derived_bytes != sighash_bytes {
+            return (
+                false,
+                None,
+                Some(format!(
+                    "sighash mismatch: derived={}, claimed={}",
+                    hex::encode(derived_bytes),
+                    hex::encode(sighash_bytes)
+                )),
+            );
+        }
+
+        // -- Sign -----------------------------------------------------------
+        let signature_bytes = match self.handler.signer.bip340_sign(
+            &SignContext::no_ledger(SigPurpose::OnchainSighash),
+            &sighash_bytes,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("forfeit sweep sighash sign: {}", e)),
+                )
+            }
+        };
+
+        let result = serde_json::json!({
+            "signer": self.node_id_hex.clone(),
+            "signature": hex::encode(signature_bytes),
+        });
+
+        tracing::info!(
+            "Signed forfeit-sweep sighash for ledger {} (share vout {})",
+            ledger_prefix,
+            share_vout
+        );
+        (true, Some(result.to_string()), None)
+    }
+
     /// Sign a proposed quorum rotation transaction.
     ///
     /// Rotation TX shape (deterministic, built via

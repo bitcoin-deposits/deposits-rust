@@ -88,6 +88,11 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         eprintln!("  confiscate <ledger_id>                 Build and broadcast confiscation TX to lottery");
         eprintln!("  reveal <ledger_id>                     Reveal lottery preimage via Nostr");
         eprintln!("  lottery-claim <ledger_id>              Claim lottery output if winner");
+        eprintln!("  forfeit-sweep <ledger_id> [--fee-sats <N>] [--dry-run]");
+        eprintln!("                                         Sweep forfeited armer-share outputs (armer never");
+        eprintln!("                                         revealed within the CSV window) pro-rata to the");
+        eprintln!("                                         armers who DID reveal; needs recovery-quorum cosigs");
+        eprintln!("    [--confiscation-txid <txid>]         Override if confiscation_state_<id>.json is absent");
         eprintln!("  refund <ledger_id> [--timeout <secs>] [--dry-run]  Cooperative anchor TX for NeverFunded reserves");
         eprintln!("                                         (pools disputants' replacement-collateral UTXOs");
         eprintln!("                                         into a lottery output; manual last-resort only)");
@@ -139,6 +144,7 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         "confiscate-plan" => recovery_confiscate_plan(&args[1..]).await,
         "reveal" => recovery_reveal(&args[1..]).await,
         "lottery-claim" => recovery_lottery_claim(&args[1..]).await,
+        "forfeit-sweep" => recovery_forfeit_sweep(&args[1..]).await,
         "refund" => recovery_refund(&args[1..]).await,
         "rotate-to-quorum" => recovery_rotate_to_quorum(&args[1..]).await,
         // Legacy commands (for backward compatibility)
@@ -3496,6 +3502,31 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     wallet.broadcast(&confiscation_tx)?;
 
     let confiscation_txid = confiscation_tx.compute_txid();
+
+    // Persist the confiscation txid so `recovery forfeit-sweep` can later
+    // locate the armer-share outputs (vouts 1..=N of this TX) without the
+    // operator hand-carrying the txid. Sibling file to the
+    // `lottery_preimage_<prefix>.hex` convention; JSON so future fields
+    // (serde-defaulted) keep old files loadable.
+    let confiscation_state_path = format!(
+        "{}/confiscation_state_{}.json",
+        config.data_dir.display(),
+        &ledger_id[..16.min(ledger_id.len())]
+    );
+    let confiscation_state = serde_json::json!({
+        "ledger_id": ledger_id,
+        "confiscation_txid": confiscation_txid.to_string(),
+    });
+    if let Err(e) = std::fs::write(&confiscation_state_path, confiscation_state.to_string()) {
+        eprintln!(
+            "  warning: failed to persist confiscation txid to {}: {} \
+             (forfeit-sweep will need --confiscation-txid {})",
+            confiscation_state_path, e, confiscation_txid
+        );
+    } else {
+        println!("  Saved confiscation state: {}", confiscation_state_path);
+    }
+
     println!();
     println!("Confiscation transaction broadcast!");
     println!("  Txid: {}", confiscation_txid);
@@ -3511,6 +3542,692 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         "  3. Winner runs: recovery lottery-claim {}...",
         &ledger_id[..16.min(ledger_id.len())]
     );
+
+    Ok(())
+}
+
+/// Sweep forfeited armer-share outputs after a punitive confiscation.
+///
+/// DEP-06 §"Arm-and-reveal forfeiture": each armer's slashing-share
+/// output (vouts 1..=N of the punitive confiscation TX, in sorted-armer
+/// order) has a reveal-claim leaf (armer spends with their lottery
+/// preimage + signature) and a sweep leaf (recovery quorum spends after
+/// `ARMER_SHARE_SWEEP_CSV_BLOCKS`). An armer who never revealed within
+/// the CSV window forfeits their slice. This command:
+///
+///   1. Locates the confiscation TX (persisted by `recovery confiscate`
+///      into `confiscation_state_<prefix>.json`, or `--confiscation-txid`).
+///   2. Finds the lottery claim TX (spender of vout 0) and extracts the
+///      revealer set from its witness via `revealers_from_claim_witness`.
+///   3. For each armer-share vout that is still unspent with >= CSV
+///      confirmations, builds the deterministic `build_forfeit_sweep_tx`
+///      paying the slice pro-rata to the revealers.
+///   4. Collects `recovery_threshold` Schnorr signatures over the sweep
+///      leaf (local key + `forfeit_sweep_sign` ledger requests over
+///      Nostr), assembles the CHECKSIGADD witness, and broadcasts.
+pub async fn recovery_forfeit_sweep(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::nostr::{NostrTransportBuilder, KIND_LEDGER_RESPONSE, KIND_LEDGER_UPDATE};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use bitcoin::secp256k1::{Keypair, PublicKey, Secp256k1, XOnlyPublicKey};
+    use bitcoin::sighash::{SighashCache, TapSighashType};
+    use bitcoin::taproot::{LeafVersion, TapLeafHash};
+    use bitcoin::{Amount, OutPoint, TxOut};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tapscript_reserves::{
+        build_armer_share_output, build_forfeit_sweep_tx, revealers_from_claim_witness,
+        LotteryParticipant, ARMER_SHARE_SWEEP_CSV_BLOCKS,
+    };
+    use deposits_core::{SignedLedgerUpdate, TlvDecode};
+    use nostr_sdk::prelude::*;
+
+    let mut ledger_id: Option<String> = None;
+    let mut fee_sats: u64 = 500;
+    let mut dry_run = false;
+    let mut confiscation_txid_arg: Option<String> = None;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--fee-sats" if i + 1 < args.len() => {
+                fee_sats = args[i + 1]
+                    .parse()
+                    .map_err(|_| format!("Invalid --fee-sats: {}", args[i + 1]))?;
+                i += 1;
+            }
+            "--dry-run" => {
+                dry_run = true;
+            }
+            "--confiscation-txid" if i + 1 < args.len() => {
+                confiscation_txid_arg = Some(args[i + 1].clone());
+                i += 1;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id.is_none() {
+                    ledger_id = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
+    let config = parse_config(&config_args)?;
+    let relay_url = config
+        .relays
+        .first()
+        .ok_or("No relay configured. Use --relay <url>")?
+        .clone();
+
+    let secp = Secp256k1::new();
+    let secret_key = derive_operator_secret(&config.seed, config.network)?;
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let our_pubkey = keypair.public_key();
+    let our_xonly = our_pubkey.x_only_public_key().0;
+
+    println!(
+        "Forfeit sweep for ledger: {}...",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
+
+    // ------------------------------------------------------------------
+    // 1. Recovery state: armers + commitment hashes + recovery voters,
+    //    rebuilt from the ledger's Nostr history — same source and same
+    //    sort order as `recovery confiscate`, so the share outputs we
+    //    re-derive match the ones the confiscation TX created.
+    // ------------------------------------------------------------------
+    println!("Fetching ledger from Nostr...");
+    let client = get_or_create_client(&relay_url).await?;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [crate::nostr::ledger_tag(ledger_id.as_str())],
+        )
+        .limit(500);
+
+    let events = client
+        .fetch_events(vec![filter], None)
+        .await
+        .map_err(|e| format!("Failed to fetch events: {}", e))?;
+
+    let mut participants: Vec<LotteryParticipant> = Vec::new();
+    let mut quorum_members: Vec<PublicKey> = Vec::new();
+    let mut original_operator: Option<PublicKey> = None;
+
+    for event in events.iter() {
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    match op {
+                        LedgerOperation::LedgerOpen { operator_id, .. } => {
+                            original_operator = Some(operator_id);
+                        }
+                        LedgerOperation::QuorumAddMember { quorum_member, .. } => {
+                            if !quorum_members.contains(&quorum_member) {
+                                quorum_members.push(quorum_member);
+                            }
+                        }
+                        LedgerOperation::DisputeArmed {
+                            commitment_hash,
+                            target_reserves,
+                            ..
+                        } => {
+                            let x_only = update.operator_id.x_only_public_key().0;
+                            if !participants.iter().any(|p| p.pubkey == x_only) {
+                                participants.push(LotteryParticipant::new(
+                                    x_only,
+                                    commitment_hash,
+                                    target_reserves,
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    if participants.len() < 2 {
+        return Err(format!(
+            "Need at least 2 DisputeArmed participants, found {}",
+            participants.len()
+        )
+        .into());
+    }
+    let original_operator = original_operator.ok_or("Could not find original operator")?;
+
+    // Armer order: sorted by xonly pubkey — MUST match the confiscation
+    // output ordering (`recovery confiscate` punitive split sorts the
+    // same way before emitting vouts 1..=N).
+    let mut armers_sorted: Vec<LotteryParticipant> = participants.clone();
+    armers_sorted.sort_by_key(|p| p.pubkey.serialize());
+    let armers_for_match: Vec<(XOnlyPublicKey, [u8; 20])> = armers_sorted
+        .iter()
+        .map(|p| (p.pubkey, p.commitment_hash))
+        .collect();
+
+    // Recovery voters (quorum minus original operator) + majority
+    // threshold — same derivation `recovery confiscate` used when it
+    // built the share outputs' sweep leaves.
+    let recovery_voters: Vec<XOnlyPublicKey> = quorum_members
+        .iter()
+        .filter(|pk| **pk != original_operator)
+        .map(|pk| pk.x_only_public_key().0)
+        .collect();
+    let recovery_threshold = (recovery_voters.len() / 2) + 1;
+    if recovery_voters.len() < recovery_threshold {
+        return Err("Not enough recovery voters for the sweep threshold".into());
+    }
+
+    println!("  Armers: {}", armers_sorted.len());
+    println!(
+        "  Recovery voters: {} (threshold {})",
+        recovery_voters.len(),
+        recovery_threshold
+    );
+
+    let we_are_voter = recovery_voters.contains(&our_xonly);
+    if !we_are_voter {
+        println!(
+            "  NOTE: our key is not in the recovery-voter set; all {} \
+             signatures must come from cosigners",
+            recovery_threshold
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // 2. Confiscation TX: --confiscation-txid, or the state file
+    //    `recovery confiscate` persisted after broadcast.
+    // ------------------------------------------------------------------
+    let confiscation_state_path = format!(
+        "{}/confiscation_state_{}.json",
+        config.data_dir.display(),
+        &ledger_id[..16.min(ledger_id.len())]
+    );
+    let confiscation_txid: bitcoin::Txid = match confiscation_txid_arg {
+        Some(s) => s
+            .trim()
+            .parse()
+            .map_err(|e| format!("Invalid --confiscation-txid: {}", e))?,
+        None => {
+            let raw = std::fs::read_to_string(&confiscation_state_path).map_err(|e| {
+                format!(
+                    "Failed to read {}: {}. Pass --confiscation-txid <txid> \
+                     (the punitive confiscation TX whose vouts 1..=N are the \
+                     armer-share outputs).",
+                    confiscation_state_path, e
+                )
+            })?;
+            let state: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| format!("Failed to parse {}: {}", confiscation_state_path, e))?;
+            state
+                .get("confiscation_txid")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    format!("{} missing confiscation_txid", confiscation_state_path)
+                })?
+                .parse()
+                .map_err(|e| format!("Invalid confiscation_txid in state file: {}", e))?
+        }
+    };
+    println!("  Confiscation txid: {}", confiscation_txid);
+
+    let backend = crate::chain_backend::from_env(&config.electrum_url);
+    let confiscation_tx = backend
+        .get_tx(&confiscation_txid)
+        .map_err(|e| format!("Failed to fetch confiscation tx: {}", e))?
+        .ok_or("Confiscation tx not found on-chain")?;
+    let confiscation_height = backend
+        .get_tx_block_height(&confiscation_txid)
+        .map_err(|e| format!("Failed to fetch confiscation tx height: {}", e))?
+        .ok_or("Confiscation tx not confirmed yet — nothing is sweepable")?;
+    let tip_height = backend
+        .get_tip_height()
+        .map_err(|e| format!("Failed to fetch chain tip: {}", e))?;
+    let confirmations = tip_height.saturating_sub(confiscation_height) + 1;
+    println!(
+        "  Confirmed at height {} ({} confirmations, CSV requires {})",
+        confiscation_height, confirmations, ARMER_SHARE_SWEEP_CSV_BLOCKS
+    );
+
+    // Shape check: vout 0 = lottery, vouts 1..=N = armer shares. A
+    // respectful confiscation (2 outputs, operator change) has no share
+    // outputs and nothing to sweep.
+    if confiscation_tx.output.len() != armers_sorted.len() + 1 {
+        return Err(format!(
+            "Confiscation tx has {} outputs, expected {} (1 lottery + {} armer \
+             shares). Was this a punitive confiscation?",
+            confiscation_tx.output.len(),
+            armers_sorted.len() + 1,
+            armers_sorted.len()
+        )
+        .into());
+    }
+
+    // ------------------------------------------------------------------
+    // 3. Revealer discovery: find the lottery claim TX (spender of
+    //    vout 0) and extract the revealed preimages from its witness.
+    // ------------------------------------------------------------------
+    let lottery_outpoint = OutPoint::new(confiscation_txid, 0);
+    let lottery_spk = confiscation_tx.output[0].script_pubkey.clone();
+
+    let lottery_unspent = backend
+        .is_output_unspent(&confiscation_txid, 0)
+        .map_err(|e| format!("Failed to query lottery output: {}", e))?;
+
+    let revealers: Vec<XOnlyPublicKey> = if lottery_unspent == Some(true) {
+        println!("  Lottery output is UNSPENT — no claim TX, no revealers.");
+        Vec::new()
+    } else {
+        match backend
+            .find_spending_tx(&lottery_outpoint, &lottery_spk, confiscation_height)
+            .map_err(|e| format!("Failed to locate lottery claim tx: {}", e))?
+        {
+            Some(claim_tx) => {
+                let claim_input = claim_tx
+                    .input
+                    .iter()
+                    .find(|inp| inp.previous_output == lottery_outpoint)
+                    .ok_or("Claim tx does not spend the lottery outpoint (backend bug?)")?;
+                let r = revealers_from_claim_witness(&claim_input.witness, &armers_for_match);
+                println!(
+                    "  Lottery claim tx: {} — {} of {} armers revealed",
+                    claim_tx.compute_txid(),
+                    r.len(),
+                    armers_sorted.len()
+                );
+                r
+            }
+            None => {
+                println!(
+                    "  Lottery output spent but claim tx not found by the chain \
+                     backend — treating as zero revealers."
+                );
+                Vec::new()
+            }
+        }
+    };
+
+    // Zero revealers is degenerate-but-defined: the slice has no honest
+    // pro-rata recipient, so `build_forfeit_sweep_tx` pays its fallback.
+    // We use OUR operator xonly key and say so loudly — cosigners will
+    // see the fallback in the request and apply their own judgment.
+    let fallback: Option<XOnlyPublicKey> = if revealers.is_empty() {
+        eprintln!();
+        eprintln!(
+            "WARNING: ZERO revealers found. The sweep normally pays the armers \
+             who revealed their lottery preimage; with none, the entire slice \
+             (minus fee) goes to the FALLBACK RECIPIENT — this node's operator \
+             key ({}). Cosigners are told this explicitly in the sign request.",
+            our_xonly
+        );
+        eprintln!();
+        Some(our_xonly)
+    } else {
+        for r in &revealers {
+            println!("    revealer: {}", r);
+        }
+        None
+    };
+
+    // ------------------------------------------------------------------
+    // 4. Per-share scan: rebuild each armer's share output, verify it
+    //    matches the on-chain script, and classify sweepability.
+    // ------------------------------------------------------------------
+    struct SweepableShare {
+        vout: u32,
+        armer_xonly: XOnlyPublicKey,
+        value_sats: u64,
+        share: deposits_core::tapscript_reserves::ArmerShareOutput,
+    }
+    let mut sweepable: Vec<SweepableShare> = Vec::new();
+
+    println!();
+    println!("Scanning {} armer-share outputs:", armers_sorted.len());
+    for (idx, armer) in armers_sorted.iter().enumerate() {
+        let vout = (idx + 1) as u32;
+        let share = build_armer_share_output(
+            &armer.pubkey,
+            &armer.commitment_hash,
+            &recovery_voters,
+            recovery_threshold,
+            config.network,
+        )
+        .map_err(|e| format!("Failed to rebuild armer-share output: {:?}", e))?;
+
+        let onchain_out = &confiscation_tx.output[vout as usize];
+        if onchain_out.script_pubkey != share.script_pubkey() {
+            return Err(format!(
+                "Armer-share vout {} script mismatch: on-chain {} != rebuilt {}. \
+                 Local recovery state (armers/commitments/voters) diverges from \
+                 what the confiscation TX was built with — refusing to continue.",
+                vout,
+                hex::encode(onchain_out.script_pubkey.as_bytes()),
+                hex::encode(share.script_pubkey().as_bytes())
+            )
+            .into());
+        }
+
+        let armer_prefix = &armer.pubkey.to_string()[..16];
+        let unspent = backend
+            .is_output_unspent(&confiscation_txid, vout)
+            .map_err(|e| format!("Failed to query share vout {}: {}", vout, e))?;
+        match unspent {
+            Some(true) => {
+                if confirmations >= ARMER_SHARE_SWEEP_CSV_BLOCKS {
+                    println!(
+                        "  vout {}: armer {}... FORFEITED ({} sats) — sweepable",
+                        vout,
+                        armer_prefix,
+                        onchain_out.value.to_sat()
+                    );
+                    sweepable.push(SweepableShare {
+                        vout,
+                        armer_xonly: armer.pubkey,
+                        value_sats: onchain_out.value.to_sat(),
+                        share,
+                    });
+                } else {
+                    println!(
+                        "  vout {}: armer {}... unspent but CSV not mature \
+                         ({}/{} confirmations) — skipping",
+                        vout, armer_prefix, confirmations, ARMER_SHARE_SWEEP_CSV_BLOCKS
+                    );
+                }
+            }
+            Some(false) => {
+                println!(
+                    "  vout {}: armer {}... already spent (revealed & claimed, or \
+                     previously swept) — skipping",
+                    vout, armer_prefix
+                );
+            }
+            None => {
+                println!(
+                    "  vout {}: armer {}... backend doesn't know this outpoint — skipping",
+                    vout, armer_prefix
+                );
+            }
+        }
+    }
+
+    if sweepable.is_empty() {
+        println!();
+        println!("Nothing to sweep.");
+        return Ok(());
+    }
+
+    // ------------------------------------------------------------------
+    // 5. Per-share: build the deterministic sweep TX, compute the sweep-
+    //    leaf sighash, collect signatures, assemble witness, broadcast.
+    // ------------------------------------------------------------------
+    let publish_transport = NostrTransportBuilder::new(secret_key)
+        .relay(&relay_url)
+        .build()
+        .await?;
+
+    // Sorted recovery keys — the sweep leaf's CHECKSIG/CHECKSIGADD order.
+    let mut sorted_voters = recovery_voters.clone();
+    sorted_voters.sort_by_key(|k| k.serialize());
+
+    let mut broadcast_txids: Vec<bitcoin::Txid> = Vec::new();
+
+    for entry in &sweepable {
+        let share_outpoint = OutPoint::new(confiscation_txid, entry.vout);
+        println!();
+        println!(
+            "Sweeping vout {} (armer {}..., {} sats, fee {}):",
+            entry.vout,
+            &entry.armer_xonly.to_string()[..16],
+            entry.value_sats,
+            fee_sats
+        );
+
+        let mut sweep_tx = build_forfeit_sweep_tx(
+            share_outpoint,
+            entry.value_sats,
+            &revealers,
+            fee_sats,
+            fallback.as_ref(),
+            config.network,
+        )
+        .map_err(|e| format!("Failed to build sweep tx: {:?}", e))?;
+
+        // Sighash: taproot script-spend over the sweep leaf. The input's
+        // nSequence is already ARMER_SHARE_SWEEP_CSV_BLOCKS (set inside
+        // build_forfeit_sweep_tx) so the leaf's OP_CSV passes.
+        let leaf_hash =
+            TapLeafHash::from_script(&entry.share.sweep_script, LeafVersion::TapScript);
+        let prevouts = vec![TxOut {
+            value: Amount::from_sat(entry.value_sats),
+            script_pubkey: entry.share.script_pubkey(),
+        }];
+        let mut sighash_cache = SighashCache::new(&sweep_tx);
+        let sighash = sighash_cache
+            .taproot_script_spend_signature_hash(
+                0,
+                &bitcoin::sighash::Prevouts::All(&prevouts),
+                leaf_hash,
+                TapSighashType::Default,
+            )
+            .map_err(|e| format!("Failed to compute sweep sighash: {}", e))?;
+        let sighash_bytes: [u8; 32] = *sighash.as_ref();
+
+        let unsigned_tx_hex =
+            hex::encode(bitcoin::consensus::encode::serialize(&sweep_tx));
+
+        if dry_run {
+            println!("  [dry-run] unsigned tx: {}", unsigned_tx_hex);
+            println!("  [dry-run] sighash:     {}", hex::encode(sighash_bytes));
+            println!(
+                "  [dry-run] recipients:  {}",
+                if revealers.is_empty() {
+                    format!("fallback {}", our_xonly)
+                } else {
+                    format!("{} revealers pro-rata", revealers.len())
+                }
+            );
+            continue;
+        }
+
+        // Sign locally (only useful if we're in the recovery-voter set).
+        let msg = bitcoin::secp256k1::Message::from_digest(sighash_bytes);
+        let mut signatures: std::collections::HashMap<XOnlyPublicKey, [u8; 64]> =
+            std::collections::HashMap::new();
+        if we_are_voter {
+            let our_signature = secp.sign_schnorr(&msg, &keypair);
+            signatures.insert(our_xonly, our_signature.serialize());
+            println!("  Signed with our key");
+        }
+
+        // Collect cosignatures over Nostr — same request/poll shape as
+        // `recovery confiscate`'s confiscation_sign round.
+        if signatures.len() < recovery_threshold {
+            println!(
+                "  Requesting forfeit_sweep_sign cosignatures ({}/{} so far)...",
+                signatures.len(),
+                recovery_threshold
+            );
+
+            let request_params = serde_json::json!({
+                "ledger_id": ledger_id,
+                "confiscation_txid": confiscation_txid.to_string(),
+                "share_vout": entry.vout,
+                "sighash": hex::encode(sighash_bytes),
+                "unsigned_tx": unsigned_tx_hex,
+                "revealers": revealers.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+                "fee_sats": fee_sats,
+                "fallback_recipient": fallback.map(|f| f.to_string()),
+            });
+
+            let request_id = publish_transport
+                .send_ledger_request(&ledger_id, "forfeit_sweep_sign", request_params)
+                .await
+                .map_err(|e| format!("Failed to send sign request: {:?}", e))?;
+
+            println!("  Request ID: {}...", &request_id[..16]);
+
+            let max_attempts = 20;
+            let poll_interval = std::time::Duration::from_secs(3);
+
+            for attempt in 1..=max_attempts {
+                tokio::time::sleep(poll_interval).await;
+
+                let since = nostr_sdk::Timestamp::now() - 120;
+                let filter = Filter::new()
+                    .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
+                    .since(since);
+
+                let response_events = publish_transport
+                    .client()
+                    .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+                    .await
+                    .map_err(|e| format!("Failed to fetch responses: {:?}", e))?;
+
+                for event in response_events.iter() {
+                    let mut is_our_request = false;
+                    for tag in event.tags.iter() {
+                        if tag.kind() == TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF) {
+                            if let Some(val) = tag.content() {
+                                if val == request_id {
+                                    is_our_request = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if !is_our_request {
+                        continue;
+                    }
+
+                    if let Ok(response) =
+                        serde_json::from_str::<crate::nostr::LedgerResponse>(&event.content)
+                    {
+                        if response.success {
+                            if let Some(result) = &response.result {
+                                if let (Some(signer_hex), Some(sig_hex)) = (
+                                    result.get("signer").and_then(|v| v.as_str()),
+                                    result.get("signature").and_then(|v| v.as_str()),
+                                ) {
+                                    if let (Ok(signer), Ok(sig_bytes)) =
+                                        (signer_hex.parse::<PublicKey>(), hex::decode(sig_hex))
+                                    {
+                                        let signer_xonly = signer.x_only_public_key().0;
+                                        if sig_bytes.len() == 64
+                                            && recovery_voters.contains(&signer_xonly)
+                                            && !signatures.contains_key(&signer_xonly)
+                                        {
+                                            let mut sig_arr = [0u8; 64];
+                                            sig_arr.copy_from_slice(&sig_bytes);
+                                            // Verify before counting — a bad
+                                            // cosignature discovered at
+                                            // broadcast time wastes the round.
+                                            let parsed = bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_arr)
+                                                .ok()
+                                                .filter(|s| {
+                                                    secp.verify_schnorr(s, &msg, &signer_xonly).is_ok()
+                                                });
+                                            if parsed.is_some() {
+                                                signatures.insert(signer_xonly, sig_arr);
+                                                println!(
+                                                    "    Received signature from {}...",
+                                                    &signer_hex[..16]
+                                                );
+                                            } else {
+                                                println!(
+                                                    "    Ignoring INVALID signature from {}...",
+                                                    &signer_hex[..16]
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                println!(
+                    "    Poll {}/{}: {}/{} signatures",
+                    attempt,
+                    max_attempts,
+                    signatures.len(),
+                    recovery_threshold
+                );
+
+                if signatures.len() >= recovery_threshold {
+                    break;
+                }
+            }
+        }
+
+        if signatures.len() < recovery_threshold {
+            return Err(format!(
+                "Could not collect enough signatures for vout {} ({}/{}). \
+                 Forfeit sweep failed.",
+                entry.vout,
+                signatures.len(),
+                recovery_threshold
+            )
+            .into());
+        }
+
+        // Assemble the CHECKSIGADD threshold witness. Signatures are
+        // pushed in REVERSE sorted-key order (witness[0] = bottom of
+        // stack = signature for the LAST key in the script), with empty
+        // pushes for non-signing keys — same shape as the confiscation
+        // and lottery recovery long-tail spends.
+        let mut witness = bitcoin::Witness::new();
+        for key in sorted_voters.iter().rev() {
+            if let Some(sig) = signatures.get(key) {
+                witness.push(sig);
+            } else {
+                witness.push(&[] as &[u8]);
+            }
+        }
+        witness.push(entry.share.sweep_script.as_bytes());
+        let control_block = entry
+            .share
+            .sweep_control_block()
+            .ok_or("Failed to get sweep-leaf control block")?;
+        witness.push(control_block.serialize());
+
+        sweep_tx.input[0].witness = witness;
+
+        println!("  Broadcasting sweep transaction...");
+        let txid = backend
+            .broadcast_tx(&sweep_tx)
+            .map_err(|e| format!("Failed to broadcast sweep tx: {}", e))?;
+        println!("  Sweep broadcast! Txid: {}", txid);
+        broadcast_txids.push(txid);
+    }
+
+    println!();
+    if dry_run {
+        println!(
+            "[dry-run] {} share(s) sweepable; no transactions signed or broadcast.",
+            sweepable.len()
+        );
+    } else {
+        println!(
+            "Forfeit sweep complete: {} transaction(s) broadcast.",
+            broadcast_txids.len()
+        );
+        for txid in &broadcast_txids {
+            println!("  {}", txid);
+        }
+    }
 
     Ok(())
 }

@@ -146,6 +146,31 @@ impl ChainBackend for EsploraBackend {
         Ok(None)
     }
 
+    fn find_spending_tx(
+        &self,
+        outpoint: &OutPoint,
+        _script: &Script,
+        _scan_from_height: u32,
+    ) -> Result<Option<Transaction>, Error> {
+        // Esplora exposes the spender directly via
+        // /tx/{txid}/outspend/{vout} — OutputStatus carries the spending
+        // txid (mempool or confirmed). No script or height hint needed.
+        match self
+            .client()
+            .get_output_status(&outpoint.txid, outpoint.vout as u64)
+        {
+            Ok(Some(status)) if status.spent => match status.txid {
+                Some(spender) => self.get_tx(&spender),
+                None => Ok(None),
+            },
+            Ok(_) => Ok(None),
+            Err(e) => Err(Error::Wallet(format!(
+                "esplora get_output_status({}:{}): {}",
+                outpoint.txid, outpoint.vout, e
+            ))),
+        }
+    }
+
     fn broadcast_tx(&self, tx: &Transaction) -> Result<Txid, Error> {
         self.client()
             .broadcast(tx)

@@ -3035,6 +3035,110 @@ mod tests {
             _ => panic!("expected InsufficientBondRatio, got {:?}", err),
         }
     }
+
+    #[test]
+    fn test_forfeit_sweep_tx_satisfies_csv_and_pays_revealers_pro_rata() {
+        // The armer-share sweep leaf opens with
+        // `<ARMER_SHARE_SWEEP_CSV_BLOCKS> OP_CSV`, so the sweep TX's
+        // input MUST carry nSequence = that height (block-height
+        // relative locktime, BIP-68) and nVersion = 2, or the script
+        // fails at OP_CSV. This pins both — a regression here makes
+        // every forfeit sweep unbroadcastable.
+        let outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_raw_hash(
+                <bitcoin::hashes::sha256d::Hash as bitcoin::hashes::Hash>::from_byte_array(
+                    [0x11; 32],
+                ),
+            ),
+            vout: 1,
+        };
+        let revealers = vec![
+            generate_x_only_pubkey(21),
+            generate_x_only_pubkey(22),
+            generate_x_only_pubkey(23),
+        ];
+        let tx = build_forfeit_sweep_tx(
+            outpoint,
+            30_000,
+            &revealers,
+            500,
+            None,
+            Network::Regtest,
+        )
+        .expect("sweep tx builds");
+
+        assert_eq!(tx.version, bitcoin::transaction::Version::TWO);
+        assert_eq!(tx.input.len(), 1);
+        assert_eq!(
+            tx.input[0].sequence,
+            bitcoin::Sequence::from_height(ARMER_SHARE_SWEEP_CSV_BLOCKS as u16),
+            "input nSequence must equal the sweep leaf's CSV height"
+        );
+        assert!(
+            tx.input[0].sequence.is_relative_lock_time(),
+            "sequence must enable BIP-68 relative locktime"
+        );
+
+        // Pro-rata: (30_000 - 500) / 3 each, residue → fee.
+        assert_eq!(tx.output.len(), 3);
+        for out in &tx.output {
+            assert_eq!(out.value.to_sat(), 29_500 / 3);
+        }
+
+        // Determinism: same inputs with revealers passed in a different
+        // order produce byte-identical TXs (outputs sorted by xonly key).
+        let mut shuffled = revealers.clone();
+        shuffled.reverse();
+        let tx2 = build_forfeit_sweep_tx(
+            outpoint,
+            30_000,
+            &shuffled,
+            500,
+            None,
+            Network::Regtest,
+        )
+        .expect("sweep tx builds");
+        assert_eq!(
+            bitcoin::consensus::encode::serialize(&tx),
+            bitcoin::consensus::encode::serialize(&tx2),
+            "sweep tx must be order-independent in its revealer input"
+        );
+    }
+
+    #[test]
+    fn test_forfeit_sweep_tx_zero_revealers_requires_fallback() {
+        let outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_raw_hash(
+                <bitcoin::hashes::sha256d::Hash as bitcoin::hashes::Hash>::from_byte_array(
+                    [0x22; 32],
+                ),
+            ),
+            vout: 2,
+        };
+        // No revealers, no fallback → refuse.
+        assert!(
+            build_forfeit_sweep_tx(outpoint, 30_000, &[], 500, None, Network::Regtest)
+                .is_err()
+        );
+        // No revealers + fallback → single output of slice - fee to the
+        // fallback's key-path P2TR, CSV sequence still set.
+        let fallback = generate_x_only_pubkey(31);
+        let tx = build_forfeit_sweep_tx(
+            outpoint,
+            30_000,
+            &[],
+            500,
+            Some(&fallback),
+            Network::Regtest,
+        )
+        .expect("fallback sweep builds");
+        assert_eq!(tx.output.len(), 1);
+        assert_eq!(tx.output[0].value.to_sat(), 29_500);
+        assert_eq!(
+            tx.input[0].sequence,
+            bitcoin::Sequence::from_height(ARMER_SHARE_SWEEP_CSV_BLOCKS as u16)
+        );
+    }
 }
 
 /// Frozen-builder enforcement: a snapshot test against a canonical input

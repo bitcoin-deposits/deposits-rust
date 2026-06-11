@@ -417,6 +417,51 @@ impl ChainBackend for BitcoindRpcBackend {
         }))
     }
 
+    fn find_spending_tx(
+        &self,
+        outpoint: &bitcoin::OutPoint,
+        _script: &bitcoin::Script,
+        scan_from_height: u32,
+    ) -> Result<Option<bitcoin::Transaction>, Error> {
+        // bitcoind has no spent-output index, so walk raw blocks from
+        // `scan_from_height` (the funding TX's confirmation height, per
+        // the trait contract) up to the tip and scan every tx's inputs.
+        // getblock verbosity=0 returns consensus-serialized hex, which
+        // avoids depending on the verbose JSON's field shapes.
+        //
+        // Mempool-only spends are NOT found (we don't trawl getrawmempool
+        // — unbounded on mainnet). For the forfeit-sweep caller this is
+        // fine: the claim TX it hunts for is necessarily older than the
+        // CSV delay, hence confirmed.
+        const MAX_SCAN_BLOCKS: u32 = 4320; // ~30 days; unbounded walks are operator error
+        let tip = self.get_tip_height()?;
+        let start = scan_from_height.min(tip);
+        if tip - start > MAX_SCAN_BLOCKS {
+            return Err(Error::Wallet(format!(
+                "bitcoind find_spending_tx: scan range {}..={} exceeds {} blocks; \
+                 pass a tighter scan_from_height or use an esplora/electrum backend",
+                start, tip, MAX_SCAN_BLOCKS
+            )));
+        }
+        for height in start..=tip {
+            let hash = self.get_block_hash(height)?;
+            let block_hex: String =
+                self.call("getblock", serde_json::json!([hash.to_string(), 0]))?;
+            let block_bytes = hex::decode(&block_hex)
+                .map_err(|e| Error::Wallet(format!("bitcoind block hex: {}", e)))?;
+            let block: bitcoin::Block = bitcoin::consensus::deserialize(&block_bytes)
+                .map_err(|e| {
+                    Error::Wallet(format!("bitcoind block consensus decode: {}", e))
+                })?;
+            for tx in block.txdata {
+                if tx.input.iter().any(|i| i.previous_output == *outpoint) {
+                    return Ok(Some(tx));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     fn broadcast_tx(&self, tx: &bitcoin::Transaction) -> Result<bitcoin::Txid, Error> {
         use bitcoin::consensus::serialize;
         let hex_str = hex::encode(serialize(tx));

@@ -217,6 +217,12 @@ struct ScripthashUnspent {
     // height: u32 — emitted by electrum but we don't currently surface it.
 }
 
+#[derive(Deserialize)]
+struct ScripthashHistoryItem {
+    tx_hash: String,
+    // height: i64 — 0/-1 for mempool entries; not currently surfaced.
+}
+
 // -- ChainBackend impl -----------------------------------------------------
 
 impl ChainBackend for ElectrumBackend {
@@ -393,6 +399,41 @@ impl ChainBackend for ElectrumBackend {
             outpoint: bitcoin::OutPoint::new(txid, first.tx_pos),
             value_sats: first.value,
         }))
+    }
+
+    fn find_spending_tx(
+        &self,
+        outpoint: &bitcoin::OutPoint,
+        script: &bitcoin::Script,
+        _scan_from_height: u32,
+    ) -> Result<Option<bitcoin::Transaction>, Error> {
+        // Electrum keys everything by scripthash. The spender of an
+        // outpoint necessarily appears in the script's history (it
+        // touches the script by consuming the output), so walk the
+        // history and find the tx whose inputs include the outpoint.
+        let sh = scripthash_hex(script);
+        let history: Vec<ScripthashHistoryItem> = self.call(
+            "blockchain.scripthash.get_history",
+            serde_json::json!([sh]),
+        )?;
+        let funding_txid_hex = outpoint.txid.to_string();
+        for item in history {
+            // Skip the funding tx itself — it pays TO the script, it
+            // doesn't spend from it.
+            if item.tx_hash == funding_txid_hex {
+                continue;
+            }
+            let txid: bitcoin::Txid = item
+                .tx_hash
+                .parse()
+                .map_err(|e| Error::Wallet(format!("electrum tx_hash parse: {}", e)))?;
+            if let Some(tx) = self.get_tx(&txid)? {
+                if tx.input.iter().any(|i| i.previous_output == *outpoint) {
+                    return Ok(Some(tx));
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn broadcast_tx(&self, tx: &bitcoin::Transaction) -> Result<bitcoin::Txid, Error> {

@@ -94,6 +94,28 @@ pub trait ChainBackend: Send + Sync {
         script: &Script,
     ) -> Result<Option<UnspentOutput>, Error>;
 
+    /// Find the transaction that SPENDS `outpoint`, if the backend can
+    /// see one. Used by the forfeit-sweep flow to locate the lottery
+    /// claim TX (the spender of the confiscation TX's vout 0) so the
+    /// revealer set can be extracted from its witness.
+    ///
+    /// `script` is the outpoint's scriptPubKey — electrum can only key
+    /// lookups by scripthash, so it's required there and ignored by
+    /// esplora. `scan_from_height` is a lower bound on the spender's
+    /// block height — bitcoind (which has no spent-output index without
+    /// `txindex` add-ons) walks raw blocks from there to the tip, so
+    /// callers should pass the funding TX's confirmation height to keep
+    /// the walk bounded.
+    ///
+    /// `Ok(None)` — the outpoint is unspent, unknown, or the spend isn't
+    /// visible to this backend (e.g. mempool-only spend on bitcoind).
+    fn find_spending_tx(
+        &self,
+        outpoint: &OutPoint,
+        script: &Script,
+        scan_from_height: u32,
+    ) -> Result<Option<Transaction>, Error>;
+
     /// Broadcast a signed transaction. Returns the txid on success.
     /// Backends propagate to mempool; whether the broadcast actually
     /// reaches the rest of the network depends on the backend's peer
