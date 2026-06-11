@@ -168,6 +168,12 @@ The sweep leaf permits the recovery quorum to spend the slice; the leaf does NOT
 
 A *revealer* is an armer whose preimage appears in the lottery output's claim TX witness OR in a published `CustodyLotteryReveal` event before the sweep TX is constructed. Equivalently: an armer who satisfied either the primary lottery leaf, a partial-reveal leaf, or signed a Kind 9106 reveal that the sweepers can verify against the on-chain `commitment_hash`. The set of revealers is derivable from public evidence (chain + relay) at sweep time; sweepers are expected to compute it deterministically and agree on the resulting recipient list before cosigning the sweep TX.
 
+##### Sweep orchestration
+
+The reference flow is `deposits-node recovery forfeit-sweep <ledger_id>`: the initiating recovery-quorum member rebuilds the armer set and recovery voters from the ledger's public history, locates the lottery claim TX on-chain, extracts the revealer set from its witness, identifies the share outputs that are both unspent and past `ARMER_SHARE_SWEEP_CSV_BLOCKS`, constructs the deterministic sweep TX per forfeited share, signs, and collects the remaining threshold cosignatures via a `forfeit_sweep_sign` peer request (DEP-04 §"Request Actions").
+
+The cosigner's defense is determinism: before signing, each cosigner independently recomputes the expected sweep TX byte-for-byte from the request's claimed revealer set and fee, rebuilds the share output from its own local view of the armers, and recomputes the sighash. A sweep request that pays anyone other than the revealers — or mis-states the revealer set — cannot reproduce the bytes and is refused. Where the cosigner has independently observed the claim TX, it also cross-checks the claimed revealers against that witness directly.
+
 Math for a single sweep:
 ```
 slice_value = <per-armer share from the confiscation TX>

@@ -98,6 +98,8 @@ Wallets send ephemeral Kind 20101 events to operator relays. The content is JSON
 | partner_add | Add quorum member | DEP-05 |
 | partner_join | Record quorum join | DEP-05 |
 | request_route | Request cross-ledger route from courier | DEP-13 |
+| confiscation_sign | Request co-signature on a confiscation TX (dispute) | DEP-06 |
+| forfeit_sweep_sign | Request co-signature on a forfeit-sweep TX (arm-and-reveal forfeiture) | DEP-06 |
 
 ### Response Format
 

@@ -31,6 +31,8 @@ The recipient (or anyone who can satisfy the completion_script) provides a `Tran
 - **transfer_id**: matches the lock
 - **script_witness**: satisfies the `completion_script` from the lock
 
+**Enforcement.** Verifiers (cosigners and replayers) evaluate `script_witness` against the lock's `completion_script` through the dep-16 evaluator: the witness stack's entries are bound to the descriptor's obligations by content — 64-byte entries tried as ECDSA signatures over the dep-17 operation preimage, any-length entries tried as hash preimages (re-hashed against each `hashlock` target), 32-byte entries tried as scalars (curve-checked against each `pointlock` target). A `TransferComplete` whose witness fails evaluation is non-conforming; cosigners refuse it and replayers flag it. This is a hard validity rule — a release with a wrong preimage or scalar cannot commit.
+
 On success: `amount` is credited to the destination deposit, `fee` is credited to the operator, and the transfer is removed from pending.
 
 ### Phase 2b: Fail (disc 72)

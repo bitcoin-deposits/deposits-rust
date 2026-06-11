@@ -233,7 +233,9 @@ a corpus of canonical-byte test vectors lives under `third_party/rust-miniscript
 
 the replay harness (`tests/calculus_conformance.rs::replay_all_vectors`) decodes each vector, runs `evaluate()` under `EcdsaVerifier`, and asserts the verdict matches. an independent implementation in any language can consume the same json files and confirm bit-for-bit agreement — this is the substrate that closes the "no second implementation" verification gap.
 
-the starter corpus covers `pk` (valid + wrong-signer), `hashlock` satisfied, and `pointlock` satisfied. extending the corpus is purely additive: new scenarios are added to the generator (`tests/calculus_conformance.rs::generate_vectors`, gated `#[ignore]`), the generator is re-run to refresh the on-disk json, and the replay test picks them up automatically.
+the corpus currently holds sixteen vectors: `pk` valid + wrong-signer; `pk_h` satisfied; `pk_any` one-of-two; `pk_threshold` met + unmet; `hashlock` satisfied + wrong-preimage (the evaluator re-hashes the witness entry rather than trusting the map key); `pointlock` satisfied + wrong-scalar (the verifier recomputes `G·s`); `attest` presence-satisfied — with the explicit caveat that this pins the *deferred* semantics (attestation-content-vs-schema verification is not yet implemented; the vector will change when it lands); `older` satisfied + unsatisfied; `after` satisfied; operation-type routing via `match(operation_type)`; and a wire-form vector built by parsing the literal `sha256(<bare hex>)` string every `TransferLock.completion_script` carries — pinning the miniscript hashlock-fragment elision and bare-hex digest acceptance for external implementations that consume wire scripts directly.
+
+extending the corpus is purely additive: new scenarios are added to the generator (`tests/calculus_conformance.rs::generate_vectors`, gated `#[ignore]`), the generator is re-run to refresh the on-disk json, and the replay test picks them up automatically.
 
 ## summary
 
