@@ -184,56 +184,175 @@ fn extract_witness(op: &LedgerOperation) -> Option<&DescriptorWitness> {
 }
 
 /// Convert a positional byte-stack witness (the legacy `DescriptorWitness` shape) into
-/// the dep-16 keyed `Witness`. Walks the descriptor's body for every `pk(K)` obligation;
-/// for each (stack signature, descriptor key) pair, tries ECDSA verification against the
-/// operation preimage; on match, binds the signature to the key in the dep-16 witness.
+/// the dep-16 keyed `Witness`. Three parallel walks over the descriptor's body collect
+/// the obligation targets, then each stack entry is tried against each unbound target:
 ///
-/// A signature that matches multiple keys (theoretically impossible with secp256k1
-/// uniqueness, but defensively) is bound to whichever key the descriptor walk encountered
-/// first — the dep-16 evaluator only cares whether each obligation's key has *some*
-/// satisfying entry, so duplicate bindings don't change the verdict.
+/// - **Signatures** (`pk` / `pk_any` / `pk_threshold`): 64-byte entries, bound to a key
+///   when ECDSA verification against the operation preimage succeeds.
+/// - **Preimages** (`hashlock(H)`): any-length entries, bound to `H` when hashing the
+///   entry with `H`'s hash function reproduces `H`. This is what makes HTLC
+///   `TransferComplete` (courier hops, the Lightning bridge) actually *evaluate* —
+///   before this walk existed, every hashlock obligation was unsatisfiable through
+///   the byte-stack path and lock completion went cryptographically unenforced.
+/// - **Scalars** (`pointlock(P)`): 32-byte entries, bound to `P` when the verifier
+///   confirms `G·s == P` (the PTLC analog; same enforcement story).
+///
+/// An entry that matches multiple targets (theoretically impossible for signatures,
+/// merely improbable for hashes) is bound to whichever target the walk met first —
+/// the evaluator only needs *some* satisfying entry per obligation, so duplicate
+/// bindings can't change a verdict.
 fn stack_to_keyed(
     verifier: &EcdsaVerifier,
     descriptor: &miniscript::calculus::Descriptor<PublicKey>,
     stack: &[Vec<u8>],
     preimage: &[u8],
 ) -> Dep16Witness<PublicKey> {
+    use miniscript::calculus::HashValue;
+
     let mut witness = Dep16Witness::empty();
     let body = match descriptor.body() {
         Some(b) => b,
         None => return witness, // tr(K) with no body
     };
     let keys = collect_pk_keys(body);
-    for stack_bytes in stack {
-        if stack_bytes.len() != 64 {
-            // dep-16 ECDSA verifier expects 64-byte compact signatures. Anything else
-            // (Bitcoin Script witness elements that aren't sigs, ridiculous lengths)
-            // is skipped — the witness simply lacks a matching entry for whichever
-            // key needed this sig.
-            continue;
+    let hash_targets = collect_hashlock_targets(body);
+    let point_targets = collect_pointlock_targets(body);
+
+    /// Hash `bytes` with the function `target` is tagged with and compare.
+    fn preimage_matches(target: &HashValue, bytes: &[u8]) -> bool {
+        use bitcoin::hashes::{hash160, ripemd160, sha256, sha256d, Hash};
+        match target {
+            HashValue::Sha256(h) => sha256::Hash::hash(bytes).to_byte_array() == *h,
+            HashValue::Hash256(h) => sha256d::Hash::hash(bytes).to_byte_array() == *h,
+            HashValue::Ripemd160(h) => ripemd160::Hash::hash(bytes).to_byte_array() == *h,
+            HashValue::Hash160(h) => hash160::Hash::hash(bytes).to_byte_array() == *h,
         }
-        let sig = Dep16Signature(stack_bytes.clone());
-        for key in &keys {
-            if witness.signatures.contains_key(key) {
+    }
+
+    for stack_bytes in stack {
+        // Signature binding: 64-byte compact ECDSA only.
+        if stack_bytes.len() == 64 {
+            let sig = Dep16Signature(stack_bytes.clone());
+            let mut bound = false;
+            for key in &keys {
+                if witness.signatures.contains_key(key) {
+                    continue;
+                }
+                if verifier.verify_signature(key, &sig, preimage) {
+                    witness = witness.with_signature(*key, sig.clone());
+                    bound = true;
+                    break;
+                }
+            }
+            if bound {
                 continue;
             }
-            if verifier.verify_signature(key, &sig, preimage) {
-                witness = witness.with_signature(*key, sig.clone());
+            // A 64-byte entry that isn't a valid signature for any key falls
+            // through to the preimage walk — hashlock preimages may legally
+            // be 64 bytes.
+        }
+
+        // Preimage binding: any length.
+        let mut bound = false;
+        for target in &hash_targets {
+            if witness.preimages.contains_key(target) {
+                continue;
+            }
+            if preimage_matches(target, stack_bytes) {
+                witness = witness.with_preimage(target.clone(), stack_bytes.clone());
+                bound = true;
                 break;
+            }
+        }
+        if bound {
+            continue;
+        }
+
+        // Scalar binding: exactly 32 bytes, and the verifier must confirm
+        // the point relation (invalid scalars and non-matching points are
+        // both just "no match" — the witness lacks an entry and the
+        // obligation evaluates false).
+        if stack_bytes.len() == 32 {
+            let mut scalar = [0u8; 32];
+            scalar.copy_from_slice(stack_bytes);
+            for point in &point_targets {
+                if witness.scalars.contains_key(point) {
+                    continue;
+                }
+                if verifier.point_is_scalar_image(point, &scalar) {
+                    witness = witness.with_scalar(*point, scalar);
+                    break;
+                }
             }
         }
     }
     witness
 }
 
+/// Collect every literal hash referenced by a `hashlock(H)` obligation.
+fn collect_hashlock_targets(
+    t: &BTerm<PublicKey>,
+) -> Vec<miniscript::calculus::HashValue> {
+    use miniscript::calculus::ast::VTerm;
+    use miniscript::calculus::Value;
+    let mut out = Vec::new();
+    walk_obligations(t, &mut |ob| {
+        if let Obligation::Hashlock(VTerm::Lit(Value::Hash(h))) = ob {
+            if !out.contains(h) {
+                out.push(h.clone());
+            }
+        }
+    });
+    out
+}
+
+/// Collect every literal point referenced by a `pointlock(P)` obligation.
+fn collect_pointlock_targets(t: &BTerm<PublicKey>) -> Vec<PublicKey> {
+    use miniscript::calculus::ast::VTerm;
+    use miniscript::calculus::Value;
+    let mut out = Vec::new();
+    walk_obligations(t, &mut |ob| {
+        if let Obligation::Pointlock(VTerm::Lit(Value::Key(k))) = ob {
+            if !out.contains(k) {
+                out.push(*k);
+            }
+        }
+    });
+    out
+}
+
+/// Visit every `Prove(obligation)` leaf in a body term.
+fn walk_obligations<F: FnMut(&Obligation<PublicKey>)>(t: &BTerm<PublicKey>, f: &mut F) {
+    match t {
+        BTerm::Prove(ob) => f(ob),
+        BTerm::And(bs) | BTerm::Or(bs) | BTerm::Thresh(_, bs) => {
+            for b in bs {
+                walk_obligations(b, f);
+            }
+        }
+        BTerm::Not(b) => walk_obligations(b, f),
+        BTerm::If(c, t2, e) => {
+            walk_obligations(c, f);
+            walk_obligations(t2, f);
+            walk_obligations(e, f);
+        }
+        BTerm::Match { arms, default, .. } => {
+            for (_, body) in arms {
+                walk_obligations(body, f);
+            }
+            walk_obligations(default, f);
+        }
+        BTerm::Const(_) | BTerm::Cmp(..) | BTerm::State(..) => {}
+    }
+}
+
 /// Recursively walk a body term and collect every key referenced by a signature-bearing
 /// obligation (`pk(K)`, `pk_any([K, ...])`, `pk_threshold(k, [K, ...])`). The collected
-/// keys are the universe of candidates for stack-to-keyed witness binding.
-///
-/// Other obligation kinds (`pk_h`, `hashlock`, `attest`) carry a different witness
-/// shape (key-hash, preimage, attestation) and aren't fed by stack signatures —
-/// supporting them would require parallel walks of the witness for preimages / attestor
-/// references. Phase 5 / 6 will add those as the lock-side descriptors start using them.
+/// keys are the universe of candidates for signature binding; `hashlock` and
+/// `pointlock` targets have their own collectors above. `pk_h` and `attest` remain
+/// unfed by the byte-stack path (key-hash reveals and attestations need richer wire
+/// shapes than bare stack entries) — they'll grow dedicated request fields when a
+/// lock-side descriptor first uses them.
 fn collect_pk_keys(t: &BTerm<PublicKey>) -> Vec<PublicKey> {
     let mut keys = Vec::new();
     collect_pk_keys_into(t, &mut keys);
@@ -526,5 +645,131 @@ mod tests {
             deposit_id: dummy_deposit_id(),
         };
         assert!(!auth.authorize(&descriptor, &close));
+    }
+
+    /// HTLC release: a `TransferComplete` whose script_witness reveals the
+    /// correct preimage satisfies the lock's `sha256(H)` completion_script.
+    /// This is the enforcement the bridge and courier flows rest on — before
+    /// the preimage walk in `stack_to_keyed`, this authorize() returned
+    /// false for EVERY hashlock witness, correct or not.
+    #[test]
+    fn authorizes_hashlock_release_with_correct_preimage() {
+        use bitcoin::hashes::{sha256, Hash};
+        let preimage_bytes = [0xab; 32];
+        let hash = sha256::Hash::hash(&preimage_bytes).to_byte_array();
+        let completion_script = format!("sha256({})", hex::encode(hash));
+        let auth = Dep16Authorizer::new();
+
+        let good = LedgerOperation::TransferComplete {
+            transfer_id: [0x77; 32],
+            script_witness: DescriptorWitness {
+                stack: vec![preimage_bytes.to_vec()],
+            },
+        };
+        assert!(
+            auth.authorize(&completion_script, &good),
+            "correct preimage must satisfy sha256 lock"
+        );
+
+        let bad = LedgerOperation::TransferComplete {
+            transfer_id: [0x77; 32],
+            script_witness: DescriptorWitness {
+                stack: vec![vec![0xcd; 32]],
+            },
+        };
+        assert!(
+            !auth.authorize(&completion_script, &bad),
+            "wrong preimage must NOT satisfy sha256 lock"
+        );
+
+        let empty = LedgerOperation::TransferComplete {
+            transfer_id: [0x77; 32],
+            script_witness: DescriptorWitness::new(),
+        };
+        assert!(
+            !auth.authorize(&completion_script, &empty),
+            "empty witness must NOT satisfy sha256 lock"
+        );
+    }
+
+    /// PTLC release: a `TransferComplete` revealing the scalar `s` whose
+    /// curve image is `P` satisfies `pointlock(P)`; a scalar for a different
+    /// point does not. Mirrors the hashlock test for the PTLC path.
+    #[test]
+    fn authorizes_pointlock_release_with_correct_scalar() {
+        let (sk, pk) = keypair(0x42);
+        let completion_script = format!("pointlock({})", pk);
+        let auth = Dep16Authorizer::new();
+
+        let good = LedgerOperation::TransferComplete {
+            transfer_id: [0x88; 32],
+            script_witness: DescriptorWitness {
+                stack: vec![sk.secret_bytes().to_vec()],
+            },
+        };
+        assert!(
+            auth.authorize(&completion_script, &good),
+            "matching scalar must satisfy pointlock"
+        );
+
+        let (other_sk, _) = keypair(0x43);
+        let bad = LedgerOperation::TransferComplete {
+            transfer_id: [0x88; 32],
+            script_witness: DescriptorWitness {
+                stack: vec![other_sk.secret_bytes().to_vec()],
+            },
+        };
+        assert!(
+            !auth.authorize(&completion_script, &bad),
+            "scalar for a different point must NOT satisfy pointlock"
+        );
+    }
+
+    /// Combined lock: `sha256(H) and pk(K)` needs BOTH the preimage and the
+    /// signature in one stack — exercises signature + preimage binding from
+    /// a single walk, including the 64-byte-entry fall-through (a 64-byte
+    /// hashlock preimage must not be swallowed by the signature path).
+    #[test]
+    fn authorizes_combined_hashlock_and_pk() {
+        use bitcoin::hashes::{sha256, Hash};
+        let (sk, pk) = keypair(0x55);
+        // 64-byte preimage on purpose: lands in the signature-size branch
+        // first, fails sig verification, falls through to preimage binding.
+        let preimage_bytes = [0x5a; 64];
+        let hash = sha256::Hash::hash(&preimage_bytes).to_byte_array();
+        let script = format!("and(sha256({}), pk({}))", hex::encode(hash), pk);
+        let auth = Dep16Authorizer::new();
+
+        let op_unsigned = LedgerOperation::TransferComplete {
+            transfer_id: [0x99; 32],
+            script_witness: DescriptorWitness::new(),
+        };
+        let msg = miniscript::calculus::operation_preimage(
+            &operations::to_dep16(&op_unsigned).unwrap(),
+        );
+        let verifier = EcdsaVerifier::new();
+        let sig = verifier.sign(&sk, &msg);
+
+        let both = LedgerOperation::TransferComplete {
+            transfer_id: [0x99; 32],
+            script_witness: DescriptorWitness {
+                stack: vec![preimage_bytes.to_vec(), sig.0.clone()],
+            },
+        };
+        assert!(
+            auth.authorize(&script, &both),
+            "preimage + signature must satisfy the combined lock"
+        );
+
+        let only_preimage = LedgerOperation::TransferComplete {
+            transfer_id: [0x99; 32],
+            script_witness: DescriptorWitness {
+                stack: vec![preimage_bytes.to_vec()],
+            },
+        };
+        assert!(
+            !auth.authorize(&script, &only_preimage),
+            "preimage alone must NOT satisfy and(hashlock, pk)"
+        );
     }
 }
