@@ -26,7 +26,7 @@ The protocol code is `--network bitcoin` instead of `--network regtest` — that
 
 ## Pre-deployment checklist
 
-**Pick the cluster size first.** The existing `setup.sh 3` uses 10 operators with Q=3 and 30 ledgers. For a mainnet sandbox, **start with 3 operators, Q=2, 1 ledger each (3 ledgers total)**. That's enough to exercise the dispute pipeline with actual on-chain confiscation TXs and is the smallest configuration that proves the protocol end-to-end. Scale up later.
+**Pick the cluster size first.** The existing `setup.sh 3` uses 10 operators with Q=3 and 30 ledgers. For a mainnet sandbox, **start with 4 operators, Q=3, 1 ledger each (4 ledgers total)** — the minimal self-connected configuration. Terminology: **Q counts cosigners, and the operator is NOT in its own ledger's quorum** — each ledger's 3 cosigners are exactly the other 3 operators. Q=3 is the supported floor: the dispute lottery's partial-reveal leaves require N≥3 participants (`PARTIAL_REVEAL_MIN_N`); a 2-member quorum would silently lose that machinery and fall back to the CSV-144 recovery long-tail only. This is the smallest configuration that proves the protocol end-to-end. Scale up later.
 
 **Decide who runs each operator.** The trust assumption is "no single operator can steal funds from a ledger they don't control" — so the 3 operators should be on different machines, ideally different networks, ideally different administrative control.
 
@@ -193,7 +193,7 @@ The seed deterministically derives:
 - The operator's reserves UTXO key
 - The Nostr account key
 
-**Lose the seed → lose access to the ledger.** With Q=2, the other operator can dispute and acquire custody, but their slashed collateral plus dispute-resolution time means it's still a multi-day painful event.
+**Lose the seed → lose access to the ledger.** With Q=3, the cosigners can dispute and acquire custody, but slashed collateral plus dispute-resolution time means it's still a multi-day painful event.
 
 Storage options ranked by paranoia level:
 1. Keep the file on the operator host with strict perms (sandbox-acceptable).
@@ -283,7 +283,7 @@ deposits-node ledger open --seed-file /run/secrets/op-seed.hex \
 # 8. Out-of-band: each operator shares their pubkey with the other two.
 #    Then each operator runs `quorum add` for the others' pubkeys.
 
-# 9. Once quorums match, run `quorum begin` to activate Q=2 operation.
+# 9. Once quorums match, run `quorum begin` to activate Q=3 operation.
 ```
 
 The `setup.sh` script automates steps 6–9 for regtest; for a mainnet sandbox, doing them manually is a feature — each step is a checkpoint where you confirm the on-chain state matches expectations.
