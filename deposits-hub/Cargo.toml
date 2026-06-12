@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 # Wire protocol + transport — also used by deposits-signer (and later
 # deposits-node) so peers can register with the hub.
 deposits-hub-proto = { path = "../deposits-hub-proto" }
+deposits-protocol = { path = "../deposits-protocol" }
 
 # Shared deps for nostr keypair handling — match the project's pins
 bitcoin = { version = "0.32", features = ["serde"] }

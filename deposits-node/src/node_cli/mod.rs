@@ -1554,6 +1554,10 @@ pub async fn show_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let node = Node::new(config).await?;
 
     println!("Node ID: {}", node.node_id);
+    println!(
+        "Display name: {}",
+        deposits_core::display_name::pubkey_display_name_hex(&node.node_id.to_string())
+    );
     println!("Nostr pubkey: {}", node.nostr.nostr_pubkey());
 
     if let Err(e) = node.sync_wallet() {

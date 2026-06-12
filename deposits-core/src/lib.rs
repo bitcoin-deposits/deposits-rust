@@ -56,6 +56,7 @@
 // Protocol definitions (re-exported from deposits-protocol for backward compatibility)
 pub use deposits_protocol::constants;
 pub use deposits_protocol::cosign_threshold;
+pub use deposits_protocol::display_name;
 pub use deposits_protocol::error;
 pub use deposits_protocol::fraud;
 pub use deposits_protocol::messages;

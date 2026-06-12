@@ -1154,10 +1154,16 @@ impl App {
                         self.wizard.selected_peer_pubkeys.contains(&p.operator_pubkey);
                     let marker = if selected { "[x]" } else { "[ ]" };
                     let cursor = if i == self.peer_cursor { ">" } else { " " };
-                    let name = p
-                        .operator_name
-                        .clone()
-                        .unwrap_or_else(|| format!("op-{}…", &p.operator_pubkey[..8]));
+                    // Self-chosen ad names can collide or impersonate;
+                    // the pubkey-derived handle can't. Show the derived
+                    // name first, ad name as flavor.
+                    let derived = deposits_protocol::display_name::pubkey_display_name_hex(
+                        &p.operator_pubkey,
+                    );
+                    let name = match &p.operator_name {
+                        Some(n) => format!("{} ({})", derived, n),
+                        None => derived,
+                    };
                     let short_name = if name.len() > 24 {
                         format!("{}…", &name[..23])
                     } else {
@@ -1526,8 +1532,9 @@ impl App {
                     .map(|ts| format!("hb {}s ago", now.saturating_sub(*ts)))
                     .unwrap_or_else(|| "(no heartbeat yet)".to_string());
                 lines.push(Line::from(format!(
-                    "  {:<24} {}  v{}  {}",
+                    "  {:<24} {:<28} {}  v{}  {}",
                     rec.label,
+                    deposits_protocol::display_name::pubkey_display_name_hex(pk),
                     short_pk(pk),
                     rec.last_version,
                     hb

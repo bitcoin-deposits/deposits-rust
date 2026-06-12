@@ -700,7 +700,12 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     println!("bootstrap complete: {} nodes, {} ledgers, Q={}", args.nodes, args.nodes, Q);
     for i in 0..args.nodes {
         let name = node_name(i);
-        println!("  {}  ledger {}", name, st.ledgers[&name]);
+        // Display handle derives from the Node ID — same words on every
+        // surface, no naming coordination (the dir name nodeN is just a
+        // filesystem detail).
+        let display =
+            deposits_protocol::display_name::pubkey_display_name_hex(&st.node_ids[&name]);
+        println!("  {}  {}  ledger {}", name, display, st.ledgers[&name]);
     }
     println!("on-chain: 1 funding tx + 1 disbursement ({}) + {} activations",
         st.disbursement_txid.as_deref().unwrap_or("?"), args.nodes);
