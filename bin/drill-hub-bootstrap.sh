@@ -44,8 +44,14 @@ for i in $(seq 1 60); do
     sleep 2
 done
 [[ -n "$ADDR" ]] || { echo "FAIL: no treasury address"; cat "$D/bootstrap.log"; exit 1; }
-echo "[drill] funding treasury $ADDR (one tx)"
-$BCLI -rpcwallet=faucet sendtoaddress "$ADDR" 0.0405 >/dev/null
+# Fund EXACTLY what the hub asked for (its required floor) — this turns
+# the drill into a real guard on the fee-headroom math: if the floor is
+# ever too tight, the disbursement underpays and the run stalls here.
+REQ_SATS=$(grep -oE "send AT LEAST [0-9]+ sats" "$D/bootstrap.log" | grep -oE "[0-9]+" | head -1)
+[[ -n "$REQ_SATS" ]] || { echo "FAIL: could not read required sats"; exit 1; }
+REQ_BTC=$(python3 -c "print(f'{$REQ_SATS/1e8:.8f}')")
+echo "[drill] funding treasury $ADDR with exactly $REQ_SATS sats ($REQ_BTC BTC)"
+$BCLI -rpcwallet=faucet sendtoaddress "$ADDR" "$REQ_BTC" >/dev/null
 $BCLI -rpcwallet=faucet -generate 1 >/dev/null
 
 echo "[drill] mining loop while the pipeline runs"

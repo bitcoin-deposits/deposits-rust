@@ -45,8 +45,23 @@ const NODE_INDEX_BASE: u32 = 1_000_000;
 /// Cosigners per ledger. Protocol floor — see PARTIAL_REVEAL_MIN_N.
 const Q: usize = 3;
 const DEFAULT_PER_LEDGER_SATS: u64 = 1_000_000; // 0.01 BTC
-/// Disbursement + funding fee headroom on top of N × per-ledger.
-const FEE_HEADROOM_SATS: u64 = 50_000;
+/// Multiplier on the estimated disbursement fee — covers vsize rounding
+/// and fee-estimate drift between funding and broadcast. The whole flow
+/// is "fund once", so erring high beats a stall; 2× of a real estimate
+/// is generous without being the old flat 50k.
+const DISBURSEMENT_FEE_SAFETY: u64 = 2;
+
+/// Estimated fee for the single disbursement tx: one P2WPKH input, N
+/// ledger outputs + 1 change. Standard segwit sizing (witness
+/// discounted); the safety multiplier absorbs the approximation.
+///
+///   non-witness: 10 overhead + 41 input + 31 per output
+///   witness:     (2 marker/flag + ~107 input witness) / 4 ≈ 28 vB
+fn disbursement_fee_sats(nodes: u32, fee_rate_sat_vb: u64) -> u64 {
+    let outputs = nodes as u64 + 1; // N ledgers + change
+    let vsize = 10 + 41 + 28 + 31 * outputs;
+    vsize * fee_rate_sat_vb.max(1) * DISBURSEMENT_FEE_SAFETY
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 struct BootstrapState {
@@ -360,8 +375,8 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     }
 
     // ── Phase 3: funding ────────────────────────────────────────────────
-    let required_sats =
-        args.per_ledger_sats * args.nodes as u64 + FEE_HEADROOM_SATS;
+    let required_sats = args.per_ledger_sats * args.nodes as u64
+        + disbursement_fee_sats(args.nodes, args.fee_rate);
     if st.treasury_address.is_none() {
         let out = node_cli(
             &args,
