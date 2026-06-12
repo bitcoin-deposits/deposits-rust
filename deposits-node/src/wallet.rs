@@ -525,6 +525,70 @@ impl Wallet {
                 .map_err(|e| Error::Wallet(format!("Failed to build withdrawal tx: {}", e)))?
         };
 
+        let txid = self.sign_node_wallet_psbt_and_broadcast(signer, psbt)?;
+        tracing::info!(
+            "Broadcast withdrawal tx: {} (amount: {} sats, op_return: {})",
+            txid,
+            withdrawal.amount_sats,
+            hex::encode(&withdrawal.withdrawal_id[..8])
+        );
+        Ok(txid.to_string())
+    }
+
+    /// Build, sign, and broadcast ONE transaction paying every recipient
+    /// in `recipients` (`(address, sats)`) from the node wallet. The hub's
+    /// bootstrap uses this to fund all N ledgers in a single disbursement.
+    pub fn send_to_many(
+        &self,
+        signer: &dyn deposits_signer_api::Signer,
+        recipients: &[(String, u64)],
+        fee_rate_sat_vb: u64,
+    ) -> Result<String, Error> {
+        if recipients.is_empty() {
+            return Err(Error::Wallet("send_to_many: no recipients".to_string()));
+        }
+        let psbt = {
+            let mut wallet = self.inner.lock().unwrap();
+            let mut builder = wallet.build_tx();
+            for (addr, sats) in recipients {
+                let dest = addr
+                    .parse::<Address<_>>()
+                    .map_err(|e| Error::Wallet(format!("Invalid address {}: {}", addr, e)))?
+                    .require_network(self.network)
+                    .map_err(|e| Error::Wallet(format!("Address network mismatch: {}", e)))?;
+                builder.add_recipient(dest.script_pubkey(), Amount::from_sat(*sats));
+            }
+            builder.fee_rate(
+                FeeRate::from_sat_per_vb(fee_rate_sat_vb.max(1))
+                    .ok_or_else(|| Error::Wallet("invalid fee rate".to_string()))?,
+            );
+            builder
+                .finish()
+                .map_err(|e| Error::Wallet(format!("Failed to build send-many tx: {}", e)))?
+        };
+        let txid = self.sign_node_wallet_psbt_and_broadcast(signer, psbt)?;
+        tracing::info!(
+            "Broadcast send-many tx: {} ({} outputs)",
+            txid,
+            recipients.len()
+        );
+        Ok(txid.to_string())
+    }
+
+    /// Shared tail for node-wallet spends: sign each p2wpkh input via the
+    /// signer (KeyPath::NodeWallet) and broadcast. Extracted from
+    /// `send_withdrawal`; `send_to_many` reuses it.
+    fn sign_node_wallet_psbt_and_broadcast(
+        &self,
+        signer: &dyn deposits_signer_api::Signer,
+        mut psbt: bdk_wallet::bitcoin::psbt::Psbt,
+    ) -> Result<String, Error> {
+        use bdk_wallet::bitcoin::ecdsa::Signature as BtcEcdsaSignature;
+        use bdk_wallet::bitcoin::hashes::Hash as _;
+        use bdk_wallet::bitcoin::sighash::{EcdsaSighashType, SighashCache};
+        use bdk_wallet::bitcoin::Witness;
+        use deposits_signer_api::{KeyPath, SigPurpose, SigRole, SignContext};
+
         // Per-input sighash signing routed through the signer. The
         // node-level wallet uses `wpkh(master_xpub/<change>/*)`, so
         // BDK's `bip32_derivation` records `[change, index]` relative
@@ -611,17 +675,9 @@ impl Wallet {
 
         let tx = psbt
             .extract_tx()
-            .map_err(|e| Error::Wallet(format!("Failed to extract withdrawal tx: {}", e)))?;
+            .map_err(|e| Error::Wallet(format!("Failed to extract tx: {}", e)))?;
 
-        // Broadcast the transaction
         let txid = crate::chain_backend::from_env(&self.electrum_url).broadcast_tx(&tx)?;
-        tracing::info!(
-            "Broadcast withdrawal tx: {} (amount: {} sats, op_return: {})",
-            txid,
-            withdrawal.amount_sats,
-            hex::encode(&withdrawal.withdrawal_id[..8])
-        );
-
         Ok(txid.to_string())
     }
 

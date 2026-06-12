@@ -1575,6 +1575,71 @@ pub async fn show_address(args: &[String]) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+/// `deposits-node wallet <subcommand>` — raw node-wallet operations.
+///
+///   wallet send-many <addr:sats> [<addr:sats>...] [--fee-rate <sat/vb>]
+///
+/// Builds ONE transaction paying every recipient. The hub's bootstrap
+/// uses this to fund all N ledgers in a single on-chain disbursement.
+pub async fn wallet_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    match args.first().map(|s| s.as_str()) {
+        Some("send-many") => {
+            let mut recipients: Vec<(String, u64)> = Vec::new();
+            let mut fee_rate: u64 = 2;
+            let mut config_args = Vec::new();
+            let rest = &args[1..];
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--fee-rate" if i + 1 < rest.len() => {
+                        fee_rate = rest[i + 1].parse()?;
+                        i += 1;
+                    }
+                    s if s.starts_with("--") => {
+                        config_args.push(rest[i].clone());
+                        if i + 1 < rest.len() && !rest[i + 1].starts_with("--") {
+                            config_args.push(rest[i + 1].clone());
+                            i += 1;
+                        }
+                    }
+                    pair => {
+                        let (addr, sats) = pair
+                            .rsplit_once(':')
+                            .ok_or("recipients are <address>:<sats>")?;
+                        recipients.push((addr.to_string(), sats.parse()?));
+                    }
+                }
+                i += 1;
+            }
+            if recipients.is_empty() {
+                return Err(
+                    "Usage: deposits-node wallet send-many <addr:sats> [<addr:sats>...] \
+                     [--fee-rate <sat/vb>]"
+                        .into(),
+                );
+            }
+            let config = parse_config(&config_args)?;
+            let node = Node::new(config).await?;
+            node.sync_wallet()?;
+            let total: u64 = recipients.iter().map(|(_, s)| s).sum();
+            let txid = node
+                .wallet
+                .send_to_many(&*node.handler.signer, &recipients, fee_rate)?;
+            println!(
+                "send-many broadcast: {} ({} outputs, {} sats total)",
+                txid,
+                recipients.len(),
+                total
+            );
+            Ok(())
+        }
+        _ => {
+            eprintln!("Usage: deposits-node wallet send-many <addr:sats> [...] [--fee-rate N]");
+            Ok(())
+        }
+    }
+}
+
 pub async fn collateral_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Collateral operations have been removed in the collateral-in-UTXO migration.
     let _ = args;

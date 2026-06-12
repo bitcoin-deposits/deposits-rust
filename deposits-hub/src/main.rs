@@ -43,6 +43,12 @@ COMMANDS:
     qr [--text <STR>]            Print a QR code for the hub pubkey (or arbitrary --text).
                                   Renders with Unicode half-blocks; one terminal cell = two
                                   QR modules so the code stays roughly square.
+    bootstrap --nodes <N>        Fund once, deploy a self-connected cluster: N daemons,
+              --relay <URL>               one ledger each, Q=3 cross-wired quorums, ONE funding
+              --esplora <URL>             tx + ONE disbursement + N activations. Resumable —
+              [--per-ledger-sats <S>]     re-run after any interruption. All keys derive from
+              [--network <NET>]           hub-master-seed (BIP-85); one mnemonic backs up the
+              [--node-bin <PATH>]         entire cluster.
     help                         Show this message
 
 OPTIONS:
@@ -95,6 +101,13 @@ fn main() -> ExitCode {
         "publish-backup" => cmd_publish_backup(rest),
         "spawn-line" => cmd_spawn_line(rest),
         "spawn" => cmd_spawn(rest),
+        "bootstrap" => {
+            let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string());
+            match rt {
+                Ok(rt) => rt.block_on(deposits_hub::bootstrap::run(rest)),
+                Err(e) => Err(e),
+            }
+        }
         "qr" => cmd_qr(rest),
         other => {
             eprintln!("unknown command: {}\n\n{}", other, USAGE);
