@@ -286,6 +286,106 @@ fn seed_file_for(dir: &Path) -> PathBuf {
     dir.join("seed.hex")
 }
 
+/// `deposits-hub bootstrap --reset [--data-dir D] [--force]`
+///
+/// Tear a bootstrapped cluster down to bare metal: kill the spawned
+/// daemons and delete the per-run state so the next `bootstrap` starts
+/// clean. Always safe to re-run.
+///
+/// The one irreplaceable thing is `hub-master-seed` — every node and
+/// treasury key derives from it, so deleting it on a network with real
+/// funds means losing access. The guard: the seed is removed only when
+/// `bootstrap-state.json` records `network=regtest`, or `--force` is
+/// passed. Without proof of regtest and without --force, everything
+/// else is wiped but the seed is kept (with a printed note).
+fn reset(rest: &[String]) -> Result<(), String> {
+    let mut data_dir: Option<PathBuf> = None;
+    let mut force = false;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--data-dir" => {
+                data_dir = Some(PathBuf::from(rest.get(i + 1).ok_or("--data-dir needs a value")?));
+                i += 1;
+            }
+            "--force" => force = true,
+            "--reset" => {}
+            other => return Err(format!("--reset: unexpected flag {}", other)),
+        }
+        i += 1;
+    }
+    let data_dir = data_dir.unwrap_or_else(|| dirs_home().join(".deposits-hub"));
+
+    // Determine the network from any surviving state (to gate seed deletion).
+    let network = std::fs::read_to_string(BootstrapState::path(&data_dir))
+        .ok()
+        .and_then(|s| serde_json::from_str::<BootstrapState>(&s).ok())
+        .map(|st| st.network)
+        .unwrap_or_default();
+
+    // Kill spawned daemons via their pid files.
+    let nodes_root = data_dir.join("bootstrap-nodes");
+    let mut killed = 0;
+    if let Ok(entries) = std::fs::read_dir(&nodes_root) {
+        for e in entries.flatten() {
+            let pidf = e.path().join("daemon.pid");
+            if let Ok(pid) = std::fs::read_to_string(&pidf) {
+                if let Ok(pid) = pid.trim().parse::<i32>() {
+                    if unsafe { libc_kill(pid, 15) } == 0 {
+                        killed += 1;
+                    }
+                }
+            }
+        }
+    }
+    if killed > 0 {
+        println!("reset: signalled {} daemon(s) to stop", killed);
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    // Remove per-run state + node/treasury workspaces.
+    for p in [
+        BootstrapState::path(&data_dir),
+        nodes_root,
+        data_dir.join("bootstrap-treasury"),
+    ] {
+        if p.exists() {
+            let r = if p.is_dir() {
+                std::fs::remove_dir_all(&p)
+            } else {
+                std::fs::remove_file(&p)
+            };
+            r.map_err(|e| format!("remove {}: {}", p.display(), e))?;
+            println!("reset: removed {}", p.display());
+        }
+    }
+
+    // The seed is the dangerous one — gate on confirmed-regtest or --force.
+    let seed = state::HubState::master_seed_path(&data_dir);
+    if seed.exists() {
+        let regtest = network == "regtest";
+        if regtest || force {
+            std::fs::remove_file(&seed).map_err(|e| format!("remove {}: {}", seed.display(), e))?;
+            println!(
+                "reset: removed {} ({})",
+                seed.display(),
+                if regtest { "regtest" } else { "forced" }
+            );
+        } else {
+            println!(
+                "reset: KEPT {} — network is '{}', not confirmed regtest.\n        \
+                 The next bootstrap will reuse these keys. To wipe the seed too, \
+                 re-run with --force (only if no real funds depend on it).",
+                seed.display(),
+                if network.is_empty() { "unknown" } else { &network }
+            );
+        }
+    }
+
+    println!("reset: done — next `bootstrap` on {} starts clean", data_dir.display());
+    Ok(())
+}
+
 async fn esplora_get(esplora: &str, path: &str) -> Result<String, String> {
     let url = format!("{}{}", esplora.trim_end_matches('/'), path);
     let resp = reqwest::get(&url).await.map_err(|e| format!("GET {}: {}", url, e))?;
@@ -308,6 +408,11 @@ async fn confirmed_sats(esplora: &str, address: &str) -> Result<u64, String> {
 }
 
 pub async fn run(rest: &[String]) -> Result<(), String> {
+    // `--reset` is handled before the normal arg parse: it doesn't need
+    // --relay/--esplora and short-circuits the whole pipeline.
+    if rest.iter().any(|a| a == "--reset") {
+        return reset(rest);
+    }
     let args = parse_args(rest)?;
     std::fs::create_dir_all(&args.data_dir).map_err(|e| e.to_string())?;
 

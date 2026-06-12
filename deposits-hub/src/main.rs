@@ -49,6 +49,10 @@ COMMANDS:
               [--per-ledger-sats <S>]     re-run after any interruption. All keys derive from
               [--network <NET>]           hub-master-seed (BIP-85); one mnemonic backs up the
               [--node-bin <PATH>]         entire cluster.
+    bootstrap --reset            Tear down a bootstrapped cluster: kill spawned daemons,
+              [--data-dir <DIR>]          delete bootstrap state + node/treasury workspaces.
+              [--force]                   Keeps hub-master-seed unless network is regtest or
+                                          --force is given (the seed is the keys — guarded).
     help                         Show this message
 
 OPTIONS:
