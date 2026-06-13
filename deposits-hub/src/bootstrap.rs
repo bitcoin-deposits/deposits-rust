@@ -501,12 +501,37 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     println!();
     println!("    {}", treasury_addr);
     println!();
+    // Preflight the esplora endpoint BEFORE the wait loop. A wrong base
+    // URL (the classic: a mempool/blockstream host without the `/api`
+    // suffix returns an HTML 200 that fails JSON parse) used to swallow
+    // to "0 sats" and wait forever. Fail fast with the real error and a
+    // hint instead.
+    match confirmed_sats(&args.esplora, &treasury_addr).await {
+        Ok(_) => {}
+        Err(e) => {
+            return Err(format!(
+                "esplora at `{}` is not returning a usable address/utxo response: {}\n\
+                 The funding poll needs an esplora REST base URL. mempool.space /\n\
+                 blockstream-style hosts need the `/api` suffix (e.g.\n\
+                 `https://blockstream.info/api`); a raw electrs-esplora serves it\n\
+                 at the root. Re-run with a corrected --esplora (bootstrap is\n\
+                 resumable; the treasury address is unchanged).",
+                args.esplora, e
+            ));
+        }
+    }
     println!("  (waiting for confirmed funds — safe to interrupt and re-run)");
     loop {
-        let have = confirmed_sats(&args.esplora, &treasury_addr).await.unwrap_or(0);
-        if have >= required_sats {
-            println!("  funded: {} sats confirmed", have);
-            break;
+        match confirmed_sats(&args.esplora, &treasury_addr).await {
+            Ok(have) if have >= required_sats => {
+                println!("  funded: {} sats confirmed", have);
+                break;
+            }
+            Ok(_) => {}
+            // Transient after a successful preflight (network blip, provider
+            // hiccup) — surface it but keep waiting rather than abort a
+            // mainnet run.
+            Err(e) => eprintln!("  [poll] esplora error (will retry): {}", e),
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
@@ -589,8 +614,10 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     for i in 0..args.nodes {
         let addr = st.ledger_addresses[&node_name(i)].clone();
         loop {
-            if confirmed_sats(&args.esplora, &addr).await.unwrap_or(0) >= args.per_ledger_sats {
-                break;
+            match confirmed_sats(&args.esplora, &addr).await {
+                Ok(have) if have >= args.per_ledger_sats => break,
+                Ok(_) => {}
+                Err(e) => eprintln!("  [poll] esplora error (will retry): {}", e),
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
