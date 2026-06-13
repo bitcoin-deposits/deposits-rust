@@ -542,14 +542,42 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
         let name = node_name(i);
         let dir = node_dir(&args, i);
         if !st.ledgers.contains_key(&name) {
-            let mut cmd: Vec<&str> = vec!["ledger", "open"];
-            let qe;
-            if let Some(q) = args.quorum_expiry_blocks {
-                qe = q.to_string();
-                cmd.push("--quorum-expiry-blocks");
-                cmd.push(&qe);
+            let qe = args.quorum_expiry_blocks.map(|q| q.to_string());
+            let build_cmd = || {
+                let mut cmd: Vec<&str> = vec!["ledger", "open"];
+                if let Some(q) = qe.as_deref() {
+                    cmd.push("--quorum-expiry-blocks");
+                    cmd.push(q);
+                }
+                cmd
+            };
+            // `ledger open` is an admin request the CLI sends to the running
+            // daemon over the relay. A daemon spawned long ago (e.g. across
+            // an overnight funding wait) can have a dead relay subscription
+            // — pid-alive but deaf — so the request times out. On timeout,
+            // restart that daemon (fresh relay connection) and retry. Only
+            // retry on *timeout*: a real rejection means the daemon answered.
+            let mut out = node_cli(&args, &seed_file_for(&dir), &dir, &name, &build_cmd()).await;
+            let mut attempts = 1;
+            while attempts < 4 {
+                match &out {
+                    Ok(_) => break,
+                    Err(e) if e.contains("timeout") || e.contains("Timeout") => {
+                        println!(
+                            "  {} ledger open timed out (daemon may have a stale relay \
+                             connection) — restarting it and retrying",
+                            name
+                        );
+                        restart_daemon(&args, i)?;
+                        // Give the fresh daemon time to connect + subscribe.
+                        tokio::time::sleep(Duration::from_secs(15)).await;
+                        out = node_cli(&args, &seed_file_for(&dir), &dir, &name, &build_cmd()).await;
+                        attempts += 1;
+                    }
+                    Err(_) => break,
+                }
             }
-            let out = node_cli(&args, &seed_file_for(&dir), &dir, &name, &cmd).await?;
+            let out = out?;
             let lid = out
                 .lines()
                 .find_map(|l| l.split("Ledger ID:").nth(1))
@@ -932,10 +960,30 @@ extern "C" {
     fn libc_kill(pid: i32, sig: i32) -> i32;
 }
 
+/// Stop a daemon (via its pid file) and spawn a fresh one. Used by phase 4
+/// when an admin request times out against a daemon whose long-lived relay
+/// subscription has gone stale.
+fn restart_daemon(args: &BootstrapArgs, i: u32) -> Result<(), String> {
+    let dir = node_dir(args, i);
+    if let Ok(pid) = std::fs::read_to_string(pid_file(&dir)) {
+        if let Ok(pid) = pid.trim().parse::<i32>() {
+            unsafe { libc_kill(pid, 15) };
+        }
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    spawn_daemon(args, i)
+}
+
 fn spawn_daemon(args: &BootstrapArgs, i: u32) -> Result<(), String> {
     let dir = node_dir(args, i);
     let name = node_name(i);
-    let log = std::fs::File::create(dir.join("daemon.log")).map_err(|e| e.to_string())?;
+    // Append, don't truncate — a restart should preserve the prior log
+    // (which holds the disconnect history that explains the restart).
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("daemon.log"))
+        .map_err(|e| e.to_string())?;
     let log_err = log.try_clone().map_err(|e| e.to_string())?;
     let mut c = std::process::Command::new(&args.node_bin);
     c.arg("run")
