@@ -480,60 +480,69 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     }
 
     // ── Phase 3: funding ────────────────────────────────────────────────
-    let required_sats = args.per_ledger_sats * args.nodes as u64
-        + disbursement_fee_sats(args.nodes, args.fee_rate);
-    if st.treasury_address.is_none() {
-        let out = node_cli(
-            &args,
-            &seed_file_for(&treasury_dir),
-            &treasury_dir,
-            "treasury",
-            &["address"],
-        )
-        .await?;
-        let addr = extract_address(&out)
-            .ok_or_else(|| format!("no address in treasury `address` output:\n{}", out))?;
-        st.treasury_address = Some(addr);
-        st.save(&args.data_dir);
-    }
-    let treasury_addr = st.treasury_address.clone().unwrap();
-    println!("[3/7] funding — send AT LEAST {} sats ({:.8} BTC) to:", required_sats, required_sats as f64 / 1e8);
-    println!();
-    println!("    {}", treasury_addr);
-    println!();
-    // Preflight the esplora endpoint BEFORE the wait loop. A wrong base
-    // URL (the classic: a mempool/blockstream host without the `/api`
-    // suffix returns an HTML 200 that fails JSON parse) used to swallow
-    // to "0 sats" and wait forever. Fail fast with the real error and a
-    // hint instead.
-    match confirmed_sats(&args.esplora, &treasury_addr).await {
-        Ok(_) => {}
-        Err(e) => {
-            return Err(format!(
-                "esplora at `{}` is not returning a usable address/utxo response: {}\n\
-                 The funding poll needs an esplora REST base URL. mempool.space /\n\
-                 blockstream-style hosts need the `/api` suffix (e.g.\n\
-                 `https://blockstream.info/api`); a raw electrs-esplora serves it\n\
-                 at the root. Re-run with a corrected --esplora (bootstrap is\n\
-                 resumable; the treasury address is unchanged).",
-                args.esplora, e
-            ));
+    // Skip entirely once the disbursement has happened: phase 5 SPENDS the
+    // treasury UTXO into the ledgers, so on a resume the treasury address
+    // reads 0 confirmed and a naive funding poll would wait forever for
+    // money that's already downstream.
+    if st.disbursement_txid.is_some() {
+        println!("[3/7] funding — already disbursed ({}), skipping",
+            &st.disbursement_txid.as_deref().unwrap_or("")[..16.min(st.disbursement_txid.as_deref().unwrap_or("").len())]);
+    } else {
+        let required_sats = args.per_ledger_sats * args.nodes as u64
+            + disbursement_fee_sats(args.nodes, args.fee_rate);
+        if st.treasury_address.is_none() {
+            let out = node_cli(
+                &args,
+                &seed_file_for(&treasury_dir),
+                &treasury_dir,
+                "treasury",
+                &["address"],
+            )
+            .await?;
+            let addr = extract_address(&out)
+                .ok_or_else(|| format!("no address in treasury `address` output:\n{}", out))?;
+            st.treasury_address = Some(addr);
+            st.save(&args.data_dir);
         }
-    }
-    println!("  (waiting for confirmed funds — safe to interrupt and re-run)");
-    loop {
+        let treasury_addr = st.treasury_address.clone().unwrap();
+        println!("[3/7] funding — send AT LEAST {} sats ({:.8} BTC) to:", required_sats, required_sats as f64 / 1e8);
+        println!();
+        println!("    {}", treasury_addr);
+        println!();
+        // Preflight the esplora endpoint BEFORE the wait loop. A wrong base
+        // URL (the classic: a mempool/blockstream host without the `/api`
+        // suffix returns an HTML 200 that fails JSON parse) used to swallow
+        // to "0 sats" and wait forever. Fail fast with the real error and a
+        // hint instead.
         match confirmed_sats(&args.esplora, &treasury_addr).await {
-            Ok(have) if have >= required_sats => {
-                println!("  funded: {} sats confirmed", have);
-                break;
-            }
             Ok(_) => {}
-            // Transient after a successful preflight (network blip, provider
-            // hiccup) — surface it but keep waiting rather than abort a
-            // mainnet run.
-            Err(e) => eprintln!("  [poll] esplora error (will retry): {}", e),
+            Err(e) => {
+                return Err(format!(
+                    "esplora at `{}` is not returning a usable address/utxo response: {}\n\
+                     The funding poll needs an esplora REST base URL. mempool.space /\n\
+                     blockstream-style hosts need the `/api` suffix (e.g.\n\
+                     `https://blockstream.info/api`); a raw electrs-esplora serves it\n\
+                     at the root. Re-run with a corrected --esplora (bootstrap is\n\
+                     resumable; the treasury address is unchanged).",
+                    args.esplora, e
+                ));
+            }
         }
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        println!("  (waiting for confirmed funds — safe to interrupt and re-run)");
+        loop {
+            match confirmed_sats(&args.esplora, &treasury_addr).await {
+                Ok(have) if have >= required_sats => {
+                    println!("  funded: {} sats confirmed", have);
+                    break;
+                }
+                Ok(_) => {}
+                // Transient after a successful preflight (network blip,
+                // provider hiccup) — surface it but keep waiting rather than
+                // abort a mainnet run.
+                Err(e) => eprintln!("  [poll] esplora error (will retry): {}", e),
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
     }
 
     // ── Phase 4: ledgers ────────────────────────────────────────────────
