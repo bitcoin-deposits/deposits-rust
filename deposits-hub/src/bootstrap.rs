@@ -643,24 +643,31 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
         println!("  disbursement: {}", txid);
         st.disbursement_txid = Some(txid);
         st.save(&args.data_dir);
-    }
-    // Wait for every ledger address to show confirmed funds, then give the
-    // per-ledger BDK wallets one sync cycle to ingest (same reasoning as
-    // setup.sh's 45s pad).
-    println!("  waiting for the disbursement to confirm on every ledger address…");
-    for i in 0..args.nodes {
-        let addr = st.ledger_addresses[&node_name(i)].clone();
-        loop {
-            match confirmed_sats(&args.esplora, &addr).await {
-                Ok(have) if have >= args.per_ledger_sats => break,
-                Ok(_) => {}
-                Err(e) => eprintln!("  [poll] esplora error (will retry): {}", e),
+
+        // Wait for every ledger address to show confirmed funds, then give the
+        // per-ledger BDK wallets one sync cycle to ingest (same reasoning as
+        // setup.sh's 45s pad). This lives INSIDE the disbursement-made block on
+        // purpose: it must run only on the run that broadcasts the disbursement.
+        // On a resume the disbursement is long confirmed AND phase-6 quorum
+        // begin has already spent these ledger UTXOs into the quorum vaults, so
+        // the addresses read 0 confirmed and this poll would hang forever.
+        // Funding readiness on resume is instead covered by quorum begin's own
+        // wallet sync + its "Insufficient funds" retry.
+        println!("  waiting for the disbursement to confirm on every ledger address…");
+        for i in 0..args.nodes {
+            let addr = st.ledger_addresses[&node_name(i)].clone();
+            loop {
+                match confirmed_sats(&args.esplora, &addr).await {
+                    Ok(have) if have >= args.per_ledger_sats => break,
+                    Ok(_) => {}
+                    Err(e) => eprintln!("  [poll] esplora error (will retry): {}", e),
+                }
+                tokio::time::sleep(Duration::from_secs(10)).await;
             }
-            tokio::time::sleep(Duration::from_secs(10)).await;
         }
+        println!("  confirmed; waiting 45s for ledger wallets to ingest");
+        tokio::time::sleep(Duration::from_secs(45)).await;
     }
-    println!("  confirmed; waiting 45s for ledger wallets to ingest");
-    tokio::time::sleep(Duration::from_secs(45)).await;
 
     // ── Phase 6: quorums ────────────────────────────────────────────────
     println!("[6/7] quorums — cross-wiring Q={} and beginning", Q);
