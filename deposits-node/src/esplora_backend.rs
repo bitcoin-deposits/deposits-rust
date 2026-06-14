@@ -28,7 +28,13 @@ pub struct EsploraBackend {
 
 impl EsploraBackend {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into() }
+        // Trim trailing slashes: the esplora client appends paths like
+        // `/blocks/tip/height`, so a base of `http://host:3100/` would
+        // produce `http://host:3100//blocks/tip/height` → 404. The
+        // bootstrap's own poll already trims; match it here so the two
+        // paths agree and `--esplora http://host:3100/` just works.
+        let url = url.into().trim_end_matches('/').to_string();
+        Self { url }
     }
 
     fn client(&self) -> bdk_esplora::esplora_client::BlockingClient {
