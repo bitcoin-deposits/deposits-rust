@@ -675,14 +675,31 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
             let m_name = node_name(m);
             let m_id = st.node_ids[&m_name].clone();
             let m_lid = st.ledgers[&m_name].clone();
-            node_cli(
-                &args,
-                &seed_file_for(&dir),
-                &dir,
-                &name,
-                &["quorum", "add", &lid, &m_id, &m_lid],
-            )
-            .await?;
+            let add_args = ["quorum", "add", lid.as_str(), m_id.as_str(), m_lid.as_str()];
+            // Consent-response race on a remote relay: the operator only
+            // starts listening for the member's response (tagged with the
+            // member's ledger) when `request_consent` calls
+            // add_interested_ledger — and on a high-latency relay that
+            // re-subscription can lose the member's near-instant, ephemeral
+            // response, timing out at 10s. On a RETRY the member's ledger is
+            // already in the interest set/subscription, so the response
+            // lands. Idempotent: the member re-records the same QuorumJoin.
+            let mut r = node_cli(&args, &seed_file_for(&dir), &dir, &name, &add_args).await;
+            let mut attempts = 1;
+            while r.is_err() && attempts < 5 {
+                let e = r.as_ref().err().map(|s| s.as_str()).unwrap_or("");
+                if !(e.contains("timed out") || e.contains("consent") || e.contains("Consent")) {
+                    break;
+                }
+                println!(
+                    "  {} add {} consent attempt {} timed out — retrying (interest set now warm)",
+                    name, m_name, attempts
+                );
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                r = node_cli(&args, &seed_file_for(&dir), &dir, &name, &add_args).await;
+                attempts += 1;
+            }
+            r?;
             added += 1;
         }
         st.quorums_added.insert(name, true);
