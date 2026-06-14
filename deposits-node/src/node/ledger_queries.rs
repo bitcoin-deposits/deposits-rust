@@ -1014,6 +1014,29 @@ impl Node {
                     quorum_members.len(),
                     result.quorum_expiry
                 );
+                // Persist the pending taproot record NOW — before the
+                // confirmation wait below (up to ~1h on mainnet, 6 confs), not
+                // at Phase 5 after cosign. The activation tx is already
+                // broadcast and has spent the ledger wallet's funding UTXO. If
+                // begin times out or the daemon restarts during that long wait
+                // (routine on mainnet), a later retry MUST find this entry and
+                // resume via `pending_resume` above. Without the early persist
+                // the retry rebuilds against a now-spent input and dead-ends at
+                // "Insufficient funds: 0 available", with the funds stranded in
+                // the vault and no local record of them. `confirmed` stays false
+                // until the depth wait completes; Phase 5 re-commits the
+                // identical record idempotently (save guard allows same
+                // outpoint+script). This is the recoverability the Phase-5-only
+                // commit previously failed to provide.
+                if let Err(e) = ledger_wallet.commit_taproot_reserves(pending.clone()) {
+                    tracing::warn!(
+                        "failed to persist pending taproot reserves before conf-wait for \
+                         ledger {} ({}): a restart during the wait would rebuild instead of \
+                         resume",
+                        &ledger_id[..16.min(ledger_id.len())],
+                        e
+                    );
+                }
                 (result, pending)
             };
 
@@ -1124,13 +1147,13 @@ impl Node {
         // producing a result that peers' validators will accept.
         self.commit_operation(ledger_id, operation).await?;
 
-        // --- Phase 5: the ledger op has committed → mutate wallet state ---
-        // Only now do we start tracking the new taproot UTXO. If a crash
-        // had occurred between broadcast and this commit, a retry would
-        // see no taproot entry yet and rebuild — at which point the
-        // broadcast would fail because the input is already spent on-chain,
-        // exposing the half-rotated state to the operator rather than
-        // silently losing track of funds.
+        // --- Phase 5: the ledger op has committed → confirm wallet state ---
+        // The taproot record was already persisted right after broadcast (see
+        // the fresh-build branch above), so a crash anywhere between broadcast
+        // and here resumes via `pending_resume` rather than rebuilding against a
+        // spent input. This re-commit is idempotent for the fresh path (same
+        // outpoint + script) and is the *first* persist for the resume path
+        // (where build+broadcast were skipped); both are required.
         ledger_wallet.commit_taproot_reserves(pending_taproot)?;
 
         tracing::info!(
