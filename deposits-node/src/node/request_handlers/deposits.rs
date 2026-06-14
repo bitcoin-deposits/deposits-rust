@@ -1076,9 +1076,13 @@ impl Node {
             return denial;
         }
 
-        if let Err(e) = self.sync_wallet() {
-            return (false, None, Some(format!("wallet sync failed: {}", e)));
-        }
+        // NB: no wallet sync here. Opening a ledger is a pure declaration —
+        // `open_ledger` uses a synthetic genesis and provisions the
+        // per-ledger wallet locally, touching no chain backend. A node-wallet
+        // sync would only couple this request to esplora availability: on a
+        // slow/rate-limited backend it blocks (or hard-fails) a request that
+        // needs nothing from the chain. The on-chain commitment happens later
+        // at `quorum begin`, which syncs the relevant ledger wallet itself.
 
         // Optional collateral ratio. Stored on the LedgerOpen so
         // every later rotation (`quorum begin`, recovery rotation)

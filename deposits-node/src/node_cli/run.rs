@@ -113,20 +113,31 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         tracing::info!("Admin UI disabled (--admin-disabled)");
     }
 
-    // Sync wallet
-    tracing::info!("Syncing wallet...");
-    if let Err(e) = node.sync_wallet() {
-        tracing::warn!("Initial wallet sync failed: {}", e);
-    }
-
-    // Show balance
-    match node.wallet_balance() {
-        Ok(balance) => tracing::info!("Wallet balance: {} sats", balance),
-        Err(e) => tracing::warn!("Failed to get balance: {}", e),
-    }
-
-    // Start the node
+    // Start the node's message loop FIRST, then sync the wallet in the
+    // background. `sync_wallet()` is a blocking call into the chain backend
+    // (esplora/electrum); if that backend is slow or rate-limited, a
+    // foreground sync here freezes startup *before* the message loop runs.
+    // The daemon would still connect + subscribe to the relay (that happens
+    // in `Node::new`, earlier) — so it looks alive and answers pings — yet
+    // never drains incoming requests, and every `ledger_open`/cosign times
+    // out with no error. Opening a ledger is a pure declaration that needs
+    // no wallet, and on-chain ops sync their per-ledger wallet on demand,
+    // so nothing the daemon serves should ever wait on this initial sync.
     node.start().await?;
+
+    {
+        let node = node.clone();
+        tokio::task::spawn_blocking(move || {
+            tracing::info!("Syncing wallet (background)...");
+            match node.sync_wallet() {
+                Ok(()) => match node.wallet_balance() {
+                    Ok(balance) => tracing::info!("Wallet synced; balance: {} sats", balance),
+                    Err(e) => tracing::warn!("Wallet balance after sync: {}", e),
+                },
+                Err(e) => tracing::warn!("Initial wallet sync failed: {}", e),
+            }
+        });
+    }
 
     // Spawn the hub registration loop alongside the node's main event
     // loop. Same nostr identity (`m/85'/.../0`) the daemon uses for
