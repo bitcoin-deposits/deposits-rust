@@ -867,9 +867,13 @@ impl Node {
         // ledger wallet still has the entry. Reuse it instead of
         // building a fresh tx.
         let ledger_wallet = self.ensure_ledger_wallet(&ledger_id)?;
-        if let Err(e) = ledger_wallet.sync() {
-            tracing::warn!("Ledger wallet sync failed before quorum_begin: {}", e);
-        }
+        let sync_err: Option<String> = match ledger_wallet.sync() {
+            Ok(()) => None,
+            Err(e) => {
+                tracing::warn!("Ledger wallet sync failed before quorum_begin: {}", e);
+                Some(e.to_string())
+            }
+        };
 
         // Detect a refresh case: ledger is already Active and has an
         // existing on-chain reserves UTXO. We rotate by spending the
@@ -958,6 +962,35 @@ impl Node {
                         bal.saturating_sub(1000)
                     }
                 };
+                // Guard against the cryptic "Insufficient funds: 0 available"
+                // that BDK's coin selector emits when the ledger wallet is
+                // empty. With an explicit --amount-sats (the bootstrap always
+                // passes one) the friendly balance check above is skipped, so a
+                // wallet that simply hasn't seen its on-chain coins falls
+                // straight through to a confusing error that looks like the
+                // funds are gone. They almost never are — the usual cause is the
+                // daemon's chain backend not seeing them (a stale daemon from an
+                // earlier run keeps its original --esplora; or electrs isn't
+                // fully synced). Surface that distinction here, including the
+                // swallowed sync error if there was one.
+                let confirmed = ledger_wallet.balance_sats().unwrap_or(0);
+                if confirmed < chosen_amount {
+                    return Err(Error::Wallet(format!(
+                        "QuorumBegin: ledger {} wallet sees {} confirmed sats but needs {} to \
+                         build the activation tx. If the funds are confirmed on-chain at the \
+                         ledger deposit address, this daemon's chain backend isn't seeing them — \
+                         check its --esplora and that electrs is fully synced, then retry. (A \
+                         daemon left running from an earlier bootstrap keeps its original \
+                         --esplora; restart it to pick up a corrected one.){}",
+                        &ledger_id[..16.min(ledger_id.len())],
+                        confirmed,
+                        chosen_amount,
+                        match &sync_err {
+                            Some(e) => format!(" Wallet sync also errored: {}", e),
+                            None => String::new(),
+                        },
+                    )));
+                }
                 tracing::info!(
                     "QuorumBegin: spending {} sats from ledger {} wallet into Q={} taproot vault",
                     chosen_amount,
