@@ -779,13 +779,20 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
         println!("  {} members current at seq {}", name, owner_tip);
     }
 
-    // Begin all ledgers in parallel — each broadcasts its activation tx,
-    // waits for confs, then runs the cosign round.
+    // Dispatch quorum begin for every not-yet-Active ledger, then poll for
+    // Active. On mainnet `quorum begin` CANNOT return synchronously: the
+    // daemon broadcasts the activation tx and patiently waits for the
+    // cosigners' required confirmations (6 ≈ 1h) before cosigning +
+    // committing. The CLI's 30s admin timeout fires first ("No response from
+    // daemon"), but the daemon's spawned handler keeps working — so a timeout
+    // here means "dispatched, awaiting confirmations", NOT a failure. The
+    // only genuinely retryable case is a pre-broadcast "Insufficient funds"
+    // (ledger wallet not synced yet). Phase 7 polling is the source of truth.
     let activation_sats = args.per_ledger_sats.saturating_sub(1_000);
     let mut joins = Vec::new();
     for i in 0..args.nodes {
         let name = node_name(i);
-        if st.begun.get(&name).copied().unwrap_or(false) {
+        if st.active.get(&name).copied().unwrap_or(false) {
             continue;
         }
         let dir = node_dir(&args, i);
@@ -805,57 +812,47 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
                 "--protocol-version",
                 "cltv-offset-v2",
             ];
-            // Retry policy: ONLY pre-broadcast failures may be retried.
-            // "Insufficient funds" on a fresh ledger = the wallet's
-            // fast-poll sync hasn't landed the funding UTXO; the build
-            // failed, nothing went on-chain, retrying is free. A COSIGN
-            // TIMEOUT is the opposite: the activation tx is ALREADY
-            // on-chain, and a re-begin would try to rebuild it from the
-            // now-emptied ledger wallet (failing with a misleading
-            // "Insufficient funds" forever). The republish step exists
-            // precisely so cosign timeouts don't happen; if one does,
-            // stop and surface it instead of digging deeper.
             let mut r = node_cli(args_ref, &seed_path, &dir, &name, &begin_args).await;
             let mut attempts = 1;
-            while attempts < 6 {
-                match &r {
-                    Err(e) if e.contains("Insufficient funds") => {
-                        println!(
-                            "  {} begin attempt {}: ledger wallet not synced yet; retry in 20s",
-                            name, attempts
-                        );
-                        tokio::time::sleep(Duration::from_secs(20)).await;
-                        r = node_cli(args_ref, &seed_path, &dir, &name, &begin_args).await;
-                        attempts += 1;
-                    }
-                    Err(e) if e.contains("Cosign timeout") => {
-                        r = Err(format!(
-                            "cosign timeout AFTER broadcasting the activation tx — do NOT \
-                             re-run `quorum begin`; the funds sit in the broadcast vault. \
-                             Bring members current and re-drive the cosign round. {}",
-                            e
-                        ));
-                        break;
-                    }
-                    _ => break,
-                }
+            while attempts < 6
+                && r.as_ref()
+                    .err()
+                    .map(|e| e.contains("Insufficient funds"))
+                    .unwrap_or(false)
+            {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                r = node_cli(args_ref, &seed_path, &dir, &name, &begin_args).await;
+                attempts += 1;
             }
             (name, r)
         });
     }
     for (name, r) in futures::future::join_all(joins).await {
         match r {
-            Ok(_) => {
-                println!("  {} quorum begun", name);
-                st.begun.insert(name, true);
-                st.save(&args.data_dir);
+            Ok(_) => println!("  {} quorum begun (committed)", name),
+            Err(e) if e.contains("No response") || e.to_lowercase().contains("timeout") => {
+                println!(
+                    "  {} begin dispatched — daemon awaiting confirmations (mainnet ~1h)",
+                    name
+                );
             }
-            Err(e) => return Err(format!("{} quorum begin failed: {}", name, e)),
+            Err(e) => println!("  {} begin returned '{}' — polling for Active anyway", name, e),
         }
     }
 
     // ── Phase 7: verify ─────────────────────────────────────────────────
-    println!("[7/7] verify — waiting for every quorum to report Active");
+    // On mainnet the activation tx needs ~6 confirmations (~1h, longer on
+    // slow blocks) before the daemon cosigns + commits the QuorumBegin, so
+    // give the poll a budget that covers it. Regtest is near-instant.
+    let verify_budget = if args.network == "bitcoin" {
+        Duration::from_secs(3 * 3600 + 1800) // 3.5h
+    } else {
+        Duration::from_secs(300)
+    };
+    println!(
+        "[7/7] verify — waiting for every quorum to report Active (up to {} min)",
+        verify_budget.as_secs() / 60
+    );
     for i in 0..args.nodes {
         let name = node_name(i);
         if st.active.get(&name).copied().unwrap_or(false) {
@@ -865,10 +862,16 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
         let dir = node_dir(&args, i);
         let token = read_admin_token(&dir)?;
         let url = format!("http://127.0.0.1:{}/api/ledgers", admin_port(i));
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        let deadline = tokio::time::Instant::now() + verify_budget;
         loop {
             if tokio::time::Instant::now() > deadline {
-                return Err(format!("{}: quorum not Active after 300s", name));
+                return Err(format!(
+                    "{}: quorum not Active within {} min. The activation tx may still be \
+                     confirming — re-run bootstrap to resume (it is idempotent), or check \
+                     the daemon log.",
+                    name,
+                    verify_budget.as_secs() / 60
+                ));
             }
             let active = reqwest::Client::new()
                 .get(&url)
@@ -890,7 +893,7 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
                     }
                 }
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(15)).await;
         }
         println!("  {} Active", name);
         st.active.insert(name, true);

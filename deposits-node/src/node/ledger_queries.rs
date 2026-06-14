@@ -1001,7 +1001,12 @@ impl Node {
             txid,
             result.outpoint.vout,
             required_confs,
-            std::time::Duration::from_secs(600),
+            // Budget ~30 min per required confirmation. On mainnet
+            // `required_confs` is 6 (≈1h of blocks, longer on slow stretches),
+            // so a single begin attempt waits it out rather than giving up at
+            // ~1 conf (the old flat 600s). Scales with the network's
+            // required_confs (regtest=1 → 30 min, ample).
+            std::time::Duration::from_secs(required_confs.max(1) as u64 * 30 * 60),
         )
         .await?;
 
