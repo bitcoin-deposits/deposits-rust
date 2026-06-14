@@ -2657,6 +2657,29 @@ impl Node {
     /// Idempotent: a second call with the same `ledger_id` returns the
     /// existing wallet at the original account, without consuming an
     /// account index.
+    /// Snapshot the staged quorum membership + ledger hash for a ledger, in
+    /// the same (`next_quorum_members` first, else active) order
+    /// `rotate_reserves_to_quorum` uses to build the activation tx. Used by
+    /// the `recovery adopt-vault` path to re-derive a lost taproot record.
+    pub fn quorum_snapshot(
+        &self,
+        ledger_id: &str,
+    ) -> Result<(Vec<PublicKey>, [u8; 32]), Error> {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        let l = ledgers
+            .get(ledger_id)
+            .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
+            .read()
+            .unwrap();
+        let source = if !l.state.next_quorum_members.is_empty() {
+            &l.state.next_quorum_members
+        } else {
+            &l.state.quorum_members
+        };
+        let members: Vec<PublicKey> = source.iter().map(|m| m.pubkey).collect();
+        Ok((members, l.hash()))
+    }
+
     pub fn ensure_ledger_wallet(
         &self,
         ledger_id: &str,

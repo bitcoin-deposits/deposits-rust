@@ -578,6 +578,74 @@ impl LedgerWallet {
         Ok(())
     }
 
+    /// Adopt an on-chain Q=N taproot vault into this wallet's local state.
+    ///
+    /// Recovery path for when `quorum begin` broadcast the activation tx but
+    /// never persisted the taproot record — e.g. a daemon timeout/restart
+    /// during the post-broadcast confirmation wait, the failure mode the
+    /// persist-after-broadcast fix closes going forward. The funds are sitting
+    /// in the vault on-chain; this re-derives the local view so `quorum begin`
+    /// hits its `pending_resume` path and completes.
+    ///
+    /// Correctness is verified, not assumed: for each candidate `quorum_expiry`
+    /// it rebuilds the vault output with the exact same builder the activation
+    /// used (`VoterSet` + ruleset tier factory) and keeps the one whose
+    /// scriptPubKey matches `onchain_script`. A mismatch on every candidate is
+    /// an error rather than a guess, so we never persist a record the daemon
+    /// would later fail to spend. Persistence goes through the normal
+    /// [`commit_taproot_reserves`] path (verify-against-chain + full serde),
+    /// making the written record byte-identical to a healthy run's.
+    ///
+    /// Caller must stop the daemon first (this instantiates a wallet that would
+    /// otherwise contend with the running one).
+    pub fn adopt_taproot_from_chain(
+        &self,
+        vault_outpoint: OutPoint,
+        onchain_script: bdk_wallet::bitcoin::ScriptBuf,
+        amount: u64,
+        quorum_members: Vec<PublicKey>,
+        ledger_hash: [u8; 32],
+        ruleset_name: &str,
+        candidate_expiries: &[u32],
+    ) -> Result<TaprootReservesInfo, Error> {
+        let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(ruleset_name));
+        for &expiry in candidate_expiries {
+            let voter_set = VoterSet::new(self.operator_pubkey, quorum_members.clone());
+            // Mirror build_activation_tx exactly: factory takes the full voter
+            // count (members + operator) and the first expiry.
+            let config = (ruleset.tier_config_factory)(quorum_members.len() + 1, expiry);
+            let taproot_output =
+                TapscriptReservesBuilder::new(voter_set, config, self.network, ledger_hash)
+                    .build()
+                    .map_err(|e| Error::Wallet(format!("rebuild taproot output: {:?}", e)))?;
+            if taproot_output.script_pubkey() == onchain_script {
+                let info = TaprootReservesInfo {
+                    outpoint: vault_outpoint,
+                    amount,
+                    operator: self.operator_pubkey,
+                    quorum_members,
+                    quorum_expiry: expiry,
+                    ledger_hash,
+                    taproot_output,
+                    ruleset_name: ruleset_name.to_string(),
+                    confirmed: true,
+                };
+                self.commit_taproot_reserves(info.clone())?;
+                return Ok(info);
+            }
+        }
+        Err(Error::Wallet(format!(
+            "could not reconstruct the vault at {}: no expiry in the searched window \
+             reproduced the on-chain scriptPubKey under ruleset '{}' with {} quorum \
+             members. The members, ledger hash, or ruleset likely differ from what the \
+             activation tx was built with — widen --expiry-search or pass --quorum-expiry / \
+             --protocol-version explicitly.",
+            vault_outpoint,
+            ruleset_name,
+            quorum_members.len()
+        )))
+    }
+
     /// Fetch the scriptpubkey at the given outpoint via esplora, with 3
     /// retries on transient errors (exponential backoff: 500ms, 1s, 2s).
     /// Returns Ok(None) if the tx is genuinely not found (404) — the tx
@@ -1035,6 +1103,75 @@ mod tests {
             Err(e) => assert!(format!("{:?}", e).contains("already exists")),
             Ok(_) => panic!("expected create to refuse overwrite"),
         }
+    }
+
+    /// Recovery: `adopt_taproot_from_chain` must reconstruct the exact
+    /// `quorum_expiry` from the on-chain vault scriptPubKey by brute-force, and
+    /// refuse (not guess) when the searched window misses it. This is the
+    /// correctness backstop for the stranded-vault recovery path: the activation
+    /// tx's P2TR commits to the expiry (cltv-offset-v2 bakes it into the leaf
+    /// CLTVs), so the scriptPubKey uniquely identifies it.
+    #[test]
+    fn adopt_vault_bruteforces_correct_expiry() {
+        use bdk_wallet::bitcoin::secp256k1::{Secp256k1, SecretKey};
+        let tmp = TempDir::new().unwrap();
+        let w = open(3, "ledger_adopt", tmp.path());
+
+        let secp = Secp256k1::new();
+        let members: Vec<PublicKey> = (1u8..=3)
+            .map(|i| PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[i; 32]).unwrap()))
+            .collect();
+        let ledger_hash = [9u8; 32];
+        let ruleset_name = "cltv-offset-v2";
+        let expiry_true: u32 = 100_000;
+
+        // Build the vault scriptPubKey exactly as build_activation_tx would, for
+        // a given expiry. This is the "on-chain" output the recovery sees.
+        let build_spk = |expiry: u32| {
+            let voter_set = VoterSet::new(w.operator_pubkey(), members.clone());
+            let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(ruleset_name));
+            let config = (ruleset.tier_config_factory)(members.len() + 1, expiry);
+            TapscriptReservesBuilder::new(voter_set, config, Network::Regtest, ledger_hash)
+                .build()
+                .unwrap()
+                .script_pubkey()
+        };
+        let true_spk = build_spk(expiry_true);
+        // Neighbouring expiries produce different scripts — so the match is
+        // unambiguous and a wide search window stays safe.
+        assert_ne!(build_spk(expiry_true - 1), true_spk);
+        assert_ne!(build_spk(expiry_true + 1), true_spk);
+
+        // Window straddling the true expiry → adopts it.
+        let candidates: Vec<u32> = (expiry_true - 2..=expiry_true + 2).collect();
+        let info = w
+            .adopt_taproot_from_chain(
+                OutPoint::null(),
+                true_spk.clone(),
+                39_000,
+                members.clone(),
+                ledger_hash,
+                ruleset_name,
+                &candidates,
+            )
+            .expect("adopt should reconstruct the vault");
+        assert_eq!(info.quorum_expiry, expiry_true);
+        assert_eq!(info.amount, 39_000);
+        assert_eq!(info.taproot_output.script_pubkey(), true_spk);
+
+        // Window that misses the true expiry → error, never a wrong guess.
+        let bad: Vec<u32> = (expiry_true + 10..=expiry_true + 12).collect();
+        assert!(w
+            .adopt_taproot_from_chain(
+                OutPoint::null(),
+                true_spk,
+                39_000,
+                members,
+                ledger_hash,
+                ruleset_name,
+                &bad,
+            )
+            .is_err());
     }
 
     /// Three sibling per-ledger wallets at accounts 0/1/2 must keep

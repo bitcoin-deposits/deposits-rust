@@ -104,6 +104,15 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         eprintln!("                                         the legacy P2WSH UTXO but failed to persist");
         eprintln!("                                         the new entry locally. Run with the daemon");
         eprintln!("                                         stopped (or behind manual_override.marker).");
+        eprintln!("  adopt-vault [<ledger_id>] --funding-address <addr>");
+        eprintln!("              [--protocol-version <name>] [--quorum-expiry <block>]");
+        eprintln!("              [--expiry-search <N>]");
+        eprintln!("                                         Like reconstruct-taproot, but for the");
+        eprintln!("                                         hub-bootstrap funding model (ledger funded");
+        eprintln!("                                         by sending to its wpkh deposit address, no");
+        eprintln!("                                         legacy reserves entry). Follows the spent");
+        eprintln!("                                         funding output to the P2TR vault and");
+        eprintln!("                                         reconstructs the record. Daemon stopped.");
         eprintln!();
         eprintln!("Recovery flow (entropy-based):");
         eprintln!("  1. dispute - Detect violation, publish DisputeEnter (quorum disbanded)");
@@ -131,6 +140,7 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         "embed-hash" => recovery_embed_hash(&args[1..]).await,
         "publish-fraud-broadcast" => recovery_publish_fraud_broadcast(&args[1..]).await,
         "reconstruct-taproot" => recovery_reconstruct_taproot(&args[1..]).await,
+        "adopt-vault" => recovery_adopt_vault(&args[1..]).await,
         // New dispute protocol commands
         "dispute" => recovery_dispute(&args[1..]).await,
         "rebuild" => recovery_rebuild(&args[1..]).await,
@@ -500,6 +510,222 @@ pub async fn recovery_reconstruct_taproot(
          wrong. Re-run with --quorum-expiry <correct-block> to override.",
         new_taproot_entries[0].quorum_expiry
     );
+
+    Ok(())
+}
+
+/// Adopt an on-chain taproot vault back into local state when `quorum begin`
+/// broadcast the activation tx but never persisted the taproot record — the
+/// pre-fix mainnet failure where a timeout during the post-broadcast
+/// confirmation wait stranded the funds in the vault with no local memory of
+/// them.
+///
+/// Unlike [`recovery_reconstruct_taproot`] (which rotates a *legacy P2WSH*
+/// reserves entry), this handles the hub-bootstrap funding model: the ledger
+/// was funded by sending straight to its wpkh deposit address, so there's no
+/// `reserves.json` entry — the spent funding UTXO is a plain wallet output. We
+/// follow that output's spend to the P2TR vault, brute-force the `quorum_expiry`
+/// that reproduces the on-chain scriptPubKey (verified, not guessed), and
+/// persist via the wallet's normal commit path so `quorum begin` resumes.
+///
+/// Run with the daemon STOPPED — this instantiates a `Node` (for the ledger
+/// state + per-ledger wallet) that would otherwise contend with the running
+/// one. After it succeeds, restart the daemon and re-run `quorum begin`.
+pub async fn recovery_adopt_vault(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut ledger_id_arg: Option<String> = None;
+    let mut funding_address: Option<String> = None;
+    let mut protocol_version = "cltv-offset-v2".to_string();
+    let mut quorum_expiry_arg: Option<u32> = None;
+    let mut expiry_search: u32 = 50;
+    let mut config_args = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--funding-address" if i + 1 < args.len() => {
+                funding_address = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--protocol-version" if i + 1 < args.len() => {
+                protocol_version = args[i + 1].clone();
+                i += 1;
+            }
+            "--quorum-expiry" if i + 1 < args.len() => {
+                quorum_expiry_arg =
+                    Some(args[i + 1].parse().map_err(|_| {
+                        format!("Invalid --quorum-expiry: {}", args[i + 1])
+                    })?);
+                i += 1;
+            }
+            "--expiry-search" if i + 1 < args.len() => {
+                expiry_search = args[i + 1]
+                    .parse()
+                    .map_err(|_| format!("Invalid --expiry-search: {}", args[i + 1]))?;
+                i += 1;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if ledger_id_arg.is_none() {
+                    ledger_id_arg = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let funding_address = funding_address.ok_or(
+        "--funding-address <wpkh-addr> is required (the ledger's deposit address; \
+         `deposits-node ledger address <ledger_id>`)",
+    )?;
+
+    let config = parse_config(&config_args)?;
+    let esplora = config.electrum_url.trim_end_matches('/').to_string();
+
+    let node = crate::Node::new(config).await?;
+    let ledger_id = match ledger_id_arg {
+        Some(id) => super::resolve_to_ledger_id(&node, &id)?,
+        None => node
+            .get_primary_ledger()
+            .map(|(lid, _)| lid)
+            .ok_or("No ledger found; pass <ledger_id> explicitly.")?,
+    };
+
+    let (quorum_members, ledger_hash) = node.quorum_snapshot(&ledger_id)?;
+    if quorum_members.is_empty() {
+        return Err(format!(
+            "ledger {} has no staged quorum members — nothing to adopt",
+            &ledger_id[..16.min(ledger_id.len())]
+        )
+        .into());
+    }
+
+    // 1. Find the spent funding output paying the deposit address.
+    let http = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let txs: serde_json::Value = http
+        .get(format!("{}/address/{}/txs", esplora, funding_address))
+        .send()?
+        .json()?;
+    let txs = txs.as_array().ok_or("esplora /address/.../txs not an array")?;
+    let mut funding: Option<(String, u32)> = None;
+    for tx in txs {
+        let txid = tx["txid"].as_str().unwrap_or_default();
+        if let Some(vouts) = tx["vout"].as_array() {
+            for (vout_idx, o) in vouts.iter().enumerate() {
+                if o["scriptpubkey_address"].as_str() == Some(funding_address.as_str()) {
+                    funding = Some((txid.to_string(), vout_idx as u32));
+                    break;
+                }
+            }
+        }
+        if funding.is_some() {
+            break;
+        }
+    }
+    let (funding_txid, funding_vout) = funding.ok_or_else(|| {
+        format!(
+            "no output paying {} found on-chain — wrong address or wrong --esplora?",
+            funding_address
+        )
+    })?;
+
+    // 2. Follow that output's spend to the activation tx.
+    let outspend: serde_json::Value = http
+        .get(format!(
+            "{}/tx/{}/outspend/{}",
+            esplora, funding_txid, funding_vout
+        ))
+        .send()?
+        .json()?;
+    if !outspend["spent"].as_bool().unwrap_or(false) {
+        return Err(format!(
+            "funding output {}:{} is still UNSPENT — the activation tx was never \
+             broadcast, so there is no vault to adopt. Just re-run `quorum begin`.",
+            funding_txid, funding_vout
+        )
+        .into());
+    }
+    let activation_txid = outspend["txid"]
+        .as_str()
+        .ok_or("outspend missing spender txid")?
+        .to_string();
+    let confirm_block = outspend["status"]["block_height"].as_u64().unwrap_or(0) as u32;
+
+    // 3. Locate the P2TR vault output in the activation tx.
+    let activation: serde_json::Value = http
+        .get(format!("{}/tx/{}", esplora, activation_txid))
+        .send()?
+        .json()?;
+    let vouts = activation["vout"]
+        .as_array()
+        .ok_or("activation tx has no vout array")?;
+    let (vault_vout, vault_out) = vouts
+        .iter()
+        .enumerate()
+        .find(|(_, o)| o["scriptpubkey_type"].as_str() == Some("v1_p2tr"))
+        .ok_or("activation tx has no P2TR output — not a quorum-begin rotation")?;
+    let vault_spk_hex = vault_out["scriptpubkey"]
+        .as_str()
+        .ok_or("vault output missing scriptpubkey")?;
+    let vault_amount = vault_out["value"].as_u64().ok_or("vault output missing value")?;
+    let onchain_script =
+        bdk_wallet::bitcoin::ScriptBuf::from(hex::decode(vault_spk_hex)?);
+    let vault_outpoint = bdk_wallet::bitcoin::OutPoint {
+        txid: activation_txid.parse()?,
+        vout: vault_vout as u32,
+    };
+
+    // 4. Candidate expiries. rotate built expiry = tip_at_build + DEFAULT, and
+    // tip_at_build is a few blocks before the activation confirmed. Brute-force
+    // a window around that; the scriptPubKey match makes a wide window safe.
+    let candidates: Vec<u32> = if let Some(e) = quorum_expiry_arg {
+        vec![e]
+    } else {
+        let lo = confirm_block.saturating_sub(expiry_search);
+        let hi = confirm_block + 2;
+        (lo..=hi)
+            .map(|tip| tip + crate::node::DEFAULT_QUORUM_EXPIRY_BLOCKS)
+            .collect()
+    };
+
+    println!("Adopting taproot vault for ledger {}", &ledger_id[..16.min(ledger_id.len())]);
+    println!("  funding output: {}:{}", funding_txid, funding_vout);
+    println!("  activation tx:  {} (block {})", activation_txid, confirm_block);
+    println!("  vault outpoint: {}:{}", activation_txid, vault_vout);
+    println!("  vault amount:   {} sats", vault_amount);
+    println!("  Q members:      {}", quorum_members.len());
+    println!("  ruleset:        {}", protocol_version);
+    println!("  expiry search:  {} candidate(s)", candidates.len());
+
+    let member_count = quorum_members.len();
+    let ledger_wallet = node.ensure_ledger_wallet(&ledger_id)?;
+    let info = ledger_wallet.adopt_taproot_from_chain(
+        vault_outpoint,
+        onchain_script,
+        vault_amount,
+        quorum_members,
+        ledger_hash,
+        &protocol_version,
+        &candidates,
+    )?;
+
+    println!();
+    println!(
+        "Reconstructed and persisted taproot_reserves.json (expiry block {}, Q={}).",
+        info.quorum_expiry, member_count
+    );
+    println!();
+    println!("Next steps:");
+    println!("  1. Restart the daemon so it reloads the wallet state from disk");
+    println!("  2. Re-run `quorum begin` — it will hit the resume path (reusing the");
+    println!("     on-chain vault UTXO), run the cosign round, and go Active.");
 
     Ok(())
 }
