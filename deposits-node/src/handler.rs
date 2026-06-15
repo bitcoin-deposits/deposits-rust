@@ -1577,6 +1577,8 @@ impl DepositsHandler {
             .ok_or_else(|| format!("Ledger not found: {}", ledger_id))?;
         drop(ledgers); // Release lock before modifying
 
+        use deposits_core::tlv::TlvDecode;
+
         let mut ledger = ledger_arc.write().unwrap();
         let mut applied = 0;
 
@@ -1591,8 +1593,44 @@ impl DepositsHandler {
                 ));
             }
 
-            // Append the update
-            ledger.append_signed_update(update);
+            // Run the state machine — don't just append. Appending to history
+            // alone advanced the chain (sequence/tip) but left derived state
+            // (deposits, balances, quorum) untouched, so a joined member's
+            // re-imported replica sat at the right seq with an empty deposits
+            // map — and a later dependent op (e.g. a drip InvoiceCredit against
+            // the buffer's DepositOpen) was rejected DepositNotFound. Mirror
+            // ledger_actor::apply_inbound: apply the op through the state
+            // machine + conformance verifier, then advance chain + push.
+            let op = match deposits_core::messages::LedgerOperation::tlv_decode(&update.message) {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(format!("decode op at seq {}: {}", update.sequence_number, e))
+                }
+            };
+            match ledger.apply_and_check(&op, update.block_height) {
+                Ok(violations) if !violations.is_empty() => {
+                    tracing::warn!(
+                        "apply_updates_to_ledger {}: conformance violations at seq {}: {:?}",
+                        ledger_id,
+                        update.sequence_number,
+                        violations
+                    );
+                }
+                Err(e) => {
+                    // Stop at the first un-appliable update; keep prior progress.
+                    tracing::warn!(
+                        "apply_updates_to_ledger {}: apply failed at seq {}: {} — stopping",
+                        ledger_id,
+                        update.sequence_number,
+                        e
+                    );
+                    break;
+                }
+                _ => {}
+            }
+            ledger.state.sequence = update.sequence_number;
+            ledger.state.chain_tip_hash = update.chain_hash();
+            ledger.history.push(update);
             applied += 1;
         }
 
