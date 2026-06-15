@@ -361,6 +361,11 @@ impl LedgerWallet {
             let mut tx_builder = wallet.build_tx();
             tx_builder
                 .add_recipient(new_script_pubkey.clone(), Amount::from_sat(amount_sats))
+                // NB: `from_sat_per_vb_unchecked` shows a deprecation hint
+                // pointing at `from_sat_per_vb_u32`, but the FeeRate reached via
+                // bdk_wallet::bitcoin resolves to an older bitcoin-units that
+                // lacks that constructor (version skew in the tree). Keep the
+                // working call until bdk's pin catches up.
                 .fee_rate(FeeRate::from_sat_per_vb_unchecked(
                     fee_rate_sat_per_vb.max(1.0) as u64,
                 ));
