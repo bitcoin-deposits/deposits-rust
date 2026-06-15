@@ -66,6 +66,7 @@ impl Node {
             request.action.as_str(),
             "ledger_open"
                 | "admin_status"
+                | "ledger_drop"
                 | "admin_buffer_open"
                 | "admin_buffer_fill"
                 | "admin_buffer_drain"
@@ -370,6 +371,7 @@ impl Node {
             "admin_buffer_drain" => self.process_admin_buffer_drain_request(&request).await,
             "admin_buffer_list" => self.process_admin_buffer_list_request(&request).await,
             "admin_status" => self.process_admin_status_request(&request).await,
+            "ledger_drop" => self.process_ledger_drop_request(&request).await,
             "bump" => {
                 tracing::info!("Bump requested - syncing wallet and checking deposits...");
                 if let Err(e) = self.sync_wallet() {

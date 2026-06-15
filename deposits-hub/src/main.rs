@@ -47,6 +47,9 @@ COMMANDS:
                                   print per-node + per-ledger status (owned vs member, quorum
                                   active, reserves). Requires the nodes to trust the hub
                                   (admin.npub — written automatically by `bootstrap`).
+    drop-ledger --node <NAME>    Tell a node to drop an unfunded, PreQuorum ledger it operates
+        --ledger <ID>             (orphan cleanup; identify via `status`). Daemon refuses
+        --relay <URL> [--force]   anything active/funded/with an on-chain vault.
     bootstrap --nodes <N>        Fund once, deploy a self-connected cluster: N daemons,
               --relay <URL>               one ledger each, Q=3 cross-wired quorums, ONE funding
               --esplora <URL>             tx + ONE disbursement + N activations. Resumable —
@@ -105,6 +108,7 @@ fn main() -> ExitCode {
         "pubkey" => cmd_pubkey(rest),
         "approve" => cmd_approve(rest),
         "status" => cmd_status(rest),
+        "drop-ledger" => cmd_drop_ledger(rest),
         "reject" => cmd_reject(rest),
         "restore" => cmd_restore(rest),
         "publish-backup" => cmd_publish_backup(rest),
@@ -648,6 +652,99 @@ fn cmd_status(args: &[String]) -> Result<(), String> {
             }
         }
         Ok::<(), String>(())
+    })
+}
+
+/// `deposits-hub drop-ledger --node <name> --ledger <id> --relay <URL> [--force]`
+///
+/// Tell a node to drop an unfunded, PreQuorum ledger it operates — cleanup for
+/// orphan ledgers (identify them with `deposits-hub status`). The daemon
+/// hard-refuses anything active, funded, or with an on-chain vault, so this is
+/// only ever destructive for an empty ledger.
+fn cmd_drop_ledger(args: &[String]) -> Result<(), String> {
+    let mut data_dir: Option<std::path::PathBuf> = None;
+    let mut relays: Vec<String> = Vec::new();
+    let mut node: Option<String> = None;
+    let mut ledger: Option<String> = None;
+    let mut force = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--data-dir" => {
+                data_dir = args.get(i + 1).map(std::path::PathBuf::from);
+                i += 1;
+            }
+            "--relay" => {
+                if let Some(v) = args.get(i + 1) {
+                    relays.push(v.clone());
+                }
+                i += 1;
+            }
+            "--node" => {
+                node = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--ledger" => {
+                ledger = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--force" => force = true,
+            _ => {}
+        }
+        i += 1;
+    }
+    let data_dir = data_dir_or_default(data_dir);
+    let node = node.ok_or("drop-ledger requires --node <name> (see `deposits-hub status`)")?;
+    let ledger = ledger.ok_or("drop-ledger requires --ledger <id>")?;
+    if relays.is_empty() {
+        return Err("drop-ledger requires at least one --relay".to_string());
+    }
+    let secret_hex =
+        std::fs::read_to_string(deposits_hub::state::HubState::nostr_secret_path(&data_dir))
+            .map_err(|e| format!("read hub secret: {}", e))?
+            .trim()
+            .to_string();
+
+    // Resolve the node's operator pubkey from bootstrap-state.json.
+    let state_path = data_dir.join("bootstrap-state.json");
+    let raw = std::fs::read_to_string(&state_path)
+        .map_err(|e| format!("read {}: {}", state_path.display(), e))?;
+    let sv: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse bootstrap-state: {}", e))?;
+    let node_id = sv
+        .get("node_ids")
+        .and_then(|m| m.get(&node))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("node '{}' not found in bootstrap-state.json", node))?
+        .to_string();
+    let xonly = if node_id.len() == 66 {
+        node_id[2..].to_string()
+    } else {
+        node_id
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {}", e))?;
+    rt.block_on(async move {
+        match deposits_hub::admin_client::send_admin_request(
+            &secret_hex,
+            &relays,
+            &xonly,
+            &ledger,
+            "ledger_drop",
+            serde_json::json!({ "ledger_id": ledger, "force": force }),
+            deposits_hub::admin_client::DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        {
+            Ok(_) => {
+                println!("dropped ledger {} on {}", ledger, node);
+                Ok::<(), String>(())
+            }
+            Err(e) => Err(format!("drop refused/failed: {}", e)),
+        }
     })
 }
 

@@ -310,6 +310,152 @@ impl Node {
         (true, Some(result.to_string()), None)
     }
 
+    /// Admin: drop an unfunded, PreQuorum ledger this node operates — for
+    /// clearing orphan ledgers left by a messy bring-up.
+    ///
+    /// Hard-refuses anything that could hold value. To be dropped a ledger
+    /// must be: Operator-role (partner replicas re-sync on their own and aren't
+    /// ours to delete), PreQuorum (never Active/funded), with no recorded
+    /// taproot vault, zero reserves/collateral, and — unless `force` — a synced
+    /// zero-balance ledger wallet (so funds sent to the deposit address but not
+    /// yet activated aren't silently orphaned). Removes it from memory
+    /// (handler, actor, wallet) before deleting its on-disk jsonl + wallet dir,
+    /// so nothing re-persists it. Irreversible, but only ever for an empty
+    /// ledger.
+    pub(crate) async fn process_ledger_drop_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        if let Err(denial) = self.check_admin_authorized(request) {
+            return denial;
+        }
+        let ledger_id = request
+            .params
+            .get("ledger_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(request.ledger_id.as_str())
+            .to_string();
+        let force = request
+            .params
+            .get("force")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let short = &ledger_id[..16.min(ledger_id.len())];
+        let refuse = |msg: String| (false, None, Some(msg));
+
+        // Role + state snapshot under the ledgers lock.
+        let (role_operator, prequorum, reserves, collateral) = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let Some(arc) = ledgers.get(&ledger_id) else {
+                return refuse(format!("ledger {} not found on this node", short));
+            };
+            let l = arc.read().unwrap();
+            (
+                matches!(l.role, deposits_core::ledger::LedgerRole::Operator),
+                l.state.quorum_state == deposits_core::QuorumState::PreQuorum,
+                l.reserves_amount(),
+                l.state.collateral_amount,
+            )
+        };
+        if !role_operator {
+            return refuse(
+                "refusing: this node is not the Operator of that ledger (partner replicas \
+                 re-sync on their own and aren't dropped here)"
+                    .to_string(),
+            );
+        }
+        if !prequorum {
+            return refuse(
+                "refusing: ledger quorum is not PreQuorum — active/funded ledgers are never \
+                 dropped"
+                    .to_string(),
+            );
+        }
+        if reserves != 0 || collateral != 0 {
+            return refuse(format!(
+                "refusing: ledger carries reserves={} / collateral={} msats",
+                reserves, collateral
+            ));
+        }
+
+        // Load the per-ledger wallet without creating a fresh account: use the
+        // cached one, else load from disk only if its dir exists.
+        let lw = {
+            let cached = self.ledger_wallets.read().unwrap().get(&ledger_id).cloned();
+            match cached {
+                Some(w) => Some(w),
+                None => {
+                    let dir = crate::ledger_wallet::LedgerWallet::ledger_dir(
+                        &self.data_dir,
+                        &ledger_id,
+                    );
+                    if dir.join("account_index.txt").exists() {
+                        match self.ensure_ledger_wallet(&ledger_id) {
+                            Ok(w) => Some(w),
+                            Err(e) => {
+                                return refuse(format!("could not load ledger wallet: {}", e))
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+        if let Some(lw) = &lw {
+            if lw.taproot_reserves().is_some() {
+                return refuse(
+                    "refusing: an on-chain taproot vault is recorded for this ledger".to_string(),
+                );
+            }
+            if !force {
+                if let Err(e) = lw.sync() {
+                    return refuse(format!(
+                        "refusing: couldn't sync the ledger wallet to confirm it's empty: {} \
+                         (pass force=true to skip the on-chain check)",
+                        e
+                    ));
+                }
+                match lw.balance_sats() {
+                    Ok(0) => {}
+                    Ok(bal) => {
+                        return refuse(format!(
+                            "refusing: ledger wallet holds {} sats — withdraw/sweep before \
+                             dropping",
+                            bal
+                        ))
+                    }
+                    Err(e) => {
+                        return refuse(format!("refusing: couldn't read ledger balance: {}", e))
+                    }
+                }
+            }
+        }
+
+        // Gate passed. Drop from memory first (so no save re-persists it),
+        // then delete on-disk state. Removing the actor handle closes its inbox
+        // → the actor task exits.
+        self.handler.ledgers.lock().unwrap().remove(&ledger_id);
+        self.ledger_actors.lock().unwrap().remove(&ledger_id);
+        self.ledger_wallets.write().unwrap().remove(&ledger_id);
+
+        let jsonl = self
+            .data_dir
+            .join("wallet")
+            .join("ledgers")
+            .join(format!("{}.jsonl", ledger_id));
+        let dir = crate::ledger_wallet::LedgerWallet::ledger_dir(&self.data_dir, &ledger_id);
+        let _ = std::fs::remove_file(&jsonl);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        tracing::info!("Dropped unfunded PreQuorum ledger {}", short);
+        (
+            true,
+            Some(serde_json::json!({ "dropped": ledger_id }).to_string()),
+            None,
+        )
+    }
+
     /// Admin: increase a buffer deposit's balance via a synthetic
     /// InvoiceCredit. The `invoice_id` is a random UUID-like string —
     /// co-signers don't care where the payment came from, they validate
