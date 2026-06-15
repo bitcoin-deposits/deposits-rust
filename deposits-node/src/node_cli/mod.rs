@@ -1168,14 +1168,38 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
     let mut published = 0;
 
     for ledger_id in ledger_ids {
-        let existing = match node.nostr.fetch_ledger_advertisement(&ledger_id).await {
+        let mut ad = match node.nostr.fetch_ledger_advertisement(&ledger_id).await {
             Ok(Some(ad)) => ad,
             Ok(None) => {
-                tracing::debug!(
-                    "No prior advertisement for ledger {} — skipping republish",
+                // No prior ad — this ledger has never been advertised. The
+                // common case is a cluster brought up via `deposits-hub
+                // bootstrap`, which never calls `ledger advertise`, leaving
+                // every ledger invisible to wallets and the explorer forever
+                // (this routine used to just skip). Publish a first ad with
+                // default terms so it's discoverable; the operator can later
+                // run `ledger advertise` with explicit --*-fee flags to
+                // override. Dynamic fields are filled by the refresh below.
+                let Some((_, l)) = node.get_ledger_with_id(&ledger_id) else {
+                    continue;
+                };
+                let network_str = match node.wallet.network() {
+                    bitcoin::Network::Bitcoin => "bitcoin",
+                    bitcoin::Network::Testnet => "testnet",
+                    bitcoin::Network::Signet => "signet",
+                    bitcoin::Network::Regtest => "regtest",
+                    _ => "unknown",
+                };
+                tracing::info!(
+                    "No prior advertisement for ledger {} — publishing a first ad \
+                     with default terms",
                     &ledger_id[..16]
                 );
-                continue;
+                crate::nostr::LedgerAdvertisement::new(
+                    l.ledger_id_hex(),
+                    hex::encode(l.operator_key().serialize()),
+                    l.reserves_key().to_string(),
+                    network_str.to_string(),
+                )
             }
             Err(e) => {
                 tracing::warn!(
@@ -1186,8 +1210,6 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
                 continue;
             }
         };
-
-        let mut ad = existing;
 
         // Refresh dynamic fields from the local ledger snapshot.
         let refreshed = {

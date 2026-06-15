@@ -1213,6 +1213,20 @@ impl Node {
             tokio::time::Duration::from_secs(60)
         };
 
+        // Ensure every operator ledger stays advertised (Kind 39100). Startup
+        // already runs this once; the periodic pass is self-healing — it
+        // publishes a first ad for any ledger that has never been advertised
+        // (e.g. a hub-bootstrapped cluster, otherwise invisible to wallets and
+        // the explorer) and refreshes the rest. Heavier than the per-cycle
+        // remirror (fetch+publish per ledger), so it runs on a slow cadence and
+        // is spawned so it never blocks the loop.
+        let mut last_advertise = tokio::time::Instant::now();
+        let advertise_interval = if self.fast_poll {
+            tokio::time::Duration::from_secs(20)
+        } else {
+            tokio::time::Duration::from_secs(600)
+        };
+
         if self.fast_poll {
             tracing::info!(
                 "Fast poll mode enabled: periodic=5s, wallet_sync=30s, poll=30s, reload=2s"
@@ -1239,6 +1253,15 @@ impl Node {
                     tracing::warn!("Full wallet sync failed: {}", e);
                 }
                 last_wallet_sync = tokio::time::Instant::now();
+            }
+
+            // Self-healing ledger advertisement (every 10 min, spawned).
+            if last_advertise.elapsed() >= advertise_interval {
+                let node = Arc::clone(self);
+                tokio::spawn(async move {
+                    crate::node_cli::republish_ledger_advertisements(&node).await;
+                });
+                last_advertise = tokio::time::Instant::now();
             }
 
             // Periodic tasks (every 5s fast / 60s normal)
