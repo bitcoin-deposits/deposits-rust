@@ -293,6 +293,7 @@ impl Node {
                             l.state.quorum_state == deposits_core::QuorumState::Active,
                         "quorum_size": l.state.quorum_members.len(),
                         "reserves_sats": l.reserves_amount() / 1000,
+                        "collateral_sats": l.state.collateral_amount / 1000,
                         "updates": l.history.len(),
                     })
                 })

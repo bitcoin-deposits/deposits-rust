@@ -1182,6 +1182,19 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
                 let Some((_, l)) = node.get_ledger_with_id(&ledger_id) else {
                     continue;
                 };
+                // Only auto-publish a *first* ad for a ledger whose quorum is
+                // active. A PreQuorum ledger has no cosigners, so advertising it
+                // would invite deposits with no custody guarantee — and empty
+                // orphan ledgers left over from a messy bring-up would otherwise
+                // pollute the explorer. (An operator can still advertise a
+                // specific ledger explicitly via `ledger advertise`.)
+                if l.state.quorum_state != deposits_core::QuorumState::Active {
+                    tracing::debug!(
+                        "Skipping auto-advertise for non-active ledger {}",
+                        &ledger_id[..16.min(ledger_id.len())]
+                    );
+                    continue;
+                }
                 let network_str = match node.wallet.network() {
                     bitcoin::Network::Bitcoin => "bitcoin",
                     bitcoin::Network::Testnet => "testnet",

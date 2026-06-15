@@ -630,13 +630,17 @@ fn cmd_status(args: &[String]) -> Result<(), String> {
                             .unwrap_or(false);
                         let q = l.get("quorum_size").and_then(|v| v.as_u64()).unwrap_or(0);
                         let reserves = l.get("reserves_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let collateral =
+                            l.get("collateral_sats").and_then(|v| v.as_u64()).unwrap_or(0);
                         println!(
-                            "    {:<10} {}  Q={}  {}  reserves={} sats",
+                            "    {:<10} {}  Q={}  {}  vault={} sats (reserves {} + collateral {})",
                             role,
                             &lid[..16.min(lid.len())],
                             q,
                             if act { "active" } else { "PreQuorum" },
-                            reserves
+                            reserves + collateral,
+                            reserves,
+                            collateral
                         );
                     }
                 }
