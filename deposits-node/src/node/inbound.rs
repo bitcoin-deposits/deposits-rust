@@ -67,6 +67,8 @@ impl Node {
             "ledger_open"
                 | "admin_status"
                 | "ledger_drop"
+                | "advertise_status"
+                | "advertise_set"
                 | "liquidity_list"
                 | "liquidity_create"
                 | "liquidity_pause"
@@ -377,6 +379,8 @@ impl Node {
             "admin_buffer_list" => self.process_admin_buffer_list_request(&request).await,
             "admin_status" => self.process_admin_status_request(&request).await,
             "ledger_drop" => self.process_ledger_drop_request(&request).await,
+            "advertise_status" => self.process_advertise_status_request(&request).await,
+            "advertise_set" => self.process_advertise_set_request(&request).await,
             "liquidity_list" => self.process_liquidity_list_request(&request).await,
             "liquidity_create" => self.process_liquidity_create_request(&request).await,
             "liquidity_pause" => self.process_liquidity_set_paused_request(&request, true).await,

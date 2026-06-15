@@ -573,6 +573,168 @@ impl Node {
         )
     }
 
+    /// Admin: report the currently-published Kind-39100 advertisement terms for
+    /// each operator ledger (read-only). Fetches from the relay — the source of
+    /// truth for the static terms (republish refreshes the dynamic fields).
+    pub(crate) async fn process_advertise_status_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        if let Err(denial) = self.check_admin_authorized(request) {
+            return denial;
+        }
+        let ledger_ids: Vec<String> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .values()
+                .filter_map(|arc| {
+                    let l = arc.read().unwrap();
+                    matches!(l.role, deposits_core::ledger::LedgerRole::Operator)
+                        .then(|| l.ledger_id_hex())
+                })
+                .collect()
+        };
+        let mut ads = Vec::new();
+        for lid in ledger_ids {
+            match self.nostr.fetch_ledger_advertisement(&lid).await {
+                Ok(Some(ad)) => ads.push(serde_json::json!({
+                    "ledger_id": lid,
+                    "advertised": true,
+                    "operator_name": ad.operator_name,
+                    "description": ad.description,
+                    "annual_fee_bps": ad.annual_fee_bps,
+                    "deposit_fee_bps": ad.deposit_fee_bps,
+                    "withdrawal_fee_bps": ad.withdrawal_fee_bps,
+                    "invoice_fee_bps": ad.invoice_fee_bps,
+                    "max_deposit_msats": ad.max_deposit_msats,
+                    "min_deposit_msats": ad.min_deposit_msats,
+                })),
+                _ => ads.push(serde_json::json!({ "ledger_id": lid, "advertised": false })),
+            }
+        }
+        (true, Some(serde_json::json!({ "ads": ads }).to_string()), None)
+    }
+
+    /// Admin: set advertisement terms (operator name/description, fee bps,
+    /// deposit limits) for one ledger and republish the Kind-39100 ad.
+    /// Gated to an Operator-role, quorum-Active ledger (advertising a
+    /// quorumless ledger invites deposits with no custody guarantee). Fetches
+    /// the existing ad as the base (preserving fields not overridden); if none
+    /// exists yet, builds a fresh one from current ledger state.
+    pub(crate) async fn process_advertise_set_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        if let Err(denial) = self.check_admin_authorized(request) {
+            return denial;
+        }
+        let p = &request.params;
+        let refuse = |m: String| (false, None, Some(m));
+        let ledger_id = p
+            .get("ledger_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if ledger_id.is_empty() {
+            return refuse("ledger_id is required".to_string());
+        }
+
+        // Gate: Operator role + active quorum.
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            match ledgers.get(&ledger_id) {
+                None => return refuse(format!("ledger {} not found", &ledger_id[..16.min(ledger_id.len())])),
+                Some(arc) => {
+                    let l = arc.read().unwrap();
+                    if !matches!(l.role, deposits_core::ledger::LedgerRole::Operator) {
+                        return refuse("not the operator of this ledger".to_string());
+                    }
+                    if l.state.quorum_state != deposits_core::QuorumState::Active {
+                        return refuse(
+                            "ledger quorum is not active — can't advertise a quorumless ledger"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Base ad: existing (preserve untouched fields) or a fresh build.
+        let mut ad = match self.nostr.fetch_ledger_advertisement(&ledger_id).await {
+            Ok(Some(a)) => a,
+            _ => {
+                let Some((_, l)) = self.get_ledger_with_id(&ledger_id) else {
+                    return refuse("ledger not found".to_string());
+                };
+                let network_str = match self.wallet.network() {
+                    bitcoin::Network::Bitcoin => "bitcoin",
+                    bitcoin::Network::Testnet => "testnet",
+                    bitcoin::Network::Signet => "signet",
+                    bitcoin::Network::Regtest => "regtest",
+                    _ => "unknown",
+                };
+                let mut fresh = crate::nostr::LedgerAdvertisement::new(
+                    l.ledger_id_hex(),
+                    hex::encode(l.operator_key().serialize()),
+                    l.reserves_key().to_string(),
+                    network_str.to_string(),
+                );
+                fresh.guarantees = crate::nostr::LedgerAdvertisement::default_guarantees();
+                fresh.capabilities = crate::operator_policy::default_advertised_capabilities();
+                fresh.reserves_amount_msats = l.reserves_amount();
+                fresh.collateral_amount_msats = l.state.collateral_amount;
+                fresh.current_block = l
+                    .history
+                    .last()
+                    .map(|u| u.block_height)
+                    .unwrap_or_else(|| self.wallet.get_block_height().unwrap_or(0));
+                fresh.quorum_state = format!("{:?}", l.state.quorum_state);
+                fresh.quorum_members = l
+                    .state
+                    .quorum_members
+                    .iter()
+                    .map(|m| m.pubkey.to_string())
+                    .collect();
+                fresh
+            }
+        };
+
+        // Apply operator overrides.
+        if let Some(v) = p.get("operator_name").and_then(|v| v.as_str()) {
+            ad.operator_name = Some(v.to_string());
+        }
+        if let Some(v) = p.get("description").and_then(|v| v.as_str()) {
+            ad.description = Some(v.to_string());
+        }
+        if let Some(v) = p.get("annual_fee_bps").and_then(|v| v.as_u64()) {
+            ad.annual_fee_bps = v as u32;
+        }
+        if let Some(v) = p.get("deposit_fee_bps").and_then(|v| v.as_u64()) {
+            ad.deposit_fee_bps = v as u32;
+        }
+        if let Some(v) = p.get("withdrawal_fee_bps").and_then(|v| v.as_u64()) {
+            ad.withdrawal_fee_bps = v as u32;
+        }
+        if let Some(v) = p.get("invoice_fee_bps").and_then(|v| v.as_u64()) {
+            ad.invoice_fee_bps = v as u32;
+        }
+        if let Some(v) = p.get("max_deposit_msats").and_then(|v| v.as_u64()) {
+            ad.max_deposit_msats = v;
+        }
+        if let Some(v) = p.get("min_deposit_msats").and_then(|v| v.as_u64()) {
+            ad.min_deposit_msats = v;
+        }
+
+        match self.nostr.publish_ledger_advertisement(&ad).await {
+            Ok(_) => (
+                true,
+                Some(serde_json::json!({ "ledger_id": ledger_id, "advertised": true }).to_string()),
+                None,
+            ),
+            Err(e) => refuse(format!("publish advertisement: {}", e)),
+        }
+    }
+
     /// Admin: list this node's liquidity-drip plans (read-only).
     pub(crate) async fn process_liquidity_list_request(
         &self,

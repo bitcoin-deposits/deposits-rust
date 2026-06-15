@@ -55,6 +55,11 @@ COMMANDS:
         create --node N --alias A --ledger ID --initial-sats N --decrement-sats M
                --interval-sec S [--interval-fuzz-sec F]
         pause|resume|remove --node N --alias A
+    advertise <sub> --relay <URL>  View/set Kind-39100 advertisement terms over the admin RPC:
+        status [--node N]            show published terms (whole cluster, or one node)
+        set --node N [--ledger ID] [--name S] [--description S] [--annual-fee-bps N]
+            [--deposit-fee-bps N] [--withdrawal-fee-bps N] [--invoice-fee-bps N]
+            [--max-deposit-msats N] [--min-deposit-msats N]   (unset terms preserved)
     bootstrap --nodes <N>        Fund once, deploy a self-connected cluster: N daemons,
               --relay <URL>               one ledger each, Q=3 cross-wired quorums, ONE funding
               --esplora <URL>             tx + ONE disbursement + N activations. Resumable —
@@ -115,6 +120,7 @@ fn main() -> ExitCode {
         "status" => cmd_status(rest),
         "drop-ledger" => cmd_drop_ledger(rest),
         "liquidity" => cmd_liquidity(rest),
+        "advertise" => cmd_advertise(rest),
         "reject" => cmd_reject(rest),
         "restore" => cmd_restore(rest),
         "publish-backup" => cmd_publish_backup(rest),
@@ -991,6 +997,207 @@ fn cmd_liquidity(args: &[String]) -> Result<(), String> {
                 Ok::<(), String>(())
             }
             Err(e) => Err(format!("liquidity {} failed: {}", sub, e)),
+        }
+    })
+}
+
+/// `deposits-hub advertise <status|set> ...`
+///
+/// View or set Kind-39100 advertisement terms over the Nostr admin RPC.
+/// `status` fans out over the cluster (or one --node); `set` targets one
+/// --node's ledger (or an explicit --ledger) and republishes with the given
+/// fee/limit/name overrides (unspecified terms are preserved).
+fn cmd_advertise(args: &[String]) -> Result<(), String> {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+    if sub.is_empty() {
+        return Err(
+            "usage: deposits-hub advertise <status|set> [--node N] [--ledger ID] \
+             [--name S] [--description S] [--annual-fee-bps N] [--deposit-fee-bps N] \
+             [--withdrawal-fee-bps N] [--invoice-fee-bps N] [--max-deposit-msats N] \
+             [--min-deposit-msats N] --relay <url>"
+                .to_string(),
+        );
+    }
+    let rest = &args[1..];
+
+    let mut data_dir: Option<std::path::PathBuf> = None;
+    let mut relays: Vec<String> = Vec::new();
+    let mut node: Option<String> = None;
+    let mut ledger: Option<String> = None;
+    // Only the term flags the operator actually passes are sent, so the
+    // daemon preserves the rest of the existing ad.
+    let mut terms = serde_json::Map::new();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--data-dir" => data_dir = rest.get(i + 1).map(std::path::PathBuf::from),
+            "--relay" => {
+                if let Some(v) = rest.get(i + 1) {
+                    relays.push(v.clone());
+                }
+            }
+            "--node" => node = rest.get(i + 1).cloned(),
+            "--ledger" => ledger = rest.get(i + 1).cloned(),
+            "--name" => {
+                if let Some(v) = rest.get(i + 1) {
+                    terms.insert("operator_name".into(), serde_json::Value::String(v.clone()));
+                }
+            }
+            "--description" => {
+                if let Some(v) = rest.get(i + 1) {
+                    terms.insert("description".into(), serde_json::Value::String(v.clone()));
+                }
+            }
+            "--annual-fee-bps" => {
+                if let Some(v) = rest.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                    terms.insert("annual_fee_bps".into(), v.into());
+                }
+            }
+            "--deposit-fee-bps" => {
+                if let Some(v) = rest.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                    terms.insert("deposit_fee_bps".into(), v.into());
+                }
+            }
+            "--withdrawal-fee-bps" => {
+                if let Some(v) = rest.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                    terms.insert("withdrawal_fee_bps".into(), v.into());
+                }
+            }
+            "--invoice-fee-bps" => {
+                if let Some(v) = rest.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                    terms.insert("invoice_fee_bps".into(), v.into());
+                }
+            }
+            "--max-deposit-msats" => {
+                if let Some(v) = rest.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                    terms.insert("max_deposit_msats".into(), v.into());
+                }
+            }
+            "--min-deposit-msats" => {
+                if let Some(v) = rest.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                    terms.insert("min_deposit_msats".into(), v.into());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let data_dir = data_dir_or_default(data_dir);
+    if relays.is_empty() {
+        return Err("advertise requires at least one --relay".to_string());
+    }
+    let secret_hex =
+        std::fs::read_to_string(deposits_hub::state::HubState::nostr_secret_path(&data_dir))
+            .map_err(|e| format!("read hub secret: {}", e))?
+            .trim()
+            .to_string();
+    let raw = std::fs::read_to_string(data_dir.join("bootstrap-state.json"))
+        .map_err(|e| format!("read bootstrap-state.json: {}", e))?;
+    let sv: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse bootstrap-state: {}", e))?;
+    let node_xonly = |name: &str| -> Result<String, String> {
+        let id = sv
+            .get("node_ids")
+            .and_then(|m| m.get(name))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("node '{}' not in bootstrap-state.json", name))?;
+        Ok(if id.len() == 66 {
+            id[2..].to_string()
+        } else {
+            id.to_string()
+        })
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {}", e))?;
+    let timeout = deposits_hub::admin_client::DEFAULT_TIMEOUT_MS;
+
+    if sub == "status" {
+        let targets: Vec<(String, String)> = match &node {
+            Some(n) => vec![(n.clone(), node_xonly(n)?)],
+            None => sv
+                .get("node_ids")
+                .and_then(|m| m.as_object())
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| {
+                            v.as_str().map(|s| {
+                                (k.clone(), if s.len() == 66 { s[2..].to_string() } else { s.to_string() })
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        return rt.block_on(async move {
+            for (name, xo) in targets {
+                match deposits_hub::admin_client::send_admin_request(
+                    &secret_hex, &relays, &xo, &xo, "advertise_status",
+                    serde_json::json!({}), timeout,
+                )
+                .await
+                {
+                    Ok(res) => {
+                        let empty = Vec::new();
+                        let ads = res.get("ads").and_then(|v| v.as_array()).unwrap_or(&empty);
+                        println!("{}", name);
+                        for a in ads {
+                            let lid = a.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("?");
+                            if a.get("advertised").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                println!(
+                                    "    {}  name={:?} fees(annual/dep/wd/inv bps)={}/{}/{}/{} deposit(min..max msats)={}..{}",
+                                    &lid[..16.min(lid.len())],
+                                    a.get("operator_name").and_then(|v| v.as_str()).unwrap_or(""),
+                                    a.get("annual_fee_bps").and_then(|v| v.as_u64()).unwrap_or(0),
+                                    a.get("deposit_fee_bps").and_then(|v| v.as_u64()).unwrap_or(0),
+                                    a.get("withdrawal_fee_bps").and_then(|v| v.as_u64()).unwrap_or(0),
+                                    a.get("invoice_fee_bps").and_then(|v| v.as_u64()).unwrap_or(0),
+                                    a.get("min_deposit_msats").and_then(|v| v.as_u64()).unwrap_or(0),
+                                    a.get("max_deposit_msats").and_then(|v| v.as_u64()).unwrap_or(0),
+                                );
+                            } else {
+                                println!("    {}  (not advertised)", &lid[..16.min(lid.len())]);
+                            }
+                        }
+                    }
+                    Err(e) => println!("{}  ERROR: {}", name, e),
+                }
+            }
+            Ok::<(), String>(())
+        });
+    }
+
+    // set: target one node's ledger.
+    let node = node.ok_or("advertise set requires --node <name>")?;
+    let xo = node_xonly(&node)?;
+    let ledger = match ledger {
+        Some(l) => l,
+        None => sv
+            .get("ledgers")
+            .and_then(|m| m.get(&node))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("no ledger for node '{}' in bootstrap-state; pass --ledger", node))?
+            .to_string(),
+    };
+    if terms.is_empty() {
+        return Err("advertise set: nothing to set — pass at least one term flag".to_string());
+    }
+    terms.insert("ledger_id".into(), serde_json::Value::String(ledger.clone()));
+    rt.block_on(async move {
+        match deposits_hub::admin_client::send_admin_request(
+            &secret_hex, &relays, &xo, &ledger, "advertise_set",
+            serde_json::Value::Object(terms), timeout,
+        )
+        .await
+        {
+            Ok(_) => {
+                println!("advertisement updated on {} (ledger {})", node, &ledger[..16.min(ledger.len())]);
+                Ok::<(), String>(())
+            }
+            Err(e) => Err(format!("advertise set failed: {}", e)),
         }
     })
 }
