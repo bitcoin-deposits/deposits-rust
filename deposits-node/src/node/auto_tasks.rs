@@ -1216,69 +1216,49 @@ impl Node {
                 continue;
             }
 
-            // ── Step 1: open the buffer deposit if we haven't yet ──
+            // ── Step 1: open + fund the buffer atomically if we haven't yet ──
+            // One Batch([DepositOpen, InvoiceCredit]) — see
+            // internal_buffer_open_and_fund. The previous split (open one
+            // cycle, fund the next, as two separate cosign rounds) raced quorum
+            // replication and stranded the drip at DepositNotFound.
             if plan.buffer_index.is_none() {
+                let target_msats = plan.target_deposit_sats.saturating_mul(1_000);
                 match self
-                    .internal_buffer_open(Some(plan.ledger_id.clone()), None)
+                    .internal_buffer_open_and_fund(Some(plan.ledger_id.clone()), target_msats)
                     .await
                 {
                     Ok(out) => {
                         plan.buffer_index = Some(out.index);
                         dirty = true;
                         tracing::info!(
-                            "auto_drip_self_liquidity: opened buffer #{} (deposit {}…) \
+                            "auto_drip_self_liquidity: opened+funded buffer #{} ({} sats) \
                              for plan '{}' on ledger {}…",
                             out.index,
-                            &out.deposit_id_hex[..16.min(out.deposit_id_hex.len())],
+                            plan.target_deposit_sats,
                             plan.alias,
                             &plan.ledger_id[..16.min(plan.ledger_id.len())],
                         );
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "auto_drip_self_liquidity: open failed for plan '{}': {}",
+                            "auto_drip_self_liquidity: open+fund failed for plan '{}': {}",
                             plan.alias,
                             e,
                         );
                     }
                 }
-                // One step per cycle — pick up funding next tick.
                 continue;
             }
 
             let buffer_index = plan.buffer_index.unwrap();
 
-            // ── Step 2: initial fund — credit if balance still 0 ──
-            let current_balance_msats = self
-                .internal_buffer_balance_msats(buffer_index)
-                .unwrap_or(0);
-            if current_balance_msats == 0 && plan.ticks_completed == 0 {
-                let target_msats = plan.target_deposit_sats.saturating_mul(1_000);
-                match self.internal_buffer_fill(buffer_index, target_msats).await {
-                    Ok(new_balance) => {
-                        tracing::info!(
-                            "auto_drip_self_liquidity: funded plan '{}' with {} sats \
-                             (balance now {} msats)",
-                            plan.alias,
-                            plan.target_deposit_sats,
-                            new_balance,
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "auto_drip_self_liquidity: fund failed for plan '{}': {}",
-                            plan.alias,
-                            e,
-                        );
-                    }
-                }
-                continue;
-            }
-
-            // ── Step 3: drip drain on interval ──
+            // ── Step 2: drip drain on interval ──
             if !plan.is_due(now) {
                 continue;
             }
+            let current_balance_msats = self
+                .internal_buffer_balance_msats(buffer_index)
+                .unwrap_or(0);
             let decrement_msats = plan.decrement_sats.saturating_mul(1_000);
             if current_balance_msats < decrement_msats {
                 tracing::info!(

@@ -104,6 +104,100 @@ impl Node {
         })
     }
 
+    /// Open a buffer deposit AND fund it to `target_msats` in a single atomic
+    /// `Batch([DepositOpen, InvoiceCredit])` update.
+    ///
+    /// The two ops are dependent — the credit references the deposit the open
+    /// creates — so emitting them as separate cosign rounds raced quorum
+    /// replication: a member asked to cosign the credit before it had applied
+    /// the open rejected with `DepositNotFound`, and the drip stalled. Batching
+    /// makes them one cosigned update; the batch applier applies inner ops
+    /// sequentially against a scratch state, so the credit sees the deposit the
+    /// open just created. Buffer index is registered only after the commit
+    /// succeeds, so a failed batch leaves no dangling registration.
+    pub(crate) async fn internal_buffer_open_and_fund(
+        &self,
+        ledger_id_override: Option<String>,
+        target_msats: u64,
+    ) -> Result<BufferOpenOutcome, String> {
+        use bitcoin::hashes::{sha256, Hash};
+        use bitcoin::secp256k1::rand::rngs::OsRng;
+        use bitcoin::secp256k1::rand::RngCore;
+
+        let mut entries = self.load_buffer_indices();
+        let index = self.next_buffer_index(&entries);
+        let pk = self
+            .handler
+            .signer
+            .pubkey_at(deposits_signer_api::KeyPath::Deposit { index })
+            .map_err(|e| format!("signer pubkey_at(Deposit {{ index: {} }}): {}", index, e))?;
+        let deposit_pubkey_hex = hex::encode(pk.serialize());
+
+        let ledger_id = match ledger_id_override {
+            Some(s) => s,
+            None => match self.get_primary_ledger() {
+                Some((lid, _)) => lid,
+                None => return Err("no ledger open — run bootstrap reserves first".into()),
+            },
+        };
+        let descriptor = format!("pk({})", deposit_pubkey_hex);
+        let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+        let deposit_id_hex = hex::encode(deposit_id);
+
+        let fees = deposits_core::FeeStructure {
+            annualized_msats: 0,
+            annualized_bps: 0,
+            frequency_blocks: 2016,
+        };
+        let deposit_open = deposits_core::messages::LedgerOperation::DepositOpen {
+            deposit_id,
+            descriptor: descriptor.clone(),
+            fees: Some(fees),
+            transfer_fees: None,
+            payment_hash: None,
+            invoice: None,
+            cosigner_guarantee_signature: None,
+            receive_requires_sig: false,
+            fee_change_after_blocks: None,
+            fee_change_notice_blocks: None,
+            fee_change_limit_bps: None,
+        };
+
+        let mut nonce = [0u8; 16];
+        OsRng.fill_bytes(&mut nonce);
+        let invoice_id = format!("buffer-fill-{}-{}", index, hex::encode(nonce));
+        let payment_hash = sha256::Hash::hash(invoice_id.as_bytes()).to_byte_array();
+        let invoice_credit = deposits_core::messages::LedgerOperation::InvoiceCredit {
+            payment_hash,
+            deposit_id,
+            amount: target_msats,
+            invoice_id,
+            // Inner ops carry seq 0; the batch update carries the chain seq.
+            sequence_number: 0,
+            wallet_authorization: None,
+        };
+
+        let batch = deposits_core::messages::LedgerOperation::Batch(vec![deposit_open, invoice_credit]);
+        self.commit_operation(&ledger_id, batch)
+            .await
+            .map_err(|e| format!("commit open+fund batch: {}", e))?;
+
+        entries.push(BufferIndexEntry {
+            index,
+            ledger_id: ledger_id.clone(),
+            deposit_pubkey: deposit_pubkey_hex.clone(),
+        });
+        if let Err(e) = self.save_buffer_indices(&entries) {
+            tracing::warn!("couldn't persist buffer index: {}", e);
+        }
+        Ok(BufferOpenOutcome {
+            index,
+            deposit_pubkey_hex,
+            deposit_id_hex,
+            ledger_id,
+        })
+    }
+
     /// Fill an existing buffer deposit via synthetic InvoiceCredit.
     /// Returns the new balance in msats. Internal — see
     /// [`internal_buffer_open`] for the split rationale.
@@ -182,27 +276,50 @@ impl Node {
         };
         let fulfill_witness = lock_witness.clone();
 
-        self.lock_invoice_payment(
-            &entry.ledger_id,
+        // Lock then fulfill in a single atomic batch. The fulfill depends on
+        // the lock (it settles the OpenInvoiceLock the lock creates), so as
+        // separate cosign rounds the fulfill would race a member that hadn't
+        // applied the lock yet. Inner ops carry seq 0 (the witness sighash is
+        // over the payment, not the chain seq); the batch update carries the
+        // real sequence. Applier runs them in order on a scratch state.
+        let lock_op = deposits_core::messages::LedgerOperation::InvoiceLock {
             deposit_id,
-            amount_msats,
+            amount: amount_msats,
             payment_id,
-            op_nonce,
-            op_expiry,
-            lock_witness,
-        )
-        .await
-        .map_err(|e| format!("lock_invoice_payment: {}", e))?;
-        self.fulfill_invoice_payment(
-            &entry.ledger_id,
+            sequence_number: 0,
+            nonce: op_nonce,
+            expiry: op_expiry,
+            witness: lock_witness,
+        };
+        let fulfill_op = deposits_core::messages::LedgerOperation::InvoiceFulfill {
             deposit_id,
-            amount_msats,
+            amount: amount_msats,
             payment_id,
             preimage,
-            fulfill_witness,
-        )
-        .await
-        .map_err(|e| format!("fulfill_invoice_payment: {}", e))
+            sequence_number: 0,
+            witness: fulfill_witness,
+        };
+        let batch =
+            deposits_core::messages::LedgerOperation::Batch(vec![lock_op, fulfill_op]);
+        self.commit_operation(&entry.ledger_id, batch)
+            .await
+            .map_err(|e| format!("commit drain batch: {}", e))?;
+
+        let new_balance = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .get(&entry.ledger_id)
+                .and_then(|arc| {
+                    arc.read()
+                        .unwrap()
+                        .state
+                        .deposits
+                        .get(&deposit_id)
+                        .map(|d| d.balance)
+                })
+                .unwrap_or(0)
+        };
+        Ok(new_balance)
     }
 
     /// Read the current balance (msats) of the buffer deposit at
