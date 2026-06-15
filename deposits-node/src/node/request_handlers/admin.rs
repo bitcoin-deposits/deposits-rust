@@ -456,6 +456,182 @@ impl Node {
         )
     }
 
+    /// Admin: list this node's liquidity-drip plans (read-only).
+    pub(crate) async fn process_liquidity_list_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        if let Err(denial) = self.check_admin_authorized(request) {
+            return denial;
+        }
+        match crate::operator_drips::DripRegistry::load(&self.data_dir) {
+            Ok(reg) => {
+                let plans = serde_json::to_value(&reg.plans).unwrap_or(serde_json::json!([]));
+                (true, Some(serde_json::json!({ "plans": plans }).to_string()), None)
+            }
+            Err(e) => (false, None, Some(format!("load drips: {}", e))),
+        }
+    }
+
+    /// Admin: create a liquidity-drip plan. Mirrors `deposits-node liquidity
+    /// drip-create` but, since it runs on the daemon, also fail-fast validates
+    /// the target ledger is one this node operates and whose quorum is active
+    /// (a drip opens self-deposits on it). The running daemon's auto-task picks
+    /// the plan up on its next cycle.
+    pub(crate) async fn process_liquidity_create_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        if let Err(denial) = self.check_admin_authorized(request) {
+            return denial;
+        }
+        let p = &request.params;
+        let refuse = |m: String| (false, None, Some(m));
+        let alias = p.get("alias").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let ledger_id = p.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let initial = p.get("initial_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+        let decrement = p.get("decrement_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+        let interval = p.get("interval_sec").and_then(|v| v.as_u64()).unwrap_or(0);
+        let fuzz = p.get("interval_fuzz_sec").and_then(|v| v.as_u64()).unwrap_or(0);
+
+        if alias.is_empty() || ledger_id.is_empty() {
+            return refuse("alias and ledger_id are required".to_string());
+        }
+        if initial == 0 || decrement == 0 || interval == 0 {
+            return refuse(
+                "initial_sats, decrement_sats, interval_sec must all be > 0".to_string(),
+            );
+        }
+        if decrement > initial {
+            return refuse(format!(
+                "decrement_sats ({}) must not exceed initial_sats ({})",
+                decrement, initial
+            ));
+        }
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            match ledgers.get(&ledger_id) {
+                None => {
+                    return refuse(format!(
+                        "ledger {} not found on this node",
+                        &ledger_id[..16.min(ledger_id.len())]
+                    ))
+                }
+                Some(arc) => {
+                    let l = arc.read().unwrap();
+                    if !matches!(l.role, deposits_core::ledger::LedgerRole::Operator) {
+                        return refuse("ledger is not operated by this node".to_string());
+                    }
+                    if l.state.quorum_state != deposits_core::QuorumState::Active {
+                        return refuse(
+                            "ledger quorum is not active — fund + begin the quorum before \
+                             adding a liquidity drip"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let plan = crate::operator_drips::DripPlan {
+            alias: alias.clone(),
+            ledger_id,
+            target_deposit_sats: initial,
+            decrement_sats: decrement,
+            interval_sec: interval,
+            interval_fuzz_sec: fuzz,
+            buffer_index: None,
+            paused: false,
+            created_unix: now,
+            last_tick_unix: 0,
+            next_tick_unix: 0,
+            ticks_completed: 0,
+        };
+        let mut reg = match crate::operator_drips::DripRegistry::load(&self.data_dir) {
+            Ok(r) => r,
+            Err(e) => return refuse(format!("load drips: {}", e)),
+        };
+        if let Err(e) = reg.insert(plan) {
+            return refuse(e);
+        }
+        if let Err(e) = reg.save(&self.data_dir) {
+            return refuse(format!("save drips: {}", e));
+        }
+        (true, Some(serde_json::json!({ "created": alias }).to_string()), None)
+    }
+
+    /// Admin: pause/resume a drip plan by alias (the auto-task skips paused
+    /// plans). `paused` selects which.
+    pub(crate) async fn process_liquidity_set_paused_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+        paused: bool,
+    ) -> (bool, Option<String>, Option<String>) {
+        if let Err(denial) = self.check_admin_authorized(request) {
+            return denial;
+        }
+        let alias = request
+            .params
+            .get("alias")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if alias.is_empty() {
+            return (false, None, Some("alias is required".to_string()));
+        }
+        let mut reg = match crate::operator_drips::DripRegistry::load(&self.data_dir) {
+            Ok(r) => r,
+            Err(e) => return (false, None, Some(format!("load drips: {}", e))),
+        };
+        match reg.find_mut(&alias) {
+            Some(plan) => plan.paused = paused,
+            None => return (false, None, Some(format!("no drip plan '{}'", alias))),
+        }
+        if let Err(e) = reg.save(&self.data_dir) {
+            return (false, None, Some(format!("save drips: {}", e)));
+        }
+        (
+            true,
+            Some(serde_json::json!({ "alias": alias, "paused": paused }).to_string()),
+            None,
+        )
+    }
+
+    /// Admin: remove a drip plan by alias (the underlying buffer deposit, if
+    /// any, is left untouched on the ledger).
+    pub(crate) async fn process_liquidity_remove_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        if let Err(denial) = self.check_admin_authorized(request) {
+            return denial;
+        }
+        let alias = request
+            .params
+            .get("alias")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if alias.is_empty() {
+            return (false, None, Some("alias is required".to_string()));
+        }
+        let mut reg = match crate::operator_drips::DripRegistry::load(&self.data_dir) {
+            Ok(r) => r,
+            Err(e) => return (false, None, Some(format!("load drips: {}", e))),
+        };
+        if reg.remove(&alias).is_none() {
+            return (false, None, Some(format!("no drip plan '{}'", alias)));
+        }
+        if let Err(e) = reg.save(&self.data_dir) {
+            return (false, None, Some(format!("save drips: {}", e)));
+        }
+        (true, Some(serde_json::json!({ "removed": alias }).to_string()), None)
+    }
+
     /// Admin: increase a buffer deposit's balance via a synthetic
     /// InvoiceCredit. The `invoice_id` is a random UUID-like string —
     /// co-signers don't care where the payment came from, they validate

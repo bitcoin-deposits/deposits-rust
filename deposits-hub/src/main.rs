@@ -50,6 +50,11 @@ COMMANDS:
     drop-ledger --node <NAME>    Tell a node to drop an unfunded, PreQuorum ledger it operates
         --ledger <ID>             (orphan cleanup; identify via `status`). Daemon refuses
         --relay <URL> [--force]   anything active/funded/with an on-chain vault.
+    liquidity <sub> --relay <URL>  Manage operator liquidity-drip plans over the admin RPC:
+        list [--node N]              show plans (whole cluster, or one node)
+        create --node N --alias A --ledger ID --initial-sats N --decrement-sats M
+               --interval-sec S [--interval-fuzz-sec F]
+        pause|resume|remove --node N --alias A
     bootstrap --nodes <N>        Fund once, deploy a self-connected cluster: N daemons,
               --relay <URL>               one ledger each, Q=3 cross-wired quorums, ONE funding
               --esplora <URL>             tx + ONE disbursement + N activations. Resumable —
@@ -109,6 +114,7 @@ fn main() -> ExitCode {
         "approve" => cmd_approve(rest),
         "status" => cmd_status(rest),
         "drop-ledger" => cmd_drop_ledger(rest),
+        "liquidity" => cmd_liquidity(rest),
         "reject" => cmd_reject(rest),
         "restore" => cmd_restore(rest),
         "publish-backup" => cmd_publish_backup(rest),
@@ -744,6 +750,247 @@ fn cmd_drop_ledger(args: &[String]) -> Result<(), String> {
                 Ok::<(), String>(())
             }
             Err(e) => Err(format!("drop refused/failed: {}", e)),
+        }
+    })
+}
+
+/// `deposits-hub liquidity <list|create|pause|resume|remove> ...`
+///
+/// Manage operator liquidity-drip plans on a node over the Nostr admin RPC.
+/// `list` fans out over the whole cluster (or one --node); the mutating
+/// subcommands target a single --node. The drip engine on each daemon picks
+/// up changes on its next cycle — no restart.
+fn cmd_liquidity(args: &[String]) -> Result<(), String> {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+    if sub.is_empty() {
+        return Err(
+            "usage: deposits-hub liquidity <list|create|pause|resume|remove> [--node N] \
+             [--alias A] [--ledger ID] [--initial-sats N] [--decrement-sats M] \
+             [--interval-sec S] [--interval-fuzz-sec F] --relay <url>"
+                .to_string(),
+        );
+    }
+    let rest = &args[1..];
+
+    let mut data_dir: Option<std::path::PathBuf> = None;
+    let mut relays: Vec<String> = Vec::new();
+    let mut node: Option<String> = None;
+    let mut alias: Option<String> = None;
+    let mut ledger: Option<String> = None;
+    let mut initial: Option<u64> = None;
+    let mut decrement: Option<u64> = None;
+    let mut interval: Option<u64> = None;
+    let mut fuzz: u64 = 0;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--data-dir" => {
+                data_dir = rest.get(i + 1).map(std::path::PathBuf::from);
+                i += 1;
+            }
+            "--relay" => {
+                if let Some(v) = rest.get(i + 1) {
+                    relays.push(v.clone());
+                }
+                i += 1;
+            }
+            "--node" => {
+                node = rest.get(i + 1).cloned();
+                i += 1;
+            }
+            "--alias" => {
+                alias = rest.get(i + 1).cloned();
+                i += 1;
+            }
+            "--ledger" => {
+                ledger = rest.get(i + 1).cloned();
+                i += 1;
+            }
+            "--initial-sats" => {
+                initial = rest.get(i + 1).and_then(|v| v.parse().ok());
+                i += 1;
+            }
+            "--decrement-sats" => {
+                decrement = rest.get(i + 1).and_then(|v| v.parse().ok());
+                i += 1;
+            }
+            "--interval-sec" => {
+                interval = rest.get(i + 1).and_then(|v| v.parse().ok());
+                i += 1;
+            }
+            "--interval-fuzz-sec" => {
+                fuzz = rest.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let data_dir = data_dir_or_default(data_dir);
+    if relays.is_empty() {
+        return Err("liquidity requires at least one --relay".to_string());
+    }
+    let secret_hex =
+        std::fs::read_to_string(deposits_hub::state::HubState::nostr_secret_path(&data_dir))
+            .map_err(|e| format!("read hub secret: {}", e))?
+            .trim()
+            .to_string();
+    let raw = std::fs::read_to_string(data_dir.join("bootstrap-state.json"))
+        .map_err(|e| format!("read bootstrap-state.json: {}", e))?;
+    let sv: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse bootstrap-state: {}", e))?;
+    let node_xonly = |name: &str| -> Result<String, String> {
+        let id = sv
+            .get("node_ids")
+            .and_then(|m| m.get(name))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("node '{}' not in bootstrap-state.json", name))?;
+        Ok(if id.len() == 66 {
+            id[2..].to_string()
+        } else {
+            id.to_string()
+        })
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {}", e))?;
+    let timeout = deposits_hub::admin_client::DEFAULT_TIMEOUT_MS;
+
+    if sub == "list" {
+        let targets: Vec<(String, String)> = match &node {
+            Some(n) => vec![(n.clone(), node_xonly(n)?)],
+            None => sv
+                .get("node_ids")
+                .and_then(|m| m.as_object())
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| {
+                            v.as_str().map(|s| {
+                                (
+                                    k.clone(),
+                                    if s.len() == 66 { s[2..].to_string() } else { s.to_string() },
+                                )
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        return rt.block_on(async move {
+            for (name, xo) in targets {
+                match deposits_hub::admin_client::send_admin_request(
+                    &secret_hex,
+                    &relays,
+                    &xo,
+                    &xo,
+                    "liquidity_list",
+                    serde_json::json!({}),
+                    timeout,
+                )
+                .await
+                {
+                    Ok(res) => {
+                        let empty = Vec::new();
+                        let plans = res.get("plans").and_then(|v| v.as_array()).unwrap_or(&empty);
+                        if plans.is_empty() {
+                            println!("{}  (no drip plans)", name);
+                        } else {
+                            println!("{}", name);
+                            for p in plans {
+                                let a = p.get("alias").and_then(|v| v.as_str()).unwrap_or("?");
+                                let lid =
+                                    p.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("?");
+                                let tgt = p
+                                    .get("target_deposit_sats")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let dec = p
+                                    .get("decrement_sats")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let iv =
+                                    p.get("interval_sec").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let paused =
+                                    p.get("paused").and_then(|v| v.as_bool()).unwrap_or(false);
+                                let ticks = p
+                                    .get("ticks_completed")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                println!(
+                                    "    {:<16} ledger {}  {} sats, -{}/{}s{}  ticks={}",
+                                    a,
+                                    &lid[..16.min(lid.len())],
+                                    tgt,
+                                    dec,
+                                    iv,
+                                    if paused { " [paused]" } else { "" },
+                                    ticks
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => println!("{}  ERROR: {}", name, e),
+                }
+            }
+            Ok::<(), String>(())
+        });
+    }
+
+    // Mutating subcommands target one node.
+    let node = node.ok_or_else(|| format!("liquidity {} requires --node <name>", sub))?;
+    let xo = node_xonly(&node)?;
+    let (action, ledger_arg, params): (&str, String, serde_json::Value) = match sub {
+        "create" => {
+            let alias = alias.ok_or("create requires --alias")?;
+            let ledger = ledger.ok_or("create requires --ledger")?;
+            let initial = initial.ok_or("create requires --initial-sats")?;
+            let decrement = decrement.ok_or("create requires --decrement-sats")?;
+            let interval = interval.ok_or("create requires --interval-sec")?;
+            (
+                "liquidity_create",
+                ledger.clone(),
+                serde_json::json!({
+                    "alias": alias,
+                    "ledger_id": ledger,
+                    "initial_sats": initial,
+                    "decrement_sats": decrement,
+                    "interval_sec": interval,
+                    "interval_fuzz_sec": fuzz,
+                }),
+            )
+        }
+        "pause" | "resume" | "remove" => {
+            let alias = alias.ok_or_else(|| format!("{} requires --alias", sub))?;
+            let action = match sub {
+                "pause" => "liquidity_pause",
+                "resume" => "liquidity_resume",
+                _ => "liquidity_remove",
+            };
+            (action, xo.clone(), serde_json::json!({ "alias": alias }))
+        }
+        other => return Err(format!("unknown liquidity subcommand '{}'", other)),
+    };
+
+    rt.block_on(async move {
+        match deposits_hub::admin_client::send_admin_request(
+            &secret_hex,
+            &relays,
+            &xo,
+            &ledger_arg,
+            action,
+            params,
+            timeout,
+        )
+        .await
+        {
+            Ok(_) => {
+                println!("liquidity {} ok on {}", sub, node);
+                Ok::<(), String>(())
+            }
+            Err(e) => Err(format!("liquidity {} failed: {}", sub, e)),
         }
     })
 }
