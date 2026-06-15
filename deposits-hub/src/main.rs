@@ -43,6 +43,10 @@ COMMANDS:
     qr [--text <STR>]            Print a QR code for the hub pubkey (or arbitrary --text).
                                   Renders with Unicode half-blocks; one terminal cell = two
                                   QR modules so the code stays roughly square.
+    status --relay <URL>         Query every bootstrapped node over the Nostr admin RPC and
+                                  print per-node + per-ledger status (owned vs member, quorum
+                                  active, reserves). Requires the nodes to trust the hub
+                                  (admin.npub — written automatically by `bootstrap`).
     bootstrap --nodes <N>        Fund once, deploy a self-connected cluster: N daemons,
               --relay <URL>               one ledger each, Q=3 cross-wired quorums, ONE funding
               --esplora <URL>             tx + ONE disbursement + N activations. Resumable —
@@ -100,6 +104,7 @@ fn main() -> ExitCode {
         "run" => cmd_run(rest),
         "pubkey" => cmd_pubkey(rest),
         "approve" => cmd_approve(rest),
+        "status" => cmd_status(rest),
         "reject" => cmd_reject(rest),
         "restore" => cmd_restore(rest),
         "publish-backup" => cmd_publish_backup(rest),
@@ -514,6 +519,130 @@ fn cmd_approve(args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("nostr connect: {}", e))?;
         deposits_hub::control::send_accept_ack(&transport, &pubkey, &label).await;
         println!("approved {} as '{}'", pubkey, label);
+        Ok::<(), String>(())
+    })
+}
+
+/// `deposits-hub status [--relay <URL>]+ [--data-dir <DIR>]`
+///
+/// Query every bootstrapped node over the Nostr admin RPC (gift-wrapped,
+/// signed by the hub key the nodes trust via admin.npub) and print a per-node
+/// + per-ledger summary. First management command on the hub's control plane;
+/// liquidity + advertising follow on the same path.
+fn cmd_status(args: &[String]) -> Result<(), String> {
+    let c = parse_common(args)?;
+    let data_dir = data_dir_or_default(c.data_dir);
+    if c.relays.is_empty() {
+        return Err("`status` requires at least one --relay (the cluster's relay)".to_string());
+    }
+    let secret_hex =
+        std::fs::read_to_string(deposits_hub::state::HubState::nostr_secret_path(&data_dir))
+            .map_err(|e| format!("read hub secret: {}", e))?
+            .trim()
+            .to_string();
+
+    // Node operator pubkeys come from the bootstrap state (parsed loosely so we
+    // don't depend on the private BootstrapState struct).
+    let state_path = data_dir.join("bootstrap-state.json");
+    let raw = std::fs::read_to_string(&state_path).map_err(|e| {
+        format!(
+            "read {}: {} (run `deposits-hub bootstrap` first)",
+            state_path.display(),
+            e
+        )
+    })?;
+    let sv: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse bootstrap-state: {}", e))?;
+    let nodes: Vec<(String, String)> = sv
+        .get("node_ids")
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .map(|(name, v)| (name.clone(), v.as_str().unwrap_or_default().to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if nodes.is_empty() {
+        println!("no nodes in {} yet", state_path.display());
+        return Ok(());
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {}", e))?;
+    rt.block_on(async move {
+        for (name, node_id) in nodes {
+            // Gift-wrap recipient is the operator's x-only key (drop the
+            // 02/03 compressed-pubkey parity prefix).
+            let xonly = if node_id.len() == 66 {
+                &node_id[2..]
+            } else {
+                node_id.as_str()
+            };
+            match deposits_hub::admin_client::send_admin_request(
+                &secret_hex,
+                &c.relays,
+                xonly,
+                xonly,
+                "admin_status",
+                serde_json::json!({}),
+                deposits_hub::admin_client::DEFAULT_TIMEOUT_MS,
+            )
+            .await
+            {
+                Ok(res) => {
+                    let tip = res.get("chain_tip").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let bal = res
+                        .get("wallet_balance_sats")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let empty = Vec::new();
+                    let ledgers = res.get("ledgers").and_then(|v| v.as_array()).unwrap_or(&empty);
+                    let is_owned =
+                        |l: &serde_json::Value| l.get("role").and_then(|v| v.as_str()) == Some("Operator");
+                    let owned: Vec<&serde_json::Value> =
+                        ledgers.iter().filter(|l| is_owned(l)).collect();
+                    let owned_active = owned
+                        .iter()
+                        .filter(|l| l.get("quorum_active").and_then(|v| v.as_bool()).unwrap_or(false))
+                        .count();
+                    let member_count = ledgers.len() - owned.len();
+                    println!(
+                        "{}  tip={}  wallet={} sats  owned: {}/{} active (+{} member replicas)",
+                        name,
+                        tip,
+                        bal,
+                        owned_active,
+                        owned.len(),
+                        member_count
+                    );
+                    // Owned ledgers first (the ones this node operates), then
+                    // member replicas (its co-signed copies of peers' ledgers).
+                    let mut sorted: Vec<&serde_json::Value> = ledgers.iter().collect();
+                    sorted.sort_by_key(|l| !is_owned(l));
+                    for l in sorted {
+                        let lid = l.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("?");
+                        let role = l.get("role").and_then(|v| v.as_str()).unwrap_or("?");
+                        let act = l
+                            .get("quorum_active")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let q = l.get("quorum_size").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let reserves = l.get("reserves_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+                        println!(
+                            "    {:<10} {}  Q={}  {}  reserves={} sats",
+                            role,
+                            &lid[..16.min(lid.len())],
+                            q,
+                            if act { "active" } else { "PreQuorum" },
+                            reserves
+                        );
+                    }
+                }
+                Err(e) => println!("{}  ERROR: {}", name, e),
+            }
+        }
         Ok::<(), String>(())
     })
 }

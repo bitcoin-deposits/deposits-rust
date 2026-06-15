@@ -418,6 +418,15 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
 
     let master = state::HubState::load_or_init_master_seed(&args.data_dir)
         .map_err(|e| format!("master seed: {:?}", e))?;
+    // The hub's own nostr pubkey (x-only hex). Each spawned daemon gets this
+    // written to <node-dir>/admin.npub so it accepts gift-wrapped admin RPC
+    // from the hub (check_admin_authorized) — the control path the hub uses to
+    // manage the cluster (`deposits-hub status`, liquidity, ads) over Nostr.
+    // load_or_init also creates hub-nostr-secret if missing.
+    let hub_pubkey = state::HubState::load_or_init(&args.data_dir)
+        .map_err(|e| format!("hub state (for admin.npub): {:?}", e))?
+        .hub_pubkey_hex()
+        .to_string();
     let mut st = BootstrapState::load(&args.data_dir);
     if st.nodes != 0 && st.nodes != args.nodes {
         return Err(format!(
@@ -451,6 +460,12 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     for i in 0..args.nodes {
         let name = node_name(i);
         let dir = node_dir(&args, i);
+        // Trust the hub for admin RPC. Written for every node (even
+        // already-running ones, which pick it up on their next restart) so the
+        // hub can drive the cluster over Nostr. The daemon reads admin.npub at
+        // startup (init.rs::load_admin_pubkey).
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join("admin.npub"), &hub_pubkey).map_err(|e| e.to_string())?;
         if daemon_alive(&dir) {
             println!("  {} already running", name);
         } else {

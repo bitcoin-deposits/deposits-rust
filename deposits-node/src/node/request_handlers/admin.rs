@@ -264,6 +264,51 @@ impl Node {
         }
     }
 
+    /// Admin: concise node + per-ledger status for the hub control plane.
+    /// Admin-gated (operator's own key or the configured hub `admin.npub`),
+    /// read-only. Returns operator identity, network, chain tip, wallet
+    /// balance, and a per-ledger summary.
+    pub(crate) async fn process_admin_status_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        if let Err(denial) = self.check_admin_authorized(request) {
+            return denial;
+        }
+
+        let (xo, _) = self.node_id.x_only_public_key();
+        let chain_tip = self.wallet.get_block_height().unwrap_or(0);
+        let wallet_balance = self.wallet_balance().unwrap_or(0);
+
+        let ledgers: Vec<serde_json::Value> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .values()
+                .map(|arc| {
+                    let l = arc.read().unwrap();
+                    serde_json::json!({
+                        "ledger_id": l.ledger_id_hex(),
+                        "role": format!("{:?}", l.role),
+                        "quorum_active":
+                            l.state.quorum_state == deposits_core::QuorumState::Active,
+                        "quorum_size": l.state.quorum_members.len(),
+                        "reserves_sats": l.reserves_amount() / 1000,
+                        "updates": l.history.len(),
+                    })
+                })
+                .collect()
+        };
+
+        let result = serde_json::json!({
+            "operator": hex::encode(xo.serialize()),
+            "network": format!("{:?}", self.wallet.network()),
+            "chain_tip": chain_tip,
+            "wallet_balance_sats": wallet_balance,
+            "ledgers": ledgers,
+        });
+        (true, Some(result.to_string()), None)
+    }
+
     /// Admin: increase a buffer deposit's balance via a synthetic
     /// InvoiceCredit. The `invoice_id` is a random UUID-like string —
     /// co-signers don't care where the payment came from, they validate
