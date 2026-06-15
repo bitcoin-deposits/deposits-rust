@@ -419,11 +419,14 @@ DANGER SUBCOMMANDS (testing only - DO NOT USE IN PRODUCTION):
     The CLI dispatches based on shape — no flags needed.
 
 OPTIONS (most subcommands accept these):
-    --seed <hex>       Seed for wallet/identity (64 hex chars).
-                       Visible in `ps`/`/proc` — prefer --seed-file.
-    --seed-file <path> Read the seed from a file (64-char hex). Use
-                       this instead of --seed in production / under
-                       Docker so the seed doesn't leak via `ps`.
+    --seed <hex>       Seed for wallet/identity (64 hex chars). Dev/test
+                       only — REFUSED on mainnet (--network bitcoin)
+                       because it leaks via `ps`/`/proc`/shell history.
+    --seed-file <path> Read the seed from a file (64-char hex). Use this
+                       instead of --seed in production / under Docker so
+                       the seed doesn't leak via `ps`.
+                       (If neither flag is given, <data-dir>/seed.hex is
+                       used when present — so a data-dir is self-sufficient.)
     --network <net>    Bitcoin network: mainnet, testnet, signet, regtest (default: signet)
     --esplora <url>    Esplora server URL (default: https://mempool.space/signet/api)
     --relay <url>      Nostr relay URL (can be specified multiple times)
@@ -473,6 +476,10 @@ EXAMPLES:
 
 pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     let mut seed: Option<[u8; 32]> = None;
+    // Whether the seed came from the inline `--seed <hex>` flag (vs --seed-file
+    // or auto-discovery). Inline seeds leak via `ps`/`/proc`/shell history, so
+    // they're refused on mainnet below.
+    let mut seed_inline = false;
     let mut network = Network::Signet;
     let mut electrum_url = "https://mempool.space/signet/api".to_string();
     let mut relays = Vec::new();
@@ -512,6 +519,7 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&bytes);
                 seed = Some(arr);
+                seed_inline = true;
             }
             "--seed-file" => {
                 // Read the seed from a file instead of taking it on the
@@ -635,39 +643,74 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
         i += 1;
     }
 
-    // Generate random seed if not provided. On mainnet this is a hard
-    // error — generating an operator key without explicit input means
-    // we'd lose track of any funds the operator controls (no way to
-    // recover the seed from CLI output alone, since BDK reuses the
-    // same seed across daemon restarts via $DATA_DIR/seed.hex which
-    // wasn't written here). Force the operator to be deliberate.
+    // Refuse the inline `--seed <hex>` on mainnet: it lands in `ps`/`/proc`
+    // and shell history, where a real operator seed must never appear. The
+    // file forms (`--seed-file`, or the auto-discovered `<data-dir>/seed.hex`)
+    // keep it off the command line. Non-mainnet keeps inline `--seed` for the
+    // ephemeral seeds the dev/test harness passes.
+    if seed_inline && network == Network::Bitcoin {
+        return Err(
+            "inline --seed is refused on mainnet (--network bitcoin): it leaks via \
+             ps/proc/shell history. Use --seed-file <path>, or place the seed at \
+             <data-dir>/seed.hex (auto-discovered when no seed flag is given)."
+                .to_string(),
+        );
+    }
+
+    // Resolve the seed. Order: explicit flag (--seed/--seed-file) → the
+    // data-dir's own seed.hex (the convention the hub writes and launches
+    // with, so the data-dir is self-sufficient and no seed flag is needed to
+    // re-attach to it) → on mainnet a hard error, off mainnet a fresh random
+    // dev seed. The mainnet error stands because an unrecoverable random
+    // operator key would lose track of funds.
     let seed = match seed {
         Some(s) => s,
         None => {
-            if network == Network::Bitcoin {
-                return Err(
-                    "--seed is required on mainnet (--network bitcoin). \
-                     Generate an operator seed via `bootstrap init` or supply \
-                     one explicitly. Implicit timestamp/random seeds are \
-                     refused because there's no recovery path if the seed \
-                     isn't captured."
-                        .to_string(),
-                );
+            let auto = data_dir.join("seed.hex");
+            match std::fs::read_to_string(&auto) {
+                Ok(raw) => {
+                    let hex = raw.trim();
+                    if hex.len() != 64 {
+                        return Err(format!(
+                            "Seed in {} must be 64 hex characters, got {}",
+                            auto.display(),
+                            hex.len()
+                        ));
+                    }
+                    let bytes = hex::decode(hex).map_err(|e| {
+                        format!("Invalid hex in {}: {}", auto.display(), e)
+                    })?;
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    tracing::info!("Using seed from {}", auto.display());
+                    arr
+                }
+                Err(_) => {
+                    if network == Network::Bitcoin {
+                        return Err(format!(
+                            "no seed available on mainnet (--network bitcoin). Supply \
+                             --seed-file <path>, or place the seed at {}. Implicit \
+                             random seeds are refused because there's no recovery path \
+                             if the seed isn't captured.",
+                            auto.display()
+                        ));
+                    }
+                    // Non-mainnet networks: real OS entropy. The previous behavior
+                    // mixed 16 bytes of timestamp with 16 zero bytes — terrible
+                    // entropy even for testnet. Replaced with OsRng.
+                    use bitcoin::secp256k1::rand::rngs::OsRng;
+                    use bitcoin::secp256k1::rand::RngCore;
+                    let mut s = [0u8; 32];
+                    OsRng.fill_bytes(&mut s);
+                    tracing::warn!(
+                        "No seed supplied on {:?}: generated random seed {}. \
+                         Save this if you want to reuse the same operator identity.",
+                        network,
+                        hex::encode(s)
+                    );
+                    s
+                }
             }
-            // Non-mainnet networks: real OS entropy. The previous behavior
-            // mixed 16 bytes of timestamp with 16 zero bytes — terrible
-            // entropy even for testnet. Replaced with OsRng.
-            use bitcoin::secp256k1::rand::rngs::OsRng;
-            use bitcoin::secp256k1::rand::RngCore;
-            let mut s = [0u8; 32];
-            OsRng.fill_bytes(&mut s);
-            tracing::warn!(
-                "No --seed supplied on {:?}: generated random seed {}. \
-                 Save this if you want to reuse the same operator identity.",
-                network,
-                hex::encode(s)
-            );
-            s
         }
     };
 
