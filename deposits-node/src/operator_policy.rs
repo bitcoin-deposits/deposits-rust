@@ -191,9 +191,29 @@ impl OperatorPolicy {
         touched
     }
 
+    /// Annual custody fee (bps) to ADVERTISE / CHARGE when the operator hasn't
+    /// set one, falling back to the project default
+    /// ([`deposits_core::types::DEFAULT_ANNUAL_FEE_BPS`], 2%/yr). An explicit
+    /// `Some(0)` keeps free custody. Distinct from `minimum_fees` (the
+    /// acceptance floor), which deliberately stays 0 when unset.
+    pub fn effective_annual_fee_bps(&self) -> u32 {
+        self.annual_fee_bps
+            .unwrap_or(deposits_core::types::DEFAULT_ANNUAL_FEE_BPS as u32)
+    }
+
+    /// Annualized fixed custody fee (msats/yr) to advertise/charge, defaulting to
+    /// [`deposits_core::types::DEFAULT_ANNUALIZED_FIXED_MSATS`] (120 sat/yr).
+    pub fn effective_annualized_fixed_msats(&self) -> u64 {
+        self.annualized_fixed_msats
+            .unwrap_or(deposits_core::types::DEFAULT_ANNUALIZED_FIXED_MSATS)
+    }
+
     /// Operator's minimum fees for `validate_fee_minimum`. Falls back to
     /// `(0, 0)` when the field isn't set — `(0, 0)` means "no floor", the
     /// same semantics as the previous relay-fetched-zero-on-missing ad.
+    /// Intentionally NOT defaulted to the project custody default: defaulting
+    /// the advertised/charged fee is desirable, but defaulting the acceptance
+    /// floor would silently start rejecting deposits.
     pub fn minimum_fees(&self) -> (u16, u64) {
         let bps = self.annual_fee_bps.unwrap_or(0).min(u16::MAX as u32) as u16;
         let blocks_per_year: u64 = 52560;

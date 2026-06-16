@@ -1254,12 +1254,16 @@ impl LedgerAdvertisement {
             reserves_address,
             operator_name: None,
             description: None,
-            annual_fee_bps: 0,
-            annualized_fixed_msats: 0,
+            // Custody fee defaults to the project-wide 2%/yr + 120 sat/yr
+            // (deposits_protocol::types::DEFAULT_*) rather than free; operators
+            // override explicitly (incl. to 0). deposit/withdrawal/invoice fees
+            // are separate opt-ins and stay 0 by default.
+            annual_fee_bps: deposits_protocol::types::DEFAULT_ANNUAL_FEE_BPS as u32,
+            annualized_fixed_msats: deposits_protocol::types::DEFAULT_ANNUALIZED_FIXED_MSATS,
             deposit_fee_bps: 0,
             withdrawal_fee_bps: 0,
             invoice_fee_bps: 0,
-            fee_period_blocks: 0,
+            fee_period_blocks: deposits_protocol::types::DEFAULT_FEE_PERIOD_BLOCKS,
             transfer_fee_fixed_msats: 0,
             transfer_fee_rate_bps: 0,
             max_deposit_msats: u64::MAX,

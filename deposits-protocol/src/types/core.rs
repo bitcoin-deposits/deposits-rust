@@ -94,12 +94,24 @@ pub struct FeeStructure {
     pub frequency_blocks: u32,
 }
 
+/// Project-wide default custody fee for when an operator hasn't configured one:
+/// **2%/yr plus a 120 sat/yr fixed component**. Zero defaults meant ledgers
+/// advertised free custody, which is almost never intended. These are the single
+/// source of truth shared by `FeeStructure::default()` (what a default-fee
+/// deposit is charged), `LedgerAdvertisement::new` (what's advertised on the
+/// explorer), and `OperatorPolicy`'s `effective_*` accessors (deposits-node), so
+/// the advertised, charged, and floor defaults all agree. An operator can still
+/// configure an explicit `0` to offer free custody.
+pub const DEFAULT_ANNUAL_FEE_BPS: u16 = 200; // 2.00 %/yr
+pub const DEFAULT_ANNUALIZED_FIXED_MSATS: u64 = 120_000; // 120 sat/yr
+pub const DEFAULT_FEE_PERIOD_BLOCKS: u32 = 2016; // ~2 weeks
+
 impl Default for FeeStructure {
     fn default() -> Self {
         Self {
-            annualized_msats: 0,
-            annualized_bps: 0,
-            frequency_blocks: 2016, // ~2 weeks
+            annualized_msats: DEFAULT_ANNUALIZED_FIXED_MSATS,
+            annualized_bps: DEFAULT_ANNUAL_FEE_BPS,
+            frequency_blocks: DEFAULT_FEE_PERIOD_BLOCKS,
         }
     }
 }

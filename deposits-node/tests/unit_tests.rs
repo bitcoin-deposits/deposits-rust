@@ -51,19 +51,22 @@ fn advertisement_new_sets_required_fields() {
 }
 
 #[test]
-fn advertisement_new_defaults_fees_to_zero() {
+fn advertisement_new_defaults_custody_fee_to_project_default() {
+    // Custody fee defaults to the project-wide 2%/yr + 120 sat/yr rather than
+    // free (deposits_protocol::types::DEFAULT_*). Other fee types are opt-in and
+    // stay 0.
     let ad = LedgerAdvertisement::new(
         String::new(),
         String::new(),
         String::new(),
         "regtest".to_string(),
     );
-    assert_eq!(ad.annual_fee_bps, 0);
+    assert_eq!(ad.annual_fee_bps, 200); // 2%/yr
+    assert_eq!(ad.annualized_fixed_msats, 120_000); // 120 sat/yr
+    assert_eq!(ad.fee_period_blocks, 2016); // ~2 weeks
     assert_eq!(ad.deposit_fee_bps, 0);
     assert_eq!(ad.withdrawal_fee_bps, 0);
     assert_eq!(ad.invoice_fee_bps, 0);
-    assert_eq!(ad.annualized_fixed_msats, 0);
-    assert_eq!(ad.fee_period_blocks, 0);
     assert_eq!(ad.transfer_fee_fixed_msats, 0);
     assert_eq!(ad.transfer_fee_rate_bps, 0);
 }
@@ -101,7 +104,10 @@ fn advertisement_new_optional_fields_are_none() {
 // ============================================================================
 
 #[test]
-fn to_fee_structure_zero_period_returns_zero_annualized() {
+fn to_fee_structure_maps_advertised_custody_defaults() {
+    // A default ad now carries the project custody fee; to_fee_structure maps
+    // it straight through (annualized_fixed_msats → annualized_msats,
+    // annual_fee_bps → annualized_bps, fee_period_blocks → frequency_blocks).
     let ad = LedgerAdvertisement::new(
         String::new(),
         String::new(),
@@ -109,9 +115,9 @@ fn to_fee_structure_zero_period_returns_zero_annualized() {
         "regtest".to_string(),
     );
     let fs = ad.to_fee_structure();
-    assert_eq!(fs.frequency_blocks, 0);
-    assert_eq!(fs.annualized_msats, 0);
-    assert_eq!(fs.annualized_bps, 0);
+    assert_eq!(fs.frequency_blocks, 2016);
+    assert_eq!(fs.annualized_msats, 120_000);
+    assert_eq!(fs.annualized_bps, 200);
 }
 
 #[test]
@@ -213,17 +219,19 @@ fn minimum_fees_converts_annualized_to_per_period() {
 }
 
 #[test]
-fn minimum_fees_zero_values() {
+fn minimum_fees_uses_custody_defaults() {
+    // A default ad carries the project custody fee, so its derived per-period
+    // floor reflects 2%/yr + (120 sat/yr ÷ periods_per_year).
     let ad = LedgerAdvertisement::new(
         String::new(),
         String::new(),
         String::new(),
         "regtest".to_string(),
     );
-
+    let periods_per_year = 52_560 / 2016;
     let (bps, fixed_msats) = ad.minimum_fees();
-    assert_eq!(bps, 0);
-    assert_eq!(fixed_msats, 0);
+    assert_eq!(bps, 200);
+    assert_eq!(fixed_msats, 120_000 / periods_per_year);
 }
 
 #[test]

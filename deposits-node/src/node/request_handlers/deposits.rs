@@ -271,8 +271,10 @@ impl Node {
                     String::new(),
                     String::new(),
                 );
-                ad.annual_fee_bps = p.annual_fee_bps.unwrap_or(0);
-                ad.annualized_fixed_msats = p.annualized_fixed_msats.unwrap_or(0);
+                // Charged-fee defaults for wallets that don't propose explicit
+                // fees (the FLOOR is `min_*` above, which stays 0 when unset).
+                ad.annual_fee_bps = p.effective_annual_fee_bps();
+                ad.annualized_fixed_msats = p.effective_annualized_fixed_msats();
                 ad.fee_period_blocks = p.fee_period_blocks.unwrap_or(2016);
                 (bps, fixed, ad)
             }
@@ -293,24 +295,37 @@ impl Node {
                             "No advertisement found for ledger {}, using zero fee minimums",
                             &request.ledger_id[..16]
                         );
-                        crate::nostr::LedgerAdvertisement::new(
+                        // Genuinely unconfigured (no policy, no relay ad): keep the
+                        // historical zero floor / zero charged default rather than
+                        // fabricating the project fee default in the accept path.
+                        // (new() now defaults to the project custody fee.)
+                        let mut ad = crate::nostr::LedgerAdvertisement::new(
                             request.ledger_id.clone(),
                             String::new(),
                             String::new(),
                             String::new(),
-                        )
+                        );
+                        ad.annual_fee_bps = 0;
+                        ad.annualized_fixed_msats = 0;
+                        ad
                     }
                     Err(e) => {
                         tracing::warn!(
                             "Failed to fetch advertisement: {}, using zero fee minimums",
                             e
                         );
-                        crate::nostr::LedgerAdvertisement::new(
+                        // Unknown config (fetch failed): keep historical zero
+                        // floor / zero charged default rather than the project
+                        // fee default that new() now carries.
+                        let mut ad = crate::nostr::LedgerAdvertisement::new(
                             request.ledger_id.clone(),
                             String::new(),
                             String::new(),
                             String::new(),
-                        )
+                        );
+                        ad.annual_fee_bps = 0;
+                        ad.annualized_fixed_msats = 0;
+                        ad
                     }
                 };
                 let (bps, fixed) = advertisement.minimum_fees();
@@ -541,24 +556,34 @@ impl Node {
                     "No advertisement found for ledger {}, using zero fee minimums",
                     &resolved_ledger_id[..16]
                 );
-                crate::nostr::LedgerAdvertisement::new(
+                // Unconfigured: keep zero floor / zero charged default rather
+                // than the project fee default that new() now carries.
+                let mut ad = crate::nostr::LedgerAdvertisement::new(
                     resolved_ledger_id.clone(),
                     String::new(),
                     String::new(),
                     String::new(),
-                )
+                );
+                ad.annual_fee_bps = 0;
+                ad.annualized_fixed_msats = 0;
+                ad
             }
             Err(e) => {
                 tracing::warn!(
                     "Failed to fetch advertisement: {}, using zero fee minimums",
                     e
                 );
-                crate::nostr::LedgerAdvertisement::new(
+                // Unknown config (fetch failed): keep zero floor / zero charged
+                // default rather than the project fee default new() now carries.
+                let mut ad = crate::nostr::LedgerAdvertisement::new(
                     resolved_ledger_id.clone(),
                     String::new(),
                     String::new(),
                     String::new(),
-                )
+                );
+                ad.annual_fee_bps = 0;
+                ad.annualized_fixed_msats = 0;
+                ad
             }
         };
 

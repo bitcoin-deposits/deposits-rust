@@ -1019,8 +1019,8 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     // Materialize concrete values from the merged policy. `fee_period_blocks`
     // defaults to 2016 (~2 weeks); other fields default to 0 / u64::MAX.
-    let annual_fee_bps = policy.annual_fee_bps.unwrap_or(0);
-    let annualized_fixed_msats = policy.annualized_fixed_msats.unwrap_or(0);
+    let annual_fee_bps = policy.effective_annual_fee_bps();
+    let annualized_fixed_msats = policy.effective_annualized_fixed_msats();
     let fee_period_blocks = policy.fee_period_blocks.unwrap_or(2016);
     let deposit_fee_bps = policy.deposit_fee_bps.unwrap_or(0);
     let withdrawal_fee_bps = policy.withdrawal_fee_bps.unwrap_or(0);
