@@ -3516,14 +3516,19 @@ impl NostrTransport {
 
     /// Retract a previously-published Kind-39100 ledger advertisement.
     ///
-    /// Publishes a NIP-09 deletion (kind 5) referencing the addressable
-    /// coordinate `39100:<operator_pubkey>:<ledger_id>`, signed by the same
-    /// operator key that authored the ad. Best-effort by Nostr's nature:
-    /// relays SHOULD drop the ad and stop serving it, but aren't required to —
-    /// an ad may linger on relays that ignore deletions. This is the strongest
-    /// retraction the protocol allows; combined with not republishing it, the
-    /// ad disappears from every well-behaved relay (and the explorer). Also
-    /// clears the local ad cache so our own reads don't resurrect it.
+    /// Publishes a NIP-09 deletion (kind 5), signed by the same operator key
+    /// that authored the ad, carrying BOTH:
+    ///   * `e` tags — the concrete event id(s) of the live ad on the relay,
+    ///     looked up by the ledger_id `d` tag. This is the original NIP-09 form
+    ///     and the one relays act on most reliably (strfry keys deletion on the
+    ///     `e` tag; the addressable `a` coordinate alone is not always honored).
+    ///   * an `a` tag — the addressable coordinate `39100:<pubkey>:<ledger_id>`,
+    ///     for relays that prefer it and to cover any future republish.
+    ///
+    /// Best-effort by Nostr's nature: relays SHOULD drop the ad, but aren't
+    /// required to. Also clears the local ad cache. The returned log includes
+    /// the count of matched `e` ids — `0` means no live ad authored by our key
+    /// was found on the relay (already gone, or signed by a different key).
     pub async fn delete_ledger_advertisement(&self, ledger_id: &str) -> Result<String, Error> {
         let author = self.operator_author_pubkey()?;
         let coordinate = format!("{}:{}:{}", KIND_LEDGER_ADVERTISE, author.to_hex(), ledger_id);
@@ -3533,15 +3538,42 @@ impl NostrTransport {
             cache.remove(ledger_id);
         }
 
-        let builder = EventBuilder::new(Kind::Custom(5), "retracted")
-            .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::A)),
-                [coordinate.as_str()],
-            ))
-            .tag(Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::K)),
-                [KIND_LEDGER_ADVERTISE.to_string().as_str()],
-            ));
+        // Look up the concrete ad event id(s) on the relay (by the ledger_id `d`
+        // tag) so the deletion can reference them with `e` tags. Only ids
+        // authored by our own key are deletable by us.
+        let mut tags: Vec<Tag> = Vec::new();
+        let mut matched = 0usize;
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
+            .custom_tag(TAG_LEDGER_ID, [ledger_id]);
+        if let Ok(events) = self
+            .client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+            .await
+        {
+            for ev in events.iter().filter(|e| e.pubkey == author) {
+                tags.push(Tag::custom(
+                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)),
+                    [ev.id.to_hex()],
+                ));
+                matched += 1;
+            }
+        }
+        // Addressable coordinate + kind, regardless of whether we found a live
+        // event on this relay.
+        tags.push(Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::A)),
+            [coordinate.as_str()],
+        ));
+        tags.push(Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::K)),
+            [KIND_LEDGER_ADVERTISE.to_string().as_str()],
+        ));
+
+        let mut builder = EventBuilder::new(Kind::Custom(5), "retracted");
+        for t in tags {
+            builder = builder.tag(t);
+        }
 
         let event = self.sign_as_operator(builder).await?;
         let event_id = event.id.to_hex();
@@ -3553,9 +3585,10 @@ impl NostrTransport {
             let _ = tx.send(event);
         }
         tracing::info!(
-            "Retracted ledger advertisement: ledger={}, deletion={}",
+            "Retracted ledger advertisement: ledger={}, deletion={}, e-tags={}",
             &ledger_id[..16.min(ledger_id.len())],
-            &event_id[..16]
+            &event_id[..16],
+            matched
         );
         Ok(event_id)
     }
