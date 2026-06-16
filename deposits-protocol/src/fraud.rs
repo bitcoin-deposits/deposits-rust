@@ -1138,7 +1138,7 @@ pub fn verify_non_conforming_cosignature(
         }
         let op = LedgerOperation::tlv_decode(&u.message)
             .map_err(|e| format!("replay decode at seq {}: {}", u.sequence_number, e))?;
-        state = state.apply(&op).map_err(|e| {
+        state.apply_in_place(&op).map_err(|e| {
             format!("replay apply at seq {}: {:?}", u.sequence_number, e)
         })?;
     }

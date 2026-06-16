@@ -8,7 +8,9 @@
 //! Convention: `sha256(pubkey_bytes)` → first 4 BIP-39 English words,
 //! hyphenated (hyphens convey "this is an identifier, not prose"):
 //!
-//!     03b1c4…e2 → "ribbon-mad-hotel-clip"
+//! ```text
+//! 03b1c4…e2 → "ribbon-mad-hotel-clip"
+//! ```
 //!
 //! Hashing first matters: compressed pubkeys start with 02/03, so raw
 //! bytes would give half the network the same first word.

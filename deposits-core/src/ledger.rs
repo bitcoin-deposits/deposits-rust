@@ -882,7 +882,7 @@ impl Ledger {
                     details: format!("seq {}: {}", update.sequence_number, e),
                 }
             })?;
-            state = state.apply(&op)?;
+            state.apply_in_place(&op)?;
             // Post-hook: stamp opened_at_block for fresh deposits (block_height
             // isn't carried in the operation itself).
             if let LedgerOperation::DepositOpen { deposit_id, .. } = &op {
@@ -1585,7 +1585,7 @@ impl Ledger {
     /// Delegates to `LedgerState::apply()` which clones the state and returns a new one.
     /// The old state is replaced atomically — failed transitions leave state unchanged.
     pub fn apply_state_changes(&mut self, operation: &LedgerOperation) -> DepositsResult<()> {
-        self.state = self.state.apply(operation)?;
+        self.state.apply_in_place(operation)?;
         Ok(())
     }
 

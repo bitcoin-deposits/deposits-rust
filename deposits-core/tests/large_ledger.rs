@@ -21,23 +21,39 @@
 //! Override the target (and add it as a checkpoint):
 //!   LARGE_LEDGER_N=100000 cargo test --release ... -- --ignored --nocapture
 //!
-//! ## Findings (2026-06-16, release)
+//! ## Findings
+//!
+//! Original characterization (2026-06-16, release) — **before** the fix:
 //!
 //! | entries | append us/op | recompute | binary |
 //! |---------|--------------|-----------|--------|
 //! | 10,000  |    299       |   3.4 s   | 4.5 MB |
 //! | 100,000 |  4,077       |   478 s   |  45 MB |
 //!
-//! Both append/op (×13.6 per ×10) and recompute (×138 per ×10) are super-linear
-//! → **O(n²)**. Root cause: `LedgerState::apply` does `let next = self.clone()`
-//! on every operation, copying the whole state (deposits map + credited_payments
-//! set + …). Each apply is O(current size) → O(n²) to build and to replay. A
-//! million entries is therefore NOT reachable today (extrapolated: hours to
-//! build, ~13 h to recompute). Fix is a core refactor: mutate state in place
-//! (`&mut self`, validate-before-mutate to keep failure-leaves-state-unchanged)
-//! or back it with structural-sharing maps (e.g. `im`) so apply is ~O(1). The
+//! Both append/op (×13.6 per ×10) and recompute (×138 per ×10) were super-linear
+//! → **O(n²)**. Root cause: `LedgerState::apply` did `let next = self.clone()` on
+//! every operation, copying the whole state (deposits map + credited_payments set
+//! + …). Each apply was O(current size) → O(n²) to build and to replay; ~1M was
+//! unreachable (extrapolated ~13 h to recompute).
+//!
+//! **Fixed** (2026-06-16, release) — split `apply` into a functional wrapper that
+//! clones once and `apply_in_place(&mut self)` that mutates the real state
+//! machine; all hot paths (append, recompute, fraud replay, Batch inner ops) now
+//! call `apply_in_place`, so there is no per-op full-state clone. The functional
+//! `apply` is kept as a one-clone wrapper for validate-scratch callers
+//! (check_speculative, apply_with_verifier) so failure-leaves-state-unchanged
+//! still holds for free there.
+//!
+//! | entries   | append us/op | recompute | binary  | RSS    |
+//! |-----------|--------------|-----------|---------|--------|
+//! | 10,000    |     2.5      |    14 ms  |  4.5 MB |  11 MB |
+//! | 100,000   |     2.0      |   138 ms  |   45 MB |  88 MB |
+//! | 1,000,000 |     3.0      | 1,794 ms  |  451 MB | 852 MB |
+//!
+//! append/op is now flat (~2–3 µs, O(1) per op → O(n) build) and recompute is
+//! linear; **1M entries is reachable** (≈3 s to build, 1.8 s to recompute). The
 //! default target is small so this stays a quick smoke run; override
-//! `LARGE_LEDGER_N` to re-characterize after the fix and watch the columns flatten.
+//! `LARGE_LEDGER_N` to re-characterize.
 
 use deposits_core::ledger::Ledger;
 use deposits_core::messages::LedgerOperation;

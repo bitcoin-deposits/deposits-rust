@@ -225,13 +225,32 @@ impl LedgerState {
     ///
     /// [`apply_signed`]: Self::apply_signed
     /// [`check_speculative`]: Self::check_speculative
+    /// Functional apply: returns a new state, leaving `self` untouched — the
+    /// ergonomic form for callers that need before+after (conformance verifier,
+    /// speculative checks, tests). One full clone per call, fine off the hot
+    /// path. Per-history-op loops (append, replay) should use `apply_in_place`
+    /// to stay O(1)/op instead of O(n)/op (the O(n) vs O(n^2) ledger question).
     pub fn apply(
         &self,
         operation: &crate::messages::LedgerOperation,
     ) -> crate::DepositsResult<Self> {
+        let mut next = self.clone();
+        next.apply_in_place(operation)?;
+        Ok(next)
+    }
+
+    /// In-place apply — the actual state machine. Mutates `self` directly so the
+    /// growing state isn't cloned on every operation; this is what keeps
+    /// building/replaying a large ledger O(n) rather than O(n^2). Single ops
+    /// validate before they mutate, so an early `?` leaves state untouched;
+    /// Batch keeps all-or-nothing semantics via a scratch copy.
+    pub fn apply_in_place(
+        &mut self,
+        operation: &crate::messages::LedgerOperation,
+    ) -> crate::DepositsResult<()> {
         use crate::messages::LedgerOperation;
 
-        let mut next = self.clone();
+        let next = &mut *self;
         match operation {
             LedgerOperation::LedgerOpen {
                 operator_id,
@@ -766,21 +785,25 @@ impl LedgerState {
                 // No state changes — causal ordering only.
             }
             LedgerOperation::Batch(ops) => {
-                // Transactional apply: each inner op is applied against the
-                // running `next` state. If any inner op fails, this `?`
-                // returns Err and the *outer* function's `next` (the local
-                // clone created at the top) is dropped — `self` is
-                // unchanged. So failure leaves the original state intact.
+                // Transactional: build on a scratch copy, commit only on full
+                // success. If any inner op fails, `?` returns Err and the
+                // scratch is dropped — `*next` (i.e. `self`) is untouched, so
+                // failure leaves the original state intact. Now that apply
+                // mutates in place we can't replay onto `self` directly without
+                // losing that atomicity, hence the explicit scratch (one clone
+                // per Batch op, not per inner op — and Batches are rare).
                 //
                 // Validation (empty/oversize/nested-Batch) happens in
-                // `validate_operation`; by the time we get here every
-                // inner op is structurally permitted.
+                // `validate_operation`; by the time we get here every inner op
+                // is structurally permitted.
+                let mut scratch = next.clone();
                 for inner in ops {
-                    next = next.apply(inner)?;
+                    scratch.apply_in_place(inner)?;
                 }
+                *next = scratch;
             }
         }
-        Ok(next)
+        Ok(())
     }
 
     /// Apply an operation and check conformance.
