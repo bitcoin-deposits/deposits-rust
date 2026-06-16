@@ -159,9 +159,11 @@ impl LedgerActor {
     ///
     /// `self.ledger` is shared with `handler.ledgers`, so this is the
     /// authoritative apply path the rest of the daemon sees. The
-    /// handler's `inbound.rs` apply path may race with us; whichever
-    /// gets the lock first wins, the other's dedup check turns into
-    /// a no-op.
+    /// handler's `apply_updates_to_ledger` (joined-ledger relay gap-fill,
+    /// driven by `main_loop::reimport_joined_ledger`) may race with us;
+    /// both are sync, hold the ledger write lock atomically, and recheck
+    /// chain continuity under it, so whichever gets the lock first wins
+    /// and the other backs off (Err / dedup no-op).
     fn apply_inbound(&mut self, update: deposits_core::types::SignedLedgerUpdate) {
         use deposits_core::messages::LedgerOperation;
         use deposits_core::tlv::TlvDecode;

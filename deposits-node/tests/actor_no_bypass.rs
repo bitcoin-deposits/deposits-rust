@@ -30,8 +30,16 @@ use std::path::{Path, PathBuf};
 const FORBIDDEN_PATTERNS: &[(&str, &[&str])] = &[
     (
         // The actor's apply-inbound path. Conformance + state machine.
+        // Also handler.rs::apply_updates_to_ledger — the joined-ledger relay
+        // gap-fill / re-import path (main_loop::reimport_joined_ledger). That's
+        // a genuine second writer to ledgers that already have a live actor, but
+        // it can't corrupt: it's a sync fn that holds the ledger RwLock write
+        // lock atomically (no awaits mid-apply) and rechecks chain continuity
+        // (previous_hash == tail_hash) under the lock, so it serializes with the
+        // actor's apply_inbound and the loser backs off (Err / dedup no-op). See
+        // the race note in ledger_actor.rs::apply_inbound.
         "apply_and_check",
-        &["node/ledger_actor.rs"],
+        &["node/ledger_actor.rs", "handler.rs"],
     ),
     (
         // The actor's apply-commit path. Stages our outbound op.
@@ -39,9 +47,11 @@ const FORBIDDEN_PATTERNS: &[(&str, &[&str])] = &[
         &["node/ledger_actor.rs"],
     ),
     (
-        // Raw history append from the actor.
+        // Raw history append from the actor — and from the same
+        // apply_updates_to_ledger gap-fill path noted above (lock-serialized,
+        // continuity-rechecked, safe against the actor).
         "history.push",
-        &["node/ledger_actor.rs"],
+        &["node/ledger_actor.rs", "handler.rs"],
     ),
     (
         // LedgerOpen creation (pre-actor) + fork creation replay.
