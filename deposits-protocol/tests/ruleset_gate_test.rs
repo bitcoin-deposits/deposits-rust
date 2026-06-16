@@ -110,6 +110,29 @@ fn nonlegacy_quorum_begin_rejects_unattested_member() {
     assert!(msg.contains("cltv-offset-v2"), "got: {}", msg);
 }
 
+/// A rejected `QuorumBegin` must leave state untouched — the documented
+/// `apply_in_place` atomicity invariant. Regression guard: an earlier version
+/// drained `next_quorum_members` *before* the ruleset gate, so a rejected
+/// QuorumBegin silently emptied the staged set (the functional `apply` clone
+/// hid it, but the in-place build/replay path corrupted state).
+#[test]
+fn rejected_quorum_begin_leaves_state_untouched() {
+    let operator = pk(1);
+    let member = pk(2);
+    let mut s = state_with_staged_member(operator, member, Vec::new());
+    let before = s.clone();
+    let op = quorum_begin(member, Some("cltv-offset-v2".into()));
+
+    let err = s.apply_in_place(&op).unwrap_err();
+    assert!(format!("{:?}", err).contains("ruleset_unsupported_by_member"));
+
+    // Nothing moved: staged set intact, quorum not activated.
+    assert_eq!(s.next_quorum_members, before.next_quorum_members);
+    assert!(s.quorum_members.is_empty());
+    assert_eq!(s.quorum_state, before.quorum_state);
+    assert_eq!(s, before, "rejected QuorumBegin must leave the whole state unchanged");
+}
+
 /// A member who declared support only for `legacy` cannot be promoted
 /// into a `cltv-offset-v2` quorum.
 #[test]

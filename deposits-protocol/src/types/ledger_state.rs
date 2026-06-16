@@ -292,12 +292,20 @@ impl LedgerState {
                 // declared (validated upstream to be ⊆ next_quorum_members).
                 // Members in next_quorum_members that the operation
                 // *omitted* are dropped — they never enter the active set.
+                //
+                // Compute `promoted` by cloning rather than draining
+                // next_quorum_members: the ruleset gate below can `return Err`,
+                // and apply_in_place must leave state untouched on failure (the
+                // documented atomicity invariant). next_quorum_members is only
+                // cleared once every check has passed. The clone is bounded by
+                // quorum size (handful of members), not by ledger size.
                 let declared: std::collections::HashSet<_> =
                     quorum_members.iter().map(|m| m.pubkey).collect();
-                let staged = std::mem::take(&mut next.next_quorum_members);
-                let promoted: Vec<QuorumMember> = staged
-                    .into_iter()
+                let promoted: Vec<QuorumMember> = next
+                    .next_quorum_members
+                    .iter()
                     .filter(|m| declared.contains(&m.pubkey))
+                    .cloned()
                     .collect();
 
                 // Ruleset attestation gate. Skipped for "legacy" so
@@ -330,6 +338,10 @@ impl LedgerState {
                     }
                 }
 
+                // All checks passed — commit. Clearing next_quorum_members here
+                // (instead of draining it above) is what makes the failure path
+                // leave state untouched.
+                next.next_quorum_members.clear();
                 next.reserves_key = reserves_id.clone();
                 next.reserves_amount = *amount;
                 next.collateral_amount = *collateral_amount;
