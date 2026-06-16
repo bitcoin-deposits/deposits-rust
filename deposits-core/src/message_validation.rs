@@ -915,6 +915,7 @@ mod tests {
         let mut deposit = Deposit::from_pubkey(&deposit_pubkey, None);
         deposit.balance = 50_000; // Has balance
         ledger.state.deposits.insert(deposit.deposit_id, deposit);
+        ledger.state.rebuild_balance_cache(); // direct insert bypasses apply_in_place
         ctx.add_ledger(operator, our_node_id.to_string(), ledger);
 
         let msg = LedgerCloseMsg {

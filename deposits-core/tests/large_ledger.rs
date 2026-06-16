@@ -83,24 +83,24 @@
 //! in place + restore-on-reject) rather than to drop persistent structures.
 //!
 //! The SECOND scaling axis — #deposits, not history — is characterized by
-//! `deposit_count_characterization` (below). `check_conformance` computes
-//! `total_deposit_balance()` (a fold over ALL deposits) on every
-//! credit/onchain/transfer op, so routine apply is O(#deposits) per op,
-//! independent of history length. Measured:
+//! `deposit_count_characterization` (below). `check_conformance`'s reserve check
+//! reads `total_deposit_balance()` on every credit/onchain/transfer op. That
+//! used to be an O(#deposits) fold; it is now an O(1) read of a cached running
+//! total maintained by `apply_in_place` (see `LedgerState::total_deposit_balance`
+//! the field). Before vs after:
 //!
-//! | deposits | deposit_open us/op | credit us/op |
-//! |----------|--------------------|--------------|
-//! |    1,000 |        ~7          |       20     |
-//! |   10,000 |        ~3          |       88     |
-//! |  100,000 |        ~3          |    1,200     |
+//! | deposits | deposit_open us/op | credit us/op (fold) | credit us/op (cached) |
+//! |----------|--------------------|---------------------|-----------------------|
+//! |    1,000 |        ~5          |          20         |          15           |
+//! |   10,000 |        ~3          |          88         |          16           |
+//! |  100,000 |        ~3          |       1,200         |          21           |
 //!
-//! `credit us/op` is ~linear in #deposits (×13.6 per ×10) — the balance fold —
-//! while `deposit_open` stays flat (O(log d) insert). At 100k deposits a single
-//! credit costs ~1.2 ms (~830/s), so unlike the history axis this one can bite a
-//! genuinely large operator. The fix when it matters: maintain a running
-//! `total_deposit_balance` (update on each balance change) so the reserve-
-//! sufficiency check is O(1) instead of an O(#deposits) fold per op. Not done —
-//! current deposit counts are nowhere near this.
+//! With the fold, `credit us/op` was ~linear in #deposits (×13.6 per ×10) — at
+//! 100k deposits a single credit cost ~1.2 ms (~830/s). With the cached total
+//! it is flat (~15-21 µs; the mild rise is OrdMap cache effects, not the deposit
+//! count), 57× faster at 100k. `deposit_open` stays flat (O(log d) insert) in
+//! both. The cache is kept honest by a debug_assert in `apply_in_place` that
+//! recomputes the fold and compares on every apply across the whole test suite.
 //!
 //! **1M entries is reachable**: ~3 s build, 2.3 s recompute, 24 s full
 //! conformance re-import (was projected hours). Slightly higher constants than

@@ -108,6 +108,18 @@ pub struct LedgerState {
     /// set grows one-per-payment and was the dominant per-op clone cost.
     #[serde(default)]
     pub credited_payments: im::OrdSet<String>,
+    /// Cached sum of every deposit's `balance` — the operator's total obligation.
+    /// Maintained incrementally by `apply_in_place` (the sole production site
+    /// that mutates deposit balances) so the reserve-sufficiency conformance
+    /// check is O(1) instead of an O(#deposits) fold per credit/withdraw/transfer
+    /// op. `total_deposit_balance()` returns this; `fold_deposit_balance()` is
+    /// the O(#deposits) ground truth used by the debug-build drift assertion and
+    /// `rebuild_balance_cache()`. `#[serde(default)]`: pre-cache ledgers load
+    /// with 0, then every production load path (startup replay, from_export,
+    /// recompute_state) rebuilds state through `apply_in_place` from genesis,
+    /// which repopulates it correctly.
+    #[serde(default)]
+    pub total_deposit_balance: u64,
     /// Running total of fees the operator has accrued on this ledger
     /// (msats), across both maintenance fees (FeeCollect) and per-transfer
     /// fees captured on TransferComplete. On-chain withdrawal fees are
@@ -189,6 +201,7 @@ impl LedgerState {
             open_invoice_locks: HashMap::new(),
             pending_withdrawals: HashMap::new(),
             credited_payments: im::OrdSet::new(),
+            total_deposit_balance: 0,
             fees_accumulated: 0,
             sequence: 0,
             chain_tip_hash: [0u8; 32],
@@ -372,7 +385,11 @@ impl LedgerState {
                 deposit.fee_change_after_blocks = *fee_change_after_blocks;
                 deposit.fee_change_notice_blocks = *fee_change_notice_blocks;
                 deposit.fee_change_limit_bps = *fee_change_limit_bps;
+                let opened_balance = deposit.balance;
                 next.deposits.insert(*deposit_id, deposit);
+                // Deposits open at zero balance today; fold in whatever they
+                // carry so the cache stays correct if that ever changes.
+                next.add_balance_delta(0, opened_balance);
             }
             LedgerOperation::DepositClose { deposit_id } => {
                 let deposit = next
@@ -384,7 +401,9 @@ impl LedgerState {
                         balance: deposit.balance,
                     });
                 }
+                let closed_balance = deposit.balance;
                 next.deposits.remove(deposit_id);
+                next.add_balance_delta(closed_balance, 0);
             }
             LedgerOperation::FeeChange {
                 deposit_id,
@@ -424,8 +443,11 @@ impl LedgerState {
                     .deposits
                     .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
+                let before = deposit.balance;
                 deposit.credit(*amount);
+                let after = deposit.balance;
                 next.credited_payments.insert(hash_hex);
+                next.add_balance_delta(before, after);
             }
             LedgerOperation::InvoiceLock {
                 deposit_id,
@@ -479,10 +501,13 @@ impl LedgerState {
                 // moved). Charged best-effort from current balance —
                 // saturating_sub guards the edge where balance dipped
                 // below the fixed fee between lock and fail.
+                let before = deposit.balance;
                 let charged = deposit.transfer_fees.fixed_msats.min(deposit.balance);
                 deposit.balance -= charged;
+                let after = deposit.balance;
                 next.fees_accumulated = next.fees_accumulated.saturating_add(charged);
                 next.open_invoice_locks.remove(payment_id);
+                next.add_balance_delta(before, after);
             }
             LedgerOperation::InvoiceFulfill {
                 payment_id,
@@ -494,8 +519,11 @@ impl LedgerState {
                     .deposits
                     .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
+                let before = deposit.balance;
                 deposit.fulfill(*amount);
+                let after = deposit.balance;
                 next.open_invoice_locks.remove(payment_id);
+                next.add_balance_delta(before, after);
             }
             LedgerOperation::OnchainCredit {
                 deposit_id, amount, ..
@@ -504,7 +532,10 @@ impl LedgerState {
                     .deposits
                     .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
+                let before = deposit.balance;
                 deposit.credit(*amount);
+                let after = deposit.balance;
+                next.add_balance_delta(before, after);
             }
             LedgerOperation::OnchainLock {
                 deposit_id,
@@ -559,9 +590,12 @@ impl LedgerState {
                         // Fixed operator fee applies even on failure;
                         // variable portion is zero. fee_sats was the miner
                         // fee, unrelated to operator revenue.
+                        let before = deposit.balance;
                         let charged = deposit.transfer_fees.fixed_msats.min(deposit.balance);
                         deposit.balance -= charged;
+                        let after = deposit.balance;
                         next.fees_accumulated = next.fees_accumulated.saturating_add(charged);
+                        next.add_balance_delta(before, after);
                     }
                 }
             }
@@ -582,7 +616,10 @@ impl LedgerState {
                 if let Some(pending) = next.pending_withdrawals.remove(withdrawal_id) {
                     if let Some(deposit) = next.deposits.get_mut(&pending.deposit_id) {
                         let total = pending.amount.saturating_add(pending.fee_sats);
+                        let before = deposit.balance;
                         deposit.fulfill(total);
+                        let after = deposit.balance;
+                        next.add_balance_delta(before, after);
                     }
                 }
             }
@@ -599,9 +636,12 @@ impl LedgerState {
                             deposit.pending_fee_change = Some((new_fees, effective));
                         }
                     }
+                    let before = deposit.balance;
                     deposit.balance = deposit.balance.saturating_sub(*amount);
                     deposit.last_fee_assessment = *block_height;
+                    let after = deposit.balance;
                     next.fees_accumulated = next.fees_accumulated.saturating_add(*amount);
+                    next.add_balance_delta(before, after);
                 }
             }
             LedgerOperation::QuorumAddMember {
@@ -774,10 +814,16 @@ impl LedgerState {
                         // Fee is operator income (not tracked as per-deposit
                         // obligation), so only `amount` comes off source.balance.
                         source.locked_balance = source.locked_balance.saturating_sub(total);
+                        let before = source.balance;
                         source.balance = source.balance.saturating_sub(pending.amount);
+                        let after = source.balance;
+                        next.add_balance_delta(before, after);
                     }
                     if let Some(dest) = next.deposits.get_mut(&pending.destination_deposit_id) {
+                        let before = dest.balance;
                         dest.balance = dest.balance.saturating_add(pending.amount);
+                        let after = dest.balance;
+                        next.add_balance_delta(before, after);
                     }
                     // The transfer fee is operator income — tally it for later
                     // distribution to quorum members (see QuorumMember.compensation_*).
@@ -796,8 +842,11 @@ impl LedgerState {
                         // is zero because no amount moved. Read from the
                         // deposit's current schedule — sufficient for v1.
                         source.locked_balance = source.locked_balance.saturating_sub(total);
+                        let before = source.balance;
                         charged = source.transfer_fees.fixed_msats.min(source.balance);
                         source.balance -= charged;
+                        let after = source.balance;
+                        next.add_balance_delta(before, after);
                     }
                     next.fees_accumulated = next.fees_accumulated.saturating_add(charged);
                 }
@@ -824,6 +873,15 @@ impl LedgerState {
                 *next = scratch;
             }
         }
+        // Drift guard: the cached total must always equal the fold. Debug-only,
+        // so it costs nothing in release but turns every apply in the whole test
+        // suite into a check that the incremental maintenance above stays exact.
+        debug_assert_eq!(
+            next.total_deposit_balance,
+            next.fold_deposit_balance(),
+            "total_deposit_balance cache drifted from the deposit fold after {:?}",
+            std::mem::discriminant(operation)
+        );
         Ok(())
     }
 
@@ -1397,9 +1455,35 @@ impl LedgerState {
     /// portion currently locked for in-flight ops). Per-deposit spendable
     /// funds are computed by `available_balance()` = `balance - locked_balance`.
     pub fn total_deposit_balance(&self) -> u64 {
+        self.total_deposit_balance
+    }
+
+    /// Ground-truth O(#deposits) fold over every deposit's balance. This is what
+    /// the cached `total_deposit_balance` must always equal; used by
+    /// `rebuild_balance_cache` and the debug-build drift assertion in
+    /// `apply_in_place`. Not for hot paths — use `total_deposit_balance()`.
+    pub fn fold_deposit_balance(&self) -> u64 {
         self.deposits
             .values()
             .fold(0u64, |acc, d| acc.saturating_add(d.balance))
+    }
+
+    /// Recompute the cached `total_deposit_balance` from the deposits map.
+    /// Production never needs this (every balance mutation goes through
+    /// `apply_in_place`, which keeps the cache in step), but code that builds a
+    /// `LedgerState` by inserting deposits directly — tests, ad-hoc fixtures —
+    /// must call it so the cache matches the map.
+    pub fn rebuild_balance_cache(&mut self) {
+        self.total_deposit_balance = self.fold_deposit_balance();
+    }
+
+    /// Adjust the cached total by the signed delta between a deposit's balance
+    /// before and after a mutation. Centralizes the saturating-i128 arithmetic so
+    /// every `apply_in_place` arm that touches a balance stays consistent.
+    #[inline]
+    fn add_balance_delta(&mut self, before: u64, after: u64) {
+        let next = self.total_deposit_balance as i128 + after as i128 - before as i128;
+        self.total_deposit_balance = next.max(0) as u64;
     }
 
     /// Get the declared collateral amount for this ledger (msats).
@@ -1469,6 +1553,7 @@ mod replay_protection_tests {
         deposit.balance = 1000;
         let did = deposit.deposit_id;
         state.deposits.insert(did, deposit);
+        state.rebuild_balance_cache(); // direct insert bypasses apply_in_place
         (state, did)
     }
 
@@ -1623,5 +1708,94 @@ mod replay_protection_tests {
             "fulfill ops must not run the replay/expiry checks: {:?}",
             violations,
         );
+    }
+}
+
+#[cfg(test)]
+mod balance_cache_tests {
+    //! `total_deposit_balance` is a cache maintained incrementally by
+    //! `apply_in_place`. The debug_assert at the end of `apply_in_place` already
+    //! checks cache == fold on every apply across the whole suite; these tests
+    //! additionally pin the *value* (the accessor returns the right number) and
+    //! that it tracks across credit / transfer / close.
+    use super::*;
+    use crate::messages::LedgerOperation;
+
+    fn pk() -> bitcoin::secp256k1::PublicKey {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[9u8; 32]).unwrap();
+        bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk)
+    }
+
+    fn open(state: &mut LedgerState, did: [u8; 16]) {
+        state
+            .apply_in_place(&LedgerOperation::DepositOpen {
+                deposit_id: did,
+                descriptor: format!("d{}", did[0]),
+                fees: None,
+                transfer_fees: None,
+                payment_hash: None,
+                invoice: None,
+                cosigner_guarantee_signature: None,
+                receive_requires_sig: false,
+                fee_change_after_blocks: None,
+                fee_change_notice_blocks: None,
+                fee_change_limit_bps: None,
+            })
+            .unwrap();
+    }
+
+    fn credit(state: &mut LedgerState, did: [u8; 16], hash: u8, amount: u64) {
+        state
+            .apply_in_place(&LedgerOperation::InvoiceCredit {
+                payment_hash: [hash; 32],
+                deposit_id: did,
+                amount,
+                invoice_id: format!("i{}", hash),
+                sequence_number: 0,
+                wallet_authorization: None,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn cache_tracks_credits_and_close_and_equals_fold() {
+        let mut state = LedgerState::new(pk(), "r".to_string(), 0);
+        assert_eq!(state.total_deposit_balance(), 0);
+
+        let a = [1u8; 16];
+        let b = [2u8; 16];
+        open(&mut state, a);
+        open(&mut state, b);
+        assert_eq!(state.total_deposit_balance(), 0);
+
+        credit(&mut state, a, 0xa1, 500);
+        credit(&mut state, b, 0xb1, 300);
+        credit(&mut state, a, 0xa2, 200);
+        // 500 + 200 on a, 300 on b
+        assert_eq!(state.total_deposit_balance(), 1000);
+        assert_eq!(state.total_deposit_balance(), state.fold_deposit_balance());
+
+        // A zero-balance deposit can be closed; total is unchanged.
+        let c = [3u8; 16];
+        open(&mut state, c);
+        state
+            .apply_in_place(&LedgerOperation::DepositClose { deposit_id: c })
+            .unwrap();
+        assert_eq!(state.total_deposit_balance(), 1000);
+        assert_eq!(state.total_deposit_balance(), state.fold_deposit_balance());
+    }
+
+    #[test]
+    fn rebuild_matches_fold_after_direct_insert() {
+        let mut state = LedgerState::new(pk(), "r".to_string(), 0);
+        let mut d = Deposit::new("x".to_string(), None);
+        d.balance = 777;
+        let did = d.deposit_id;
+        state.deposits.insert(did, d); // bypasses apply_in_place
+        assert_eq!(state.total_deposit_balance(), 0, "cache stale before rebuild");
+        state.rebuild_balance_cache();
+        assert_eq!(state.total_deposit_balance(), 777);
+        assert_eq!(state.total_deposit_balance(), state.fold_deposit_balance());
     }
 }

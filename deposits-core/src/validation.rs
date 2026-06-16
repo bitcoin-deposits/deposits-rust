@@ -1046,6 +1046,7 @@ mod tests {
         let deposit = create_test_deposit(deposit_balance);
         let deposit_id = deposit.deposit_id;
         state.deposits.insert(deposit_id, deposit);
+        state.rebuild_balance_cache(); // direct insert bypasses apply_in_place
 
         state.reserves_amount = reserves;
 

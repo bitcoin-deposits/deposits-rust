@@ -2532,6 +2532,7 @@ mod tests {
         };
         ledger.state.deposits.insert(source_id, source_deposit);
         ledger.state.deposits.insert(dest_id, dest_deposit);
+        ledger.state.rebuild_balance_cache(); // direct inserts bypass apply_in_place
 
         // Create transfer lock
         let nonce = [0x42u8; 32];
@@ -2625,6 +2626,7 @@ mod tests {
             seen_nonces: std::collections::BTreeSet::new(),
         };
         ledger.state.deposits.insert(source_id, source_deposit);
+        ledger.state.rebuild_balance_cache(); // direct insert bypasses apply_in_place
 
         // Create transfer lock
         let transfer_id = [0xBBu8; 32];
