@@ -36,24 +36,36 @@
 //! + …). Each apply was O(current size) → O(n²) to build and to replay; ~1M was
 //! unreachable (extrapolated ~13 h to recompute).
 //!
-//! **Fixed** (2026-06-16, release) — split `apply` into a functional wrapper that
-//! clones once and `apply_in_place(&mut self)` that mutates the real state
-//! machine; all hot paths (append, recompute, fraud replay, Batch inner ops) now
-//! call `apply_in_place`, so there is no per-op full-state clone. The functional
-//! `apply` is kept as a one-clone wrapper for validate-scratch callers
-//! (check_speculative, apply_with_verifier) so failure-leaves-state-unchanged
-//! still holds for free there.
+//! **Fix, part 1** — split `apply` into a functional wrapper that clones once
+//! and `apply_in_place(&mut self)` that mutates the real state machine; the
+//! build/replay hot paths (append, recompute, fraud replay, Batch inner ops)
+//! call `apply_in_place`, removing the per-op full-state clone there. This fixed
+//! append + recompute but NOT the clone-based verifier paths — `apply_and_check`
+//! (joined-ledger re-import / watcher) still went through the cloning
+//! `apply_with_verifier`, so re-import stayed O(n²): 4,083 ms @10k → 35,576 ms
+//! @30k (the `reimport` column was added to catch exactly this).
 //!
-//! | entries   | append us/op | recompute | chainwalk | binary  | RSS    |
-//! |-----------|--------------|-----------|-----------|---------|--------|
-//! | 10,000    |     2.6      |     9 ms  |    0 ms   |  4.5 MB |  11 MB |
-//! | 100,000   |     2.0      |   103 ms  |    9 ms   |   45 MB |  88 MB |
-//! | 1,000,000 |     2.4      | 1,570 ms  |   94 ms   |  451 MB | 855 MB |
+//! **Fix, part 2 (the real one)** — make the clone itself cheap. `deposits` and
+//! `credited_payments` (the two collections that grow with n) became persistent
+//! structures (`im::OrdMap` / `im::OrdSet`): `LedgerState::clone()` is now O(1)
+//! structural sharing and mutation is O(log n) copy-on-write. Every clone-based
+//! path — re-import, `check_speculative`, `apply_signed` — drops to O(n log n)
+//! with zero logic changes, and failure-leaves-state-unchanged comes back for
+//! free (the discarded clone). This is what the COW migration bought.
 //!
-//! append/op is now flat (~2–3 µs, O(1) per op → O(n) build); recompute and
-//! chainwalk are both linear; **1M entries is reachable** (≈3 s build, 1.6 s
-//! recompute, 94 ms continuity walk). The default target is small so this stays
-//! a quick smoke run; override `LARGE_LEDGER_N` to re-characterize.
+//! | entries   | append us/op | recompute | reimport  | chainwalk | binary  | RSS    |
+//! |-----------|--------------|-----------|-----------|-----------|---------|--------|
+//! | 10,000    |     3.0      |    11 ms  |    82 ms  |    0 ms   |  4.5 MB |  11 MB |
+//! | 100,000   |     2.5      |   170 ms  | 1,454 ms  |   41 ms   |   45 MB |  92 MB |
+//! | 1,000,000 |     3.7      | 2,374 ms  | 28,182 ms |  321 ms   |  451 MB | 864 MB |
+//!
+//! append/op is flat (~3 µs); recompute, reimport and chainwalk are all
+//! sub-quadratic (reimport ×19 per ×10 ≈ n·log n + cache effects at the ~450 MB
+//! working set, vs the old ×76 quadratic). **1M entries is reachable**: ~4 s to
+//! build, 2.4 s to recompute, 28 s for a full conformance re-import (was
+//! projected at hours). Slightly higher constants than part 1's std-collection
+//! numbers — the price of O(1) clone — but the curve is the point. The default
+//! target is small so this stays a quick smoke run; override `LARGE_LEDGER_N`.
 //!
 //! Note: the `chainwalk` column reported a deceptive 0 ms before this harness
 //! called `finalize_chain_hash()` after each append. `append_operation_with_block`
@@ -150,8 +162,8 @@ fn large_ledger_characterization() {
 
     println!("\nlarge-ledger characterization: target={} checkpoints={:?}", target, checkpoints);
     println!(
-        "{:>11}  {:>12}  {:>13}  {:>13}  {:>10}  {:>9}",
-        "entries", "append us/op", "recompute ms", "chainwalk ms", "binary MB", "RSS MB"
+        "{:>11}  {:>12}  {:>13}  {:>13}  {:>13}  {:>10}  {:>9}",
+        "entries", "append us/op", "recompute ms", "reimport ms", "chainwalk ms", "binary MB", "RSS MB"
     );
 
     let mut i: u64 = 0;
@@ -188,6 +200,24 @@ fn large_ledger_characterization() {
         ledger.recompute_state().expect("recompute_state");
         let recompute_ms = t_rc.elapsed().as_millis();
 
+        // Re-import cost: replay the whole history through `apply_and_check`
+        // (apply + conformance per op) — the joined-ledger re-import / watcher
+        // path behind the stranded-quorum incident. Distinct from recompute:
+        // it runs the conformance verifier on every op as a member would.
+        let t_reimport = Instant::now();
+        {
+            use deposits_core::tlv::TlvDecode;
+            let mut fresh = Ledger::new_as_operator(op, hex::encode(op.serialize()), 0);
+            for update in &ledger.history {
+                let inner = LedgerOperation::tlv_decode(&update.message)
+                    .expect("tlv_decode history op");
+                fresh
+                    .apply_and_check(&inner, update.block_height)
+                    .expect("apply_and_check");
+            }
+        }
+        let reimport_ms = t_reimport.elapsed().as_millis();
+
         // Chain-continuity walk. Assert it covers the WHOLE history — a walk
         // that stops short means the chain is broken and the timing below is
         // measuring a partial walk, not a 1M-entry validation.
@@ -206,10 +236,11 @@ fn large_ledger_characterization() {
         let bin_mb = ledger.export_binary(0).len() as f64 / 1e6;
 
         println!(
-            "{:>11}  {:>12.3}  {:>13}  {:>13}  {:>10.1}  {:>9.0}",
+            "{:>11}  {:>12.3}  {:>13}  {:>13}  {:>13}  {:>10.1}  {:>9.0}",
             ledger.history.len(),
             per_op_us,
             recompute_ms,
+            reimport_ms,
             walk_ms,
             bin_mb,
             rss_mb()

@@ -48,8 +48,12 @@ pub struct LedgerState {
     #[serde(default)]
     pub reserves_outpoint: Option<String>,
     /// All deposits in this ledger, keyed by deposit_id.
+    ///
+    /// `im::OrdMap` (persistent B-tree): `clone()` is O(1) structural sharing,
+    /// so the per-op `LedgerState` clone on speculative/verify/re-import paths
+    /// doesn't copy the whole map. Mutation is O(log n) copy-on-write.
     #[serde(with = "serde_deposit_id_map")]
-    pub deposits: HashMap<DepositId, Deposit>,
+    pub deposits: im::OrdMap<DepositId, Deposit>,
     /// Reserves amount backing this ledger (deposit capacity, millisatoshis).
     /// Set at LedgerOpen, updated at QuorumBegin during reserves rotation.
     #[serde(default)]
@@ -97,8 +101,13 @@ pub struct LedgerState {
     pub pending_withdrawals: HashMap<[u8; 32], PendingWithdrawal>,
     /// Payment hashes that have been credited (InvoiceCredit).
     /// Prevents double-crediting the same lightning payment.
+    ///
+    /// Append-only (a hash goes in at credit time and is never removed), so an
+    /// `im::OrdSet` (persistent B-tree) is the natural fit: clone shares all
+    /// prior entries O(1); each credit adds a version pointing at the old. This
+    /// set grows one-per-payment and was the dominant per-op clone cost.
     #[serde(default)]
-    pub credited_payments: std::collections::HashSet<String>,
+    pub credited_payments: im::OrdSet<String>,
     /// Running total of fees the operator has accrued on this ledger
     /// (msats), across both maintenance fees (FeeCollect) and per-transfer
     /// fees captured on TransferComplete. On-chain withdrawal fees are
@@ -168,7 +177,7 @@ impl LedgerState {
             operator_key,
             reserves_key,
             reserves_outpoint: None,
-            deposits: HashMap::new(),
+            deposits: im::OrdMap::new(),
             reserves_amount: 0,
             quorum_state: QuorumState::PreQuorum,
             quorum_members: Vec::new(),
@@ -179,7 +188,7 @@ impl LedgerState {
             pending_transfers: HashMap::new(),
             open_invoice_locks: HashMap::new(),
             pending_withdrawals: HashMap::new(),
-            credited_payments: std::collections::HashSet::new(),
+            credited_payments: im::OrdSet::new(),
             fees_accumulated: 0,
             sequence: 0,
             chain_tip_hash: [0u8; 32],

@@ -250,7 +250,6 @@ pub mod serde_deposit_id {
 /// Serde helper for HashMap<DepositId, V> - serializes as Vec of tuples with hex keys
 pub mod serde_deposit_id_map {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::HashMap;
 
     /// Entry for serialization
     #[derive(Serialize, Deserialize)]
@@ -260,11 +259,12 @@ pub mod serde_deposit_id_map {
         value: V,
     }
 
-    /// Serialize a HashMap<DepositId, V>
-    pub fn serialize<S, V>(map: &HashMap<[u8; 16], V>, serializer: S) -> Result<S::Ok, S::Error>
+    /// Serialize an `im::OrdMap<DepositId, V>`. OrdMap iterates in key order,
+    /// so the on-disk entry list is deterministic regardless of insert order.
+    pub fn serialize<S, V>(map: &im::OrdMap<[u8; 16], V>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
-        V: Serialize,
+        V: Serialize + Clone,
     {
         let entries: Vec<Entry<&V>> = map
             .iter()
@@ -273,11 +273,11 @@ pub mod serde_deposit_id_map {
         entries.serialize(serializer)
     }
 
-    /// Deserialize a HashMap<DepositId, V>
-    pub fn deserialize<'de, D, V>(deserializer: D) -> Result<HashMap<[u8; 16], V>, D::Error>
+    /// Deserialize an `im::OrdMap<DepositId, V>`.
+    pub fn deserialize<'de, D, V>(deserializer: D) -> Result<im::OrdMap<[u8; 16], V>, D::Error>
     where
         D: Deserializer<'de>,
-        V: Deserialize<'de>,
+        V: Deserialize<'de> + Clone,
     {
         let entries: Vec<Entry<V>> = Vec::deserialize(deserializer)?;
         Ok(entries.into_iter().map(|e| (e.key, e.value)).collect())

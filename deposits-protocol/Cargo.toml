@@ -9,6 +9,11 @@ license = "MIT OR Apache-2.0"
 bitcoin = { version = "0.32", features = ["serde"] }
 secp256k1 = { version = "0.29", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
+# Persistent (immutable + structural-sharing) collections. LedgerState is cloned
+# on every speculative apply / re-import op; with std collections that clone is
+# O(state size) → O(n^2) to build/replay a ledger. im's OrdMap/OrdSet make clone
+# O(1) and mutation O(log n) copy-on-write, so all clone paths drop to O(n log n).
+im = { version = "15", features = ["serde"] }
 sha2 = "0.10"
 hex = "0.4"
 thiserror = "1.0"
