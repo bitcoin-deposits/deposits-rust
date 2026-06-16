@@ -44,16 +44,25 @@
 //! (check_speculative, apply_with_verifier) so failure-leaves-state-unchanged
 //! still holds for free there.
 //!
-//! | entries   | append us/op | recompute | binary  | RSS    |
-//! |-----------|--------------|-----------|---------|--------|
-//! | 10,000    |     2.5      |    14 ms  |  4.5 MB |  11 MB |
-//! | 100,000   |     2.0      |   138 ms  |   45 MB |  88 MB |
-//! | 1,000,000 |     3.0      | 1,794 ms  |  451 MB | 852 MB |
+//! | entries   | append us/op | recompute | chainwalk | binary  | RSS    |
+//! |-----------|--------------|-----------|-----------|---------|--------|
+//! | 10,000    |     2.6      |     9 ms  |    0 ms   |  4.5 MB |  11 MB |
+//! | 100,000   |     2.0      |   103 ms  |    9 ms   |   45 MB |  88 MB |
+//! | 1,000,000 |     2.4      | 1,570 ms  |   94 ms   |  451 MB | 855 MB |
 //!
-//! append/op is now flat (~2–3 µs, O(1) per op → O(n) build) and recompute is
-//! linear; **1M entries is reachable** (≈3 s to build, 1.8 s to recompute). The
-//! default target is small so this stays a quick smoke run; override
-//! `LARGE_LEDGER_N` to re-characterize.
+//! append/op is now flat (~2–3 µs, O(1) per op → O(n) build); recompute and
+//! chainwalk are both linear; **1M entries is reachable** (≈3 s build, 1.6 s
+//! recompute, 94 ms continuity walk). The default target is small so this stays
+//! a quick smoke run; override `LARGE_LEDGER_N` to re-characterize.
+//!
+//! Note: the `chainwalk` column reported a deceptive 0 ms before this harness
+//! called `finalize_chain_hash()` after each append. `append_operation_with_block`
+//! leaves `chain_tip_hash = content_hash`; production advances it to `chain_hash()`
+//! once the operator signs. Without that step the chain links via content_hash
+//! while `find_valid_chain_length` expects `chain_hash()`, so the walk bailed
+//! after one entry. The harness now finalizes each update and asserts the walk
+//! covers the whole history — so a broken chain can never again read as "0 ms".
+//! (`find_valid_chain_length` itself was correct; this was a harness-only flaw.)
 
 use deposits_core::ledger::Ledger;
 use deposits_core::messages::LedgerOperation;
@@ -110,6 +119,12 @@ fn large_ledger_characterization() {
             [0u8; 32],
         )
         .expect("LedgerOpen");
+    // append_operation_with_block leaves chain_tip_hash = content_hash; prod
+    // advances it to chain_hash() after the operator signs. The harness never
+    // signs, so finalize explicitly — otherwise the chain links via content_hash
+    // while find_valid_chain_length expects chain_hash(), and the walk bails
+    // after one entry (a deceptive "0 ms").
+    ledger.finalize_chain_hash();
     let descriptor = format!("pk({})", hex::encode(op.serialize()));
     let deposit_id = compute_deposit_id(&descriptor);
     ledger
@@ -131,6 +146,7 @@ fn large_ledger_characterization() {
             [0u8; 32],
         )
         .expect("DepositOpen");
+    ledger.finalize_chain_hash();
 
     println!("\nlarge-ledger characterization: target={} checkpoints={:?}", target, checkpoints);
     println!(
@@ -160,6 +176,7 @@ fn large_ledger_characterization() {
                     [0u8; 32],
                 )
                 .expect("InvoiceCredit append");
+            ledger.finalize_chain_hash();
             i += 1;
         }
         let appended = (ledger.history.len() - prev_len).max(1);
@@ -171,10 +188,19 @@ fn large_ledger_characterization() {
         ledger.recompute_state().expect("recompute_state");
         let recompute_ms = t_rc.elapsed().as_millis();
 
-        // Chain-continuity walk.
+        // Chain-continuity walk. Assert it covers the WHOLE history — a walk
+        // that stops short means the chain is broken and the timing below is
+        // measuring a partial walk, not a 1M-entry validation.
         let t_walk = Instant::now();
-        let _ = deposits_core::ledger::LedgerValidator::find_valid_chain_length(&ledger);
+        let valid_len = deposits_core::ledger::LedgerValidator::find_valid_chain_length(&ledger);
         let walk_ms = t_walk.elapsed().as_millis();
+        assert_eq!(
+            valid_len,
+            ledger.history.len(),
+            "chain continuity broke at {} of {} — walk timing would be meaningless",
+            valid_len,
+            ledger.history.len()
+        );
 
         // Serialized size.
         let bin_mb = ledger.export_binary(0).len() as f64 / 1e6;
