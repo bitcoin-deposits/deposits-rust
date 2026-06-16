@@ -111,6 +111,14 @@ pub struct BootstrapArgs {
     pub fee_rate: u64,
     pub node_bin: PathBuf,
     pub quorum_expiry_blocks: Option<u32>,
+    /// Roll already-running daemons onto the current binary (a code upgrade)
+    /// instead of leaving them be. Phase 2 SIGTERMs each running daemon, waits
+    /// for it to exit, re-spawns it from `node_bin`, and waits for it to answer
+    /// before moving to the next — a rolling restart that preserves every
+    /// node's on-disk state (seeds, ledgers, wallet). All other phases resume
+    /// idempotently. Use after `cargo build` to deploy new code to a cluster
+    /// that bootstrap already stood up.
+    pub restart_daemons: bool,
 }
 
 pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
@@ -123,6 +131,7 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
     let mut fee_rate = 2u64;
     let mut node_bin: Option<PathBuf> = None;
     let mut quorum_expiry_blocks: Option<u32> = None;
+    let mut restart_daemons = false;
 
     let mut i = 0;
     while i < rest.len() {
@@ -169,6 +178,7 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
                 );
                 i += 1;
             }
+            "--restart" => restart_daemons = true,
             other => return Err(format!("unknown flag {}", other)),
         }
         i += 1;
@@ -210,6 +220,7 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
         fee_rate,
         node_bin,
         quorum_expiry_blocks,
+        restart_daemons,
     })
 }
 
@@ -456,7 +467,15 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     }
 
     // ── Phase 2: daemons ────────────────────────────────────────────────
-    println!("[2/7] daemons — spawning {} operators", args.nodes);
+    if args.restart_daemons {
+        println!(
+            "[2/7] daemons — rolling-restart {} operators onto {}",
+            args.nodes,
+            args.node_bin.display()
+        );
+    } else {
+        println!("[2/7] daemons — spawning {} operators", args.nodes);
+    }
     for i in 0..args.nodes {
         let name = node_name(i);
         let dir = node_dir(&args, i);
@@ -467,7 +486,25 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         std::fs::write(dir.join("admin.npub"), &hub_pubkey).map_err(|e| e.to_string())?;
         if daemon_alive(&dir) {
-            println!("  {} already running", name);
+            if args.restart_daemons {
+                // Rolling code upgrade: stop this daemon, re-spawn it from the
+                // (freshly built) node_bin, and wait for it to answer before
+                // touching the next node — so at most one node is down at a
+                // time and the rest of the quorum stays available. On startup
+                // the daemon re-runs republish_ledger_advertisements (retracts
+                // pre-quorum ads, re-publishes active ones at current terms).
+                println!("  {} restarting onto current binary…", name);
+                restart_daemon(&args, i)?;
+                let seed_path = seed_file_for(&dir);
+                retry(20, Duration::from_secs(3), || {
+                    node_cli(&args, &seed_path, &dir, &name, &["info"])
+                })
+                .await
+                .map_err(|e| format!("{} did not come back after restart: {}", name, e))?;
+                println!("  {} back up", name);
+            } else {
+                println!("  {} already running", name);
+            }
         } else {
             spawn_daemon(&args, i)?;
             println!("  {} spawned (admin 127.0.0.1:{})", name, admin_port(i));
@@ -1021,7 +1058,17 @@ fn restart_daemon(args: &BootstrapArgs, i: u32) -> Result<(), String> {
             unsafe { libc_kill(pid, 15) };
         }
     }
-    std::thread::sleep(Duration::from_millis(500));
+    // Wait for the old process to actually exit before re-spawning: a clean
+    // SIGTERM shutdown flushes ledger state and releases the admin port +
+    // metrics port, which the new process needs to bind. Poll up to ~15s, then
+    // proceed regardless (a wedged process is rare and the new one will surface
+    // the bind failure in its log).
+    for _ in 0..60 {
+        if !daemon_alive(&dir) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
     spawn_daemon(args, i)
 }
 
