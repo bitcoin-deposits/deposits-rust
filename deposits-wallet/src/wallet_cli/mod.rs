@@ -93,6 +93,7 @@ pub fn print_usage(program: &str) {
     eprintln!("Deposits:");
     eprintln!("  open <ledger_id>                 Create a deposit account (no funding yet)");
     eprintln!("  list                             List all your deposits with aliases");
+    eprintln!("  lnurl [alias] [--domain D]       Print each deposit's lightning address");
     eprintln!("  balance                          Show balances across all deposits");
     eprintln!("  sync                             Sync deposit statuses from daemon");
     eprintln!();

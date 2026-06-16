@@ -1264,3 +1264,135 @@ pub async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Er
 
     Ok(())
 }
+
+/// `deposits-wallet lnurl [<alias>] [--domain <d>]`
+///
+/// Print the LNURL / lightning address for each tracked deposit:
+/// `<deposit_id>@<bech32(ledger_id)>.<domain>`. The 32-byte ledger_id is
+/// bech32-data-encoded (no HRP, no checksum) into a single DNS label — the exact
+/// subdomain `deposits-lnurl` decodes back to the ledger. The deposit_id is the
+/// LNURL-pay username (`/.well-known/lnurlp/<deposit_id>`).
+///
+/// Domain resolves: `--domain` flag > `DEPOSITS_LNURL_DOMAIN` env >
+/// `ledger.bitcoindeposits.net`. Unlike the docker `wallet-cli.sh` wrapper —
+/// which re-derived the id as `sha256("pk(<pubkey>)")` and so was wrong for any
+/// non-`pk` descriptor — this uses the stored deposit_id/descriptor via
+/// `deposit_record_identity`, so it's correct for every deposit shape.
+pub async fn lnurl_addresses(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_config(args)?;
+
+    // Optional `--domain <d>` and `--alias <name>` filter. Both value-taking, so
+    // they don't collide with other flags' values (e.g. `--data-dir <path>`, the
+    // bug a bare positional alias would hit). parse_config ignores them.
+    let mut domain: Option<String> = None;
+    let mut alias_filter: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--domain" if i + 1 < args.len() => {
+                domain = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--alias" if i + 1 < args.len() => {
+                alias_filter = Some(args[i + 1].clone());
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let domain = domain
+        .or_else(|| std::env::var("DEPOSITS_LNURL_DOMAIN").ok())
+        .unwrap_or_else(|| "ledger.bitcoindeposits.net".to_string());
+
+    let deposits_file = config.data_dir.join("deposits.json");
+    if !deposits_file.exists() {
+        println!("No deposits. Open one first with `deposits-wallet open ...`.");
+        return Ok(());
+    }
+    let data = std::fs::read_to_string(&deposits_file)?;
+    let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+    if deposits.is_empty() {
+        println!("No deposits.");
+        return Ok(());
+    }
+
+    println!("Lightning addresses (domain: {})", domain);
+    println!();
+
+    let mut shown = 0usize;
+    for d in &deposits {
+        let alias = d.get("alias").and_then(|v| v.as_str()).unwrap_or("(none)");
+        if let Some(ref want) = alias_filter {
+            if alias != want {
+                continue;
+            }
+        }
+        let Some(ledger_id) = d.get("ledger_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some((_descriptor, deposit_id_hex)) =
+            crate::wallet_cli::deposit_record_identity(d)
+        else {
+            continue;
+        };
+        let ledger_bytes = match hex::decode(ledger_id) {
+            Ok(b) if b.len() == 32 => b,
+            _ => {
+                eprintln!("  {}: ledger_id is not 32-byte hex — skipping", alias);
+                continue;
+            }
+        };
+        let sub = bytes_to_bech32_data(&ledger_bytes);
+        println!("  {}", alias);
+        println!("    {}@{}.{}", deposit_id_hex, sub, domain);
+        shown += 1;
+    }
+
+    if shown == 0 {
+        match alias_filter {
+            Some(want) => println!("  (no deposit with alias '{}')", want),
+            None => println!("  (no deposits with a ledger_id)"),
+        }
+    }
+    Ok(())
+}
+
+/// Encode bytes as bech32 *data* characters — no HRP, no checksum — byte-for-byte
+/// matching `deposits-lnurl`'s `bytes_to_bech32_data`, so the subdomain we print
+/// is exactly the one the gateway resolves back to this ledger. 32 bytes → 52
+/// chars (fits a single DNS label).
+fn bytes_to_bech32_data(bytes: &[u8]) -> String {
+    const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    let mut result = Vec::new();
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in bytes {
+        acc = (acc << 8) | b as u32;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            result.push(CHARSET[((acc >> bits) & 0x1f) as usize]);
+        }
+    }
+    if bits > 0 {
+        result.push(CHARSET[((acc << (5 - bits)) & 0x1f) as usize]);
+    }
+    String::from_utf8(result).unwrap()
+}
+
+#[cfg(test)]
+mod lnurl_tests {
+    use super::bytes_to_bech32_data;
+
+    #[test]
+    fn bech32_data_matches_known_lengths_and_charset() {
+        // 32 bytes → 52 bech32-data chars (one DNS label), charset only.
+        let id = [0xABu8; 32];
+        let s = bytes_to_bech32_data(&id);
+        assert_eq!(s.len(), 52);
+        assert!(s.chars().all(|c| "qpzry9x8gf2tvdw0s3jn54khce6mua7l".contains(c)));
+        // All-zero ledger → all 'q' (the 0 symbol).
+        assert_eq!(bytes_to_bech32_data(&[0u8; 32]), "q".repeat(52));
+    }
+}

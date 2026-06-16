@@ -67,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "pay_invoice" => wallet_cli::payments::pay_invoice(&args[2..]).await,
         "history" => wallet_cli::payments::show_history(&args[2..]).await,
         "list" => wallet_cli::deposit::list_deposits(&args[2..]).await,
+        "lnurl" => wallet_cli::deposit::lnurl_addresses(&args[2..]).await,
         "ledger" => wallet_cli::ledger::ledger_command(&args[2..]).await,
         "regtest-faucet" => wallet_cli::regtest::faucet(&args[2..]).await,
         "help" | "--help" | "-h" => {
