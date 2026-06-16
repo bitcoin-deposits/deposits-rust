@@ -55,11 +55,14 @@ COMMANDS:
         create --node N --alias A --ledger ID --initial-sats N --decrement-sats M
                --interval-sec S [--interval-fuzz-sec F]
         pause|resume|remove --node N --alias A
-    advertise <sub> --relay <URL>  View/set Kind-39100 advertisement terms over the admin RPC:
+    advertise <sub> --relay <URL>  Manage Kind-39100 advertisements over the admin RPC:
         status [--node N]            show published terms (whole cluster, or one node)
         set --node N [--ledger ID] [--name S] [--description S] [--annual-fee-bps N]
-            [--deposit-fee-bps N] [--withdrawal-fee-bps N] [--invoice-fee-bps N]
-            [--max-deposit-msats N] [--min-deposit-msats N]   (unset terms preserved)
+            [--annualized-fixed-msats N] [--deposit-fee-bps N] [--withdrawal-fee-bps N]
+            [--invoice-fee-bps N] [--max-deposit-msats N] [--min-deposit-msats N]
+                                        override only passed terms (rest preserved)
+        refresh --node N [--ledger ID]  rebuild ad from operator policy/defaults
+        retract --node N [--ledger ID]  NIP-09 delete the ad (best-effort)
     bootstrap --nodes <N>        Fund once, deploy a self-connected cluster: N daemons,
               --relay <URL>               one ledger each, Q=3 cross-wired quorums, ONE funding
               --esplora <URL>             tx + ONE disbursement + N activations. Resumable —
@@ -1009,12 +1012,16 @@ fn cmd_liquidity(args: &[String]) -> Result<(), String> {
 /// fee/limit/name overrides (unspecified terms are preserved).
 fn cmd_advertise(args: &[String]) -> Result<(), String> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("");
-    if sub.is_empty() {
+    if sub.is_empty() || !matches!(sub, "status" | "set" | "retract" | "refresh") {
         return Err(
-            "usage: deposits-hub advertise <status|set> [--node N] [--ledger ID] \
-             [--name S] [--description S] [--annual-fee-bps N] [--deposit-fee-bps N] \
-             [--withdrawal-fee-bps N] [--invoice-fee-bps N] [--max-deposit-msats N] \
-             [--min-deposit-msats N] --relay <url>"
+            "usage: deposits-hub advertise <status|set|refresh|retract> [--node N] [--ledger ID] \
+             [--name S] [--description S] [--annual-fee-bps N] [--annualized-fixed-msats N] \
+             [--deposit-fee-bps N] [--withdrawal-fee-bps N] [--invoice-fee-bps N] \
+             [--max-deposit-msats N] [--min-deposit-msats N] --relay <url>\n\
+             \n  set      override only the passed terms on the existing ad\n\
+               refresh  rebuild the ad from operator policy/defaults (pushes the\n\
+                        default custody fee onto an ad first published with zeros)\n\
+               retract  NIP-09 delete the ad (best-effort; relays may not honor it)"
                 .to_string(),
         );
     }
@@ -1051,6 +1058,11 @@ fn cmd_advertise(args: &[String]) -> Result<(), String> {
             "--annual-fee-bps" => {
                 if let Some(v) = rest.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
                     terms.insert("annual_fee_bps".into(), v.into());
+                }
+            }
+            "--annualized-fixed-msats" => {
+                if let Some(v) = rest.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                    terms.insert("annualized_fixed_msats".into(), v.into());
                 }
             }
             "--deposit-fee-bps" => {
@@ -1167,6 +1179,48 @@ fn cmd_advertise(args: &[String]) -> Result<(), String> {
                 }
             }
             Ok::<(), String>(())
+        });
+    }
+
+    // retract / refresh: target one node's ledger; no term flags needed.
+    if sub == "retract" || sub == "refresh" {
+        let node = node.ok_or_else(|| format!("advertise {} requires --node <name>", sub))?;
+        let xo = node_xonly(&node)?;
+        let ledger = match ledger {
+            Some(l) => l,
+            None => sv
+                .get("ledgers")
+                .and_then(|m| m.get(&node))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    format!("no ledger for node '{}' in bootstrap-state; pass --ledger", node)
+                })?
+                .to_string(),
+        };
+        let action = if sub == "retract" {
+            "advertise_retract"
+        } else {
+            "advertise_refresh"
+        };
+        let verb = if sub == "retract" { "retracted" } else { "refreshed" };
+        let params = serde_json::json!({ "ledger_id": ledger });
+        return rt.block_on(async move {
+            match deposits_hub::admin_client::send_admin_request(
+                &secret_hex, &relays, &xo, &ledger, action, params, timeout,
+            )
+            .await
+            {
+                Ok(_) => {
+                    println!(
+                        "advertisement {} on {} (ledger {})",
+                        verb,
+                        node,
+                        &ledger[..16.min(ledger.len())]
+                    );
+                    Ok::<(), String>(())
+                }
+                Err(e) => Err(format!("advertise {} failed: {}", action, e)),
+            }
         });
     }
 

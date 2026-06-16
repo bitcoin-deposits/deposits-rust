@@ -709,6 +709,9 @@ impl Node {
         if let Some(v) = p.get("annual_fee_bps").and_then(|v| v.as_u64()) {
             ad.annual_fee_bps = v as u32;
         }
+        if let Some(v) = p.get("annualized_fixed_msats").and_then(|v| v.as_u64()) {
+            ad.annualized_fixed_msats = v;
+        }
         if let Some(v) = p.get("deposit_fee_bps").and_then(|v| v.as_u64()) {
             ad.deposit_fee_bps = v as u32;
         }
@@ -729,6 +732,176 @@ impl Node {
             Ok(_) => (
                 true,
                 Some(serde_json::json!({ "ledger_id": ledger_id, "advertised": true }).to_string()),
+                None,
+            ),
+            Err(e) => refuse(format!("publish advertisement: {}", e)),
+        }
+    }
+
+    /// Admin: retract this node's Kind-39100 ad for a ledger (NIP-09 deletion).
+    ///
+    /// Gated to Operator role but allowed in ANY quorum state — an operator may
+    /// retract a pre-quorum, stale, or simply-unwanted ad. Best-effort: relays
+    /// that honor NIP-09 drop the ad; others may keep serving it (that's Nostr).
+    pub(crate) async fn process_advertise_retract_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        if let Err(denial) = self.check_admin_authorized(request) {
+            return denial;
+        }
+        let refuse = |m: String| (false, None, Some(m));
+        let ledger_id = request
+            .params
+            .get("ledger_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if ledger_id.is_empty() {
+            return refuse("ledger_id is required".to_string());
+        }
+        {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            match ledgers.get(&ledger_id) {
+                None => {
+                    return refuse(format!(
+                        "ledger {} not found",
+                        &ledger_id[..16.min(ledger_id.len())]
+                    ))
+                }
+                Some(arc) => {
+                    if !matches!(
+                        arc.read().unwrap().role,
+                        deposits_core::ledger::LedgerRole::Operator
+                    ) {
+                        return refuse("not the operator of this ledger".to_string());
+                    }
+                }
+            }
+        }
+        match self.nostr.delete_ledger_advertisement(&ledger_id).await {
+            Ok(event_id) => (
+                true,
+                Some(
+                    serde_json::json!({
+                        "ledger_id": ledger_id,
+                        "advertised": false,
+                        "deletion_event": event_id,
+                    })
+                    .to_string(),
+                ),
+                None,
+            ),
+            Err(e) => refuse(format!("retract advertisement: {}", e)),
+        }
+    }
+
+    /// Admin: rebuild a ledger's ad from operator_policy.json (or the project
+    /// defaults when a field is unset) and republish.
+    ///
+    /// Unlike `advertise_set` — which preserves the on-relay ad and overrides
+    /// only the fields passed — `refresh` re-derives every operator-settable
+    /// field from policy. This is how an operator pushes the default
+    /// 2%/yr + 120 sat/yr custody fee onto an ad that was first published with
+    /// zeros (the on-relay ad's stale fees would otherwise be preserved).
+    /// Gated Operator + active quorum.
+    pub(crate) async fn process_advertise_refresh_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        if let Err(denial) = self.check_admin_authorized(request) {
+            return denial;
+        }
+        let refuse = |m: String| (false, None, Some(m));
+        let ledger_id = request
+            .params
+            .get("ledger_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if ledger_id.is_empty() {
+            return refuse("ledger_id is required".to_string());
+        }
+        let Some((_, l)) = self.get_ledger_with_id(&ledger_id) else {
+            return refuse("ledger not found".to_string());
+        };
+        if !matches!(l.role, deposits_core::ledger::LedgerRole::Operator) {
+            return refuse("not the operator of this ledger".to_string());
+        }
+        if l.state.quorum_state != deposits_core::QuorumState::Active {
+            return refuse(
+                "ledger quorum is not active — can't advertise a quorumless ledger".to_string(),
+            );
+        }
+        let network_str = match self.wallet.network() {
+            bitcoin::Network::Bitcoin => "bitcoin",
+            bitcoin::Network::Testnet => "testnet",
+            bitcoin::Network::Signet => "signet",
+            bitcoin::Network::Regtest => "regtest",
+            _ => "unknown",
+        };
+        let mut ad = crate::nostr::LedgerAdvertisement::new(
+            l.ledger_id_hex(),
+            hex::encode(l.operator_key().serialize()),
+            l.reserves_key().to_string(),
+            network_str.to_string(),
+        );
+        ad.guarantees = crate::nostr::LedgerAdvertisement::default_guarantees();
+        ad.capabilities = crate::operator_policy::default_advertised_capabilities();
+        ad.reserves_amount_msats = l.reserves_amount();
+        ad.collateral_amount_msats = l.state.collateral_amount;
+        ad.current_block = l
+            .history
+            .last()
+            .map(|u| u.block_height)
+            .unwrap_or_else(|| self.wallet.get_block_height().unwrap_or(0));
+        ad.quorum_state = format!("{:?}", l.state.quorum_state);
+        ad.quorum_members = l
+            .state
+            .quorum_members
+            .iter()
+            .map(|m| m.pubkey.to_string())
+            .collect();
+        ad.max_deposit_balance_msats = self.max_deposit_balance_msats();
+
+        // Re-derive operator-settable fields from policy (defaults when unset).
+        let policy = crate::operator_policy::OperatorPolicy::load(&self.data_dir)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        ad.annual_fee_bps = policy.effective_annual_fee_bps();
+        ad.annualized_fixed_msats = policy.effective_annualized_fixed_msats();
+        ad.fee_period_blocks = policy.fee_period_blocks.unwrap_or(2016);
+        ad.deposit_fee_bps = policy.deposit_fee_bps.unwrap_or(0);
+        ad.withdrawal_fee_bps = policy.withdrawal_fee_bps.unwrap_or(0);
+        ad.invoice_fee_bps = policy.invoice_fee_bps.unwrap_or(0);
+        if let Some(v) = policy.max_deposit_msats {
+            ad.max_deposit_msats = v;
+        }
+        if let Some(v) = policy.min_deposit_msats {
+            ad.min_deposit_msats = v;
+        }
+        if policy.operator_name.is_some() {
+            ad.operator_name = policy.operator_name.clone();
+        } else if let Some(n) = self.operator_name() {
+            ad.operator_name = Some(n.to_string());
+        }
+        if policy.description.is_some() {
+            ad.description = policy.description.clone();
+        }
+
+        match self.nostr.publish_ledger_advertisement(&ad).await {
+            Ok(_) => (
+                true,
+                Some(
+                    serde_json::json!({
+                        "ledger_id": ledger_id,
+                        "advertised": true,
+                        "annual_fee_bps": ad.annual_fee_bps,
+                        "annualized_fixed_msats": ad.annualized_fixed_msats,
+                    })
+                    .to_string(),
+                ),
                 None,
             ),
             Err(e) => refuse(format!("publish advertisement: {}", e)),

@@ -1063,6 +1063,22 @@ async fn ledger_advertise(args: &[String]) -> Result<(), Box<dyn std::error::Err
             .ok_or_else(|| format!("Ledger not found: {}", ledger_id_hex))?;
 
         let ledger_id = ledger.ledger_id_hex();
+
+        // Never advertise a quorumless ledger: a PreQuorum ledger has no
+        // cosigners, so advertising it invites deposits with no custody
+        // guarantee, and stray pre-quorum ledgers from a messy bring-up would
+        // pollute the explorer. (The admin RPC + auto-republish paths gate the
+        // same way.) Skip rather than error so `advertise` over many ledgers
+        // still publishes the active ones.
+        if ledger.state.quorum_state != deposits_core::QuorumState::Active {
+            println!(
+                "  Skipping {} — quorum not active ({:?})",
+                &ledger_id[..16.min(ledger_id.len())],
+                ledger.state.quorum_state
+            );
+            continue;
+        }
+
         let operator_pubkey = hex::encode(ledger.operator_key().serialize());
 
         let network = match config.network {

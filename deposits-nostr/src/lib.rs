@@ -3463,6 +3463,103 @@ impl NostrTransport {
         Ok(event_id)
     }
 
+    /// The pubkey that authors Kind-39100 ads (and their retractions): the
+    /// operator key via the signer when wired, else `self.keys`. Must match the
+    /// ad's author so a NIP-09 deletion is honored.
+    fn operator_author_pubkey(&self) -> Result<nostr_sdk::PublicKey, Error> {
+        #[cfg(feature = "signer")]
+        {
+            if let Some(signer) = self.signer.lock().ok().and_then(|g| g.clone()) {
+                let xonly_bytes = signer.xonly_pubkey().serialize();
+                return nostr_sdk::PublicKey::from_slice(&xonly_bytes).map_err(|e| {
+                    Error::Nostr(format!("operator xonly → nostr pubkey: {}", e))
+                });
+            }
+        }
+        Ok(self.keys.public_key())
+    }
+
+    /// Build + sign an event as the operator (signer when wired, else
+    /// `self.keys`). Same path `publish_ledger_advertisement` uses, factored so
+    /// ad retractions are authored by the identical key.
+    async fn sign_as_operator(&self, builder: EventBuilder) -> Result<Event, Error> {
+        #[cfg(feature = "signer")]
+        {
+            if let Some(signer) = self.signer.lock().ok().and_then(|g| g.clone()) {
+                let xonly_bytes = signer.xonly_pubkey().serialize();
+                let operator_xonly =
+                    nostr_sdk::PublicKey::from_slice(&xonly_bytes).map_err(|e| {
+                        Error::Nostr(format!("operator xonly → nostr pubkey: {}", e))
+                    })?;
+                let unsigned = builder.build(operator_xonly);
+                let id = unsigned.id.ok_or_else(|| {
+                    Error::Nostr("UnsignedEvent::build did not populate id".to_string())
+                })?;
+                let id_bytes: [u8; 32] = id.to_bytes();
+                let ctx = deposits_signer_api::SignContext::no_ledger(
+                    deposits_signer_api::SigPurpose::NostrEvent,
+                );
+                let sig_bytes = signer.bip340_sign(&ctx, &id_bytes).map_err(|e| {
+                    Error::Nostr(format!("signer bip340_sign: {}", e))
+                })?;
+                let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes)
+                    .map_err(|e| Error::Nostr(format!("parse schnorr sig: {}", e)))?;
+                return unsigned
+                    .add_signature(sig)
+                    .map_err(|e| Error::Nostr(format!("attach signature: {}", e)));
+            }
+        }
+        builder
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign event: {}", e)))
+    }
+
+    /// Retract a previously-published Kind-39100 ledger advertisement.
+    ///
+    /// Publishes a NIP-09 deletion (kind 5) referencing the addressable
+    /// coordinate `39100:<operator_pubkey>:<ledger_id>`, signed by the same
+    /// operator key that authored the ad. Best-effort by Nostr's nature:
+    /// relays SHOULD drop the ad and stop serving it, but aren't required to —
+    /// an ad may linger on relays that ignore deletions. This is the strongest
+    /// retraction the protocol allows; combined with not republishing it, the
+    /// ad disappears from every well-behaved relay (and the explorer). Also
+    /// clears the local ad cache so our own reads don't resurrect it.
+    pub async fn delete_ledger_advertisement(&self, ledger_id: &str) -> Result<String, Error> {
+        let author = self.operator_author_pubkey()?;
+        let coordinate = format!("{}:{}:{}", KIND_LEDGER_ADVERTISE, author.to_hex(), ledger_id);
+
+        // Drop the local cache first so a concurrent read can't re-cache it.
+        if let Ok(mut cache) = self.ad_cache.write() {
+            cache.remove(ledger_id);
+        }
+
+        let builder = EventBuilder::new(Kind::Custom(5), "retracted")
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::A)),
+                [coordinate.as_str()],
+            ))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::K)),
+                [KIND_LEDGER_ADVERTISE.to_string().as_str()],
+            ));
+
+        let event = self.sign_as_operator(builder).await?;
+        let event_id = event.id.to_hex();
+        self.send_event_with_timeout(event.clone())
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to send ad retraction: {}", e)))?;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if let Some(ref tx) = self.mirror_tx {
+            let _ = tx.send(event);
+        }
+        tracing::info!(
+            "Retracted ledger advertisement: ledger={}, deletion={}",
+            &ledger_id[..16.min(ledger_id.len())],
+            &event_id[..16]
+        );
+        Ok(event_id)
+    }
+
     /// Publish a price oracle event (BTC/USD rate).
     ///
     /// `block_height` is the operator's current chain tip; clients

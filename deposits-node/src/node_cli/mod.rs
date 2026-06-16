@@ -1224,6 +1224,36 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
             }
         };
 
+        // A ledger that isn't quorum-Active must not stay advertised. The
+        // Ok(None) first-ad branch above already skipped inactive ledgers; this
+        // catches an EXISTING ad on a ledger that's pre-quorum (published before
+        // bring-up finished) or has since expired — actively retract it so a
+        // restart cleans up rather than refreshing a quorumless ad.
+        let is_active = {
+            let ledgers = node.handler.ledgers.lock().unwrap();
+            ledgers
+                .get(&ledger_id)
+                .map(|arc| {
+                    arc.read().unwrap().state.quorum_state
+                        == deposits_core::QuorumState::Active
+                })
+                .unwrap_or(false)
+        };
+        if !is_active {
+            tracing::info!(
+                "Retracting advertisement for non-active ledger {}",
+                &ledger_id[..16.min(ledger_id.len())]
+            );
+            if let Err(e) = node.nostr.delete_ledger_advertisement(&ledger_id).await {
+                tracing::warn!(
+                    "Failed to retract advertisement for {}: {}",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    e
+                );
+            }
+            continue;
+        }
+
         // Refresh dynamic fields from the local ledger snapshot.
         let refreshed = {
             let ledgers = node.handler.ledgers.lock().unwrap();
