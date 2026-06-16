@@ -69,9 +69,11 @@ COMMANDS:
               [--per-ledger-sats <S>]     re-run after any interruption. All keys derive from
               [--network <NET>]           hub-master-seed (BIP-85); one mnemonic backs up the
               [--node-bin <PATH>]         entire cluster.
-              [--restart]                 Deploy new code: rolling-restart running daemons onto
-                                          the current binary (rebuild first), one at a time,
-                                          preserving all state. Other phases resume idempotently.
+    bootstrap restart            Deploy new code: rolling-restart running daemons onto the
+                                          current binary (rebuild first), one at a time,
+                                          preserving all state. Reads --nodes/--relay/--esplora/…
+                                          from bootstrap-state.json — no other args needed.
+                                          (Equivalent to `bootstrap --restart`.)
     bootstrap --reset            Tear down a bootstrapped cluster: kill spawned daemons,
               [--data-dir <DIR>]          delete bootstrap state + node/treasury workspaces.
               [--force]                   Keeps hub-master-seed unless network is regtest or

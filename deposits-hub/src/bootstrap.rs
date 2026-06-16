@@ -68,6 +68,20 @@ struct BootstrapState {
     network: String,
     nodes: u32,
     per_ledger_sats: u64,
+    // Connection/topology args recorded on every run so a later
+    // `bootstrap --restart` (or any resume) needs no further flags. All
+    // `#[serde(default)]` so state files written before this field existed still
+    // parse — a parse failure would reset state and re-trigger funding.
+    #[serde(default)]
+    relays: Vec<String>,
+    #[serde(default)]
+    esplora: String,
+    #[serde(default)]
+    fee_rate: u64,
+    #[serde(default)]
+    quorum_expiry_blocks: Option<u32>,
+    #[serde(default)]
+    node_bin: Option<String>,
     treasury_address: Option<String>,
     /// node name -> Node ID (operator pubkey, compressed hex)
     node_ids: BTreeMap<String, String>,
@@ -101,6 +115,80 @@ impl BootstrapState {
     }
 }
 
+#[cfg(test)]
+mod arg_persistence_tests {
+    use super::*;
+
+    fn dd(p: &std::path::Path) -> Vec<String> {
+        vec!["--data-dir".into(), p.display().to_string()]
+    }
+
+    /// `bootstrap restart` with no other flags reads the cluster config back
+    /// from bootstrap-state.json.
+    #[test]
+    fn restart_reads_args_from_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = BootstrapState {
+            nodes: 5,
+            network: "signet".into(),
+            relays: vec!["wss://relay.example".into()],
+            esplora: "https://esplora.example".into(),
+            fee_rate: 7,
+            per_ledger_sats: 2_000_000,
+            quorum_expiry_blocks: Some(4032),
+            node_bin: Some("deposits-node".into()),
+            ..Default::default()
+        };
+        st.save(dir.path());
+
+        let mut argv = vec!["restart".to_string()];
+        argv.extend(dd(dir.path()));
+        let args = parse_args(&argv).unwrap();
+
+        assert!(args.restart_daemons);
+        assert_eq!(args.nodes, 5);
+        assert_eq!(args.network, "signet");
+        assert_eq!(args.relays, vec!["wss://relay.example".to_string()]);
+        assert_eq!(args.esplora, "https://esplora.example");
+        assert_eq!(args.fee_rate, 7);
+        assert_eq!(args.per_ledger_sats, 2_000_000);
+        assert_eq!(args.quorum_expiry_blocks, Some(4032));
+    }
+
+    /// CLI flags win over persisted values; unset ones still fall back.
+    #[test]
+    fn cli_overrides_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = BootstrapState {
+            nodes: 5,
+            relays: vec!["wss://old".into()],
+            esplora: "https://old".into(),
+            node_bin: Some("deposits-node".into()),
+            ..Default::default()
+        };
+        st.save(dir.path());
+
+        let mut argv = dd(dir.path());
+        argv.extend(["--nodes".into(), "6".into(), "--relay".into(), "wss://new".into()]);
+        let args = parse_args(&argv).unwrap();
+
+        assert_eq!(args.nodes, 6); // CLI wins
+        assert_eq!(args.relays, vec!["wss://new".to_string()]); // CLI wins
+        assert_eq!(args.esplora, "https://old"); // unset → from state
+    }
+
+    /// No flags and no saved state → the relay requirement still fires.
+    #[test]
+    fn missing_relay_without_state_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut argv = dd(dir.path());
+        argv.extend(["--esplora".into(), "https://e".into(), "--node-bin".into(), "deposits-node".into()]);
+        let err = parse_args(&argv).unwrap_err();
+        assert!(err.contains("--relay"), "got: {}", err);
+    }
+}
+
+#[derive(Debug)]
 pub struct BootstrapArgs {
     pub data_dir: PathBuf,
     pub nodes: u32,
@@ -123,12 +211,14 @@ pub struct BootstrapArgs {
 
 pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
     let mut data_dir: Option<PathBuf> = None;
-    let mut nodes: u32 = 4;
-    let mut network = "regtest".to_string();
-    let mut relays = Vec::new();
+    // All None = "not given on the CLI"; filled from persisted state, then
+    // defaults. This is what lets `bootstrap --restart` run with no other flags.
+    let mut nodes: Option<u32> = None;
+    let mut network: Option<String> = None;
+    let mut relays: Vec<String> = Vec::new();
     let mut esplora: Option<String> = None;
-    let mut per_ledger_sats = DEFAULT_PER_LEDGER_SATS;
-    let mut fee_rate = 2u64;
+    let mut per_ledger_sats: Option<u64> = None;
+    let mut fee_rate: Option<u64> = None;
     let mut node_bin: Option<PathBuf> = None;
     let mut quorum_expiry_blocks: Option<u32> = None;
     let mut restart_daemons = false;
@@ -141,11 +231,11 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
                 i += 1;
             }
             "--nodes" => {
-                nodes = rest[i + 1].parse().map_err(|e| format!("--nodes: {}", e))?;
+                nodes = Some(rest[i + 1].parse().map_err(|e| format!("--nodes: {}", e))?);
                 i += 1;
             }
             "--network" => {
-                network = rest[i + 1].clone();
+                network = Some(rest[i + 1].clone());
                 i += 1;
             }
             "--relay" => {
@@ -157,13 +247,15 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
                 i += 1;
             }
             "--per-ledger-sats" => {
-                per_ledger_sats = rest[i + 1]
-                    .parse()
-                    .map_err(|e| format!("--per-ledger-sats: {}", e))?;
+                per_ledger_sats = Some(
+                    rest[i + 1]
+                        .parse()
+                        .map_err(|e| format!("--per-ledger-sats: {}", e))?,
+                );
                 i += 1;
             }
             "--fee-rate" => {
-                fee_rate = rest[i + 1].parse().map_err(|e| format!("--fee-rate: {}", e))?;
+                fee_rate = Some(rest[i + 1].parse().map_err(|e| format!("--fee-rate: {}", e))?);
                 i += 1;
             }
             "--node-bin" => {
@@ -178,11 +270,39 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
                 );
                 i += 1;
             }
-            "--restart" => restart_daemons = true,
+            // Accept both the `--restart` flag and a bare `restart` subcommand
+            // (`deposits-hub bootstrap restart`), which — with args persisted in
+            // bootstrap-state.json — needs nothing else.
+            "--restart" | "restart" => restart_daemons = true,
             other => return Err(format!("unknown flag {}", other)),
         }
         i += 1;
     }
+
+    let data_dir = data_dir.unwrap_or_else(|| dirs_home().join(".deposits-hub"));
+
+    // Merge with what the last run recorded in bootstrap-state.json. CLI flags
+    // win; anything unset falls back to the saved value (so `--restart` and
+    // plain resumes need no further args), then to the built-in default. Empty
+    // string / 0 in the saved state means "never recorded".
+    let saved = BootstrapState::load(&data_dir);
+    let nodes = nodes
+        .or((saved.nodes != 0).then_some(saved.nodes))
+        .unwrap_or(4);
+    let network = network
+        .or((!saved.network.is_empty()).then(|| saved.network.clone()))
+        .unwrap_or_else(|| "regtest".to_string());
+    if relays.is_empty() {
+        relays = saved.relays.clone();
+    }
+    let esplora = esplora.or((!saved.esplora.is_empty()).then(|| saved.esplora.clone()));
+    let per_ledger_sats = per_ledger_sats
+        .or((saved.per_ledger_sats != 0).then_some(saved.per_ledger_sats))
+        .unwrap_or(DEFAULT_PER_LEDGER_SATS);
+    let fee_rate = fee_rate
+        .or((saved.fee_rate != 0).then_some(saved.fee_rate))
+        .unwrap_or(2);
+    let quorum_expiry_blocks = quorum_expiry_blocks.or(saved.quorum_expiry_blocks);
 
     // Q=3 cosigners per ledger, operator excluded → at least 4 nodes.
     if nodes < (Q as u32 + 1) {
@@ -193,21 +313,24 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
         ));
     }
     if relays.is_empty() {
-        return Err("at least one --relay is required".into());
+        return Err(
+            "at least one --relay is required (run a full bootstrap once to record it)".into(),
+        );
     }
-    let esplora = esplora.ok_or("--esplora is required")?;
-    let data_dir = data_dir.unwrap_or_else(|| {
-        dirs_home().join(".deposits-hub")
-    });
+    let esplora = esplora
+        .ok_or("--esplora is required (run a full bootstrap once to record it)")?;
     let node_bin = node_bin
         .or_else(|| std::env::var("DEPOSITS_NODE").ok().map(PathBuf::from))
         .or_else(|| {
-            // Sibling of this binary, then target/debug fallback.
+            // Sibling of this binary (freshly-built deposits-node next to a
+            // freshly-built deposits-hub — what you want for an upgrade).
             std::env::current_exe().ok().and_then(|p| {
                 let sib = p.parent()?.join("deposits-node");
                 sib.exists().then_some(sib)
             })
         })
+        // Last resort: the path the last run used.
+        .or_else(|| saved.node_bin.as_ref().map(PathBuf::from))
         .ok_or("deposits-node binary not found — pass --node-bin or set DEPOSITS_NODE")?;
 
     Ok(BootstrapArgs {
@@ -449,6 +572,13 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     st.nodes = args.nodes;
     st.network = args.network.clone();
     st.per_ledger_sats = args.per_ledger_sats;
+    // Record the connection/topology args so a later `bootstrap --restart`
+    // (or any resume) needs no flags — parse_args reads these back.
+    st.relays = args.relays.clone();
+    st.esplora = args.esplora.clone();
+    st.fee_rate = args.fee_rate;
+    st.quorum_expiry_blocks = args.quorum_expiry_blocks;
+    st.node_bin = Some(args.node_bin.display().to_string());
     st.save(&args.data_dir);
 
     // ── Phase 1: seeds ──────────────────────────────────────────────────
