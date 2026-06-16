@@ -851,37 +851,54 @@ impl Ledger {
     }
 
     /// Recompute all derived state by replaying the history.
+    ///
+    /// Rebuilds from a fresh `LedgerState` carrying only this ledger's identity
+    /// (operator/reserves keys, genesis), then replays every history op through
+    /// the canonical state machine. Two things this MUST get right (both were
+    /// historically wrong, which silently corrupted the rebuild):
+    ///   1. Decode via `LedgerOperation::tlv_decode` — the same codec the
+    ///      messages were written with and that `apply_inbound` reads. The old
+    ///      path used `DepositsMessage::decode`/`to_operation`, which doesn't
+    ///      round-trip current ops, so they decoded to nothing and were skipped
+    ///      → deposits/reserves dropped from the rebuilt state.
+    ///   2. Reset ALL derived state, not just a few fields. Starting from a
+    ///      fresh state (vs clearing `deposits`/`reserves` only) guarantees
+    ///      per-op invariants like the `credited_payments` replay-protection set
+    ///      don't carry stale entries that make replayed InvoiceCredits trip
+    ///      `duplicate_credit`.
     pub fn recompute_state(&mut self) -> DepositsResult<()> {
-        use crate::messages::DepositsMessage;
+        use crate::tlv::TlvDecode;
 
-        // Reset derived state
-        self.state.deposits.clear();
-        self.state.reserves_amount = 0;
-        self.state.sequence = 0;
-        self.state.chain_tip_hash = [0u8; 32];
+        let mut state = LedgerState::new(
+            self.state.operator_key,
+            self.state.reserves_key.clone(),
+            self.state.genesis_block,
+        );
 
-        // Replay all updates
-        for update in &self.history.clone() {
-            // Deserialize the message to get the operation
-            if let Ok(msg) = DepositsMessage::decode(&update.message) {
-                if let Some(operation) = msg.to_operation() {
-                    self.apply_state_changes(&operation)?;
-                    // Set opened_at_block and initial last_fee_assessment for new deposits
-                    if let LedgerOperation::DepositOpen { deposit_id, .. } = &operation {
-                        if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
-                            if update.block_height > 0 {
-                                deposit.opened_at_block = update.block_height;
-                                if deposit.last_fee_assessment == 0 {
-                                    deposit.last_fee_assessment = update.block_height;
-                                }
-                            }
+        for update in &self.history {
+            let op = LedgerOperation::tlv_decode(&update.message).map_err(|e| {
+                DepositsError::ProtocolViolation {
+                    violation_type: "recompute_decode".to_string(),
+                    details: format!("seq {}: {}", update.sequence_number, e),
+                }
+            })?;
+            state = state.apply(&op)?;
+            // Post-hook: stamp opened_at_block for fresh deposits (block_height
+            // isn't carried in the operation itself).
+            if let LedgerOperation::DepositOpen { deposit_id, .. } = &op {
+                if update.block_height > 0 {
+                    if let Some(deposit) = state.deposits.get_mut(deposit_id) {
+                        deposit.opened_at_block = update.block_height;
+                        if deposit.last_fee_assessment == 0 {
+                            deposit.last_fee_assessment = update.block_height;
                         }
                     }
                 }
             }
-            self.state.sequence = update.sequence_number;
-            self.state.chain_tip_hash = update.chain_hash();
+            state.sequence = update.sequence_number;
+            state.chain_tip_hash = update.chain_hash();
         }
+        self.state = state;
         Ok(())
     }
 
