@@ -53,19 +53,47 @@
 //! with zero logic changes, and failure-leaves-state-unchanged comes back for
 //! free (the discarded clone). This is what the COW migration bought.
 //!
-//! | entries   | append us/op | recompute | reimport  | chainwalk | binary  | RSS    |
-//! |-----------|--------------|-----------|-----------|-----------|---------|--------|
-//! | 10,000    |     3.0      |    11 ms  |    82 ms  |    0 ms   |  4.5 MB |  11 MB |
-//! | 100,000   |     2.5      |   170 ms  | 1,454 ms  |   41 ms   |   45 MB |  92 MB |
-//! | 1,000,000 |     3.7      | 2,374 ms  | 28,182 ms |  321 ms   |  451 MB | 864 MB |
+//! | entries   | append us/op | recompute | inbound us/op | reimport  | chainwalk | binary  | RSS    |
+//! |-----------|--------------|-----------|---------------|-----------|-----------|---------|--------|
+//! | 10,000    |     3.2      |    14 ms  |     9.9       |    92 ms  |    0 ms   |  4.5 MB |  11 MB |
+//! | 100,000   |     2.5      |   166 ms  |    15.7       | 1,339 ms  |   13 ms   |   45 MB |  94 MB |
+//! | 1,000,000 |     3.2      | 2,318 ms  |    84.2       | 24,275 ms |  234 ms   |  451 MB | 869 MB |
 //!
-//! append/op is flat (~3 µs); recompute, reimport and chainwalk are all
-//! sub-quadratic (reimport ×19 per ×10 ≈ n·log n + cache effects at the ~450 MB
-//! working set, vs the old ×76 quadratic). **1M entries is reachable**: ~4 s to
-//! build, 2.4 s to recompute, 28 s for a full conformance re-import (was
-//! projected at hours). Slightly higher constants than part 1's std-collection
-//! numbers — the price of O(1) clone — but the curve is the point. The default
-//! target is small so this stays a quick smoke run; override `LARGE_LEDGER_N`.
+//! `inbound us/op` is the MARGINAL cost of one more op on a ledger whose state
+//! is already this big — the routine path (`apply_inbound` /
+//! `apply_updates_to_ledger` both call `apply_and_check` per op). It is the only
+//! n-dependent work the routine path does: the wrappers' dedup scan is over the
+//! *bounded* in-memory history (truncated to HISTORY_RETAIN = 2000) and persist
+//! is an incremental append, both n-independent.
+//!
+//! All columns are sub-quadratic (the old O(n²) clone is gone). But inbound/op
+//! is NOT flat — it climbs with ledger size: ~9 µs @10k → ~18 µs @100k → ~53 µs
+//! @300k → ~84 µs @1M. The curve is noisy at this 2000-op batch (±~15 % run to
+//! run) so the exact exponent is fuzzy — somewhere between O(log n) with large
+//! constants and a mild super-log term; it is clearly NOT linear-or-worse (the
+//! 300k→1M step is sublinear) and clearly NOT flat. The driver is the price of
+//! O(1) clone via persistent structures: every op clones the state (Arc share),
+//! then the single mutation must COW-copy an O(log n) path because the structure
+//! is shared — so each op allocates ~log n B-tree nodes, and as the ~450 MB
+//! working set blows past cache those node accesses become DRAM chases. A flat
+//! HashMap has better locality but O(n) clone, which is what gave us O(n²) to
+//! begin with. Operationally 84 µs/op ≈ 12k ops/s of headroom at 1M, far above
+//! any real payment rate — routine ops on a large ledger are fine — but if this
+//! ever needs to be flat, the lever is to stop cloning on the verify path (apply
+//! in place + restore-on-reject) rather than to drop persistent structures.
+//!
+//! Caveat — a SECOND scaling axis this 1-deposit harness does NOT exercise:
+//! `check_conformance` computes `total_deposit_balance()` (a fold over ALL
+//! deposits) on every credit/onchain/transfer op, so routine apply is also
+//! O(#deposits) per op. A ledger with many deposits pays that on every credit,
+//! independent of history length. Worth a separate characterization if deposit
+//! counts get large.
+//!
+//! **1M entries is reachable**: ~3 s build, 2.3 s recompute, 24 s full
+//! conformance re-import (was projected hours). Slightly higher constants than
+//! the std-collection numbers — the price of O(1) clone — but the curve is the
+//! point. The default target is small so this stays a quick smoke run; override
+//! `LARGE_LEDGER_N`.
 //!
 //! Note: the `chainwalk` column reported a deceptive 0 ms before this harness
 //! called `finalize_chain_hash()` after each append. `append_operation_with_block`
@@ -162,8 +190,8 @@ fn large_ledger_characterization() {
 
     println!("\nlarge-ledger characterization: target={} checkpoints={:?}", target, checkpoints);
     println!(
-        "{:>11}  {:>12}  {:>13}  {:>13}  {:>13}  {:>10}  {:>9}",
-        "entries", "append us/op", "recompute ms", "reimport ms", "chainwalk ms", "binary MB", "RSS MB"
+        "{:>11}  {:>12}  {:>13}  {:>12}  {:>13}  {:>13}  {:>10}  {:>9}",
+        "entries", "append us/op", "recompute ms", "inbound us/op", "reimport ms", "chainwalk ms", "binary MB", "RSS MB"
     );
 
     let mut i: u64 = 0;
@@ -218,6 +246,39 @@ fn large_ledger_characterization() {
         }
         let reimport_ms = t_reimport.elapsed().as_millis();
 
+        // Routine inbound cost: the MARGINAL cost of applying one more op to a
+        // ledger whose state is already this big. apply_inbound and
+        // apply_updates_to_ledger both call `apply_and_check` (apply +
+        // conformance) per op; that's the only n-dependent work in the routine
+        // path. The node wrappers add, per op: an O(HISTORY_RETAIN=2000) dedup
+        // scan over the *bounded* in-memory history (it's truncated to 2000) and
+        // an O(new) incremental jsonl append — both independent of total ledger
+        // size, so they don't appear here. Flat µs/op across sizes ⇒ touching a
+        // large ledger live stays O(log n). Fresh 0xFF-prefixed payment hashes
+        // so they never collide with the i-counter credits above; the next
+        // checkpoint's recompute_state rebuilds state from history and discards
+        // these, so they don't accumulate.
+        const INBOUND_BATCH: u64 = 2000;
+        let t_inbound = Instant::now();
+        for j in 0..INBOUND_BATCH {
+            let mut payment_hash = [0xFFu8; 32];
+            payment_hash[..8].copy_from_slice(&j.to_le_bytes());
+            ledger
+                .apply_and_check(
+                    &LedgerOperation::InvoiceCredit {
+                        payment_hash,
+                        deposit_id,
+                        amount: 1,
+                        invoice_id: format!("inb{}", j),
+                        sequence_number: 0,
+                        wallet_authorization: None,
+                    },
+                    0,
+                )
+                .expect("inbound apply_and_check");
+        }
+        let inbound_us = t_inbound.elapsed().as_micros() as f64 / INBOUND_BATCH as f64;
+
         // Chain-continuity walk. Assert it covers the WHOLE history — a walk
         // that stops short means the chain is broken and the timing below is
         // measuring a partial walk, not a 1M-entry validation.
@@ -236,10 +297,11 @@ fn large_ledger_characterization() {
         let bin_mb = ledger.export_binary(0).len() as f64 / 1e6;
 
         println!(
-            "{:>11}  {:>12.3}  {:>13}  {:>13}  {:>13}  {:>10.1}  {:>9.0}",
+            "{:>11}  {:>12.3}  {:>13}  {:>12.3}  {:>13}  {:>13}  {:>10.1}  {:>9.0}",
             ledger.history.len(),
             per_op_us,
             recompute_ms,
+            inbound_us,
             reimport_ms,
             walk_ms,
             bin_mb,
