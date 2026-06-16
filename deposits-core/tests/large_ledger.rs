@@ -82,12 +82,25 @@
 //! ever needs to be flat, the lever is to stop cloning on the verify path (apply
 //! in place + restore-on-reject) rather than to drop persistent structures.
 //!
-//! Caveat — a SECOND scaling axis this 1-deposit harness does NOT exercise:
-//! `check_conformance` computes `total_deposit_balance()` (a fold over ALL
-//! deposits) on every credit/onchain/transfer op, so routine apply is also
-//! O(#deposits) per op. A ledger with many deposits pays that on every credit,
-//! independent of history length. Worth a separate characterization if deposit
-//! counts get large.
+//! The SECOND scaling axis — #deposits, not history — is characterized by
+//! `deposit_count_characterization` (below). `check_conformance` computes
+//! `total_deposit_balance()` (a fold over ALL deposits) on every
+//! credit/onchain/transfer op, so routine apply is O(#deposits) per op,
+//! independent of history length. Measured:
+//!
+//! | deposits | deposit_open us/op | credit us/op |
+//! |----------|--------------------|--------------|
+//! |    1,000 |        ~7          |       20     |
+//! |   10,000 |        ~3          |       88     |
+//! |  100,000 |        ~3          |    1,200     |
+//!
+//! `credit us/op` is ~linear in #deposits (×13.6 per ×10) — the balance fold —
+//! while `deposit_open` stays flat (O(log d) insert). At 100k deposits a single
+//! credit costs ~1.2 ms (~830/s), so unlike the history axis this one can bite a
+//! genuinely large operator. The fix when it matters: maintain a running
+//! `total_deposit_balance` (update on each balance change) so the reserve-
+//! sufficiency check is O(1) instead of an O(#deposits) fold per op. Not done —
+//! current deposit counts are nowhere near this.
 //!
 //! **1M entries is reachable**: ~3 s build, 2.3 s recompute, 24 s full
 //! conformance re-import (was projected hours). Slightly higher constants than
@@ -305,6 +318,135 @@ fn large_ledger_characterization() {
             reimport_ms,
             walk_ms,
             bin_mb,
+            rss_mb()
+        );
+    }
+    println!();
+}
+
+/// The OTHER scaling axis: #deposits, not history length. `check_conformance`
+/// computes `total_deposit_balance()` — a fold over EVERY deposit — on every
+/// credit/onchain/transfer op, so the routine apply path is O(#deposits) per op
+/// regardless of how short the history is. This grows the deposit count and
+/// measures the marginal cost of one InvoiceCredit (via `apply_and_check`, the
+/// routine path) at each size. We expect `credit us/op` to climb ~linearly with
+/// #deposits while `deposit_open us/op` stays ~flat (O(log d) insert). Run:
+///   LARGE_LEDGER_DEPOSITS=100000 cargo test --release -p deposits-core \
+///       --test large_ledger deposit_count -- --ignored --nocapture
+#[test]
+#[ignore = "perf characterization; run explicitly with --release --ignored --nocapture"]
+fn deposit_count_characterization() {
+    let target: usize = std::env::var("LARGE_LEDGER_DEPOSITS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100_000);
+
+    let mut checkpoints: Vec<usize> = [1_000usize, 10_000, 100_000]
+        .into_iter()
+        .filter(|&c| c <= target)
+        .collect();
+    if !checkpoints.contains(&target) {
+        checkpoints.push(target);
+    }
+    checkpoints.sort_unstable();
+
+    let op = fixed_pubkey();
+    let mut ledger = Ledger::new_as_operator(op, hex::encode(op.serialize()), 0);
+    ledger
+        .append_operation_with_block(
+            LedgerOperation::LedgerOpen {
+                operator_id: op,
+                reserves_id: hex::encode(op.serialize()),
+                genesis_block: 0,
+                reserves_amount: u64::MAX / 4,
+                collateral_amount: 0,
+            },
+            0,
+            [0u8; 32],
+        )
+        .expect("LedgerOpen");
+    ledger.finalize_chain_hash();
+
+    println!(
+        "\ndeposit-count characterization: target={} checkpoints={:?}",
+        target, checkpoints
+    );
+    println!(
+        "{:>11}  {:>16}  {:>13}  {:>9}",
+        "deposits", "deposit_open us/op", "credit us/op", "RSS MB"
+    );
+
+    let mut opened: u64 = 0;
+    let mut first_deposit_id: Option<_> = None;
+    let mut credit_ctr: u64 = 0; // unique across checkpoints — state accumulates here
+    let mut prev_len = ledger.state.deposits.len();
+    for &cp in &checkpoints {
+        // Open deposits (unique descriptor → unique deposit_id) until we hit cp.
+        let t_open = Instant::now();
+        while ledger.state.deposits.len() < cp {
+            let descriptor = format!("deposit-{}", opened);
+            let deposit_id = compute_deposit_id(&descriptor);
+            if first_deposit_id.is_none() {
+                first_deposit_id = Some(deposit_id);
+            }
+            ledger
+                .append_operation_with_block(
+                    LedgerOperation::DepositOpen {
+                        deposit_id,
+                        descriptor,
+                        fees: Some(FeeStructure::default()),
+                        transfer_fees: None,
+                        payment_hash: None,
+                        invoice: None,
+                        cosigner_guarantee_signature: None,
+                        receive_requires_sig: false,
+                        fee_change_after_blocks: None,
+                        fee_change_notice_blocks: None,
+                        fee_change_limit_bps: None,
+                    },
+                    0,
+                    [0u8; 32],
+                )
+                .expect("DepositOpen");
+            ledger.finalize_chain_hash();
+            opened += 1;
+        }
+        let opened_now = (ledger.state.deposits.len() - prev_len).max(1);
+        let open_us = t_open.elapsed().as_micros() as f64 / opened_now as f64;
+        prev_len = ledger.state.deposits.len();
+
+        // Marginal InvoiceCredit cost at this deposit count. Credits always land
+        // on the same deposit; the cost we're isolating is conformance folding
+        // total_deposit_balance() over all `cp` deposits. Unique payment hashes
+        // (0xEE + global counter) since state accumulates across checkpoints.
+        let did = first_deposit_id.unwrap();
+        const CREDIT_BATCH: u64 = 2000;
+        let t_credit = Instant::now();
+        for _ in 0..CREDIT_BATCH {
+            let mut payment_hash = [0xEEu8; 32];
+            payment_hash[..8].copy_from_slice(&credit_ctr.to_le_bytes());
+            credit_ctr += 1;
+            ledger
+                .apply_and_check(
+                    &LedgerOperation::InvoiceCredit {
+                        payment_hash,
+                        deposit_id: did,
+                        amount: 1,
+                        invoice_id: format!("dc{}", credit_ctr),
+                        sequence_number: 0,
+                        wallet_authorization: None,
+                    },
+                    0,
+                )
+                .expect("credit apply_and_check");
+        }
+        let credit_us = t_credit.elapsed().as_micros() as f64 / CREDIT_BATCH as f64;
+
+        println!(
+            "{:>11}  {:>16.3}  {:>13.3}  {:>9.0}",
+            ledger.state.deposits.len(),
+            open_us,
+            credit_us,
             rss_mb()
         );
     }
