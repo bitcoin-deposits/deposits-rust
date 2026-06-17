@@ -948,6 +948,50 @@ function depositIdentity(d) {
   return { descriptor, depositIdHex };
 }
 
+// LNURL-pay gateway domain. Lightning addresses resolve as
+// <deposit_id_hex>@<bech32(ledger_id)>.<LNURL_DOMAIN>; the gateway
+// (deposits-lnurl) decodes the subdomain back to the ledger and routes a
+// make_invoice to the operator. Matches the CLI's default (deposits-wallet
+// `lnurl` command) and deposits-lnurl's address format.
+const LNURL_DOMAIN = 'ledger.bitcoindeposits.net';
+const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+
+// Regroup 8-bit bytes into 5-bit bech32-data chars (no HRP, no checksum) —
+// the exact transform deposits-lnurl::bytes_to_bech32_data uses, so a 32-byte
+// ledger id becomes the same 52-char subdomain label the gateway expects.
+function bytesToBech32Data(bytes) {
+  let acc = 0, bits = 0, out = '';
+  for (const b of bytes) {
+    acc = (acc << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      out += BECH32_CHARSET[(acc >> bits) & 0x1f];
+    }
+  }
+  if (bits > 0) out += BECH32_CHARSET[(acc << (5 - bits)) & 0x1f];
+  return out;
+}
+
+// Lightning address for a deposit record, or null if we can't resolve its
+// deposit_id / ledger_id. Anyone can pay this from any LN wallet.
+function lnurlAddressFor(d) {
+  const ident = depositIdentity(d);
+  if (!ident || !d || !d.ledger_id) return null;
+  const ledgerBytes = hexToBytes(d.ledger_id);
+  if (ledgerBytes.length !== 32) return null;
+  return `${ident.depositIdHex}@${bytesToBech32Data(ledgerBytes)}.${LNURL_DOMAIN}`;
+}
+
+window.copyLnurlAddress = async function(addr) {
+  try {
+    await navigator.clipboard.writeText(addr);
+    log('Lightning address copied', 'success');
+  } catch (e) {
+    log(`Copy failed: ${e.message}`, 'error');
+  }
+};
+
 // Build a `receive_witness` JSON for an owned deposit if it requires one;
 // returns null otherwise. The wallet signs the dep-17 receive-op preimage with
 // the deposit's key (the same key its `pk(K)` descriptor names). Wire format
@@ -4154,6 +4198,11 @@ window.selectDeposit = function(alias) {
   document.getElementById('detail-balance').style.color = hasBal && bal > 0 ? 'var(--balance)' : 'var(--muted)';
 
   let info = `Ledger: <a href="#ledger/${d.ledger_id}" onclick="event.preventDefault(); openLedgerTab('${d.ledger_id}')">${d.ledger_id}</a>`;
+  const lnAddr = lnurlAddressFor(d);
+  if (lnAddr) {
+    info += `<br>Lightning address: <span style="color:var(--fg); word-break:break-all;">${esc(lnAddr)}</span>` +
+      ` <button style="font-size:10px; padding:1px 6px; margin-left:4px;" onclick="event.stopPropagation(); copyLnurlAddress('${esc(lnAddr)}')">copy</button>`;
+  }
   if (d.deposit_pubkey) info += `<br>Deposit pubkey: ${esc(d.deposit_pubkey)}`;
   if (d.funding_address) info += `<br>Funding address: ${esc(d.funding_address)}`;
   if (d.offer_id) info += `<br>Offer ID: ${esc(d.offer_id)}`;
@@ -6461,7 +6510,7 @@ window.saveToKeychain = async function(autoConfirm = false) {
 
   // Safari fallback: show confirmation pane, then submit a real form POST.
   // The Service Worker (sw.js) intercepts the POST and responds with a 303
-  // redirect back to /#settings — the mnemonic never leaves the browser.
+  // redirect back to the current tab — the mnemonic never leaves the browser.
   // nginx also blocks POST as a defense-in-depth measure.
   window._keychainUsername = username;
   window._keychainSecret = secret;
@@ -6475,7 +6524,13 @@ window.saveToKeychain = async function(autoConfirm = false) {
 window.keychainConfirmSave = function() {
   const form = document.createElement('form');
   form.method = 'post';
-  form.action = location.pathname + '#settings';
+  // Land back on whatever tab the user was on. The URL fragment isn't sent
+  // with the POST, so we pass the tab as a query param the Service Worker
+  // can read and echo into its 303 redirect. First-run creation has an empty
+  // hash → defaults to the Wallet home, so a new user isn't dumped on
+  // Settings; a manual save from #settings round-trips back to settings.
+  const returnTab = location.hash.slice(1).split('/')[0] || 'wallet';
+  form.action = location.pathname + '?tab=' + encodeURIComponent(returnTab);
   const u = document.createElement('input');
   u.type = 'text'; u.name = 'username'; u.autocomplete = 'username'; u.value = window._keychainUsername; u.style.display = 'none';
   const p = document.createElement('input');
