@@ -134,13 +134,47 @@ impl Node {
         }
 
         // Create invoice via the configured Lightning backend (same as
-        // `deposits-node lightning invoice`).
-        let cli = crate::lightning_backend::from_env();
-
-        let invoice_result = if let Some(dh) = description_hash {
-            cli.create_invoice_with_desc_hash(amount_msat, dh)
-        } else {
-            cli.create_invoice(amount_msat, description)
+        // `deposits-node lightning invoice`). The backend shells out to a
+        // sidecar (ldk-server-cli / lnd / cln) with a BLOCKING call and no
+        // timeout, so run it on a blocking thread under a hard cap: a missing or
+        // unreachable backend must fail fast with a clear error rather than hang
+        // until the caller (e.g. the LNURL gateway) times out. spawn_blocking
+        // also isolates the lnd/cln `from_env` panic-on-misconfig into a JoinError
+        // instead of taking down the worker.
+        const BACKEND_INVOICE_TIMEOUT_SECS: u64 = 20;
+        let desc_owned = description.to_string();
+        let dh_owned: Option<String> = description_hash.map(|s| s.to_string());
+        let invoice_result = match tokio::time::timeout(
+            std::time::Duration::from_secs(BACKEND_INVOICE_TIMEOUT_SECS),
+            tokio::task::spawn_blocking(move || {
+                let cli = crate::lightning_backend::from_env();
+                match dh_owned {
+                    Some(dh) => cli.create_invoice_with_desc_hash(amount_msat, &dh),
+                    None => cli.create_invoice(amount_msat, &desc_owned),
+                }
+            }),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(join)) => {
+                return (
+                    false,
+                    None,
+                    Some(format!("Lightning backend unavailable: {}", join)),
+                );
+            }
+            Err(_) => {
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "Lightning backend did not return an invoice within {}s — check the \
+                         daemon's LDK_*/LIGHTNING_BACKEND config and that the sidecar is reachable",
+                        BACKEND_INVOICE_TIMEOUT_SECS
+                    )),
+                );
+            }
         };
         match invoice_result {
             Ok(invoice_str) => {

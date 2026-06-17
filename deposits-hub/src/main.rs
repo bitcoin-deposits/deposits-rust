@@ -69,6 +69,10 @@ COMMANDS:
               [--per-ledger-sats <S>]     re-run after any interruption. All keys derive from
               [--network <NET>]           hub-master-seed (BIP-85); one mnemonic backs up the
               [--node-bin <PATH>]         entire cluster.
+              [--daemon-env K=V]          Env set on every daemon (repeatable); e.g. the
+                                          Lightning backend: --daemon-env LDK_HOST=...
+                                          --daemon-env LDK_PORT=... --daemon-env LDK_CLI=...
+                                          Persisted; re-applied on restart.
     bootstrap restart            Deploy new code: rolling-restart running daemons onto the
                                           current binary (rebuild first), one at a time,
                                           preserving all state. Reads --nodes/--relay/--esplora/…

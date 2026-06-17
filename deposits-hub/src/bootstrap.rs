@@ -82,6 +82,12 @@ struct BootstrapState {
     quorum_expiry_blocks: Option<u32>,
     #[serde(default)]
     node_bin: Option<String>,
+    /// Extra environment variables forwarded to every spawned daemon (e.g. the
+    /// Lightning backend config: LDK_CLI / LDK_HOST / LDK_PORT / LDK_API_KEY /
+    /// LDK_TLS_CERT, or LIGHTNING_BACKEND=lnd|cln + that backend's vars).
+    /// Persisted so `bootstrap restart` re-applies them.
+    #[serde(default)]
+    daemon_env: BTreeMap<String, String>,
     treasury_address: Option<String>,
     /// node name -> Node ID (operator pubkey, compressed hex)
     node_ids: BTreeMap<String, String>,
@@ -177,6 +183,48 @@ mod arg_persistence_tests {
         assert_eq!(args.esplora, "https://old"); // unset → from state
     }
 
+    /// daemon_env round-trips through state, and a CLI `--daemon-env` overrides
+    /// the persisted value for that key while leaving others intact.
+    #[test]
+    fn daemon_env_persists_and_merges() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut saved_env = std::collections::BTreeMap::new();
+        saved_env.insert("LDK_HOST".to_string(), "10.0.0.1".to_string());
+        saved_env.insert("LDK_PORT".to_string(), "3001".to_string());
+        let st = BootstrapState {
+            nodes: 4,
+            relays: vec!["wss://r".into()],
+            esplora: "https://e".into(),
+            node_bin: Some("deposits-node".into()),
+            daemon_env: saved_env,
+            ..Default::default()
+        };
+        st.save(dir.path());
+
+        // restart with no env flags → inherits the persisted pair set.
+        let mut argv = vec!["restart".to_string()];
+        argv.extend(dd(dir.path()));
+        let a = parse_args(&argv).unwrap();
+        assert_eq!(a.daemon_env.get("LDK_HOST").map(String::as_str), Some("10.0.0.1"));
+        assert_eq!(a.daemon_env.get("LDK_PORT").map(String::as_str), Some("3001"));
+
+        // CLI override for one key; the other persists.
+        let mut argv = dd(dir.path());
+        argv.extend([
+            "--daemon-env".into(),
+            "LDK_PORT=9999".into(),
+            "--daemon-env".into(),
+            "LDK_CLI=/usr/local/bin/ldk-server-cli".into(),
+        ]);
+        let a = parse_args(&argv).unwrap();
+        assert_eq!(a.daemon_env.get("LDK_PORT").map(String::as_str), Some("9999")); // CLI wins
+        assert_eq!(a.daemon_env.get("LDK_HOST").map(String::as_str), Some("10.0.0.1")); // persisted
+        assert_eq!(
+            a.daemon_env.get("LDK_CLI").map(String::as_str),
+            Some("/usr/local/bin/ldk-server-cli")
+        ); // new
+    }
+
     /// No flags and no saved state → the relay requirement still fires.
     #[test]
     fn missing_relay_without_state_errors() {
@@ -207,6 +255,11 @@ pub struct BootstrapArgs {
     /// idempotently. Use after `cargo build` to deploy new code to a cluster
     /// that bootstrap already stood up.
     pub restart_daemons: bool,
+    /// Environment variables set on every spawned daemon — notably the Lightning
+    /// backend config (`make_invoice`/`pay_invoice` read LDK_* / LIGHTNING_BACKEND
+    /// from the daemon's env). Merged over the persisted set (CLI wins per key)
+    /// and re-applied on `restart`.
+    pub daemon_env: std::collections::BTreeMap<String, String>,
 }
 
 pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
@@ -222,6 +275,7 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
     let mut node_bin: Option<PathBuf> = None;
     let mut quorum_expiry_blocks: Option<u32> = None;
     let mut restart_daemons = false;
+    let mut daemon_env_cli: Vec<(String, String)> = Vec::new();
 
     let mut i = 0;
     while i < rest.len() {
@@ -274,6 +328,23 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
             // (`deposits-hub bootstrap restart`), which — with args persisted in
             // bootstrap-state.json — needs nothing else.
             "--restart" | "restart" => restart_daemons = true,
+            // `--daemon-env KEY=VALUE` (repeatable): forwarded to every spawned
+            // daemon's environment. Mainly for the Lightning backend config
+            // (LDK_CLI / LDK_HOST / LDK_PORT / LDK_API_KEY / LDK_TLS_CERT, or
+            // LIGHTNING_BACKEND=lnd|cln + that backend's vars).
+            "--daemon-env" => {
+                let kv = rest
+                    .get(i + 1)
+                    .ok_or("--daemon-env needs KEY=VALUE")?;
+                let (k, v) = kv
+                    .split_once('=')
+                    .ok_or_else(|| format!("--daemon-env expects KEY=VALUE, got '{}'", kv))?;
+                if k.is_empty() {
+                    return Err(format!("--daemon-env has empty key: '{}'", kv));
+                }
+                daemon_env_cli.push((k.to_string(), v.to_string()));
+                i += 1;
+            }
             other => return Err(format!("unknown flag {}", other)),
         }
         i += 1;
@@ -303,6 +374,12 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
         .or((saved.fee_rate != 0).then_some(saved.fee_rate))
         .unwrap_or(2);
     let quorum_expiry_blocks = quorum_expiry_blocks.or(saved.quorum_expiry_blocks);
+    // Merge daemon env: start from the persisted set, let CLI pairs override
+    // per key. So `restart --daemon-env LDK_PORT=9999` tweaks just that.
+    let mut daemon_env = saved.daemon_env.clone();
+    for (k, v) in daemon_env_cli {
+        daemon_env.insert(k, v);
+    }
 
     // Q=3 cosigners per ledger, operator excluded → at least 4 nodes.
     if nodes < (Q as u32 + 1) {
@@ -344,6 +421,7 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
         node_bin,
         quorum_expiry_blocks,
         restart_daemons,
+        daemon_env,
     })
 }
 
@@ -579,6 +657,7 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     st.fee_rate = args.fee_rate;
     st.quorum_expiry_blocks = args.quorum_expiry_blocks;
     st.node_bin = Some(args.node_bin.display().to_string());
+    st.daemon_env = args.daemon_env.clone();
     st.save(&args.data_dir);
 
     // ── Phase 1: seeds ──────────────────────────────────────────────────
@@ -1231,6 +1310,13 @@ fn spawn_daemon(args: &BootstrapArgs, i: u32) -> Result<(), String> {
         .arg(format!("127.0.0.1:{}", admin_port(i)));
     for r in &args.relays {
         c.arg("--relay").arg(r);
+    }
+    // Forward operator-supplied env (Lightning backend config, etc.) to the
+    // daemon. Set explicitly rather than relying on the hub's inherited env so
+    // the config is the one recorded in bootstrap-state.json and survives
+    // `restart` regardless of the shell that launches it.
+    for (k, v) in &args.daemon_env {
+        c.env(k, v);
     }
     if args.network == "regtest" {
         c.arg("--fast-poll");
