@@ -43,6 +43,8 @@ COMMANDS:
     qr [--text <STR>]            Print a QR code for the hub pubkey (or arbitrary --text).
                                   Renders with Unicode half-blocks; one terminal cell = two
                                   QR modules so the code stays roughly square.
+    logs [--node N]              Tail logs from every bootstrapped daemon + the hub itself
+         [--lines N] [--follow]      (local files under <data-dir>; --node hub for hub only).
     status --relay <URL>         Query every bootstrapped node over the Nostr admin RPC and
                                   print per-node + per-ledger status (owned vs member, quorum
                                   active, reserves). Requires the nodes to trust the hub
@@ -104,13 +106,42 @@ fn main() -> ExitCode {
     // errors so subcommands that re-enter the runtime don't trip.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    // Resolve --data-dir early so the hub's own logs can be teed to a file
+    // there (default ~/.deposits-hub) — surfaced by `deposits-hub logs` so the
+    // hub is a one-stop shop for both its own and the daemons' logs.
+    let early_args: Vec<String> = std::env::args().collect();
+    let log_dir = data_dir_or_default(
+        early_args
+            .windows(2)
+            .find(|w| w[0] == "--data-dir")
+            .map(|w| PathBuf::from(&w[1])),
+    );
+    let _ = std::fs::create_dir_all(&log_dir);
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("hub.log"))
+    {
+        Ok(file) => {
+            use tracing_subscriber::fmt::writer::MakeWriterExt;
+            // Tee to stderr (as before) AND append to <data-dir>/hub.log. The
+            // closure hands out a fresh File handle per write — no extra deps.
+            let to_file = move || file.try_clone().expect("clone hub.log handle");
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(std::io::stderr.and(to_file))
+                .init();
+        }
+        Err(_) => {
+            // Couldn't open the log file (e.g. read-only dir) — stderr only.
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(std::io::stderr)
+                .init();
+        }
+    }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (cmd, rest) = match args.split_first() {
@@ -146,6 +177,7 @@ fn main() -> ExitCode {
             }
         }
         "qr" => cmd_qr(rest),
+        "logs" => cmd_logs(rest),
         other => {
             eprintln!("unknown command: {}\n\n{}", other, USAGE);
             return ExitCode::FAILURE;
@@ -301,6 +333,134 @@ fn parse_seed_arg(s: Option<&str>) -> Result<Option<[u8; 32]>, String> {
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(Some(out))
+}
+
+/// `deposits-hub logs [--node N] [--lines N] [--follow]`
+///
+/// One-stop log viewer: shows the tail of every bootstrap-spawned daemon's
+/// `daemon.log` plus the hub's own `hub.log`, all under `<data-dir>`. With
+/// `--follow`, streams new lines from each, prefixed by source. `--node hub`
+/// (or any node name) narrows to one source.
+fn cmd_logs(args: &[String]) -> Result<(), String> {
+    let mut data_dir: Option<PathBuf> = None;
+    let mut node: Option<String> = None;
+    let mut lines: usize = 60;
+    let mut follow = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--data-dir" => {
+                data_dir = args.get(i + 1).map(PathBuf::from);
+                i += 1;
+            }
+            "--node" => {
+                node = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--lines" | "-n" => {
+                lines = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(60);
+                i += 1;
+            }
+            "--follow" | "-f" => follow = true,
+            other => return Err(format!("logs: unknown flag {}", other)),
+        }
+        i += 1;
+    }
+    let dd = data_dir_or_default(data_dir);
+
+    // (label, path) sources: one selected node, or every node + the hub.
+    let mut sources: Vec<(String, PathBuf)> = Vec::new();
+    match node.as_deref() {
+        Some("hub") => sources.push(("hub".into(), dd.join("hub.log"))),
+        Some(n) => sources.push((
+            n.to_string(),
+            dd.join("bootstrap-nodes").join(n).join("daemon.log"),
+        )),
+        None => {
+            if let Ok(rd) = std::fs::read_dir(dd.join("bootstrap-nodes")) {
+                let mut names: Vec<String> = rd
+                    .flatten()
+                    .filter(|e| e.path().is_dir())
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect();
+                names.sort();
+                for n in names {
+                    sources.push((
+                        n.clone(),
+                        dd.join("bootstrap-nodes").join(&n).join("daemon.log"),
+                    ));
+                }
+            }
+            sources.push(("hub".into(), dd.join("hub.log")));
+        }
+    }
+    if sources.is_empty() {
+        return Err(format!("no logs found under {}", dd.display()));
+    }
+
+    // Initial tail of each source; remember byte length so --follow only emits
+    // lines written after this point.
+    let mut offsets: Vec<u64> = Vec::with_capacity(sources.len());
+    for (label, path) in &sources {
+        let (tail, len) = read_tail_lines(path, lines);
+        println!("==> {} ({}) <==", label, path.display());
+        if tail.is_empty() {
+            println!("  (empty or not yet created)");
+        } else {
+            for l in tail {
+                println!("{}", l);
+            }
+        }
+        println!();
+        offsets.push(len);
+    }
+
+    if !follow {
+        return Ok(());
+    }
+
+    println!("— following {} source(s); Ctrl-C to stop —", sources.len());
+    use std::io::{Read, Seek, SeekFrom};
+    loop {
+        for (idx, (label, path)) in sources.iter().enumerate() {
+            let Ok(meta) = std::fs::metadata(path) else {
+                continue;
+            };
+            let len = meta.len();
+            // Truncation/rotation → restart from the top.
+            if len < offsets[idx] {
+                offsets[idx] = 0;
+            }
+            if len > offsets[idx] {
+                if let Ok(mut f) = std::fs::File::open(path) {
+                    if f.seek(SeekFrom::Start(offsets[idx])).is_ok() {
+                        let mut buf = String::new();
+                        if f.read_to_string(&mut buf).is_ok() {
+                            for line in buf.lines() {
+                                println!("[{}] {}", label, line);
+                            }
+                        }
+                    }
+                }
+                offsets[idx] = len;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+/// Best-effort last-`n`-lines of a file. Returns `(lines, byte_len)`; empty +
+/// 0 if the file is missing/unreadable.
+fn read_tail_lines(path: &std::path::Path, n: usize) -> (Vec<String>, u64) {
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(_) => return (Vec::new(), 0),
+    };
+    let len = data.len() as u64;
+    let text = String::from_utf8_lossy(&data);
+    let all: Vec<&str> = text.lines().collect();
+    let start = all.len().saturating_sub(n);
+    (all[start..].iter().map(|s| s.to_string()).collect(), len)
 }
 
 fn data_dir_or_default(opt: Option<PathBuf>) -> PathBuf {
