@@ -368,6 +368,12 @@ async fn vendor_jsqr() -> ([(axum::http::HeaderName, &'static str); 1], &'static
 async fn vendor_bip39_english() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
     js_response(assets().bip39_english)
 }
+/// GET /vendor/dep17.js — DEP-17 receive-witness / lock op builders the
+/// wallet imports as `* as dep17`. Without this route the wallet's whole ES
+/// module graph fails to load.
+async fn vendor_dep17() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+    js_response(assets().dep17)
+}
 
 /// Common JS-MIME response shape for the asset handlers above.
 fn js_response(body: &'static str) -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
@@ -437,6 +443,7 @@ struct StaticAssets {
     noble_hashes_utils: &'static str,
     noble_secp256k1: &'static str,
     qrcode_generator: &'static str,
+    dep17: &'static str,
 }
 
 impl StaticAssets {
@@ -465,6 +472,7 @@ impl StaticAssets {
             noble_hashes_utils:  load("wallet/vendor/noble-hashes-utils.js"),
             noble_secp256k1:     load("wallet/vendor/noble-secp256k1.js"),
             qrcode_generator:    load("wallet/vendor/qrcode-generator.js"),
+            dep17:               load("wallet/vendor/dep17.js"),
         }
     }
 }
@@ -1252,6 +1260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/vendor/qrcode-generator.js", get(vendor_qrcode_generator))
         .route("/vendor/jsqr.js", get(vendor_jsqr))
         .route("/vendor/bip39-english.js", get(vendor_bip39_english))
+        .route("/vendor/dep17.js", get(vendor_dep17))
         .with_state(state);
 
     log::info!("Listening on {}", listen);
