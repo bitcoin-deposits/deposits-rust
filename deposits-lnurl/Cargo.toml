@@ -13,6 +13,11 @@ path = "src/bin/deposits-lnurl.rs"
 # Web server
 axum = "0.7"
 
+# Static file serving for the bundled web UI (wallet + explorer). ServeDir
+# means we don't hand-wire a route per asset — adding a vendor file is just
+# dropping it in the directory.
+tower-http = { version = "0.6", features = ["fs"] }
+
 # Pulled in for the rustls `install_default_crypto_provider()` helper —
 # binaries that talk to wss:// relays need to call it once at startup.
 # `default-features = false` disables the `signer` feature (we don't

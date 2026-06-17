@@ -332,88 +332,6 @@ async fn wallet_index() -> Html<&'static str> {
     Html(assets().wallet_index)
 }
 
-/// GET /sw.js
-///
-/// Service worker the wallet's index.html registers via
-/// `navigator.serviceWorker.register('./sw.js')`. Caches the wallet
-/// shell + vendor scripts for offline-tolerant page loads. Served
-/// with the JS MIME type so the browser will accept it as a SW.
-async fn wallet_sw_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(assets().wallet_sw)
-}
-
-// Vendor scripts pulled by the wallet at module import time. All are
-// `include_str!`-bundled so a single binary ships the whole UI.
-async fn vendor_noble_hashes_hmac() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(assets().noble_hashes_hmac)
-}
-async fn vendor_noble_hashes_sha256() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(assets().noble_hashes_sha256)
-}
-async fn vendor_noble_hashes_sha512() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(assets().noble_hashes_sha512)
-}
-async fn vendor_noble_hashes_utils() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(assets().noble_hashes_utils)
-}
-async fn vendor_noble_secp256k1() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(assets().noble_secp256k1)
-}
-async fn vendor_qrcode_generator() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(assets().qrcode_generator)
-}
-async fn vendor_jsqr() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(assets().jsqr)
-}
-async fn vendor_bip39_english() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(assets().bip39_english)
-}
-/// GET /vendor/dep17.js — DEP-17 receive-witness / lock op builders the
-/// wallet imports as `* as dep17`. Without this route the wallet's whole ES
-/// module graph fails to load.
-async fn vendor_dep17() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(assets().dep17)
-}
-
-/// Common JS-MIME response shape for the asset handlers above.
-fn js_response(body: &'static str) -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
-        body,
-    )
-}
-
-/// GET /tlv-catalog.js
-///
-/// Auto-generated from `deposits-protocol/deposits_protocol.ksy` by
-/// `bin/gen-tlv-catalog.sh` and lives next to the wallet. Both the
-/// explorer pages and the web wallet import `OP_NAMES` / `FIELD_NAMES`
-/// from it to render operation names instead of raw discriminants.
-async fn tlv_catalog_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(assets().tlv_catalog)
-}
-
-/// GET /vendor/noble-curves-secp256k1.js
-///
-/// Vendored secp256k1 + BIP-340 — used by both the explorer's per-
-/// update page (Nostr sig verify) and the web wallet (deposit
-/// witnessing). ~70KB minified; browser caches across loads.
-async fn noble_curves_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(assets().noble_curves)
-}
-
-/// GET /shared.js
-///
-/// ES module of helpers shared across the explorer pages — TLV
-/// decoder, QuorumBegin/QuorumAddMember derivers, content_hash search.
-/// Bundled at compile time alongside the HTML.
-async fn shared_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    js_response(assets().shared)
-}
-
 /// Static UI assets the gateway serves alongside the LNURL endpoints.
 ///
 /// These were `include_str!`-bundled into the binary, which made every
@@ -426,24 +344,16 @@ async fn shared_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static s
 /// Files are read once and `Box::leak`ed into `&'static str` so the
 /// existing handler signatures (`Html<&'static str>`, etc.) stay
 /// identical and the per-request hot path is a pointer dereference.
+///
+/// Only the HTML entry pages live here — they need Host-aware dispatch
+/// (see `root_index`). Every other asset (sw.js, tlv-catalog.js, vendor/*,
+/// the explorer's shared.js) is served straight off disk by the router's
+/// `ServeDir` fallback, so there's no per-file wiring to forget.
 struct StaticAssets {
     explorer_ledger: &'static str,
     explorer_overview: &'static str,
     explorer_update: &'static str,
     wallet_index: &'static str,
-    wallet_sw: &'static str,
-    tlv_catalog: &'static str,
-    shared: &'static str,
-    noble_curves: &'static str,
-    bip39_english: &'static str,
-    jsqr: &'static str,
-    noble_hashes_hmac: &'static str,
-    noble_hashes_sha256: &'static str,
-    noble_hashes_sha512: &'static str,
-    noble_hashes_utils: &'static str,
-    noble_secp256k1: &'static str,
-    qrcode_generator: &'static str,
-    dep17: &'static str,
 }
 
 impl StaticAssets {
@@ -456,23 +366,10 @@ impl StaticAssets {
             Box::leak(s.into_boxed_str())
         };
         Self {
-            explorer_ledger:     load("explorer/ledger.html"),
-            explorer_overview:   load("explorer/explorer.html"),
-            explorer_update:     load("explorer/update.html"),
-            wallet_index:        load("wallet/index.html"),
-            wallet_sw:           load("wallet/sw.js"),
-            tlv_catalog:         load("wallet/tlv-catalog.js"),
-            shared:              load("explorer/shared.js"),
-            noble_curves:        load("wallet/vendor/noble-curves-secp256k1.js"),
-            bip39_english:       load("wallet/vendor/bip39-english.js"),
-            jsqr:                load("wallet/vendor/jsqr.js"),
-            noble_hashes_hmac:   load("wallet/vendor/noble-hashes-hmac.js"),
-            noble_hashes_sha256: load("wallet/vendor/noble-hashes-sha256.js"),
-            noble_hashes_sha512: load("wallet/vendor/noble-hashes-sha512.js"),
-            noble_hashes_utils:  load("wallet/vendor/noble-hashes-utils.js"),
-            noble_secp256k1:     load("wallet/vendor/noble-secp256k1.js"),
-            qrcode_generator:    load("wallet/vendor/qrcode-generator.js"),
-            dep17:               load("wallet/vendor/dep17.js"),
+            explorer_ledger:   load("explorer/ledger.html"),
+            explorer_overview: load("explorer/explorer.html"),
+            explorer_update:   load("explorer/update.html"),
+            wallet_index:      load("wallet/index.html"),
         }
     }
 }
@@ -1234,33 +1131,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/.well-known/lnurlp/:deposit_id", get(lnurlp_metadata))
         .route("/lnurl/callback/:deposit_id", get(lnurlp_callback))
         // Explorer + wallet pages — Host-aware default plus explicit
-        // paths for dev. Bundled into the binary at build time via
-        // `include_str!`; rebuild to update. See the handler docs for
-        // routing rules.
+        // paths for dev. HTML is loaded from DEPOSITS_WEB_DIR at startup
+        // (see StaticAssets). See the handler docs for routing rules.
         .route("/", get(root_index))
         .route("/ledger", get(explorer_ledger))
         .route("/explorer", get(explorer_overview))
         .route("/update", get(explorer_update))
         .route("/wallet", get(wallet_index))
-        // Service worker for the web wallet. Path matches the
-        // `serviceWorker.register('./sw.js')` call in index.html.
-        .route("/sw.js", get(wallet_sw_js))
-        // Catalog + helpers shared by explorer and wallet.
-        .route("/tlv-catalog.js", get(tlv_catalog_js))
-        .route("/shared.js", get(shared_js))
-        // Vendor scripts. Layout matches the on-disk
-        // `deposits-web/wallet/vendor/` tree so paths in `index.html`
-        // resolve unchanged.
-        .route("/vendor/noble-curves-secp256k1.js", get(noble_curves_js))
-        .route("/vendor/noble-hashes-hmac.js", get(vendor_noble_hashes_hmac))
-        .route("/vendor/noble-hashes-sha256.js", get(vendor_noble_hashes_sha256))
-        .route("/vendor/noble-hashes-sha512.js", get(vendor_noble_hashes_sha512))
-        .route("/vendor/noble-hashes-utils.js", get(vendor_noble_hashes_utils))
-        .route("/vendor/noble-secp256k1.js", get(vendor_noble_secp256k1))
-        .route("/vendor/qrcode-generator.js", get(vendor_qrcode_generator))
-        .route("/vendor/jsqr.js", get(vendor_jsqr))
-        .route("/vendor/bip39-english.js", get(vendor_bip39_english))
-        .route("/vendor/dep17.js", get(vendor_dep17))
+        // Everything else (sw.js, tlv-catalog.js, vendor/*, the explorer's
+        // shared.js) is a static file under deposits-web/. Serve the
+        // directory rather than hand-wiring a route per asset — adding a
+        // vendor file is now just dropping it in the tree. Wallet assets
+        // live under `wallet/`; the explorer's `shared.js` lives under
+        // `explorer/`, so fall back there for paths not found in wallet/.
+        .fallback_service(
+            tower_http::services::ServeDir::new(
+                std::path::Path::new(&asset_dir).join("wallet"),
+            )
+            .not_found_service(tower_http::services::ServeDir::new(
+                std::path::Path::new(&asset_dir).join("explorer"),
+            )),
+        )
         .with_state(state);
 
     log::info!("Listening on {}", listen);
