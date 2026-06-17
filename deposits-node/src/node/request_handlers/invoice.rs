@@ -141,7 +141,11 @@ impl Node {
         // until the caller (e.g. the LNURL gateway) times out. spawn_blocking
         // also isolates the lnd/cln `from_env` panic-on-misconfig into a JoinError
         // instead of taking down the worker.
-        const BACKEND_INVOICE_TIMEOUT_SECS: u64 = 20;
+        //
+        // Must be shorter than callers' own waits or they time out first and
+        // never see our clear error — the LNURL gateway waits 15s
+        // (deposits-lnurl lnurlp_callback), so cap well under that.
+        const BACKEND_INVOICE_TIMEOUT_SECS: u64 = 10;
         let desc_owned = description.to_string();
         let dh_owned: Option<String> = description_hash.map(|s| s.to_string());
         let invoice_result = match tokio::time::timeout(
