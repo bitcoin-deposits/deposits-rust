@@ -6038,7 +6038,7 @@ async function populateLedgerQuickLinks() {
 
 function ledgerExternalUrl(ledgerId, seq) {
   const sub = hexToBech32Data(ledgerId);
-  const base = `https://${sub}.ledgers.bitcoindeposits.net`;
+  const base = `https://${sub}.ledger.bitcoindeposits.net`;
   return seq != null ? `${base}#seq=${seq}` : base;
 }
 
