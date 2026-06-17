@@ -751,6 +751,30 @@ async fn lnurlp_callback(
     let (tx, rx) = tokio::sync::oneshot::channel();
     state.pending.lock().await.insert(event_id.clone(), tx);
 
+    // Refresh the kind-20102 response subscription RIGHT BEFORE sending.
+    //
+    // Responses are ephemeral (kind 20000–29999): relays neither store nor
+    // replay them, so we only ever see one if a live subscription is active
+    // on the relay at the instant the operator publishes. The startup
+    // subscription can go stale (relay restart, connection bounce, sub
+    // eviction) — and a missed ephemeral response is unrecoverable. The
+    // wallet/hub avoid this by (re)subscribing immediately before each send
+    // (`subscribe_to_response`); mirror that here with a fixed-id sub so it
+    // overwrites rather than accumulates. `since` trims the historical dump.
+    {
+        let refresh = Filter::new()
+            .kind(Kind::Custom(20102))
+            .since(Timestamp::now() - 10);
+        if let Err(e) = state
+            .client
+            .subscribe_with_id(SubscriptionId::new("lnurl-responses"), vec![refresh], None)
+            .await
+        {
+            // Non-fatal: the startup subscription may still catch it.
+            log::warn!("Response subscription refresh failed: {}", e);
+        }
+    }
+
     // Send to relays
     if let Err(e) = state.client.send_event(event).await {
         state.pending.lock().await.remove(&event_id);
@@ -1033,9 +1057,23 @@ async fn handle_response_event(state: &AppState, event: &Event) {
         }
     });
 
-    let Some(req_id) = request_id else { return };
+    let Some(req_id) = request_id else {
+        log::debug!(
+            "Received kind-20102 response with no #e tag (event={}…) — ignoring",
+            &event.id.to_hex()[..16]
+        );
+        return;
+    };
     let mut pending = state.pending.lock().await;
     let Some(tx) = pending.remove(&req_id) else {
+        // A 20102 reached us but matched no outstanding request. Distinguishes
+        // "operator never responded / response lost in transport" (no log here
+        // at all) from "response arrived but correlation id mismatched".
+        log::warn!(
+            "kind-20102 response for unknown request #e={}… (event={}…) — no pending match",
+            &req_id[..16.min(req_id.len())],
+            &event.id.to_hex()[..16]
+        );
         return;
     };
     // Operator mirrors our wrap state — plaintext request → plaintext
