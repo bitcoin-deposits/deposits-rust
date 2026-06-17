@@ -535,15 +535,49 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     }
     .map_err(|e| e.to_string())?;
 
-    let state = deposits_hub::state::HubState::load_or_init(&data_dir)
+    let mut state = deposits_hub::state::HubState::load_or_init(&data_dir)
         .map_err(|e| format!("hub state: {}", e))?;
+
+    // Seed the dashboard from bootstrap-state.json. Bootstrap-spawned daemons
+    // are recorded there but only land in HubState.nodes when they register
+    // over Nostr — which the TUI may never witness if the daemons registered
+    // before this `run` started (or aren't configured to). Pre-populate them
+    // so the cluster shows up immediately; live registration / status pushes
+    // then enrich each entry (version, signer, reserves). Keyed by x-only
+    // operator pubkey to match the key a live Register uses, so registration
+    // updates the same entry rather than duplicating it.
+    let mut seeded = 0usize;
+    for (name, node_id) in deposits_hub::bootstrap::persisted_node_ids(&data_dir) {
+        let xonly = if node_id.len() == 66 {
+            node_id[2..].to_string()
+        } else {
+            node_id
+        };
+        state
+            .nodes
+            .entry(xonly)
+            .or_insert_with(|| deposits_hub::state::NodeRecord {
+                label: name,
+                spawned_by_hub: true,
+                registered_at: 0,
+                last_version: String::new(),
+                signer_pubkey: None,
+            });
+        seeded += 1;
+    }
+
     eprintln!("hub pubkey: {}", state.hub_pubkey_hex());
     eprintln!("data dir:   {}", data_dir.display());
     eprintln!("relays:     {:?}", relays);
     eprintln!(
-        "registered: {} signer(s), {} node(s)",
+        "registered: {} signer(s), {} node(s){}",
         state.signers.len(),
-        state.nodes.len()
+        state.nodes.len(),
+        if seeded > 0 {
+            format!(" ({seeded} from bootstrap-state.json)")
+        } else {
+            String::new()
+        }
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()

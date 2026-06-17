@@ -135,6 +135,17 @@ pub fn persisted_esplora(dir: &Path) -> String {
     BootstrapState::load(dir).esplora
 }
 
+/// Nodes recorded by the last `bootstrap` run as `(name, operator_pubkey)`,
+/// operator pubkey in compressed hex (02/03-prefixed). Lets the hub seed its
+/// dashboard from the cluster bootstrap stood up, instead of waiting for each
+/// daemon to re-register over Nostr.
+pub fn persisted_node_ids(dir: &Path) -> Vec<(String, String)> {
+    BootstrapState::load(dir)
+        .node_ids
+        .into_iter()
+        .collect()
+}
+
 #[cfg(test)]
 mod arg_persistence_tests {
     use super::*;
