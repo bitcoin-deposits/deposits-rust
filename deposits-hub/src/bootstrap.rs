@@ -121,6 +121,20 @@ impl BootstrapState {
     }
 }
 
+/// Relays recorded by the last `bootstrap` run in this data dir (empty if no
+/// state file). Lets the cluster-facing admin commands (`run`, `status`,
+/// `liquidity`, `advertise`, …) default to the bootstrap config instead of
+/// forcing `--relay` on every invocation — they manage the very cluster
+/// bootstrap stood up, so its relays are the right default.
+pub fn persisted_relays(dir: &Path) -> Vec<String> {
+    BootstrapState::load(dir).relays
+}
+
+/// Esplora endpoint recorded by the last `bootstrap` run (empty if none).
+pub fn persisted_esplora(dir: &Path) -> String {
+    BootstrapState::load(dir).esplora
+}
+
 #[cfg(test)]
 mod arg_persistence_tests {
     use super::*;

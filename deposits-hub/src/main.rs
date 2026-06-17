@@ -45,19 +45,19 @@ COMMANDS:
                                   QR modules so the code stays roughly square.
     logs [--node N]              Tail logs from every bootstrapped daemon + the hub itself
          [--lines N] [--follow]      (local files under <data-dir>; --node hub for hub only).
-    status --relay <URL>         Query every bootstrapped node over the Nostr admin RPC and
+    status [--relay <URL>]       Query every bootstrapped node over the Nostr admin RPC and
                                   print per-node + per-ledger status (owned vs member, quorum
                                   active, reserves). Requires the nodes to trust the hub
                                   (admin.npub — written automatically by `bootstrap`).
     drop-ledger --node <NAME>    Tell a node to drop an unfunded, PreQuorum ledger it operates
         --ledger <ID>             (orphan cleanup; identify via `status`). Daemon refuses
-        --relay <URL> [--force]   anything active/funded/with an on-chain vault.
-    liquidity <sub> --relay <URL>  Manage operator liquidity-drip plans over the admin RPC:
+        [--relay <URL>] [--force] anything active/funded/with an on-chain vault.
+    liquidity <sub> [--relay <URL>]  Manage operator liquidity-drip plans over the admin RPC:
         list [--node N]              show plans (whole cluster, or one node)
         create --node N --alias A --ledger ID --initial-sats N --decrement-sats M
                --interval-sec S [--interval-fuzz-sec F]
         pause|resume|remove --node N --alias A
-    advertise <sub> --relay <URL>  Manage Kind-39100 advertisements over the admin RPC:
+    advertise <sub> [--relay <URL>]  Manage Kind-39100 advertisements over the admin RPC:
         status [--node N]            show published terms (whole cluster, or one node)
         set --node N [--ledger ID] [--name S] [--description S] [--annual-fee-bps N]
             [--annualized-fixed-msats N] [--deposit-fee-bps N] [--withdrawal-fee-bps N]
@@ -88,7 +88,10 @@ COMMANDS:
 
 OPTIONS:
     --data-dir <DIR>   Hub data directory (default: ~/.deposits-hub)
-    --relay <URL>      Nostr relay (can be passed more than once; required for `run`, `spawn*`)
+    --relay <URL>      Nostr relay (repeatable). Required for `spawn*`. For cluster commands
+                       (`run`, `status`, `liquidity`, `advertise`, `drop-ledger`) it defaults
+                       to the relays recorded in bootstrap-state.json, so it's optional once
+                       you've run `bootstrap`.
     --name <NAME>      Signer name (workspace + label)
 
 EXAMPLES:
@@ -471,12 +474,34 @@ fn data_dir_or_default(opt: Option<PathBuf>) -> PathBuf {
     })
 }
 
+/// Resolve relays for a cluster-facing admin command. Explicit `--relay`
+/// flags win; otherwise fall back to the relays `bootstrap` recorded in this
+/// data dir's `bootstrap-state.json`. These commands drive the very cluster
+/// bootstrap stood up, so demanding `--relay` on every call was needless
+/// friction — the cluster's relays are the obvious default.
+fn relays_or_bootstrap(
+    explicit: Vec<String>,
+    data_dir: &std::path::Path,
+    cmd: &str,
+) -> Result<Vec<String>, String> {
+    if !explicit.is_empty() {
+        return Ok(explicit);
+    }
+    let saved = deposits_hub::bootstrap::persisted_relays(data_dir);
+    if saved.is_empty() {
+        return Err(format!(
+            "`{cmd}` requires at least one --relay \
+             (or run `deposits-hub bootstrap` once to record the cluster's relays)"
+        ));
+    }
+    eprintln!("relays:     {saved:?} (from bootstrap-state.json)");
+    Ok(saved)
+}
+
 fn cmd_run(args: &[String]) -> Result<(), String> {
     let c = parse_common(args)?;
     let data_dir = data_dir_or_default(c.data_dir);
-    if c.relays.is_empty() {
-        return Err("`run` requires at least one --relay".to_string());
-    }
+    let relays = relays_or_bootstrap(c.relays, &data_dir, "run")?;
 
     // Ensure the data dir exists with permissions tight enough for the
     // hub's nostr secret to live alongside the JSON state. 0700 keeps
@@ -514,7 +539,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("hub state: {}", e))?;
     eprintln!("hub pubkey: {}", state.hub_pubkey_hex());
     eprintln!("data dir:   {}", data_dir.display());
-    eprintln!("relays:     {:?}", c.relays);
+    eprintln!("relays:     {:?}", relays);
     eprintln!(
         "registered: {} signer(s), {} node(s)",
         state.signers.len(),
@@ -528,7 +553,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     if c.auto_approve && !c.headless {
         return Err("--auto-approve requires --headless".to_string());
     }
-    rt.block_on(run_async(data_dir, state, c.relays, c.headless, c.auto_approve))
+    rt.block_on(run_async(data_dir, state, relays, c.headless, c.auto_approve))
 }
 
 async fn run_async(
@@ -720,9 +745,7 @@ fn cmd_approve(args: &[String]) -> Result<(), String> {
 fn cmd_status(args: &[String]) -> Result<(), String> {
     let c = parse_common(args)?;
     let data_dir = data_dir_or_default(c.data_dir);
-    if c.relays.is_empty() {
-        return Err("`status` requires at least one --relay (the cluster's relay)".to_string());
-    }
+    let relays = relays_or_bootstrap(c.relays, &data_dir, "status")?;
     let secret_hex =
         std::fs::read_to_string(deposits_hub::state::HubState::nostr_secret_path(&data_dir))
             .map_err(|e| format!("read hub secret: {}", e))?
@@ -770,7 +793,7 @@ fn cmd_status(args: &[String]) -> Result<(), String> {
             };
             match deposits_hub::admin_client::send_admin_request(
                 &secret_hex,
-                &c.relays,
+                &relays,
                 xonly,
                 xonly,
                 "admin_status",
@@ -880,9 +903,7 @@ fn cmd_drop_ledger(args: &[String]) -> Result<(), String> {
     let data_dir = data_dir_or_default(data_dir);
     let node = node.ok_or("drop-ledger requires --node <name> (see `deposits-hub status`)")?;
     let ledger = ledger.ok_or("drop-ledger requires --ledger <id>")?;
-    if relays.is_empty() {
-        return Err("drop-ledger requires at least one --relay".to_string());
-    }
+    let relays = relays_or_bootstrap(relays, &data_dir, "drop-ledger")?;
     let secret_hex =
         std::fs::read_to_string(deposits_hub::state::HubState::nostr_secret_path(&data_dir))
             .map_err(|e| format!("read hub secret: {}", e))?
@@ -1006,9 +1027,7 @@ fn cmd_liquidity(args: &[String]) -> Result<(), String> {
     }
 
     let data_dir = data_dir_or_default(data_dir);
-    if relays.is_empty() {
-        return Err("liquidity requires at least one --relay".to_string());
-    }
+    let relays = relays_or_bootstrap(relays, &data_dir, "liquidity")?;
     let secret_hex =
         std::fs::read_to_string(deposits_hub::state::HubState::nostr_secret_path(&data_dir))
             .map_err(|e| format!("read hub secret: {}", e))?
@@ -1265,9 +1284,7 @@ fn cmd_advertise(args: &[String]) -> Result<(), String> {
     }
 
     let data_dir = data_dir_or_default(data_dir);
-    if relays.is_empty() {
-        return Err("advertise requires at least one --relay".to_string());
-    }
+    let relays = relays_or_bootstrap(relays, &data_dir, "advertise")?;
     let secret_hex =
         std::fs::read_to_string(deposits_hub::state::HubState::nostr_secret_path(&data_dir))
             .map_err(|e| format!("read hub secret: {}", e))?
