@@ -374,6 +374,18 @@ impl StaticAssets {
     }
 }
 
+/// Static-file service for the bundled web UI: serve `<dir>/wallet`, and for
+/// paths not found there fall through to `<dir>/explorer` (where the
+/// explorer's `shared.js` lives). `.fallback` — NOT `.not_found_service`,
+/// which wraps the inner response in `SetStatus(404)` and would 404 every
+/// explorer asset even when the file is served.
+fn web_assets_service(
+    dir: &std::path::Path,
+) -> tower_http::services::ServeDir<tower_http::services::ServeDir> {
+    use tower_http::services::ServeDir;
+    ServeDir::new(dir.join("wallet")).fallback(ServeDir::new(dir.join("explorer")))
+}
+
 static ASSETS: std::sync::OnceLock<StaticAssets> = std::sync::OnceLock::new();
 
 fn assets() -> &'static StaticAssets {
@@ -1144,14 +1156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // vendor file is now just dropping it in the tree. Wallet assets
         // live under `wallet/`; the explorer's `shared.js` lives under
         // `explorer/`, so fall back there for paths not found in wallet/.
-        .fallback_service(
-            tower_http::services::ServeDir::new(
-                std::path::Path::new(&asset_dir).join("wallet"),
-            )
-            .not_found_service(tower_http::services::ServeDir::new(
-                std::path::Path::new(&asset_dir).join("explorer"),
-            )),
-        )
+        .fallback_service(web_assets_service(std::path::Path::new(&asset_dir)))
         .with_state(state);
 
     log::info!("Listening on {}", listen);
@@ -1159,4 +1164,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod static_asset_tests {
+    use super::web_assets_service;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt; // for `oneshot`
+
+    /// The wallet and explorer share the URL root but live in different
+    /// subdirs. `/shared.js` lives only under explorer/ and must fall through
+    /// from the wallet ServeDir with its real 200 — the regression that
+    /// `not_found_service` (SetStatus 404) introduced.
+    #[tokio::test]
+    async fn explorer_only_asset_falls_through_with_200() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("wallet/vendor")).unwrap();
+        std::fs::create_dir_all(root.join("explorer")).unwrap();
+        std::fs::write(root.join("wallet/vendor/dep17.js"), "export const a=1;").unwrap();
+        std::fs::write(root.join("explorer/shared.js"), "export const b=2;").unwrap();
+
+        let req = |uri: &str| {
+            Request::builder().uri(uri).body(Body::empty()).unwrap()
+        };
+
+        // Wallet asset resolves directly.
+        let r = web_assets_service(root).oneshot(req("/vendor/dep17.js")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "wallet vendor asset");
+
+        // Explorer-only asset must fall through with 200, not 404.
+        let r = web_assets_service(root).oneshot(req("/shared.js")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "explorer shared.js fallthrough");
+
+        // Genuinely missing in both → 404.
+        let r = web_assets_service(root).oneshot(req("/nope.js")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "missing asset");
+    }
 }

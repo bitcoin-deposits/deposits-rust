@@ -43,5 +43,10 @@ env_logger = "0.10"
 # sha256 for NIP-57 zap-request description_hash + receipt-tag work.
 sha2 = "0.10"
 
+[dev-dependencies]
+# oneshot() for driving the static-file service in tests without a socket.
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
+
 [lints]
 workspace = true
