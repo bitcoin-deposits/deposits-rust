@@ -730,6 +730,24 @@ impl Node {
         // wallet — auto_complete_outbound_payments will pick the lock
         // up and commit the right operation when LDK eventually
         // reports.
+        // Shared response for "LDK resolved the payment but we can't produce a
+        // verifiable preimage yet" (no preimage surfaced, lookup error, or a
+        // preimage that doesn't hash). The InvoiceLock stays open and
+        // auto_complete_outbound reconciles it on a later poll — so tell the
+        // caller to WAIT, not retry: a retry could double-pay a payment that
+        // actually settled.
+        let pending_reconcile = || -> (bool, Option<String>, Option<String>) {
+            (
+                false,
+                None,
+                Some(
+                    "Payment is still reconciling on the operator — do not retry. \
+                     Run `deposits-wallet sync` shortly to pick up the final outcome."
+                        .to_string(),
+                ),
+            )
+        };
+
         let payment_hex = hex::encode(payment_id);
         let resolve_deadline =
             tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
@@ -790,26 +808,22 @@ impl Node {
                             );
                         }
                         Ok(None) => {
-                            return (
-                                false,
-                                None,
-                                Some(format!(
-                                    "LDK reported succeeded but no preimage on either \
-                                     list-payments or get-payment-details for {}",
-                                    &payment_hex[..16]
-                                )),
+                            tracing::warn!(
+                                "pay_invoice {}: LDK marked succeeded but no preimage on \
+                                 list-payments or get-payment-details yet — leaving the \
+                                 InvoiceLock open for auto_complete_outbound to reconcile",
+                                &payment_hex[..16]
                             );
+                            return pending_reconcile();
                         }
                         Err(e) => {
-                            return (
-                                false,
-                                None,
-                                Some(format!(
-                                    "LDK preimage lookup failed for {}: {}",
-                                    &payment_hex[..16],
-                                    e
-                                )),
+                            tracing::warn!(
+                                "pay_invoice {}: LDK preimage lookup failed: {} — leaving the \
+                                 InvoiceLock open for auto_complete_outbound to reconcile",
+                                &payment_hex[..16],
+                                e
                             );
+                            return pending_reconcile();
                         }
                     }
                 }
@@ -821,17 +835,23 @@ impl Node {
                     let computed: [u8; 32] =
                         *sha256::Hash::hash(&preimage).as_byte_array();
                     if computed != payment_id {
-                        return (
-                            false,
-                            None,
-                            Some(format!(
-                                "LDK preimage doesn't hash to payment_hash for {}: \
-                                 sha256(preimage)={} != payment_hash={}",
-                                &payment_hex[..16],
-                                hex::encode(computed),
-                                payment_hex
-                            )),
+                        // LDK reported the payment succeeded but the preimage it
+                        // gave us doesn't hash to the payment_hash. Don't commit a
+                        // guaranteed-invalid InvoiceFulfill, and — critically — don't
+                        // return a hard error: the lock is still open and the payment
+                        // may have actually settled, so a "failed" response could make
+                        // the wallet retry and double-pay. Leave it for
+                        // auto_complete_outbound (which re-checks and can pick up a
+                        // valid preimage on a later poll), and tell the caller to wait.
+                        tracing::warn!(
+                            "pay_invoice {}: LDK preimage doesn't hash to payment_hash — \
+                             leaving lock for auto_complete_outbound. \
+                             sha256(preimage)={} != payment_hash={}",
+                            &payment_hex[..16],
+                            hex::encode(computed),
+                            payment_hex
                         );
+                        return pending_reconcile();
                     }
                 }
 
