@@ -45,8 +45,9 @@ header h1 { font-size: 16px; font-weight: 600; }
 #conn-status.connected { background: #0d1f0d; color: var(--balance); }
 #conn-status.disconnected { background: #1f0d0d; color: var(--red); }
 
-nav { display: flex; flex-wrap: wrap; gap: 2px; margin-bottom: 16px; border-bottom: 1px solid var(--border); padding-bottom: 0; }
-.nav-tools { display: flex; gap: 8px; align-items: center; margin-left: auto; }
+nav { margin-bottom: 16px; }
+.nav-tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--border); }
+.nav-tools { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; padding-top: 6px; }
 nav button {
   border: none; border-bottom: 2px solid transparent; border-radius: 0;
   padding: 8px 14px; background: transparent; color: var(--muted); font-size: 12px;
@@ -161,10 +162,12 @@ body.hide-amounts .amt { visibility: hidden; }
   <div id="main-panel" style="display:none">
 
     <nav>
-      <button class="active" data-tab="wallet">Wallet</button>
-      <button data-tab="deposits">Deposits</button>
-      <button data-tab="transfer">Transfer</button>
-      <button data-tab="settings">Settings</button>
+      <div class="nav-tabs">
+        <button class="active" data-tab="wallet">Wallet</button>
+        <button data-tab="deposits">Deposits</button>
+        <button data-tab="transfer">Transfer</button>
+        <button data-tab="settings">Settings</button>
+      </div>
       <span class="nav-tools">
         <button id="sync-btn" style="border:none; color:var(--muted); font-size:11px;" onclick="syncAll()">Sync</button>
         <span id="conn-status" class="disconnected" style="font-size:11px; padding:3px 8px; border-radius:10px;">disconnected</span>
