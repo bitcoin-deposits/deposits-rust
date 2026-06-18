@@ -1520,8 +1520,11 @@ function connectOne(url, readOnly = false) {
       setTimeout(open, 3000);
     };
 
-    sock.onerror = (e) => {
-      log(`Connection error: ${url}`, 'error');
+    sock.onerror = () => {
+      // Transient relay drops are normal on mobile (screen lock, network
+      // change) and onclose auto-reconnects, so log quietly — don't pop the
+      // error modal, which is reserved for user-facing operation failures.
+      log(`Connection error: ${url} (will retry)`);
     };
 
     sock.onmessage = (msg) => {
