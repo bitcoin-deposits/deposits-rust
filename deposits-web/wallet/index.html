@@ -161,9 +161,7 @@ body.hide-amounts .amt { visibility: hidden; }
     <nav>
       <button class="active" data-tab="wallet">Wallet</button>
       <button data-tab="deposits">Deposits</button>
-      <button data-tab="discover">Discover</button>
       <button data-tab="transfer">Transfer</button>
-      <button data-tab="ledgers">Ledgers</button>
       <button data-tab="settings">Settings</button>
       <span style="flex:1"></span>
       <button id="sync-btn" style="border:none; color:var(--muted); font-size:11px;" onclick="syncAll()">Sync</button>
@@ -368,53 +366,6 @@ body.hide-amounts .amt { visibility: hidden; }
       </div>
     </div>
 
-    <!-- Discover tab -->
-    <div id="tab-discover" class="panel">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-        <span style="color:var(--muted)">Network</span>
-        <button onclick="discoverLedgers()">Refresh</button>
-      </div>
-      <canvas id="network-graph" style="width:100%; height:350px; border:1px solid var(--border); border-radius:6px; cursor:grab; background:var(--surface);"></canvas>
-      <div id="network-node-info" class="card" style="display:none; margin-top:8px;">
-        <div style="display:flex; justify-content:space-between; align-items:baseline;">
-          <h3 id="node-info-name"></h3>
-          <span style="color:var(--muted); font-size:11px;" id="node-info-pubkey"></span>
-        </div>
-        <div id="node-info-details"></div>
-        <div id="node-info-ledgers" style="margin-top:8px; display:flex; flex-wrap:wrap; gap:4px;"></div>
-      </div>
-      <div id="ledgers-list" style="margin-top:12px;"></div>
-
-      <!-- Ledger info pane (shown when a ledger is selected) -->
-      <div id="ledger-info-pane" class="card" style="display:none; margin-top:12px;">
-        <div style="display:flex; justify-content:space-between; align-items:baseline;">
-          <h3 id="ledger-info-name"></h3>
-          <a href="#" id="ledger-info-explore" style="font-size:11px;" onclick="event.preventDefault()">View ledger history</a>
-        </div>
-        <div id="ledger-info-details"></div>
-      </div>
-
-      <div id="open-deposit-form" class="card" style="display:none; margin-top:8px;">
-        <h3>Open Deposit on <span id="open-ledger-name"></span></h3>
-        <input type="hidden" id="open-ledger-id">
-        <div class="form-group">
-          <label>Alias</label>
-          <input id="open-alias" type="text" placeholder="my-deposit">
-        </div>
-        <div class="form-group">
-          <label style="display:flex; align-items:center; gap:8px; font-weight:normal;">
-            <input id="open-receive-requires-sig" type="checkbox">
-            Require my signature to receive funds
-          </label>
-          <small style="display:block; margin-top:4px; color:#666;">
-            When on, every inbound credit (invoice, on-chain, transfer) must
-            be authorized by the deposit key. Prevents unsolicited crediting.
-          </small>
-        </div>
-        <button class="primary" onclick="doOpenDeposit()">Open Deposit</button>
-      </div>
-    </div>
-
     <!-- Transfer tab -->
     <div id="tab-transfer" class="panel">
       <div class="card">
@@ -513,34 +464,6 @@ body.hide-amounts .amt { visibility: hidden; }
         </div>
         <button id="complete-btn" class="primary" onclick="doTransferComplete()">Complete Transfer</button>
       </div>
-    </div>
-
-    <!-- Ledgers tab -->
-    <div id="tab-ledgers" class="panel">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-        <span style="color:var(--muted)">Ledger Explorer</span>
-      </div>
-      <div id="ledger-browse" style="margin-bottom:12px;"></div>
-      <div class="form-group">
-        <div style="display:flex; gap:6px;">
-          <input id="ledger-explorer-id" type="text" placeholder="Ledger ID (64 hex or prefix)" style="flex:1">
-          <button onclick="exploreLedger()">Load</button>
-        </div>
-      </div>
-      <div id="ledger-explorer-header" style="display:none; color:var(--muted); font-size:11px; margin-bottom:4px;"></div>
-      <div id="ledger-explorer-viewport" style="display:none; height:500px; overflow-y:auto; border:1px solid var(--border); border-radius:6px; position:relative; transition:height 0.15s;">
-        <div id="ledger-explorer-spacer" style="width:100%;"></div>
-        <div id="ledger-explorer-rows" style="position:absolute; top:0; left:0; right:0;"></div>
-      </div>
-      <div id="ledger-explorer-detail" class="card" style="display:none; margin-top:8px; max-height:300px; overflow-y:auto;">
-        <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;">
-          <h3 id="ledger-detail-title"></h3>
-          <button style="font-size:10px; padding:2px 8px;" onclick="closeLedgerDetail()">Close</button>
-        </div>
-        <div id="ledger-detail-meta" style="color:var(--muted); font-size:10px; margin-bottom:8px;"></div>
-        <div id="ledger-detail-fields"></div>
-      </div>
-      <div id="ledger-explorer-empty"></div>
     </div>
 
     <!-- Settings tab -->
@@ -4197,7 +4120,7 @@ window.selectDeposit = function(alias) {
   document.getElementById('detail-balance').textContent = hasBal ? `₿ ${bal.toLocaleString()}${locked}` : 'sync to check';
   document.getElementById('detail-balance').style.color = hasBal && bal > 0 ? 'var(--balance)' : 'var(--muted)';
 
-  let info = `Ledger: <a href="#ledger/${d.ledger_id}" onclick="event.preventDefault(); openLedgerTab('${d.ledger_id}')">${d.ledger_id}</a>`;
+  let info = `Ledger: <a href="${ledgerExternalUrl(d.ledger_id)}" target="_blank" rel="noopener noreferrer">${d.ledger_id}</a>`;
   const lnAddr = lnurlAddressFor(d);
   if (lnAddr) {
     info += `<br>Lightning address: <span style="color:var(--fg); word-break:break-all;">${esc(lnAddr)}</span>` +
@@ -6351,9 +6274,7 @@ function switchToTab(tab) {
   if (btn) btn.classList.add('active');
   const panel = document.getElementById('tab-' + tab);
   if (panel) panel.classList.add('active');
-  if (tab === 'discover') discoverLedgers();
   if (tab === 'transfer') { onTransferFromChange(); refreshAgentAds(); }
-  if (tab === 'ledgers') populateLedgerQuickLinks();
 }
 
 function updateHash(hash) {
@@ -6367,17 +6288,10 @@ function restoreFromHash() {
   const parts = hash.split('/');
   const tab = parts[0];
 
-  if (tab === 'ledger' && parts[1]) {
-    const seq = parts[2] ? parseInt(parts[2]) : null;
-    switchToTab('ledgers');
-    document.getElementById('ledger-explorer-id').value = parts[1];
-    exploreLedger().then(() => {
-      if (seq !== null) highlightLedgerEntry(seq);
-    });
-  } else if (tab === 'deposit' && parts[1]) {
+  if (tab === 'deposit' && parts[1]) {
     switchToTab('deposits');
     selectDeposit(decodeURIComponent(parts[1]));
-  } else if (['wallet','deposits','discover','transfer','ledgers','settings'].includes(tab)) {
+  } else if (['wallet','deposits','transfer','settings'].includes(tab)) {
     switchToTab(tab);
   }
 }
