@@ -681,6 +681,7 @@ impl Node {
             sequence_number,
             nonce: op_nonce,
             expiry: op_expiry,
+            timeout_height: None,
             witness,
         };
 

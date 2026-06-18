@@ -197,6 +197,7 @@ fn invoice_lock() {
         sequence_number: 43,
         nonce: 0,
         expiry: u32::MAX,
+        timeout_height: None,
         witness: wit(),
     });
 }

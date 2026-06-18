@@ -123,6 +123,7 @@ fn watcher_detects_bad_invoice_witness() {
         sequence_number: net.op("alice").ledger.state.sequence + 1,
         nonce: 0,
         expiry: u32::MAX,
+        timeout_height: None,
         witness: deposits_protocol::DescriptorWitness {
             stack: vec![vec![0xFF; 64]], // garbage signature
         },

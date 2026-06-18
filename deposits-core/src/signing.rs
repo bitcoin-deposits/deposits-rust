@@ -345,6 +345,7 @@ pub fn sign_op(
             sequence_number,
             nonce,
             expiry,
+            timeout_height,
             witness: _,
         } => LedgerOperation::InvoiceLock {
             deposit_id,
@@ -353,6 +354,7 @@ pub fn sign_op(
             sequence_number,
             nonce,
             expiry,
+            timeout_height,
             witness,
         },
         LedgerOperation::OnchainLock {
@@ -680,6 +682,7 @@ mod tests {
             sequence_number: 1,
             nonce: 1,
             expiry: u32::MAX,
+            timeout_height: None,
             witness: DescriptorWitness::new(),
         };
         let signed = sign_op(proto.clone(), &sk).expect("InvoiceLock is signature-bearing");

@@ -530,6 +530,44 @@ impl Node {
             ledger.next_sequence()
         };
 
+        // Fund-lock timeout (block height): the operator's deadline to release
+        // the lock if the payment never resolves. NOT the dep-17 signature
+        // `expiry` above — the depositor doesn't sign this; the node sets it to
+        // a self-interested minimum (just past the invoice's own expiry plus a
+        // settlement margin) and caps it at the strictest quorum member's
+        // `max_transfer_timeout_blocks`. If the invoice's expiry is so long that
+        // even the minimum lock would exceed the cap, reject up front rather
+        // than building a lock the quorum won't co-sign.
+        let timeout_height = {
+            const SETTLEMENT_MARGIN_BLOCKS: u32 = 144; // ~1 day past invoice expiry
+            let ledger = ledger_arc.read().unwrap();
+            let current_block = ledger.history.last().map(|u| u.block_height).unwrap_or(0);
+            let max_timeout = ledger
+                .state
+                .quorum_members
+                .iter()
+                .filter_map(|m| m.max_transfer_timeout_blocks)
+                .min()
+                .unwrap_or(1008); // default ~1 week
+            // BOLT11 expiry window (seconds) → blocks at ~10 min/block.
+            let invoice_expiry_blocks =
+                (invoice.expiry_time().as_secs() / 600) as u32;
+            let needed = invoice_expiry_blocks.saturating_add(SETTLEMENT_MARGIN_BLOCKS);
+            if needed > max_timeout {
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "Invoice expiry too long: would need a {}-block fund lock, but the \
+                         quorum's maximum is {} blocks. Ask for an invoice with a shorter expiry.",
+                        needed, max_timeout
+                    )),
+                );
+            }
+            // current_block can be 0 pre-sync; still produce a bounded height.
+            current_block.saturating_add(needed)
+        };
+
         let lock_operation = LedgerOperation::InvoiceLock {
             deposit_id,
             amount: amount_msat,
@@ -537,6 +575,7 @@ impl Node {
             sequence_number,
             nonce: op_nonce,
             expiry: op_expiry,
+            timeout_height: Some(timeout_height),
             witness: witness.clone(),
         };
 

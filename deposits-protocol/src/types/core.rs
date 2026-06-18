@@ -294,6 +294,13 @@ pub struct OpenInvoiceLock {
     /// eventual fulfill conformance check (auto-task logs the failure).
     #[serde(default)]
     pub witness: DescriptorWitness,
+    /// Block height at which the operator may release these funds (InvoiceFail)
+    /// if the payment never resolves — the fund-lock timeout, set by the node and
+    /// capped by cosigners (mirrors `PendingTransfer.timeout_height`). `None` for
+    /// legacy locks created before this field existed; those have no enforced
+    /// release deadline and are left alone by the auto-timeout task.
+    #[serde(default)]
+    pub timeout_height: Option<u32>,
 }
 
 /// Created by TransferLock, resolved by TransferComplete (funds to destination)

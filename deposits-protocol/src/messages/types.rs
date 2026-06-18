@@ -362,6 +362,16 @@ pub enum LedgerOperation {
         /// Block height after which a signature over this operation is invalid. Plumbed into
         /// the dep-16 operation preimage; protocol rejects on apply if `current_height > expiry`.
         expiry: u32,
+        /// Fund-lock timeout: block height at which the operator may release the
+        /// locked funds (InvoiceFail) if the payment never resolves. This is the
+        /// node's operational deadline, NOT the dep-17 signature `expiry` above —
+        /// the depositor does not sign it, so it's omitted from the dep-16
+        /// preimage. The node sets it to a self-interested minimum and cosigners
+        /// cap it at `max_transfer_timeout_blocks` (see conformance), bounding how
+        /// long a depositor's funds can stay locked. Optional on the wire (odd TLV
+        /// tag) so pre-timeout ledgers/peers stay compatible; `None` = legacy lock
+        /// with no enforced release deadline.
+        timeout_height: Option<u32>,
         /// Witness satisfying the deposit descriptor
         witness: DescriptorWitness,
     },
@@ -1681,6 +1691,7 @@ impl BinaryCodec for LedgerOperation {
                     sequence_number,
                     nonce: 0,
                     expiry: u32::MAX,
+                    timeout_height: None,
                     witness: crate::types::DescriptorWitness {
                         stack: vec![sig.to_vec()],
                     },

@@ -318,6 +318,7 @@ mod tests {
             sequence_number: 3, // ledger-position bookkeeping; distinct from nonce
             nonce: 7,
             expiry: 1_000_000,
+            timeout_height: None,
             witness: DescriptorWitness::new(),
         };
         let d = to_dep16(&op).expect("descriptor-evaluated");
@@ -477,6 +478,7 @@ mod tests {
             sequence_number: 1,
             nonce: 1,
             expiry: u32::MAX,
+            timeout_height: None,
             witness: DescriptorWitness::new(),
         };
         let op_b = LedgerOperation::InvoiceLock {
@@ -486,6 +488,7 @@ mod tests {
             sequence_number: 1,
             nonce: 1,
             expiry: u32::MAX,
+            timeout_height: None,
             witness: DescriptorWitness::new(),
         };
         let sh_a = operation_sighash(&op_a).expect("sighash");
@@ -506,6 +509,7 @@ mod tests {
             sequence_number: 1,
             nonce: 1,
             expiry: u32::MAX,
+            timeout_height: None,
             witness: DescriptorWitness::new(),
         };
         let op_b = LedgerOperation::InvoiceLock {
@@ -515,6 +519,7 @@ mod tests {
             sequence_number: 1,
             nonce: 2,
             expiry: u32::MAX,
+            timeout_height: None,
             witness: DescriptorWitness::new(),
         };
         let sh_a = operation_sighash(&op_a).expect("sighash");
@@ -535,6 +540,7 @@ mod tests {
             sequence_number: 1,
             nonce: 1,
             expiry: 1_000_000,
+            timeout_height: None,
             witness: DescriptorWitness::new(),
         };
         let op_b = LedgerOperation::InvoiceLock {
@@ -544,6 +550,7 @@ mod tests {
             sequence_number: 1,
             nonce: 1,
             expiry: 2_000_000,
+            timeout_height: None,
             witness: DescriptorWitness::new(),
         };
         let sh_a = operation_sighash(&op_a).expect("sighash");

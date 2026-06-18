@@ -1480,6 +1480,9 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         sequence_number: 0, // operator picks; not bound by dep-17 preimage
         nonce: op_nonce,
         expiry: op_expiry,
+        // Not bound by the dep-17 preimage and set by the operator on the real
+        // op; this local copy only computes the witness sighash.
+        timeout_height: None,
         witness: deposits_core::types::DescriptorWitness::new(),
     };
     let signed = deposits_core::signing::sign_op(proto, &keypair.secret_key())

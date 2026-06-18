@@ -231,6 +231,7 @@ fn scaling_witness_verification() {
             sequence_number: net.op(&names[0]).ledger.state.sequence + 1,
             nonce: 0,
             expiry: u32::MAX,
+            timeout_height: None,
             witness: DescriptorWitness {
                 stack: vec![vec![0xFF; 64]],
             },

@@ -210,6 +210,7 @@ async fn pay_invoice_self_pay_returns_real_preimage() {
         sequence_number: 0,
         nonce: op_nonce,
         expiry: op_expiry,
+        timeout_height: None,
         witness: deposits_core::types::DescriptorWitness::new(),
     };
     let signed = deposits_core::signing::sign_op(proto, &send_sk)

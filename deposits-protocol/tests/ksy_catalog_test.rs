@@ -823,6 +823,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 sequence_number: 43,
                 nonce: 0,
                 expiry: u32::MAX,
+                timeout_height: None,
                 witness: wit(),
             },
         ),

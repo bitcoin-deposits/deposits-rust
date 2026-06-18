@@ -269,6 +269,7 @@ fn invariant_c1_witness_validity() {
         sequence_number: 2,
         nonce: 1,
         expiry: u32::MAX,
+        timeout_height: None,
         witness: DescriptorWitness::new(),
     };
     let good_op = deposits_core::signing::sign_op(good_proto, &user_sk)
@@ -287,6 +288,7 @@ fn invariant_c1_witness_validity() {
         sequence_number: 3,
         nonce: 2,
         expiry: u32::MAX,
+        timeout_height: None,
         witness: DescriptorWitness::new(),
     };
     let bad_op = deposits_core::signing::sign_op(bad_proto, &attacker_sk)
@@ -381,6 +383,7 @@ fn invariant_c3_signature_binding() {
         sequence_number: 1,
         nonce: 0,
         expiry: u32::MAX,
+        timeout_height: None,
         witness: DescriptorWitness::new(),
     };
     let withdrawal_op = LedgerOperation::OnchainLock {
@@ -414,6 +417,7 @@ fn invariant_c3_signature_binding() {
         sequence_number: 1,
         nonce: 0,
         expiry: u32::MAX,
+        timeout_height: None,
         witness: DescriptorWitness::new(),
     };
     let msg_other_deposit = preimage(&other_op);
@@ -673,6 +677,7 @@ fn invariant_s3_balance_non_negative() {
         sequence_number: 99,
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
+        timeout_height: None,
         witness: DescriptorWitness::new(),
     };
     let op = deposits_core::signing::sign_op(proto, &user.secret_key)

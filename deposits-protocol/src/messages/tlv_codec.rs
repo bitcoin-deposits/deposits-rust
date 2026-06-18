@@ -92,6 +92,10 @@ mod ledger_op_tlv {
     pub const DESTINATION_DEPOSIT_ID: u64 = 214;
     pub const COMPLETION_SCRIPT: u64 = 216;
     pub const TIMEOUT_HEIGHT: u64 = 218;
+    /// InvoiceLock fund-lock timeout. ODD = optional per the TLV convention, so
+    /// pre-timeout decoders skip it and old/new nodes stay interoperable. Distinct
+    /// from the even/required transfer TIMEOUT_HEIGHT(218).
+    pub const INVOICE_LOCK_TIMEOUT: u64 = 219;
     pub const TRANSFER_ID: u64 = 220;
     pub const BLOCK_HASH: u64 = 222;
     pub const SCRIPT_WITNESS: u64 = 224;
@@ -327,6 +331,7 @@ impl TlvEncode for LedgerOperation {
                 sequence_number,
                 nonce,
                 expiry,
+                timeout_height,
                 witness,
             } => {
                 builder = builder
@@ -337,6 +342,11 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(NONCE, *nonce)
                     .u32_field(EXPIRY, *expiry)
                     .witness_field(WITNESS, witness);
+                // Optional (odd tag): only written when set, so legacy locks
+                // round-trip byte-identically and old decoders skip it.
+                if let Some(t) = timeout_height {
+                    builder = builder.u32_field(INVOICE_LOCK_TIMEOUT, *t);
+                }
             }
             Self::InvoiceFail {
                 deposit_id,
@@ -742,6 +752,8 @@ impl TlvDecode for LedgerOperation {
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
                 nonce: reader.read_u64(NONCE)?,
                 expiry: reader.read_u32(EXPIRY)?,
+                // Absent on legacy ops → None (no enforced release deadline).
+                timeout_height: reader.read_u32_opt(INVOICE_LOCK_TIMEOUT)?,
                 witness: reader.read_witness(WITNESS)?,
             }),
             32 => Ok(Self::InvoiceFail {

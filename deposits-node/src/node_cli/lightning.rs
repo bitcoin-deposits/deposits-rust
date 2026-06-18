@@ -654,6 +654,7 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
         sequence_number: 0,
         nonce: op_nonce,
         expiry: op_expiry,
+        timeout_height: None,
         witness: deposits_core::types::DescriptorWitness::new(),
     };
     let lock_signed = deposits_core::signing::sign_op(lock_proto, &secret_key)

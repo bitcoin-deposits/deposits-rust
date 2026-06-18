@@ -477,7 +477,7 @@ impl Node {
         use crate::lightning_backend::PaymentStatus;
 
         // Collect open locks from all owned ledgers
-        let mut open_locks: Vec<(String, [u8; 32], deposits_core::types::OpenInvoiceLock)> =
+        let mut open_locks: Vec<(String, [u8; 32], deposits_core::types::OpenInvoiceLock, u32)> =
             Vec::new();
         {
             let ledgers = match self.handler.ledgers.try_lock() {
@@ -491,8 +491,10 @@ impl Node {
             };
             for (lid, arc) in ledgers.iter() {
                 let ledger = arc.read().unwrap();
+                let current_block =
+                    ledger.history.last().map(|u| u.block_height).unwrap_or(0);
                 for (payment_id, lock) in &ledger.state.open_invoice_locks {
-                    open_locks.push((lid.clone(), *payment_id, lock.clone()));
+                    open_locks.push((lid.clone(), *payment_id, lock.clone(), current_block));
                 }
             }
         }
@@ -515,7 +517,7 @@ impl Node {
             }
         };
 
-        for (ledger_id, payment_id, lock) in open_locks {
+        for (ledger_id, payment_id, lock, current_block) in open_locks {
             let payment_hex = hex::encode(payment_id);
             let matching = payments.iter().find(|p| p.id == payment_hex);
 
@@ -715,11 +717,51 @@ impl Node {
                     }
                 }
                 _ => {
-                    // Still pending or not found in LDK — leave alone
-                    tracing::debug!(
-                        "auto_complete_outbound: payment {}... still pending",
-                        &payment_hex[..16]
+                    // Not succeeded in LDK (pending or unknown). If the lock's
+                    // fund-lock timeout has passed, the invoice can no longer
+                    // settle, so release the depositor's funds with InvoiceFail
+                    // rather than leaving them locked forever. Only acts when the
+                    // lock carries a timeout_height (legacy None locks are left
+                    // alone) and the chain is past it.
+                    let expired = matches!(
+                        (lock.timeout_height, current_block),
+                        (Some(t), cb) if cb > 0 && cb >= t
                     );
+                    if expired {
+                        let sequence = {
+                            let ledgers = self.handler.ledgers.lock().unwrap();
+                            match ledgers.get(&ledger_id) {
+                                Some(arc) => arc.read().unwrap().next_sequence(),
+                                None => continue,
+                            }
+                        };
+                        let op = deposits_core::messages::LedgerOperation::InvoiceFail {
+                            deposit_id: lock.deposit_id,
+                            amount: lock.amount,
+                            payment_id,
+                            sequence_number: sequence,
+                        };
+                        match self.commit_operation(&ledger_id, op).await {
+                            Ok(_) => tracing::warn!(
+                                "auto_complete_outbound: lock {}… expired at height {} \
+                                 (current {}), LDK shows not-succeeded — released {} msat",
+                                &payment_hex[..16],
+                                lock.timeout_height.unwrap_or(0),
+                                current_block,
+                                lock.amount
+                            ),
+                            Err(e) => tracing::error!(
+                                "auto_complete_outbound: failed to release expired lock {}…: {}",
+                                &payment_hex[..16],
+                                e
+                            ),
+                        }
+                    } else {
+                        tracing::debug!(
+                            "auto_complete_outbound: payment {}... still pending",
+                            &payment_hex[..16]
+                        );
+                    }
                 }
             }
         }

@@ -639,6 +639,7 @@ fn invoice_lock_preimage(deposit_id: [u8; 16], payment_id: [u8; 32], amount: u64
         sequence_number: 1,
         nonce: 0,
         expiry: u32::MAX,
+        timeout_height: None,
         witness: deposits_core::types::DescriptorWitness::new(),
     };
     deposits_core::dep16::operations::operation_sighash(&op)

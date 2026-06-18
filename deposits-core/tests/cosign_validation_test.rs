@@ -80,6 +80,7 @@ fn cosign_rejects_invoice_lock_insufficient_balance() {
         sequence_number: 0,
         nonce: 0,
         expiry: u32::MAX,
+        timeout_height: None,
         witness: DescriptorWitness { stack: vec![] },
     });
     assert!(result.is_err(), "Should reject lock exceeding balance");
@@ -101,6 +102,7 @@ fn cosign_accepts_invoice_lock_within_balance() {
         sequence_number: 0,
         nonce: 0,
         expiry: u32::MAX,
+        timeout_height: None,
         witness: DescriptorWitness { stack: vec![] },
     });
     assert!(result.is_ok(), "Should accept lock within balance");
@@ -124,6 +126,7 @@ fn cosign_rejects_double_lock_exceeding_available() {
             sequence_number: 0,
             nonce: 0,
             expiry: u32::MAX,
+            timeout_height: None,
             witness: DescriptorWitness { stack: vec![] },
         })
         .unwrap();
@@ -136,6 +139,7 @@ fn cosign_rejects_double_lock_exceeding_available() {
         sequence_number: 0,
         nonce: 0,
         expiry: u32::MAX,
+        timeout_height: None,
         witness: DescriptorWitness { stack: vec![] },
     });
     assert!(
@@ -160,6 +164,7 @@ fn cosign_rejects_lock_on_nonexistent_deposit() {
         sequence_number: 0,
         nonce: 0,
         expiry: u32::MAX,
+        timeout_height: None,
         witness: DescriptorWitness { stack: vec![] },
     });
     assert!(result.is_err(), "Should reject lock on nonexistent deposit");
@@ -293,6 +298,7 @@ fn open_invoice_locks_tracked_through_lifecycle() {
             sequence_number: 0,
             nonce: 0,
             expiry: u32::MAX,
+            timeout_height: None,
             witness: DescriptorWitness { stack: vec![] },
         })
         .unwrap();
@@ -341,6 +347,7 @@ fn open_invoice_lock_cleared_on_fail() {
             sequence_number: 0,
             nonce: 0,
             expiry: u32::MAX,
+            timeout_height: None,
             witness: DescriptorWitness { stack: vec![] },
         })
         .unwrap();
@@ -394,6 +401,7 @@ fn cosign_data_contains_decodable_operation() {
         sequence_number: 3,
         nonce: 0,
         expiry: u32::MAX,
+        timeout_height: None,
         witness: DescriptorWitness { stack: vec![] },
     };
 
@@ -437,6 +445,7 @@ fn cosign_data_invalid_operation_rejected() {
         sequence_number: 0,
         nonce: 0,
         expiry: u32::MAX,
+        timeout_height: None,
         witness: DescriptorWitness { stack: vec![] },
     };
 

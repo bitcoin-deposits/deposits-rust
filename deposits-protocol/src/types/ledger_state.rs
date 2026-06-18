@@ -456,6 +456,7 @@ impl LedgerState {
                 sequence_number,
                 nonce,
                 expiry,
+                timeout_height,
                 witness,
                 ..
             } => {
@@ -482,6 +483,7 @@ impl LedgerState {
                         amount: *amount,
                         lock_sequence: *sequence_number,
                         witness: witness.clone(),
+                        timeout_height: *timeout_height,
                     },
                 );
             }
@@ -1571,6 +1573,7 @@ mod replay_protection_tests {
             sequence_number: nonce,
             nonce,
             expiry,
+            timeout_height: None,
             witness: DescriptorWitness::new(),
         }
     }

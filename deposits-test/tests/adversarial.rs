@@ -176,6 +176,7 @@ fn attack_forged_invoice_witness() {
         sequence_number: net.op("alice").ledger.state.sequence + 1,
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
+        timeout_height: None,
         witness: deposits_protocol::DescriptorWitness::new(),
     };
     let op = deposits_core::signing::sign_op(proto, &attacker_key.secret_key)
@@ -353,6 +354,7 @@ fn attack_drain_via_overlapping_locks() {
         sequence_number: next_seq,
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
+        timeout_height: None,
         witness: deposits_protocol::DescriptorWitness::new(),
     };
     let op = deposits_core::signing::sign_op(proto, &user.secret_key)
