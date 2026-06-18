@@ -6,9 +6,10 @@
 <title>Deposits Wallet</title>
 <style>
 :root {
-  --bg: #0d1117; --surface: #161b22; --border: #30363d;
-  --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
-  --green: #3fb950; --red: #f85149; --yellow: #d29922; --btc: #f7931a;
+  /* Navy palette, shared with the ledger explorer site. */
+  --bg: #11131f; --surface: #1d2237; --border: #2a304a;
+  --text: #e7e9f0; --muted: #8d96b3; --accent: #f7931a;
+  --green: #4cae5a; --red: #d9534f; --yellow: #f0ad4e; --btc: #f7931a;
   --balance: var(--btc);
   --font: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
   --font-balance: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
@@ -22,8 +23,8 @@ button {
   border-radius: 4px; cursor: pointer; transition: background 0.15s;
 }
 button:hover { background: var(--border); }
-button.primary { background: #1f6feb; border-color: #388bfd; }
-button.primary:hover { background: #388bfd; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+button.primary:hover { background: #ffa838; border-color: #ffa838; }
 button.danger { border-color: var(--red); color: var(--red); }
 input, select {
   font-family: var(--font); font-size: 12px; padding: 6px 10px;
@@ -74,7 +75,7 @@ nav button:hover { color: var(--text); background: transparent; }
   padding: 10px 14px; cursor: pointer; min-width: 120px; transition: border-color 0.15s;
 }
 .deposit-tile:hover { border-color: var(--accent); }
-.deposit-tile.selected { border-color: var(--accent); background: #161b2a; }
+.deposit-tile.selected { border-color: var(--accent); background: #232943; }
 .deposit-tile .alias { font-weight: 600; font-size: 12px; }
 .deposit-tile .bal { font-size: 15px; font-weight: 700; color: var(--balance); margin-top: 2px; }
 .deposit-tile .bal.zero { color: var(--muted); font-size: 12px; }
