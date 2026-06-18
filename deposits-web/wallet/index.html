@@ -978,9 +978,15 @@ function decodeBolt11(invoice) {
   // First: timestamp (first 7 groups = 35 bits)
   let bitPos = 35; // skip timestamp
 
-  // Parse tagged fields to find payment_hash (tag 'p' = 1)
+  // Parse tagged fields to find payment_hash (tag 'p' = 1). Stop before the
+  // trailing 65-byte signature (104 5-bit groups) — otherwise the loop parses
+  // signature bits as tagged fields, and a chunk that happens to look like
+  // tag=1/len=52 overwrites the real payment_hash with garbage (an
+  // intermittent, invoice-specific failure). Also break on the first 'p' (it
+  // appears exactly once) as belt-and-suspenders.
   let paymentHash = null;
-  while (bitPos + 10 <= data5.length * 5) {
+  const fieldsEnd = (data5.length - 104) * 5; // exclude signature region
+  while (bitPos + 15 <= fieldsEnd) {
     const tag = getBits(data5, bitPos, 5); bitPos += 5;
     const dataLen = getBits(data5, bitPos, 10); bitPos += 10; // length in 5-bit groups
     const fieldBits = dataLen * 5;
@@ -991,6 +997,7 @@ function decodeBolt11(invoice) {
         hashBytes.push(getBits(data5, bitPos + i * 8, 8));
       }
       paymentHash = new Uint8Array(hashBytes);
+      break;
     }
     bitPos += fieldBits;
   }
