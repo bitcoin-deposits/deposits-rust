@@ -24,7 +24,12 @@ use super::serde_helpers::*;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DescriptorWitness {
     /// Stack elements (signatures, preimages, etc.)
-    /// Order matches witness stack order: index 0 is bottom of stack
+    /// Order matches witness stack order: index 0 is bottom of stack.
+    ///
+    /// On the wire each element may be a hex string or a byte array — the
+    /// CLI emits byte arrays, hex-native JSON clients (the web wallet) emit
+    /// hex. Serialization stays as byte arrays.
+    #[serde(deserialize_with = "deserialize_witness_stack")]
     pub stack: Vec<Vec<u8>>,
 }
 
@@ -1226,4 +1231,30 @@ pub struct WithdrawalCompleteResult {
     pub fee_sats: u64,
     /// Final deposit balance (millisatoshis).
     pub final_balance_msats: u64,
+}
+
+#[cfg(test)]
+mod descriptor_witness_serde_tests {
+    use super::DescriptorWitness;
+
+    // The web wallet sends each stack element as a hex string; the CLI sends
+    // byte arrays. Both must deserialize to the same DescriptorWitness — this
+    // is the rebalance/pay_invoice "invalid type: string, expected a sequence"
+    // regression.
+    #[test]
+    fn stack_accepts_hex_strings_and_byte_arrays() {
+        let sig = [0xABu8; 64];
+        let hex_json = format!(r#"{{"stack":["{}"]}}"#, hex::encode(sig));
+        let from_hex: DescriptorWitness = serde_json::from_str(&hex_json).unwrap();
+        assert_eq!(from_hex.stack, vec![sig.to_vec()]);
+
+        // Byte-array form (what serde's default + the CLI produce).
+        let bytes_json = serde_json::to_string(&from_hex).unwrap();
+        let from_bytes: DescriptorWitness = serde_json::from_str(&bytes_json).unwrap();
+        assert_eq!(from_hex, from_bytes);
+
+        // Mixed/empty stack still works.
+        let empty: DescriptorWitness = serde_json::from_str(r#"{"stack":[]}"#).unwrap();
+        assert!(empty.stack.is_empty());
+    }
 }

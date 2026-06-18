@@ -320,3 +320,36 @@ pub mod serde_transfer_id_map {
         Ok(entries.into_iter().map(|e| (e.key, e.value)).collect())
     }
 }
+
+/// Deserialize a witness stack whose elements may be **either** hex strings
+/// or raw byte arrays.
+///
+/// The Rust CLI serializes `Vec<Vec<u8>>` as JSON arrays-of-numbers (the
+/// default), but the web wallet (and any hex-native JSON client) emits each
+/// stack element as a hex string — matching how every other byte field in
+/// this protocol is rendered in JSON (deposit ids, signatures, payment
+/// hashes). Accept both so a `{"stack":["<hex>"]}` witness round-trips.
+/// Serialization is left as the default (byte arrays), so existing peers and
+/// conformance vectors are unaffected.
+pub fn deserialize_witness_stack<'de, D>(deserializer: D) -> Result<Vec<Vec<u8>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Element {
+        Hex(String),
+        Bytes(Vec<u8>),
+    }
+    let elements = Vec::<Element>::deserialize(deserializer)?;
+    elements
+        .into_iter()
+        .map(|e| match e {
+            Element::Hex(s) => {
+                hex::decode(s.strip_prefix("0x").unwrap_or(&s)).map_err(serde::de::Error::custom)
+            }
+            Element::Bytes(b) => Ok(b),
+        })
+        .collect()
+}
