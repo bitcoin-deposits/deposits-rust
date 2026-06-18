@@ -15,8 +15,10 @@ axum = "0.7"
 
 # Static file serving for the bundled web UI (wallet + explorer). ServeDir
 # means we don't hand-wire a route per asset — adding a vendor file is just
-# dropping it in the directory.
-tower-http = { version = "0.6", features = ["fs"] }
+# dropping it in the directory. Compression (gzip/br) is a big win for the
+# UI: index.html is ~280KB and jsqr.js ~320KB uncompressed, which otherwise
+# saturate the HTTP/2 connection window and stall sibling requests.
+tower-http = { version = "0.6", features = ["fs", "compression-gzip", "compression-br"] }
 
 # Pulled in for the rustls `install_default_crypto_provider()` helper —
 # binaries that talk to wss:// relays need to call it once at startup.

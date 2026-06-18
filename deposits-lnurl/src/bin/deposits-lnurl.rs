@@ -1157,6 +1157,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // live under `wallet/`; the explorer's `shared.js` lives under
         // `explorer/`, so fall back there for paths not found in wallet/.
         .fallback_service(web_assets_service(std::path::Path::new(&asset_dir)))
+        // Compress text responses (HTML + JS) per the client's
+        // Accept-Encoding (br/gzip). The UI is mostly large text assets
+        // (index.html ~280KB, jsqr.js ~320KB); uncompressed they saturate
+        // the HTTP/2 connection-level flow-control window so sibling
+        // requests stall waiting for first byte. Shrinks the payload ~4-5x.
+        .layer(tower_http::compression::CompressionLayer::new())
         .with_state(state);
 
     log::info!("Listening on {}", listen);
