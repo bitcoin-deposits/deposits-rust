@@ -477,23 +477,6 @@ body.hide-amounts .amt { visibility: hidden; }
         <div class="kv"><span class="k">Network</span><span class="v" id="settings-network">—</span></div>
         <div class="kv"><span class="k">Relays</span><span class="v" id="settings-relay">—</span></div>
       </div>
-      <div class="card" id="settings-attest-card" style="display:none;">
-        <h3>Subkey Attestation</h3>
-        <div style="font-size:11px; color:var(--muted); margin-bottom:8px;">
-          Sign an attestation authorizing another pubkey to act on behalf of this wallet.
-          Give the operator the resulting <code>v</code> and <code>va</code> tags.
-        </div>
-        <div class="form-group">
-          <label>Subkey pubkey (hex)</label>
-          <input id="attest-subkey-input" type="text" placeholder="64-char hex pubkey" style="font-size:11px;" onkeydown="if(event.key==='Enter')createSubkeyAttestation()">
-        </div>
-        <button onclick="createSubkeyAttestation()">Sign Attestation</button>
-        <div id="attest-result" style="display:none; margin-top:8px; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:4px; font-size:11px;">
-          <div class="kv"><span class="k">v (account)</span><span class="v" id="attest-v" style="word-break:break-all; cursor:pointer;" onclick="copyAttestField('v')"></span></div>
-          <div class="kv"><span class="k">va (signature)</span><span class="v" id="attest-va" style="word-break:break-all; cursor:pointer;" onclick="copyAttestField('va')"></span></div>
-          <div style="margin-top:4px; color:var(--muted);">Click values to copy.</div>
-        </div>
-      </div>
       <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:baseline;">
           <h3>Backup</h3>
@@ -5667,37 +5650,7 @@ window.changeRelays = function() {
 function updateSigningModeUI(walletPubkey) {
   document.getElementById('settings-signing-mode').textContent = 'Wallet key';
   document.getElementById('settings-npub').textContent = walletPubkey;
-  document.getElementById('settings-attest-card').style.display = '';
 }
-
-window.createSubkeyAttestation = function() {
-  const input = document.getElementById('attest-subkey-input').value.trim().toLowerCase();
-  if (!input || input.length !== 64 || !/^[0-9a-f]+$/.test(input)) {
-    document.getElementById('attest-subkey-input').style.borderColor = 'var(--red)';
-    return;
-  }
-  document.getElementById('attest-subkey-input').style.borderColor = '';
-
-  const accountKey = deriveSecretKey(state.seed, 0);
-  const accountPubkey = getPublicKeyHex(accountKey);
-
-  // Attestation: SHA256("nostr301:<subkey-hex>"), signed with Schnorr
-  const msg = utf8ToBytes('nostr301:' + input);
-  const digest = sha256(msg);
-  const sig = schnorr.sign(digest, accountKey);
-  const sigHex = bytesToHex(sig);
-
-  document.getElementById('attest-v').textContent = accountPubkey;
-  document.getElementById('attest-va').textContent = sigHex;
-  document.getElementById('attest-result').style.display = '';
-  log(`Attestation created for subkey ${input.slice(0, 16)}...`);
-};
-
-window.copyAttestField = async function(field) {
-  const el = document.getElementById(field === 'v' ? 'attest-v' : 'attest-va');
-  try { await navigator.clipboard.writeText(el.textContent); log(`Copied ${field} tag`); } catch {}
-};
-
 
 function startMainUI() {
   document.getElementById('setup-panel').style.display = 'none';
