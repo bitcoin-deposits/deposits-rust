@@ -121,6 +121,39 @@ Or with a reverse proxy (nginx, caddy, frp):
 *.pay.example.com → localhost:3000
 ```
 
+### Tuning behind frp
+
+In the production topology (internet → Caddy → frps → frpc → gateway) frp's
+defaults make this UI feel broken — multi-second time-to-first-byte — even
+though the gateway answers in milliseconds.
+
+- **`transport.poolCount` is the fix.** frp opens a "work connection"
+  through the tunnel for each incoming request. With the default tiny pool,
+  every new connection first pays a frps→frpc→frps round-trip before any
+  byte flows, which shows up as seconds of TTFB. Pre-warm a pool so
+  connections are ready: `transport.poolCount = 10` on the frpc proxy
+  (per-proxy is fine). This alone resolved the slow first byte in prod.
+
+- **`transport.tcpMux`** (both ends, default `true`) is a *separate* knob,
+  only relevant if you still lack parallelism after fixing poolCount. It
+  multiplexes all proxied connections over one TCP connection (yamux) — one
+  congestion window + TCP head-of-line blocking. `tcpMux = false` gives a
+  real connection per stream, or `transport.protocol = "quic"` gives
+  independent streams without HoL (`quicBindPort` on frps). Both must match
+  on frps and frpc — and leaving tcpMux on is fine for many setups, so
+  don't change it unless poolCount didn't get you parallel transfers.
+
+Confirm it's the tunnel and not the gateway by hitting the gateway directly
+on the box, bypassing frp:
+
+```bash
+curl -o /dev/null -s \
+  -w 'ttfb=%{time_starttransfer}s total=%{time_total}s\n' \
+  http://localhost:3000/wallet
+```
+
+Milliseconds locally but seconds through the public URL ⇒ it's the tunnel.
+
 ## TLS
 
 The gateway serves plain HTTP. For production, terminate TLS at a
