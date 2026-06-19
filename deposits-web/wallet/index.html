@@ -1494,6 +1494,18 @@ function buildInvoiceSigningData(ledgerIdHex, paymentHashHex, depositIdHex, amou
 // ============================================================
 // Nostr WebSocket transport
 // ============================================================
+// Debounced balance refresh after a relay (re)connects. Waits a moment for
+// connections to settle, then runs syncAll once (it self-guards against
+// concurrent runs and no-ops when there are no deposits).
+let _reconnectSyncTimer = null;
+function scheduleReconnectSync() {
+  if (_reconnectSyncTimer) clearTimeout(_reconnectSyncTimer);
+  _reconnectSyncTimer = setTimeout(() => {
+    _reconnectSyncTimer = null;
+    if (state.deposits && state.deposits.length) syncAll();
+  }, 1500);
+}
+
 function connect() {
   // Close existing sockets
   for (const s of sockets) { try { s.ws.close(); } catch {} }
@@ -1521,6 +1533,11 @@ function connectOne(url, readOnly = false) {
       updateConnStatus();
       log(`Connected to ${url}${readOnly ? ' (read-only)' : ''}`);
       subscribeOnSocket(sock);
+      // Refresh balances once a relay (re)connects — e.g. when the phone
+      // wakes and the socket comes back, so current balances land on screen
+      // without a manual Sync. Debounced so multiple relays reconnecting
+      // trigger a single sync.
+      scheduleReconnectSync();
     };
 
     sock.onclose = (e) => {
