@@ -1723,6 +1723,48 @@ impl Ledger {
         operation: &LedgerOperation,
         current_block_height: u32,
     ) -> DepositsResult<()> {
+        // Quorum policy: fund-lock timeouts must not exceed the strictest
+        // member's `max_transfer_timeout_blocks`. A cosigner refuses to sign a
+        // lock that would hold a depositor's funds longer than the quorum
+        // agreed — symmetric enforcement of what the originating operator set
+        // (InvoiceLock/TransferLock `timeout_height`). Deterministic across
+        // members: the cap is the min over the shared `quorum_members` state,
+        // so every cosigner reaches the same verdict. Skips legacy InvoiceLocks
+        // with no `timeout_height` (None) and pre-sync state (height 0).
+        {
+            use deposits_protocol::messages::LedgerOperation as Op;
+            let lock_timeout = match operation {
+                Op::InvoiceLock {
+                    timeout_height: Some(t),
+                    ..
+                } => Some(*t),
+                Op::TransferLock { timeout_height, .. } => Some(*timeout_height),
+                _ => None,
+            };
+            if let Some(t) = lock_timeout {
+                if current_block_height > 0 {
+                    let max_timeout = self
+                        .state
+                        .quorum_members
+                        .iter()
+                        .filter_map(|m| m.max_transfer_timeout_blocks)
+                        .min()
+                        .unwrap_or(1008); // default ~1 week
+                    let cap = current_block_height.saturating_add(max_timeout);
+                    if t > cap {
+                        return Err(DepositsError::ProtocolViolation {
+                            violation_type: "lock_timeout_exceeds_max".to_string(),
+                            details: format!(
+                                "Lock timeout_height {} exceeds quorum max: current block {} \
+                                 + max_transfer_timeout_blocks {} = {}",
+                                t, current_block_height, max_timeout, cap
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
         self.validate_operation(operation)?;
 
         // Legacy ledgers: keep the old "fatal at expiry" behavior. The
@@ -2874,6 +2916,74 @@ mod tests {
             DepositsError::ProtocolViolation {
                 violation_type, ..
             } => assert_eq!(violation_type, "post_expiry_cosign_refused"),
+            other => panic!("expected ProtocolViolation, got {:?}", other),
+        }
+    }
+
+    /// A cosigner refuses to sign a lock whose `timeout_height` exceeds the
+    /// strictest quorum member's `max_transfer_timeout_blocks` — the symmetric
+    /// enforcement of the bounded fund-lock policy (an operator can't lock a
+    /// depositor's funds longer than the quorum agreed).
+    #[test]
+    fn validate_for_cosign_refuses_overlong_lock_timeout() {
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+        use deposits_protocol::types::{DescriptorWitness, QuorumMember};
+
+        fn pk(seed: u8) -> PublicKey {
+            let secp = Secp256k1::new();
+            let mut bytes = [0u8; 32];
+            bytes[31] = seed;
+            let sk = SecretKey::from_slice(&bytes).unwrap();
+            PublicKey::from_secret_key(&secp, &sk)
+        }
+        let operator = pk(1);
+        let mut ledger = Ledger::new(
+            operator,
+            "rid".into(),
+            LedgerRole::Operator,
+            Vec::new(),
+            100,
+        );
+        ledger.state.parent_pubkey = operator;
+        // One member caps lock timeouts at 1008 blocks.
+        ledger.state.quorum_members = vec![QuorumMember {
+            pubkey: pk(2),
+            ledger_id: "m1".into(),
+            min_fee_bps: None,
+            min_fee_fixed: None,
+            max_fee_period: None,
+            membership_until: None,
+            dispute_response_blocks: None,
+            dispute_arm_blocks: None,
+            service_response_blocks: None,
+            max_transfer_timeout_blocks: Some(1008),
+            max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
+            supported_rulesets: Vec::new(),
+        }];
+
+        let current = 100_000u32;
+        let over_cap = LedgerOperation::InvoiceLock {
+            deposit_id: [0xde; 16],
+            amount: 1000,
+            payment_id: [0xab; 32],
+            sequence_number: 1,
+            nonce: 1,
+            expiry: u32::MAX,
+            timeout_height: Some(current + 1009), // cap is current + 1008
+            witness: DescriptorWitness::new(),
+        };
+        // The cap gate runs before structural validation, so over-cap refuses
+        // with exactly this policy violation.
+        let err = ledger
+            .validate_for_cosign(&over_cap, current)
+            .expect_err("over-cap lock timeout must refuse");
+        match err {
+            DepositsError::ProtocolViolation {
+                violation_type, ..
+            } => assert_eq!(violation_type, "lock_timeout_exceeds_max"),
             other => panic!("expected ProtocolViolation, got {:?}", other),
         }
     }
