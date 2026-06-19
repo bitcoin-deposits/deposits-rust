@@ -259,3 +259,58 @@ export async function findEventByContentHash(relayUrl, ledgerPrefix, targetHashH
   }
   return null;
 }
+
+// Parse a miniscript/output descriptor into a fragment tree and render it as
+// parsed, indented name/value rows — the same decoded-sub-field style used for
+// operation fields, instead of one long string.
+//   "tr(K,{and_v(v:pk(A),older(144)),multi_a(2,B,C)})"
+export function parseDescriptorTree(s) {
+  let i = 0;
+  const parseList = (close) => {
+    const out = [];
+    while (i < s.length && s[i] !== close) {
+      if (s[i] === ',') { i++; continue; }
+      out.push(parseNode());
+    }
+    if (s[i] === close) i++;
+    return out;
+  };
+  const parseNode = () => {
+    const start = i;
+    while (i < s.length && !'({,)}'.includes(s[i])) i++;
+    const head = s.slice(start, i).trim();
+    if (s[i] === '(') { i++; return { name: head, args: parseList(')') }; }
+    if (s[i] === '{') { i++; return { name: head || 'tree', args: parseList('}') }; }
+    return { leaf: head };
+  };
+  return parseNode();
+}
+
+function descLeafKind(tok) {
+  if (/^-?\d+$/.test(tok)) return 'n';
+  if (/^(02|03)?[0-9a-fA-F]{64}$/.test(tok) || /^[xt]pub/.test(tok)) return 'key';
+  return 'arg';
+}
+
+/// Render a descriptor string as nested `.desc-row` rows. `esc` escapes HTML.
+export function renderDescriptorRows(desc, esc) {
+  let root;
+  try { root = parseDescriptorTree(desc); } catch { return `<div class="desc-row">${esc(desc)}</div>`; }
+  let html = '';
+  const walk = (n, depth) => {
+    const pad = `padding-left:${depth * 14}px`;
+    if (n.leaf !== undefined) {
+      html += `<div class="desc-row" style="${pad}"><span class="desc-k">${descLeafKind(n.leaf)}</span><span class="desc-v">${esc(n.leaf)}</span></div>`;
+      return;
+    }
+    const leaves = (n.args || []).filter((a) => a.leaf !== undefined);
+    if ((n.args || []).length > 0 && leaves.length === n.args.length) {
+      html += `<div class="desc-row" style="${pad}"><span class="desc-name">${esc(n.name || 'tree')}</span><span class="desc-v">${n.args.map((a) => esc(a.leaf)).join(', ')}</span></div>`;
+    } else {
+      html += `<div class="desc-row" style="${pad}"><span class="desc-name">${esc(n.name || 'tree')}</span></div>`;
+      (n.args || []).forEach((a) => walk(a, depth + 1));
+    }
+  };
+  walk(root, 0);
+  return html;
+}

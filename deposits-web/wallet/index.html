@@ -96,6 +96,13 @@ nav button:hover { color: var(--text); background: transparent; }
 .badge.pending { background: #2d1f00; color: var(--yellow); }
 .badge.funded { background: #0d1f0d; color: var(--balance); }
 
+/* Parsed descriptor tree (deposit detail) */
+.desc-tree { margin-top: 4px; padding: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; font-size: 11px; overflow-x: auto; }
+.desc-row { line-height: 1.6; white-space: nowrap; }
+.desc-name { font-family: var(--font); font-weight: 600; color: var(--accent); }
+.desc-k { font-family: var(--font); color: var(--muted); margin-right: 6px; }
+.desc-v { font-family: var(--font); color: var(--text); margin-left: 6px; word-break: break-all; }
+
 @keyframes spin { to { transform: rotate(360deg); } }
 .spinner::after { content: '\21BB'; display:inline-block; animation: spin 0.8s linear infinite; font-size:20px; line-height:1; }
 
@@ -843,6 +850,67 @@ function computeDepositId(compressedPubkey) {
 
 function computeDepositIdFromDescriptor(descriptor) {
   return sha256(utf8ToBytes(descriptor)).slice(0, 16);
+}
+
+// Parse a miniscript/output descriptor into a fragment tree:
+//   "tr(K,{and_v(v:pk(A),older(144)),multi_a(2,B,C)})"
+//   → { name:'tr', args:[ {leaf:'K'}, {name:'tree', args:[...]} ] }
+// Bare leaves (keys, numbers) become { leaf: token }. Brace groups (taproot
+// trees) become a synthetic { name:'tree', ... } node.
+function parseDescriptorTree(s) {
+  let i = 0;
+  const parseList = (close) => {
+    const out = [];
+    while (i < s.length && s[i] !== close) {
+      if (s[i] === ',') { i++; continue; }
+      out.push(parseNode());
+    }
+    if (s[i] === close) i++;
+    return out;
+  };
+  const parseNode = () => {
+    const start = i;
+    while (i < s.length && !'({,)}'.includes(s[i])) i++;
+    const head = s.slice(start, i).trim();
+    if (s[i] === '(') { i++; return { name: head, args: parseList(')') }; }
+    if (s[i] === '{') { i++; return { name: head || 'tree', args: parseList('}') }; }
+    return { leaf: head };
+  };
+  return parseNode();
+}
+
+// Classify a leaf token for the row label.
+function descLeafKind(tok) {
+  if (/^-?\d+$/.test(tok)) return 'n';
+  if (/^(02|03)?[0-9a-fA-F]{64}$/.test(tok) || /^[xt]pub/.test(tok)) return 'key';
+  return 'arg';
+}
+
+// Render a descriptor as parsed, indented name/value rows (the explorer's
+// decoded-sub-field style). A fragment whose args are all leaves shows them
+// inline; otherwise its children break onto indented rows. esc() escapes HTML.
+function renderDescriptorRows(desc, esc) {
+  let root;
+  try { root = parseDescriptorTree(desc); } catch { return `<div class="desc-row">${esc(desc)}</div>`; }
+  let html = '';
+  const walk = (n, depth) => {
+    const pad = `padding-left:${depth * 14}px`;
+    if (n.leaf !== undefined) {
+      html += `<div class="desc-row" style="${pad}"><span class="desc-k">${descLeafKind(n.leaf)}</span><span class="desc-v">${esc(n.leaf)}</span></div>`;
+      return;
+    }
+    const leafKids = (n.args || []).filter((a) => a.leaf !== undefined);
+    const allLeaves = (n.args || []).length > 0 && leafKids.length === n.args.length;
+    if (allLeaves) {
+      const inline = n.args.map((a) => esc(a.leaf)).join(', ');
+      html += `<div class="desc-row" style="${pad}"><span class="desc-name">${esc(n.name || 'tree')}</span><span class="desc-v">${inline}</span></div>`;
+    } else {
+      html += `<div class="desc-row" style="${pad}"><span class="desc-name">${esc(n.name || 'tree')}</span></div>`;
+      (n.args || []).forEach((a) => walk(a, depth + 1));
+    }
+  };
+  walk(root, 0);
+  return html;
 }
 
 // Resolve the (descriptor, deposit_id_hex) for a stored deposit record.
@@ -3600,6 +3668,10 @@ window.selectDeposit = function(alias) {
       ` <button style="font-size:10px; padding:1px 6px; margin-left:4px;" onclick="event.stopPropagation(); copyLnurlAddress('${esc(lnAddr)}')">copy</button>`;
   }
   if (d.deposit_pubkey) info += `<br>Deposit pubkey: ${esc(d.deposit_pubkey)}`;
+  const descIdent = depositIdentity(d);
+  if (descIdent && descIdent.descriptor) {
+    info += `<br>Descriptor:<div class="desc-tree">${renderDescriptorRows(descIdent.descriptor, esc)}</div>`;
+  }
   if (d.funding_address) info += `<br>Funding address: ${esc(d.funding_address)}`;
   if (d.offer_id) info += `<br>Offer ID: ${esc(d.offer_id)}`;
   if (d.key_index != null) info += `<br>Key index: ${d.key_index}`;

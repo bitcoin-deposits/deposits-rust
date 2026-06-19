@@ -170,6 +170,13 @@
       font-size: 0.78rem;
     }
 
+    /* parsed descriptor tree (decoded sub-field of an op) */
+    .desc-tree { font-family: var(--mono); font-size: 0.82rem; }
+    .desc-row { line-height: 1.5; white-space: nowrap; }
+    .desc-name { font-weight: 600; color: var(--accent); }
+    .desc-k { color: var(--fg-muted); margin-right: 0.4rem; }
+    .desc-v { color: var(--fg-strong); margin-left: 0.4rem; word-break: break-all; }
+
     /* hex dump */
     pre.hexdump {
       margin: 0;
@@ -286,6 +293,7 @@ import { schnorr } from './vendor/noble-curves-secp256k1.js';
 import {
   getParam, bytesToHex, b64ToBytes, nostrFetch, parseTlv,
   computeContentHash, fetchCosignerLedgerMap, findEventByContentHash,
+  renderDescriptorRows,
 } from './shared.js';
 
 // ── page-specific helpers (most are imported from ./shared.js) ──
@@ -593,13 +601,23 @@ function renderInnerOp(opBytes) {
         <thead><tr><th>tag</th><th>name</th><th>len</th><th>value</th></tr></thead>
         <tbody>
           ${inner.map(r => {
-            const interp = interpretValue(r);
             const name = FIELD_NAMES[r.type] || `field_${r.type}`;
+            // descriptor (202) / new_descriptor (208): decode the UTF-8 string
+            // and show it parsed into nested fragment rows, like the op's own
+            // decoded sub-fields, rather than one long string.
+            let valueCell;
+            if (r.type === 202 || r.type === 208) {
+              const descStr = new TextDecoder().decode(r.value);
+              valueCell = `<div class="desc-tree">${renderDescriptorRows(descStr, escapeHtml)}</div>`;
+            } else {
+              const interp = interpretValue(r);
+              valueCell = `${escapeHtml(interp.hex)}<span class="interp">${escapeHtml(interp.ann)}</span>`;
+            }
             return `<tr>
               <td class="tag-id">${r.type}</td>
               <td class="name">${escapeHtml(name)}</td>
               <td class="len">${r.value.length}</td>
-              <td class="value">${escapeHtml(interp.hex)}<span class="interp">${escapeHtml(interp.ann)}</span></td>
+              <td class="value">${valueCell}</td>
             </tr>`;
           }).join('')}
         </tbody>
