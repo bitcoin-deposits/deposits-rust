@@ -1,0 +1,654 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Deposit · Deposits Explorer</title>
+  <style>
+    :root {
+      --bg:        #11131f;
+      --bg-elev:   #181c2c;
+      --bg-card:   #1d2237;
+      --bg-card-h: #232943;
+      --border:    #2a304a;
+      --border-strong: #3a4263;
+      --fg:        #e7e9f0;
+      --fg-strong: #ffffff;
+      --fg-muted:  #8d96b3;
+      --fg-dim:    #5b6386;
+      --accent:    #f7931a;
+      --green:     #4cae5a;
+      --red:       #d9534f;
+      --yellow:    #f0ad4e;
+      --blue:      #5b8def;
+      --purple:    #b58cf0;
+      --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { background: var(--bg); }
+    body { margin: 0; color: var(--fg); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+    a { color: inherit; text-decoration: none; }
+    a:hover { color: var(--accent); }
+
+    .topnav {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.85rem 1.25rem;
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 10;
+    }
+    .brand { display: flex; align-items: baseline; gap: 0.45rem; font-weight: 600; font-size: 1.05rem; }
+    .brand .logo { color: var(--accent); font-size: 1.25rem; line-height: 1; }
+    .brand .name { color: var(--fg-strong); }
+    .brand .sub { color: var(--fg-muted); font-weight: 400; font-size: 0.85rem; }
+    .nav-links { display: flex; gap: 1rem; font-size: 0.9rem; color: var(--fg-muted); }
+    .nav-links a.active { color: var(--accent); }
+
+    main { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+
+    h1.section-title {
+      font-size: 0.78rem; font-weight: 600;
+      color: var(--fg-muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+      margin: 1.5rem 0 0.85rem;
+    }
+    h1.section-title:first-child { margin-top: 0; }
+
+    .hero {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1.1rem 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .hero .lbl {
+      color: var(--fg-muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.25rem;
+    }
+    .hero .id {
+      font: 0.95rem var(--mono);
+      color: var(--accent);
+      word-break: break-all;
+      letter-spacing: -0.01em;
+    }
+    .hero .meta {
+      display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;
+      margin-top: 0.55rem;
+      color: var(--fg-muted);
+      font-size: 0.85rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.95rem 1.1rem;
+    }
+    .card h3 {
+      font-size: 0.72rem; font-weight: 600;
+      color: var(--fg-muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+      margin: 0 0 0.6rem;
+    }
+    .card .big {
+      font: 600 1.4rem/1 var(--sans);
+      color: var(--fg-strong);
+      letter-spacing: -0.01em;
+      font-variant-numeric: tabular-nums;
+      margin-bottom: 0.25rem;
+    }
+    .card .big.accent { color: var(--accent); }
+    .card .big.green  { color: var(--green); }
+    .card .big.yellow { color: var(--yellow); }
+    .card .big-sub { font-size: 0.78rem; color: var(--fg-muted); }
+
+    /* parsed descriptor tree (shared with wallet + update view) */
+    .desc-tree { font-family: var(--mono); font-size: 0.82rem; }
+    .desc-row { line-height: 1.5; white-space: nowrap; }
+    .desc-name { font-weight: 600; color: var(--accent); }
+    .desc-k { color: var(--fg-muted); margin-right: 0.4rem; }
+    .desc-v { color: var(--fg-strong); margin-left: 0.4rem; word-break: break-all; }
+
+    /* op pill (re-used from update/ledger view) */
+    .op {
+      display: inline-block;
+      padding: 0.1rem 0.5rem;
+      border-radius: 3px;
+      font: 600 0.72rem var(--mono);
+      letter-spacing: -0.01em;
+      vertical-align: middle;
+    }
+    .op.credit    { background: rgba(76, 174, 90, 0.15); color: var(--green); }
+    .op.lock      { background: rgba(240, 173, 78, 0.15); color: var(--yellow); }
+    .op.deposit   { background: rgba(91, 141, 239, 0.15); color: var(--blue); }
+    .op.quorum    { background: rgba(181, 140, 240, 0.15); color: var(--purple); }
+    .op.dispute   { background: rgba(217, 83, 79, 0.18); color: var(--red); }
+    .op.transfer  { background: rgba(91, 141, 239, 0.15); color: var(--blue); }
+    .op.unknown   { background: var(--border); color: var(--fg-muted); }
+
+    /* badges */
+    .badge {
+      display: inline-block;
+      padding: 0.05rem 0.45rem;
+      border-radius: 3px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      vertical-align: 1px;
+    }
+    .badge.active  { background: rgba(76, 174, 90, 0.18); color: var(--green); }
+    .badge.pre     { background: rgba(141, 150, 179, 0.15); color: var(--fg-muted); }
+    .badge.expired { background: rgba(217, 83, 79, 0.18); color: var(--red); }
+
+    /* activity timeline */
+    table.tl { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    .tl th, .tl td {
+      text-align: left;
+      padding: 0.5rem 0.6rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    .tl tr:last-child td { border-bottom: none; }
+    .tl th {
+      color: var(--fg-muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.68rem;
+      letter-spacing: 0.06em;
+    }
+    .tl td.seq  { color: var(--fg-dim); font-family: var(--mono); width: 4rem; font-variant-numeric: tabular-nums; }
+    .tl td.amt  { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .tl td.amt.plus  { color: var(--green); }
+    .tl td.amt.minus { color: var(--yellow); }
+    .tl td.blk  { color: var(--fg-muted); font-family: var(--mono); width: 6rem; font-variant-numeric: tabular-nums; }
+    .tl td.time { color: var(--fg-muted); font-size: 0.78rem; white-space: nowrap; }
+    .tl td.act a { color: var(--accent); font-size: 0.78rem; }
+    .tl tr:hover td { background: var(--bg-card-h); }
+
+    .note {
+      color: var(--fg-dim);
+      font-size: 0.78rem;
+      margin-top: 0.6rem;
+      line-height: 1.5;
+    }
+
+    /* deposit-id lookup form (shown when no #deposit= is supplied) */
+    .lookup { display: flex; flex-direction: column; gap: 0.6rem; max-width: 540px; }
+    .lookup label { color: var(--fg-muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; }
+    .lookup input {
+      background: var(--bg-elev); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--fg-strong); font: 0.85rem var(--mono); padding: 0.5rem 0.6rem; width: 100%;
+    }
+    .lookup input:focus { outline: none; border-color: var(--accent); }
+    .lookup button {
+      align-self: flex-start;
+      background: var(--accent); border: none; border-radius: 4px;
+      color: #1b1303; font: 600 0.85rem var(--sans); padding: 0.5rem 1rem; cursor: pointer;
+    }
+    .lookup button:hover { filter: brightness(1.08); }
+
+    .empty {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1.25rem;
+      color: var(--fg-muted);
+    }
+    .empty.err { color: var(--red); border-color: rgba(217, 83, 79, 0.4); }
+    .loading { color: var(--fg-muted); padding: 0.5rem 0; }
+
+    footer {
+      margin-top: 2.5rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      color: var(--fg-dim);
+      font-size: 0.78rem;
+      text-align: center;
+    }
+    footer .mono { font-family: var(--mono); color: var(--fg-muted); }
+  </style>
+</head>
+<body>
+  <nav class="topnav">
+    <div class="brand">
+      <span class="logo">⟁</span>
+      <span class="name">deposits</span>
+      <span class="sub">explorer</span>
+    </div>
+    <div class="nav-links">
+      <a href="/explorer">overview</a>
+      <a href="/ledger">ledger</a>
+      <a href="/deposit" class="active">deposit</a>
+    </div>
+  </nav>
+  <script>
+    // On a `<bech32-or-hex>.ledger.<basedomain>` subdomain, nav links that
+    // leave the per-ledger view (here: /explorer) hop off the ledger
+    // subdomain to `explorer.<basedomain>`; same-ledger links (/ledger,
+    // /deposit, /update) stay on this host so the subdomain still scopes
+    // them to the right ledger.
+    (function () {
+      const host = window.location.hostname;
+      const m = host.match(/^[^.]+\.ledger\.(.+)$/);
+      if (!m) return;
+      const base = m[1];
+      document.querySelectorAll('.nav-links a[href^="/explorer"]').forEach(a => {
+        a.href = `${window.location.protocol}//explorer.${base}/`;
+      });
+    })();
+  </script>
+
+  <main>
+    <div class="hero">
+      <div class="lbl">deposit</div>
+      <div class="id" id="deposit-id">…</div>
+      <div class="meta" id="hero-meta"></div>
+    </div>
+
+    <div id="body"><div class="loading">querying relay…</div></div>
+
+    <footer>
+      data via nostr relay <span class="mono" id="relay-url"></span>
+    </footer>
+  </main>
+
+<script type="module">
+import { OP_NAMES, FIELD_NAMES } from './tlv-catalog.js';
+import {
+  getParam, bytesToHex, b64ToBytes, nostrFetch, parseTlv,
+  renderDescriptorRows,
+} from './shared.js';
+
+const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+
+const RELAY_URL =
+  getParam('relay')
+  || document.querySelector('meta[name=relay]')?.content
+  || 'wss://relay.bitcoindeposits.net';
+document.getElementById('relay-url').textContent = RELAY_URL;
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+
+const fmt = {
+  short: (s, n = 16) => s ? s.slice(0, n) + (s.length > n ? '…' : '') : '',
+  msats: (n) => {
+    if (n == null) return '—';
+    const sats = n / 1000;
+    if (sats >= 100_000_000) {
+      return `₿ ${(sats / 100_000_000).toLocaleString(undefined, { maximumFractionDigits: 4 })}`;
+    }
+    if (sats >= 1_000) return `${sats.toLocaleString()} sat`;
+    return `${sats} sat`;
+  },
+  ts: (t) => {
+    if (!t) return '—';
+    return new Date(t * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+  },
+};
+
+function bech32DataToBytes(s) {
+  let acc = 0, bits = 0;
+  const out = [];
+  for (const ch of s.toLowerCase()) {
+    const v = BECH32_CHARSET.indexOf(ch);
+    if (v < 0) return null;
+    acc = (acc << 5) | v; bits += 5;
+    if (bits >= 8) { bits -= 8; out.push((acc >> bits) & 0xff); }
+  }
+  return new Uint8Array(out);
+}
+
+// Ledger id from #ledger= (64-hex or 52-char bech32-data) or the host
+// subdomain (canonical `<bech32-or-hex>.ledger.<basedomain>`). Mirrors
+// ledger.html's resolver.
+function resolveLedgerFromUrl() {
+  const override = getParam('ledger');
+  if (override) {
+    const v = override.toLowerCase();
+    if (v.length === 64 && /^[0-9a-f]+$/.test(v)) return v;
+    // 16-hex ledger *tag* — what Kind 9100 events / the /update view carry
+    // in their `d` tag. The relay query only needs this prefix, so accept
+    // it directly (display is truncated either way).
+    if (v.length === 16 && /^[0-9a-f]+$/.test(v)) return v;
+    const decoded = bech32DataToBytes(v);
+    if (decoded && decoded.length === 32) return bytesToHex(decoded);
+    return null;
+  }
+  const host = window.location.hostname;
+  const sub = host.split('.')[0];
+  if (sub.length === 64 && /^[0-9a-f]+$/.test(sub)) return sub.toLowerCase();
+  if (sub.length === 52) {
+    const decoded = bech32DataToBytes(sub);
+    if (decoded && decoded.length === 32) return bytesToHex(decoded);
+  }
+  return null;
+}
+
+// ── op-name category for color coding (shared shape with update.html) ──
+function opCategory(name) {
+  if (!name) return 'unknown';
+  if (name.startsWith('Dispute')) return 'dispute';
+  if (name.startsWith('Quorum') || name.startsWith('Ledger')) return 'quorum';
+  if (name.startsWith('Transfer')) return 'transfer';
+  if (name.startsWith('Deposit') || name === 'FeeChange' || name === 'FeeCollect') return 'deposit';
+  if (name.endsWith('Credit') || name === 'InvoiceFulfill' || name === 'OnchainFulfill') return 'credit';
+  if (name.endsWith('Lock') || name.endsWith('Fail')) return 'lock';
+  return 'unknown';
+}
+
+// ── decode a Kind 9100 SignedLedgerUpdate into the fields this view needs ──
+function decodeUpdate(base64Content) {
+  const raw = b64ToBytes(base64Content);
+  const outer = parseTlv(raw);
+  const get = (t) => outer.find(r => r.type === t)?.value;
+  const u64be = (v) => { if (!v || v.length < 8) return 0; let n = 0; for (let i = 0; i < 8; i++) n = n * 256 + v[i]; return n; };
+  const u32be = (v) => { if (!v || v.length < 4) return 0; return ((v[0] << 24) | (v[1] << 16) | (v[2] << 8) | v[3]) >>> 0; };
+
+  const seq = u64be(get(4));
+  const blockHeight = u32be(get(10));
+
+  const msg = get(8);
+  let opDisc = 0, opName = '?';
+  const f = new Map(); // inner field type → Uint8Array value
+  if (msg) {
+    const inner = parseTlv(msg);
+    if (inner.length && inner[0].type === 0 && inner[0].value.length === 1) {
+      opDisc = inner[0].value[0];
+      opName = OP_NAMES[opDisc] || `Unknown(${opDisc})`;
+    }
+    for (const r of inner) if (!f.has(r.type)) f.set(r.type, r.value);
+  }
+  const fieldU64 = (t) => u64be(f.get(t));
+  const fieldHex = (t) => { const v = f.get(t); return v ? bytesToHex(v) : null; };
+  const fieldStr = (t) => { const v = f.get(t); return v ? new TextDecoder('utf-8', { fatal: false }).decode(v) : null; };
+  return { seq, blockHeight, opDisc, opName, fieldU64, fieldHex, fieldStr };
+}
+
+// One row of the deposit's activity timeline, plus the signed balance
+// delta this op applies to *this* deposit (null when it doesn't move the
+// balance, e.g. DepositOpen / a lock that only reserves funds).
+function classify(u, depositId, ocLockTotals) {
+  const amt = u.fieldU64(2); // FIELD: amount
+  switch (u.opDisc) {
+    case 20: // DepositOpen
+      return { detail: 'opened', descriptor: u.fieldStr(202), delta: 0, opened: true };
+    case 21: // DepositClose
+      return { detail: 'closed', delta: 0, closed: true };
+    case 23: // DepositKeyRotate
+      return { detail: 'descriptor rotated', descriptor: u.fieldStr(208), delta: 0 };
+    case 22: // FeeChange
+      return { detail: 'fee schedule change scheduled', delta: 0 };
+    case 30: // InvoiceCredit
+      return { detail: 'lightning credit', delta: +amt, credited: amt };
+    case 35: // OnchainCredit
+      return { detail: 'on-chain credit', delta: +amt, credited: amt };
+    case 31: // InvoiceLock
+      return { detail: 'lightning payment locked', delta: 0, lockDelta: +amt };
+    case 32: // InvoiceFail
+      return { detail: 'lightning payment failed — funds released', delta: 0, lockDelta: -amt };
+    case 33: // InvoiceFulfill
+      return { detail: 'lightning payment settled', delta: -amt, lockDelta: -amt, settled: amt };
+    case 36: { // OnchainLock — amount field is the withdrawal amount; fee is separate & off-wire here
+      const wid = u.fieldHex(72);
+      if (wid) ocLockTotals.set(wid, amt);
+      return { detail: 'withdrawal locked', delta: 0, lockDelta: +amt };
+    }
+    case 37: { // OnchainFail — release the matching lock by withdrawal_id
+      const wid = u.fieldHex(72);
+      const t = (wid && ocLockTotals.get(wid)) || 0;
+      return { detail: 'withdrawal failed — funds released', delta: 0, lockDelta: -t };
+    }
+    case 38: { // OnchainFulfill — settle the matching lock by withdrawal_id
+      const wid = u.fieldHex(72);
+      const t = (wid && ocLockTotals.get(wid)) || 0;
+      return { detail: 'withdrawal confirmed', delta: -t, lockDelta: -t, settled: t };
+    }
+    case 50: // FeeCollect
+      return { detail: 'fee collected', delta: -amt, fee: amt };
+    case 70: { // TransferLock — this deposit may be source and/or destination
+      const src = u.fieldHex(212);
+      const dst = u.fieldHex(214);
+      const isSrc = src === depositId;
+      const isDst = dst === depositId;
+      if (isSrc) {
+        // Outbound: the amount (plus an off-wire fee) is locked here. The
+        // matching TransferComplete/Fail isn't tagged to this deposit, so
+        // this lock stays open in the derived view (see the note).
+        return { detail: 'outgoing transfer locked', delta: 0, lockDelta: +amt, transfer: 'out' };
+      }
+      if (isDst) {
+        // Inbound: credited on the (untagged) TransferComplete, so no
+        // delta is visible here.
+        return { detail: 'incoming transfer pending', delta: 0, transfer: 'in' };
+      }
+      return { detail: 'transfer', delta: 0 };
+    }
+    default:
+      return { detail: '', delta: 0 };
+  }
+}
+
+function statusBadge(opened, closed) {
+  if (closed) return '<span class="badge expired">Closed</span>';
+  if (opened) return '<span class="badge active">Open</span>';
+  return '<span class="badge pre">Unknown</span>';
+}
+
+function renderLookupForm(prefillLedger) {
+  document.getElementById('deposit-id').textContent = '— enter a deposit id';
+  document.getElementById('hero-meta').innerHTML = '';
+  document.getElementById('body').innerHTML = `
+    <div class="card">
+      <h3>look up a deposit</h3>
+      <div class="lookup">
+        <div>
+          <label for="in-deposit">deposit id (32-hex)</label>
+          <input id="in-deposit" placeholder="e.g. 9f3c…  (32 hex chars)" autocomplete="off" spellcheck="false">
+        </div>
+        <div>
+          <label for="in-ledger">ledger id (64-hex or bech32) — optional on a ledger subdomain</label>
+          <input id="in-ledger" value="${escapeHtml(prefillLedger || '')}" placeholder="ledger id" autocomplete="off" spellcheck="false">
+        </div>
+        <button id="go">view deposit</button>
+        <div class="note">A deposit id is the 16-byte (32 hex) identifier the operator assigns when a
+          deposit is opened. You'll find it in the <code>i</code> tag of any ledger update, in the
+          decoded <code>deposit_id</code> / <code>source_deposit_id</code> / <code>destination_deposit_id</code>
+          fields on the <a href="/update">update</a> view, or as the local part of a deposit's Lightning address.</div>
+      </div>
+    </div>`;
+  const go = () => {
+    const dep = document.getElementById('in-deposit').value.trim().toLowerCase();
+    const led = document.getElementById('in-ledger').value.trim();
+    if (!dep) return;
+    const params = new URLSearchParams();
+    params.set('deposit', dep);
+    if (led) params.set('ledger', led);
+    params.set('relay', RELAY_URL);
+    window.location.href = `/deposit#${params.toString()}`;
+    // Hash-only navigation won't reload; force it.
+    window.location.reload();
+  };
+  document.getElementById('go').onclick = go;
+  document.getElementById('in-deposit').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  document.getElementById('in-ledger').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+}
+
+function render(depositId, ledgerId, updates) {
+  // Chronological (ascending seq) replay mirroring deposits-protocol's
+  // LedgerState applier: balance is the total obligation, locked tracks
+  // reserved funds. Fees committed in fields not on the wire here (the
+  // fixed transfer fee on Fail, on-chain miner fees) and transfer
+  // settlements (TransferComplete/Fail aren't tagged to this deposit)
+  // are not reflected — hence "derived" / "≈".
+  const chrono = [...updates].sort((a, b) => a.seq - b.seq || a.blockHeight - b.blockHeight);
+  const ocLockTotals = new Map(); // withdrawal_id → locked amount
+
+  let balance = 0, locked = 0;
+  let credited = 0, settledOut = 0, feesPaid = 0;
+  let openOutTransfers = 0;
+  let opened = false, closed = false, openBlock = null;
+  let descriptor = null;
+  const rows = [];
+
+  for (const u of chrono) {
+    const c = classify(u, depositId, ocLockTotals);
+    if (c.opened) { opened = true; openBlock = u.blockHeight; }
+    if (c.closed) closed = true;
+    if (c.descriptor) descriptor = c.descriptor;
+    if (c.credited) credited += c.credited;
+    if (c.settled) settledOut += c.settled;
+    if (c.fee) feesPaid += c.fee;
+    if (c.transfer === 'out') openOutTransfers += 1;
+    if (c.lockDelta) locked = Math.max(0, locked + c.lockDelta);
+    if (c.delta) balance = Math.max(0, balance + c.delta);
+    rows.push({ u, c });
+  }
+
+  const available = Math.max(0, balance - locked);
+
+  document.getElementById('hero-meta').innerHTML = `
+    ${statusBadge(opened, closed)}
+    ${openBlock != null ? `<span style="color:var(--fg-dim)">·</span> <span>opened at block <b style="color:var(--fg)">${openBlock}</b></span>` : ''}
+    <span style="color:var(--fg-dim)">·</span>
+    <span><b style="color:var(--fg)">${updates.length}</b> operation${updates.length === 1 ? '' : 's'}</span>
+    <span style="color:var(--fg-dim)">·</span>
+    <a href="/ledger#ledger=${encodeURIComponent(ledgerId)}&relay=${encodeURIComponent(RELAY_URL)}">ledger ${escapeHtml(fmt.short(ledgerId, 16))}</a>
+  `;
+
+  const descCard = descriptor
+    ? `<h1 class="section-title">descriptor</h1>
+       <div class="card"><div class="desc-tree">${renderDescriptorRows(descriptor, escapeHtml)}</div></div>`
+    : '';
+
+  // newest-first timeline
+  const tlRows = [...rows].reverse().map(({ u, c }) => {
+    const cat = opCategory(u.opName);
+    let amtCell = '<td class="amt"></td>';
+    if (c.delta > 0) amtCell = `<td class="amt plus">+${escapeHtml(fmt.msats(c.delta))}</td>`;
+    else if (c.delta < 0) amtCell = `<td class="amt minus">−${escapeHtml(fmt.msats(-c.delta))}</td>`;
+    else if (c.lockDelta > 0) amtCell = `<td class="amt minus">⊟ ${escapeHtml(fmt.msats(c.lockDelta))} locked</td>`;
+    else if (c.lockDelta < 0) amtCell = `<td class="amt">⊞ ${escapeHtml(fmt.msats(-c.lockDelta))} released</td>`;
+    const eventLink = u.eventId
+      ? `<a href="/update#event=${u.eventId}&relay=${encodeURIComponent(RELAY_URL)}">open ↗</a>`
+      : '';
+    return `<tr>
+      <td class="seq">#${u.seq}</td>
+      <td><span class="op ${cat}">${escapeHtml(u.opName)}</span>${c.detail ? `<div style="color:var(--fg-muted);font-size:0.78rem;margin-top:0.15rem;">${escapeHtml(c.detail)}</div>` : ''}</td>
+      ${amtCell}
+      <td class="blk">${u.blockHeight || ''}</td>
+      <td class="time">${u.createdAt ? escapeHtml(fmt.ts(u.createdAt)) : ''}</td>
+      <td class="act">${eventLink}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('body').innerHTML = `
+    <div class="grid">
+      <div class="card">
+        <h3>available balance</h3>
+        <div class="big accent">≈ ${escapeHtml(fmt.msats(available))}</div>
+        <div class="big-sub">obligation ≈ ${escapeHtml(fmt.msats(balance))}${locked ? `, ${escapeHtml(fmt.msats(locked))} locked` : ''}</div>
+      </div>
+      <div class="card">
+        <h3>total credited</h3>
+        <div class="big green">${escapeHtml(fmt.msats(credited))}</div>
+        <div class="big-sub">sum of lightning + on-chain credits</div>
+      </div>
+      <div class="card">
+        <h3>settled out</h3>
+        <div class="big">${escapeHtml(fmt.msats(settledOut))}</div>
+        <div class="big-sub">payments + withdrawals that confirmed${feesPaid ? ` · ${escapeHtml(fmt.msats(feesPaid))} fees` : ''}</div>
+      </div>
+      <div class="card">
+        <h3>locked</h3>
+        <div class="big ${locked ? 'yellow' : ''}">${escapeHtml(fmt.msats(locked))}</div>
+        <div class="big-sub">${openOutTransfers ? `${openOutTransfers} outgoing transfer${openOutTransfers === 1 ? '' : 's'} (settlement off-view)` : 'reserved for in-flight payments'}</div>
+      </div>
+    </div>
+    ${descCard}
+    <h1 class="section-title">activity</h1>
+    <div class="card" style="padding:0;">
+      <table class="tl">
+        <thead><tr><th>seq</th><th>operation</th><th>amount</th><th>block</th><th>time</th><th></th></tr></thead>
+        <tbody>${tlRows}</tbody>
+      </table>
+    </div>
+    <div class="note">
+      Balances are <b>derived</b> by replaying this deposit's operations and are marked <b>≈</b>:
+      fixed per-operation fees and on-chain miner fees aren't carried on these messages, and a
+      transfer's settlement (<code>TransferComplete</code>/<code>TransferFail</code>) is recorded under the
+      transfer id rather than this deposit, so outgoing transfers shown as <i>locked</i> here may have
+      since cleared. For the authoritative balance, query the operator.
+    </div>`;
+}
+
+async function main() {
+  const depositId = (getParam('deposit') || '').toLowerCase();
+  const ledgerId = resolveLedgerFromUrl();
+
+  if (!depositId || !/^[0-9a-f]+$/.test(depositId)) {
+    renderLookupForm(ledgerId);
+    return;
+  }
+  document.getElementById('deposit-id').textContent = depositId;
+
+  if (!ledgerId) {
+    document.getElementById('body').innerHTML = `
+      <div class="empty err">Need a ledger to scope this deposit. Open this page on a
+        <span style="font-family:var(--mono)">&lt;ledger&gt;.ledger.${escapeHtml(document.location.hostname)}</span>
+        subdomain, or append <code>#ledger=&lt;id&gt;</code> to the URL.</div>`;
+    return;
+  }
+
+  // Server-side filter by the `i` tag (affected deposit ids) keeps this
+  // O(this-deposit's-activity) regardless of how large the ledger is.
+  const events = await nostrFetch(RELAY_URL, {
+    kinds: [9100], '#d': [ledgerId.slice(0, 16)], '#i': [depositId], limit: 1000,
+  });
+
+  if (!events.length) {
+    document.getElementById('body').innerHTML = `
+      <div class="empty">No operations found for deposit
+        <span style="font-family:var(--mono)">${escapeHtml(depositId)}</span> on ledger
+        <span style="font-family:var(--mono)">${escapeHtml(fmt.short(ledgerId, 16))}</span>
+        via <span style="font-family:var(--mono)">${escapeHtml(RELAY_URL)}</span>.
+        Check the deposit/ledger ids, or try a different relay with <code>#relay=wss://…</code>.</div>`;
+    return;
+  }
+
+  // Decode + de-dup by (seq, opDisc) — a forked/re-signed update can appear
+  // more than once on the relay; keep the first seen per slot.
+  const seen = new Set();
+  const updates = [];
+  for (const ev of events) {
+    try {
+      const u = decodeUpdate(ev.content);
+      const key = u.seq + ':' + u.opDisc;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      u.eventId = ev.id;
+      u.createdAt = ev.created_at;
+      updates.push(u);
+    } catch {}
+  }
+
+  render(depositId, ledgerId, updates);
+}
+
+main();
+</script>
+</body>
+</html>

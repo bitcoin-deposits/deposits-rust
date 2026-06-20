@@ -254,6 +254,7 @@
     <div class="nav-links">
       <a href="/explorer">overview</a>
       <a href="/ledger">ledger</a>
+      <a href="/deposit">deposit</a>
     </div>
   </nav>
   <script>
@@ -585,7 +586,7 @@ function renderCosignatures(records, cosignerLedgers) {
     </div>`;
 }
 
-function renderInnerOp(opBytes) {
+function renderInnerOp(opBytes, ledgerRef) {
   if (!opBytes) return '';
   const inner = parseTlv(opBytes);
   let opName = '?', opDisc = 0, opCat = 'unknown';
@@ -594,6 +595,12 @@ function renderInnerOp(opBytes) {
     opName = OP_NAMES[opDisc] || `Unknown(${opDisc})`;
     opCat = opCategory(opName);
   }
+  // deposit_id (200) / source_deposit_id (212) / destination_deposit_id
+  // (214) link to the per-deposit view, scoped to this update's ledger.
+  const depositLink = (hex) =>
+    `/deposit#deposit=${encodeURIComponent(hex)}` +
+    (ledgerRef ? `&ledger=${encodeURIComponent(ledgerRef)}` : '') +
+    `&relay=${encodeURIComponent(RELAY_URL)}`;
   return `
     <div class="card" id="message">
       <h3>message · <span class="op ${opCat}">${escapeHtml(opName)}</span> <span class="ann" style="font-family:var(--sans);font-size:0.78rem;color:var(--fg-muted);margin-left:0.4rem;">discriminant ${opDisc}</span></h3>
@@ -609,6 +616,10 @@ function renderInnerOp(opBytes) {
             if (r.type === 202 || r.type === 208) {
               const descStr = new TextDecoder().decode(r.value);
               valueCell = `<div class="desc-tree">${renderDescriptorRows(descStr, escapeHtml)}</div>`;
+            } else if (r.type === 200 || r.type === 212 || r.type === 214) {
+              // deposit identifiers — link to the per-deposit view.
+              const idHex = bytesToHex(r.value);
+              valueCell = `<a href="${escapeHtml(depositLink(idHex))}" style="color:var(--accent);">${escapeHtml(idHex)}</a><span class="interp">16-byte deposit_id — open deposit view ↗</span>`;
             } else {
               const interp = interpretValue(r);
               valueCell = `${escapeHtml(interp.hex)}<span class="interp">${escapeHtml(interp.ann)}</span>`;
@@ -761,7 +772,7 @@ async function main() {
 
   // Inner operation
   const msgBytes = outerRecords.find(r => r.type === 8)?.value;
-  if (msgBytes) html += renderInnerOp(msgBytes);
+  if (msgBytes) html += renderInnerOp(msgBytes, ledgerTagD);
 
   html += renderHexDump('raw TLV body (base64-decoded)', rawTlv);
   html += `<div class="card"><h3>raw event content (base64)</h3>

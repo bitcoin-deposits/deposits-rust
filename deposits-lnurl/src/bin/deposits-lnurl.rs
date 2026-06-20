@@ -324,6 +324,17 @@ async fn explorer_update() -> Html<&'static str> {
     Html(assets().explorer_update)
 }
 
+/// GET /deposit
+///
+/// Per-deposit detail view — reconstructs a single deposit's lifecycle
+/// (descriptor, derived balance, activity timeline) from the Kind 9100
+/// updates tagged with its `i` (affected-deposit) tag. Reads
+/// `#deposit=<32-hex>` and either a `#ledger=<id>` override or the host
+/// subdomain. With no `#deposit=`, shows a lookup form.
+async fn explorer_deposit() -> Html<&'static str> {
+    Html(assets().explorer_deposit)
+}
+
 /// GET /wallet
 ///
 /// Always serves the web wallet regardless of Host. Symmetric with
@@ -353,6 +364,7 @@ struct StaticAssets {
     explorer_ledger: &'static str,
     explorer_overview: &'static str,
     explorer_update: &'static str,
+    explorer_deposit: &'static str,
     wallet_index: &'static str,
 }
 
@@ -369,6 +381,7 @@ impl StaticAssets {
             explorer_ledger:   load("explorer/ledger.html"),
             explorer_overview: load("explorer/explorer.html"),
             explorer_update:   load("explorer/update.html"),
+            explorer_deposit:  load("explorer/deposit.html"),
             wallet_index:      load("wallet/index.html"),
         }
     }
@@ -1149,6 +1162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ledger", get(explorer_ledger))
         .route("/explorer", get(explorer_overview))
         .route("/update", get(explorer_update))
+        .route("/deposit", get(explorer_deposit))
         .route("/wallet", get(wallet_index))
         // Everything else (sw.js, tlv-catalog.js, vendor/*, the explorer's
         // shared.js) is a static file under deposits-web/. Serve the
