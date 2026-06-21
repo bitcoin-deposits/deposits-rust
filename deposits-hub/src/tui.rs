@@ -1257,6 +1257,8 @@ impl App {
     }
 
     fn render_stage_spawn_signer(&self, area: Rect, f: &mut ratatui::Frame) {
+        // Usable text width inside the panel = area − borders(2) − padding(2).
+        let cw = area.width.saturating_sub(4);
         let mut lines = vec![
             Line::from(Span::styled(
                 "spawn the signer subprocess",
@@ -1304,13 +1306,14 @@ impl App {
             .first()
             .map(String::as_str)
             .unwrap_or("<hub-relay-url>");
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  deposits-hub spawn-line --name {} --relay {} --docker",
+        lines.extend(command_lines(
+            &format!(
+                "deposits-hub spawn-line --name {} --relay {} --docker",
                 self.wizard.signer_name, relay_for_display
             ),
+            cw,
             Style::default().fg(Color::Yellow),
-        )));
+        ));
         lines.push(Line::from(Span::styled(
             "  (run on the signer host; emits a `docker run` invocation)",
             Style::default().fg(Color::DarkGray),
@@ -1340,10 +1343,11 @@ impl App {
         lines.push(Line::from(
             "On the daemon host, drop the hub's pubkey into admin.npub:",
         ));
-        lines.push(Line::from(Span::styled(
-            format!("  echo {} > <data-dir>/admin.npub", hub_pk),
+        lines.extend(command_lines(
+            &format!("echo {} > <data-dir>/admin.npub", hub_pk),
+            cw,
             Style::default().fg(Color::Yellow),
-        )));
+        ));
         lines.push(Line::from(Span::styled(
             "  # then restart the daemon so it picks up the trust",
             Style::default().fg(Color::DarkGray),
@@ -1453,6 +1457,7 @@ impl App {
     }
 
     fn render_stage_activate_quorum(&self, area: Rect, f: &mut ratatui::Frame) {
+        let cw = area.width.saturating_sub(4);
         let mut lines = vec![
             Line::from(Span::styled(
                 "activate the quorum",
@@ -1466,23 +1471,21 @@ impl App {
             Line::from(""),
         ];
         for pk in &self.wizard.selected_peer_pubkeys {
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "  deposits-node quorum add <ledger> {} <their_ledger>",
+            lines.extend(command_lines(
+                &format!(
+                    "deposits-node quorum add <ledger> {} <their_ledger>",
                     &pk[..16.min(pk.len())]
                 ),
+                cw,
                 Style::default().fg(Color::Yellow),
-            )));
+            ));
         }
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  deposits-node quorum begin <ledger> --amount-sats <N> \\",
+        lines.extend(command_lines(
+            "deposits-node quorum begin <ledger> --amount-sats <N> --collateral-ratio 0.6 --protocol-version cltv-offset-v2",
+            cw,
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(Span::styled(
-            "      --collateral-ratio 0.6 --protocol-version cltv-offset-v2",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        )));
+        ));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "[n] mark done   [p] back",
@@ -1495,7 +1498,8 @@ impl App {
     }
 
     fn render_stage_done(&self, area: Rect, f: &mut ratatui::Frame) {
-        let lines = vec![
+        let cw = area.width.saturating_sub(4);
+        let mut lines = vec![
             Line::from(""),
             Line::from(Span::styled(
                 "✓ bootstrap complete",
@@ -1516,20 +1520,17 @@ impl App {
                 "Set up a liquidity-drip plan with:",
                 Style::default().fg(Color::DarkGray),
             )),
-            Line::from(Span::styled(
-                "  deposits-node liquidity drip-create <alias> <ledger> \\",
-                Style::default().fg(Color::Yellow),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "      --initial-sats <N> --decrement-sats {} --interval-sec {} --interval-fuzz-sec {}",
-                    self.wizard.drip_decrement_sats,
-                    self.wizard.drip_interval_sec,
-                    self.wizard.drip_fuzz_sec,
-                ),
-                Style::default().fg(Color::Yellow),
-            )),
         ];
+        lines.extend(command_lines(
+            &format!(
+                "deposits-node liquidity drip-create <alias> <ledger> --initial-sats <N> --decrement-sats {} --interval-sec {} --interval-fuzz-sec {}",
+                self.wizard.drip_decrement_sats,
+                self.wizard.drip_interval_sec,
+                self.wizard.drip_fuzz_sec,
+            ),
+            cw,
+            Style::default().fg(Color::Yellow),
+        ));
         let p = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" done "));
@@ -1743,6 +1744,41 @@ fn short_pk(pk: &str) -> String {
     } else {
         pk.to_string()
     }
+}
+
+/// Lay out a shell command across as many lines as it takes to fit
+/// `usable_width` columns, breaking at token boundaries and ending every
+/// line but the last in a ` \` continuation so the whole thing stays
+/// copy-pasteable. The first line is indented two spaces; continuations
+/// hang at six. Tokens longer than the width (e.g. a 64-hex pubkey) sit
+/// on their own line and are left to the terminal — we never split a
+/// token. Returns owned `Line`s so callers can `extend` their buffer.
+fn command_lines(cmd: &str, usable_width: u16, style: Style) -> Vec<Line<'static>> {
+    const HEAD: &str = "  ";
+    const CONT: &str = "      ";
+    // Reserve two columns for the trailing ` \`.
+    let limit = (usable_width.max(24) as usize).saturating_sub(2);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut cur = String::from(HEAD);
+    let mut started = false; // a token already sits on the current line
+    for tok in cmd.split_whitespace() {
+        let added = if started { 1 + tok.chars().count() } else { tok.chars().count() };
+        if started && cur.chars().count() + added > limit {
+            cur.push_str(" \\");
+            lines.push(Line::from(Span::styled(std::mem::take(&mut cur), style)));
+            cur.push_str(CONT);
+            cur.push_str(tok);
+        } else {
+            if started {
+                cur.push(' ');
+            }
+            cur.push_str(tok);
+        }
+        started = true;
+    }
+    lines.push(Line::from(Span::styled(cur, style)));
+    lines
 }
 
 #[cfg(test)]
@@ -2058,6 +2094,44 @@ mod tests {
         let out = render_to_string(&mut app, 80, 24);
         assert!(out.contains("deposits-hub"), "header chrome present");
         assert!(out.contains("Dashboard"), "tab strip present");
+    }
+
+    #[test]
+    fn command_lines_wrap_with_backslash_continuations() {
+        let cmd = "deposits-node quorum begin <ledger> --amount-sats <N> \
+                   --collateral-ratio 0.6 --protocol-version cltv-offset-v2";
+        let width = 60u16;
+        let lines = command_lines(cmd, width, Style::default());
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect();
+        assert!(texts.len() > 1, "a long command should wrap: {texts:?}");
+        for (i, t) in texts.iter().enumerate() {
+            assert!(t.chars().count() <= width as usize, "line over width: {t:?}");
+            if i + 1 == texts.len() {
+                assert!(!t.ends_with('\\'), "final line must not continue: {t:?}");
+            } else {
+                assert!(t.ends_with(" \\"), "non-final line must end in ' \\': {t:?}");
+            }
+        }
+        // Stripping the indents + trailing backslashes recovers the exact
+        // token sequence — wrapping is purely cosmetic, never lossy.
+        let joined: Vec<String> = texts
+            .iter()
+            .flat_map(|t| t.trim_end_matches('\\').split_whitespace().map(String::from))
+            .collect();
+        let original: Vec<String> = cmd.split_whitespace().map(String::from).collect();
+        assert_eq!(joined, original, "tokens must survive wrapping");
+    }
+
+    #[test]
+    fn command_lines_single_line_when_it_fits() {
+        let lines = command_lines("deposits-node ledger open", 80, Style::default());
+        assert_eq!(lines.len(), 1, "short command stays on one line");
+        let t: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!t.ends_with('\\'), "single line has no continuation: {t:?}");
+        assert!(t.starts_with("  deposits-node"), "two-space head indent: {t:?}");
     }
 
     #[test]
