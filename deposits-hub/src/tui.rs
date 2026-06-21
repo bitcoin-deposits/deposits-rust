@@ -36,7 +36,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tab {
     Dashboard,
     Pending,
@@ -171,7 +171,12 @@ impl WizardState {
 pub struct App {
     data_dir: PathBuf,
     state: Arc<Mutex<HubState>>,
-    transport: HubTransport,
+    /// Nostr transport for hub→signer/daemon messaging. `None` only in
+    /// unit tests, where the App is driven offline to exercise the
+    /// input→state logic and rendering without a relay connection; the
+    /// action paths (approve/reject/discover/inbound) skip their network
+    /// sends when it's absent but still mutate + persist local state.
+    transport: Option<HubTransport>,
     /// pubkey hex → last unix-seconds we heard from this peer. Lives
     /// in memory only — heartbeats restart at each launch.
     last_heartbeat: HashMap<String, u64>,
@@ -262,7 +267,7 @@ impl App {
         Self {
             data_dir,
             state,
-            transport,
+            transport: Some(transport),
             last_heartbeat: HashMap::new(),
             node_stats: HashMap::new(),
             address_view_idx: None,
@@ -566,8 +571,10 @@ impl App {
         let label = crate::control::approve(&mut st, &self.data_dir, &sender_pk, None)?;
         let snapshot = st.clone();
         drop(st);
-        crate::control::send_accept_ack(&self.transport, &sender_pk, &label).await;
-        crate::control::publish_backup(&self.transport, &snapshot, &self.data_dir).await;
+        if let Some(t) = &self.transport {
+            crate::control::send_accept_ack(t, &sender_pk, &label).await;
+            crate::control::publish_backup(t, &snapshot, &self.data_dir).await;
+        }
         self.flash(format!("approved {}", short_pk(&sender_pk)));
         self.fix_cursor_after_shrink(cur).await;
         Ok(())
@@ -580,8 +587,10 @@ impl App {
         crate::control::reject(&mut st, &self.data_dir, &sender_pk)?;
         let snapshot = st.clone();
         drop(st);
-        crate::control::send_reject_ack(&self.transport, &sender_pk).await;
-        crate::control::publish_backup(&self.transport, &snapshot, &self.data_dir).await;
+        if let Some(t) = &self.transport {
+            crate::control::send_reject_ack(t, &sender_pk).await;
+            crate::control::publish_backup(t, &snapshot, &self.data_dir).await;
+        }
         self.flash(format!("rejected {}", short_pk(&sender_pk)));
         self.fix_cursor_after_shrink(cur).await;
         Ok(())
@@ -638,12 +647,14 @@ impl App {
                 };
                 let snapshot = st.clone();
                 drop(st);
-                if already {
-                    crate::control::send_already_approved_ack(&self.transport, &from).await;
-                } else {
-                    crate::control::send_waiting_ack(&self.transport, &from).await;
+                if let Some(t) = &self.transport {
+                    if already {
+                        crate::control::send_already_approved_ack(t, &from).await;
+                    } else {
+                        crate::control::send_waiting_ack(t, &from).await;
+                    }
+                    crate::control::publish_backup(t, &snapshot, &self.data_dir).await;
                 }
-                crate::control::publish_backup(&self.transport, &snapshot, &self.data_dir).await;
             }
             HubMessage::Heartbeat { ts, .. } => {
                 self.last_heartbeat.insert(from, ts);
@@ -801,8 +812,12 @@ impl App {
     /// from the key-handler caller's perspective — we await the fetch.
     /// 10s timeout inside `discover_peers` keeps the worst case bounded.
     async fn refresh_discovered_peers(&mut self) {
+        let Some(t) = &self.transport else {
+            self.flash("no transport — discovery unavailable".into());
+            return;
+        };
         self.discovering = true;
-        match crate::peers::discover_peers(&self.transport, &self.wizard_network).await {
+        match crate::peers::discover_peers(t, &self.wizard_network).await {
             Ok(peers) => {
                 self.discovered_peers = Some(peers);
                 self.flash("refreshed peer list".into());
@@ -1714,5 +1729,366 @@ fn short_pk(pk: &str) -> String {
         format!("{}…{}", &pk[..6], &pk[pk.len() - 4..])
     } else {
         pk.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Offline tests for the TUI's input→state logic and rendering.
+    //!
+    //! The `App` is built with `transport: None` (see the field doc) so it
+    //! can run without a relay connection: navigation/overlay/wizard
+    //! branches of `handle_key` never touch the transport, and the action
+    //! branches (approve/reject) still mutate + persist local state, just
+    //! skipping the network ack/backup. Rendering is exercised against
+    //! ratatui's in-memory `TestBackend` — no TTY required.
+
+    use super::*;
+    use crate::peers::PeerInfo;
+    use crate::state::NodeRecord;
+    use ratatui::backend::TestBackend;
+    use std::path::Path;
+
+    // ── fixtures ─────────────────────────────────────────────────────
+
+    /// Build an offline App over the given (writable) data dir and state.
+    /// Mnemonic already acknowledged → no first-launch overlay in the way.
+    fn test_app(dir: &Path, state: HubState) -> App {
+        let mut cursor = ListState::default();
+        cursor.select(Some(0));
+        App {
+            data_dir: dir.to_path_buf(),
+            state: Arc::new(Mutex::new(state)),
+            transport: None,
+            last_heartbeat: HashMap::new(),
+            node_stats: HashMap::new(),
+            address_view_idx: None,
+            tab: Tab::Dashboard,
+            pending_cursor: cursor,
+            flash: None,
+            flash_ttl: 0,
+            mnemonic_overlay: None,
+            wizard: WizardState::default(),
+            discovered_peers: None,
+            discovering: false,
+            peer_cursor: 0,
+            wizard_network: "regtest".into(),
+            spawned_signers: Vec::new(),
+            hub_relays: Vec::new(),
+        }
+    }
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+    fn code(kc: KeyCode) -> KeyEvent {
+        KeyEvent::new(kc, KeyModifiers::NONE)
+    }
+
+    fn pk(n: u8) -> String {
+        // 32-byte (64-hex) pubkey-shaped string: byte `n` repeated.
+        format!("{:02x}", n).repeat(32)
+    }
+
+    /// Insert `n` pending signer registrations into `st` via the real
+    /// ingest path so the pending-map keying matches production.
+    fn seed_pending_signers(st: &mut HubState, dir: &Path, n: u8) {
+        for i in 0..n {
+            crate::control::ingest_register(
+                st,
+                dir,
+                &pk(i),
+                Role::Signer,
+                pk(i),
+                "1.2.3".into(),
+                Some(format!("vault-{}", i)),
+                None,
+            )
+            .expect("ingest_register");
+        }
+    }
+
+    fn render_to_string(app: &mut App, w: u16, h: u16) -> String {
+        let backend = TestBackend::new(w, h);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| app.render(f.area(), f)).expect("draw");
+        format!("{}", term.backend())
+    }
+
+    fn peer(n: u8) -> PeerInfo {
+        PeerInfo {
+            operator_pubkey: pk(n),
+            operator_name: Some(format!("op-{}", n)),
+            ledger_count: 1,
+            ledger_ids: vec![pk(100 + n)],
+            latest_ad_unix: 1_700_000_000,
+            annual_fee_bps: Some(50),
+        }
+    }
+
+    // ── navigation ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tab_key_cycles_dashboard_pending_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), HubState::default());
+        assert_eq!(app.tab, Tab::Dashboard);
+        assert!(!app.handle_key(code(KeyCode::Tab)).await);
+        assert_eq!(app.tab, Tab::Pending);
+        app.handle_key(code(KeyCode::Tab)).await;
+        assert_eq!(app.tab, Tab::Setup);
+        app.handle_key(code(KeyCode::Tab)).await;
+        assert_eq!(app.tab, Tab::Dashboard);
+    }
+
+    #[tokio::test]
+    async fn number_keys_jump_to_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), HubState::default());
+        app.handle_key(key('2')).await;
+        assert_eq!(app.tab, Tab::Pending);
+        app.handle_key(key('3')).await;
+        assert_eq!(app.tab, Tab::Setup);
+        app.handle_key(key('1')).await;
+        assert_eq!(app.tab, Tab::Dashboard);
+    }
+
+    #[tokio::test]
+    async fn q_and_ctrl_c_request_quit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), HubState::default());
+        assert!(app.handle_key(key('q')).await, "q should quit");
+        assert!(app.handle_key(ctrl('c')).await, "ctrl-c should quit");
+        // A no-op key must not quit.
+        assert!(!app.handle_key(key('z')).await);
+    }
+
+    // ── mnemonic overlay gating ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn mnemonic_overlay_blocks_input_until_enter() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), HubState::default());
+        app.mnemonic_overlay = Some(Ok("word ".repeat(24).trim().to_string()));
+
+        // Tab/number keys are swallowed while the overlay is up.
+        app.handle_key(code(KeyCode::Tab)).await;
+        assert_eq!(app.tab, Tab::Dashboard, "overlay must block tab nav");
+        assert!(app.mnemonic_overlay.is_some());
+
+        // Enter acknowledges, clears the overlay, and persists the ack.
+        assert!(!app.handle_key(code(KeyCode::Enter)).await);
+        assert!(app.mnemonic_overlay.is_none());
+        assert!(
+            app.state.lock().await.mnemonic_acknowledged,
+            "ack must persist to state"
+        );
+    }
+
+    #[tokio::test]
+    async fn mnemonic_overlay_still_allows_quit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), HubState::default());
+        app.mnemonic_overlay = Some(Ok("seed".into()));
+        assert!(app.handle_key(key('q')).await, "q quits through overlay");
+    }
+
+    // ── pending cursor + approve ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn pending_cursor_steps_and_wraps() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = HubState::default();
+        seed_pending_signers(&mut st, dir.path(), 3);
+        let mut app = test_app(dir.path(), st);
+        app.tab = Tab::Pending;
+        app.pending_cursor.select(Some(0));
+
+        app.handle_key(key('j')).await;
+        assert_eq!(app.pending_cursor.selected(), Some(1));
+        app.handle_key(key('j')).await;
+        assert_eq!(app.pending_cursor.selected(), Some(2));
+        app.handle_key(key('j')).await; // wrap
+        assert_eq!(app.pending_cursor.selected(), Some(0));
+        app.handle_key(key('k')).await; // wrap backwards
+        assert_eq!(app.pending_cursor.selected(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn approve_moves_pending_into_signers_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = HubState::default();
+        seed_pending_signers(&mut st, dir.path(), 2);
+        let mut app = test_app(dir.path(), st);
+        app.tab = Tab::Pending;
+        app.pending_cursor.select(Some(0));
+
+        // 'a' on the Pending tab approves the selected entry. transport is
+        // None, so the network ack/backup is skipped but the inventory
+        // mutation + persistence still runs.
+        assert!(!app.handle_key(key('a')).await);
+
+        let st = app.state.lock().await;
+        assert_eq!(st.pending.len(), 1, "one entry should remain pending");
+        assert_eq!(st.signers.len(), 1, "approved entry moved to signers");
+        drop(st);
+        // Cursor stays in-bounds for the shrunken list.
+        let sel = app.pending_cursor.selected().unwrap();
+        assert!(sel < 1, "cursor must remain valid after shrink");
+    }
+
+    #[tokio::test]
+    async fn reject_drops_pending_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = HubState::default();
+        seed_pending_signers(&mut st, dir.path(), 2);
+        let mut app = test_app(dir.path(), st);
+        app.tab = Tab::Pending;
+        app.pending_cursor.select(Some(0));
+
+        assert!(!app.handle_key(key('x')).await);
+        let st = app.state.lock().await;
+        assert_eq!(st.pending.len(), 1, "rejected entry removed from pending");
+        assert_eq!(st.signers.len(), 0, "reject must not approve");
+    }
+
+    // ── address overlay ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn address_overlay_opens_cycles_and_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = HubState::default();
+        for i in 0..2u8 {
+            st.nodes.insert(
+                pk(i),
+                NodeRecord {
+                    label: format!("node-{}", i),
+                    spawned_by_hub: false,
+                    registered_at: 0,
+                    last_version: "1.0".into(),
+                    signer_pubkey: None,
+                },
+            );
+        }
+        let mut app = test_app(dir.path(), st);
+        app.tab = Tab::Dashboard;
+
+        app.handle_key(key('a')).await;
+        assert_eq!(app.address_view_idx, Some(0), "'a' opens address overlay");
+        app.handle_key(key('j')).await;
+        assert_eq!(app.address_view_idx, Some(1));
+        app.handle_key(key('j')).await; // wraps over 2 nodes
+        assert_eq!(app.address_view_idx, Some(0));
+        app.handle_key(code(KeyCode::Esc)).await;
+        assert_eq!(app.address_view_idx, None, "Esc closes overlay");
+    }
+
+    #[tokio::test]
+    async fn address_overlay_noop_without_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), HubState::default());
+        app.tab = Tab::Dashboard;
+        app.handle_key(key('a')).await;
+        assert_eq!(app.address_view_idx, None, "no nodes → no overlay");
+    }
+
+    // ── wizard ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn wizard_next_prev_navigates_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), HubState::default());
+        app.tab = Tab::Setup;
+        assert_eq!(app.wizard.stage, WizardStage::PickPeers);
+
+        app.handle_key(key('n')).await;
+        assert_eq!(app.wizard.stage, WizardStage::TuneDrip);
+        app.handle_key(key('n')).await;
+        assert_eq!(app.wizard.stage, WizardStage::SpawnSigner);
+        app.handle_key(key('p')).await;
+        assert_eq!(app.wizard.stage, WizardStage::TuneDrip);
+
+        // Stage transitions are persisted so the wizard resumes on restart.
+        let reloaded = WizardState::load(dir.path());
+        assert_eq!(reloaded.stage, WizardStage::TuneDrip);
+    }
+
+    #[tokio::test]
+    async fn pick_peers_space_toggles_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), HubState::default());
+        app.tab = Tab::Setup;
+        app.wizard.stage = WizardStage::PickPeers;
+        app.discovered_peers = Some(vec![peer(1), peer(2)]);
+        app.peer_cursor = 0;
+
+        app.handle_key(key(' ')).await;
+        assert_eq!(app.wizard.selected_peer_pubkeys, vec![pk(1)]);
+        // j moves cursor, space selects the second peer too.
+        app.handle_key(key('j')).await;
+        app.handle_key(key(' ')).await;
+        assert_eq!(app.wizard.selected_peer_pubkeys, vec![pk(1), pk(2)]);
+        // Toggling the same peer off removes it.
+        app.handle_key(key(' ')).await;
+        assert_eq!(app.wizard.selected_peer_pubkeys, vec![pk(1)]);
+    }
+
+    // ── rendering (TestBackend, no TTY) ──────────────────────────────
+
+    #[test]
+    fn renders_dashboard_without_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), HubState::default());
+        let out = render_to_string(&mut app, 80, 24);
+        assert!(out.contains("deposits-hub"), "header chrome present");
+        assert!(out.contains("Dashboard"), "tab strip present");
+    }
+
+    #[test]
+    fn renders_pending_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = HubState::default();
+        seed_pending_signers(&mut st, dir.path(), 1);
+        let mut app = test_app(dir.path(), st);
+        app.tab = Tab::Pending;
+        let out = render_to_string(&mut app, 100, 24);
+        assert!(out.contains("vault-0"), "pending label shown: {out}");
+        assert!(out.contains("signer"), "pending role shown");
+    }
+
+    #[test]
+    fn renders_every_wizard_stage_without_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let stages = [
+            WizardStage::PickPeers,
+            WizardStage::TuneDrip,
+            WizardStage::SpawnSigner,
+            WizardStage::OpenLedger,
+            WizardStage::FundLedger,
+            WizardStage::ActivateQuorum,
+            WizardStage::Done,
+        ];
+        for stage in stages {
+            let mut app = test_app(dir.path(), HubState::default());
+            app.tab = Tab::Setup;
+            app.wizard.stage = stage;
+            let out = render_to_string(&mut app, 80, 30);
+            assert!(!out.trim().is_empty(), "stage {:?} rendered empty", stage);
+        }
+    }
+
+    #[test]
+    fn renders_mnemonic_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), HubState::default());
+        app.mnemonic_overlay = Some(Ok("alpha bravo charlie".into()));
+        let out = render_to_string(&mut app, 80, 24);
+        assert!(
+            out.contains("written") || out.contains("Enter"),
+            "overlay should prompt for acknowledgement: {out}"
+        );
     }
 }
