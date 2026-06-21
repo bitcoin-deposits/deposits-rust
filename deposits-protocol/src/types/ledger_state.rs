@@ -77,6 +77,22 @@ pub struct LedgerState {
     /// Block height when the current quorum expires (from QuorumBegin).
     #[serde(default)]
     pub quorum_expiry: Option<u32>,
+    /// Block height at which the active quorum's `QuorumBegin` was
+    /// committed. With `quorum_expiry` this gives the full quorum
+    /// *duration* (expiry − begin). Stamped from the update envelope on
+    /// commit/replay (the block height isn't carried in the op itself),
+    /// so it's `None` until a QuorumBegin lands or on legacy states
+    /// reconstructed without block context.
+    #[serde(default)]
+    pub quorum_begin_block: Option<u32>,
+    /// Sequence number of that `QuorumBegin` update — the entry that
+    /// established the active quorum. Lets clients jump straight to it.
+    #[serde(default)]
+    pub quorum_begin_sequence: Option<u64>,
+    /// Content hash of that `QuorumBegin` update (the entry's id on the
+    /// hash chain), for linking back to it in explorers.
+    #[serde(default)]
+    pub quorum_begin_hash: Option<[u8; 32]>,
     /// Protocol-ruleset name this ledger is currently governed by.
     /// Set from `QuorumBegin.protocol_version`; missing field
     /// (legacy QuorumBegins) resolves to `"legacy"` via
@@ -195,6 +211,9 @@ impl LedgerState {
             quorum_members: Vec::new(),
             next_quorum_members: Vec::new(),
             quorum_expiry: None,
+            quorum_begin_block: None,
+            quorum_begin_sequence: None,
+            quorum_begin_hash: None,
             active_ruleset_name: default_ruleset_name(),
             collateral_amount: 0,
             pending_transfers: HashMap::new(),
@@ -211,6 +230,17 @@ impl LedgerState {
             quorum_at_fork: Vec::new(),
             dispute_fork_sequence: 0,
         }
+    }
+
+    /// Record where the active quorum's `QuorumBegin` was committed. The
+    /// block height / sequence / content hash live on the update
+    /// envelope rather than the op, so the append + replay paths call
+    /// this right after applying a QuorumBegin — mirrors how
+    /// `opened_at_block` is stamped for DepositOpen.
+    pub fn note_quorum_begin(&mut self, block_height: u32, sequence: u64, content_hash: [u8; 32]) {
+        self.quorum_begin_block = Some(block_height);
+        self.quorum_begin_sequence = Some(sequence);
+        self.quorum_begin_hash = Some(content_hash);
     }
 
     /// Get the ledger_id as a hex string.
@@ -1800,5 +1830,21 @@ mod balance_cache_tests {
         state.rebuild_balance_cache();
         assert_eq!(state.total_deposit_balance(), 777);
         assert_eq!(state.total_deposit_balance(), state.fold_deposit_balance());
+    }
+
+    #[test]
+    fn quorum_begin_ref_defaults_none_then_stamps() {
+        let mut state = LedgerState::new(pk(), "rid".into(), 100);
+        assert_eq!(state.quorum_begin_block, None);
+        assert_eq!(state.quorum_begin_sequence, None);
+        assert_eq!(state.quorum_begin_hash, None);
+        state.note_quorum_begin(120, 5, [9u8; 32]);
+        assert_eq!(state.quorum_begin_block, Some(120));
+        assert_eq!(state.quorum_begin_sequence, Some(5));
+        assert_eq!(state.quorum_begin_hash, Some([9u8; 32]));
+        // With expiry set, this is what the hub renders as duration.
+        state.quorum_expiry = Some(1020);
+        let duration = state.quorum_expiry.unwrap() - state.quorum_begin_block.unwrap();
+        assert_eq!(duration, 900);
     }
 }

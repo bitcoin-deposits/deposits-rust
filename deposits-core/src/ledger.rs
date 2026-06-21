@@ -895,6 +895,15 @@ impl Ledger {
                     }
                 }
             }
+            // Same idea for QuorumBegin: record where the active quorum
+            // started so duration / entry-link are reconstructable.
+            if matches!(op, LedgerOperation::QuorumBegin { .. }) {
+                state.note_quorum_begin(
+                    update.block_height,
+                    update.sequence_number,
+                    update.content_hash,
+                );
+            }
             state.sequence = update.sequence_number;
             state.chain_tip_hash = update.chain_hash();
         }
@@ -1043,6 +1052,10 @@ impl Ledger {
                     deposit.last_fee_assessment = block_height;
                 }
             }
+        }
+        // Record the QuorumBegin's location (for duration / entry-link).
+        if matches!(operation, LedgerOperation::QuorumBegin { .. }) {
+            self.state.note_quorum_begin(block_height, sequence, new_hash);
         }
 
         // Update sequence (hash is set above, will become chain_hash after signing)
@@ -1201,6 +1214,14 @@ impl Ledger {
                     deposit.last_fee_assessment = staged.update.block_height;
                 }
             }
+        }
+        // Record the QuorumBegin's location (for duration / entry-link).
+        if matches!(staged.operation, LedgerOperation::QuorumBegin { .. }) {
+            self.state.note_quorum_begin(
+                staged.update.block_height,
+                staged.update.sequence_number,
+                staged.update.content_hash,
+            );
         }
 
         // Push to history

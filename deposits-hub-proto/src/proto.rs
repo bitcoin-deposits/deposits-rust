@@ -214,6 +214,16 @@ pub struct LedgerHealth {
     /// Quorum members (for the details pane). Empty pre-quorum.
     #[serde(default)]
     pub members: Vec<QuorumMemberInfo>,
+    /// Block height the active quorum's QuorumBegin was committed. With
+    /// `quorum_expiry` this gives the full begin→expiry duration.
+    #[serde(default)]
+    pub quorum_begin_block: Option<u32>,
+    /// Sequence number of that QuorumBegin entry.
+    #[serde(default)]
+    pub quorum_begin_sequence: Option<u64>,
+    /// Content hash (hex) of that QuorumBegin entry, for explorer links.
+    #[serde(default)]
+    pub quorum_begin_hash: Option<String>,
 }
 
 /// A ledger this node is a *partner* quorum member of (someone else's

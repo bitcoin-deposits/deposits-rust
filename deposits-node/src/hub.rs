@@ -216,6 +216,9 @@ fn compute_node_stats(node: &Node) -> NodeStats {
                         sequence: l.sequence(),
                         deposit_count: l.state.deposits.len() as u32,
                         members: members_of(&l.state),
+                        quorum_begin_block: l.state.quorum_begin_block,
+                        quorum_begin_sequence: l.state.quorum_begin_sequence,
+                        quorum_begin_hash: l.state.quorum_begin_hash.map(hex::encode),
                     });
                 } else {
                     quorum_member_count += 1;

@@ -2062,6 +2062,27 @@ impl App {
                         format!("      quorum Q={}  ·  {}", lh.members.len(), expiry_str(lh.blocks_to_expiry, lh.quorum_expiry)),
                         Style::default().fg(Color::Gray),
                     )));
+                    // Begin entry + duration, when the QuorumBegin location
+                    // is known (stamped on commit/replay).
+                    if let Some(begin) = lh.quorum_begin_block {
+                        let dur = lh
+                            .quorum_expiry
+                            .map(|e| format!("  ·  duration {}", blocks_eta(e as i64 - begin as i64)))
+                            .unwrap_or_default();
+                        let seq = lh
+                            .quorum_begin_sequence
+                            .map(|s| format!("seq {}", s))
+                            .unwrap_or_else(|| "seq ?".to_string());
+                        let entry = lh
+                            .quorum_begin_hash
+                            .as_deref()
+                            .map(short_tag)
+                            .unwrap_or_default();
+                        lines.push(Line::from(Span::styled(
+                            format!("      began @{}  ·  {}  {}{}", begin, seq, entry, dur),
+                            muted,
+                        )));
+                    }
                     lines.push(Line::from(Span::styled(
                         format!("      members: {}", members_line(&lh.members)),
                         muted,
@@ -2668,6 +2689,9 @@ mod tests {
                 pubkey: "11".repeat(33),
                 ledger_id: "cc".repeat(8),
             }],
+            quorum_begin_block: Some(100),
+            quorum_begin_sequence: Some(5),
+            quorum_begin_hash: Some("ab".repeat(32)),
         }
     }
 
@@ -2840,6 +2864,7 @@ mod tests {
         assert!(out.contains("len 412") && out.contains("12 deposits"), "ledger metrics: {out}");
         assert!(out.contains("serving on (1)"), "serving section: {out}");
         assert!(out.contains("members:"), "members listed: {out}");
+        assert!(out.contains("began @100") && out.contains("duration"), "quorum begin + duration: {out}");
     }
 
     #[test]
