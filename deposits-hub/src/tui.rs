@@ -250,6 +250,40 @@ pub struct App {
     hub_relays: Vec<String>,
 }
 
+/// Severity of a standing operator concern, worst first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Severity {
+    Critical,
+    Warn,
+}
+
+/// One thing that needs the operator's attention, surfaced in the
+/// Dashboard's "needs attention" section. Derived each frame from the
+/// per-node `NodeStats` (which carry per-ledger health as of the last
+/// 30s push) plus heartbeat ages — never persisted.
+struct Concern {
+    severity: Severity,
+    /// Short operator-facing concern label, e.g. "quorum expiry".
+    kind: &'static str,
+    /// Node label this concern belongs to.
+    node: String,
+    /// Ledger tag (truncated) or empty when node-scoped (e.g. offline).
+    scope: String,
+    /// Human detail, e.g. "EXPIRED 2d ago" / "refresh in 920 blk (~6d)".
+    detail: String,
+    /// Blocks until the deadline; `Some(<0)` is overdue, `None` is not a
+    /// block-clock concern (reserves ratio, offline). Drives the sort so
+    /// the soonest deadline floats to the top.
+    blocks_left: Option<i64>,
+}
+
+// Block-clock thresholds (blocks). ~144 blocks ≈ 1 day.
+const EXPIRY_CRIT_BLOCKS: i64 = 144;
+const EXPIRY_WARN_BLOCKS: i64 = 1008;
+// Heartbeat staleness (seconds). Status/heartbeat cadence is ~30s.
+const HB_WARN_SECS: u64 = 120;
+const HB_CRIT_SECS: u64 = 300;
+
 impl App {
     pub fn new(
         data_dir: PathBuf,
@@ -1560,8 +1594,193 @@ impl App {
         f.render_widget(p, area);
     }
 
+    /// Derive the standing concerns across the fleet from the latest
+    /// per-node status push + heartbeat ages. Sorted worst-severity
+    /// first, then soonest block deadline, so the top row is always the
+    /// most urgent thing. Pure read — never mutates or persists.
+    fn collect_concerns(&self, st: &HubState, now: u64) -> Vec<Concern> {
+        let mut out: Vec<Concern> = Vec::new();
+        for (pk, stats) in &self.node_stats {
+            let node = st
+                .nodes
+                .get(pk)
+                .map(|r| r.label.clone())
+                .unwrap_or_else(|| short_pk(pk));
+            for lh in &stats.ledgers {
+                let scope = short_tag(&lh.ledger_id);
+                // Quorum expiry / post-expiry cascade.
+                if let Some(b) = lh.blocks_to_expiry {
+                    if !lh.value_moving_allowed || b < 0 {
+                        out.push(Concern {
+                            severity: Severity::Critical,
+                            kind: "quorum expiry",
+                            node: node.clone(),
+                            scope: scope.clone(),
+                            detail: format!("EXPIRED {} ago — tier {} cascade", blocks_eta(-b), lh.tier),
+                            blocks_left: Some(b),
+                        });
+                    } else {
+                        let sev = if b <= EXPIRY_CRIT_BLOCKS {
+                            Some(Severity::Critical)
+                        } else if b <= EXPIRY_WARN_BLOCKS {
+                            Some(Severity::Warn)
+                        } else {
+                            None
+                        };
+                        if let Some(severity) = sev {
+                            out.push(Concern {
+                                severity,
+                                kind: "quorum expiry",
+                                node: node.clone(),
+                                scope: scope.clone(),
+                                detail: format!("refresh in {}", blocks_eta(b)),
+                                blocks_left: Some(b),
+                            });
+                        }
+                    }
+                }
+                // Reserves vs. obligations (solvency).
+                if lh.obligations_sats > 0 {
+                    if lh.obligations_sats >= lh.reserves_sats {
+                        out.push(Concern {
+                            severity: Severity::Critical,
+                            kind: "reserves",
+                            node: node.clone(),
+                            scope: scope.clone(),
+                            detail: format!(
+                                "obligations {} ≥ reserves {}",
+                                sats_human(lh.obligations_sats),
+                                sats_human(lh.reserves_sats)
+                            ),
+                            blocks_left: None,
+                        });
+                    } else if lh.obligations_sats.saturating_mul(10) >= lh.reserves_sats.saturating_mul(9) {
+                        let pct = (lh.obligations_sats as f64 / lh.reserves_sats as f64 * 100.0) as u64;
+                        out.push(Concern {
+                            severity: Severity::Warn,
+                            kind: "reserves",
+                            node: node.clone(),
+                            scope: scope.clone(),
+                            detail: format!("obligations {}% of reserves", pct),
+                            blocks_left: None,
+                        });
+                    }
+                }
+                // Open dispute against this ledger.
+                if lh.open_disputes > 0 {
+                    out.push(Concern {
+                        severity: Severity::Critical,
+                        kind: "dispute",
+                        node: node.clone(),
+                        scope: scope.clone(),
+                        detail: format!("{} open — respond", lh.open_disputes),
+                        blocks_left: lh.blocks_to_dispute_deadline,
+                    });
+                }
+            }
+        }
+        // Heartbeat staleness for everyone we've heard from at least once.
+        for (pk, rec) in st.signers.iter() {
+            if let Some(c) = self.heartbeat_concern(pk, &rec.label, now) {
+                out.push(c);
+            }
+        }
+        for (pk, rec) in st.nodes.iter() {
+            if let Some(c) = self.heartbeat_concern(pk, &rec.label, now) {
+                out.push(c);
+            }
+        }
+        out.sort_by(|a, b| {
+            a.severity
+                .cmp(&b.severity)
+                .then(a.blocks_left.unwrap_or(i64::MAX).cmp(&b.blocks_left.unwrap_or(i64::MAX)))
+        });
+        out
+    }
+
+    fn heartbeat_concern(&self, pk: &str, label: &str, now: u64) -> Option<Concern> {
+        let last = self.last_heartbeat.get(pk)?;
+        let age = now.saturating_sub(*last);
+        let severity = if age > HB_CRIT_SECS {
+            Severity::Critical
+        } else if age > HB_WARN_SECS {
+            Severity::Warn
+        } else {
+            return None;
+        };
+        Some(Concern {
+            severity,
+            kind: "offline",
+            node: label.to_string(),
+            scope: String::new(),
+            detail: format!("no heartbeat for {}", secs_human(age)),
+            blocks_left: None,
+        })
+    }
+
+    /// The "needs attention" panel above the inventory: concerns sorted
+    /// worst-first, or a single "all clear" line when the fleet is quiet.
+    fn render_attention(&self, concerns: &[Concern], area: Rect, f: &mut ratatui::Frame) {
+        const MAX_SHOWN: usize = 8;
+        f.render_widget(Clear, area);
+        let mut lines: Vec<Line> = Vec::new();
+        if concerns.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "✓ all clear",
+                Style::default().fg(Color::Green),
+            )));
+        } else {
+            for c in concerns.iter().take(MAX_SHOWN) {
+                let (glyph, color) = match c.severity {
+                    Severity::Critical => ("✗", Color::Red),
+                    Severity::Warn => ("!", Color::Yellow),
+                };
+                let scope = if c.scope.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", c.scope)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{} ", glyph), Style::default().fg(color)),
+                    Span::styled(format!("{:<13} ", c.kind), Style::default().fg(color)),
+                    Span::styled(format!("{}{}", c.node, scope), Style::default().fg(Color::White)),
+                    Span::raw("  "),
+                    Span::styled(c.detail.clone(), Style::default().fg(Color::Gray)),
+                ]));
+            }
+            if concerns.len() > MAX_SHOWN {
+                lines.push(Line::from(Span::styled(
+                    format!("…and {} more", concerns.len() - MAX_SHOWN),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+        let title = if concerns.is_empty() {
+            " needs attention ".to_string()
+        } else {
+            format!(" needs attention ({}) ", concerns.len())
+        };
+        let p = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(title));
+        f.render_widget(p, area);
+    }
+
     fn render_dashboard(&self, st: &HubState, area: Rect, f: &mut ratatui::Frame) {
         let now = unix_secs();
+
+        // Split the body: "needs attention" on top (sized to its rows,
+        // capped so the inventory always stays visible), inventory below.
+        let concerns = self.collect_concerns(st, now);
+        let shown = concerns.len().min(8);
+        let overflow = usize::from(concerns.len() > 8);
+        let att_rows = if concerns.is_empty() { 1 } else { shown + overflow } as u16;
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(att_rows + 2), Constraint::Min(0)])
+            .split(area);
+        self.render_attention(&concerns, chunks[0], f);
+        let body = chunks[1];
+
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Line::from(Span::styled(
             format!("hub pubkey: {}", st.hub_pubkey),
@@ -1660,10 +1879,10 @@ impl App {
         // frame leaves stale text below. (Observed: when a node
         // disappeared, its old "signer=…  hb …" tail showed through
         // the new shorter "Nodes (0)" line.)
-        f.render_widget(Clear, area);
+        f.render_widget(Clear, body);
         let p = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" inventory "));
-        f.render_widget(p, area);
+        f.render_widget(p, body);
     }
 
     fn render_pending(&mut self, st: &HubState, area: Rect, f: &mut ratatui::Frame) {
@@ -1769,6 +1988,42 @@ fn short_pk(pk: &str) -> String {
     }
 }
 
+/// First 12 chars of a ledger id (matches the explorer's tag width).
+fn short_tag(id: &str) -> String {
+    if id.len() > 12 {
+        format!("{}…", &id[..12])
+    } else {
+        id.to_string()
+    }
+}
+
+/// A block delta as "N blk (~X.Yd)". Caller passes a non-negative count
+/// (negate the remaining-blocks value for the "ago" case).
+fn blocks_eta(blocks: i64) -> String {
+    let b = blocks.max(0);
+    format!("{} blk (~{:.1}d)", b, b as f64 / 144.0)
+}
+
+/// Compact sats: BTC above 0.01, else plain sats.
+fn sats_human(sats: u64) -> String {
+    if sats >= 1_000_000 {
+        format!("{:.4} BTC", sats as f64 / 100_000_000.0)
+    } else {
+        format!("{} sat", sats)
+    }
+}
+
+/// Compact elapsed seconds: "Nh" / "Nm" / "Ns".
+fn secs_human(s: u64) -> String {
+    if s >= 3600 {
+        format!("{}h", s / 3600)
+    } else if s >= 60 {
+        format!("{}m", s / 60)
+    } else {
+        format!("{}s", s)
+    }
+}
+
 /// Lay out a shell command across as many lines as it takes to fit
 /// `usable_width` columns, breaking at token boundaries and ending every
 /// line but the last in a ` \` continuation so the whole thing stays
@@ -1817,6 +2072,7 @@ mod tests {
 
     use super::*;
     use crate::peers::PeerInfo;
+    use crate::proto::LedgerHealth;
     use crate::state::NodeRecord;
     use ratatui::backend::TestBackend;
     use std::path::Path;
@@ -2155,6 +2411,118 @@ mod tests {
         let t: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!t.ends_with('\\'), "single line has no continuation: {t:?}");
         assert!(t.starts_with("  deposits-node"), "two-space head indent: {t:?}");
+    }
+
+    // ── needs-attention concerns ─────────────────────────────────────
+
+    fn health(b_expiry: Option<i64>, value_moving: bool, reserves: u64, obligations: u64, disputes: u32) -> LedgerHealth {
+        LedgerHealth {
+            ledger_id: "ab".repeat(32),
+            tier: if value_moving { 0 } else { 1 },
+            quorum_expiry: Some(1000),
+            blocks_to_expiry: b_expiry,
+            value_moving_allowed: value_moving,
+            open_disputes: disputes,
+            blocks_to_dispute_deadline: None,
+            reserves_sats: reserves,
+            obligations_sats: obligations,
+        }
+    }
+
+    fn node_state(label: &str) -> HubState {
+        let mut st = HubState::default();
+        st.nodes.insert(
+            pk(1),
+            NodeRecord {
+                label: label.to_string(),
+                spawned_by_hub: false,
+                registered_at: 0,
+                last_version: "1.0".into(),
+                signer_pubkey: None,
+            },
+        );
+        st
+    }
+
+    /// Run collect_concerns over a single node carrying `healths`.
+    fn concerns_for(healths: Vec<LedgerHealth>) -> Vec<Concern> {
+        let dir = tempfile::tempdir().unwrap();
+        let st = node_state("node-a");
+        let mut app = test_app(dir.path(), st.clone());
+        app.node_stats.insert(pk(1), NodeStats { ledgers: healths, ..Default::default() });
+        app.collect_concerns(&st, 0)
+    }
+
+    #[test]
+    fn healthy_fleet_has_no_concerns() {
+        let c = concerns_for(vec![health(Some(5000), true, 100, 10, 0)]);
+        assert!(c.is_empty(), "all-healthy should be quiet: {c:?}", c = c.iter().map(|x| x.kind).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn quorum_expiry_crosses_warn_then_critical_then_expired() {
+        assert!(concerns_for(vec![health(Some(2000), true, 100, 10, 0)]).is_empty(), ">1wk = quiet");
+        let warn = concerns_for(vec![health(Some(500), true, 100, 10, 0)]);
+        assert_eq!((warn[0].kind, warn[0].severity), ("quorum expiry", Severity::Warn));
+        let crit = concerns_for(vec![health(Some(100), true, 100, 10, 0)]);
+        assert_eq!((crit[0].kind, crit[0].severity), ("quorum expiry", Severity::Critical));
+        let expired = concerns_for(vec![health(Some(-288), false, 100, 10, 0)]);
+        assert_eq!(expired[0].severity, Severity::Critical);
+        assert!(expired[0].detail.contains("EXPIRED"), "{:?}", expired[0].detail);
+    }
+
+    #[test]
+    fn reserves_warn_and_critical() {
+        // expiry healthy (>1wk) so the only concern is reserves.
+        let crit = concerns_for(vec![health(Some(5000), true, 100, 100, 0)]);
+        assert_eq!((crit.len(), crit[0].kind, crit[0].severity), (1, "reserves", Severity::Critical));
+        let warn = concerns_for(vec![health(Some(5000), true, 100, 95, 0)]);
+        assert_eq!((warn[0].kind, warn[0].severity), ("reserves", Severity::Warn));
+    }
+
+    #[test]
+    fn concerns_sorted_worst_then_soonest_then_clockless() {
+        // One ledger that is both critically near expiry AND insolvent:
+        // critical-with-deadline must precede the clockless reserves crit.
+        let c = concerns_for(vec![health(Some(100), true, 100, 100, 0)]);
+        assert_eq!(c[0].kind, "quorum expiry", "deadline concern first: {c:?}",
+            c = c.iter().map(|x| x.kind).collect::<Vec<_>>());
+        assert_eq!(c[1].kind, "reserves", "clockless concern after");
+        // Across two ledgers, the soonest critical deadline wins.
+        let c = concerns_for(vec![
+            health(Some(500), true, 1000, 1, 0),  // warn, b=500
+            health(Some(50), true, 1000, 1, 0),   // critical, b=50
+        ]);
+        assert_eq!((c[0].severity, c[0].blocks_left), (Severity::Critical, Some(50)));
+    }
+
+    #[test]
+    fn stale_heartbeat_becomes_offline_concern() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = node_state("node-a");
+        let mut app = test_app(dir.path(), st.clone());
+        app.last_heartbeat.insert(pk(1), 0); // last seen at epoch
+        let c = app.collect_concerns(&st, 1000); // now = 1000s → age > crit
+        assert!(c.iter().any(|x| x.kind == "offline" && x.severity == Severity::Critical),
+            "stale node should be flagged offline: {c:?}", c = c.iter().map(|x| x.kind).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn dashboard_renders_attention_and_all_clear() {
+        // Critical concern shows in the attention panel.
+        let dir = tempfile::tempdir().unwrap();
+        let st = node_state("node-a");
+        let mut app = test_app(dir.path(), st);
+        app.node_stats.insert(pk(1), NodeStats { ledgers: vec![health(Some(-288), false, 100, 10, 0)], ..Default::default() });
+        let out = render_to_string(&mut app, 100, 24);
+        assert!(out.contains("needs attention"), "panel title: {out}");
+        assert!(out.contains("quorum expiry") && out.contains("EXPIRED"), "concern row: {out}");
+
+        // Quiet fleet collapses to all-clear.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), node_state("node-a"));
+        let out = render_to_string(&mut app, 100, 24);
+        assert!(out.contains("all clear"), "quiet fleet shows all-clear: {out}");
     }
 
     #[test]

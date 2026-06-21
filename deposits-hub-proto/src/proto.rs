@@ -163,6 +163,40 @@ pub struct BackupPayload {
     pub master_seed: Option<String>,
 }
 
+/// Per-own-ledger health the hub watches to build its "needs attention"
+/// list. One entry per ledger this node operates. Everything here the
+/// daemon already computes for its admin API (`/api/lifecycle`,
+/// reserves, disputes) — this just rides the 30s status push so the hub
+/// can rank deadlines fleet-wide without polling each daemon.
+///
+/// Block-delta fields are `i64` so an already-passed deadline reads as a
+/// negative number (overdue) rather than saturating to zero.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LedgerHealth {
+    /// 16-hex ledger tag (matches the explorer's `d` tag / nostr filter).
+    pub ledger_id: String,
+    /// DEP-05 lifecycle tier: 0 = active (value-moving), rising into the
+    /// post-expiry confiscation cascade (1 = minority … 3 = operator alone).
+    pub tier: u8,
+    /// `quorum_expiry` height from the most recent QuorumBegin, if any.
+    pub quorum_expiry: Option<u32>,
+    /// `quorum_expiry − chain_tip`. Negative once the quorum has lapsed.
+    /// `None` for pre-quorum ledgers (no expiry set yet).
+    pub blocks_to_expiry: Option<i64>,
+    /// Whether value-moving ops can still be cosigned (Tier 0 only).
+    pub value_moving_allowed: bool,
+    /// Count of disputes currently open against this ledger.
+    pub open_disputes: u32,
+    /// Blocks until the soonest dispute response/arm deadline. Negative
+    /// = overdue. `None` when no dispute is open.
+    pub blocks_to_dispute_deadline: Option<i64>,
+    /// On-chain reserves backing this ledger's deposits, in sats.
+    pub reserves_sats: u64,
+    /// Total depositor balance owed on this ledger (the obligation that
+    /// `reserves_sats` must cover), in sats.
+    pub obligations_sats: u64,
+}
+
 /// Per-node counts surfaced in the hub dashboard. Cheap to recompute
 /// (the node already tracks all this for its admin API); pushed every
 /// 30s alongside the heartbeat cadence.
@@ -193,6 +227,11 @@ pub struct NodeStats {
     /// not yet synced) — TUI shows "(awaiting address)" in that case.
     #[serde(default)]
     pub next_address: Option<String>,
+    /// Per-own-ledger health for the hub's "needs attention" list.
+    /// `#[serde(default)]`: daemons predating this field send nothing,
+    /// and the hub falls back to the aggregate counts above.
+    #[serde(default)]
+    pub ledgers: Vec<LedgerHealth>,
 }
 
 /// What the hub asks the peer to do next after a Register. Defaults

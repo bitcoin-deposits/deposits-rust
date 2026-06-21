@@ -146,6 +146,8 @@ pub async fn run(
 fn compute_node_stats(node: &Node) -> NodeStats {
     use deposits_core::messages::LedgerOperation;
     use deposits_core::cosign_threshold::{cosign_requirement, LifecycleTier};
+    use deposits_core::types::DisputeState;
+    use deposits_hub_proto::proto::LedgerHealth;
 
     let chain_tip = node.wallet.get_block_height().unwrap_or(0);
     let wallet_balance_sats = node.wallet_balance().unwrap_or(0);
@@ -155,19 +157,52 @@ fn compute_node_stats(node: &Node) -> NodeStats {
         operator_signature: [0u8; 64],
     };
 
+    // DEP-05 lifecycle tier → flat ordinal for the wire (0 = active …
+    // 4 = operator alone).
+    let tier_ordinal = |t: LifecycleTier| -> u8 {
+        match t {
+            LifecycleTier::Tier0 => 0,
+            LifecycleTier::Tier0PostExpiry => 1,
+            LifecycleTier::Tier1 => 2,
+            LifecycleTier::Tier2 => 3,
+            LifecycleTier::Tier3 => 4,
+        }
+    };
+
     let mut ledger_count = 0u32; // own (operator)
     let mut active_ledger_count = 0u32; // own + Tier 0
     let mut quorum_member_count = 0u32; // partner positions in other ops' ledgers
+    let mut ledgers_health: Vec<LedgerHealth> = Vec::new();
 
     if let Ok(ledgers) = node.handler.ledgers.lock() {
-        for (_id, arc) in ledgers.iter() {
+        for (id, arc) in ledgers.iter() {
             if let Ok(l) = arc.read() {
                 if l.operator_key() == node.node_id {
                     ledger_count += 1;
                     let req = cosign_requirement(&l.state, &probe_op, chain_tip);
-                    if matches!(req.tier, LifecycleTier::Tier0) {
+                    let value_moving = matches!(req.tier, LifecycleTier::Tier0);
+                    if value_moving {
                         active_ledger_count += 1;
                     }
+                    // The dispute response/arm window isn't stored on
+                    // LedgerState as an absolute height, so the precise
+                    // countdown is a follow-up; surface the open-dispute
+                    // signal itself for now.
+                    let disputed = !matches!(l.state.dispute_state, DisputeState::Normal);
+                    ledgers_health.push(LedgerHealth {
+                        ledger_id: id.clone(),
+                        tier: tier_ordinal(req.tier),
+                        quorum_expiry: l.state.quorum_expiry,
+                        blocks_to_expiry: l
+                            .state
+                            .quorum_expiry
+                            .map(|e| e as i64 - chain_tip as i64),
+                        value_moving_allowed: value_moving,
+                        open_disputes: u32::from(disputed),
+                        blocks_to_dispute_deadline: None,
+                        reserves_sats: l.state.reserves_amount,
+                        obligations_sats: l.state.total_deposit_balance(),
+                    });
                 } else {
                     quorum_member_count += 1;
                 }
@@ -188,6 +223,7 @@ fn compute_node_stats(node: &Node) -> NodeStats {
         quorum_member_count,
         chain_tip,
         next_address,
+        ledgers: ledgers_health,
     }
 }
 
