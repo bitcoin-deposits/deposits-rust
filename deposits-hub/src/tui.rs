@@ -26,7 +26,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Tabs, Wrap};
 use ratatui::Terminal;
 use std::collections::HashMap;
 use std::io::Stdout;
@@ -898,7 +898,7 @@ impl App {
             "[j/k] cycle  [Esc/a/q] close"
         } else {
             match self.tab {
-                Tab::Dashboard => "[a] address  [1]ashboard  [2]ending  [3]etup  [Tab] switch  [q] quit",
+                Tab::Dashboard => "[a] address  [1/2/3] tabs  [Tab] switch  [q] quit",
                 Tab::Pending => "[a] approve  [x] reject  [j/k] move  [Tab] switch  [q] quit",
                 Tab::Setup => match self.wizard.stage {
                     WizardStage::PickPeers => "[j/k] move  [space] toggle  [r] refresh  [n] next  [Tab] switch  [q] quit",
@@ -1037,11 +1037,8 @@ impl App {
                 // Lay out 4 per row, numbered, monospace-friendly.
                 // BIP-39 24-word phrase → 6 rows of 4.
                 let words: Vec<&str> = phrase.split_whitespace().collect();
-                for chunk in words.chunks(4) {
-                    let chunk_start = words
-                        .iter()
-                        .position(|w| std::ptr::eq(*w, chunk[0]))
-                        .unwrap_or(0);
+                for (chunk_idx, chunk) in words.chunks(4).enumerate() {
+                    let chunk_start = chunk_idx * 4;
                     let mut spans: Vec<Span> = Vec::new();
                     for (offset, w) in chunk.iter().enumerate() {
                         let idx = chunk_start + offset + 1;
@@ -1119,7 +1116,12 @@ impl App {
             })
             .collect();
         let crumbs = Paragraph::new(Line::from(breadcrumb))
-            .block(Block::default().borders(Borders::ALL).title(" bootstrap "));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .padding(Padding::horizontal(1))
+                    .title(" bootstrap "),
+            );
         f.render_widget(crumbs, chunks[0]);
 
         // Body — per-stage view
@@ -1213,7 +1215,8 @@ impl App {
             }
         }
         let p = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" peers "));
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" peers "));
         f.render_widget(p, area);
     }
 
@@ -1248,7 +1251,8 @@ impl App {
             )),
         ];
         let p = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" drip "));
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" drip "));
         f.render_widget(p, area);
     }
 
@@ -1355,7 +1359,8 @@ impl App {
         )));
 
         let p = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" signer "));
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" signer "));
         f.render_widget(p, area);
     }
 
@@ -1410,7 +1415,8 @@ impl App {
             Style::default().fg(Color::DarkGray),
         )));
         let p = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" ledger "));
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" ledger "));
         f.render_widget(p, area);
     }
 
@@ -1441,7 +1447,8 @@ impl App {
             )),
         ];
         let p = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" fund "));
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" fund "));
         f.render_widget(p, area);
     }
 
@@ -1482,7 +1489,8 @@ impl App {
             Style::default().fg(Color::DarkGray),
         )));
         let p = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" quorum "));
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" quorum "));
         f.render_widget(p, area);
     }
 
@@ -1509,8 +1517,12 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(Span::styled(
+                "  deposits-node liquidity drip-create <alias> <ledger> \\",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
                 format!(
-                    "  deposits-node liquidity drip-create <alias> <ledger> \\\n      --initial-sats <N> --decrement-sats {} --interval-sec {} --interval-fuzz-sec {}",
+                    "      --initial-sats <N> --decrement-sats {} --interval-sec {} --interval-fuzz-sec {}",
                     self.wizard.drip_decrement_sats,
                     self.wizard.drip_interval_sec,
                     self.wizard.drip_fuzz_sec,
@@ -1519,7 +1531,8 @@ impl App {
             )),
         ];
         let p = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" done "));
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" done "));
         f.render_widget(p, area);
     }
 
@@ -1598,7 +1611,7 @@ impl App {
                             format!(" (active={})", s.active_ledger_count)
                         };
                         format!(
-                            "wallet={:.4}BTC  ledgers={}{}  quorums={}  tip={}",
+                            "wallet={:.4} BTC  ledgers={}{}  quorums={}  tip={}",
                             (s.wallet_balance_sats as f64) / 100_000_000.0,
                             s.ledger_count,
                             active_note,
@@ -1625,7 +1638,7 @@ impl App {
         // the new shorter "Nodes (0)" line.)
         f.render_widget(Clear, area);
         let p = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" inventory "));
+            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" inventory "));
         f.render_widget(p, area);
     }
 
@@ -1636,7 +1649,7 @@ impl App {
         if entries.is_empty() {
             f.render_widget(Clear, area);
             let p = Paragraph::new("(no pending registrations — peers waiting for approval show up here)")
-                .block(Block::default().borders(Borders::ALL).title(" pending "));
+                .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" pending "));
             f.render_widget(p, area);
             self.pending_cursor.select(None);
             return;
@@ -1673,7 +1686,7 @@ impl App {
             .collect();
         f.render_widget(Clear, area);
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" pending "))
+            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" pending "))
             .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
             .highlight_symbol("> ");
         f.render_stateful_widget(list, area, &mut self.pending_cursor);
@@ -2045,6 +2058,21 @@ mod tests {
         let out = render_to_string(&mut app, 80, 24);
         assert!(out.contains("deposits-hub"), "header chrome present");
         assert!(out.contains("Dashboard"), "tab strip present");
+    }
+
+    #[test]
+    fn dashboard_hint_uses_valid_shortcut_copy() {
+        // Regression: the status-line hint once read "[1]ashboard
+        // [2]ending [3]etup" — the [key]word form only works when the
+        // key is the word's leading letter, so numbered tabs rendered as
+        // nonsense ("1ashboard"). They must use the [1/2/3] form instead.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), HubState::default());
+        let out = render_to_string(&mut app, 100, 24);
+        assert!(out.contains("[1/2/3]"), "tab jump hint present: {out}");
+        for bad in ["]ashboard", "]ending", "]etup"] {
+            assert!(!out.contains(bad), "leftover [N]word hint {bad:?}: {out}");
+        }
     }
 
     #[test]
