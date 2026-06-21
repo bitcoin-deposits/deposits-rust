@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! deposits-hub TUI
-//! ├── Dashboard  [1]              approved signers + nodes, heartbeats
+//! ├── Dashboard  [1]              needs-attention panel + signers/nodes
+//! │   ├── needs attention         per-ledger concerns, worst deadline first
 //! │   └── address overlay  [a]    funding-address QR; j/k cycle, Esc close
 //! ├── Pending    [2]              parked Register requests
 //! │       approve [a/Enter] · reject [x] · move [j/k]
