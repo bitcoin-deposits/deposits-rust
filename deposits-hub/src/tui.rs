@@ -6,6 +6,8 @@
 //! deposits-hub TUI
 //! ├── Dashboard  [1]              needs-attention panel + signers/nodes
 //! │   ├── needs attention         per-ledger concerns, worst deadline first
+//! │   ├── node details  [Enter]   per-node ledgers/liabilities/quorum +
+//! │   │                           "serving on" partner quorums; j/k node, Esc back
 //! │   └── address overlay  [a]    funding-address QR; j/k cycle, Esc close
 //! ├── Pending    [2]              parked Register requests
 //! │       approve [a/Enter] · reject [x] · move [j/k]
@@ -249,6 +251,12 @@ pub struct App {
     /// Relays the hub was launched with — passed to the Spawner so the
     /// spawned signer knows where to find the hub.
     hub_relays: Vec<String>,
+    /// Cursor into the label-sorted node list on the Dashboard (which
+    /// node a `[Enter]` drills into).
+    dashboard_cursor: usize,
+    /// When `Some(pubkey)`, the Dashboard body is replaced by the
+    /// node-details pane for that node. Esc returns to the inventory.
+    details_node: Option<String>,
 }
 
 /// Severity of a standing operator concern, worst first.
@@ -341,6 +349,8 @@ impl App {
             wizard_network: "regtest".into(),
             spawned_signers: Vec::new(),
             hub_relays,
+            dashboard_cursor: 0,
+            details_node: None,
         }
     }
 
@@ -478,6 +488,26 @@ impl App {
             return false;
         }
 
+        // Node-details pane swallows its own keys: Esc/Left/h/b returns
+        // to the inventory; j/k drill into the prev/next node's details
+        // so the operator can scan the fleet without backing out.
+        if self.details_node.is_some() {
+            match (k.code, k.modifiers) {
+                (KeyCode::Char('q'), _) => return true,
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => return true,
+                (KeyCode::Esc, _)
+                | (KeyCode::Left, _)
+                | (KeyCode::Char('h'), _)
+                | (KeyCode::Char('b'), _) => {
+                    self.details_node = None;
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), _) => self.details_step(1).await,
+                (KeyCode::Up, _) | (KeyCode::Char('k'), _) => self.details_step(-1).await,
+                _ => {}
+            }
+            return false;
+        }
+
         match (k.code, k.modifiers) {
             (KeyCode::Char('q'), _) => return true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
@@ -499,6 +529,15 @@ impl App {
                 } else {
                     self.flash("no nodes to show addresses for".to_string());
                 }
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('j'), _) if self.tab == Tab::Dashboard => {
+                self.dashboard_step(1).await;
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), _) if self.tab == Tab::Dashboard => {
+                self.dashboard_step(-1).await;
+            }
+            (KeyCode::Enter, _) if self.tab == Tab::Dashboard => {
+                self.open_details().await;
             }
             (KeyCode::Down, _) | (KeyCode::Char('j'), _) if self.tab == Tab::Pending => {
                 self.cursor_step(1).await;
@@ -924,7 +963,10 @@ impl App {
         };
         match snapshot.as_ref() {
             Some(st) => match self.tab {
-                Tab::Dashboard => self.render_dashboard(st, chunks[1], f),
+                Tab::Dashboard => match &self.details_node {
+                    Some(pk) => self.render_node_details(st, pk, chunks[1], f),
+                    None => self.render_dashboard(st, chunks[1], f),
+                },
                 Tab::Pending => self.render_pending(st, chunks[1], f),
                 Tab::Setup => self.render_setup(st, chunks[1], f),
             },
@@ -954,9 +996,11 @@ impl App {
             "[Enter] I've written these down  [q] quit"
         } else if self.address_view_idx.is_some() {
             "[j/k] cycle  [Esc/a/q] close"
+        } else if self.details_node.is_some() {
+            "[j/k] node  [Esc] back  [q] quit"
         } else {
             match self.tab {
-                Tab::Dashboard => "[a] address  [1/2/3] tabs  [Tab] switch  [q] quit",
+                Tab::Dashboard => "[j/k] select  [Enter] details  [a] address  [1/2/3] tabs  [q] quit",
                 Tab::Pending => "[a] approve  [x] reject  [j/k] move  [Tab] switch  [q] quit",
                 Tab::Setup => match self.wizard.stage {
                     WizardStage::PickPeers => "[j/k] move  [space] toggle  [r] refresh  [n] next  [Tab] switch  [q] quit",
@@ -1595,6 +1639,42 @@ impl App {
         f.render_widget(p, area);
     }
 
+    /// Node pubkeys in the same label-sorted order the Dashboard renders,
+    /// so `dashboard_cursor` indexes consistently.
+    async fn sorted_node_pks(&self) -> Vec<String> {
+        let st = self.state.lock().await;
+        let mut v: Vec<_> = st.nodes.iter().collect();
+        v.sort_by(|a, b| a.1.label.cmp(&b.1.label));
+        v.into_iter().map(|(k, _)| k.clone()).collect()
+    }
+
+    /// Move the Dashboard node cursor, wrapping. No-op with no nodes.
+    async fn dashboard_step(&mut self, delta: i32) {
+        let n = self.state.lock().await.nodes.len();
+        if n == 0 {
+            self.dashboard_cursor = 0;
+            return;
+        }
+        let cur = self.dashboard_cursor.min(n - 1) as i32;
+        self.dashboard_cursor = (cur + delta).rem_euclid(n as i32) as usize;
+    }
+
+    /// Drill into the node at the cursor.
+    async fn open_details(&mut self) {
+        let pks = self.sorted_node_pks().await;
+        match pks.get(self.dashboard_cursor) {
+            Some(pk) => self.details_node = Some(pk.clone()),
+            None => self.flash("no node to show details for".to_string()),
+        }
+    }
+
+    /// While in the details pane, step to the prev/next node's details.
+    async fn details_step(&mut self, delta: i32) {
+        self.dashboard_step(delta).await;
+        let pks = self.sorted_node_pks().await;
+        self.details_node = pks.get(self.dashboard_cursor).cloned();
+    }
+
     /// Derive the standing concerns across the fleet from the latest
     /// per-node status push + heartbeat ages. Sorted worst-severity
     /// first, then soonest block deadline, so the top row is always the
@@ -1823,7 +1903,9 @@ impl App {
         } else {
             let mut entries: Vec<_> = st.nodes.iter().collect();
             entries.sort_by(|a, b| a.1.label.cmp(&b.1.label));
-            for (pk, rec) in entries {
+            let cursor = self.dashboard_cursor.min(entries.len().saturating_sub(1));
+            for (i, (pk, rec)) in entries.into_iter().enumerate() {
+                let marker = if i == cursor { "> " } else { "  " };
                 let hb = self
                     .last_heartbeat
                     .get(pk)
@@ -1865,7 +1947,8 @@ impl App {
                     })
                     .unwrap_or_else(|| "(awaiting status)".to_string());
                 lines.push(Line::from(format!(
-                    "  {:<10} {}  v{}  signer={}  {}",
+                    "{}{:<10} {}  v{}  signer={}  {}",
+                    marker,
                     rec.label,
                     short_pk(pk),
                     rec.last_version,
@@ -1884,6 +1967,156 @@ impl App {
         let p = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" inventory "));
         f.render_widget(p, body);
+    }
+
+    /// Drill-in pane for one node: identity + wallet, each own ledger
+    /// (length, deposits, liabilities, reserves, quorum + members), and a
+    /// "serving on" section for the partner quorums it co-signs. All
+    /// read-only, from the latest status push.
+    fn render_node_details(
+        &self,
+        st: &HubState,
+        pk: &str,
+        area: Rect,
+        f: &mut ratatui::Frame,
+    ) {
+        let muted = Style::default().fg(Color::DarkGray);
+        let head = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+        let accent = Style::default().fg(Color::Cyan);
+        let label = st.nodes.get(pk).map(|r| r.label.clone()).unwrap_or_else(|| short_pk(pk));
+        let stats = self.node_stats.get(pk);
+
+        // Compact "expires in / EXPIRED" rendering shared by both sections.
+        let expiry_str = |bte: Option<i64>, exp: Option<u32>| -> String {
+            match (bte, exp) {
+                (Some(b), Some(e)) if b < 0 => format!("EXPIRED {} ago (@{})", blocks_eta(-b), e),
+                (Some(b), Some(e)) => format!("expires in {} (@{})", blocks_eta(b), e),
+                _ => "pre-quorum".to_string(),
+            }
+        };
+        let members_line = |members: &[crate::proto::QuorumMemberInfo]| -> String {
+            if members.is_empty() {
+                "—".to_string()
+            } else {
+                members
+                    .iter()
+                    .map(|m| short_pk(&m.pubkey))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        };
+
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(vec![
+            Span::styled(format!("{}  ", label), head),
+            Span::styled(short_pk(pk), muted),
+        ]));
+        match stats {
+            None => {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "(awaiting status from this node)",
+                    muted,
+                )));
+            }
+            Some(s) => {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "wallet {}   tip {}   own {}   serving {}",
+                        sats_human(s.wallet_balance_sats),
+                        s.chain_tip,
+                        s.ledgers.len(),
+                        s.serving.len()
+                    ),
+                    accent,
+                )));
+                lines.push(Line::from(""));
+
+                // ── own ledgers ──
+                lines.push(Line::from(Span::styled(
+                    format!("own ledgers ({})", s.ledgers.len()),
+                    head,
+                )));
+                if s.ledgers.is_empty() {
+                    lines.push(Line::from(Span::styled("  (none)", muted)));
+                }
+                for lh in &s.ledgers {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("  {} ", short_tag(&lh.ledger_id)), accent),
+                        Span::styled(
+                            format!("tier {}{}", lh.tier, if lh.value_moving_allowed { "" } else { " ⚠" }),
+                            if lh.value_moving_allowed { muted } else { Style::default().fg(Color::Yellow) },
+                        ),
+                    ]));
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "      len {}  ·  {} deposits  ·  liab {}  ·  reserves {}",
+                            lh.sequence,
+                            lh.deposit_count,
+                            sats_human(lh.obligations_sats),
+                            sats_human(lh.reserves_sats),
+                        ),
+                        Style::default().fg(Color::Gray),
+                    )));
+                    lines.push(Line::from(Span::styled(
+                        format!("      quorum Q={}  ·  {}", lh.members.len(), expiry_str(lh.blocks_to_expiry, lh.quorum_expiry)),
+                        Style::default().fg(Color::Gray),
+                    )));
+                    lines.push(Line::from(Span::styled(
+                        format!("      members: {}", members_line(&lh.members)),
+                        muted,
+                    )));
+                }
+                lines.push(Line::from(""));
+
+                // ── serving on (partner quorums) ──
+                lines.push(Line::from(Span::styled(
+                    format!("serving on ({})", s.serving.len()),
+                    head,
+                )));
+                if s.serving.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "  (not a quorum member of any other operator's ledger)",
+                        muted,
+                    )));
+                }
+                for sv in &s.serving {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("  {} ", short_tag(&sv.ledger_id)), accent),
+                        Span::styled(format!("op {}  ", short_pk(&sv.operator)), muted),
+                        Span::styled(
+                            format!("tier {}", sv.tier),
+                            Style::default().fg(Color::Gray),
+                        ),
+                    ]));
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "      {} deposits  ·  liab {}  ·  reserves {}  ·  {}",
+                            sv.deposit_count,
+                            sats_human(sv.obligations_sats),
+                            sats_human(sv.reserves_sats),
+                            expiry_str(sv.blocks_to_expiry, sv.quorum_expiry),
+                        ),
+                        Style::default().fg(Color::Gray),
+                    )));
+                    lines.push(Line::from(Span::styled(
+                        format!("      members: {}", members_line(&sv.members)),
+                        muted,
+                    )));
+                }
+            }
+        }
+
+        f.render_widget(Clear, area);
+        let p = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .padding(Padding::horizontal(1))
+                    .title(format!(" node details · {} ", label)),
+            );
+        f.render_widget(p, area);
     }
 
     fn render_pending(&mut self, st: &HubState, area: Rect, f: &mut ratatui::Frame) {
@@ -2073,7 +2306,7 @@ mod tests {
 
     use super::*;
     use crate::peers::PeerInfo;
-    use crate::proto::LedgerHealth;
+    use crate::proto::{LedgerHealth, QuorumMemberInfo, ServingLedger};
     use crate::state::NodeRecord;
     use ratatui::backend::TestBackend;
     use std::path::Path;
@@ -2104,6 +2337,8 @@ mod tests {
             wizard_network: "regtest".into(),
             spawned_signers: Vec::new(),
             hub_relays: Vec::new(),
+            dashboard_cursor: 0,
+            details_node: None,
         }
     }
 
@@ -2427,6 +2662,12 @@ mod tests {
             blocks_to_dispute_deadline: None,
             reserves_sats: reserves,
             obligations_sats: obligations,
+            sequence: 412,
+            deposit_count: 12,
+            members: vec![QuorumMemberInfo {
+                pubkey: "11".repeat(33),
+                ledger_id: "cc".repeat(8),
+            }],
         }
     }
 
@@ -2524,6 +2765,81 @@ mod tests {
         let mut app = test_app(dir.path(), node_state("node-a"));
         let out = render_to_string(&mut app, 100, 24);
         assert!(out.contains("all clear"), "quiet fleet shows all-clear: {out}");
+    }
+
+    // ── node details pane ─────────────────────────────────────────────
+
+    fn serving_ledger() -> ServingLedger {
+        ServingLedger {
+            ledger_id: "cd".repeat(32),
+            operator: "ef".repeat(33),
+            tier: 0,
+            quorum_expiry: Some(2000),
+            blocks_to_expiry: Some(1500),
+            deposit_count: 7,
+            obligations_sats: 250_000_000,
+            reserves_sats: 100_000_000,
+            members: vec![QuorumMemberInfo { pubkey: "22".repeat(33), ledger_id: "dd".repeat(8) }],
+        }
+    }
+
+    #[tokio::test]
+    async fn enter_opens_details_and_esc_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(dir.path(), node_state("node-a"));
+        app.tab = Tab::Dashboard;
+        assert!(app.details_node.is_none());
+        app.handle_key(code(KeyCode::Enter)).await;
+        assert_eq!(app.details_node.as_deref(), Some(pk(1).as_str()), "Enter drills in");
+        app.handle_key(code(KeyCode::Esc)).await;
+        assert!(app.details_node.is_none(), "Esc returns to inventory");
+    }
+
+    #[tokio::test]
+    async fn dashboard_jk_moves_node_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = node_state("node-a");
+        st.nodes.insert(
+            pk(2),
+            NodeRecord {
+                label: "node-b".into(),
+                spawned_by_hub: false,
+                registered_at: 0,
+                last_version: "1.0".into(),
+                signer_pubkey: None,
+            },
+        );
+        let mut app = test_app(dir.path(), st);
+        app.tab = Tab::Dashboard;
+        assert_eq!(app.dashboard_cursor, 0);
+        app.handle_key(key('j')).await;
+        assert_eq!(app.dashboard_cursor, 1);
+        app.handle_key(key('j')).await; // wraps over 2 nodes
+        assert_eq!(app.dashboard_cursor, 0);
+    }
+
+    #[test]
+    fn details_pane_renders_own_and_serving() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = node_state("node-a");
+        let mut app = test_app(dir.path(), st);
+        app.node_stats.insert(
+            pk(1),
+            NodeStats {
+                wallet_balance_sats: 5_000_000,
+                ledger_count: 1,
+                serving: vec![serving_ledger()],
+                ledgers: vec![health(Some(900), true, 100_000_000, 40_000_000, 0)],
+                ..Default::default()
+            },
+        );
+        app.details_node = Some(pk(1));
+        let out = render_to_string(&mut app, 100, 30);
+        assert!(out.contains("node details"), "title: {out}");
+        assert!(out.contains("own ledgers (1)"), "own section: {out}");
+        assert!(out.contains("len 412") && out.contains("12 deposits"), "ledger metrics: {out}");
+        assert!(out.contains("serving on (1)"), "serving section: {out}");
+        assert!(out.contains("members:"), "members listed: {out}");
     }
 
     #[test]

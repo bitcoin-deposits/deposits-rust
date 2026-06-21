@@ -163,11 +163,21 @@ pub struct BackupPayload {
     pub master_seed: Option<String>,
 }
 
+/// One quorum member, for the node-details pane. `pubkey` is the
+/// member's signing key (hex); `ledger_id` is the ledger where that
+/// member locks its collateral.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct QuorumMemberInfo {
+    pub pubkey: String,
+    pub ledger_id: String,
+}
+
 /// Per-own-ledger health the hub watches to build its "needs attention"
-/// list. One entry per ledger this node operates. Everything here the
-/// daemon already computes for its admin API (`/api/lifecycle`,
-/// reserves, disputes) — this just rides the 30s status push so the hub
-/// can rank deadlines fleet-wide without polling each daemon.
+/// list and node-details pane. One entry per ledger this node operates.
+/// Everything here the daemon already computes for its admin API
+/// (`/api/lifecycle`, reserves, disputes) — this just rides the 30s
+/// status push so the hub can rank deadlines and show detail fleet-wide
+/// without polling each daemon.
 ///
 /// Block-delta fields are `i64` so an already-passed deadline reads as a
 /// negative number (overdue) rather than saturating to zero.
@@ -195,6 +205,37 @@ pub struct LedgerHealth {
     /// Total depositor balance owed on this ledger (the obligation that
     /// `reserves_sats` must cover), in sats.
     pub obligations_sats: u64,
+    /// Ledger length — sequence number of the latest committed update.
+    #[serde(default)]
+    pub sequence: u64,
+    /// Number of open deposits on this ledger.
+    #[serde(default)]
+    pub deposit_count: u32,
+    /// Quorum members (for the details pane). Empty pre-quorum.
+    #[serde(default)]
+    pub members: Vec<QuorumMemberInfo>,
+}
+
+/// A ledger this node is a *partner* quorum member of (someone else's
+/// operator ledger), for the "serving on" section of node details. We
+/// witness/cosign for it but don't operate it, so its liabilities are
+/// the operator's — surfaced read-only so the operator can see what
+/// they're on the hook to co-sign for.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ServingLedger {
+    /// 16-hex ledger tag.
+    pub ledger_id: String,
+    /// The operator of this ledger (pubkey hex).
+    pub operator: String,
+    /// DEP-05 lifecycle tier of the ledger.
+    pub tier: u8,
+    pub quorum_expiry: Option<u32>,
+    pub blocks_to_expiry: Option<i64>,
+    pub deposit_count: u32,
+    pub obligations_sats: u64,
+    pub reserves_sats: u64,
+    /// The full quorum, including this node.
+    pub members: Vec<QuorumMemberInfo>,
 }
 
 /// Per-node counts surfaced in the hub dashboard. Cheap to recompute
@@ -232,6 +273,10 @@ pub struct NodeStats {
     /// and the hub falls back to the aggregate counts above.
     #[serde(default)]
     pub ledgers: Vec<LedgerHealth>,
+    /// Partner ledgers this node co-signs for ("serving on" in the
+    /// node-details pane). `#[serde(default)]` for the same compat reason.
+    #[serde(default)]
+    pub serving: Vec<ServingLedger>,
 }
 
 /// What the hub asks the peer to do next after a Register. Defaults

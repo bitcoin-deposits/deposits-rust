@@ -147,7 +147,7 @@ fn compute_node_stats(node: &Node) -> NodeStats {
     use deposits_core::messages::LedgerOperation;
     use deposits_core::cosign_threshold::{cosign_requirement, LifecycleTier};
     use deposits_core::types::DisputeState;
-    use deposits_hub_proto::proto::LedgerHealth;
+    use deposits_hub_proto::proto::{LedgerHealth, QuorumMemberInfo, ServingLedger};
 
     let chain_tip = node.wallet.get_block_height().unwrap_or(0);
     let wallet_balance_sats = node.wallet_balance().unwrap_or(0);
@@ -169,17 +169,31 @@ fn compute_node_stats(node: &Node) -> NodeStats {
         }
     };
 
+    // Quorum members of a ledger as wire-friendly {pubkey, ledger_id}.
+    let members_of = |state: &deposits_core::types::LedgerState| -> Vec<QuorumMemberInfo> {
+        state
+            .quorum_members
+            .iter()
+            .map(|m| QuorumMemberInfo {
+                pubkey: m.pubkey.to_string(),
+                ledger_id: m.ledger_id.clone(),
+            })
+            .collect()
+    };
+    let blocks_to = |expiry: Option<u32>| expiry.map(|e| e as i64 - chain_tip as i64);
+
     let mut ledger_count = 0u32; // own (operator)
     let mut active_ledger_count = 0u32; // own + Tier 0
     let mut quorum_member_count = 0u32; // partner positions in other ops' ledgers
     let mut ledgers_health: Vec<LedgerHealth> = Vec::new();
+    let mut serving: Vec<ServingLedger> = Vec::new();
 
     if let Ok(ledgers) = node.handler.ledgers.lock() {
         for (id, arc) in ledgers.iter() {
             if let Ok(l) = arc.read() {
+                let req = cosign_requirement(&l.state, &probe_op, chain_tip);
                 if l.operator_key() == node.node_id {
                     ledger_count += 1;
-                    let req = cosign_requirement(&l.state, &probe_op, chain_tip);
                     let value_moving = matches!(req.tier, LifecycleTier::Tier0);
                     if value_moving {
                         active_ledger_count += 1;
@@ -193,18 +207,29 @@ fn compute_node_stats(node: &Node) -> NodeStats {
                         ledger_id: id.clone(),
                         tier: tier_ordinal(req.tier),
                         quorum_expiry: l.state.quorum_expiry,
-                        blocks_to_expiry: l
-                            .state
-                            .quorum_expiry
-                            .map(|e| e as i64 - chain_tip as i64),
+                        blocks_to_expiry: blocks_to(l.state.quorum_expiry),
                         value_moving_allowed: value_moving,
                         open_disputes: u32::from(disputed),
                         blocks_to_dispute_deadline: None,
                         reserves_sats: l.state.reserves_amount,
                         obligations_sats: l.state.total_deposit_balance(),
+                        sequence: l.sequence(),
+                        deposit_count: l.state.deposits.len() as u32,
+                        members: members_of(&l.state),
                     });
                 } else {
                     quorum_member_count += 1;
+                    serving.push(ServingLedger {
+                        ledger_id: id.clone(),
+                        operator: l.operator_key().to_string(),
+                        tier: tier_ordinal(req.tier),
+                        quorum_expiry: l.state.quorum_expiry,
+                        blocks_to_expiry: blocks_to(l.state.quorum_expiry),
+                        deposit_count: l.state.deposits.len() as u32,
+                        obligations_sats: l.state.total_deposit_balance(),
+                        reserves_sats: l.state.reserves_amount,
+                        members: members_of(&l.state),
+                    });
                 }
             }
         }
@@ -224,6 +249,7 @@ fn compute_node_stats(node: &Node) -> NodeStats {
         chain_tip,
         next_address,
         ledgers: ledgers_health,
+        serving,
     }
 }
 
