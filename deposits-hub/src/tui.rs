@@ -1,6 +1,27 @@
 //! TUI shell for the operator.
 //!
-//! Two tabs today:
+//! Screen map (Tab cycles tabs; 1/2/3 jump directly):
+//!
+//! ```text
+//! deposits-hub TUI
+//! ├── Dashboard  [1]              approved signers + nodes, heartbeats
+//! │   └── address overlay  [a]    funding-address QR; j/k cycle, Esc close
+//! ├── Pending    [2]              parked Register requests
+//! │       approve [a/Enter] · reject [x] · move [j/k]
+//! └── Setup      [3]              bootstrap wizard  (next [n] / prev [p])
+//!     ├── 1. peers       pick cosigners; [r] refresh, [space] toggle
+//!     ├── 2. drip        liquidity-drip tuning
+//!     ├── 3. signer      spawn locally [s] or copy the docker line
+//!     ├── 4. ledger      open via admin RPC [o]
+//!     ├── 5. fund        funding QR (via the Dashboard address overlay)
+//!     ├── 6. quorum      quorum add + begin
+//!     └── ✓ done         summary
+//!
+//! first launch: a mnemonic overlay gates every screen until the
+//!               operator acknowledges the hub seed with [Enter]
+//! ```
+//!
+//! Behavior notes:
 //!
 //!   * **Dashboard** — approved signers + nodes, with last-heartbeat age
 //!     (live-updated from the nostr inbox).
@@ -9,6 +30,8 @@
 //!     from `state.pending` into `state.signers` / `state.nodes`;
 //!     rejection sends a `RegisterAck { next_action: Shutdown }` so the
 //!     peer stops trying.
+//!   * **Setup**     — the bootstrap wizard. Stage is persisted to
+//!     `wizard.json` so the operator can pause and resume across runs.
 //!
 //! All mutations go through `state.save()` — the JSON inventory on disk
 //! is the source of truth across restarts.
