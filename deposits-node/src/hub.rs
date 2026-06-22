@@ -244,6 +244,22 @@ fn compute_node_stats(node: &Node) -> NodeStats {
         .ok()
         .map(|a| a.to_string());
 
+    // Probe the Lightning backend (cheap get_node_info). Err = the LN node
+    // is unreachable, so we can't mint/pay invoices — complain loudly and
+    // ship the error to the hub, which surfaces it as a critical concern.
+    // catch_unwind guards the lnd/cln from_env() panic-on-misconfig path so
+    // a bad LN setup can't take down the status pump.
+    let ln_error: Option<String> = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || crate::lightning_backend::from_env().get_node_info(),
+    )) {
+        Ok(Ok(_)) => None,
+        Ok(Err(e)) => Some(e.to_string()),
+        Err(_) => Some("lightning backend init panicked (check LIGHTNING_BACKEND config)".into()),
+    };
+    if let Some(ref e) = ln_error {
+        tracing::warn!("lightning backend unreachable — invoices will fail: {}", e);
+    }
+
     NodeStats {
         wallet_balance_sats,
         ledger_count,
@@ -253,6 +269,7 @@ fn compute_node_stats(node: &Node) -> NodeStats {
         next_address,
         ledgers: ledgers_health,
         serving,
+        ln_error,
     }
 }
 

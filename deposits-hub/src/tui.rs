@@ -1687,6 +1687,17 @@ impl App {
                 .get(pk)
                 .map(|r| r.label.clone())
                 .unwrap_or_else(|| short_pk(pk));
+            // Lightning backend unreachable — node can't mint/pay invoices.
+            if let Some(err) = &stats.ln_error {
+                out.push(Concern {
+                    severity: Severity::Critical,
+                    kind: "lightning offline",
+                    node: node.clone(),
+                    scope: String::new(),
+                    detail: err.lines().next().unwrap_or("unreachable").to_string(),
+                    blocks_left: None,
+                });
+            }
             for lh in &stats.ledgers {
                 let scope = short_tag(&lh.ledger_id);
                 // Quorum expiry / post-expiry cascade.
@@ -2030,6 +2041,14 @@ impl App {
                     ),
                     accent,
                 )));
+                // Lightning backend health.
+                match &s.ln_error {
+                    None => lines.push(Line::from(Span::styled("lightning: OK", muted))),
+                    Some(err) => lines.push(Line::from(Span::styled(
+                        format!("lightning: OFFLINE — {}", err.lines().next().unwrap_or("unreachable")),
+                        Style::default().fg(Color::Red),
+                    ))),
+                }
                 lines.push(Line::from(""));
 
                 // ── own ledgers ──
@@ -2865,6 +2884,29 @@ mod tests {
         assert!(out.contains("serving on (1)"), "serving section: {out}");
         assert!(out.contains("members:"), "members listed: {out}");
         assert!(out.contains("began @100") && out.contains("duration"), "quorum begin + duration: {out}");
+    }
+
+    #[test]
+    fn lightning_offline_raises_critical_concern() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = node_state("node-a");
+        let mut app = test_app(dir.path(), st.clone());
+        app.node_stats.insert(
+            pk(1),
+            NodeStats {
+                ln_error: Some("Container d62a7753 is restarting".into()),
+                ..Default::default()
+            },
+        );
+        let c = app.collect_concerns(&st, 0);
+        let ln = c.iter().find(|x| x.kind == "lightning offline");
+        assert!(ln.is_some(), "LN offline must be surfaced: {:?}",
+            c.iter().map(|x| x.kind).collect::<Vec<_>>());
+        assert_eq!(ln.unwrap().severity, Severity::Critical);
+        // Healthy LN (ln_error None) raises nothing.
+        let mut app2 = test_app(dir.path(), st.clone());
+        app2.node_stats.insert(pk(1), NodeStats { ln_error: None, ..Default::default() });
+        assert!(app2.collect_concerns(&st, 0).iter().all(|x| x.kind != "lightning offline"));
     }
 
     #[test]

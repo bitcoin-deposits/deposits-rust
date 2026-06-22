@@ -287,6 +287,13 @@ pub struct NodeStats {
     /// node-details pane). `#[serde(default)]` for the same compat reason.
     #[serde(default)]
     pub serving: Vec<ServingLedger>,
+    /// `None` when the node reached its Lightning backend at the last
+    /// status push; `Some(error)` when the probe failed — the daemon
+    /// can't mint/pay invoices. The hub raises this as a critical
+    /// concern. `#[serde(default)]` → old daemons report `None` (no
+    /// false alarm).
+    #[serde(default)]
+    pub ln_error: Option<String>,
 }
 
 /// What the hub asks the peer to do next after a Register. Defaults
