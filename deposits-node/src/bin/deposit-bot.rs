@@ -7,9 +7,16 @@
 //! up out of band (faucet / `deposits-wallet send`) and it resumes.
 //!
 //! Behavior (v1): `forward` — whenever the bot's balance rises above a floor,
-//! it forwards (balance − reserve) to a random peer on its ledger. It's
-//! self-clocked: balance only grows when someone pays it, so paying-onward is
-//! effectively pay-on-receive. More behaviors slot in behind `--behavior`.
+//! it forwards (balance − reserve) to a random peer. It's self-clocked:
+//! balance only grows when someone pays it, so paying-onward is effectively
+//! pay-on-receive. More behaviors slot in behind `--behavior`.
+//!
+//! The rail is chosen per peer:
+//!   * same ledger     → `transfer_lock` + `transfer_complete`
+//!   * different ledger → Lightning: mint the peer's invoice on its ledger
+//!     (`make_invoice`), then `pay_invoice` from our deposit.
+//!   * (multi-ledger via a PTLC courier is a future rail — not wired, since
+//!     nothing is running a courier here.)
 //!
 //! How a bot works, decentrally:
 //!   * It loads ONE deposit (its keypair + deposit_id + ledger) from a wallet
@@ -244,13 +251,22 @@ fn resolve_seed(cfg: &Config) -> Result<[u8; 32], String> {
 
 // ─── deposit identity ────────────────────────────────────────────────────
 
+/// A payable peer. Same-ledger peers get paid by transfer; different-ledger
+/// peers get paid over Lightning (mint their invoice, pay it from us).
+#[derive(Clone)]
+struct Peer {
+    deposit_id: DepositId,
+    ledger_id: String,
+}
+
 struct Identity {
     ledger_id: String,
     deposit_id: DepositId,
+    descriptor: String,
     keypair: Keypair,
-    /// Other deposits on the same ledger (auto-discovered from deposits.json),
-    /// plus any `--peer`s. Recipients for the forward behavior.
-    peers: Vec<DepositId>,
+    /// Every other deposit in deposits.json (any ledger) + any `--peer`s.
+    /// Recipients for the forward behavior; the rail is chosen per peer.
+    peers: Vec<Peer>,
 }
 
 fn derive_secret_key_at_index(
@@ -300,28 +316,28 @@ fn load_identity(cfg: &Config, seed: &[u8; 32]) -> Result<Identity, String> {
     let descriptor = format!("pk({})", hex::encode(keypair.public_key().serialize()));
     let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
 
-    // Second pass: peers = every other deposit on the same ledger.
-    let mut peers: Vec<DepositId> = Vec::new();
+    // Second pass: peers = every other deposit in the wallet, on ANY ledger.
+    // Same-ledger peers get paid by transfer; cross-ledger ones over Lightning.
+    let mut peers: Vec<Peer> = Vec::new();
     for d in &entries {
-        if d.get("ledger_id").and_then(|v| v.as_str()) != Some(ledger_id.as_str()) {
-            continue;
-        }
+        let Some(pledger) = d.get("ledger_id").and_then(|v| v.as_str()) else { continue };
         let idx = d.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let Ok(psk) = derive_secret_key_at_index(seed, cfg.network, idx) else { continue };
         let pkp = Keypair::from_secret_key(&secp, &psk);
         let pdesc = format!("pk({})", hex::encode(pkp.public_key().serialize()));
         let pid = deposits_core::types::compute_deposit_id(&pdesc);
-        if pid != deposit_id && !peers.contains(&pid) {
-            peers.push(pid);
+        if pid != deposit_id && !peers.iter().any(|p| p.deposit_id == pid) {
+            peers.push(Peer { deposit_id: pid, ledger_id: pledger.to_string() });
         }
     }
+    // --peer entries are assumed to be on our own ledger (transfer rail).
     for p in &cfg.extra_peers {
-        if *p != deposit_id && !peers.contains(p) {
-            peers.push(*p);
+        if *p != deposit_id && !peers.iter().any(|x| x.deposit_id == *p) {
+            peers.push(Peer { deposit_id: *p, ledger_id: ledger_id.clone() });
         }
     }
 
-    Ok(Identity { ledger_id, deposit_id, keypair, peers })
+    Ok(Identity { ledger_id, deposit_id, descriptor, keypair, peers })
 }
 
 // ─── transport ───────────────────────────────────────────────────────────
@@ -338,8 +354,9 @@ struct Bot {
     client: Client,
     ledger_id: String,
     deposit_id: DepositId,
+    descriptor: String,
     keypair: Keypair,
-    peers: Vec<DepositId>,
+    peers: Vec<Peer>,
     /// Local balance estimate (msats). Credited from observed `#i` updates,
     /// debited optimistically when we send (refunded if the lock fails).
     balance: AtomicI64,
@@ -350,10 +367,10 @@ struct Bot {
 }
 
 impl Bot {
-    async fn send_request(&self, action: &str, params: serde_json::Value) -> Result<ResponseData, String> {
+    async fn send_request(&self, ledger_id: &str, action: &str, params: serde_json::Value) -> Result<ResponseData, String> {
         let content = serde_json::to_string(&params).map_err(|e| e.to_string())?;
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &content)
-            .tag(Tag::custom(TagKind::SingleLetter(TAG_LEDGER_REQ), [self.ledger_id.clone()]))
+            .tag(Tag::custom(TagKind::SingleLetter(TAG_LEDGER_REQ), [ledger_id.to_string()]))
             .tag(Tag::custom(TagKind::custom("action"), [action]))
             .sign_with_keys(&Keys::new(
                 nostr_sdk::SecretKey::from_slice(&self.keypair.secret_key().secret_bytes())
@@ -430,7 +447,7 @@ impl Bot {
             "signature": hex::encode(&signature_bytes),
         });
 
-        let lock = self.send_request("transfer_lock", lock_params).await?;
+        let lock = self.send_request(&self.ledger_id, "transfer_lock", lock_params).await?;
         if !lock.success {
             return Err(format!("lock rejected: {}", lock.error.unwrap_or_default()));
         }
@@ -439,32 +456,96 @@ impl Bot {
             "transfer_id": hex::encode(transfer_id),
             "preimage": hex::encode(preimage),
         });
-        let complete = self.send_request("transfer_complete", complete_params).await?;
+        let complete = self.send_request(&self.ledger_id, "transfer_complete", complete_params).await?;
         if !complete.success {
             return Err(format!("complete rejected: {}", complete.error.unwrap_or_default()));
         }
         Ok(())
     }
 
-    /// Ask the operator to mint a BOLT11 funding invoice for this deposit
-    /// (the same `make_invoice` request the LNURL gateway uses). Returns the
-    /// bolt11 string; paying it credits this deposit, which seeds the swarm.
-    async fn make_invoice(&self, amount_sats: u64, description: &str) -> Result<String, String> {
+    /// Ask `ledger_id`'s operator to mint a BOLT11 for `deposit_id` (the same
+    /// `make_invoice` the LNURL gateway uses — callable by anyone, since the
+    /// operator looks the descriptor up from deposit state). Returns
+    /// (bolt11, payment_hash, amount_msats) — all carried in the response, so
+    /// we never have to parse the invoice.
+    async fn make_invoice_for(
+        &self,
+        ledger_id: &str,
+        deposit_id: DepositId,
+        amount_sats: u64,
+        description: &str,
+    ) -> Result<(String, [u8; 32], u64), String> {
         let params = serde_json::json!({
-            "deposit_id": hex::encode(self.deposit_id),
+            "deposit_id": hex::encode(deposit_id),
             "amount_sats": amount_sats,
             "description": description,
         });
-        let resp = self.send_request("make_invoice", params).await?;
+        let resp = self.send_request(ledger_id, "make_invoice", params).await?;
         if !resp.success {
             return Err(format!("make_invoice rejected: {}", resp.error.unwrap_or_default()));
         }
-        resp.result
-            .as_ref()
-            .and_then(|r| r.get("invoice"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .ok_or_else(|| "operator response had no `invoice` field".to_string())
+        let r = resp.result.ok_or("make_invoice response had no result")?;
+        let bolt11 = r.get("invoice").and_then(|v| v.as_str())
+            .ok_or("response had no `invoice`")?.to_string();
+        let ph_hex = r.get("payment_hash").and_then(|v| v.as_str())
+            .ok_or("response had no `payment_hash`")?;
+        let ph = hex::decode(ph_hex).map_err(|e| format!("bad payment_hash: {}", e))?;
+        let mut payment_hash = [0u8; 32];
+        if ph.len() != 32 {
+            return Err(format!("payment_hash not 32 bytes: {}", ph.len()));
+        }
+        payment_hash.copy_from_slice(&ph);
+        let amount_msats = r
+            .get("amount_msat")
+            .or_else(|| r.get("amount_msats"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(amount_sats * 1000);
+        Ok((bolt11, payment_hash, amount_msats))
+    }
+
+    /// Pay `peer` on a *different* ledger over Lightning: mint its invoice on
+    /// its ledger, then `pay_invoice` from our deposit on our ledger. Funds
+    /// leave us and land in the peer's deposit as an InvoiceCredit.
+    async fn lightning_pay(&self, peer: &Peer, amount_sats: u64) -> Result<(), String> {
+        let (invoice, payment_hash, amount_msats) = self
+            .make_invoice_for(&peer.ledger_id, peer.deposit_id, amount_sats, "swarm")
+            .await?;
+
+        // Sign the dep-17 InvoiceLock preimage so the operator can lock our
+        // funds against the descriptor (mirrors the wallet's pay_invoice).
+        let op_nonce = deposits_core::signing::fresh_op_nonce();
+        let op_expiry = u32::MAX;
+        let proto = LedgerOperation::InvoiceLock {
+            deposit_id: self.deposit_id,
+            amount: amount_msats,
+            payment_id: payment_hash,
+            sequence_number: 0,
+            nonce: op_nonce,
+            expiry: op_expiry,
+            timeout_height: None,
+            witness: deposits_core::types::DescriptorWitness::new(),
+        };
+        let signed = deposits_core::signing::sign_op(proto, &self.keypair.secret_key())
+            .ok_or("InvoiceLock sign failed")?;
+        let witness = match &signed {
+            LedgerOperation::InvoiceLock { witness, .. } => witness.clone(),
+            _ => unreachable!("sign_op preserves variant"),
+        };
+
+        let params = serde_json::json!({
+            "descriptor": self.descriptor,
+            "invoice": invoice,
+            "payment_hash": hex::encode(payment_hash),
+            "amount_msats": amount_msats,
+            "nonce": op_nonce,
+            "expiry": op_expiry,
+            "witness": witness,
+        });
+        let resp = self.send_request(&self.ledger_id, "pay_invoice", params).await?;
+        if !resp.success {
+            return Err(format!("pay_invoice rejected: {}", resp.error.unwrap_or_default()));
+        }
+        Ok(())
     }
 }
 
@@ -516,12 +597,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let id = load_identity(&cfg, &seed)?;
     let ledger_tag = id.ledger_id[..16.min(id.ledger_id.len())].to_string();
+    let same = id.peers.iter().filter(|p| p.ledger_id == id.ledger_id).count();
+    let cross = id.peers.len() - same;
     eprintln!(
-        "deposit-bot '{}' · deposit {} · ledger {}… · {} peers · behavior={}",
+        "deposit-bot '{}' · deposit {} · ledger {}… · {} peers ({} transfer, {} lightning) · behavior={}",
         cfg.alias,
         hex::encode(id.deposit_id),
         &ledger_tag,
         id.peers.len(),
+        same,
+        cross,
         cfg.behavior,
     );
     if id.peers.is_empty() && cfg.make_invoice_sats.is_none() {
@@ -537,11 +622,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.add_relay(cfg.relay.as_str()).await?;
     client.connect_with_timeout(Duration::from_secs(10)).await;
 
-    // Two subscriptions: our request responses (20102, #l=ledger) and our
-    // deposit's ledger updates (9100, #d=tag, #i=deposit) for balance.
-    let resp_filter = Filter::new()
-        .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
-        .custom_tag(TAG_LEDGER_REQ, [id.ledger_id.clone()]);
+    // Two subscriptions: request responses (20102) and our deposit's ledger
+    // updates (9100, #d=tag, #i=deposit) for balance. Responses aren't
+    // filtered by ledger — we also query *peer* ledgers' operators for
+    // cross-ledger make_invoice, so we accept any 20102 and match by the #e
+    // (request-id) tag.
+    let resp_filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_RESPONSE));
     let upd_filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
         .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_tag.clone()])
@@ -552,6 +638,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client: client.clone(),
         ledger_id: id.ledger_id.clone(),
         deposit_id: id.deposit_id,
+        descriptor: id.descriptor,
         keypair: id.keypair,
         peers: id.peers,
         balance: AtomicI64::new(cfg.initial_sats as i64 * 1000),
@@ -612,8 +699,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // it to stdout, and exit. Doesn't need peers or a timeout height.
     if let Some(sats) = cfg.make_invoice_sats {
         eprintln!("requesting a {} sat funding invoice from the operator…", sats);
-        match bot.make_invoice(sats, &cfg.description).await {
-            Ok(bolt11) => {
+        match bot
+            .make_invoice_for(&bot.ledger_id, bot.deposit_id, sats, &cfg.description)
+            .await
+        {
+            Ok((bolt11, _, _)) => {
                 eprintln!("pay this to fund '{}' (seeds the swarm):", cfg.alias);
                 println!("{}", bolt11);
                 return Ok(());
@@ -687,22 +777,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let total_debit = amount_sats as i64 * 1000 + fee_msats as i64;
 
+        // Pick a peer and a rail: same ledger → transfer, else → Lightning.
+        let peer = bot.peers[rng.gen_range(0..bot.peers.len())].clone();
+        let same_ledger = peer.ledger_id == bot.ledger_id;
+        let rail = if same_ledger { "transfer" } else { "lightning" };
+
         // Optimistic debit, refund on failure.
         bot.balance.fetch_sub(total_debit, Ordering::Relaxed);
-        let dest = bot.peers[rng.gen_range(0..bot.peers.len())];
-        match bot.pay(dest, amount_sats, fee_msats).await {
+        let result = if same_ledger {
+            bot.pay(peer.deposit_id, amount_sats, fee_msats).await
+        } else {
+            bot.lightning_pay(&peer, amount_sats).await
+        };
+        match result {
             Ok(()) => {
                 eprintln!(
-                    "  → paid {} sats (+{} msat fee) to {}…  (balance ~{} sats)",
+                    "  → {} {} sats to {}…  (balance ~{} sats)",
+                    rail,
                     amount_sats,
-                    fee_msats,
-                    &hex::encode(dest)[..8],
+                    &hex::encode(peer.deposit_id)[..8],
                     bot.balance.load(Ordering::Relaxed) / 1000,
                 );
             }
             Err(e) => {
                 bot.balance.fetch_add(total_debit, Ordering::Relaxed); // refund
-                eprintln!("  ✗ pay failed: {}", e);
+                eprintln!("  ✗ {} failed: {}", rail, e);
             }
         }
     }
