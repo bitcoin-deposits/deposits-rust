@@ -80,6 +80,10 @@ struct Config {
     timeout_height: u32, // 0 = auto via bitcoin-cli
     bitcoin_cli: String,
     initial_sats: u64,
+    /// One-shot: mint a BOLT11 funding invoice for this deposit and exit,
+    /// instead of running the forward loop.
+    make_invoice_sats: Option<u64>,
+    description: String,
 }
 
 fn parse_seed(s: &str) -> Result<[u8; 32], String> {
@@ -123,6 +127,8 @@ fn parse_args() -> Result<Config, String> {
         timeout_height: 0,
         bitcoin_cli: "bitcoin-cli -regtest".into(),
         initial_sats: 0,
+        make_invoice_sats: None,
+        description: "deposit-bot funding".into(),
     };
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -159,6 +165,8 @@ fn parse_args() -> Result<Config, String> {
             "--timeout-height" => { cfg.timeout_height = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
             "--bitcoin-cli" => { cfg.bitcoin_cli = need(i)?; i += 1; }
             "--initial-sats" => { cfg.initial_sats = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
+            "--make-invoice" => { cfg.make_invoice_sats = Some(need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?); i += 1; }
+            "--description" => { cfg.description = need(i)?; i += 1; }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -198,12 +206,15 @@ fn print_help() {
     eprintln!("  --timeout-offset <n>      blocks above tip for the lock timeout (default 500)");
     eprintln!("  --bitcoin-cli <cmd>       for auto timeout height (default 'bitcoin-cli -regtest')");
     eprintln!("  --initial-sats <n>        seed the local balance estimate (default 0)");
+    eprintln!("  --make-invoice <sats>     one-shot: mint a BOLT11 funding invoice and exit");
+    eprintln!("  --description <text>      invoice description (default 'deposit-bot funding')");
 }
 
 /// Resolve the master seed all deposits derive from. Order:
 ///   1. inline `--seed` (refused on mainnet without `--i-understand`),
 ///   2. `--seed-file <path>`,
 ///   3. the wallet's well-known `<data-dir>/seed.hex`.
+///
 /// Reading from a file keeps the secret off the command line — that's the
 /// path the mainnet guard nudges you toward.
 fn resolve_seed(cfg: &Config) -> Result<[u8; 32], String> {
@@ -319,6 +330,7 @@ fn load_identity(cfg: &Config, seed: &[u8; 32]) -> Result<Identity, String> {
 struct ResponseData {
     success: bool,
     error: Option<String>,
+    result: Option<serde_json::Value>,
 }
 
 /// Shared bot state.
@@ -433,6 +445,27 @@ impl Bot {
         }
         Ok(())
     }
+
+    /// Ask the operator to mint a BOLT11 funding invoice for this deposit
+    /// (the same `make_invoice` request the LNURL gateway uses). Returns the
+    /// bolt11 string; paying it credits this deposit, which seeds the swarm.
+    async fn make_invoice(&self, amount_sats: u64, description: &str) -> Result<String, String> {
+        let params = serde_json::json!({
+            "deposit_id": hex::encode(self.deposit_id),
+            "amount_sats": amount_sats,
+            "description": description,
+        });
+        let resp = self.send_request("make_invoice", params).await?;
+        if !resp.success {
+            return Err(format!("make_invoice rejected: {}", resp.error.unwrap_or_default()));
+        }
+        resp.result
+            .as_ref()
+            .and_then(|r| r.get("invoice"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| "operator response had no `invoice` field".to_string())
+    }
 }
 
 /// Decode a Kind 9100 update and return the msat delta to OUR deposit from an
@@ -491,7 +524,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         id.peers.len(),
         cfg.behavior,
     );
-    if id.peers.is_empty() {
+    if id.peers.is_empty() && cfg.make_invoice_sats.is_none() {
         return Err("no peers on this ledger — need at least one other deposit to pay".into());
     }
 
@@ -551,8 +584,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .map(|v| ResponseData {
                                             success: v.get("success").and_then(|s| s.as_bool()).unwrap_or(false),
                                             error: v.get("error").and_then(|s| s.as_str()).map(String::from),
+                                            result: v.get("result").cloned(),
                                         })
-                                        .unwrap_or(ResponseData { success: false, error: Some("bad response json".into()) });
+                                        .unwrap_or(ResponseData { success: false, error: Some("bad response json".into()), result: None });
                                     if let Some(tx) = bot.pending.lock().unwrap().remove(&req_id) {
                                         let _ = tx.send(resp);
                                     }
@@ -572,6 +606,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         });
+    }
+
+    // One-shot invoice mode: mint a funding BOLT11 for this deposit, print
+    // it to stdout, and exit. Doesn't need peers or a timeout height.
+    if let Some(sats) = cfg.make_invoice_sats {
+        eprintln!("requesting a {} sat funding invoice from the operator…", sats);
+        match bot.make_invoice(sats, &cfg.description).await {
+            Ok(bolt11) => {
+                eprintln!("pay this to fund '{}' (seeds the swarm):", cfg.alias);
+                println!("{}", bolt11);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("make_invoice failed: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     // Background timeout-height refresher (auto mode): keep the lock timeout
