@@ -1,0 +1,604 @@
+//! deposit-bot — one independent, autonomous deposit agent for stress soaks.
+//!
+//! Each process is a single bot with no shared state and no controller: you
+//! launch ~a dozen of them (optionally with different `--behavior`s) and they
+//! form an organic economy that churns transfers until the funds bleed to
+//! fees. Since you operate the nodes, those fees return to you; top a bot back
+//! up out of band (faucet / `deposits-wallet send`) and it resumes.
+//!
+//! Behavior (v1): `forward` — whenever the bot's balance rises above a floor,
+//! it forwards (balance − reserve) to a random peer on its ledger. It's
+//! self-clocked: balance only grows when someone pays it, so paying-onward is
+//! effectively pay-on-receive. More behaviors slot in behind `--behavior`.
+//!
+//! How a bot works, decentrally:
+//!   * It loads ONE deposit (its keypair + deposit_id + ledger) from a wallet
+//!     `deposits.json`, like the transfer-simulator does.
+//!   * It learns its real balance by subscribing to that deposit's Kind 9100
+//!     updates (`#d`=ledger tag, `#i`=deposit id — the affected-deposit tag)
+//!     and decoding them with the real codec: on-chain/invoice credits and
+//!     inbound transfers raise it.
+//!   * To pay, it drives BOTH `transfer_lock` and `transfer_complete` itself
+//!     (the sender reveals a fresh random preimage), so receiving is passive —
+//!     no cross-bot coordination, no central control.
+//!
+//! Usage:
+//!   deposit-bot --relay ws://localhost:7801 --data-dir /data/alice \
+//!     --seed <64-hex> --alias alice-1 [--peer <deposit_id_hex> ...] \
+//!     [--floor-sats 1000] [--reserve-sats 200] [--interval-ms 1500]
+
+use bitcoin::hashes::{sha256, Hash as _};
+use bitcoin::secp256k1::rand::rngs::OsRng;
+use bitcoin::secp256k1::rand::{Rng, RngCore};
+use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
+use deposits_core::messages::LedgerOperation;
+use deposits_core::tlv::TlvDecode;
+use deposits_core::types::{DepositId, SignedLedgerUpdate};
+use deposits_node::nostr::{TAG_EVENT_REF, TAG_LEDGER_REQ};
+use nostr_sdk::prelude::*;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::oneshot;
+
+const KIND_LEDGER_REQUEST: u16 = 20101;
+const KIND_LEDGER_RESPONSE: u16 = 20102;
+const KIND_LEDGER_UPDATE: u16 = 9100;
+
+// ─── config ──────────────────────────────────────────────────────────────
+
+struct Config {
+    relay: String,
+    data_dir: PathBuf,
+    seed: [u8; 32],
+    alias: String,
+    network: bitcoin::Network,
+    behavior: String,
+    extra_peers: Vec<DepositId>,
+    floor_msats: i64,
+    reserve_msats: i64,
+    min_payment_sats: u64,
+    interval_ms: u64,
+    fee_fixed_msats: u64,
+    fee_rate_bps: u64,
+    timeout_offset: u32,
+    timeout_height: u32, // 0 = auto via bitcoin-cli
+    bitcoin_cli: String,
+    initial_sats: u64,
+}
+
+fn parse_seed(s: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(s).map_err(|e| format!("--seed not hex: {}", e))?;
+    if bytes.len() != 32 {
+        return Err(format!("--seed must be 32 bytes (64 hex), got {}", bytes.len()));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn parse_deposit_id(s: &str) -> Result<DepositId, String> {
+    let bytes = hex::decode(s).map_err(|e| format!("bad deposit id hex: {}", e))?;
+    if bytes.len() != 16 {
+        return Err(format!("deposit id must be 16 bytes (32 hex), got {}", bytes.len()));
+    }
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn parse_args() -> Result<Config, String> {
+    let mut cfg = Config {
+        relay: "ws://localhost:7801".into(),
+        data_dir: PathBuf::from("."),
+        seed: [0u8; 32],
+        alias: String::new(),
+        network: bitcoin::Network::Regtest,
+        behavior: "forward".into(),
+        extra_peers: Vec::new(),
+        floor_msats: 1_000_000,    // 1000 sats
+        reserve_msats: 200_000,    // 200 sats kept back so we never hit 0
+        min_payment_sats: 100,
+        interval_ms: 1500,
+        fee_fixed_msats: 2,
+        fee_rate_bps: 20,
+        timeout_offset: 500,
+        timeout_height: 0,
+        bitcoin_cli: "bitcoin-cli -regtest".into(),
+        initial_sats: 0,
+    };
+    let args: Vec<String> = std::env::args().collect();
+    let mut seed_set = false;
+    let mut i = 1;
+    while i < args.len() {
+        let need = |i: usize| -> Result<String, String> {
+            args.get(i + 1).cloned().ok_or_else(|| format!("{} needs a value", args[i]))
+        };
+        match args[i].as_str() {
+            "--relay" => { cfg.relay = need(i)?; i += 1; }
+            "--data-dir" => { cfg.data_dir = PathBuf::from(need(i)?); i += 1; }
+            "--seed" => { cfg.seed = parse_seed(&need(i)?)?; seed_set = true; i += 1; }
+            "--alias" => { cfg.alias = need(i)?; i += 1; }
+            "--network" => {
+                cfg.network = match need(i)?.as_str() {
+                    "bitcoin" | "mainnet" => bitcoin::Network::Bitcoin,
+                    "testnet" => bitcoin::Network::Testnet,
+                    "signet" => bitcoin::Network::Signet,
+                    "regtest" => bitcoin::Network::Regtest,
+                    other => return Err(format!("unknown network {}", other)),
+                };
+                i += 1;
+            }
+            "--behavior" => { cfg.behavior = need(i)?; i += 1; }
+            "--peer" => { cfg.extra_peers.push(parse_deposit_id(&need(i)?)?); i += 1; }
+            "--floor-sats" => { cfg.floor_msats = need(i)?.parse::<i64>().map_err(|e| e.to_string())? * 1000; i += 1; }
+            "--reserve-sats" => { cfg.reserve_msats = need(i)?.parse::<i64>().map_err(|e| e.to_string())? * 1000; i += 1; }
+            "--min-payment-sats" => { cfg.min_payment_sats = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
+            "--interval-ms" => { cfg.interval_ms = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
+            "--fee-fixed-msats" => { cfg.fee_fixed_msats = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
+            "--fee-rate-bps" => { cfg.fee_rate_bps = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
+            "--timeout-offset" => { cfg.timeout_offset = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
+            "--timeout-height" => { cfg.timeout_height = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
+            "--bitcoin-cli" => { cfg.bitcoin_cli = need(i)?; i += 1; }
+            "--initial-sats" => { cfg.initial_sats = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown arg: {}", other)),
+        }
+        i += 1;
+    }
+    if !seed_set {
+        return Err("--seed <64-hex> is required".into());
+    }
+    if cfg.alias.is_empty() {
+        return Err("--alias <deposit alias> is required".into());
+    }
+    if cfg.behavior != "forward" {
+        return Err(format!("unknown --behavior '{}' (only 'forward' so far)", cfg.behavior));
+    }
+    Ok(cfg)
+}
+
+fn print_help() {
+    eprintln!("deposit-bot — one autonomous deposit agent (stress soak)\n");
+    eprintln!("Required: --seed <64-hex>  --alias <deposit alias>");
+    eprintln!("  --relay <url>             relay (default ws://localhost:7801)");
+    eprintln!("  --data-dir <dir>          wallet dir holding deposits.json (default .)");
+    eprintln!("  --network <net>           regtest|signet|testnet|mainnet (default regtest)");
+    eprintln!("  --behavior <name>         forward (default; more later)");
+    eprintln!("  --peer <deposit_id_hex>   add a payable peer (repeatable; else auto from deposits.json)");
+    eprintln!("  --floor-sats <n>          don't pay below this balance (default 1000)");
+    eprintln!("  --reserve-sats <n>        always keep this much back (default 200)");
+    eprintln!("  --min-payment-sats <n>    smallest payment to bother making (default 100)");
+    eprintln!("  --interval-ms <n>         tick interval, jittered ±50% (default 1500)");
+    eprintln!("  --fee-fixed-msats / --fee-rate-bps   transfer fee (default 2 + 20bps)");
+    eprintln!("  --timeout-height <n>      explicit lock timeout height (0 = auto via bitcoin-cli)");
+    eprintln!("  --timeout-offset <n>      blocks above tip for the lock timeout (default 500)");
+    eprintln!("  --bitcoin-cli <cmd>       for auto timeout height (default 'bitcoin-cli -regtest')");
+    eprintln!("  --initial-sats <n>        seed the local balance estimate (default 0)");
+}
+
+// ─── deposit identity ────────────────────────────────────────────────────
+
+struct Identity {
+    ledger_id: String,
+    deposit_id: DepositId,
+    keypair: Keypair,
+    /// Other deposits on the same ledger (auto-discovered from deposits.json),
+    /// plus any `--peer`s. Recipients for the forward behavior.
+    peers: Vec<DepositId>,
+}
+
+fn derive_secret_key_at_index(
+    seed: &[u8; 32],
+    network: bitcoin::Network,
+    index: u32,
+) -> Result<SecretKey, String> {
+    use bitcoin::bip32::{DerivationPath, Xpriv};
+    use std::str::FromStr;
+    let xpriv = Xpriv::new_master(network, seed).map_err(|e| e.to_string())?;
+    let secp = Secp256k1::new();
+    let path = DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", index))
+        .map_err(|e| e.to_string())?;
+    let derived = xpriv.derive_priv(&secp, &path).map_err(|e| e.to_string())?;
+    Ok(derived.private_key)
+}
+
+/// Load this bot's deposit (by alias) from `<data_dir>/deposits.json`, and
+/// collect the other deposits on the same ledger as default peers.
+fn load_identity(cfg: &Config) -> Result<Identity, String> {
+    let secp = Secp256k1::new();
+    let path = cfg.data_dir.join("deposits.json");
+    let data = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_str(&data).map_err(|e| format!("parse deposits.json: {}", e))?;
+
+    let mut me: Option<(String, u32)> = None; // (ledger_id, key_index)
+    // First pass: find ourselves.
+    for d in &entries {
+        if d.get("alias").and_then(|v| v.as_str()) == Some(cfg.alias.as_str()) {
+            let ledger_id = d
+                .get("ledger_id")
+                .and_then(|v| v.as_str())
+                .ok_or("our deposit has no ledger_id")?
+                .to_string();
+            let key_index = d.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            me = Some((ledger_id, key_index));
+            break;
+        }
+    }
+    let (ledger_id, key_index) =
+        me.ok_or_else(|| format!("no deposit with alias '{}' in deposits.json", cfg.alias))?;
+
+    let sk = derive_secret_key_at_index(&cfg.seed, cfg.network, key_index)?;
+    let keypair = Keypair::from_secret_key(&secp, &sk);
+    let descriptor = format!("pk({})", hex::encode(keypair.public_key().serialize()));
+    let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
+
+    // Second pass: peers = every other deposit on the same ledger.
+    let mut peers: Vec<DepositId> = Vec::new();
+    for d in &entries {
+        if d.get("ledger_id").and_then(|v| v.as_str()) != Some(ledger_id.as_str()) {
+            continue;
+        }
+        let idx = d.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let Ok(psk) = derive_secret_key_at_index(&cfg.seed, cfg.network, idx) else { continue };
+        let pkp = Keypair::from_secret_key(&secp, &psk);
+        let pdesc = format!("pk({})", hex::encode(pkp.public_key().serialize()));
+        let pid = deposits_core::types::compute_deposit_id(&pdesc);
+        if pid != deposit_id && !peers.contains(&pid) {
+            peers.push(pid);
+        }
+    }
+    for p in &cfg.extra_peers {
+        if *p != deposit_id && !peers.contains(p) {
+            peers.push(*p);
+        }
+    }
+
+    Ok(Identity { ledger_id, deposit_id, keypair, peers })
+}
+
+// ─── transport ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct ResponseData {
+    success: bool,
+    error: Option<String>,
+}
+
+/// Shared bot state.
+struct Bot {
+    client: Client,
+    ledger_id: String,
+    deposit_id: DepositId,
+    keypair: Keypair,
+    peers: Vec<DepositId>,
+    /// Local balance estimate (msats). Credited from observed `#i` updates,
+    /// debited optimistically when we send (refunded if the lock fails).
+    balance: AtomicI64,
+    timeout_height: AtomicU32,
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<ResponseData>>>>,
+    cfg_fee_fixed: u64,
+    cfg_fee_rate_bps: u64,
+}
+
+impl Bot {
+    async fn send_request(&self, action: &str, params: serde_json::Value) -> Result<ResponseData, String> {
+        let content = serde_json::to_string(&params).map_err(|e| e.to_string())?;
+        let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &content)
+            .tag(Tag::custom(TagKind::SingleLetter(TAG_LEDGER_REQ), [self.ledger_id.clone()]))
+            .tag(Tag::custom(TagKind::custom("action"), [action]))
+            .sign_with_keys(&Keys::new(
+                nostr_sdk::SecretKey::from_slice(&self.keypair.secret_key().secret_bytes())
+                    .map_err(|e| e.to_string())?,
+            ))
+            .map_err(|e| format!("sign: {}", e))?;
+        let event_id = event.id.to_hex();
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().unwrap().insert(event_id.clone(), tx);
+        let urls: Vec<_> = self.client.relays().await.keys().cloned().collect();
+        self.client
+            .send_msg_to(urls, ClientMessage::event(event))
+            .await
+            .map_err(|e| format!("send: {}", e))?;
+        match tokio::time::timeout(Duration::from_secs(30), rx).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(_)) => Err("response channel closed".into()),
+            Err(_) => {
+                self.pending.lock().unwrap().remove(&event_id);
+                Err("response timeout".into())
+            }
+        }
+    }
+
+    /// Drive a full transfer (lock + complete) to `dest`. Returns Ok on a
+    /// committed transfer. The fee is taken from us on top of `amount_sats`.
+    async fn pay(&self, dest: DepositId, amount_sats: u64, fee_msats: u64) -> Result<(), String> {
+        let mut rng = OsRng;
+        let mut transfer_nonce = [0u8; 32];
+        rng.fill_bytes(&mut transfer_nonce);
+        let mut transfer_id = [0u8; 32];
+        rng.fill_bytes(&mut transfer_id);
+        let mut preimage = [0u8; 32];
+        rng.fill_bytes(&mut preimage);
+        let hash = sha256::Hash::hash(&preimage);
+        let completion_script = format!("sha256({})", hex::encode(hash.to_byte_array()));
+
+        let amount_msats = amount_sats * 1000;
+        let timeout_height = self.timeout_height.load(Ordering::Relaxed);
+        let op_nonce = deposits_core::signing::fresh_op_nonce();
+        let op_expiry = u32::MAX;
+
+        let proto = LedgerOperation::TransferLock {
+            transfer_nonce,
+            source_deposit_id: self.deposit_id,
+            destination_deposit_id: dest,
+            amount: amount_msats,
+            fee: fee_msats,
+            completion_script: completion_script.clone(),
+            timeout_height,
+            transfer_id,
+            nonce: op_nonce,
+            expiry: op_expiry,
+            witness: deposits_core::types::DescriptorWitness::new(),
+        };
+        let signed = deposits_core::signing::sign_op(proto, &self.keypair.secret_key())
+            .ok_or("sign_op failed")?;
+        let signature_bytes = match &signed {
+            LedgerOperation::TransferLock { witness, .. } => witness.stack[0].clone(),
+            _ => unreachable!("sign_op preserves variant"),
+        };
+
+        let lock_params = serde_json::json!({
+            "transfer_nonce": hex::encode(transfer_nonce),
+            "source_deposit_id": hex::encode(self.deposit_id),
+            "destination_deposit_id": hex::encode(dest),
+            "amount": amount_msats,
+            "fee": fee_msats,
+            "completion_script": completion_script,
+            "timeout_height": timeout_height,
+            "transfer_id": hex::encode(transfer_id),
+            "op_nonce": op_nonce,
+            "op_expiry": op_expiry,
+            "signature": hex::encode(&signature_bytes),
+        });
+
+        let lock = self.send_request("transfer_lock", lock_params).await?;
+        if !lock.success {
+            return Err(format!("lock rejected: {}", lock.error.unwrap_or_default()));
+        }
+
+        let complete_params = serde_json::json!({
+            "transfer_id": hex::encode(transfer_id),
+            "preimage": hex::encode(preimage),
+        });
+        let complete = self.send_request("transfer_complete", complete_params).await?;
+        if !complete.success {
+            return Err(format!("complete rejected: {}", complete.error.unwrap_or_default()));
+        }
+        Ok(())
+    }
+}
+
+/// Decode a Kind 9100 update and return the msat delta to OUR deposit from an
+/// inbound credit (on-chain/invoice credit, or a transfer where we're the
+/// destination and not the source). Our own outbound transfers are ignored
+/// here — we debit those optimistically at send time.
+fn inbound_credit_msats(content: &str, me: &DepositId) -> Option<u64> {
+    use base64::Engine as _;
+    let raw = base64::engine::general_purpose::STANDARD.decode(content).ok()?;
+    let update = SignedLedgerUpdate::tlv_decode(&raw).ok()?;
+    let op = LedgerOperation::tlv_decode(&update.message).ok()?;
+    match op {
+        LedgerOperation::OnchainCredit { deposit_id, amount, .. }
+        | LedgerOperation::InvoiceCredit { deposit_id, amount, .. }
+            if deposit_id == *me =>
+        {
+            Some(amount)
+        }
+        LedgerOperation::TransferLock {
+            source_deposit_id,
+            destination_deposit_id,
+            amount,
+            ..
+        } if destination_deposit_id == *me && source_deposit_id != *me => Some(amount),
+        _ => None,
+    }
+}
+
+// ─── main ────────────────────────────────────────────────────────────────
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = match parse_args() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}\n", e);
+            print_help();
+            std::process::exit(2);
+        }
+    };
+
+    let id = load_identity(&cfg)?;
+    let ledger_tag = id.ledger_id[..16.min(id.ledger_id.len())].to_string();
+    eprintln!(
+        "deposit-bot '{}' · deposit {} · ledger {}… · {} peers · behavior={}",
+        cfg.alias,
+        hex::encode(id.deposit_id),
+        &ledger_tag,
+        id.peers.len(),
+        cfg.behavior,
+    );
+    if id.peers.is_empty() {
+        return Err("no peers on this ledger — need at least one other deposit to pay".into());
+    }
+
+    // Nostr client signed with the deposit key (the operator authenticates the
+    // operation via the in-params signature, not the event signer).
+    let nostr_secret = nostr_sdk::SecretKey::from_slice(&id.keypair.secret_key().secret_bytes())?;
+    let keys = Keys::new(nostr_secret);
+    let opts = Options::default().notification_channel_size(8192);
+    let client = Client::builder().signer(keys.clone()).opts(opts).build();
+    client.add_relay(cfg.relay.as_str()).await?;
+    client.connect_with_timeout(Duration::from_secs(10)).await;
+
+    // Two subscriptions: our request responses (20102, #l=ledger) and our
+    // deposit's ledger updates (9100, #d=tag, #i=deposit) for balance.
+    let resp_filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
+        .custom_tag(TAG_LEDGER_REQ, [id.ledger_id.clone()]);
+    let upd_filter = Filter::new()
+        .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_tag.clone()])
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::I), [hex::encode(id.deposit_id)]);
+    client.subscribe(vec![resp_filter, upd_filter], None).await?;
+
+    let bot = Arc::new(Bot {
+        client: client.clone(),
+        ledger_id: id.ledger_id.clone(),
+        deposit_id: id.deposit_id,
+        keypair: id.keypair,
+        peers: id.peers,
+        balance: AtomicI64::new(cfg.initial_sats as i64 * 1000),
+        timeout_height: AtomicU32::new(cfg.timeout_height),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        cfg_fee_fixed: cfg.fee_fixed_msats,
+        cfg_fee_rate_bps: cfg.fee_rate_bps,
+    });
+
+    // Notification loop: route responses to waiters, credit balance on inbound.
+    {
+        let bot = bot.clone();
+        let mut rx = client.notifications();
+        let me = id.deposit_id;
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(RelayPoolNotification::Event { event, .. }) => {
+                        match event.kind.as_u16() {
+                            KIND_LEDGER_RESPONSE => {
+                                let req_id = event.tags.iter().find_map(|t| {
+                                    if t.kind() == TagKind::SingleLetter(TAG_EVENT_REF) {
+                                        t.content().map(|s| s.to_string())
+                                    } else {
+                                        None
+                                    }
+                                });
+                                if let Some(req_id) = req_id {
+                                    let resp = serde_json::from_str::<serde_json::Value>(&event.content)
+                                        .map(|v| ResponseData {
+                                            success: v.get("success").and_then(|s| s.as_bool()).unwrap_or(false),
+                                            error: v.get("error").and_then(|s| s.as_str()).map(String::from),
+                                        })
+                                        .unwrap_or(ResponseData { success: false, error: Some("bad response json".into()) });
+                                    if let Some(tx) = bot.pending.lock().unwrap().remove(&req_id) {
+                                        let _ = tx.send(resp);
+                                    }
+                                }
+                            }
+                            KIND_LEDGER_UPDATE => {
+                                if let Some(credit) = inbound_credit_msats(&event.content, &me) {
+                                    let nb = bot.balance.fetch_add(credit as i64, Ordering::Relaxed) + credit as i64;
+                                    eprintln!("  ← received {} sats (balance ~{} sats)", credit / 1000, nb / 1000);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(RelayPoolNotification::Shutdown) => break,
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    // Background timeout-height refresher (auto mode): keep the lock timeout
+    // comfortably above the chain tip over a long soak.
+    if cfg.timeout_height == 0 {
+        let bot = bot.clone();
+        let cli = cfg.bitcoin_cli.clone();
+        let offset = cfg.timeout_offset;
+        tokio::spawn(async move {
+            loop {
+                let tip = std::process::Command::new("sh")
+                    .args(["-c", &format!("{} getblockcount", cli)])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok());
+                if let Some(tip) = tip {
+                    bot.timeout_height.store(tip + offset, Ordering::Relaxed);
+                }
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
+        // Give the first refresh a moment to land.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    eprintln!("running — forwarding above floor {} sats, reserve {} sats\n", cfg.floor_msats / 1000, cfg.reserve_msats / 1000);
+
+    // ── forward loop ──
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let s = shutdown.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            eprintln!("\nshutting down…");
+            s.store(true, Ordering::Relaxed);
+        });
+    }
+
+    let mut rng = OsRng;
+    while !shutdown.load(Ordering::Relaxed) {
+        // Jitter ±50% so independent bots don't lock-step.
+        let base = cfg.interval_ms;
+        let jitter = rng.gen_range(0..=base);
+        let sleep_ms = base / 2 + jitter;
+        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+
+        if bot.timeout_height.load(Ordering::Relaxed) == 0 {
+            continue; // no usable timeout height yet
+        }
+        let available = bot.balance.load(Ordering::Relaxed);
+        let spend = available - cfg.reserve_msats;
+        if available < cfg.floor_msats || spend < (cfg.min_payment_sats as i64 * 1000) {
+            continue; // below floor — idle until we receive
+        }
+
+        // Whole-sat payment; leave room for the fee on top.
+        let spend_sats = (spend / 1000) as u64;
+        let fee_msats = bot.cfg_fee_fixed + spend_sats * 1000 * bot.cfg_fee_rate_bps / 10_000;
+        let amount_sats = spend_sats.saturating_sub(fee_msats / 1000 + 1);
+        if amount_sats < cfg.min_payment_sats {
+            continue;
+        }
+        let total_debit = amount_sats as i64 * 1000 + fee_msats as i64;
+
+        // Optimistic debit, refund on failure.
+        bot.balance.fetch_sub(total_debit, Ordering::Relaxed);
+        let dest = bot.peers[rng.gen_range(0..bot.peers.len())];
+        match bot.pay(dest, amount_sats, fee_msats).await {
+            Ok(()) => {
+                eprintln!(
+                    "  → paid {} sats (+{} msat fee) to {}…  (balance ~{} sats)",
+                    amount_sats,
+                    fee_msats,
+                    &hex::encode(dest)[..8],
+                    bot.balance.load(Ordering::Relaxed) / 1000,
+                );
+            }
+            Err(e) => {
+                bot.balance.fetch_add(total_debit, Ordering::Relaxed); // refund
+                eprintln!("  ✗ pay failed: {}", e);
+            }
+        }
+    }
+
+    Ok(())
+}

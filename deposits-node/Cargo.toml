@@ -132,6 +132,10 @@ name = "transfer-simulator"
 path = "src/bin/transfer-simulator.rs"
 
 [[bin]]
+name = "deposit-bot"
+path = "src/bin/deposit-bot.rs"
+
+[[bin]]
 name = "htlc-agent"
 path = "src/bin/htlc-agent.rs"
 
