@@ -98,7 +98,7 @@ for alias in "${ALIASES[@]}"; do
     --alias "$alias" \
     --relay "$RELAY" \
     --network "$NETWORK" \
-    "${PASSTHRU[@]}" 2>&1 | sed "s/^/[$alias] /" &
+    "${PASSTHRU[@]}" 2>&1 | sed -u "s/^/[$alias] /" &
   PIDS+=($!)
   echo "  + $alias (pid $!)"
   sleep 0.2

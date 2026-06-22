@@ -553,6 +553,63 @@ impl Bot {
 /// inbound credit (on-chain/invoice credit, or a transfer where we're the
 /// destination and not the source). Our own outbound transfers are ignored
 /// here — we debit those optimistically at send time.
+/// Size a forward payment so the operator's fee formula matches EXACTLY.
+/// The operator charges `fee = fixed + amount_msats * rate / 10000` on top of
+/// the amount, so the fee must be computed on the *final* amount — computing
+/// it on the spendable budget overcharges by the fee-on-the-fee and gets the
+/// lock rejected ("Fee mismatch"). Returns the largest whole-sat amount (and
+/// its matching fee in msats) that fits `spend_msats`, or None if below floor.
+fn size_payment(spend_msats: i64, fixed: u64, rate_bps: u64, min_sats: u64) -> Option<(u64, u64)> {
+    let spend = u64::try_from(spend_msats).ok()?;
+    if spend <= fixed {
+        return None;
+    }
+    // Solve amount_msats * (1 + rate/10000) + fixed <= spend for the largest
+    // whole-sat amount.
+    let amount_sats = ((spend - fixed) * 10_000 / (10_000 + rate_bps)) / 1000;
+    if amount_sats < min_sats {
+        return None;
+    }
+    let fee_msats = fixed + amount_sats * 1000 * rate_bps / 10_000;
+    Some((amount_sats, fee_msats))
+}
+
+/// Pull the authoritative available balance out of an operator rejection so a
+/// bot can snap its local estimate back to ledger truth. The operator phrases
+/// the figure three ways depending on which stage rejects:
+///   1. "Insufficient balance: 1003029 msats available, 4799582 msats needed"
+///   2. "Insufficient deposit balance: available 12345, required 99999"
+///   3. "InsufficientDepositBalance { available: 12345, required: 99999 }"
+/// In (1) the available figure precedes "available"; in (2)/(3) it follows it.
+fn parse_available_msats(err: &str) -> Option<i64> {
+    let grab_after = |marker: &str| -> Option<i64> {
+        let after = &err[err.find(marker)? + marker.len()..];
+        let digits: String = after
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse().ok()
+    };
+    // Form 3 — struct Debug: "available: 12345".
+    if err.contains("available:") {
+        return grab_after("available:");
+    }
+    // Form 2 — "available 12345" (space then a digit, vs. form 1's
+    // "available," with a comma).
+    if let Some(pos) = err.find("available ") {
+        if err[pos + "available ".len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+        {
+            return grab_after("available ");
+        }
+    }
+    // Form 1 — figure right after "balance:".
+    grab_after("balance:")
+}
+
 fn inbound_credit_msats(content: &str, me: &DepositId) -> Option<u64> {
     use base64::Engine as _;
     let raw = base64::engine::general_purpose::STANDARD.decode(content).ok()?;
@@ -772,13 +829,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue; // below floor — idle until we receive
         }
 
-        // Whole-sat payment; leave room for the fee on top.
-        let spend_sats = (spend / 1000) as u64;
-        let fee_msats = bot.cfg_fee_fixed + spend_sats * 1000 * bot.cfg_fee_rate_bps / 10_000;
-        let amount_sats = spend_sats.saturating_sub(fee_msats / 1000 + 1);
-        if amount_sats < cfg.min_payment_sats {
+        let Some((amount_sats, fee_msats)) = size_payment(
+            spend,
+            bot.cfg_fee_fixed,
+            bot.cfg_fee_rate_bps,
+            cfg.min_payment_sats,
+        ) else {
             continue;
-        }
+        };
         let total_debit = amount_sats as i64 * 1000 + fee_msats as i64;
 
         // Pick a peer and a rail: same ledger → transfer, else → Lightning.
@@ -805,10 +863,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 bot.balance.fetch_add(total_debit, Ordering::Relaxed); // refund
+                // The operator's ledger is authoritative. If it tells us the
+                // real available balance, snap our local estimate to it — a
+                // replayed InvoiceCredit on resubscribe (the relay re-sends
+                // historical #i updates) or any drift would otherwise keep us
+                // overshooting forever.
+                if let Some(real) = parse_available_msats(&e) {
+                    bot.balance.store(real, Ordering::Relaxed);
+                }
                 eprintln!("  ✗ {} failed: {}", rail, e);
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fee_matches_operator_formula_exactly() {
+        // The operator recomputes fee = fixed + amount_msats * rate / 10000
+        // and rejects on any mismatch. Whatever we size, the fee we attach
+        // must equal that recomputation for the chosen amount.
+        for &(spend, fixed, rate) in &[
+            (4_800_000i64, 2u64, 20u64), // the original 5000-sat case (−200 reserve)
+            (803_029, 2, 20),            // a drifted-down balance
+            (1_000_000, 0, 10),
+            (50_000, 100, 50),
+        ] {
+            let (amount_sats, fee_msats) = size_payment(spend, fixed, rate, 1).unwrap();
+            let amount_msats = amount_sats * 1000;
+            // Operator's recomputation:
+            assert_eq!(fee_msats, fixed + amount_msats * rate / 10_000);
+            // And it all fits inside the spendable budget.
+            assert!(amount_msats as i64 + fee_msats as i64 <= spend);
+        }
+    }
+
+    #[test]
+    fn fee_regression_5000_sats() {
+        // Exactly the live mainnet case that produced the "Fee mismatch:
+        // expected 9582, got 9602" rejection. We must now produce 9582.
+        let (amount_sats, fee_msats) = size_payment(4_800_000, 2, 20, 1).unwrap();
+        assert_eq!(amount_sats, 4790);
+        assert_eq!(fee_msats, 9582);
+    }
+
+    #[test]
+    fn below_floor_returns_none() {
+        assert_eq!(size_payment(500_000, 2, 20, 1000), None); // 500 sats < 1000 floor
+        assert_eq!(size_payment(0, 2, 20, 1), None);
+        assert_eq!(size_payment(-100, 2, 20, 1), None);
+    }
+
+    #[test]
+    fn parse_available_from_rejection() {
+        // Form 1 — figure precedes "available".
+        let e1 = "pay_invoice rejected: Insufficient balance: 1003029 msats available, 4799582 msats needed";
+        assert_eq!(parse_available_msats(e1), Some(1_003_029));
+        // Form 2 — "Insufficient deposit balance: available N, required N".
+        let e2 = "lock rejected: Insufficient deposit balance: available 800000, required 4799582";
+        assert_eq!(parse_available_msats(e2), Some(800_000));
+        // Form 3 — struct Debug: "InsufficientDepositBalance { available: N, required: N }".
+        let e3 = "state machine refused transition: InsufficientDepositBalance { available: 123456, required: 999999 }";
+        assert_eq!(parse_available_msats(e3), Some(123_456));
+        // Unrelated errors yield nothing (so we don't clobber the estimate).
+        assert_eq!(parse_available_msats("some other error"), None);
+        assert_eq!(
+            parse_available_msats("Invoice co-signature required but no quorum member responded"),
+            None
+        );
+    }
 }
