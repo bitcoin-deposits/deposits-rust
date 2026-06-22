@@ -43,7 +43,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$DATA_DIR" ]] || { echo "error: --data-dir required" >&2; exit 2; }
-[[ -n "$SEED" ]]     || { echo "error: --seed required" >&2; exit 2; }
+# --seed is optional: by default each bot reads the master key from
+# <data-dir>/seed.hex (the wallet's own location), so it stays off the
+# command line. Pass --seed only for throwaway/regtest keys.
 
 DEPOSITS_JSON="$DATA_DIR/deposits.json"
 [[ -f "$DEPOSITS_JSON" ]] || { echo "error: no deposits.json at $DEPOSITS_JSON" >&2; exit 2; }
@@ -86,10 +88,13 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
+SEED_ARGS=()
+[[ -n "$SEED" ]] && SEED_ARGS=(--seed "$SEED")
+
 for alias in "${ALIASES[@]}"; do
   "$BOT" \
     --data-dir "$DATA_DIR" \
-    --seed "$SEED" \
+    "${SEED_ARGS[@]}" \
     --alias "$alias" \
     --relay "$RELAY" \
     --network "$NETWORK" \

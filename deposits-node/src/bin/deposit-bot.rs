@@ -22,9 +22,15 @@
 //!     (the sender reveals a fresh random preimage), so receiving is passive —
 //!     no cross-bot coordination, no central control.
 //!
+//! All deposits derive from ONE master seed kept in a well-known place —
+//! `<data-dir>/seed.hex` (the same file the wallet writes) — so you never
+//! put a real-money key on the command line. Inline `--seed` still works
+//! for throwaway/regtest keys but is refused on mainnet without
+//! `--i-understand`.
+//!
 //! Usage:
 //!   deposit-bot --relay ws://localhost:7801 --data-dir /data/alice \
-//!     --seed <64-hex> --alias alice-1 [--peer <deposit_id_hex> ...] \
+//!     --alias alice-1 [--peer <deposit_id_hex> ...] \
 //!     [--floor-sats 1000] [--reserve-sats 200] [--interval-ms 1500]
 
 use bitcoin::hashes::{sha256, Hash as _};
@@ -52,7 +58,14 @@ const KIND_LEDGER_UPDATE: u16 = 9100;
 struct Config {
     relay: String,
     data_dir: PathBuf,
-    seed: [u8; 32],
+    /// Inline `--seed` (discouraged; a real-money secret on the command
+    /// line). Refused on mainnet unless `--i-understand`.
+    seed_inline: Option<[u8; 32]>,
+    /// Explicit `--seed-file`. Defaults to `<data-dir>/seed.hex` — the
+    /// well-known location the wallet itself writes — so the bot derives
+    /// the same per-deposit keys the wallet created.
+    seed_file: Option<PathBuf>,
+    i_understand: bool,
     alias: String,
     network: bitcoin::Network,
     behavior: String,
@@ -93,7 +106,9 @@ fn parse_args() -> Result<Config, String> {
     let mut cfg = Config {
         relay: "ws://localhost:7801".into(),
         data_dir: PathBuf::from("."),
-        seed: [0u8; 32],
+        seed_inline: None,
+        seed_file: None,
+        i_understand: false,
         alias: String::new(),
         network: bitcoin::Network::Regtest,
         behavior: "forward".into(),
@@ -110,7 +125,6 @@ fn parse_args() -> Result<Config, String> {
         initial_sats: 0,
     };
     let args: Vec<String> = std::env::args().collect();
-    let mut seed_set = false;
     let mut i = 1;
     while i < args.len() {
         let need = |i: usize| -> Result<String, String> {
@@ -119,7 +133,9 @@ fn parse_args() -> Result<Config, String> {
         match args[i].as_str() {
             "--relay" => { cfg.relay = need(i)?; i += 1; }
             "--data-dir" => { cfg.data_dir = PathBuf::from(need(i)?); i += 1; }
-            "--seed" => { cfg.seed = parse_seed(&need(i)?)?; seed_set = true; i += 1; }
+            "--seed" => { cfg.seed_inline = Some(parse_seed(&need(i)?)?); i += 1; }
+            "--seed-file" => { cfg.seed_file = Some(PathBuf::from(need(i)?)); i += 1; }
+            "--i-understand" => { cfg.i_understand = true; }
             "--alias" => { cfg.alias = need(i)?; i += 1; }
             "--network" => {
                 cfg.network = match need(i)?.as_str() {
@@ -151,9 +167,6 @@ fn parse_args() -> Result<Config, String> {
         }
         i += 1;
     }
-    if !seed_set {
-        return Err("--seed <64-hex> is required".into());
-    }
     if cfg.alias.is_empty() {
         return Err("--alias <deposit alias> is required".into());
     }
@@ -165,9 +178,14 @@ fn parse_args() -> Result<Config, String> {
 
 fn print_help() {
     eprintln!("deposit-bot — one autonomous deposit agent (stress soak)\n");
-    eprintln!("Required: --seed <64-hex>  --alias <deposit alias>");
+    eprintln!("Required: --alias <deposit alias>");
+    eprintln!("Seed (one master key derives every deposit): read from");
+    eprintln!("  <data-dir>/seed.hex by default (the wallet's own location).");
+    eprintln!("  --seed-file <path>        read the 32-byte hex seed from here");
+    eprintln!("  --seed <64-hex>           inline (refused on mainnet w/o --i-understand)");
+    eprintln!("  --i-understand            allow inline --seed on mainnet (discouraged)");
     eprintln!("  --relay <url>             relay (default ws://localhost:7801)");
-    eprintln!("  --data-dir <dir>          wallet dir holding deposits.json (default .)");
+    eprintln!("  --data-dir <dir>          wallet dir holding deposits.json + seed.hex (default .)");
     eprintln!("  --network <net>           regtest|signet|testnet|mainnet (default regtest)");
     eprintln!("  --behavior <name>         forward (default; more later)");
     eprintln!("  --peer <deposit_id_hex>   add a payable peer (repeatable; else auto from deposits.json)");
@@ -180,6 +198,37 @@ fn print_help() {
     eprintln!("  --timeout-offset <n>      blocks above tip for the lock timeout (default 500)");
     eprintln!("  --bitcoin-cli <cmd>       for auto timeout height (default 'bitcoin-cli -regtest')");
     eprintln!("  --initial-sats <n>        seed the local balance estimate (default 0)");
+}
+
+/// Resolve the master seed all deposits derive from. Order:
+///   1. inline `--seed` (refused on mainnet without `--i-understand`),
+///   2. `--seed-file <path>`,
+///   3. the wallet's well-known `<data-dir>/seed.hex`.
+/// Reading from a file keeps the secret off the command line — that's the
+/// path the mainnet guard nudges you toward.
+fn resolve_seed(cfg: &Config) -> Result<[u8; 32], String> {
+    if let Some(s) = cfg.seed_inline {
+        if cfg.network == bitcoin::Network::Bitcoin && !cfg.i_understand {
+            return Err(
+                "refusing inline --seed on mainnet — it lands in shell history / ps. \
+                 Put it at <data-dir>/seed.hex (or --seed-file), or pass --i-understand."
+                    .into(),
+            );
+        }
+        return Ok(s);
+    }
+    let path = cfg
+        .seed_file
+        .clone()
+        .unwrap_or_else(|| cfg.data_dir.join("seed.hex"));
+    let raw = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "no seed: read {}: {} — pass --seed-file or put the 32-byte hex seed at <data-dir>/seed.hex",
+            path.display(),
+            e
+        )
+    })?;
+    parse_seed(raw.trim())
 }
 
 // ─── deposit identity ────────────────────────────────────────────────────
@@ -210,7 +259,7 @@ fn derive_secret_key_at_index(
 
 /// Load this bot's deposit (by alias) from `<data_dir>/deposits.json`, and
 /// collect the other deposits on the same ledger as default peers.
-fn load_identity(cfg: &Config) -> Result<Identity, String> {
+fn load_identity(cfg: &Config, seed: &[u8; 32]) -> Result<Identity, String> {
     let secp = Secp256k1::new();
     let path = cfg.data_dir.join("deposits.json");
     let data = std::fs::read_to_string(&path)
@@ -235,7 +284,7 @@ fn load_identity(cfg: &Config) -> Result<Identity, String> {
     let (ledger_id, key_index) =
         me.ok_or_else(|| format!("no deposit with alias '{}' in deposits.json", cfg.alias))?;
 
-    let sk = derive_secret_key_at_index(&cfg.seed, cfg.network, key_index)?;
+    let sk = derive_secret_key_at_index(seed, cfg.network, key_index)?;
     let keypair = Keypair::from_secret_key(&secp, &sk);
     let descriptor = format!("pk({})", hex::encode(keypair.public_key().serialize()));
     let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
@@ -247,7 +296,7 @@ fn load_identity(cfg: &Config) -> Result<Identity, String> {
             continue;
         }
         let idx = d.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let Ok(psk) = derive_secret_key_at_index(&cfg.seed, cfg.network, idx) else { continue };
+        let Ok(psk) = derive_secret_key_at_index(seed, cfg.network, idx) else { continue };
         let pkp = Keypair::from_secret_key(&secp, &psk);
         let pdesc = format!("pk({})", hex::encode(pkp.public_key().serialize()));
         let pid = deposits_core::types::compute_deposit_id(&pdesc);
@@ -425,7 +474,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let id = load_identity(&cfg)?;
+    let seed = match resolve_seed(&cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(2);
+        }
+    };
+    let id = load_identity(&cfg, &seed)?;
     let ledger_tag = id.ledger_id[..16.min(id.ledger_id.len())].to_string();
     eprintln!(
         "deposit-bot '{}' · deposit {} · ledger {}… · {} peers · behavior={}",
