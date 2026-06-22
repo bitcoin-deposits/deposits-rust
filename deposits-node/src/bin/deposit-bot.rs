@@ -579,6 +579,10 @@ fn inbound_credit_msats(content: &str, me: &DepositId) -> Option<u64> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // rustls 0.23+ won't auto-pick a CryptoProvider; install one before any
+    // wss/TLS connection or the relay client panics in a worker thread.
+    deposits_nostr::install_default_crypto_provider();
+
     let cfg = match parse_args() {
         Ok(c) => c,
         Err(e) => {
