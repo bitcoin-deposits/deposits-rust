@@ -372,6 +372,14 @@ pub enum LedgerOperation {
         /// tag) so pre-timeout ledgers/peers stay compatible; `None` = legacy lock
         /// with no enforced release deadline.
         timeout_height: Option<u32>,
+        /// Operator's fee budget for paying this invoice, in msats, on TOP of
+        /// `amount`. Covers the LN routing reserve plus the operator's service
+        /// margin (keep-the-spread: the operator retains `fee − actual_routing`
+        /// on success). The depositor signs it into the dep-16 operation
+        /// preimage so the operator cannot inflate it. Optional (odd TLV tag):
+        /// `None` = legacy amount-only lock, preimage byte-identical to
+        /// pre-fee ledgers; `Some(f)` binds `f` into the signed preimage.
+        fee: Option<u64>,
         /// Witness satisfying the deposit descriptor
         witness: DescriptorWitness,
     },
@@ -1692,6 +1700,10 @@ impl BinaryCodec for LedgerOperation {
                     nonce: 0,
                     expiry: u32::MAX,
                     timeout_height: None,
+                    // Legacy fixed-layout format predates the fee field and is
+                    // lossy by design (it also drops nonce/expiry/timeout); a
+                    // lock decoded this way is amount-only.
+                    fee: None,
                     witness: crate::types::DescriptorWitness {
                         stack: vec![sig.to_vec()],
                     },

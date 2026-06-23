@@ -75,6 +75,21 @@ pub trait LightningBackend: Send + Sync {
         amount_msat: u64,
     ) -> Result<String, Error>;
 
+    /// Pay a fixed-amount BOLT11 invoice, capping total routing fees at
+    /// `max_fee_msat`. The operator pays outbound LN under this cap — the
+    /// depositor's signed `InvoiceLock.fee` budget — so it never spends more
+    /// routing than the depositor funded: a route exceeding the cap fails the
+    /// payment, the lock resolves via InvoiceFail, and the depositor is
+    /// refunded. Default impl ignores the cap and falls back to `pay_invoice`
+    /// for backends that don't expose a routing-fee limit yet (lnd/cln).
+    fn pay_invoice_with_fee_cap(
+        &self,
+        invoice: &str,
+        _max_fee_msat: u64,
+    ) -> Result<String, Error> {
+        self.pay_invoice(invoice)
+    }
+
     /// Currently-open channels. Used for status display and quorum sanity
     /// checks; not on the protocol hot path.
     fn list_channels(&self) -> Result<Vec<ChannelInfo>, Error>;

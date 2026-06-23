@@ -1471,6 +1471,15 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     // The witness ends up being whatever satisfies the descriptor — for pk(...)
     // it's a single 64-byte ECDSA compact signature over the dep-17 sighash
     // (matching what Dep16Authorizer's EcdsaVerifier checks against).
+    // Fee budget on TOP of the invoice amount: the LN routing reserve plus the
+    // operator's service margin. The operator caps its routing at this and
+    // keeps the spread (fee − actual_routing); a payment that can't route under
+    // it fails and we're refunded. We sign it into the dep-17 preimage so the
+    // operator can't inflate it. 1% (min 1 sat) comfortably covers small-amount
+    // routing and clears typical operator invoice_fee_bps floors.
+    // TODO: source the exact floor from the operator's Kind-39100 ad.
+    let fee_msats = (amount_msats / 100).max(1000);
+
     let op_nonce = deposits_core::signing::fresh_op_nonce();
     let op_expiry: u32 = u32::MAX; // TODO: chain_tip + margin
     let proto = deposits_core::messages::LedgerOperation::InvoiceLock {
@@ -1483,6 +1492,7 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         // Not bound by the dep-17 preimage and set by the operator on the real
         // op; this local copy only computes the witness sighash.
         timeout_height: None,
+        fee: Some(fee_msats),
         witness: deposits_core::types::DescriptorWitness::new(),
     };
     let signed = deposits_core::signing::sign_op(proto, &keypair.secret_key())
@@ -1502,6 +1512,7 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         "invoice": invoice,
         "payment_hash": hex::encode(payment_hash_bytes),
         "amount_msats": amount_msats,
+        "fee_msats": fee_msats,
         "nonce": op_nonce,
         "expiry": op_expiry,
         "witness": witness,
@@ -1511,6 +1522,8 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("  Alias: {}", alias);
     println!("  Invoice: {}...", &invoice[..40.min(invoice.len())]);
     println!("  Amount: {} msats", amount_msats);
+    println!("  Fee budget: {} msats (routing + operator margin)", fee_msats);
+    println!("  Max total: {} msats", amount_msats + fee_msats);
 
     let request_id = transport
         .send_ledger_request(ledger_id, "pay_invoice", request_params)

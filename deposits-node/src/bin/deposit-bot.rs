@@ -511,6 +511,12 @@ impl Bot {
             .make_invoice_for(&peer.ledger_id, peer.deposit_id, amount_sats, "swarm")
             .await?;
 
+        // Fee budget on top of the invoice amount: the LN routing reserve plus
+        // the operator's margin. The operator caps routing at this; we sign it
+        // into the preimage so it can't be inflated. 1% (min 1 sat) is plenty
+        // for the small amounts the swarm moves.
+        let fee_msats = (amount_msats / 100).max(1000);
+
         // Sign the dep-17 InvoiceLock preimage so the operator can lock our
         // funds against the descriptor (mirrors the wallet's pay_invoice).
         let op_nonce = deposits_core::signing::fresh_op_nonce();
@@ -523,6 +529,7 @@ impl Bot {
             nonce: op_nonce,
             expiry: op_expiry,
             timeout_height: None,
+            fee: Some(fee_msats),
             witness: deposits_core::types::DescriptorWitness::new(),
         };
         let signed = deposits_core::signing::sign_op(proto, &self.keypair.secret_key())
@@ -537,6 +544,7 @@ impl Bot {
             "invoice": invoice,
             "payment_hash": hex::encode(payment_hash),
             "amount_msats": amount_msats,
+            "fee_msats": fee_msats,
             "nonce": op_nonce,
             "expiry": op_expiry,
             "witness": witness,

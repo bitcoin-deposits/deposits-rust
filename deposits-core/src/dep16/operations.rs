@@ -83,6 +83,7 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
             payment_id,
             nonce,
             expiry,
+            fee,
             ..
         } => Some(OperationData {
             op_type: Symbol::new(op_type::SPEND),
@@ -91,6 +92,12 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
                 a.insert("amount".to_string(), Value::Int(*amount as i128));
                 a.insert("kind".to_string(), Value::Symbol(Symbol::new(kind::INVOICE)));
                 a.insert("payment_id".to_string(), Value::Bytes(payment_id.to_vec()));
+                // Bind the operator fee budget into the signed preimage so the
+                // operator can't inflate it. Conditional: a legacy fee=None lock
+                // produces the byte-identical pre-fee preimage (back-compat).
+                if let Some(f) = fee {
+                    a.insert("fee".to_string(), Value::Int(*f as i128));
+                }
                 a
             },
             deposit_id: pad_deposit_id(deposit_id),
@@ -319,6 +326,7 @@ mod tests {
             nonce: 7,
             expiry: 1_000_000,
             timeout_height: None,
+            fee: None,
             witness: DescriptorWitness::new(),
         };
         let d = to_dep16(&op).expect("descriptor-evaluated");
@@ -328,6 +336,41 @@ mod tests {
         assert_eq!(d.args["amount"], Value::Int(50_000));
         assert_eq!(d.args["kind"], Value::Symbol(Symbol::new(kind::INVOICE)));
         assert_eq!(d.args["payment_id"], Value::Bytes(vec![0xab; 32]));
+        // fee=None → no `fee` arg, so the preimage is byte-identical to a
+        // pre-fee InvoiceLock (back-compat).
+        assert!(!d.args.contains_key("fee"));
+    }
+
+    /// `InvoiceLock.fee` binds into the signed preimage: a `Some(fee)` adds a
+    /// `fee` arg and changes the sighash, while `None` leaves the legacy
+    /// preimage untouched. This is what stops an operator inflating the fee and
+    /// keeps existing (pre-fee) signatures valid.
+    #[test]
+    fn invoice_lock_fee_binds_into_preimage() {
+        let mk = |fee: Option<u64>| LedgerOperation::InvoiceLock {
+            deposit_id: dummy_deposit_id(),
+            amount: 50_000,
+            payment_id: [0xab; 32],
+            sequence_number: 3,
+            nonce: 7,
+            expiry: 1_000_000,
+            timeout_height: None,
+            fee,
+            witness: DescriptorWitness::new(),
+        };
+
+        let none = to_dep16(&mk(None)).unwrap();
+        let some = to_dep16(&mk(Some(9582))).unwrap();
+        assert!(!none.args.contains_key("fee"));
+        assert_eq!(some.args["fee"], Value::Int(9582));
+
+        // Different fee → different sighash; None matches the legacy preimage.
+        let sh_none = operation_sighash(&mk(None)).unwrap();
+        let sh_a = operation_sighash(&mk(Some(9582))).unwrap();
+        let sh_b = operation_sighash(&mk(Some(10_000))).unwrap();
+        assert_ne!(sh_none, sh_a, "fee must change the signed preimage");
+        assert_ne!(sh_a, sh_b, "distinct fees must produce distinct sighashes");
+        assert_eq!(sh_none, operation_sighash(&mk(None)).unwrap(), "deterministic");
     }
 
     /// `OnchainLock` translates to a `spend` op with `kind=onchain` and the destination/amount/
@@ -479,6 +522,7 @@ mod tests {
             nonce: 1,
             expiry: u32::MAX,
             timeout_height: None,
+            fee: None,
             witness: DescriptorWitness::new(),
         };
         let op_b = LedgerOperation::InvoiceLock {
@@ -489,6 +533,7 @@ mod tests {
             nonce: 1,
             expiry: u32::MAX,
             timeout_height: None,
+            fee: None,
             witness: DescriptorWitness::new(),
         };
         let sh_a = operation_sighash(&op_a).expect("sighash");
@@ -510,6 +555,7 @@ mod tests {
             nonce: 1,
             expiry: u32::MAX,
             timeout_height: None,
+            fee: None,
             witness: DescriptorWitness::new(),
         };
         let op_b = LedgerOperation::InvoiceLock {
@@ -520,6 +566,7 @@ mod tests {
             nonce: 2,
             expiry: u32::MAX,
             timeout_height: None,
+            fee: None,
             witness: DescriptorWitness::new(),
         };
         let sh_a = operation_sighash(&op_a).expect("sighash");
@@ -541,6 +588,7 @@ mod tests {
             nonce: 1,
             expiry: 1_000_000,
             timeout_height: None,
+            fee: None,
             witness: DescriptorWitness::new(),
         };
         let op_b = LedgerOperation::InvoiceLock {
@@ -551,6 +599,7 @@ mod tests {
             nonce: 1,
             expiry: 2_000_000,
             timeout_height: None,
+            fee: None,
             witness: DescriptorWitness::new(),
         };
         let sh_a = operation_sighash(&op_a).expect("sighash");

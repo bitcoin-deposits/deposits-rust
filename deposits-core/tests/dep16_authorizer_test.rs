@@ -385,6 +385,7 @@ fn sign_op_invoice_lock_authorized_by_dep16() {
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
         timeout_height: None,
+        fee: None,
         witness: DescriptorWitness::new(),
     };
     let op = deposits_core::signing::sign_op(proto, &sk).expect("InvoiceLock is signable");
@@ -468,6 +469,7 @@ fn dep17_invoice_lock_sighash_pinned() {
         nonce: 42_u64,
         expiry: u32::MAX,
         timeout_height: None,
+        fee: None,
         witness: DescriptorWitness::new(),
     };
     let sighash = deposits_core::dep16::operations::operation_sighash(&op).unwrap();

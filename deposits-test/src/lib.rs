@@ -170,6 +170,7 @@ impl Operator {
             nonce: op_nonce,
             expiry: op_expiry,
             timeout_height: None,
+            fee: None,
             witness: DescriptorWitness::new(),
         };
         let op = deposits_core::signing::sign_op(proto, &depositor.secret_key)
@@ -197,6 +198,7 @@ impl Operator {
             nonce: op_nonce,
             expiry: op_expiry,
             timeout_height: None,
+            fee: None,
             witness: DescriptorWitness::new(),
         };
         let signed_lock = deposits_core::signing::sign_op(lock_proto, &depositor.secret_key)

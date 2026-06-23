@@ -124,6 +124,7 @@ fn watcher_detects_bad_invoice_witness() {
         nonce: 0,
         expiry: u32::MAX,
         timeout_height: None,
+        fee: None,
         witness: deposits_protocol::DescriptorWitness {
             stack: vec![vec![0xFF; 64]], // garbage signature
         },

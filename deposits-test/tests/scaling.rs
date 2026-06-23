@@ -232,6 +232,7 @@ fn scaling_witness_verification() {
             nonce: 0,
             expiry: u32::MAX,
             timeout_height: None,
+            fee: None,
             witness: DescriptorWitness {
                 stack: vec![vec![0xFF; 64]],
             },

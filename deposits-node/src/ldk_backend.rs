@@ -209,6 +209,27 @@ impl LdkBackend {
         Ok(response.payment_id)
     }
 
+    /// Pay a BOLT11 invoice, capping total routing fees. The fork's
+    /// `bolt11-send` takes `--max-total-routing-fee` (e.g. `50000msat`); LDK
+    /// fails the payment if no route fits under it.
+    pub fn pay_invoice_capped(&self, invoice: &str, max_fee_msat: u64) -> Result<String, Error> {
+        tracing::info!(
+            "Paying invoice via ldk-server-cli (routing cap {} msat)",
+            max_fee_msat
+        );
+        let cap = format!("{}msat", max_fee_msat);
+        let output =
+            self.run_command(&["bolt11-send", invoice, "--max-total-routing-fee", &cap])?;
+
+        let response: Bolt11SendResponse = serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!(
+                "Failed to parse payment response: {} (output: {})",
+                e, output
+            ))
+        })?;
+        Ok(response.payment_id)
+    }
+
     /// Pay a BOLT11 invoice with a specific amount (for amountless invoices)
     pub fn pay_invoice_with_amount(
         &self,
@@ -494,6 +515,14 @@ impl LightningBackend for LdkBackend {
         amount_msat: u64,
     ) -> Result<String, Error> {
         LdkBackend::pay_invoice_with_amount(self, invoice, amount_msat)
+    }
+
+    fn pay_invoice_with_fee_cap(
+        &self,
+        invoice: &str,
+        max_fee_msat: u64,
+    ) -> Result<String, Error> {
+        LdkBackend::pay_invoice_capped(self, invoice, max_fee_msat)
     }
 
     fn list_channels(&self) -> Result<Vec<BackendChannelInfo>, Error> {

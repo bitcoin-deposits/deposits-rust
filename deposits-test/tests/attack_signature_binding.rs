@@ -45,6 +45,7 @@ fn invoice_lock(
         nonce,
         expiry: u32::MAX,
         timeout_height: None,
+        fee: None,
         witness: DescriptorWitness::new(),
     }
 }

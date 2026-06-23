@@ -96,6 +96,10 @@ mod ledger_op_tlv {
     /// pre-timeout decoders skip it and old/new nodes stay interoperable. Distinct
     /// from the even/required transfer TIMEOUT_HEIGHT(218).
     pub const INVOICE_LOCK_TIMEOUT: u64 = 219;
+    /// InvoiceLock operator fee budget (msats, on top of amount). ODD = optional
+    /// per the TLV convention, so pre-fee decoders skip it and a legacy
+    /// amount-only lock round-trips byte-identically.
+    pub const INVOICE_FEE: u64 = 221;
     pub const TRANSFER_ID: u64 = 220;
     pub const BLOCK_HASH: u64 = 222;
     pub const SCRIPT_WITNESS: u64 = 224;
@@ -332,6 +336,7 @@ impl TlvEncode for LedgerOperation {
                 nonce,
                 expiry,
                 timeout_height,
+                fee,
                 witness,
             } => {
                 builder = builder
@@ -342,10 +347,13 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(NONCE, *nonce)
                     .u32_field(EXPIRY, *expiry)
                     .witness_field(WITNESS, witness);
-                // Optional (odd tag): only written when set, so legacy locks
-                // round-trip byte-identically and old decoders skip it.
+                // Optional (odd tags): only written when set, so legacy locks
+                // round-trip byte-identically and old decoders skip them.
                 if let Some(t) = timeout_height {
                     builder = builder.u32_field(INVOICE_LOCK_TIMEOUT, *t);
+                }
+                if let Some(f) = fee {
+                    builder = builder.u64_field(INVOICE_FEE, *f);
                 }
             }
             Self::InvoiceFail {
@@ -754,6 +762,8 @@ impl TlvDecode for LedgerOperation {
                 expiry: reader.read_u32(EXPIRY)?,
                 // Absent on legacy ops → None (no enforced release deadline).
                 timeout_height: reader.read_u32_opt(INVOICE_LOCK_TIMEOUT)?,
+                // Absent on legacy ops → None (amount-only lock).
+                fee: reader.read_u64_opt(INVOICE_FEE)?,
                 witness: reader.read_witness(WITNESS)?,
             }),
             32 => Ok(Self::InvoiceFail {

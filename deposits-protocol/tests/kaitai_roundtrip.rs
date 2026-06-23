@@ -198,6 +198,23 @@ fn invoice_lock() {
         nonce: 0,
         expiry: u32::MAX,
         timeout_height: None,
+        fee: None,
+        witness: wit(),
+    });
+}
+
+#[test]
+fn invoice_lock_with_fee() {
+    // Optional fee field (odd TLV tag) survives the round trip when present.
+    test_roundtrip(&LedgerOperation::InvoiceLock {
+        deposit_id: did(),
+        amount: 5_000_000,
+        payment_id: h32(),
+        sequence_number: 43,
+        nonce: 9,
+        expiry: 1_000_000,
+        timeout_height: Some(950_000),
+        fee: Some(9_582),
         witness: wit(),
     });
 }

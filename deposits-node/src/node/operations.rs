@@ -682,6 +682,8 @@ impl Node {
             nonce: op_nonce,
             expiry: op_expiry,
             timeout_height: None,
+            // Legacy helper (not the depositor pay path); amount-only lock.
+            fee: None,
             witness,
         };
 

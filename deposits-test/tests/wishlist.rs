@@ -273,6 +273,7 @@ fn tier5_1_signature_malleability() {
         nonce: 1,
         expiry: u32::MAX,
         timeout_height: None,
+        fee: None,
         witness: DescriptorWitness::new(),
     };
     let signed = deposits_core::signing::sign_op(proto, &sk).expect("sign_op");
@@ -304,6 +305,7 @@ fn tier5_1_signature_malleability() {
                 nonce: *nonce,
                 expiry: *expiry,
                 timeout_height: None,
+                fee: None,
                 witness: DescriptorWitness { stack },
             },
             _ => unreachable!(),
@@ -348,6 +350,7 @@ fn tier5_1_signature_malleability() {
         nonce: 2, // different nonce → different preimage
         expiry: u32::MAX,
         timeout_height: None,
+        fee: None,
         witness: DescriptorWitness { stack: vec![sig_bytes.clone()] },
     };
     assert!(
@@ -696,6 +699,7 @@ fn tier2_4_proof_hash_embedding() {
             nonce: 0,
             expiry: u32::MAX,
             timeout_height: None,
+            fee: None,
             witness: deposits_protocol::types::DescriptorWitness::new(),
         };
         deposits_core::dep16::operations::operation_sighash(&op)

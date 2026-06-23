@@ -487,14 +487,18 @@ impl LedgerState {
                 nonce,
                 expiry,
                 timeout_height,
+                fee,
                 witness,
                 ..
             } => {
+                // Operator fee budget locked on top of the invoice amount
+                // (keep-the-spread). None = legacy amount-only lock.
+                let fee_msats = fee.unwrap_or(0);
                 let deposit = next
                     .deposits
                     .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
-                deposit.lock(*amount)?;
+                deposit.lock(*amount + fee_msats)?;
                 deposit.seen_nonces.insert((*nonce, *expiry));
                 // Cache the depositor's witness on the open lock so the
                 // eventual InvoiceFulfill (committed asynchronously by
@@ -514,6 +518,7 @@ impl LedgerState {
                         lock_sequence: *sequence_number,
                         witness: witness.clone(),
                         timeout_height: *timeout_height,
+                        fee: fee_msats,
                     },
                 );
             }
@@ -523,11 +528,19 @@ impl LedgerState {
                 amount,
                 ..
             } => {
+                // Release the full locked budget (amount + fee). The payment
+                // never went out, so the operator keeps no spread — only the
+                // fixed dust fee below.
+                let fee_msats = next
+                    .open_invoice_locks
+                    .get(payment_id)
+                    .map(|l| l.fee)
+                    .unwrap_or(0);
                 let deposit = next
                     .deposits
                     .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
-                deposit.unlock(*amount);
+                deposit.unlock(*amount + fee_msats);
                 // Even on failure, the fixed portion of the transfer fee
                 // applies (the variable portion is zero since no amount
                 // moved). Charged best-effort from current balance —
@@ -547,14 +560,24 @@ impl LedgerState {
                 amount,
                 ..
             } => {
+                // Keep-the-spread: consume amount+fee from the deposit; the
+                // `amount` funded the LN payment (left the system), and the
+                // `fee` becomes operator revenue (the operator paid the actual
+                // routing off-ledger and retains fee − actual_routing).
+                let fee_msats = next
+                    .open_invoice_locks
+                    .get(payment_id)
+                    .map(|l| l.fee)
+                    .unwrap_or(0);
                 let deposit = next
                     .deposits
                     .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 let before = deposit.balance;
-                deposit.fulfill(*amount);
+                deposit.fulfill(*amount + fee_msats);
                 let after = deposit.balance;
                 next.open_invoice_locks.remove(payment_id);
+                next.fees_accumulated = next.fees_accumulated.saturating_add(fee_msats);
                 next.add_balance_delta(before, after);
             }
             LedgerOperation::OnchainCredit {
@@ -1604,6 +1627,7 @@ mod replay_protection_tests {
             nonce,
             expiry,
             timeout_height: None,
+            fee: None,
             witness: DescriptorWitness::new(),
         }
     }
@@ -1616,6 +1640,73 @@ mod replay_protection_tests {
         state
             .apply_with_verifier(op, &AllowAuthorizer, current_height)
             .expect("apply")
+    }
+
+    fn invoice_lock_with_fee(
+        did: [u8; 16],
+        amount: u64,
+        fee: Option<u64>,
+        payment_id: [u8; 32],
+    ) -> LedgerOperation {
+        LedgerOperation::InvoiceLock {
+            deposit_id: did,
+            amount,
+            payment_id,
+            sequence_number: 1,
+            nonce: 1,
+            expiry: u32::MAX,
+            timeout_height: None,
+            fee,
+            witness: DescriptorWitness::new(),
+        }
+    }
+
+    /// Keep-the-spread: a successful invoice pay consumes amount+fee from the
+    /// deposit and the fee lands in `fees_accumulated` (operator revenue; it
+    /// paid the actual routing off-ledger and keeps the difference).
+    #[test]
+    fn invoice_fee_kept_on_fulfill() {
+        let (state, did) = state_with_one_deposit(); // balance 1000
+        let pid = [0x11u8; 32];
+
+        let (s1, _) = apply(&state, &invoice_lock_with_fee(did, 800, Some(100), pid), 100);
+        let d = &s1.deposits[&did];
+        assert_eq!(d.balance, 1000, "lock doesn't move balance, only locks it");
+        assert_eq!(d.available_balance(), 100, "800+100 locked out of 1000");
+
+        let fulfill = LedgerOperation::InvoiceFulfill {
+            deposit_id: did,
+            amount: 800,
+            payment_id: pid,
+            sequence_number: 2,
+            witness: DescriptorWitness::new(),
+            preimage: [0u8; 32],
+        };
+        let (s2, _) = apply(&s1, &fulfill, 101);
+        let d2 = &s2.deposits[&did];
+        assert_eq!(d2.balance, 100, "1000 − amount(800) − fee(100)");
+        assert_eq!(s2.fees_accumulated, 100, "operator keeps the fee budget");
+    }
+
+    /// On failure the full budget (amount+fee) is released; only the fixed dust
+    /// fee is charged (no payment went out, so no routing was incurred).
+    #[test]
+    fn invoice_fee_released_on_fail() {
+        let (state, did) = state_with_one_deposit(); // balance 1000, default fixed fee 2
+        let pid = [0x22u8; 32];
+
+        let (s1, _) = apply(&state, &invoice_lock_with_fee(did, 800, Some(100), pid), 100);
+        let fail = LedgerOperation::InvoiceFail {
+            deposit_id: did,
+            amount: 800,
+            payment_id: pid,
+            sequence_number: 2,
+        };
+        let (s2, _) = apply(&s1, &fail, 101);
+        let d = &s2.deposits[&did];
+        assert_eq!(d.balance, 998, "only the fixed dust fee (2) is kept");
+        assert_eq!(d.available_balance(), 998, "amount+fee fully released");
+        assert_eq!(s2.fees_accumulated, 2, "fixed dust fee only; fee budget refunded");
     }
 
     /// A first op against a fresh deposit (seen_nonces empty) is accepted; the

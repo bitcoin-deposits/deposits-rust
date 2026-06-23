@@ -824,6 +824,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 nonce: 0,
                 expiry: u32::MAX,
                 timeout_height: None,
+                fee: None,
                 witness: wit(),
             },
         ),

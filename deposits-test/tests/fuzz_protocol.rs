@@ -1019,6 +1019,7 @@ fn build_invoice_lock(
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
         timeout_height: None,
+        fee: None,
         witness: DescriptorWitness::new(),
     };
     let op = deposits_core::signing::sign_op(proto, source_sk)

@@ -213,6 +213,7 @@ fn invoice_fail_accumulates_fixed_fee() {
             nonce: 0,
             expiry: u32::MAX,
             timeout_height: None,
+            fee: None,
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },

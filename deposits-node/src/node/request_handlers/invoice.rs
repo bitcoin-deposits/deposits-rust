@@ -436,6 +436,15 @@ impl Node {
             }
         };
 
+        // Operator fee budget the wallet attaches on TOP of the invoice amount,
+        // covering LN routing + the operator's service margin (keep-the-spread).
+        // Absent param = legacy amount-only lock (`fee_field` stays None so the
+        // dep-16 preimage is byte-identical to what a pre-fee wallet signed).
+        // Present = the wallet signed `Some(fee)` into the preimage; it's the
+        // routing cap the operator pays under and the spread it retains.
+        let fee_field: Option<u64> = request.params.get("fee_msats").and_then(|v| v.as_u64());
+        let fee_msats = fee_field.unwrap_or(0);
+
         // The witness is the full descriptor satisfaction (a stack of
         // bytes per miniscript node). For pk(...) it's a single Schnorr
         // signature; for multi(2,A,B,C) it's three signatures plus
@@ -508,6 +517,30 @@ impl Node {
             Some(e) if e <= u32::MAX as u64 => e as u32,
             _ => return (false, None, Some("Missing or out-of-range expiry parameter".to_string())),
         };
+        // The wallet must cover the operator's minimum fee (its advertised
+        // invoice margin); a request that doesn't is rejected up front. The LN
+        // routing cap is then `fee_msats`, so the operator never pays more
+        // routing than the depositor budgeted (over-budget routes fail → the
+        // lock resolves via InvoiceFail and the depositor is refunded).
+        let min_fee_bps =
+            crate::operator_policy::OperatorPolicy::load(&self.data_dir)
+                .ok()
+                .flatten()
+                .and_then(|p| p.invoice_fee_bps)
+                .unwrap_or(0) as u64;
+        let min_fee_msats = amount_msat.saturating_mul(min_fee_bps) / 10_000;
+        if fee_msats < min_fee_msats {
+            return (
+                false,
+                None,
+                Some(format!(
+                    "Insufficient fee: {} msats provided, operator requires at least {} msats \
+                     ({}bps of {} msats)",
+                    fee_msats, min_fee_msats, min_fee_bps, amount_msat
+                )),
+            );
+        }
+
         let sequence_number = {
             let ledger = ledger_arc.read().unwrap();
 
@@ -516,13 +549,16 @@ impl Node {
                 None => return (false, None, Some("Deposit not found".to_string())),
             };
 
-            if deposit.balance < amount_msat {
+            // Must cover the invoice amount AND the fee budget (the wallet is
+            // required to include more than the invoice amount).
+            let needed = amount_msat + fee_msats;
+            if deposit.balance < needed {
                 return (
                     false,
                     None,
                     Some(format!(
                         "Insufficient balance: {} msat available, {} msat needed",
-                        deposit.balance, amount_msat
+                        deposit.balance, needed
                     )),
                 );
             }
@@ -576,6 +612,7 @@ impl Node {
             nonce: op_nonce,
             expiry: op_expiry,
             timeout_height: Some(timeout_height),
+            fee: fee_field,
             witness: witness.clone(),
         };
 
@@ -718,7 +755,15 @@ impl Node {
         // open_invoice_lock survives on disk and gets reconciled
         // against LDK on the next periodic tick.
         let cli = crate::lightning_backend::from_env();
-        match cli.pay_invoice(invoice_str) {
+        // Cap routing at the depositor's fee budget so the operator never pays
+        // more routing than was locked. fee=0 (legacy/None) → uncapped, the
+        // backend's own default applies.
+        let pay_result = if fee_msats > 0 {
+            cli.pay_invoice_with_fee_cap(invoice_str, fee_msats)
+        } else {
+            cli.pay_invoice(invoice_str)
+        };
+        match pay_result {
             Ok(_) => {
                 tracing::info!(
                     "LDK payment dispatched for {}..., waiting for resolution",

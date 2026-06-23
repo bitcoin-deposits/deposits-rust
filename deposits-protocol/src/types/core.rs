@@ -301,6 +301,13 @@ pub struct OpenInvoiceLock {
     /// release deadline and are left alone by the auto-timeout task.
     #[serde(default)]
     pub timeout_height: Option<u32>,
+    /// Operator fee budget locked alongside `amount` (msats). On fulfill the
+    /// operator keeps it (routed to `fees_accumulated`, less the actual LN
+    /// routing it paid off-ledger); on fail it's released back to the deposit.
+    /// `serde(default)` = 0 for legacy locks created before the field existed
+    /// (amount-only behavior, no spread retained).
+    #[serde(default)]
+    pub fee: u64,
 }
 
 /// Created by TransferLock, resolved by TransferComplete (funds to destination)

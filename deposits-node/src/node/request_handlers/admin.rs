@@ -261,6 +261,8 @@ impl Node {
             // Operator self-pay (liquidity buffer), resolves synchronously — no
             // depositor funds locked, so no enforced fund-lock timeout.
             timeout_height: None,
+            // Operator's own pay; no depositor fee budget on this path.
+            fee: None,
             witness: deposits_core::types::DescriptorWitness::new(),
         };
         let lock_sighash = deposits_core::dep16::operations::operation_sighash(&lock_proto)
@@ -293,6 +295,7 @@ impl Node {
             nonce: op_nonce,
             expiry: op_expiry,
             timeout_height: None,
+            fee: None,
             witness: lock_witness,
         };
         let fulfill_op = deposits_core::messages::LedgerOperation::InvoiceFulfill {

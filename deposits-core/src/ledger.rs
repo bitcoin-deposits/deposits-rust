@@ -2994,6 +2994,7 @@ mod tests {
             nonce: 1,
             expiry: u32::MAX,
             timeout_height: Some(current + 1009), // cap is current + 1008
+            fee: None,
             witness: DescriptorWitness::new(),
         };
         // The cap gate runs before structural validation, so over-cap refuses
