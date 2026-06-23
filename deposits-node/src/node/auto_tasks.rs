@@ -521,7 +521,50 @@ impl Node {
         let payments = match cli.list_payments() {
             Ok(payments) => payments,
             Err(e) => {
-                tracing::warn!("auto_complete_outbound: failed to list payments: {}", e);
+                // The LN node is unreachable — exactly when locks pile up. We
+                // can't reconcile succeeded/failed, but a lock past its
+                // fund-timeout can still be released: if the node is down the
+                // payment certainly isn't settling. Run a timeout-only sweep
+                // instead of bailing (which would leave funds locked forever
+                // whenever the backend is down).
+                tracing::warn!(
+                    "auto_complete_outbound: list_payments failed ({}); timeout-only sweep",
+                    e
+                );
+                for (ledger_id, payment_id, lock, current_block) in open_locks {
+                    let expired = matches!(
+                        (lock.timeout_height, current_block),
+                        (Some(t), cb) if cb > 0 && cb >= t
+                    );
+                    if !expired {
+                        continue;
+                    }
+                    let sequence = {
+                        let ledgers = self.handler.ledgers.lock().unwrap();
+                        match ledgers.get(&ledger_id) {
+                            Some(arc) => arc.read().unwrap().next_sequence(),
+                            None => continue,
+                        }
+                    };
+                    let op = deposits_core::messages::LedgerOperation::InvoiceFail {
+                        deposit_id: lock.deposit_id,
+                        amount: lock.amount,
+                        payment_id,
+                        sequence_number: sequence,
+                    };
+                    match self.commit_operation(&ledger_id, op).await {
+                        Ok(_) => tracing::warn!(
+                            "auto_complete_outbound: lock {}… expired (LN down) — released {} msat",
+                            &hex::encode(payment_id)[..16],
+                            lock.amount
+                        ),
+                        Err(e) => tracing::error!(
+                            "auto_complete_outbound: failed to release expired lock {}…: {}",
+                            &hex::encode(payment_id)[..16],
+                            e
+                        ),
+                    }
+                }
                 return;
             }
         };

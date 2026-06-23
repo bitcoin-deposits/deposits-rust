@@ -42,6 +42,7 @@ pub async fn lightning_command(args: &[String]) -> Result<(), Box<dyn std::error
         "channels" => lightning_channels(&args[1..]).await,
         "payments" => lightning_payments(&args[1..]).await,
         "locks" => lightning_open_locks(&args[1..]).await,
+        "release" => lightning_release_locks(&args[1..]).await,
         // Ledger operation commands
         "lock" => lightning_lock(&args[1..]).await,
         "fail" => lightning_fail(&args[1..]).await,
@@ -257,6 +258,116 @@ async fn lightning_open_locks(args: &[String]) -> Result<(), Box<dyn std::error:
         }
     }
 
+    Ok(())
+}
+
+/// Bulk-release stuck outbound invoice locks (commits InvoiceFail, refunding the
+/// depositor minus the fixed dust fee). The per-lock `lightning fail` needs
+/// hand-gathered args; this sweeps every open lock using the data already on the
+/// lock. Recovery for locks whose payment never settled and whose fund-timeout
+/// is still far off.
+///
+/// Safety: by default only releases locks the LN backend reports as FAILED or
+/// NOT-FOUND (definitely not in-flight). PENDING locks — or all locks when the
+/// backend is unreachable — require `--force` (the operator asserting, after
+/// checking their LN node, that the payment did not settle; force-failing a
+/// settled payment refunds the depositor while the operator already paid out).
+///
+/// Usage: deposits-node lightning release [--force] [--payment-hash <hex>] [config…]
+async fn lightning_release_locks(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let force = args.iter().any(|a| a == "--force");
+    let only_hash = args
+        .iter()
+        .position(|a| a == "--payment-hash")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.to_lowercase());
+    let config_args: Vec<String> = {
+        // Drop our own flags before handing the rest to parse_config.
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--force" => {}
+                "--payment-hash" => { i += 1; } // skip its value too
+                other => out.push(other.to_string()),
+            }
+            i += 1;
+        }
+        out
+    };
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config).await?;
+
+    // Snapshot open locks (don't hold the ledgers lock across awaits).
+    let mut targets: Vec<(String, [u8; 32], deposits_core::types::DepositId, u64)> = Vec::new();
+    {
+        let ledgers = node.handler.ledgers.lock().unwrap();
+        for (lid, arc) in ledgers.iter() {
+            let ledger = arc.read().unwrap();
+            for (pid, lock) in &ledger.state.open_invoice_locks {
+                if let Some(h) = &only_hash {
+                    if hex::encode(pid) != *h {
+                        continue;
+                    }
+                }
+                targets.push((lid.clone(), *pid, lock.deposit_id, lock.amount));
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        println!("No open invoice locks to release.");
+        return Ok(());
+    }
+
+    // Best-effort backend status so we only auto-release non-in-flight locks.
+    use crate::lightning_backend::PaymentStatus;
+    let payments = crate::lightning_backend::from_env().list_payments().ok();
+    if payments.is_none() {
+        println!("⚠ Lightning backend unreachable — can't confirm payment status.");
+        if !force {
+            println!("  Re-run with --force to release anyway (only after confirming on your LN node that these did NOT settle).");
+            return Ok(());
+        }
+    }
+
+    let mut released = 0u64;
+    let mut skipped = 0u64;
+    for (lid, pid, deposit_id, amount) in targets {
+        let hex_id = hex::encode(pid);
+        let status = payments.as_ref().and_then(|ps| ps.iter().find(|p| p.id == hex_id));
+        let in_flight = matches!(status, Some(p) if p.status == PaymentStatus::Pending);
+        let succeeded = matches!(status, Some(p) if p.status == PaymentStatus::Succeeded);
+
+        if succeeded {
+            println!("  skip {}… — backend says SUCCEEDED (needs fulfill, not fail)", &hex_id[..16]);
+            skipped += 1;
+            continue;
+        }
+        if in_flight && !force {
+            println!("  skip {}… — PENDING in backend; use --force to release anyway", &hex_id[..16]);
+            skipped += 1;
+            continue;
+        }
+        match node.fail_invoice_payment(&lid, deposit_id, amount, pid).await {
+            Ok(bal) => {
+                println!(
+                    "  released {}… — {} sats unlocked (deposit balance now {} sats)",
+                    &hex_id[..16],
+                    amount / 1000,
+                    bal / 1000
+                );
+                released += 1;
+            }
+            Err(e) => {
+                println!("  FAILED to release {}…: {}", &hex_id[..16], e);
+                skipped += 1;
+            }
+        }
+    }
+
+    println!("\nReleased {} lock(s), skipped {}.", released, skipped);
     Ok(())
 }
 
