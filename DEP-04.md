@@ -336,6 +336,24 @@ Response:
 
 The quote is advisory (the bridge's signature is not on it — see DEP-10 §Pay: the bridge's risk is its own routing exposure, and a wallet that locks a different total simply won't be served). Carrying the BOLT-11 in the request is what later lets the bridge recognize the lock: it indexes pending quotes by the invoice's payment hash and matches the arriving `TransferLock.completion_script` against it.
 
+**Operator-led variant.** The same `quote_invoice` request, addressed to the **operator** (`#l =` the wallet's own ledger) rather than a bridge, pre-flights an operator-direct pay (DEP-10 §"Operator-direct pay"). The operator runs a real routing-fee estimate against its own LN node (LND `estimateroutefee`, CLN `getroute`, LDK `find_route` over its graph — no HTLCs sent) and breaks the response out so the wallet can fund a precise `InvoiceLock.fee`:
+
+```json
+{
+  "success": true,
+  "result": {
+    "invoice_amount_msats": 200000,
+    "routing_estimate_msats": 850,     // real estimate (no send); flat 1% fallback if unavailable
+    "margin_msats": 400,               // operator's invoice_fee_bps × amount
+    "total_fee_msats": 1250,           // routing_estimate + margin
+    "estimation": "real",              // "real" | "heuristic" (estimator unavailable)
+    "quote_expiry_unix": 1700000000
+  }
+}
+```
+
+`estimation: "heuristic"` signals the backend couldn't produce a real estimate (e.g. an LDK sidecar without the route-estimate endpoint), so `routing_estimate_msats` is a flat 1%-of-amount fallback and the wallet SHOULD buffer more. The wallet funds `InvoiceLock.fee = total_fee_msats` plus a safety buffer (the graph estimate is optimistic vs live liquidity) and signs it into the dep-16 preimage. As with the bridge variant the quote is advisory — the operator's routing cap on pay (= the locked `fee`) is what actually bounds the spend, and an under-funded route just fails and refunds.
+
 ## Price Oracle (Kind 39101)
 
 Operators publish a NIP-33 replaceable event (`d`=`btcusd`, kind `39101`) carrying the BTC/USD spot price and the publisher's observed chain tip:

@@ -427,24 +427,22 @@ impl Node {
             _ => return (false, None, Some("Invoice has no amount".to_string())),
         };
 
-        // Real routing estimate; fall back to 1% if the backend can't estimate.
-        let (routing_estimate_msats, estimation) =
-            match crate::lightning_backend::from_env().estimate_routing_fee(invoice_str) {
-                Ok(f) => (f, "real"),
-                Err(e) => {
-                    tracing::debug!("estimate_routing_fee fell back to heuristic: {}", e);
-                    (amount_msat / 100, "heuristic")
-                }
-            };
-
+        // Real routing estimate; None → caller's heuristic fallback.
+        let routing = match crate::lightning_backend::from_env().estimate_routing_fee(invoice_str) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                tracing::debug!("estimate_routing_fee fell back to heuristic: {}", e);
+                None
+            }
+        };
         // Operator margin from the advertised invoice fee.
         let margin_bps = crate::operator_policy::OperatorPolicy::load(&self.data_dir)
             .ok()
             .flatten()
             .and_then(|p| p.invoice_fee_bps)
             .unwrap_or(0) as u64;
-        let margin_msats = amount_msat.saturating_mul(margin_bps) / 10_000;
-        let total_fee_msats = routing_estimate_msats + margin_msats;
+        let (routing_estimate_msats, margin_msats, total_fee_msats, estimation) =
+            quote_fee_breakdown(amount_msat, routing, margin_bps);
 
         let quote_expiry_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1225,4 +1223,53 @@ impl Node {
         (true, Some(result.to_string()), None)
     }
 
+}
+
+/// Pure quote math for `quote_invoice`. `routing = Some(real estimate)` from the
+/// backend, or `None` → a flat 1%-of-amount heuristic fallback. Margin is the
+/// operator's `invoice_fee_bps` applied to the invoice amount. Returns
+/// `(routing_estimate, margin, total, estimation)` where estimation is "real"
+/// when the backend produced the figure and "heuristic" otherwise.
+fn quote_fee_breakdown(
+    amount_msat: u64,
+    routing: Option<u64>,
+    margin_bps: u64,
+) -> (u64, u64, u64, &'static str) {
+    let (routing_estimate, estimation) = match routing {
+        Some(f) => (f, "real"),
+        None => (amount_msat / 100, "heuristic"),
+    };
+    let margin = amount_msat.saturating_mul(margin_bps) / 10_000;
+    (routing_estimate, margin, routing_estimate + margin, estimation)
+}
+
+#[cfg(test)]
+mod quote_tests {
+    use super::quote_fee_breakdown;
+
+    #[test]
+    fn real_estimate_plus_margin() {
+        // 200_000 msat invoice, real 850 routing, 20 bps margin (= 400).
+        let (routing, margin, total, est) = quote_fee_breakdown(200_000, Some(850), 20);
+        assert_eq!(routing, 850);
+        assert_eq!(margin, 400);
+        assert_eq!(total, 1250);
+        assert_eq!(est, "real");
+    }
+
+    #[test]
+    fn heuristic_fallback_is_one_percent() {
+        // No backend estimate → routing = 1% of amount; margin still applies.
+        let (routing, margin, total, est) = quote_fee_breakdown(200_000, None, 20);
+        assert_eq!(routing, 2_000, "1% of 200_000");
+        assert_eq!(margin, 400);
+        assert_eq!(total, 2_400);
+        assert_eq!(est, "heuristic");
+    }
+
+    #[test]
+    fn zero_margin_when_operator_unset() {
+        let (routing, margin, total, est) = quote_fee_breakdown(50_000, Some(120), 0);
+        assert_eq!((routing, margin, total, est), (120, 0, 120, "real"));
+    }
 }
