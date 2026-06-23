@@ -76,16 +76,20 @@ pub trait LightningBackend: Send + Sync {
     ) -> Result<String, Error>;
 
     /// Pay a fixed-amount BOLT11 invoice, capping total routing fees at
-    /// `max_fee_msat`. The operator pays outbound LN under this cap — the
-    /// depositor's signed `InvoiceLock.fee` budget — so it never spends more
-    /// routing than the depositor funded: a route exceeding the cap fails the
-    /// payment, the lock resolves via InvoiceFail, and the depositor is
-    /// refunded. Default impl ignores the cap and falls back to `pay_invoice`
-    /// for backends that don't expose a routing-fee limit yet (lnd/cln).
+    /// `max_fee_msat` and (when `Some`) the total route CLTV at
+    /// `max_cltv_blocks`. The fee cap is the depositor's signed
+    /// `InvoiceLock.fee` budget, so the operator never spends more routing than
+    /// funded. The CLTV cap bounds how long an in-flight HTLC can live, which
+    /// must match the deposit's fund-lock timeout so timing the lock out is
+    /// safe (no HTLC can still settle past it). A route exceeding either cap
+    /// fails the payment → InvoiceFail → depositor refunded. Default impl
+    /// ignores both and falls back to `pay_invoice` for backends that don't
+    /// expose these limits yet (lnd/cln).
     fn pay_invoice_with_fee_cap(
         &self,
         invoice: &str,
         _max_fee_msat: u64,
+        _max_cltv_blocks: Option<u32>,
     ) -> Result<String, Error> {
         self.pay_invoice(invoice)
     }

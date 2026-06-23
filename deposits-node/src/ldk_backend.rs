@@ -209,17 +209,30 @@ impl LdkBackend {
         Ok(response.payment_id)
     }
 
-    /// Pay a BOLT11 invoice, capping total routing fees. The fork's
-    /// `bolt11-send` takes `--max-total-routing-fee` (e.g. `50000msat`); LDK
-    /// fails the payment if no route fits under it.
-    pub fn pay_invoice_capped(&self, invoice: &str, max_fee_msat: u64) -> Result<String, Error> {
+    /// Pay a BOLT11 invoice, capping total routing fees and (optionally) the
+    /// total route CLTV. The fork's `bolt11-send` takes `--max-total-routing-fee`
+    /// (e.g. `50000msat`) and `--max-total-cltv-expiry-delta <blocks>`; LDK
+    /// fails the payment if no route fits under them.
+    pub fn pay_invoice_capped(
+        &self,
+        invoice: &str,
+        max_fee_msat: u64,
+        max_cltv_blocks: Option<u32>,
+    ) -> Result<String, Error> {
         tracing::info!(
-            "Paying invoice via ldk-server-cli (routing cap {} msat)",
-            max_fee_msat
+            "Paying invoice via ldk-server-cli (routing cap {} msat, cltv cap {:?})",
+            max_fee_msat,
+            max_cltv_blocks
         );
         let cap = format!("{}msat", max_fee_msat);
-        let output =
-            self.run_command(&["bolt11-send", invoice, "--max-total-routing-fee", &cap])?;
+        let mut args = vec!["bolt11-send", invoice, "--max-total-routing-fee", &cap];
+        let cltv_str;
+        if let Some(c) = max_cltv_blocks {
+            cltv_str = c.to_string();
+            args.push("--max-total-cltv-expiry-delta");
+            args.push(&cltv_str);
+        }
+        let output = self.run_command(&args)?;
 
         let response: Bolt11SendResponse = serde_json::from_str(&output).map_err(|e| {
             Error::Protocol(format!(
@@ -535,8 +548,9 @@ impl LightningBackend for LdkBackend {
         &self,
         invoice: &str,
         max_fee_msat: u64,
+        max_cltv_blocks: Option<u32>,
     ) -> Result<String, Error> {
-        LdkBackend::pay_invoice_capped(self, invoice, max_fee_msat)
+        LdkBackend::pay_invoice_capped(self, invoice, max_fee_msat, max_cltv_blocks)
     }
 
     fn estimate_routing_fee(&self, invoice: &str) -> Result<u64, Error> {

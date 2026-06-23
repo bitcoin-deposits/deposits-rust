@@ -88,6 +88,17 @@ pub struct OperatorPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_fee_rate_bps: Option<u16>,
 
+    /// Outbound-pay fund-lock fallback timeout, in blocks (default 144 ≈ 24h).
+    /// How long a depositor's funds stay locked when the operator can't confirm
+    /// a payment's outcome (LN node down/crash). It is ALSO used as the cap on
+    /// the payment's total route CLTV, so the two stay equal — that's what makes
+    /// timing out safe: past it, no in-flight HTLC can still settle, so there's
+    /// no double-pay risk in refunding. Lower it to release stuck funds sooner;
+    /// it must stay ≥ the payee's `min_final_cltv_expiry` or payments can't
+    /// route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoice_lock_timeout_blocks: Option<u32>,
+
     // === Deposit-size limits ===
     /// Maximum single deposit size in msats.
     #[serde(default, skip_serializing_if = "Option::is_none")]

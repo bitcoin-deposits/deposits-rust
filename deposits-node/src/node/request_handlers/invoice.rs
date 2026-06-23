@@ -639,14 +639,24 @@ impl Node {
         // `max_transfer_timeout_blocks`. If the invoice's expiry is so long that
         // even the minimum lock would exceed the cap, reject up front rather
         // than building a lock the quorum won't co-sign.
+        // Fund-lock fallback timeout. The operator dispatches the LN payment
+        // immediately, so the lock only needs to outlast the worst-case
+        // in-flight HTLC (its route CLTV) — NOT the BOLT-11's acceptance window.
+        // Tying it to invoice expiry over-provisioned the lock to a day-plus for
+        // ordinary invoices. We use a flat margin (operator-tunable,
+        // `invoice_lock_timeout_blocks`, default 144 ≈ 24h) and ALSO cap the
+        // payment's route CLTV at the same value below, so timing out is safe:
+        // past it no in-flight HTLC can still settle.
+        let lock_timeout_blocks = crate::operator_policy::OperatorPolicy::load(&self.data_dir)
+            .ok()
+            .flatten()
+            .and_then(|p| p.invoice_lock_timeout_blocks)
+            .unwrap_or(144);
         let timeout_height = {
-            const SETTLEMENT_MARGIN_BLOCKS: u32 = 144; // ~1 day past invoice expiry
             let ledger = ledger_arc.read().unwrap();
-            // Anchor the fund-lock timeout to the LIVE chain tip, not the
-            // ledger's last-stamped op height (which is frozen on a ledger with
-            // no fresh on-chain ops). auto_complete_outbound_payments judges
-            // expiry against the live tip too; anchoring here to a stale height
-            // would make the lock look already-expired and fail in-flight pays.
+            // Anchor to the LIVE chain tip, not the ledger's last-stamped op
+            // height (frozen on a ledger with no fresh on-chain ops) — the
+            // auto-task judges expiry against the live tip too.
             let current_block = self
                 .wallet
                 .get_block_height()
@@ -660,23 +670,19 @@ impl Node {
                 .filter_map(|m| m.max_transfer_timeout_blocks)
                 .min()
                 .unwrap_or(1008); // default ~1 week
-            // BOLT11 expiry window (seconds) → blocks at ~10 min/block.
-            let invoice_expiry_blocks =
-                (invoice.expiry_time().as_secs() / 600) as u32;
-            let needed = invoice_expiry_blocks.saturating_add(SETTLEMENT_MARGIN_BLOCKS);
-            if needed > max_timeout {
+            if lock_timeout_blocks > max_timeout {
                 return (
                     false,
                     None,
                     Some(format!(
-                        "Invoice expiry too long: would need a {}-block fund lock, but the \
-                         quorum's maximum is {} blocks. Ask for an invoice with a shorter expiry.",
-                        needed, max_timeout
+                        "invoice_lock_timeout_blocks ({}) exceeds the quorum's maximum fund-lock \
+                         window of {} blocks — lower the operator policy value.",
+                        lock_timeout_blocks, max_timeout
                     )),
                 );
             }
             // current_block can be 0 pre-sync; still produce a bounded height.
-            current_block.saturating_add(needed)
+            current_block.saturating_add(lock_timeout_blocks)
         };
 
         let lock_operation = LedgerOperation::InvoiceLock {
@@ -830,11 +836,12 @@ impl Node {
         // open_invoice_lock survives on disk and gets reconciled
         // against LDK on the next periodic tick.
         let cli = crate::lightning_backend::from_env();
-        // Cap routing at the depositor's fee budget so the operator never pays
-        // more routing than was locked. fee=0 (legacy/None) → uncapped, the
-        // backend's own default applies.
+        // Cap routing at the depositor's fee budget (operator never overspends
+        // routing) AND cap the route CLTV at the fund-lock window, so an
+        // in-flight HTLC can't outlive the lock — that's what makes the
+        // timeout-release safe. fee=0 (legacy/None) → uncapped.
         let pay_result = if fee_msats > 0 {
-            cli.pay_invoice_with_fee_cap(invoice_str, fee_msats)
+            cli.pay_invoice_with_fee_cap(invoice_str, fee_msats, Some(lock_timeout_blocks))
         } else {
             cli.pay_invoice(invoice_str)
         };
