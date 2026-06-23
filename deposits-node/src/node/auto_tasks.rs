@@ -476,6 +476,15 @@ impl Node {
     pub async fn auto_complete_outbound_payments(&self) {
         use crate::lightning_backend::PaymentStatus;
 
+        // The fund-lock timeout MUST be judged against the live chain tip, not
+        // the height stamped on the ledger's last op — on a ledger with no
+        // fresh on-chain ops that stamped height is frozen, so a stuck lock
+        // would never reach its timeout and the depositor's funds would stay
+        // locked forever. This mirrors `auto_timeout_transfers`, which already
+        // uses the wallet tip. Fall back to 0 (= never expire this cycle) if
+        // the wallet can't report a height, so we don't release on bad data.
+        let chain_tip = self.wallet.get_block_height().unwrap_or(0);
+
         // Collect open locks from all owned ledgers
         let mut open_locks: Vec<(String, [u8; 32], deposits_core::types::OpenInvoiceLock, u32)> =
             Vec::new();
@@ -491,10 +500,10 @@ impl Node {
             };
             for (lid, arc) in ledgers.iter() {
                 let ledger = arc.read().unwrap();
-                let current_block =
-                    ledger.history.last().map(|u| u.block_height).unwrap_or(0);
                 for (payment_id, lock) in &ledger.state.open_invoice_locks {
-                    open_locks.push((lid.clone(), *payment_id, lock.clone(), current_block));
+                    // Judge the timeout against the live chain tip, not the
+                    // ledger's last-stamped height (see note above).
+                    open_locks.push((lid.clone(), *payment_id, lock.clone(), chain_tip));
                 }
             }
         }

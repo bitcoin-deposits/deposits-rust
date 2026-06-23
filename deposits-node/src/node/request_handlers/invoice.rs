@@ -642,7 +642,17 @@ impl Node {
         let timeout_height = {
             const SETTLEMENT_MARGIN_BLOCKS: u32 = 144; // ~1 day past invoice expiry
             let ledger = ledger_arc.read().unwrap();
-            let current_block = ledger.history.last().map(|u| u.block_height).unwrap_or(0);
+            // Anchor the fund-lock timeout to the LIVE chain tip, not the
+            // ledger's last-stamped op height (which is frozen on a ledger with
+            // no fresh on-chain ops). auto_complete_outbound_payments judges
+            // expiry against the live tip too; anchoring here to a stale height
+            // would make the lock look already-expired and fail in-flight pays.
+            let current_block = self
+                .wallet
+                .get_block_height()
+                .ok()
+                .filter(|&h| h > 0)
+                .unwrap_or_else(|| ledger.history.last().map(|u| u.block_height).unwrap_or(0));
             let max_timeout = ledger
                 .state
                 .quorum_members
