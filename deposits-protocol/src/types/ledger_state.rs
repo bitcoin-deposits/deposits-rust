@@ -525,22 +525,24 @@ impl LedgerState {
             LedgerOperation::InvoiceFail {
                 payment_id,
                 deposit_id,
-                amount,
                 ..
             } => {
-                // Release the full locked budget (amount + fee). The payment
-                // never went out, so the operator keeps no spread — only the
-                // fixed dust fee below.
-                let fee_msats = next
+                // Release the full locked budget (amount + fee), read from the
+                // open lock — the locked amount is authoritative state, not a
+                // settable field on the op (matching TransferFail/OnchainFail,
+                // which carry no amount). The op's own `amount` field is ignored
+                // and slated for removal. The payment never went out, so the
+                // operator keeps no spread — only the fixed dust fee below.
+                let (locked_amount, fee_msats) = next
                     .open_invoice_locks
                     .get(payment_id)
-                    .map(|l| l.fee)
-                    .unwrap_or(0);
+                    .map(|l| (l.amount, l.fee))
+                    .unwrap_or((0, 0));
                 let deposit = next
                     .deposits
                     .get_mut(deposit_id)
                     .ok_or(crate::DepositsError::DepositNotFound)?;
-                deposit.unlock(*amount + fee_msats);
+                deposit.unlock(locked_amount + fee_msats);
                 // Even on failure, the fixed portion of the transfer fee
                 // applies (the variable portion is zero since no amount
                 // moved). Charged best-effort from current balance —
