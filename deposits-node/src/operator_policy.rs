@@ -88,6 +88,15 @@ pub struct OperatorPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_fee_rate_bps: Option<u16>,
 
+    /// Settlement margin added to an outbound invoice's expiry to form the
+    /// fund-lock fallback timeout (blocks; default 36 ≈ 6h). The deposits ledger
+    /// is off-chain, so this is NOT a chain-settlement buffer — it's the
+    /// dispute/recovery window (e.g. for a confiscation, or the operator
+    /// re-establishing its view of an in-flight payment after a crash). A few
+    /// hours suffices; the legacy 144 (~1 day) was just a round number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoice_lock_margin_blocks: Option<u32>,
+
     // === Deposit-size limits ===
     /// Maximum single deposit size in msats.
     #[serde(default, skip_serializing_if = "Option::is_none")]

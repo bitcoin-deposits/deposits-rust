@@ -660,8 +660,17 @@ impl Node {
         // `max_transfer_timeout_blocks`. If the invoice's expiry is so long that
         // even the minimum lock would exceed the cap, reject up front rather
         // than building a lock the quorum won't co-sign.
+        // Settlement margin past the invoice's expiry. The deposits ledger is
+        // off-chain, so this is NOT a chain-settlement buffer — it's the
+        // dispute/recovery window (a confiscation playing out, or the operator
+        // re-establishing its view of an in-flight pay after a crash). Hours,
+        // not the legacy 144-block (~1 day) round number. Operator-tunable.
+        let settlement_margin_blocks = crate::operator_policy::OperatorPolicy::load(&self.data_dir)
+            .ok()
+            .flatten()
+            .and_then(|p| p.invoice_lock_margin_blocks)
+            .unwrap_or(36); // ~6h
         let timeout_height = {
-            const SETTLEMENT_MARGIN_BLOCKS: u32 = 144; // ~1 day past invoice expiry
             let ledger = ledger_arc.read().unwrap();
             // Anchor the fund-lock timeout to the LIVE chain tip, not the
             // ledger's last-stamped op height (which is frozen on a ledger with
@@ -684,7 +693,7 @@ impl Node {
             // BOLT11 expiry window (seconds) → blocks at ~10 min/block.
             let invoice_expiry_blocks =
                 (invoice.expiry_time().as_secs() / 600) as u32;
-            let needed = invoice_expiry_blocks.saturating_add(SETTLEMENT_MARGIN_BLOCKS);
+            let needed = invoice_expiry_blocks.saturating_add(settlement_margin_blocks);
             if needed > max_timeout {
                 return (
                     false,
