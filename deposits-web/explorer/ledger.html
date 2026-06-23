@@ -305,6 +305,13 @@
       text-align: center;
     }
     footer .mono { font-family: var(--mono); color: var(--fg-muted); }
+    /* Mobile: stack the label/value grid so a long value gets full width
+       instead of a tall, narrow right-hand cell beside a short label. */
+    @media (max-width: 560px) {
+      .kv { grid-template-columns: 1fr !important; gap: 0.15rem 0; }
+      .kv dt { margin-top: 0.5rem; }
+      .kv dt:first-of-type { margin-top: 0; }
+    }
   </style>
 </head>
 <body>
@@ -314,33 +321,8 @@
       <span class="name">deposits</span>
       <span class="sub">explorer</span>
     </div>
-    <div class="nav-links">
-      <a href="/explorer">overview</a>
-      <a href="/ledger" class="active">ledger</a>
-      <a href="/deposit">deposit</a>
-    </div>
+    <div class="nav-links" id="crumbs"></div>
   </nav>
-  <script>
-    // When the page is loaded on a `<bech32-or-hex>.ledger.<basedomain>`
-    // subdomain, any nav link that leaves the per-ledger view (today
-    // just /explorer; tomorrow whatever else we add) should hop off
-    // the ledger subdomain to `explorer.<basedomain>` rather than just
-    // change the path on the same host. The host-aware root route would
-    // otherwise keep serving the per-ledger view since the subdomain
-    // still matches a ledger.
-    (function () {
-      const host = window.location.hostname;
-      const m = host.match(/^[^.]+\.ledger\.(.+)$/);
-      if (!m) return;
-      const base = m[1];
-      // Anything pointing at /explorer on the same host gets rewritten
-      // to the explorer subdomain. Same-ledger links (/ledger, /update)
-      // stay on the current host.
-      document.querySelectorAll('.nav-links a[href^="/explorer"]').forEach(a => {
-        a.href = `${window.location.protocol}//explorer.${base}/`;
-      });
-    })();
-  </script>
 
   <main>
     <div class="hero">
@@ -370,7 +352,10 @@
 
 <script type="module">
 import { OP_NAMES, FIELD_NAMES } from './tlv-catalog.js';
-import { fetchCosignerLedgerMap } from './shared.js';
+import { fetchCosignerLedgerMap, installBreadcrumbs } from './shared.js';
+
+// Breadcrumb trail (overview › ledger). Reads ledger/relay from the URL.
+installBreadcrumbs('ledger');
 
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 

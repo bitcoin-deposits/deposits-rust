@@ -242,6 +242,16 @@
       text-align: center;
     }
     footer .mono { font-family: var(--mono); color: var(--fg-muted); }
+    /* Mobile: stack the label/value grid so a long value (hex, descriptors)
+       gets the full width instead of being squeezed into a tall, narrow
+       right-hand cell next to a short label. */
+    @media (max-width: 560px) {
+      .kv { grid-template-columns: 1fr !important; gap: 0.15rem 0; }
+      .kv dt { margin-top: 0.5rem; }
+      .kv dt:first-of-type { margin-top: 0; }
+      /* Wide fixed-layout tables scroll sideways rather than wrap tall. */
+      table.tlv, table.tags { display: block; overflow-x: auto; white-space: nowrap; }
+    }
   </style>
 </head>
 <body>
@@ -251,28 +261,8 @@
       <span class="name">deposits</span>
       <span class="sub">explorer</span>
     </div>
-    <div class="nav-links">
-      <a href="/explorer">overview</a>
-      <a href="/ledger">ledger</a>
-      <a href="/deposit">deposit</a>
-    </div>
+    <div class="nav-links" id="crumbs"></div>
   </nav>
-  <script>
-    // On a `<bech32-or-hex>.ledger.<basedomain>` subdomain, any nav link
-    // that leaves the per-ledger view (today just /explorer; whatever
-    // else we add later) should hop off the ledger subdomain to
-    // `explorer.<basedomain>`. The host-aware root route would otherwise
-    // keep serving the per-ledger view since the subdomain still matches.
-    (function () {
-      const host = window.location.hostname;
-      const m = host.match(/^[^.]+\.ledger\.(.+)$/);
-      if (!m) return;
-      const base = m[1];
-      document.querySelectorAll('.nav-links a[href^="/explorer"]').forEach(a => {
-        a.href = `${window.location.protocol}//explorer.${base}/`;
-      });
-    })();
-  </script>
 
   <main>
     <div class="hero">
@@ -294,8 +284,11 @@ import { schnorr } from './vendor/noble-curves-secp256k1.js';
 import {
   getParam, bytesToHex, b64ToBytes, nostrFetch, parseTlv,
   computeContentHash, fetchCosignerLedgerMap, findEventByContentHash,
-  renderDescriptorRows,
+  renderDescriptorRows, installBreadcrumbs,
 } from './shared.js';
+
+// Breadcrumb trail (overview › ledger › update). ledger/relay from the URL.
+installBreadcrumbs('update');
 
 // ── page-specific helpers (most are imported from ./shared.js) ──
 
@@ -721,23 +714,20 @@ async function main() {
   const idCheck = await verifyEventId(event);
   const sigOk = verifyEventSig(event);
 
-  let html = '';
-  html += renderEventCard(event, idCheck, sigOk);
-
-  // Decode the base64 TLV body
+  // Decode + TLV-parse the event body first — the parsed inner operation is
+  // the headline of this view and renders at the top, ahead of the wrapper.
   let rawTlv = null;
   try { rawTlv = b64ToBytes(event.content); }
   catch (e) {
-    html += `<div class="empty err">Failed to base64-decode event content: ${escapeHtml(e.message)}</div>`;
-    document.getElementById('body').innerHTML = html;
+    document.getElementById('body').innerHTML = renderEventCard(event, idCheck, sigOk)
+      + `<div class="empty err">Failed to base64-decode event content: ${escapeHtml(e.message)}</div>`;
     return;
   }
-
   let outerRecords = [];
   try { outerRecords = parseTlv(rawTlv); }
   catch (e) {
-    html += `<div class="empty err">Failed to TLV-parse event content: ${escapeHtml(e.message)}</div>`;
-    document.getElementById('body').innerHTML = html;
+    document.getElementById('body').innerHTML = renderEventCard(event, idCheck, sigOk)
+      + `<div class="empty err">Failed to TLV-parse event content: ${escapeHtml(e.message)}</div>`;
     return;
   }
 
@@ -754,26 +744,27 @@ async function main() {
     }
   }
 
-  html += renderUpdateFields(outerRecords, hashOk);
-
-  // Per-cosigner breakdown of the cosignatures field (tag 22) or
-  // legacy single-cosig fallback (tags 16/18). Skipped silently if
-  // neither is present.
-  //
-  // Look up which member-ledger each cosigner operates by fetching
-  // this ledger's most-recent QuorumBegin (it carries
-  // QUORUM_MEMBER_LEDGER_IDS as of `11bc5c0`; older events return an
-  // empty map and the cosignatures section says so per row).
+  // Per-cosigner breakdown needs the cosigner→member-ledger map (fetched from
+  // this ledger's most-recent QuorumBegin). Resolve it before assembling html.
   let cosignerLedgers = new Map();
   if (ledgerTagD) {
     cosignerLedgers = await fetchCosignerLedgerMap(RELAY_URL, ledgerTagD);
   }
-  html += renderCosignatures(outerRecords, cosignerLedgers);
 
-  // Inner operation
+  let html = '';
+
+  // 1. Parsed message — the decoded operation, the value of this view. Top.
   const msgBytes = outerRecords.find(r => r.type === 8)?.value;
   if (msgBytes) html += renderInnerOp(msgBytes, ledgerTagD);
 
+  // 2. Wrapper — the SignedLedgerUpdate envelope + the Nostr event it rode in.
+  html += renderUpdateFields(outerRecords, hashOk);
+  html += renderEventCard(event, idCheck, sigOk);
+
+  // 3. Cosignatures (tag 22, or legacy 16/18 fallback; silent if absent).
+  html += renderCosignatures(outerRecords, cosignerLedgers);
+
+  // 4. Raw bytes, last.
   html += renderHexDump('raw TLV body (base64-decoded)', rawTlv);
   html += `<div class="card"><h3>raw event content (base64)</h3>
     <pre class="hexdump" style="white-space:pre-wrap;word-break:break-all;">${escapeHtml(event.content)}</pre>

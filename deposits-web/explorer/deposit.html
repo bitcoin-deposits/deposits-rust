@@ -217,6 +217,11 @@
       text-align: center;
     }
     footer .mono { font-family: var(--mono); color: var(--fg-muted); }
+    /* Mobile: let the activity table scroll sideways instead of squeezing a
+       cell into an extremely tall, narrow column. */
+    @media (max-width: 560px) {
+      table.tl { display: block; overflow-x: auto; white-space: nowrap; }
+    }
   </style>
 </head>
 <body>
@@ -226,28 +231,8 @@
       <span class="name">deposits</span>
       <span class="sub">explorer</span>
     </div>
-    <div class="nav-links">
-      <a href="/explorer">overview</a>
-      <a href="/ledger">ledger</a>
-      <a href="/deposit" class="active">deposit</a>
-    </div>
+    <div class="nav-links" id="crumbs"></div>
   </nav>
-  <script>
-    // On a `<bech32-or-hex>.ledger.<basedomain>` subdomain, nav links that
-    // leave the per-ledger view (here: /explorer) hop off the ledger
-    // subdomain to `explorer.<basedomain>`; same-ledger links (/ledger,
-    // /deposit, /update) stay on this host so the subdomain still scopes
-    // them to the right ledger.
-    (function () {
-      const host = window.location.hostname;
-      const m = host.match(/^[^.]+\.ledger\.(.+)$/);
-      if (!m) return;
-      const base = m[1];
-      document.querySelectorAll('.nav-links a[href^="/explorer"]').forEach(a => {
-        a.href = `${window.location.protocol}//explorer.${base}/`;
-      });
-    })();
-  </script>
 
   <main>
     <div class="hero">
@@ -267,8 +252,12 @@
 import { OP_NAMES, FIELD_NAMES } from './tlv-catalog.js';
 import {
   getParam, bytesToHex, b64ToBytes, nostrFetch, parseTlv,
-  renderDescriptorRows,
+  renderDescriptorRows, installBreadcrumbs,
 } from './shared.js';
+
+// Breadcrumb trail (overview › ledger › deposit). Reads ledger/deposit/relay
+// from the URL; re-called with a resolved ledger id if one is discovered.
+installBreadcrumbs('deposit');
 
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 

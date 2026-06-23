@@ -18,6 +18,71 @@ export function getParam(name) {
   return new URLSearchParams(window.location.search).get(name);
 }
 
+// ── breadcrumb nav ───────────────────────────────────────────────────
+//
+// Context-aware trail built from the URL params (relay/ledger/deposit),
+// replacing the old flat tabs (overview | ledger | deposit) that linked to
+// id-less detail pages — clicking "deposit" with no id landed you on a blank
+// view. Here only a level we actually have an id for becomes a link; the
+// current page is the inert tail. Pages may pass `{ ledger, deposit }`
+// overrides once they've resolved ids that aren't in the URL.
+//
+// Renders into `#crumbs` and injects its own CSS once (so the four pages don't
+// each duplicate it). Call as e.g. `installBreadcrumbs('deposit', { ledger })`.
+let _crumbCssInstalled = false;
+export function installBreadcrumbs(current, opts = {}) {
+  const el = document.getElementById('crumbs');
+  if (!el) return;
+  if (!_crumbCssInstalled) {
+    const css = document.createElement('style');
+    css.textContent = `
+      #crumbs { display:flex; flex-wrap:wrap; align-items:center; gap:0.4rem;
+                font-size:0.9rem; min-width:0; }
+      #crumbs a { color: var(--fg-muted); text-decoration:none; }
+      #crumbs a:hover { color: var(--accent); }
+      #crumbs .crumb-cur { color: var(--fg-strong); }
+      #crumbs .crumb-sep { color: var(--fg-muted); opacity:0.5; }`;
+    document.head.appendChild(css);
+    _crumbCssInstalled = true;
+  }
+  const relay = opts.relay || getParam('relay') || '';
+  const ledger = opts.ledger || getParam('ledger') || '';
+  const deposit = opts.deposit || getParam('deposit') || '';
+  const esc = (s) => String(s).replace(/[&<>"]/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const short = (s, n = 16) => (s ? (s.length > n ? s.slice(0, n) + '…' : s) : '');
+  const frag = (o) => Object.entries(o).filter(([, v]) => v)
+    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+
+  // On a `<id>.ledger.<base>` subdomain the overview crumb must hop off the
+  // ledger host to `explorer.<base>`; same-ledger crumbs stay on this host.
+  const relayFrag = relay ? '#' + frag({ relay }) : '';
+  const sub = window.location.hostname.match(/^[^.]+\.ledger\.(.+)$/);
+  const overviewHref = sub
+    ? `${window.location.protocol}//explorer.${sub[1]}/${relayFrag}`
+    : `/explorer${relayFrag}`;
+  const crumbs = [{ label: 'overview', href: overviewHref }];
+  if (current === 'ledger' || (ledger && (current === 'deposit' || current === 'update'))) {
+    crumbs.push({
+      label: `ledger ${short(ledger)}`,
+      href: ledger ? `/ledger#${frag({ ledger, relay })}` : null,
+    });
+  }
+  if (current === 'deposit') {
+    crumbs.push({ label: `deposit ${short(deposit)}`, href: null });
+  } else if (current === 'update') {
+    crumbs.push({ label: 'update', href: null });
+  }
+  el.innerHTML = crumbs.map((c, i) => {
+    const last = i === crumbs.length - 1;
+    const sep = i > 0 ? '<span class="crumb-sep">›</span>' : '';
+    const inner = (c.href && !last)
+      ? `<a href="${c.href}">${esc(c.label)}</a>`
+      : `<span class="crumb-cur">${esc(c.label)}</span>`;
+    return sep + inner;
+  }).join('');
+}
+
 // ── byte / hex / base64 ──────────────────────────────────────────────
 export function bytesToHex(buf) {
   return [...buf].map(b => b.toString(16).padStart(2, '0')).join('');
