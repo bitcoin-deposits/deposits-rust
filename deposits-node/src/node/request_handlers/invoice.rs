@@ -146,6 +146,22 @@ impl Node {
         // never see our clear error — the LNURL gateway waits 15s
         // (deposits-lnurl lnurlp_callback), so cap well under that.
         const BACKEND_INVOICE_TIMEOUT_SECS: u64 = 10;
+        // BOLT-11 expiry. The payer's fund-lock is `invoice_expiry +
+        // settlement_margin`, so a 24h backend default (ldk-server) made locks
+        // needlessly long. Default to 1h and let the requester ask for a
+        // different window, clamped to [1min, 24h]. The handler still rejects
+        // (below, via max_transfer_timeout) if expiry + margin exceeds what the
+        // quorum will co-sign.
+        const DEFAULT_INVOICE_EXPIRY_SECS: u32 = 3600; // 1h
+        const MIN_INVOICE_EXPIRY_SECS: u32 = 60;
+        const MAX_INVOICE_EXPIRY_SECS: u32 = 86_400; // 24h
+        let invoice_expiry_secs = request
+            .params
+            .get("expiry_secs")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.min(u32::MAX as u64) as u32)
+            .unwrap_or(DEFAULT_INVOICE_EXPIRY_SECS)
+            .clamp(MIN_INVOICE_EXPIRY_SECS, MAX_INVOICE_EXPIRY_SECS);
         let desc_owned = description.to_string();
         let dh_owned: Option<String> = description_hash.map(|s| s.to_string());
         let invoice_result = match tokio::time::timeout(
@@ -153,8 +169,13 @@ impl Node {
             tokio::task::spawn_blocking(move || {
                 let cli = crate::lightning_backend::from_env();
                 match dh_owned {
+                    // Desc-hash (zap) invoices keep the backend default expiry.
                     Some(dh) => cli.create_invoice_with_desc_hash(amount_msat, &dh),
-                    None => cli.create_invoice(amount_msat, &desc_owned),
+                    None => cli.create_invoice_with_expiry(
+                        amount_msat,
+                        &desc_owned,
+                        invoice_expiry_secs,
+                    ),
                 }
             }),
         )

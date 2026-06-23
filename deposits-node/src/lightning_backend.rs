@@ -50,6 +50,20 @@ pub trait LightningBackend: Send + Sync {
     /// Returns the bech32-encoded invoice string.
     fn create_invoice(&self, amount_msat: u64, description: &str) -> Result<String, Error>;
 
+    /// Like `create_invoice` but with an explicit BOLT-11 expiry (seconds).
+    /// The payer's fund-lock window is `invoice_expiry + settlement_margin`, so
+    /// a shorter expiry yields a shorter lock — `make_invoice` uses this with a
+    /// short default. Default impl ignores it (backend default expiry) for
+    /// backends not yet wired (lnd/cln).
+    fn create_invoice_with_expiry(
+        &self,
+        amount_msat: u64,
+        description: &str,
+        _expiry_secs: u32,
+    ) -> Result<String, Error> {
+        self.create_invoice(amount_msat, description)
+    }
+
     /// Create a fixed-amount BOLT11 invoice committing to a 32-byte
     /// description hash instead of a plaintext description. Required by
     /// NIP-57 zaps — the wallet sha256s the zap-request JSON and expects

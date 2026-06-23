@@ -135,10 +135,36 @@ impl LdkBackend {
 
     /// Create a BOLT11 invoice
     pub fn create_invoice(&self, amount_msat: u64, description: &str) -> Result<String, Error> {
-        tracing::info!("Creating invoice via ldk-server-cli: {} msat", amount_msat);
+        // The fork's bolt11-receive defaults to a 24h expiry, which makes the
+        // payer's fund-lock (invoice_expiry + settlement margin) needlessly
+        // long. Callers that care pass an explicit expiry via
+        // create_invoice_with_expiry; this no-expiry entry keeps the backend
+        // default for non-pay paths (e.g. zaps).
+        self.create_invoice_expiry(amount_msat, description, None)
+    }
+
+    /// Create a BOLT11 invoice with an explicit expiry (seconds). `None` →
+    /// backend default. Shorter expiries shorten the payer's fund-lock window.
+    pub fn create_invoice_expiry(
+        &self,
+        amount_msat: u64,
+        description: &str,
+        expiry_secs: Option<u32>,
+    ) -> Result<String, Error> {
+        tracing::info!(
+            "Creating invoice via ldk-server-cli: {} msat (expiry {:?})",
+            amount_msat,
+            expiry_secs
+        );
         let amount_str = format!("{}msat", amount_msat);
-        let output =
-            self.run_command(&["bolt11-receive", &amount_str, "--description", description])?;
+        let mut args = vec!["bolt11-receive", &amount_str, "--description", description];
+        let exp_str;
+        if let Some(e) = expiry_secs {
+            exp_str = e.to_string();
+            args.push("--expiry-secs");
+            args.push(&exp_str);
+        }
+        let output = self.run_command(&args)?;
 
         let response: Bolt11ReceiveResponse = serde_json::from_str(&output).map_err(|e| {
             Error::Protocol(format!(
@@ -505,6 +531,15 @@ impl LightningBackend for LdkBackend {
 
     fn create_invoice(&self, amount_msat: u64, description: &str) -> Result<String, Error> {
         LdkBackend::create_invoice(self, amount_msat, description)
+    }
+
+    fn create_invoice_with_expiry(
+        &self,
+        amount_msat: u64,
+        description: &str,
+        expiry_secs: u32,
+    ) -> Result<String, Error> {
+        LdkBackend::create_invoice_expiry(self, amount_msat, description, Some(expiry_secs))
     }
 
     fn create_invoice_with_desc_hash(
