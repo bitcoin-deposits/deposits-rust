@@ -395,6 +395,73 @@ impl Node {
     /// - payment_hash: 32-byte hex (must match invoice)
     /// - amount_msats: amount in msats (must match invoice)
     /// - witness: DescriptorWitness authorizing the spend over the dep-17 InvoiceLock preimage
+    /// Pre-flight quote for an outbound BOLT-11 (DEP-10 §Pay). Estimates the LN
+    /// routing fee (real, via the backend's `estimate_routing_fee`; falls back
+    /// to a 1% heuristic if the backend can't estimate) and adds the operator's
+    /// margin (`invoice_fee_bps`). The wallet uses `total_fee_msats` to fund the
+    /// `InvoiceLock.fee` budget instead of guessing. Advisory only — the routing
+    /// cap on pay is what actually bounds the spend. Same handler the bridge
+    /// uses for third-party quotes, just answered by the operator here.
+    pub(crate) async fn process_quote_invoice_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        use lightning_invoice::Bolt11Invoice;
+        use std::str::FromStr;
+
+        let invoice_str = match request
+            .params
+            .get("invoice")
+            .or_else(|| request.params.get("bolt11"))
+            .and_then(|v| v.as_str())
+        {
+            Some(i) => i,
+            None => return (false, None, Some("Missing invoice parameter".to_string())),
+        };
+        let invoice = match Bolt11Invoice::from_str(invoice_str) {
+            Ok(i) => i,
+            Err(e) => return (false, None, Some(format!("Invalid invoice: {}", e))),
+        };
+        let amount_msat = match invoice.amount_milli_satoshis() {
+            Some(a) if a > 0 => a,
+            _ => return (false, None, Some("Invoice has no amount".to_string())),
+        };
+
+        // Real routing estimate; fall back to 1% if the backend can't estimate.
+        let (routing_estimate_msats, estimation) =
+            match crate::lightning_backend::from_env().estimate_routing_fee(invoice_str) {
+                Ok(f) => (f, "real"),
+                Err(e) => {
+                    tracing::debug!("estimate_routing_fee fell back to heuristic: {}", e);
+                    (amount_msat / 100, "heuristic")
+                }
+            };
+
+        // Operator margin from the advertised invoice fee.
+        let margin_bps = crate::operator_policy::OperatorPolicy::load(&self.data_dir)
+            .ok()
+            .flatten()
+            .and_then(|p| p.invoice_fee_bps)
+            .unwrap_or(0) as u64;
+        let margin_msats = amount_msat.saturating_mul(margin_bps) / 10_000;
+        let total_fee_msats = routing_estimate_msats + margin_msats;
+
+        let quote_expiry_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            + 300;
+        let result = serde_json::json!({
+            "invoice_amount_msats": amount_msat,
+            "routing_estimate_msats": routing_estimate_msats,
+            "margin_msats": margin_msats,
+            "total_fee_msats": total_fee_msats,
+            "estimation": estimation,
+            "quote_expiry_unix": quote_expiry_unix,
+        });
+        (true, Some(result.to_string()), None)
+    }
+
     pub(crate) async fn process_pay_invoice_request(
         &self,
         request: &crate::nostr::LedgerRequest,

@@ -394,6 +394,30 @@ impl LightningBackend for LndBackend {
         Ok(resp.payment_request)
     }
 
+    fn estimate_routing_fee(&self, invoice: &str) -> Result<u64, Error> {
+        // routerrpc.EstimateRouteFee — pathfinding only, sends no HTLC.
+        // LND ≥0.18 accepts a payment_request and returns routing_fee_msat
+        // (int64 as a JSON string). A failure_reason means no route fits.
+        #[derive(serde::Deserialize)]
+        struct EstResp {
+            #[serde(default)]
+            routing_fee_msat: String,
+            #[serde(default)]
+            failure_reason: String,
+        }
+        let body = serde_json::json!({ "payment_request": invoice, "timeout": 30 });
+        let resp: EstResp = self.post("/v2/router/route/estimatefee", &body)?;
+        if !resp.failure_reason.is_empty() && resp.failure_reason != "FAILURE_REASON_NONE" {
+            return Err(Error::Wallet(format!(
+                "LND estimateroutefee: {}",
+                resp.failure_reason
+            )));
+        }
+        resp.routing_fee_msat
+            .parse::<u64>()
+            .map_err(|e| Error::Wallet(format!("LND estimateroutefee parse: {}", e)))
+    }
+
     fn pay_invoice(&self, invoice: &str) -> Result<String, Error> {
         // /v1/channels/transactions is sync — blocks until terminal state.
         let body = serde_json::json!({ "payment_request": invoice });

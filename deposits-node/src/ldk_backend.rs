@@ -230,6 +230,20 @@ impl LdkBackend {
         Ok(response.payment_id)
     }
 
+    /// Estimate the routing fee (msats) for a BOLT-11 without sending, via the
+    /// fork's `bolt11-estimate-route-fee` command (find_route over the node's
+    /// network graph). Errors (older sidecar without the command, no route
+    /// found) propagate so the caller falls back to a heuristic.
+    pub fn estimate_route_fee(&self, invoice: &str) -> Result<u64, Error> {
+        let output = self.run_command(&["bolt11-estimate-route-fee", invoice])?;
+        let v: serde_json::Value = serde_json::from_str(&output).map_err(|e| {
+            Error::Protocol(format!("estimate-route-fee parse: {} (output: {})", e, output))
+        })?;
+        v.get("routing_fee_msat")
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| Error::Protocol(format!("estimate-route-fee: no routing_fee_msat in {}", output)))
+    }
+
     /// Pay a BOLT11 invoice with a specific amount (for amountless invoices)
     pub fn pay_invoice_with_amount(
         &self,
@@ -523,6 +537,10 @@ impl LightningBackend for LdkBackend {
         max_fee_msat: u64,
     ) -> Result<String, Error> {
         LdkBackend::pay_invoice_capped(self, invoice, max_fee_msat)
+    }
+
+    fn estimate_routing_fee(&self, invoice: &str) -> Result<u64, Error> {
+        LdkBackend::estimate_route_fee(self, invoice)
     }
 
     fn list_channels(&self) -> Result<Vec<BackendChannelInfo>, Error> {

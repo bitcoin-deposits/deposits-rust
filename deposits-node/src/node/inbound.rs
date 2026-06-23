@@ -92,6 +92,7 @@ impl Node {
             "balance_query",
             "make_invoice",
             "pay_invoice",
+            "quote_invoice",
             "transfer_lock",
             "transfer_complete",
             "bump",
@@ -374,6 +375,7 @@ impl Node {
             }
             "make_invoice" => self.process_make_invoice_request(&request).await,
             "pay_invoice" => self.process_pay_invoice_request(&request).await,
+            "quote_invoice" => self.process_quote_invoice_request(&request).await,
             "ledger_open" => self.process_ledger_open_request(&request).await,
             "admin_buffer_open" => self.process_admin_buffer_open_request(&request).await,
             "admin_buffer_fill" => self.process_admin_buffer_fill_request(&request).await,

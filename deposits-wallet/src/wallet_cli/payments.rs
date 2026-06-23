@@ -1471,14 +1471,47 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     // The witness ends up being whatever satisfies the descriptor — for pk(...)
     // it's a single 64-byte ECDSA compact signature over the dep-17 sighash
     // (matching what Dep16Authorizer's EcdsaVerifier checks against).
+    let transport = NostrTransportBuilder::new(nostr_key)
+        .relay(&config.relays[0])
+        .build()
+        .await?;
+
     // Fee budget on TOP of the invoice amount: the LN routing reserve plus the
     // operator's service margin. The operator caps its routing at this and
     // keeps the spread (fee − actual_routing); a payment that can't route under
     // it fails and we're refunded. We sign it into the dep-17 preimage so the
-    // operator can't inflate it. 1% (min 1 sat) comfortably covers small-amount
-    // routing and clears typical operator invoice_fee_bps floors.
-    // TODO: source the exact floor from the operator's Kind-39100 ad.
-    let fee_msats = (amount_msats / 100).max(1000);
+    // operator can't inflate it.
+    //
+    // Pre-flight: ask the operator to quote a real routing estimate (DEP-10
+    // §Pay). Fund `total_fee_msats` + a 20% safety buffer (the graph estimate is
+    // optimistic vs live liquidity). Fall back to a flat 1% (min 1 sat) if the
+    // quote round-trip fails so a pay never blocks on an unanswered quote.
+    let quoted_total: Option<u64> = {
+        let qp = serde_json::json!({ "invoice": invoice });
+        match transport.send_ledger_request(ledger_id, "quote_invoice", qp).await {
+            Ok(rid) => match transport.wait_for_response(&rid, 30_000).await {
+                Ok(resp) if resp.success => resp
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.get("total_fee_msats"))
+                    .and_then(|v| v.as_u64()),
+                _ => None,
+            },
+            Err(_) => None,
+        }
+    };
+    let fee_msats = match quoted_total {
+        Some(total) => {
+            let buffered = total + total / 5;
+            println!("  Quote: ~{} msats routing+margin (+20% buffer = {})", total, buffered);
+            buffered.max(1000)
+        }
+        None => {
+            let h = (amount_msats / 100).max(1000);
+            println!("  Quote unavailable — using {} msat heuristic budget", h);
+            h
+        }
+    };
 
     let op_nonce = deposits_core::signing::fresh_op_nonce();
     let op_expiry: u32 = u32::MAX; // TODO: chain_tip + margin
@@ -1501,11 +1534,6 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         deposits_core::messages::LedgerOperation::InvoiceLock { witness, .. } => witness.clone(),
         _ => unreachable!("sign_op preserved the variant"),
     };
-
-    let transport = NostrTransportBuilder::new(nostr_key)
-        .relay(&config.relays[0])
-        .build()
-        .await?;
 
     let request_params = serde_json::json!({
         "descriptor": descriptor,

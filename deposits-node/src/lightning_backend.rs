@@ -90,6 +90,19 @@ pub trait LightningBackend: Send + Sync {
         self.pay_invoice(invoice)
     }
 
+    /// Estimate the LN routing fee (msats) to pay this BOLT-11, WITHOUT sending.
+    /// Powers the `quote_invoice` pre-flight (DEP-10 §Pay) so the wallet funds a
+    /// realistic `InvoiceLock.fee` instead of a blind guess. Backends estimate
+    /// natively where they can (LND `routerrpc.estimateroutefee`, CLN
+    /// `getroute`, LDK via the sidecar's route-estimate endpoint). The default
+    /// returns `Unsupported` so the quote handler falls back to its bps
+    /// heuristic — the routing cap still bounds the actual spend either way.
+    fn estimate_routing_fee(&self, _invoice: &str) -> Result<u64, Error> {
+        Err(Error::Protocol(
+            "routing-fee estimation not implemented for this backend".to_string(),
+        ))
+    }
+
     /// Currently-open channels. Used for status display and quorum sanity
     /// checks; not on the protocol hot path.
     fn list_channels(&self) -> Result<Vec<ChannelInfo>, Error>;
