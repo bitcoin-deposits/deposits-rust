@@ -900,7 +900,6 @@ impl Node {
                     };
                     let fail_operation = LedgerOperation::InvoiceFail {
                         deposit_id,
-                        amount: amount_msat,
                         payment_id,
                         sequence_number: fail_sequence,
                     };
@@ -1098,7 +1097,6 @@ impl Node {
                 };
                 let fail_op = LedgerOperation::InvoiceFail {
                     deposit_id,
-                    amount: amount_msat,
                     payment_id,
                     sequence_number: fail_sequence,
                 };

@@ -222,7 +222,6 @@ fn invoice_fail_accumulates_fixed_fee() {
     ledger
         .apply_state_changes(&LedgerOperation::InvoiceFail {
             deposit_id: did,
-            amount: 10_000,
             payment_id,
             sequence_number: 3,
         })

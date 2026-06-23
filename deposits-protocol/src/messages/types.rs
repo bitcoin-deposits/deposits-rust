@@ -383,10 +383,12 @@ pub enum LedgerOperation {
         /// Witness satisfying the deposit descriptor
         witness: DescriptorWitness,
     },
-    /// Fail a pending invoice payment
+    /// Fail a pending invoice payment. Carries no amount — the released amount
+    /// is read from the open lock (`open_invoice_locks[payment_id]`) at apply
+    /// time, mirroring TransferFail/OnchainFail which reference their pending
+    /// entry by id.
     InvoiceFail {
         deposit_id: DepositId,
-        amount: u64,
         payment_id: [u8; 32],
         sequence_number: u64,
     },
@@ -1264,7 +1266,6 @@ impl BinaryCodec for LedgerOperation {
             }
             Self::InvoiceFail {
                 deposit_id,
-                amount,
                 payment_id,
                 sequence_number,
             } => {
@@ -1272,7 +1273,6 @@ impl BinaryCodec for LedgerOperation {
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
                 w.write_all(&legacy_bytes)?;
-                write_u64(w, *amount)?;
                 write_32(w, payment_id)?;
                 write_u64(w, *sequence_number)?;
             }
@@ -1715,7 +1715,6 @@ impl BinaryCodec for LedgerOperation {
                 deposit_id.copy_from_slice(&legacy_bytes[1..17]);
                 Ok(Self::InvoiceFail {
                     deposit_id,
-                    amount: read_u64(r)?,
                     payment_id: read_32(r)?,
                     sequence_number: read_u64(r)?,
                 })

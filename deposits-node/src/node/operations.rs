@@ -745,7 +745,6 @@ impl Node {
 
         let operation = LedgerOperation::InvoiceFail {
             deposit_id,
-            amount: amount_msats,
             payment_id,
             sequence_number,
         };

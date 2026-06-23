@@ -1700,7 +1700,6 @@ mod replay_protection_tests {
         let (s1, _) = apply(&state, &invoice_lock_with_fee(did, 800, Some(100), pid), 100);
         let fail = LedgerOperation::InvoiceFail {
             deposit_id: did,
-            amount: 800,
             payment_id: pid,
             sequence_number: 2,
         };

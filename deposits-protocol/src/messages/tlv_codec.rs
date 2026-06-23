@@ -358,13 +358,11 @@ impl TlvEncode for LedgerOperation {
             }
             Self::InvoiceFail {
                 deposit_id,
-                amount,
                 payment_id,
                 sequence_number,
             } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
-                    .u64_field(AMOUNT, *amount)
                     .bytes_field(PAYMENT_ID, payment_id)
                     .u64_field(SEQUENCE_NUMBER, *sequence_number);
             }
@@ -768,7 +766,9 @@ impl TlvDecode for LedgerOperation {
             }),
             32 => Ok(Self::InvoiceFail {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
-                amount: reader.read_u64(AMOUNT)?,
+                // amount removed — read from the open lock at apply time. Old
+                // events that still carry an AMOUNT tag decode fine (unread tags
+                // are skipped).
                 payment_id: reader.read_bytes(PAYMENT_ID)?,
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
             }),

@@ -365,7 +365,6 @@ fn open_invoice_lock_cleared_on_fail() {
     ledger
         .apply_state_changes(&LedgerOperation::InvoiceFail {
             deposit_id: dep,
-            amount: 3000,
             payment_id,
             sequence_number: 1,
         })

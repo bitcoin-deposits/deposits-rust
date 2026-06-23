@@ -180,7 +180,6 @@ fn invoice_fail_unlocks_funds() {
         .ledger
         .apply_operation(&LedgerOperation::InvoiceFail {
             deposit_id: did,
-            amount: 30_000,
             payment_id,
             sequence_number: next_seq,
         })

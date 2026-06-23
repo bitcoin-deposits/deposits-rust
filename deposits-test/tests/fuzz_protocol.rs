@@ -731,9 +731,9 @@ fn validate_per_op_as_cosigner(
         .is_ok(),
         LedgerOperation::InvoiceLock { .. } => true,
         LedgerOperation::InvoiceFulfill { .. } => true,
-        LedgerOperation::InvoiceFail { amount, .. } => {
-            op_val::validate_payment_fail(*amount).is_ok()
-        }
+        // InvoiceFail carries no amount — the released amount is read from the
+        // open lock at apply time. Nothing op-level to validate.
+        LedgerOperation::InvoiceFail { .. } => true,
         LedgerOperation::OnchainCredit {
             deposit_id, amount, ..
         } => ledger.state.deposits.contains_key(deposit_id) && *amount > 0,
@@ -1538,7 +1538,6 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
         } else {
             LedgerOperation::InvoiceFail {
                 deposit_id: source.0,
-                amount,
                 payment_id: pid,
                 sequence_number: op.ledger.state.sequence + 1,
             }

@@ -223,7 +223,6 @@ fn invoice_lock_with_fee() {
 fn invoice_fail() {
     test_roundtrip(&LedgerOperation::InvoiceFail {
         deposit_id: did(),
-        amount: 5_000_000,
         payment_id: h32(),
         sequence_number: 44,
     });

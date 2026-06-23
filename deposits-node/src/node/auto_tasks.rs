@@ -548,7 +548,6 @@ impl Node {
                     };
                     let op = deposits_core::messages::LedgerOperation::InvoiceFail {
                         deposit_id: lock.deposit_id,
-                        amount: lock.amount,
                         payment_id,
                         sequence_number: sequence,
                     };
@@ -750,7 +749,6 @@ impl Node {
 
                     let op = deposits_core::messages::LedgerOperation::InvoiceFail {
                         deposit_id: lock.deposit_id,
-                        amount: lock.amount,
                         payment_id,
                         sequence_number: sequence,
                     };
@@ -789,7 +787,6 @@ impl Node {
                         };
                         let op = deposits_core::messages::LedgerOperation::InvoiceFail {
                             deposit_id: lock.deposit_id,
-                            amount: lock.amount,
                             payment_id,
                             sequence_number: sequence,
                         };

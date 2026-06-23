@@ -832,7 +832,6 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
             "InvoiceFail",
             LedgerOperation::InvoiceFail {
                 deposit_id: did(),
-                amount: 5_000_000,
                 payment_id: h32(),
                 sequence_number: 44,
             },

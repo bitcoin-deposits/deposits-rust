@@ -220,13 +220,9 @@ fn format_op(op: &LedgerOperation) -> String {
             short_deposit_id(deposit_id),
             format_msats(*amount)
         ),
-        LedgerOperation::InvoiceFail {
-            deposit_id, amount, ..
-        } => format!(
-            "InvoiceFail  id={} +{}",
-            short_deposit_id(deposit_id),
-            format_msats(*amount)
-        ),
+        LedgerOperation::InvoiceFail { deposit_id, .. } => {
+            format!("InvoiceFail  id={}", short_deposit_id(deposit_id))
+        }
         LedgerOperation::InvoiceFulfill {
             deposit_id, amount, ..
         } => format!(
