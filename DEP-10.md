@@ -97,6 +97,17 @@ The wallet's commitment is the locked `amount`; the bridge's risk is its own rou
 
 When the payer and payee are deposits on the same operator, no bridge is needed: the operator (or the wallet, or anyone) can issue a TransferLock between the two deposits directly. Lightning is bypassed entirely. Fees fall back to the operator's published intra-ledger `TransferFeeSchedule` (DEP-07).
 
+### Operator-direct pay
+
+A depositor can also ask its own operator to pay an external BOLT-11 directly — the operator runs the LN node and acts as the bridge for its own depositors. This uses the `InvoiceLock` → `InvoiceFulfill`/`InvoiceFail` ops (DEP-02) rather than a `TransferLock`, but the economics are the bridge model's keep-the-spread, just settled on-ledger:
+
+1. **Fund.** The wallet emits an `InvoiceLock` carrying `amount = invoice_amount` and a `fee` budget (DEP-02 tag 221) on top — the LN routing reserve plus the operator's margin. The wallet signs `fee` into the dep-16 operation preimage so the operator cannot inflate it (a legacy lock with no `fee` is the pre-fee amount-only behavior). The lock reserves `amount + fee` from the deposit.
+2. **Validate.** The operator MUST reject the request if the deposit can't cover `amount + fee`, or if `fee` is below the operator's advertised minimum (`invoice_fee_bps × amount`, DEP-04). The wallet is thus *required* to include more than the invoice amount — a bare-amount request is refused.
+3. **Pay under cap.** The operator pays the BOLT-11 with its LN routing fee capped at `fee`. Because the cap equals the depositor's budget, the operator never spends more routing than was locked: a payment that can't route under the cap simply fails.
+4. **Resolve.** On success the operator commits `InvoiceFulfill`; the deposit is debited `amount + fee`, the `amount` having left over Lightning and the `fee` landing in `fees_accumulated`. The operator's net is `fee − actual_routing_fee` (keep-the-spread). On failure (`InvoiceFail`) the full `amount + fee` is released and only `fixed_msats` (the dust fee) is kept — the depositor is made whole minus dust (DEP-07 §"Fee on Failure").
+
+Routing variance is the operator's business risk, bounded by the cap; like the bridge model there is no on-ledger quote signature — the wallet either funds enough budget or the payment fails and refunds.
+
 ### Bridge cosigner rules
 
 A bridge `TransferLock` is, on the wire, indistinguishable from any other hash-locked transfer — courier hops (DEP-13) use the same `sha256(H)` completion scripts. Cosigners therefore CANNOT require a correlated BOLT-11 for every hash-locked transfer; the bridge checks below apply only when the lock's submitter supplies the BOLT-11.

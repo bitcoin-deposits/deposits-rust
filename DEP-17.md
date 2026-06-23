@@ -169,6 +169,8 @@ operation_sighash = tagged_hash("dep17/operation", operation_preimage)
 
 this is dep-16's `Operation::signing_message` (more precisely, its digest): `pk(K)` verifies a signature by `K` over `operation_sighash`. because `deposit_id` is inside the preimage and the tag is operation-specific, a signature is not replayable across deposits, operation types, argument sets, nonces, or roles.
 
+**optional args are present only when set.** an arg that an operation omits does not appear in the `args` list — it is not encoded as a zero or a null. this keeps the encoding canonical (one valid form) and lets a field be added to an operation without breaking existing signatures: an instance that doesn't carry the new field produces the byte-identical preimage it did before the field existed. for example, the operator fee budget on an outbound Lightning pay (`InvoiceLock.fee`, DEP-02 tag 221) appears as a `fee` arg on the `spend` op only when the depositor funds one; a legacy amount-only lock omits it and verifies exactly as it did pre-fee. since `args` is sorted by name and decoders reject trailing bytes, the presence or absence of an optional arg is itself committed to — an adversary cannot strip or inject one without invalidating the signature.
+
 ### nonce and expiry
 
 `nonce` and `expiry` are replay protection enforced by the **protocol**, not by the descriptor's predicates:

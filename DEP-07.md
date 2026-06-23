@@ -67,7 +67,7 @@ Lock-then-resolve operations (`TransferLock`/`Complete`/`Fail`, `InvoiceLock`/`F
 
 - The **proportional** portion of the fee is zero, since no `amount` was moved.
 - The **fixed** portion (`fixed_msats` from the deposit's current `TransferFeeSchedule`) is charged to the deposit and credited to the operator's `fees_accumulated`.
-- Any locked capacity is otherwise released. For `TransferFail` specifically, the source recovers `amount + proportional_portion` — only `fixed_msats` stays with the operator. For `InvoiceFail` and `OnchainFail`, the locked `amount` is released in full (those ops don't lock an operator fee upfront) and `fixed_msats` is debited from the deposit's balance.
+- Any locked capacity is otherwise released. For `TransferFail` specifically, the source recovers `amount + proportional_portion` — only `fixed_msats` stays with the operator. For `OnchainFail`, the locked `amount` is released in full (no operator fee locked upfront) and `fixed_msats` is debited from the deposit's balance. For `InvoiceFail`, the locked budget — `amount + fee`, where `fee` is the operator's routing+margin budget (see DEP-10 §"Operator-direct pay") — is released in full and only `fixed_msats` is debited: the payment never went out, so the operator incurred no routing and retains no spread.
 
 Implementations MUST use saturating subtraction so that a deposit whose balance dipped below `fixed_msats` between lock and fail does not panic or underflow — in that edge case the operator collects only what the deposit can afford.
 
@@ -82,8 +82,11 @@ Every ledger carries a monotonically non-decreasing `fees_accumulated: u64` coun
 | `TransferFail` | `source.transfer_fees.fixed_msats` |
 | `InvoiceFail` | `deposit.transfer_fees.fixed_msats` |
 | `OnchainFail` | `deposit.transfer_fees.fixed_msats` |
+| `InvoiceFulfill` | `open_invoice_lock.fee` (the depositor-funded routing+margin budget; keep-the-spread) |
 
-`OnchainLock.fee_sats` is a **miner** fee and is NOT accumulated on success or failure. Successful `InvoiceFulfill` and `OnchainFulfill` do not contribute (no operator-fee model on those paths today — `InvoiceLock`/`InvoiceFulfill` is the legacy operator-runs-the-LN-node pay path, kept around for back-compat; the modern bridge-mediated pay flow uses `TransferLock`/`TransferComplete` whose fee is captured under `TransferComplete` above).
+`OnchainLock.fee_sats` is a **miner** fee and is NOT accumulated on success or failure. Successful `OnchainFulfill` does not contribute (no operator-fee model on that path today).
+
+Successful `InvoiceFulfill` **does** contribute the `fee` budget the depositor signed into the `InvoiceLock` (DEP-02 tag 221; DEP-10 §"Operator-direct pay"). On the operator-direct LN pay path the operator pays the BOLT-11 with a routing cap equal to that budget and **keeps the spread** (`fee − actual_routing_fee`) — the same keep-the-spread economics as a bridge's `service_fee`, except here it lands on-ledger in `fees_accumulated` rather than off-ledger. A legacy `InvoiceLock` with no `fee` field contributes nothing on fulfill (back-compat). The bridge-mediated pay flow remains available and uses `TransferLock`/`TransferComplete` whose fee is captured under `TransferComplete` above.
 
 The legacy `InvoiceCredit` op (deterrence-mode receive — DEP-10 §"Offline receive") also doesn't contribute to `fees_accumulated`, since the operator's fee on that path is collected entirely outside the ledger via the spread between LN routing/margin and what they choose to credit. Operators offering this path SHOULD price it conservatively given the lack of cosigner-enforced fee transparency.
 

@@ -230,6 +230,15 @@ The `message` field contains a TLV-encoded operation. Type 0 is always a 1-byte 
 | 28 | sequence_number | 8 | InvoiceCredit, InvoiceLock, InvoiceFulfill |
 | 30 | payment_id | 32 | InvoiceCredit, InvoiceLock, InvoiceFulfill |
 | 34 | preimage | 32 | InvoiceFulfill |
+| 221 | fee | 8 | InvoiceLock (optional, odd tag) |
+
+The InvoiceLock `fee` (tag 221, odd → optional) is the operator's fee budget in
+msats charged on top of `amount` for paying the invoice — the LN routing reserve
+plus the operator's service margin. When present it is bound into the dep-16
+operation preimage (an extra `fee` arg on the spend op — see DEP-16/DEP-17) so the
+depositor authorizes it and the operator cannot inflate it. Absent (legacy locks)
+the preimage is byte-identical to a pre-fee InvoiceLock, so existing signatures
+stay valid. See DEP-10 §"Operator-direct pay" for the settlement model.
 
 #### On-chain
 
