@@ -1,5 +1,15 @@
 use super::*;
 
+/// Total obligation backed by reserves: the sum of every deposit's `balance`.
+///
+/// `locked_balance` is a SUBSET of `balance` (funds earmarked for an in-flight
+/// op), not a separate bucket, so it must NOT be added — doing so double-counts
+/// every locked sat and can falsely trip the reserves/collateral caps the
+/// moment in-flight locks accumulate. See `Deposit::balance` / `locked_balance`.
+pub(crate) fn ledger_obligation_msats(state: &deposits_core::LedgerState) -> u64 {
+    state.deposits.values().map(|d| d.balance).sum()
+}
+
 impl Node {
     /// Check if adding `additional_msats` to a ledger's obligations would exceed
     /// either the reserves limit or 2x the smallest quorum member's collateral commitment.
@@ -17,13 +27,11 @@ impl Node {
         };
         let ledger = ledger_arc.read().unwrap();
 
-        // All deposits (including collateral) count toward reserves usage
-        let all_deposits: u64 = ledger
-            .state
-            .deposits
-            .values()
-            .map(|d| d.balance + d.locked_balance)
-            .sum();
+        // All deposits (including collateral) count toward reserves usage.
+        // Obligation = Σ balance only; locked is a subset of balance (see
+        // ledger_obligation_msats) — adding it would double-count and previously
+        // wedged make_invoice once in-flight locks accumulated.
+        let all_deposits: u64 = ledger_obligation_msats(&ledger.state);
         let new_total_all = all_deposits.saturating_add(additional_msats);
 
         // Check reserves limit: reserves cover everything (including collateral deposits)
@@ -1054,6 +1062,66 @@ impl Node {
             fee_sats: withdrawal.fee_sats,
             final_balance_msats: final_balance,
         })
+    }
+}
+
+#[cfg(test)]
+mod obligation_tests {
+    use super::ledger_obligation_msats;
+    use deposits_core::types::Deposit;
+    use deposits_core::LedgerState;
+
+    fn pk() -> bitcoin::secp256k1::PublicKey {
+        use std::str::FromStr;
+        bitcoin::secp256k1::PublicKey::from_str(
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap()
+    }
+
+    fn state_with(deposits: &[(u64, u64)]) -> LedgerState {
+        let mut state = LedgerState::new(pk(), "bcrt1qtest".into(), 0);
+        for (i, (balance, locked)) in deposits.iter().enumerate() {
+            let mut d = Deposit::new(format!("pk(deposit-{i})"), None);
+            d.balance = *balance;
+            d.locked_balance = *locked;
+            state.deposits.insert(d.deposit_id, d);
+        }
+        state.rebuild_balance_cache();
+        state
+    }
+
+    /// Regression: the reserves/collateral gate must count `balance` only.
+    /// Locking is an in-flight earmark (a subset of balance), so heavily-locked
+    /// deposits must NOT read as extra obligation — that double-count once
+    /// wedged make_invoice when stuck InvoiceLocks held ~half of each balance.
+    #[test]
+    fn locked_balance_does_not_inflate_obligation() {
+        // 8,075 sat of balance, almost all of it locked in-flight.
+        let state = state_with(&[(7_417_000, 7_351_000), (658_000, 654_000)]);
+        let obligation = ledger_obligation_msats(&state);
+        assert_eq!(obligation, 7_417_000 + 658_000, "obligation = Σ balance");
+
+        // The buggy formula (balance + locked) would have read far higher and
+        // tripped a 15,600,000-msat reserves cap that the truth clears easily.
+        let buggy: u64 = state
+            .deposits
+            .values()
+            .map(|d| d.balance + d.locked_balance)
+            .sum();
+        let reserves_cap = 15_600_000u64;
+        assert!(obligation <= reserves_cap, "true obligation fits reserves");
+        assert!(buggy > reserves_cap, "buggy formula falsely exceeds reserves");
+    }
+
+    #[test]
+    fn obligation_matches_cached_total_deposit_balance() {
+        let state = state_with(&[(1_000_000, 250_000), (3_000_000, 0)]);
+        assert_eq!(
+            ledger_obligation_msats(&state),
+            state.total_deposit_balance(),
+            "helper must agree with the cached Σ balance"
+        );
     }
 }
 

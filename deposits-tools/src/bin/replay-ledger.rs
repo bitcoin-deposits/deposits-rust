@@ -40,7 +40,11 @@ fn format_msats(msats: u64) -> String {
     if rem == 0 {
         format_sats(sats)
     } else {
-        format!("{}.{:03} sat", format_sats(sats), rem)
+        // format_sats already appends its own " sat"/" BTC" unit; strip it so we
+        // don't render "7,484 sat.029 sat" — want "7,484.029 sat".
+        let base = format_sats(sats);
+        let num = base.trim_end_matches(" sat");
+        format!("{}.{:03} sat", num, rem)
     }
 }
 
@@ -459,7 +463,10 @@ fn print_state(state: &LedgerState) {
     if total_collateral > 0 {
         println!("    collateral:  {}", format_msats(total_collateral));
     }
-    let solvent = state.reserves_amount >= total_balance + total_locked;
+    // `locked` is a subset of `balance` (in-flight earmark), not additive — the
+    // obligation backed by reserves is `total_balance` alone. See the matching
+    // check in deposits-node operations.rs::check_collateral_obligation_limit.
+    let solvent = state.reserves_amount >= total_balance;
     println!("    solvent:     {}", if solvent { "YES" } else { "NO" });
 }
 
