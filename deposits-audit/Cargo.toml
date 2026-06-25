@@ -12,6 +12,7 @@ edition = "2021"
 deposits-core = { path = "../deposits-core" }
 serde = { version = "1.0", features = ["derive"] }
 base64 = "0.21"
+hex = "0.4"
 
 [dev-dependencies]
 serde_json = "1.0"

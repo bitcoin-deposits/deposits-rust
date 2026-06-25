@@ -39,6 +39,28 @@ export function audit_version() {
     }
 }
 
+/**
+ * Per-deposit rows for the "all deposits" view (id, descriptor, balance,
+ * locked, available), sorted by descending balance. Same input shape as
+ * `audit`. Returns a JSON array, or `{"error": ...}` on malformed input.
+ * @param {string} updates_b64_json
+ * @returns {string}
+ */
+export function deposits(updates_b64_json) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(updates_b64_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.deposits(ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,

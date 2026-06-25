@@ -366,6 +366,8 @@
       <div class="loading">querying relay…</div>
     </div>
 
+    <div id="deposits-link" style="margin:0.25rem 0 0.5rem;"></div>
+
     <h1 class="section-title">solvency audit</h1>
     <div id="audit-panel">
       <button id="audit-run" class="audit-run">compute solvency</button>
@@ -1164,6 +1166,11 @@ async function main() {
   renderOverview(ad, cosignerLedgers, quorumExpiry, chainTip);
   const auditBtn = document.getElementById('audit-run');
   if (auditBtn) auditBtn.addEventListener('click', () => runAudit(ledgerId));
+  const dl = document.getElementById('deposits-link');
+  if (dl) {
+    const frag = `ledger=${encodeURIComponent(ledgerId)}&relay=${encodeURIComponent(RELAY_URL)}`;
+    dl.innerHTML = `<a class="audit-run" style="display:inline-block;text-decoration:none;" href="/deposits#${frag}">view all deposits →</a>`;
+  }
   loadActivity(ledgerId);
 }
 

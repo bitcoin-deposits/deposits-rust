@@ -58,4 +58,25 @@ test.describe('explorer solvency audit (wasm)', () => {
     expect(report.obligations_msats).toBe(0);
     expect(report.deposits).toBe(0);
   });
+
+  test('deposits() lists per-deposit rows matching the aggregate', async ({ page }) => {
+    const [rows, report] = await page.evaluate((blobs) => {
+      const j = JSON.stringify(blobs);
+      return [JSON.parse(window.__deposits(j)), JSON.parse(window.__audit(j))];
+    }, contents);
+
+    expect(Array.isArray(rows)).toBe(true);
+    expect(rows.length).toBe(report.deposits); // 3
+    // Σ row balances == aggregate obligations.
+    expect(rows.reduce((s, r) => s + r.balance_msats, 0)).toBe(report.obligations_msats);
+    // Sorted by descending balance; each row internally consistent.
+    for (let i = 1; i < rows.length; i++) {
+      expect(rows[i - 1].balance_msats).toBeGreaterThanOrEqual(rows[i].balance_msats);
+    }
+    for (const r of rows) {
+      expect(r.deposit_id).toMatch(/^[0-9a-f]{32}$/);
+      expect(r.descriptor.length).toBeGreaterThan(0);
+      expect(r.available_msats).toBe(r.balance_msats - r.locked_msats);
+    }
+  });
 });

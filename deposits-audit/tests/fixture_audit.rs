@@ -37,3 +37,27 @@ fn fixture_report_is_sane_and_solvent() {
     assert_eq!(r.op_counts.get("InvoiceCredit").copied().unwrap_or(0), 11);
     assert_eq!(r.replay_errors, 0, "fixture replays cleanly");
 }
+
+#[test]
+fn deposit_rows_match_aggregate() {
+    let blobs = load_fixture();
+    let rows = deposits_audit::deposit_rows_base64(&blobs);
+    let agg = audit_base64(&blobs);
+
+    // Per-deposit list agrees with the aggregate audit.
+    assert_eq!(rows.len(), agg.deposits, "row count == deposit count");
+    let sum: u64 = rows.iter().map(|r| r.balance_msats).sum();
+    assert_eq!(sum, agg.obligations_msats, "Σ row balance == obligations");
+    let locked: u64 = rows.iter().map(|r| r.locked_msats).sum();
+    assert_eq!(locked, agg.locked_msats, "Σ row locked == locked total");
+
+    // Sorted descending; each row internally consistent + has a descriptor.
+    for w in rows.windows(2) {
+        assert!(w[0].balance_msats >= w[1].balance_msats, "sorted by balance desc");
+    }
+    for r in &rows {
+        assert_eq!(r.available_msats, r.balance_msats - r.locked_msats);
+        assert!(!r.descriptor.is_empty(), "deposit has a descriptor");
+        assert_eq!(r.deposit_id.len(), 32, "16-byte id as 32 hex chars");
+    }
+}

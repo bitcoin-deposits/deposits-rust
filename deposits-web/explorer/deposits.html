@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Deposits · Deposits Explorer</title>
+  <style>
+    :root {
+      --bg:        #11131f;
+      --bg-elev:   #181c2c;
+      --bg-card:   #1d2237;
+      --bg-card-h: #232943;
+      --border:    #2a304a;
+      --border-strong: #3a4263;
+      --fg:        #e7e9f0;
+      --fg-strong: #ffffff;
+      --fg-muted:  #8d96b3;
+      --fg-dim:    #5b6386;
+      --accent:    #f7931a;
+      --green:     #4cae5a;
+      --red:       #d9534f;
+      --yellow:    #f0ad4e;
+      --blue:      #5b8def;
+      --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { background: var(--bg); }
+    body { margin: 0; color: var(--fg); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+    a { color: inherit; text-decoration: none; }
+    a:hover { color: var(--accent); }
+
+    .topnav {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.85rem 1.25rem;
+      background: var(--bg-elev);
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 10;
+    }
+    .brand { display: flex; align-items: baseline; gap: 0.45rem; font-weight: 600; font-size: 1.05rem; }
+    .brand .logo { color: var(--accent); font-size: 1.25rem; line-height: 1; }
+    .brand .name { color: var(--fg-strong); }
+    .brand .sub { color: var(--fg-muted); font-weight: 400; font-size: 0.85rem; }
+    .nav-links { display: flex; gap: 1rem; font-size: 0.9rem; color: var(--fg-muted); }
+
+    main { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+
+    .hero {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1.1rem 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .hero .lbl {
+      color: var(--fg-muted); font-size: 0.72rem;
+      text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.25rem;
+    }
+    .hero .id { font: 0.95rem var(--mono); color: var(--accent); word-break: break-all; }
+    .hero .meta {
+      display: flex; gap: 0.9rem; flex-wrap: wrap; align-items: baseline;
+      margin-top: 0.6rem; color: var(--fg-muted); font-size: 0.85rem;
+    }
+    .hero .meta strong { color: var(--fg-strong); font-variant-numeric: tabular-nums; }
+
+    table.dl { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    .dl th, .dl td {
+      text-align: left; padding: 0.55rem 0.7rem;
+      border-bottom: 1px solid var(--border); vertical-align: top;
+    }
+    .dl tr:last-child td { border-bottom: none; }
+    .dl th {
+      color: var(--fg-muted); font-weight: 600;
+      text-transform: uppercase; font-size: 0.68rem; letter-spacing: 0.06em;
+    }
+    .dl td.id { font-family: var(--mono); }
+    .dl td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+    .dl td.num.locked { color: var(--yellow); }
+    .dl td.desc { color: var(--fg-muted); font-family: var(--mono); font-size: 0.8rem; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dl tr:hover td { background: var(--bg-card-h); }
+    .dl tfoot td { font-weight: 600; color: var(--fg-strong); border-top: 1px solid var(--border-strong); }
+
+    .empty {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 6px; padding: 1.25rem; color: var(--fg-muted);
+    }
+    .empty.err { color: var(--red); border-color: rgba(217, 83, 79, 0.4); }
+    .loading { color: var(--fg-muted); padding: 0.5rem 0; }
+
+    footer {
+      margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--border);
+      color: var(--fg-dim); font-size: 0.78rem; text-align: center;
+    }
+    footer .mono { font-family: var(--mono); color: var(--fg-muted); }
+    @media (max-width: 560px) {
+      table.dl { display: block; overflow-x: auto; white-space: nowrap; }
+      .dl td.desc { max-width: none; }
+    }
+  </style>
+</head>
+<body>
+  <nav class="topnav">
+    <div class="brand">
+      <span class="logo">⟁</span>
+      <span class="name">deposits</span>
+      <span class="sub">explorer</span>
+    </div>
+    <div class="nav-links" id="crumbs"></div>
+  </nav>
+
+  <main>
+    <div class="hero">
+      <div class="lbl">deposits in ledger</div>
+      <div class="id" id="ledger-id">…</div>
+      <div class="meta" id="hero-meta"></div>
+    </div>
+
+    <div id="body"><div class="loading">querying relay…</div></div>
+
+    <footer>
+      data via nostr relay <span class="mono" id="relay-url"></span>
+    </footer>
+  </main>
+
+<script type="module">
+import { getParam, bytesToHex, nostrFetch, installBreadcrumbs } from './shared.js';
+
+const RELAY_URL =
+  getParam('relay')
+  || document.querySelector('meta[name=relay]')?.content
+  || 'wss://relay.bitcoindeposits.net';
+document.getElementById('relay-url').textContent = RELAY_URL;
+
+const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+function bech32DataToBytes(s) {
+  let acc = 0, bits = 0; const out = [];
+  for (const ch of s.toLowerCase()) {
+    const v = BECH32_CHARSET.indexOf(ch);
+    if (v < 0) return null;
+    acc = (acc << 5) | v; bits += 5;
+    if (bits >= 8) { bits -= 8; out.push((acc >> bits) & 0xff); }
+  }
+  return new Uint8Array(out);
+}
+function resolveLedgerFromUrl() {
+  const override = getParam('ledger');
+  if (override) {
+    const v = override.toLowerCase();
+    if ((v.length === 64 || v.length === 16) && /^[0-9a-f]+$/.test(v)) return v;
+    const d = bech32DataToBytes(v);
+    if (d && d.length === 32) return bytesToHex(d);
+    return null;
+  }
+  const sub = window.location.hostname.split('.')[0];
+  if (sub.length === 64 && /^[0-9a-f]+$/.test(sub)) return sub.toLowerCase();
+  if (sub.length === 52) { const d = bech32DataToBytes(sub); if (d && d.length === 32) return bytesToHex(d); }
+  return null;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+const fmt = {
+  short: (s, n = 16) => s ? s.slice(0, n) + (s.length > n ? '…' : '') : '',
+  msats: (n) => {
+    if (n == null) return '—';
+    const sats = n / 1000;
+    if (sats >= 100_000_000) return `₿ ${(sats / 100_000_000).toLocaleString(undefined, { maximumFractionDigits: 4 })}`;
+    if (sats >= 1_000) return `${sats.toLocaleString()} sat`;
+    return `${sats} sat`;
+  },
+};
+
+let _wasm = null;
+async function loadWasm() {
+  if (_wasm) return _wasm;
+  const mod = await import('./wasm/deposits_audit_wasm.js');
+  await mod.default();
+  _wasm = mod;
+  return mod;
+}
+
+function depositHref(ledgerId, id) {
+  const frag = `deposit=${encodeURIComponent(id)}&ledger=${encodeURIComponent(ledgerId)}&relay=${encodeURIComponent(RELAY_URL)}`;
+  return `/deposit#${frag}`;
+}
+
+function render(ledgerId, rows) {
+  const totalBal = rows.reduce((s, r) => s + r.balance_msats, 0);
+  const totalLocked = rows.reduce((s, r) => s + r.locked_msats, 0);
+  document.getElementById('hero-meta').innerHTML =
+    `<span><strong>${rows.length}</strong> deposit${rows.length === 1 ? '' : 's'}</span>` +
+    `<span>total <strong>${escapeHtml(fmt.msats(totalBal))}</strong></span>` +
+    (totalLocked > 0 ? `<span>locked <strong>${escapeHtml(fmt.msats(totalLocked))}</strong></span>` : '');
+
+  if (!rows.length) {
+    document.getElementById('body').innerHTML =
+      `<div class="empty">no deposits in this ledger yet.</div>`;
+    return;
+  }
+  const body = rows.map(r => `
+    <tr>
+      <td class="id"><a href="${depositHref(ledgerId, r.deposit_id)}">${escapeHtml(fmt.short(r.deposit_id, 16))}</a></td>
+      <td class="num">${escapeHtml(fmt.msats(r.balance_msats))}</td>
+      <td class="num">${escapeHtml(fmt.msats(r.available_msats))}</td>
+      <td class="num locked">${r.locked_msats ? escapeHtml(fmt.msats(r.locked_msats)) : '—'}</td>
+      <td class="desc" title="${escapeHtml(r.descriptor)}">${escapeHtml(r.descriptor)}</td>
+    </tr>`).join('');
+  document.getElementById('body').innerHTML = `
+    <table class="dl">
+      <thead><tr><th>deposit</th><th style="text-align:right">balance</th><th style="text-align:right">available</th><th style="text-align:right">locked</th><th>descriptor</th></tr></thead>
+      <tbody>${body}</tbody>
+      <tfoot><tr><td>${rows.length} total</td><td class="num">${escapeHtml(fmt.msats(totalBal))}</td><td class="num">${escapeHtml(fmt.msats(totalBal - totalLocked))}</td><td class="num">${totalLocked ? escapeHtml(fmt.msats(totalLocked)) : '—'}</td><td></td></tr></tfoot>
+    </table>`;
+}
+
+async function main() {
+  const ledgerId = resolveLedgerFromUrl();
+  installBreadcrumbs('deposits', { ledger: ledgerId || '' });
+  if (!ledgerId) {
+    document.getElementById('ledger-id').textContent = '— no ledger';
+    document.getElementById('body').innerHTML =
+      `<div class="empty err">No ledger id. Open from a ledger page, use a <code>&lt;id&gt;.ledger.&lt;base&gt;</code> subdomain, or append <code>#ledger=&lt;id&gt;</code>.</div>`;
+    return;
+  }
+  document.getElementById('ledger-id').textContent = ledgerId;
+
+  try {
+    const mod = await loadWasm();
+    const events = await nostrFetch(
+      RELAY_URL,
+      { kinds: [9100], '#d': [ledgerId.slice(0, 16)], limit: 5000 },
+      { timeoutMs: 15000 },
+    );
+    const rows = JSON.parse(mod.deposits(JSON.stringify(events.map(e => e.content))));
+    if (rows.error) {
+      document.getElementById('body').innerHTML = `<div class="empty err">audit error: ${escapeHtml(rows.error)}</div>`;
+      return;
+    }
+    render(ledgerId, rows);
+  } catch (e) {
+    document.getElementById('body').innerHTML =
+      `<div class="empty err">failed to load deposits: ${escapeHtml(String((e && e.message) || e))}</div>`;
+  }
+}
+
+main();
+</script>
+</body>
+</html>

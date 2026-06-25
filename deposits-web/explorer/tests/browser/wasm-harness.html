@@ -4,11 +4,12 @@
 <!-- Loads the deposits-audit wasm module the same way ledger.html does, and
      exposes audit()/version on window for the Playwright spec to drive. -->
 <script type="module">
-  import init, { audit, audit_version } from '../../wasm/deposits_audit_wasm.js';
+  import init, { audit, deposits, audit_version } from '../../wasm/deposits_audit_wasm.js';
   try {
     await init();
     window.__auditVersion = audit_version();
     window.__audit = (json) => audit(json);
+    window.__deposits = (json) => deposits(json);
     window.__auditReady = true;
   } catch (e) {
     window.__auditError = String((e && e.message) || e);

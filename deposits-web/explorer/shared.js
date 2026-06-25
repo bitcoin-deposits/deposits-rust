@@ -62,7 +62,10 @@ export function installBreadcrumbs(current, opts = {}) {
     ? `${window.location.protocol}//explorer.${sub[1]}/${relayFrag}`
     : `/explorer${relayFrag}`;
   const crumbs = [{ label: 'overview', href: overviewHref }];
-  if (current === 'ledger' || (ledger && (current === 'deposit' || current === 'update'))) {
+  if (
+    current === 'ledger' ||
+    (ledger && (current === 'deposit' || current === 'update' || current === 'deposits'))
+  ) {
     crumbs.push({
       label: `ledger ${short(ledger)}`,
       href: ledger ? `/ledger#${frag({ ledger, relay })}` : null,
@@ -70,6 +73,8 @@ export function installBreadcrumbs(current, opts = {}) {
   }
   if (current === 'deposit') {
     crumbs.push({ label: `deposit ${short(deposit)}`, href: null });
+  } else if (current === 'deposits') {
+    crumbs.push({ label: 'deposits', href: null });
   } else if (current === 'update') {
     crumbs.push({ label: 'update', href: null });
   }

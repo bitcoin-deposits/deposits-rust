@@ -25,6 +25,21 @@ pub fn audit(updates_b64_json: &str) -> String {
     serde_json::to_string(&report).unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
 }
 
+/// Per-deposit rows for the "all deposits" view (id, descriptor, balance,
+/// locked, available), sorted by descending balance. Same input shape as
+/// `audit`. Returns a JSON array, or `{"error": ...}` on malformed input.
+#[wasm_bindgen]
+pub fn deposits(updates_b64_json: &str) -> String {
+    let blobs: Vec<String> = match serde_json::from_str(updates_b64_json) {
+        Ok(v) => v,
+        Err(e) => {
+            return format!("{{\"error\":\"bad input: {}\"}}", e.to_string().replace('"', "'"))
+        }
+    };
+    let rows = deposits_audit::deposit_rows_base64(&blobs);
+    serde_json::to_string(&rows).unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
+}
+
 /// Version marker so the explorer can confirm the wasm module loaded.
 #[wasm_bindgen]
 pub fn audit_version() -> String {

@@ -102,29 +102,40 @@ pub fn build_chain(updates: &[SignedLedgerUpdate]) -> Vec<usize> {
     chain
 }
 
-/// Replay a set of signed updates and report the audit figures.
+/// Per-deposit row for the "all deposits" view.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DepositRow {
+    /// Deposit id (hex of the 16-byte id).
+    pub deposit_id: String,
+    /// Miniscript descriptor the deposit is held under.
+    pub descriptor: String,
+    /// Total obligation owed on this deposit (msats).
+    pub balance_msats: u64,
+    /// Portion earmarked for in-flight ops (subset of balance), msats.
+    pub locked_msats: u64,
+    /// Spendable now: balance − locked (msats).
+    pub available_msats: u64,
+}
+
+/// Outcome of replaying a chain: the final state plus replay bookkeeping.
+struct Replayed {
+    state: LedgerState,
+    op_counts: BTreeMap<String, u32>,
+    replay_errors: usize,
+}
+
+/// Order + replay a set of signed updates through the canonical state machine.
 ///
 /// Mirrors `replay-ledger`: builds the chain, drives `apply_signed` with a
-/// strict `Dep16Authorizer` (chain_tip = 0, the read-only replay reading),
-/// and tolerates per-update failures (counted in `replay_errors`) so a single
-/// bad update doesn't abort the whole audit.
-pub fn audit_updates(updates: &[SignedLedgerUpdate]) -> AuditReport {
+/// strict `Dep16Authorizer` (chain_tip = 0, the read-only replay reading), and
+/// tolerates per-update failures (counted in `replay_errors`) so a single bad
+/// update doesn't abort the whole replay. Shared by every public entry point so
+/// the audit totals and the per-deposit list can never disagree.
+/// Caller MUST ensure `updates` is non-empty (build_chain yields at least the
+/// tip), so a genesis seed key is always available.
+fn replay(updates: &[SignedLedgerUpdate]) -> Replayed {
     let mut op_counts: BTreeMap<String, u32> = BTreeMap::new();
     let mut replay_errors = 0usize;
-
-    if updates.is_empty() {
-        return AuditReport {
-            deposits: 0,
-            obligations_msats: 0,
-            locked_msats: 0,
-            reserves_msats: 0,
-            collateral_msats: 0,
-            solvent: true,
-            sequence: 0,
-            op_counts,
-            replay_errors,
-        };
-    }
 
     let order = build_chain(updates);
     let chain: Vec<&SignedLedgerUpdate> = order.iter().map(|&i| &updates[i]).collect();
@@ -164,6 +175,47 @@ pub fn audit_updates(updates: &[SignedLedgerUpdate]) -> AuditReport {
             }
         }
     }
+    Replayed { state, op_counts, replay_errors }
+}
+
+/// Per-deposit rows from a replayed ledger, sorted by descending balance.
+pub fn deposit_rows(updates: &[SignedLedgerUpdate]) -> Vec<DepositRow> {
+    if updates.is_empty() {
+        return Vec::new();
+    }
+    let state = replay(updates).state;
+    let mut rows: Vec<DepositRow> = state
+        .deposits
+        .values()
+        .map(|d| DepositRow {
+            deposit_id: hex::encode(d.deposit_id),
+            descriptor: d.descriptor.clone(),
+            balance_msats: d.balance,
+            locked_msats: d.locked_balance,
+            available_msats: d.available_balance(),
+        })
+        .collect();
+    rows.sort_by(|a, b| b.balance_msats.cmp(&a.balance_msats));
+    rows
+}
+
+/// Replay a set of signed updates and report the audit figures.
+pub fn audit_updates(updates: &[SignedLedgerUpdate]) -> AuditReport {
+    if updates.is_empty() {
+        return AuditReport {
+            deposits: 0,
+            obligations_msats: 0,
+            locked_msats: 0,
+            reserves_msats: 0,
+            collateral_msats: 0,
+            solvent: true,
+            sequence: 0,
+            op_counts: BTreeMap::new(),
+            replay_errors: 0,
+        };
+    }
+
+    let Replayed { state, op_counts, replay_errors } = replay(updates);
 
     let obligations_msats = state.total_deposit_balance();
     let locked_msats = state.total_locked_balance();
@@ -204,4 +256,18 @@ pub fn audit_base64(blobs: &[String]) -> AuditReport {
     let mut rep = audit_updates(&updates);
     rep.replay_errors += predecode_errors;
     rep
+}
+
+/// Like `deposit_rows` but decodes base64 TLV update blobs first.
+pub fn deposit_rows_base64(blobs: &[String]) -> Vec<DepositRow> {
+    use base64::Engine;
+    let mut updates = Vec::with_capacity(blobs.len());
+    for b in blobs {
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b) {
+            if let Ok(u) = SignedLedgerUpdate::tlv_decode(&bytes) {
+                updates.push(u);
+            }
+        }
+    }
+    deposit_rows(&updates)
 }
