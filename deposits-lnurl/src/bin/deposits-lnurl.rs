@@ -335,6 +335,15 @@ async fn explorer_deposit() -> Html<&'static str> {
     Html(assets().explorer_deposit)
 }
 
+/// GET /deposits
+///
+/// All deposits in a ledger: every deposit's balance / available / locked /
+/// descriptor, computed by replaying the Kind 9100 chain through the canonical
+/// LedgerState (wasm). Reads `#ledger=<id>` or the host subdomain.
+async fn explorer_deposits() -> Html<&'static str> {
+    Html(assets().explorer_deposits)
+}
+
 /// GET /wallet
 ///
 /// Always serves the web wallet regardless of Host. Symmetric with
@@ -365,6 +374,7 @@ struct StaticAssets {
     explorer_overview: &'static str,
     explorer_update: &'static str,
     explorer_deposit: &'static str,
+    explorer_deposits: &'static str,
     wallet_index: &'static str,
 }
 
@@ -382,6 +392,7 @@ impl StaticAssets {
             explorer_overview: load("explorer/explorer.html"),
             explorer_update:   load("explorer/update.html"),
             explorer_deposit:  load("explorer/deposit.html"),
+            explorer_deposits: load("explorer/deposits.html"),
             wallet_index:      load("wallet/index.html"),
         }
     }
@@ -1163,6 +1174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/explorer", get(explorer_overview))
         .route("/update", get(explorer_update))
         .route("/deposit", get(explorer_deposit))
+        .route("/deposits", get(explorer_deposits))
         .route("/wallet", get(wallet_index))
         // Everything else (sw.js, tlv-catalog.js, vendor/*, the explorer's
         // shared.js) is a static file under deposits-web/. Serve the
