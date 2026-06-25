@@ -584,11 +584,6 @@ function renderOverview(ad, cosignerLedgers, quorumExpiry, chainTip) {
         <div class="big-sub">period: ${ad.fee_period_blocks} blocks</div>
       </div>
       <div class="card">
-        <h3>per-deposit cap</h3>
-        <div class="big">${ad.max_deposit_balance_msats ? escapeHtml(fmt.msats(ad.max_deposit_balance_msats)) : 'unlimited'}</div>
-        <div class="big-sub">${ad.max_deposit_balance_msats ? 'maximum balance per deposit' : 'no per-deposit cap'}</div>
-      </div>
-      <div class="card">
         <h3>operator</h3>
         <dl class="kv">
           <dt>name</dt><dd>${escapeHtml(ad.operator_name || '—')}</dd>
