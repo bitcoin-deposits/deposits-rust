@@ -134,6 +134,14 @@ pub struct Ledger {
     pub role: LedgerRole,
     /// History of signed updates.
     pub history: Vec<SignedLedgerUpdate>,
+    /// Nostr `created_at` (unix-seconds) recorded the first time each update
+    /// (keyed by `content_hash`) went over the wire. Reused on re-broadcast so
+    /// the same SignedLedgerUpdate yields the same event id and relays dedupe
+    /// instead of fanning out a fresh duplicate. Transport metadata only — not
+    /// part of the hash chain — so it's `skip`ped from the whole-struct serde
+    /// and persisted separately via `LedgerLogRow::CreatedAt` jsonl rows.
+    #[serde(skip, default)]
+    pub created_at: std::collections::HashMap<[u8; 32], u64>,
 }
 
 impl Ledger {
@@ -148,6 +156,7 @@ impl Ledger {
             protocol: LedgerProtocolState::default(),
             role: LedgerRole::Operator,
             history: Vec::new(),
+            created_at: std::collections::HashMap::new(),
         }
     }
 
@@ -162,6 +171,7 @@ impl Ledger {
             protocol: LedgerProtocolState::default(),
             role: LedgerRole::Partner,
             history: Vec::new(),
+            created_at: std::collections::HashMap::new(),
         }
     }
 
@@ -180,6 +190,7 @@ impl Ledger {
             protocol: LedgerProtocolState::default(),
             role,
             history: Vec::new(),
+            created_at: std::collections::HashMap::new(),
         }
     }
 
@@ -1717,6 +1728,7 @@ impl Ledger {
             protocol: LedgerProtocolState::default(),
             role: LedgerRole::Partner, // Default role for reconstructed ledgers
             history: updates,
+            created_at: std::collections::HashMap::new(),
         }
     }
 

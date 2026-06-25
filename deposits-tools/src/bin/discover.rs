@@ -154,6 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 protocol: Default::default(),
                 role: deposits_core::ledger::LedgerRole::Operator,
                 history: updates,
+                created_at: Default::default(),
             };
             for i in 0..ledger.history.len() {
                 let u = &ledger.history[i];

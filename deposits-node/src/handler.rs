@@ -56,6 +56,12 @@ enum LedgerLogRow {
     Role { role: LedgerRole },
     State(LedgerState),
     Update(SignedLedgerUpdate),
+    /// Nostr `created_at` (unix-seconds) for the update whose `content_hash`
+    /// (hex) is given. Lets a re-broadcast after restart reuse the original
+    /// timestamp so the event id is stable and relays dedupe. Last-wins on
+    /// load; written incrementally on record and snapshotted on compaction.
+    /// Older binaries skip this unknown row (parse error → warn+continue).
+    CreatedAt { content_hash: String, ts: u64 },
 }
 
 /// Request to persist ledgers (sent from handler to persistence thread)
@@ -171,6 +177,12 @@ impl DepositsHandler {
                 let ledger = arc.read().unwrap();
                 for update in &ledger.history {
                     store.insert(update.clone());
+                }
+                // Restore the persisted Nostr created_at so a re-broadcast
+                // after this restart reuses the original timestamp (stable
+                // event id → relay dedupe) instead of minting a fresh now().
+                for (hash, ts) in &ledger.created_at {
+                    store.record_created_at(hash, *ts);
                 }
             }
             if !store.is_empty() {
@@ -483,6 +495,7 @@ impl DepositsHandler {
         let mut role: Option<LedgerRole> = None;
         let mut state: Option<LedgerState> = None;
         let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
+        let mut created_at: HashMap<[u8; 32], u64> = HashMap::new();
         let mut seen_sequences = std::collections::HashSet::new();
         // Main-chain operator pubkey. Established from the first update
         // (or seq 0's LedgerOpen if present). Updates from a different
@@ -534,6 +547,15 @@ impl DepositsHandler {
                     }
                     if seen_sequences.insert(u.sequence_number) {
                         updates.push(u);
+                    }
+                }
+                Ok(LedgerLogRow::CreatedAt { content_hash, ts }) => {
+                    // Transport metadata (Nostr created_at). Last-wins so a
+                    // later snapshot/append overrides an earlier value.
+                    if let Ok(bytes) = hex::decode(&content_hash) {
+                        if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                            created_at.insert(arr, ts);
+                        }
                     }
                 }
                 Err(e) => {
@@ -618,6 +640,7 @@ impl DepositsHandler {
             protocol: Default::default(),
             role: ledger_role,
             history: updates,
+            created_at,
         };
 
         let ops_to_replay: Vec<_> = ledger
@@ -1059,6 +1082,46 @@ impl DepositsHandler {
         is_new
     }
 
+    /// Record (and durably persist) the Nostr `created_at` of the kind:9100
+    /// event for `content_hash` on `ledger_id`. Writes to three places:
+    ///   1. the in-memory `EventStore` (live cache the resync path reads), and
+    ///   2. the owning `Ledger`'s `created_at` map (the carrier that travels
+    ///      with the ledger clone into the persist thread + full-write
+    ///      snapshots), and
+    ///   3. an incremental `CreatedAt` jsonl row on disk so the timestamp
+    ///      survives an immediate restart, not just the next compaction.
+    /// First-write-wins per hash, matching `EventStore::record_created_at`.
+    pub fn record_created_at(&self, ledger_id: &str, content_hash: [u8; 32], ts: u64) {
+        // 1. Live cache for resync.
+        self.event_store
+            .lock()
+            .unwrap()
+            .record_created_at(&content_hash, ts);
+
+        // 2. Persistence carrier on the ledger. Skip the disk append if this
+        //    hash was already recorded (idempotent re-broadcast).
+        let newly_recorded = {
+            let ledgers = self.ledgers.lock().unwrap();
+            match ledgers.get(ledger_id) {
+                Some(arc) => {
+                    let mut ledger = arc.write().unwrap();
+                    if ledger.created_at.contains_key(&content_hash) {
+                        false
+                    } else {
+                        ledger.created_at.insert(content_hash, ts);
+                        true
+                    }
+                }
+                None => false,
+            }
+        };
+
+        // 3. Durable incremental row (outside the ledgers lock).
+        if newly_recorded {
+            Self::append_created_at_to_disk(ledger_id, &content_hash, ts, &self.data_dir);
+        }
+    }
+
     /// Persist a specific ledger to disk using append-only strategy.
     ///
     /// On first save (or when no tracking exists), does a full rewrite.
@@ -1332,6 +1395,23 @@ impl DepositsHandler {
             }
         }
 
+        // Snapshot the Nostr created_at for each retained update so a
+        // re-broadcast after restart reuses the original timestamp (stable
+        // event id → relay dedupe). Only the retained tail is kept, which
+        // also compacts the incremental CreatedAt rows appended since the
+        // last full write. Hashes outside the tail are dropped as orphans.
+        for update in &ledger.history[start..] {
+            if let Some(ts) = ledger.created_at.get(&update.content_hash) {
+                let row = LedgerLogRow::CreatedAt {
+                    content_hash: hex::encode(update.content_hash),
+                    ts: *ts,
+                };
+                if let Ok(line) = serde_json::to_string(&row) {
+                    let _ = writeln!(writer, "{}", line);
+                }
+            }
+        }
+
         if let Err(e) = writer.flush() {
             tracing::error!("Failed to flush ledger file {}: {}", ledger_id, e);
             let _ = fs::remove_file(&tmp_file);
@@ -1411,6 +1491,36 @@ impl DepositsHandler {
         if let Err(e) = writer.flush() {
             tracing::error!("Failed to flush ledger file {}: {}", ledger_id, e);
         }
+    }
+
+    /// Append a single Nostr `created_at` row to an existing ledger JSONL.
+    /// Cheap (one line, append mode) so it can run every time we mint a fresh
+    /// timestamp on first broadcast. Snapshotted/compacted on the next full
+    /// write. No-op if the file doesn't exist yet (first persist writes it).
+    fn append_created_at_to_disk(
+        ledger_id: &str,
+        content_hash: &[u8; 32],
+        ts: u64,
+        data_dir: &PathBuf,
+    ) {
+        let ledger_file = data_dir
+            .join("ledgers")
+            .join(format!("{}.jsonl", ledger_id));
+        let file = match fs::OpenOptions::new().append(true).open(&ledger_file) {
+            Ok(f) => f,
+            // Not yet persisted — the first full write will snapshot it.
+            Err(_) => return,
+        };
+        use std::io::Write;
+        let mut writer = std::io::BufWriter::new(file);
+        let row = LedgerLogRow::CreatedAt {
+            content_hash: hex::encode(content_hash),
+            ts,
+        };
+        if let Ok(line) = serde_json::to_string(&row) {
+            let _ = write!(writer, "\n{}", line);
+        }
+        let _ = writer.flush();
     }
 
     /// Sign the last update in a ledger with our operator key.
@@ -1796,6 +1906,92 @@ mod tests {
 
             let ledgers = handler.ledgers.lock().unwrap();
             assert_eq!(ledgers.len(), 1);
+        }
+    }
+
+    /// Build a minimal SignedLedgerUpdate for a given operator/seq, with a
+    /// deterministic content_hash. Mirrors event_store::tests::make_update.
+    fn mk_update(operator_id: PublicKey, seq: u64, tag: u8) -> SignedLedgerUpdate {
+        SignedLedgerUpdate {
+            message: vec![tag],
+            message_type: 0x0001,
+            operator_id,
+            ledger_id: [tag; 32],
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash: [tag; 32],
+            block_height: 100 + seq as u32,
+            block_hash: [0u8; 32],
+            cosign_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: Vec::new(),
+        }
+    }
+
+    /// Regression: the Nostr `created_at` recorded on first broadcast must
+    /// survive a restart so a re-broadcast reuses the same timestamp (stable
+    /// event id → relay dedupe). Before the fix it lived only in the in-memory
+    /// EventStore and was lost on reload, so every post-redeploy republish
+    /// minted a fresh now() and fanned out a duplicate.
+    #[test]
+    fn created_at_persists_across_restart() {
+        let temp_dir = TempDir::new().unwrap();
+        let wallet = create_mock_wallet(&temp_dir);
+        let data_dir = temp_dir.path().to_path_buf();
+
+        let op_pk = {
+            let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();
+            let secp = bitcoin::secp256k1::Secp256k1::new();
+            PublicKey::from_secret_key(&secp, &sk)
+        };
+
+        let update = mk_update(op_pk, 0, 0xAB);
+        let pinned_ts = 1_700_000_000u64;
+
+        // Session 1: create ledger, add an update, persist, then record the
+        // Nostr created_at (as the broadcast path does after minting now()).
+        {
+            let (handler, _rx) =
+                DepositsHandler::new(test_local_signer(), wallet.clone(), data_dir.clone(), false);
+            let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
+            let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+            arc.write().unwrap().history.push(update.clone());
+            // The commit path inserts into the EventStore before broadcasting;
+            // mirror that so record_created_at's live-cache write lands.
+            handler.insert_event(&update);
+            handler.persist_ledger_to_disk(&ledger_id).unwrap();
+
+            handler.record_created_at(&ledger_id, update.content_hash, pinned_ts);
+            // Recorded in the live cache this session.
+            assert_eq!(
+                handler
+                    .event_store
+                    .lock()
+                    .unwrap()
+                    .get(&update.content_hash)
+                    .and_then(|s| s.created_at),
+                Some(pinned_ts),
+            );
+        }
+
+        // Session 2: fresh handler over the same data dir — simulates the
+        // `deposits-hub bootstrap` restart. The timestamp must come back.
+        {
+            let (handler, _rx) =
+                DepositsHandler::new(test_local_signer(), wallet, data_dir, false);
+            let restored = handler
+                .event_store
+                .lock()
+                .unwrap()
+                .get(&update.content_hash)
+                .and_then(|s| s.created_at);
+            assert_eq!(
+                restored,
+                Some(pinned_ts),
+                "created_at should survive restart so re-broadcast reuses it"
+            );
         }
     }
 

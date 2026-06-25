@@ -120,15 +120,15 @@ impl Node {
                 .await
             {
                 Ok((_event_id, used_ts)) => {
-                    // Record the timestamp if we minted a fresh one
-                    // here so the next resync of the same range can
-                    // collapse to a no-op at the relay.
+                    // Record + persist the timestamp if we minted a fresh
+                    // one here so the next resync (even after a restart)
+                    // collapses to a no-op at the relay.
                     if pinned_ts.is_none() {
-                        self.handler
-                            .event_store
-                            .lock()
-                            .unwrap()
-                            .record_created_at(&update.content_hash, used_ts);
+                        self.handler.record_created_at(
+                            &update.ledger_id_hex(),
+                            update.content_hash,
+                            used_ts,
+                        );
                     }
                     rebroadcast_count += 1;
                 }

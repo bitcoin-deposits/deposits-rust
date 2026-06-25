@@ -27,6 +27,7 @@ fn make_ledger() -> Ledger {
         protocol: Default::default(),
         role: LedgerRole::Operator,
         history: Vec::new(),
+        created_at: Default::default(),
     }
 }
 

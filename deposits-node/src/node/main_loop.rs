@@ -1086,14 +1086,14 @@ impl Node {
                                     .await;
                                 match &res {
                                     Ok((_event_id, used_ts)) => {
-                                        node.handler
-                                            .event_store
-                                            .lock()
-                                            .unwrap()
-                                            .record_created_at(
-                                                &update.content_hash,
-                                                *used_ts,
-                                            );
+                                        // Record + persist the minted timestamp so a
+                                        // re-broadcast after restart reuses it (stable
+                                        // event id → relay dedupe).
+                                        node.handler.record_created_at(
+                                            &lid,
+                                            update.content_hash,
+                                            *used_ts,
+                                        );
                                         tracing::trace!(
                                             "actor_outbox[{}…] Broadcast seq={} ok",
                                             &lid[..16.min(lid.len())],

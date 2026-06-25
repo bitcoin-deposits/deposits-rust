@@ -53,6 +53,7 @@ fn ledger_with_staged(operator_pk: PublicKey, staged_pks: &[PublicKey]) -> Ledge
         protocol: Default::default(),
         role: LedgerRole::Operator,
         history: Vec::new(),
+        created_at: Default::default(),
     }
 }
 

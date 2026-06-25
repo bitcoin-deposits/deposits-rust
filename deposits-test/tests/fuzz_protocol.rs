@@ -673,6 +673,7 @@ fn ledger_shell(state: &LedgerState) -> Ledger {
         protocol: LedgerProtocolState::default(),
         role: LedgerRole::Partner,
         history: Vec::new(),
+        created_at: Default::default(),
     }
 }
 

@@ -1517,6 +1517,7 @@ impl Node {
             protocol: Default::default(),
             role: deposits_core::ledger::LedgerRole::Operator, // We operate the fork
             history: truncated_history.clone(),
+            created_at: Default::default(),
         };
 
         // Replay all truncated operations to rebuild state
