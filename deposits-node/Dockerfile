@@ -53,6 +53,14 @@ RUN mkdir -p deposits-lnurl/src deposits-lnurl/src/bin && \
     echo "" > deposits-lnurl/src/lib.rs && \
     echo "fn main() {}" > deposits-lnurl/src/bin/deposits-lnurl.rs
 
+# deposits-node depends on deposits-hub-proto; deposits-hub is a member too.
+COPY deposits-hub-proto/Cargo.toml deposits-hub-proto/Cargo.toml
+COPY deposits-hub/Cargo.toml deposits-hub/Cargo.toml
+RUN mkdir -p deposits-hub-proto/src deposits-hub/src && \
+    echo "" > deposits-hub-proto/src/lib.rs && \
+    echo "" > deposits-hub/src/lib.rs && \
+    echo "fn main() {}" > deposits-hub/src/main.rs
+
 # native-tls (pulled in transitively) wants system openssl; point it at
 # Alpine's static libs so the final binary has no runtime .so dependencies
 # beyond libc/libgcc.

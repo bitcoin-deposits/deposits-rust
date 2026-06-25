@@ -16,5 +16,7 @@ base64 = "0.21"
 [dev-dependencies]
 serde_json = "1.0"
 
-[lints]
-workspace = true
+# Excluded from the workspace, so the root's [patch] doesn't apply here.
+# Mirror it: deposits-core (transitively) uses the vendored miniscript fork.
+[patch.crates-io]
+miniscript = { path = "../third_party/rust-miniscript" }

@@ -37,9 +37,13 @@ COPY deposits-signer-api/Cargo.toml  ./deposits-signer-api/Cargo.toml
 COPY deposits-signer/Cargo.toml      ./deposits-signer/Cargo.toml
 COPY deposits-tools/Cargo.toml    ./deposits-tools/Cargo.toml
 COPY deposits-test/Cargo.toml     ./deposits-test/Cargo.toml
-RUN for c in deposits-core deposits-node deposits-wallet deposits-attestation deposits-ringsig deposits-signer-api deposits-signer deposits-tools deposits-test; do \
+# deposits-node depends on deposits-hub-proto; deposits-hub is a member too.
+COPY deposits-hub-proto/Cargo.toml ./deposits-hub-proto/Cargo.toml
+COPY deposits-hub/Cargo.toml       ./deposits-hub/Cargo.toml
+RUN for c in deposits-core deposits-node deposits-wallet deposits-attestation deposits-ringsig deposits-signer-api deposits-signer deposits-tools deposits-test deposits-hub-proto deposits-hub; do \
         mkdir -p "$c/src" && echo "" > "$c/src/lib.rs"; \
-    done
+    done && \
+    echo "fn main() {}" > deposits-hub/src/main.rs
 
 RUN cargo build --release -p deposits-lnurl --bin deposits-lnurl
 

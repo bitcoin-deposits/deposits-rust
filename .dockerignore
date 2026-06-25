@@ -1,4 +1,9 @@
 target/
+target-wasm/
+deposits-audit/target/
+deposits-audit-wasm/target/
+node_modules/
+deposits-web/explorer/node_modules
 .git/
 deposits-tools/data/
 deposits-tools/log/

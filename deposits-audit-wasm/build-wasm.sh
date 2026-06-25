@@ -21,7 +21,9 @@ docker run --rm \
   -e CARGO_TARGET_DIR=/work/target-wasm \
   "$IMAGE" bash -c "
     set -e
-    cargo build --release -p deposits-audit-wasm --target wasm32-unknown-unknown
+    # Excluded from the workspace, so build via --manifest-path (standalone).
+    cargo build --release --manifest-path deposits-audit-wasm/Cargo.toml \
+      --target wasm32-unknown-unknown
     wasm-bindgen --target web --no-typescript \
       --out-dir $OUT \
       target-wasm/wasm32-unknown-unknown/release/deposits_audit_wasm.wasm

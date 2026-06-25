@@ -43,3 +43,8 @@ deposits-web/wallet/playwright-report/
 deposits-web/explorer/node_modules
 deposits-web/explorer/test-results/
 deposits-web/explorer/playwright-report/
+# Excluded audit crates build standalone (own target dir + lock).
+/deposits-audit/target/
+/deposits-audit-wasm/target/
+/deposits-audit/Cargo.lock
+/deposits-audit-wasm/Cargo.lock

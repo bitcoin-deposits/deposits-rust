@@ -14,6 +14,12 @@ members = [
     "deposits-signer-api",
     "deposits-tools",
     "deposits-test",
+]
+# Browser audit tooling — kept OUT of the workspace members so the service
+# container builds (which selectively COPY a subset of crates) don't need to
+# vendor these. They build standalone via --manifest-path; deposits-audit-wasm
+# additionally needs clang (see deposits-audit-wasm/build-wasm.sh).
+exclude = [
     "deposits-audit",
     "deposits-audit-wasm",
 ]
