@@ -665,22 +665,37 @@ impl Node {
                     }
                     {
                         use bitcoin::hashes::{sha256, Hash};
-                        let computed: [u8; 32] = *sha256::Hash::hash(&preimage).as_byte_array();
-                        if computed != payment_id {
-                            tracing::error!(
-                                "auto_complete_outbound: payment {}: preimage from {} \
-                                 doesn't hash to payment_hash — refusing to commit a \
-                                 guaranteed-invalid Fulfill. \
-                                 payment_hash={} preimage={} sha256(preimage)={} \
-                                 LDK_record_id={}",
-                                &payment_hex[..16],
-                                preimage_source,
-                                payment_hex,
-                                preimage_hex_opt.as_deref().unwrap_or("(none)"),
-                                hex::encode(computed),
-                                p.id
-                            );
-                            continue;
+                        let verifies =
+                            |pi: &[u8; 32]| *sha256::Hash::hash(pi).as_byte_array() == payment_id;
+                        if !verifies(&preimage) {
+                            // The list-payments preimage didn't hash to the
+                            // payment_hash. This is the shared-node / cross-ledger
+                            // self-pay case: LDK's OUTBOUND record carries a
+                            // placeholder/wrong preimage, while the receive-side
+                            // BOLT11 record (get-payment-details) holds the real
+                            // one. Fall back to it before giving up — previously we
+                            // only fell back when the preimage was ABSENT, so these
+                            // succeeded-but-can't-fulfill locks wedged forever.
+                            match cli.get_payment_preimage(&payment_hex) {
+                                Ok(Some(p_inbound)) if verifies(&p_inbound) => {
+                                    preimage = p_inbound;
+                                    preimage_hex_opt = Some(hex::encode(p_inbound));
+                                    preimage_source = "get-payment-details (mismatch fallback)";
+                                }
+                                other => {
+                                    tracing::error!(
+                                        "auto_complete_outbound: payment {}: no preimage that \
+                                         hashes to payment_hash — list-payments gave {}, \
+                                         get-payment-details fallback={:?}. Leaving lock open; \
+                                         LDK id={}",
+                                        &payment_hex[..16],
+                                        preimage_hex_opt.as_deref().unwrap_or("(none)"),
+                                        other.map(|o| o.map(hex::encode)),
+                                        p.id
+                                    );
+                                    continue;
+                                }
+                            }
                         }
                     }
 
@@ -722,9 +737,10 @@ impl Node {
 
                     match self.commit_operation(&ledger_id, op).await {
                         Ok(_) => tracing::info!(
-                            "auto_complete_outbound: fulfilled payment {}..., {} msat",
+                            "auto_complete_outbound: fulfilled payment {}..., {} msat (preimage via {})",
                             &payment_hex[..16],
-                            lock.amount
+                            lock.amount,
+                            preimage_source
                         ),
                         Err(e) => tracing::error!(
                             "auto_complete_outbound: payment {}: commit failed: {} \
