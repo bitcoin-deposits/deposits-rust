@@ -123,7 +123,7 @@
   </main>
 
 <script type="module">
-import { getParam, bytesToHex, nostrFetch, installBreadcrumbs } from './shared.js';
+import { getParam, bytesToHex, nostrFetch, installBreadcrumbs, installTopNav } from './shared.js';
 
 const RELAY_URL =
   getParam('relay')
@@ -218,6 +218,7 @@ function render(ledgerId, rows) {
 async function main() {
   const ledgerId = resolveLedgerFromUrl();
   installBreadcrumbs('deposits', { ledger: ledgerId || '' });
+  installTopNav({ ledger: ledgerId || '' });
   if (!ledgerId) {
     document.getElementById('ledger-id').textContent = '— no ledger';
     document.getElementById('body').innerHTML =

@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>topnav harness</title>
+<!-- Minimal topnav so installTopNav (from shared.js, no tlv-catalog dep) can
+     render the section switcher for the Playwright nav test. -->
+<nav class="topnav">
+  <div class="brand"><span class="name">deposits</span></div>
+  <div class="nav-links" id="crumbs"></div>
+</nav>
+<script type="module">
+  import { installTopNav } from '/shared.js';
+  const p = new URLSearchParams(location.search);
+  installTopNav({ ledger: p.get('ledger') || '', relay: p.get('relay') || '' });
+  window.__navReady = true;
+</script>

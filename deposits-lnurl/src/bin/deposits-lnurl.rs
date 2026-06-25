@@ -1172,6 +1172,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(root_index))
         .route("/ledger", get(explorer_ledger))
         .route("/explorer", get(explorer_overview))
+        // Top-nav section URLs. `nodes` and `ledgers` both serve the
+        // operators+ledgers overview for now (forward-compatible: when those
+        // views split, only these handlers change, not the nav).
+        .route("/nodes", get(explorer_overview))
+        .route("/ledgers", get(explorer_overview))
         .route("/update", get(explorer_update))
         .route("/deposit", get(explorer_deposit))
         .route("/deposits", get(explorer_deposits))

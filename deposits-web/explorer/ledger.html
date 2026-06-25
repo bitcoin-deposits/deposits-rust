@@ -392,10 +392,11 @@
 
 <script type="module">
 import { OP_NAMES, FIELD_NAMES } from './tlv-catalog.js';
-import { fetchCosignerLedgerMap, installBreadcrumbs } from './shared.js';
+import { fetchCosignerLedgerMap, installBreadcrumbs, installTopNav } from './shared.js';
 
 // Breadcrumb trail (overview › ledger). Reads ledger/relay from the URL.
 installBreadcrumbs('ledger');
+installTopNav();
 
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 

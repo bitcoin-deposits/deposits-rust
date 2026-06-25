@@ -88,6 +88,74 @@ export function installBreadcrumbs(current, opts = {}) {
   }).join('');
 }
 
+// ── top-level section nav ────────────────────────────────────────────
+//
+// Persistent switcher (nodes · ledgers · deposits) injected into the topnav
+// after the brand. Active section inferred from the path. `nodes`/`ledgers`
+// currently both serve the operators+ledgers overview (forward-compatible:
+// when those pages split, only the page content changes, not this nav).
+// `deposits` is per-ledger, so it's a live link only when a ledger context
+// exists (subdomain or `?ledger=`); otherwise it's shown inert.
+let _topnavCssInstalled = false;
+export function installTopNav(opts = {}) {
+  const nav = document.querySelector('nav.topnav');
+  if (!nav) return;
+  if (!_topnavCssInstalled) {
+    const css = document.createElement('style');
+    css.textContent = `
+      nav.topnav .sections { display:flex; gap:1.1rem; font-size:0.9rem;
+                             margin-left:1.25rem; flex:1; min-width:0; }
+      nav.topnav .sections a { color:var(--fg-muted); text-decoration:none; }
+      nav.topnav .sections a:hover { color:var(--accent); }
+      nav.topnav .sections a.active { color:var(--fg-strong); font-weight:600; }
+      nav.topnav .sections a.disabled { color:var(--fg-dim); pointer-events:none; }`;
+    document.head.appendChild(css);
+    _topnavCssInstalled = true;
+  }
+  const relay = opts.relay || getParam('relay') || '';
+  const ledger = opts.ledger || getParam('ledger') || '';
+
+  const path = window.location.pathname;
+  let active;
+  if (path.startsWith('/nodes')) active = 'nodes';
+  else if (path.startsWith('/deposit')) active = 'deposits'; // /deposit + /deposits
+  else active = 'ledgers'; // /ledgers, /explorer, /ledger, /update, /
+
+  // On a `<id>.ledger.<base>` subdomain the section pages live on
+  // `explorer.<base>`; deposits stays on this host (resolves the ledger from
+  // the subdomain). Off-subdomain everything is same-origin.
+  const sub = window.location.hostname.match(/^[^.]+\.ledger\.(.+)$/);
+  const relayFrag = relay ? '#relay=' + encodeURIComponent(relay) : '';
+  const ovBase = sub ? `${window.location.protocol}//explorer.${sub[1]}` : '';
+
+  let depositsHref = null;
+  if (sub) depositsHref = `/deposits${relayFrag}`;
+  else if (ledger) {
+    depositsHref = `/deposits#ledger=${encodeURIComponent(ledger)}` +
+      (relay ? `&relay=${encodeURIComponent(relay)}` : '');
+  }
+
+  const items = [
+    { key: 'nodes', label: 'nodes', href: `${ovBase}/nodes${relayFrag}` },
+    { key: 'ledgers', label: 'ledgers', href: `${ovBase}/ledgers${relayFrag}` },
+    { key: 'deposits', label: 'deposits', href: depositsHref },
+  ];
+  const html = items.map((it) => {
+    const cls = [it.key === active ? 'active' : '', !it.href ? 'disabled' : '']
+      .filter(Boolean).join(' ');
+    return `<a class="${cls}" href="${it.href || '#'}">${it.label}</a>`;
+  }).join('');
+
+  let container = nav.querySelector('.sections');
+  if (!container) {
+    container = document.createElement('div');
+    container.className = 'sections';
+    const brand = nav.querySelector('.brand');
+    if (brand) brand.after(container); else nav.prepend(container);
+  }
+  container.innerHTML = html;
+}
+
 // ── byte / hex / base64 ──────────────────────────────────────────────
 export function bytesToHex(buf) {
   return [...buf].map(b => b.toString(16).padStart(2, '0')).join('');

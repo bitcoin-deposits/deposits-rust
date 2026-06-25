@@ -253,10 +253,11 @@
   </main>
 
 <script type="module">
-import { parseTlv, b64ToBytes, installBreadcrumbs } from './shared.js';
+import { parseTlv, b64ToBytes, installBreadcrumbs, installTopNav } from './shared.js';
 
 // Breadcrumb trail — overview is the root (just the current crumb here).
 installBreadcrumbs('overview');
+installTopNav();
 
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 

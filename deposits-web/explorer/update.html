@@ -284,11 +284,12 @@ import { schnorr } from './vendor/noble-curves-secp256k1.js';
 import {
   getParam, bytesToHex, b64ToBytes, nostrFetch, parseTlv,
   computeContentHash, fetchCosignerLedgerMap, findEventByContentHash,
-  renderDescriptorRows, installBreadcrumbs,
+  renderDescriptorRows, installBreadcrumbs, installTopNav,
 } from './shared.js';
 
 // Breadcrumb trail (overview › ledger › update). ledger/relay from the URL.
 installBreadcrumbs('update');
+installTopNav();
 
 // ── page-specific helpers (most are imported from ./shared.js) ──
 
