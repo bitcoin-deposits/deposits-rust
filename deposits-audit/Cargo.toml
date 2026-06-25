@@ -1,0 +1,20 @@
+[package]
+name = "deposits-audit"
+version = "0.1.0"
+edition = "2021"
+
+# Shared audit/solvency computation: orders a set of signed ledger updates,
+# replays them through the canonical `LedgerState::apply_signed`, and reports
+# obligations vs reserves. Used by the `replay-ledger` CLI and the
+# `deposits-audit-wasm` browser module so the explorer can never disagree
+# with the command-line audit — the balance math lives in deposits-core.
+[dependencies]
+deposits-core = { path = "../deposits-core" }
+serde = { version = "1.0", features = ["derive"] }
+base64 = "0.21"
+
+[dev-dependencies]
+serde_json = "1.0"
+
+[lints]
+workspace = true

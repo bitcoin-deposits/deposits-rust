@@ -35,3 +35,11 @@ simulator-ledger.db-shm
 node_modules/
 deposits-web/wallet/test-results/
 deposits-web/wallet/playwright-report/
+
+# Wasm cross-compile build dir (deposits-audit-wasm/build-wasm.sh; rebuilt in
+# the clang container). The shipped artifact lives in deposits-web/explorer/wasm/.
+/target-wasm/
+# Explorer Playwright runner (symlinked to the wallet's node_modules) + output.
+deposits-web/explorer/node_modules
+deposits-web/explorer/test-results/
+deposits-web/explorer/playwright-report/

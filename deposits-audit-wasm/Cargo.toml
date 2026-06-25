@@ -1,0 +1,20 @@
+[package]
+name = "deposits-audit-wasm"
+version = "0.1.0"
+edition = "2021"
+
+# Browser-facing wasm wrapper around `deposits-audit`. Exposes a single
+# `audit(json)` function the explorer calls with the base64 TLV update blobs it
+# already fetches from the relay; returns the AuditReport as JSON. Reuses the
+# canonical LedgerState replay — no second implementation of the accounting.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+deposits-audit = { path = "../deposits-audit" }
+wasm-bindgen = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lints]
+workspace = true

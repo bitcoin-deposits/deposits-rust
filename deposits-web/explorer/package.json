@@ -1,0 +1,8 @@
+{
+  "name": "deposits-web-explorer",
+  "private": true,
+  "type": "module",
+  "description": "Static explorer assets (served by Caddy/nginx in prod). This package.json exists so Playwright can drive the wasm audit test in Chromium.",
+  "scripts": { "test:browser": "playwright test" },
+  "devDependencies": { "@playwright/test": "^1.60.0" }
+}

@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>audit wasm harness</title>
+<!-- Loads the deposits-audit wasm module the same way ledger.html does, and
+     exposes audit()/version on window for the Playwright spec to drive. -->
+<script type="module">
+  import init, { audit, audit_version } from '../../wasm/deposits_audit_wasm.js';
+  try {
+    await init();
+    window.__auditVersion = audit_version();
+    window.__audit = (json) => audit(json);
+    window.__auditReady = true;
+  } catch (e) {
+    window.__auditError = String((e && e.message) || e);
+  }
+</script>
+<body><pre id="out">audit harness</pre></body>

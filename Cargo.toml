@@ -14,6 +14,8 @@ members = [
     "deposits-signer-api",
     "deposits-tools",
     "deposits-test",
+    "deposits-audit",
+    "deposits-audit-wasm",
 ]
 resolver = "2"
 

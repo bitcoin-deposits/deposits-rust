@@ -312,6 +312,37 @@
       .kv dt { margin-top: 0.5rem; }
       .kv dt:first-of-type { margin-top: 0; }
     }
+
+    /* Solvency audit panel */
+    #audit-panel { margin: 0.5rem 0 1.5rem; }
+    .audit-run {
+      background: var(--accent); color: #1a1205; border: none; border-radius: 6px;
+      padding: 0.5rem 1rem; font: inherit; font-weight: 600; cursor: pointer;
+    }
+    .audit-run:hover { filter: brightness(1.08); }
+    .audit-run:disabled { opacity: 0.6; cursor: default; }
+    .audit-hint { color: var(--fg-muted); font-size: 0.85rem; margin-left: 0.75rem; }
+    .audit-hint code { color: var(--fg); }
+    #audit-result { margin-top: 1rem; }
+    .audit-verdict {
+      display: inline-block; padding: 0.2rem 0.7rem; border-radius: 6px;
+      font-weight: 700; font-size: 0.95rem; margin-bottom: 0.75rem;
+    }
+    .audit-verdict.ok  { background: rgba(76,174,90,0.18);  color: var(--green); }
+    .audit-verdict.bad { background: rgba(217,83,79,0.18);  color: var(--red); }
+    .audit-bar {
+      height: 12px; border-radius: 6px; background: var(--border);
+      overflow: hidden; margin: 0.4rem 0 0.2rem; display: flex;
+    }
+    .audit-bar .fill  { background: var(--blue); height: 100%; }
+    .audit-bar .fill.lock { background: var(--yellow); }
+    .audit-bar-legend { font-size: 0.8rem; color: var(--fg-muted); }
+    .audit-tally { margin-top: 1rem; }
+    .audit-tally table { border-collapse: collapse; font-size: 0.85rem; }
+    .audit-tally td { padding: 0.15rem 0.9rem 0.15rem 0; }
+    .audit-tally td.n { text-align: right; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+    .audit-warn { color: var(--yellow); font-size: 0.85rem; margin-top: 0.6rem; }
+    .audit-err  { color: var(--red); }
   </style>
 </head>
 <body>
@@ -333,6 +364,13 @@
 
     <div id="overview-body">
       <div class="loading">querying relay…</div>
+    </div>
+
+    <h1 class="section-title">solvency audit</h1>
+    <div id="audit-panel">
+      <button id="audit-run" class="audit-run">compute solvency</button>
+      <span class="audit-hint">replays every update through the canonical ledger state machine (wasm) — same math as the <code>replay-ledger</code> CLI</span>
+      <div id="audit-result"></div>
     </div>
 
     <h1 class="section-title">activity</h1>
@@ -991,6 +1029,80 @@ async function loadActivity(ledgerId) {
   });
 }
 
+// ---- Solvency audit (wasm) -------------------------------------------------
+// Lazily loads the deposits-audit wasm module (the canonical LedgerState
+// replay compiled for the browser) and runs it over the full update set, so
+// the explorer reports exactly what the `replay-ledger` CLI would.
+let _wasmAudit = null;
+async function loadWasmAudit() {
+  if (_wasmAudit) return _wasmAudit;
+  const mod = await import('./wasm/deposits_audit_wasm.js');
+  await mod.default(); // instantiate wasm
+  _wasmAudit = mod;
+  return mod;
+}
+
+async function runAudit(ledgerId) {
+  const btn = document.getElementById('audit-run');
+  const out = document.getElementById('audit-result');
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'auditing…';
+  out.innerHTML = '<div class="loading">loading wasm + fetching every update…</div>';
+  try {
+    const mod = await loadWasmAudit();
+    // Full update set for this ledger (no op-type filter, unlike the overview).
+    const events = await nostrFetch(
+      RELAY_URL,
+      { kinds: [9100], '#d': [ledgerId.slice(0, 16)], limit: 5000 },
+      { timeoutMs: 15000 },
+    );
+    const contents = events.map(e => e.content);
+    const r = JSON.parse(mod.audit(JSON.stringify(contents)));
+    if (r.error) {
+      out.innerHTML = `<div class="audit-err">audit error: ${escapeHtml(r.error)}</div>`;
+      return;
+    }
+    renderAudit(out, r, events.length);
+  } catch (e) {
+    out.innerHTML = `<div class="audit-err">audit failed: ${escapeHtml(String((e && e.message) || e))}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+function renderAudit(out, r, eventCount) {
+  const ob = r.obligations_msats, res = r.reserves_msats, lock = r.locked_msats;
+  const pct = res > 0 ? Math.min(100, (ob / res) * 100) : 0;
+  const headroom = res - ob;
+  const verdict = r.solvent
+    ? '<span class="audit-verdict ok">SOLVENT</span>'
+    : '<span class="audit-verdict bad">INSOLVENT</span>';
+  const rows = Object.entries(r.op_counts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td class="n">${v}</td></tr>`)
+    .join('');
+  const locks = r.op_counts.InvoiceLock || 0;
+  const openLocks = locks - (r.op_counts.InvoiceFulfill || 0) - (r.op_counts.InvoiceFail || 0);
+  let warn = '';
+  if (openLocks > 0) warn += `<div class="audit-warn">⚠ ${openLocks} invoice lock(s) still open (neither fulfilled nor failed).</div>`;
+  if (r.replay_errors > 0) warn += `<div class="audit-warn">⚠ ${r.replay_errors} update(s) failed to decode/apply during replay.</div>`;
+
+  out.innerHTML = `
+    ${verdict}
+    <div class="cards">
+      <div class="card"><h3>obligations</h3><div class="big">${escapeHtml(fmt.msats(ob))}</div><div class="big-sub">Σ deposit balance owed</div></div>
+      <div class="card"><h3>reserves</h3><div class="big accent">${escapeHtml(fmt.msats(res))}</div><div class="big-sub">backing on-chain</div></div>
+      <div class="card"><h3>headroom</h3><div class="big" style="color:${headroom >= 0 ? 'var(--green)' : 'var(--red)'}">${escapeHtml(fmt.msats(headroom))}</div><div class="big-sub">reserves − obligations</div></div>
+      <div class="card"><h3>locked</h3><div class="big">${escapeHtml(fmt.msats(lock))}</div><div class="big-sub">in-flight (subset of obligations)</div></div>
+    </div>
+    <div class="audit-bar"><div class="fill" style="width:${pct}%"></div></div>
+    <div class="audit-bar-legend">obligations are ${pct.toFixed(1)}% of reserves · ${r.deposits} deposit(s) · seq ${r.sequence} · ${eventCount} events</div>
+    <div class="audit-tally"><table>${rows}</table></div>
+    ${warn}`;
+}
+
 async function main() {
   let ledgerId;
   try { ledgerId = resolveLedgerFromUrl(); }
@@ -1055,6 +1167,8 @@ async function main() {
   }
 
   renderOverview(ad, cosignerLedgers, quorumExpiry, chainTip);
+  const auditBtn = document.getElementById('audit-run');
+  if (auditBtn) auditBtn.addEventListener('click', () => runAudit(ledgerId));
   loadActivity(ledgerId);
 }
 
