@@ -95,16 +95,27 @@ impl Node {
             }
         }
 
-        let amount_sats = match request.params.get("amount_sats").and_then(|v| v.as_u64()) {
-            Some(a) => a,
-            None => {
-                return (
-                    false,
-                    None,
-                    Some("Missing amount_sats parameter".to_string()),
-                )
-            }
+        // Amount: prefer `amount_msats` (sub-sat capable — LN/BOLT11/LDK are all
+        // msat-native, and our backend already takes amount_msat), falling back
+        // to whole-sat `amount_sats` for older callers.
+        let amount_msat = match request.params.get("amount_msats").and_then(|v| v.as_u64()) {
+            Some(m) => m,
+            None => match request.params.get("amount_sats").and_then(|v| v.as_u64()) {
+                Some(s) => s * 1000,
+                None => {
+                    return (
+                        false,
+                        None,
+                        Some("Missing amount_msats or amount_sats parameter".to_string()),
+                    )
+                }
+            },
         };
+        if amount_msat == 0 {
+            return (false, None, Some("amount must be > 0".to_string()));
+        }
+        // Whole-sat view, kept for response fields / back-compat (rounds down).
+        let amount_sats = amount_msat / 1000;
 
         let description = request
             .params
@@ -372,6 +383,7 @@ impl Node {
                             let result = serde_json::json!({
                                 "invoice": invoice_str,
                                 "amount_sats": amount_sats,
+                                "amount_msat": amount_msat,
                                 "deposit_id": hex::encode(deposit_id),
                                 "payment_hash": hex::encode(payment_hash),
                                 "cosign_required": true,
@@ -397,6 +409,7 @@ impl Node {
                     let result = serde_json::json!({
                         "invoice": invoice_str,
                         "amount_sats": amount_sats,
+                        "amount_msat": amount_msat,
                         "deposit_id": hex::encode(deposit_id),
                         "payment_hash": hex::encode(payment_hash),
                         "operator_pubkey": operator_pubkey_hex,

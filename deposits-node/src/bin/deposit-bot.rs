@@ -79,7 +79,7 @@ struct Config {
     extra_peers: Vec<DepositId>,
     floor_msats: i64,
     reserve_msats: i64,
-    min_payment_sats: u64,
+    min_payment_msats: u64,
     interval_ms: u64,
     fee_fixed_msats: u64,
     fee_rate_bps: u64,
@@ -126,7 +126,7 @@ fn parse_args() -> Result<Config, String> {
         extra_peers: Vec::new(),
         floor_msats: 1_000_000,    // 1000 sats
         reserve_msats: 200_000,    // 200 sats kept back so we never hit 0
-        min_payment_sats: 100,
+        min_payment_msats: 1_000,  // 1 sat
         interval_ms: 1500,
         fee_fixed_msats: 2,
         fee_rate_bps: 20,
@@ -164,7 +164,9 @@ fn parse_args() -> Result<Config, String> {
             "--peer" => { cfg.extra_peers.push(parse_deposit_id(&need(i)?)?); i += 1; }
             "--floor-sats" => { cfg.floor_msats = need(i)?.parse::<i64>().map_err(|e| e.to_string())? * 1000; i += 1; }
             "--reserve-sats" => { cfg.reserve_msats = need(i)?.parse::<i64>().map_err(|e| e.to_string())? * 1000; i += 1; }
-            "--min-payment-sats" => { cfg.min_payment_sats = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
+            "--floor-msats" => { cfg.floor_msats = need(i)?.parse::<i64>().map_err(|e| e.to_string())?; i += 1; }
+            "--min-payment-sats" => { cfg.min_payment_msats = need(i)?.parse::<u64>().map_err(|e: std::num::ParseIntError| e.to_string())? * 1000; i += 1; }
+            "--min-payment-msats" => { cfg.min_payment_msats = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
             "--interval-ms" => { cfg.interval_ms = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
             "--fee-fixed-msats" => { cfg.fee_fixed_msats = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
             "--fee-rate-bps" => { cfg.fee_rate_bps = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
@@ -204,9 +206,9 @@ fn print_help() {
     eprintln!("  --network <net>           regtest|signet|testnet|mainnet (default regtest)");
     eprintln!("  --behavior <name>         forward (default; more later)");
     eprintln!("  --peer <deposit_id_hex>   add a payable peer (repeatable; else auto from deposits.json)");
-    eprintln!("  --floor-sats <n>          don't pay below this balance (default 1000)");
+    eprintln!("  --floor-sats / --floor-msats <n>   don't pay below this balance (default 1000 sat)");
     eprintln!("  --reserve-sats <n>        always keep this much back (default 200)");
-    eprintln!("  --min-payment-sats <n>    smallest payment to bother making (default 100)");
+    eprintln!("  --min-payment-sats / --min-payment-msats <n>   smallest payment to bother making (default 1 sat)");
     eprintln!("  --interval-ms <n>         tick interval, jittered ±50% (default 1500)");
     eprintln!("  --fee-fixed-msats / --fee-rate-bps   transfer fee (default 2 + 20bps)");
     eprintln!("  --timeout-height <n>      explicit lock timeout height (0 = auto via bitcoin-cli)");
@@ -396,8 +398,9 @@ impl Bot {
     }
 
     /// Drive a full transfer (lock + complete) to `dest`. Returns Ok on a
-    /// committed transfer. The fee is taken from us on top of `amount_sats`.
-    async fn pay(&self, dest: DepositId, amount_sats: u64, fee_msats: u64) -> Result<(), String> {
+    /// committed transfer. The fee is taken from us on top of `amount_msats`.
+    /// Transfers are msat-native, so this leg goes sub-sat freely.
+    async fn pay(&self, dest: DepositId, amount_msats: u64, fee_msats: u64) -> Result<(), String> {
         let mut rng = OsRng;
         let mut transfer_nonce = [0u8; 32];
         rng.fill_bytes(&mut transfer_nonce);
@@ -408,7 +411,6 @@ impl Bot {
         let hash = sha256::Hash::hash(&preimage);
         let completion_script = format!("sha256({})", hex::encode(hash.to_byte_array()));
 
-        let amount_msats = amount_sats * 1000;
         let timeout_height = self.timeout_height.load(Ordering::Relaxed);
         let op_nonce = deposits_core::signing::fresh_op_nonce();
         let op_expiry = u32::MAX;
@@ -472,12 +474,18 @@ impl Bot {
         &self,
         ledger_id: &str,
         deposit_id: DepositId,
-        amount_sats: u64,
+        amount_msats: u64,
         description: &str,
     ) -> Result<(String, [u8; 32], u64), String> {
+        // Send both: a new operator prefers `amount_msats` (sub-sat capable);
+        // an operator still on the old binary reads `amount_sats` (rounded up to
+        // ≥1 sat so it never mints a 0-amount "any" invoice). This lets the bot
+        // roll out ahead of the operators — the LN leg just floors to whole sats
+        // until they upgrade.
         let params = serde_json::json!({
             "deposit_id": hex::encode(deposit_id),
-            "amount_sats": amount_sats,
+            "amount_msats": amount_msats,
+            "amount_sats": (amount_msats / 1000).max(1),
             "description": description,
         });
         let resp = self.send_request(ledger_id, "make_invoice", params).await?;
@@ -495,11 +503,18 @@ impl Bot {
             return Err(format!("payment_hash not 32 bytes: {}", ph.len()));
         }
         payment_hash.copy_from_slice(&ph);
+        // Use the operator's *authoritative* minted amount, not our request: an
+        // operator on the old binary floors sub-sat requests to whole sats and
+        // returns `amount_sats`, so paying our requested sub-sat value would
+        // trip "amount_msats does not match invoice". Prefer amount_msat (new
+        // operator, exact), else amount_sats×1000 (current operator, floored),
+        // else our request as a last resort.
         let amount_msats = r
             .get("amount_msat")
             .or_else(|| r.get("amount_msats"))
             .and_then(|v| v.as_u64())
-            .unwrap_or(amount_sats * 1000);
+            .or_else(|| r.get("amount_sats").and_then(|v| v.as_u64()).map(|s| s * 1000))
+            .unwrap_or(amount_msats);
         Ok((bolt11, payment_hash, amount_msats))
     }
 
@@ -528,9 +543,9 @@ impl Bot {
     /// Pay `peer` on a *different* ledger over Lightning: mint its invoice on
     /// its ledger, then `pay_invoice` from our deposit on our ledger. Funds
     /// leave us and land in the peer's deposit as an InvoiceCredit.
-    async fn lightning_pay(&self, peer: &Peer, amount_sats: u64) -> Result<(), String> {
+    async fn lightning_pay(&self, peer: &Peer, amount_msats: u64) -> Result<(), String> {
         let (invoice, payment_hash, amount_msats) = self
-            .make_invoice_for(&peer.ledger_id, peer.deposit_id, amount_sats, "swarm")
+            .make_invoice_for(&peer.ledger_id, peer.deposit_id, amount_msats, "swarm")
             .await?;
 
         // Fee budget on top of the invoice amount: the LN routing reserve plus
@@ -587,21 +602,22 @@ impl Bot {
 /// The operator charges `fee = fixed + amount_msats * rate / 10000` on top of
 /// the amount, so the fee must be computed on the *final* amount — computing
 /// it on the spendable budget overcharges by the fee-on-the-fee and gets the
-/// lock rejected ("Fee mismatch"). Returns the largest whole-sat amount (and
-/// its matching fee in msats) that fits `spend_msats`, or None if below floor.
-fn size_payment(spend_msats: i64, fixed: u64, rate_bps: u64, min_sats: u64) -> Option<(u64, u64)> {
+/// lock rejected ("Fee mismatch"). Returns the largest msat amount (and its
+/// matching fee in msats) that fits `spend_msats`, or None if below floor.
+/// Sizing is msat-native — transfers carry the sub-sat amount through; the
+/// Lightning leg's operator mints a whole-msat invoice from it.
+fn size_payment(spend_msats: i64, fixed: u64, rate_bps: u64, min_msats: u64) -> Option<(u64, u64)> {
     let spend = u64::try_from(spend_msats).ok()?;
     if spend <= fixed {
         return None;
     }
-    // Solve amount_msats * (1 + rate/10000) + fixed <= spend for the largest
-    // whole-sat amount.
-    let amount_sats = ((spend - fixed) * 10_000 / (10_000 + rate_bps)) / 1000;
-    if amount_sats < min_sats {
+    // Solve amount_msats * (1 + rate/10000) + fixed <= spend for the largest amount.
+    let amount_msats = (spend - fixed) * 10_000 / (10_000 + rate_bps);
+    if amount_msats < min_msats {
         return None;
     }
-    let fee_msats = fixed + amount_sats * 1000 * rate_bps / 10_000;
-    Some((amount_sats, fee_msats))
+    let fee_msats = fixed + amount_msats * rate_bps / 10_000;
+    Some((amount_msats, fee_msats))
 }
 
 /// Pull the authoritative available balance out of an operator rejection so a
@@ -791,7 +807,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(sats) = cfg.make_invoice_sats {
         eprintln!("requesting a {} sat funding invoice from the operator…", sats);
         match bot
-            .make_invoice_for(&bot.ledger_id, bot.deposit_id, sats, &cfg.description)
+            .make_invoice_for(&bot.ledger_id, bot.deposit_id, sats * 1000, &cfg.description)
             .await
         {
             Ok((bolt11, _, _)) => {
@@ -877,38 +893,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // pay_invoice rejects ("Insufficient balance"). A penny-shuffler can
         // happily leave 5% on the table to always complete.
         let spend = (available - cfg.reserve_msats) * 95 / 100;
-        if available < cfg.floor_msats || spend < (cfg.min_payment_sats as i64 * 1000) {
+        if available < cfg.floor_msats || spend < (cfg.min_payment_msats as i64) {
             continue; // below floor — idle until we receive
         }
 
-        let Some((amount_sats, fee_msats)) = size_payment(
+        let Some((amount_msats, fee_msats)) = size_payment(
             spend,
             bot.cfg_fee_fixed,
             bot.cfg_fee_rate_bps,
-            cfg.min_payment_sats,
+            cfg.min_payment_msats,
         ) else {
             continue;
         };
-        let total_debit = amount_sats as i64 * 1000 + fee_msats as i64;
-
         // Pick a peer and a rail: same ledger → transfer, else → Lightning.
         let peer = bot.peers[rng.gen_range(0..bot.peers.len())].clone();
         let same_ledger = peer.ledger_id == bot.ledger_id;
         let rail = if same_ledger { "transfer" } else { "lightning" };
 
+        // Transfers are msat-native, so they carry the sub-sat amount as sized.
+        // Lightning can't: the operator floors the invoice up to a whole sat and
+        // lightning_pay adds a routing-fee budget on top, so a sub-sat balance
+        // would size an amount the lock can't cover. For the LN rail, floor to
+        // whole sats with the same fee lightning_pay uses and skip if a whole
+        // sat + its fee won't fit the budget.
+        let (amount_msats, fee_msats) = if same_ledger {
+            (amount_msats, fee_msats)
+        } else {
+            let whole = (amount_msats / 1000) * 1000;
+            let ln_fee = (whole / 100).max(1000);
+            if whole == 0 || (whole + ln_fee) as i64 > spend {
+                continue; // too small for the Lightning rail — wait for more
+            }
+            (whole, ln_fee)
+        };
+        let total_debit = amount_msats as i64 + fee_msats as i64;
+
         // Optimistic debit, refund on failure.
         bot.balance.fetch_sub(total_debit, Ordering::Relaxed);
         let result = if same_ledger {
-            bot.pay(peer.deposit_id, amount_sats, fee_msats).await
+            bot.pay(peer.deposit_id, amount_msats, fee_msats).await
         } else {
-            bot.lightning_pay(&peer, amount_sats).await
+            bot.lightning_pay(&peer, amount_msats).await
         };
         match result {
             Ok(()) => {
                 eprintln!(
-                    "  → {} {} sats to {}…  (balance ~{} sats)",
+                    "  → {} {} msat to {}…  (balance ~{} sats)",
                     rail,
-                    amount_sats,
+                    amount_msats,
                     &hex::encode(peer.deposit_id)[..8],
                     bot.balance.load(Ordering::Relaxed) / 1000,
                 );
@@ -957,8 +989,7 @@ mod tests {
             (1_000_000, 0, 10),
             (50_000, 100, 50),
         ] {
-            let (amount_sats, fee_msats) = size_payment(spend, fixed, rate, 1).unwrap();
-            let amount_msats = amount_sats * 1000;
+            let (amount_msats, fee_msats) = size_payment(spend, fixed, rate, 1).unwrap();
             // Operator's recomputation:
             assert_eq!(fee_msats, fixed + amount_msats * rate / 10_000);
             // And it all fits inside the spendable budget.
@@ -969,15 +1000,18 @@ mod tests {
     #[test]
     fn fee_regression_5000_sats() {
         // Exactly the live mainnet case that produced the "Fee mismatch:
-        // expected 9582, got 9602" rejection. We must now produce 9582.
-        let (amount_sats, fee_msats) = size_payment(4_800_000, 2, 20, 1).unwrap();
-        assert_eq!(amount_sats, 4790);
+        // expected 9582, got 9602" rejection. Msat-native sizing keeps the
+        // same fee (the fee formula floors identically) but no longer throws
+        // away the sub-sat remainder of the amount.
+        let (amount_msats, fee_msats) = size_payment(4_800_000, 2, 20, 1).unwrap();
+        assert_eq!(amount_msats, 4_790_417);
         assert_eq!(fee_msats, 9582);
+        assert!(amount_msats as i64 + fee_msats as i64 <= 4_800_000);
     }
 
     #[test]
     fn below_floor_returns_none() {
-        assert_eq!(size_payment(500_000, 2, 20, 1000), None); // 500 sats < 1000 floor
+        assert_eq!(size_payment(500_000, 2, 20, 1_000_000), None); // 500 sats < 1000-sat (1M msat) floor
         assert_eq!(size_payment(0, 2, 20, 1), None);
         assert_eq!(size_payment(-100, 2, 20, 1), None);
     }
