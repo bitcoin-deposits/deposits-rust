@@ -51,6 +51,18 @@ test.describe('firehose', () => {
     expect(typeof r.op).toBe('string'); // decoded a discriminant from content
   });
 
+  test('feed is newest-on-top regardless of arrival order', async ({ page }) => {
+    // Feed events out of order (mimics the relay sending its backlog
+    // newest-first, then live events). Rows must end up sorted newest-on-top.
+    const mk = (id, ts) => ({ id, created_at: ts, tags: [['d', 'aa'.repeat(8)], ['t', '30']], content: '' });
+    await page.evaluate(() => { /* ensure ready */ });
+    await page.evaluate((evs) => evs.forEach((e) => window.__addEvent(e)), [
+      mk('a', 1000), mk('b', 1002), mk('c', 1001), mk('d', 1003),
+    ]);
+    const order = await page.$$eval('#rows .row', els => els.map(e => Number(e.dataset.ts)));
+    expect(order).toEqual([1003, 1002, 1001, 1000]); // strictly descending
+  });
+
   test('missing tags degrade gracefully', async ({ page }) => {
     const r = await page.evaluate(() => window.__decodeEvent({ id: 'x', tags: [], content: '' }));
     expect(r.ledger).toBe('');

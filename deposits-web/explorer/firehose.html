@@ -202,12 +202,22 @@ function addEvent(ev){
 
   if (emptyEl && emptyEl.parentNode) emptyEl.remove();
   const r = decodeEvent(ev);
+  const ts = r.ts || 0;
   const div = document.createElement('div');
   div.className = 'row fresh';
+  div.dataset.ts = String(ts);
   div.innerHTML = rowHtml(r);
-  rowsEl.prepend(div);
+  // Insert sorted by created_at descending (newest on top). Blind prepend
+  // reversed the relay backlog, which arrives newest-first — so an idle feed
+  // ended up oldest-on-top. Walk from the top to the first older row.
+  let anchor = null;
+  for (const child of rowsEl.children) {
+    if (Number(child.dataset.ts || 0) < ts) { anchor = child; break; }
+  }
+  if (anchor) rowsEl.insertBefore(div, anchor); else rowsEl.appendChild(div);
   while (rowsEl.children.length > MAX_ROWS) rowsEl.removeChild(rowsEl.lastChild);
 }
+window.__addEvent = addEvent;
 
 setInterval(() => {
   const cut = Date.now() - 60_000;
