@@ -857,14 +857,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Snap to the operator's authoritative balance before sizing a payment.
         // The streamed local estimate drifts upward (replayed/duplicate credit
         // updates with no matching debits), which otherwise makes us over-send
-        // and stick in a reject loop. Ground-truth wins.
-        match bot.query_balance().await {
-            Ok(avail) => bot.balance.store(avail, Ordering::Relaxed),
-            Err(e) => eprintln!("  (balance check failed: {} — using local estimate)", e),
-        }
-
-        let available = bot.balance.load(Ordering::Relaxed);
-        let spend = available - cfg.reserve_msats;
+        // and stick in a reject loop. Ground-truth wins. Size off the queried
+        // value directly — not a re-read of the shared counter, which the inbound
+        // credit task can inflate in the gap between snap and sizing.
+        let available = match bot.query_balance().await {
+            Ok(avail) => {
+                bot.balance.store(avail, Ordering::Relaxed);
+                avail
+            }
+            Err(e) => {
+                eprintln!("  (balance check failed: {} — using local estimate)", e);
+                bot.balance.load(Ordering::Relaxed)
+            }
+        };
+        // Spend only ~95% of what's available. The operator charges the
+        // *deposit's* fee schedule (which can run a touch higher than our
+        // --fee estimate), and the balance can drift a hair between this query
+        // and the pay; without headroom the total lands just over available and
+        // pay_invoice rejects ("Insufficient balance"). A penny-shuffler can
+        // happily leave 5% on the table to always complete.
+        let spend = (available - cfg.reserve_msats) * 95 / 100;
         if available < cfg.floor_msats || spend < (cfg.min_payment_sats as i64 * 1000) {
             continue; // below floor — idle until we receive
         }
@@ -903,6 +915,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 bot.balance.fetch_add(total_debit, Ordering::Relaxed); // refund
+                // "still reconciling — do not retry": the operator accepted the
+                // pay and its InvoiceFulfill is settling asynchronously; the
+                // funds already moved. Not a failure — just wait it out so we
+                // don't fire a second pay against a balance it hasn't settled
+                // yet (a double-spend attempt). The next-tick balance_query
+                // picks up the real outcome.
+                if e.contains("reconciling") || e.contains("do not retry") {
+                    eprintln!("  ⧖ {} in flight (reconciling) — backing off", rail);
+                    tokio::time::sleep(Duration::from_secs(8)).await;
+                    continue;
+                }
                 // The operator's ledger is authoritative. If it tells us the
                 // real available balance, snap our local estimate to it — a
                 // replayed InvoiceCredit on resubscribe (the relay re-sends
