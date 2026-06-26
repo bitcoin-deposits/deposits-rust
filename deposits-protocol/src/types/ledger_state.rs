@@ -24,6 +24,16 @@ fn default_ruleset_name() -> String {
     "legacy".to_string()
 }
 
+/// Whether a ledger's active ruleset enforces the DEP-07 one-period maintenance
+/// fee cap as a consensus rule (`FeeExceedsAssessment`). Version-gated per
+/// DEP-18: dormant until a ledger is upgraded (`QuorumUpgrade`/`QuorumBegin`) to
+/// `fee-cap-v3`, so an upgraded node never retroactively faults a pre-upgrade
+/// `FeeCollect` and trips the DEP-06 confiscation cascade. Keyed by ruleset name
+/// (the reserves half of `fee-cap-v3` lives in `deposits-core::ruleset`).
+pub fn ruleset_enforces_fee_cap(ruleset_name: &str) -> bool {
+    matches!(ruleset_name, "fee-cap-v3")
+}
+
 // ============================================================================
 // Ledger State
 // ============================================================================
@@ -1395,13 +1405,18 @@ impl LedgerState {
                     // (calculate_fees_due caps to a single frequency_blocks
                     // period). The operator may collect less, never more — this
                     // is what stops a years-of-backlog sweep or any over-bill
-                    // beyond the depositor's accepted schedule.
-                    let max_due = deposit.calculate_fees_due(*block_height);
-                    if *amount > max_due {
-                        violations.push(ConformanceViolation::FeeExceedsAssessment {
-                            collected: *amount,
-                            max_due,
-                        });
+                    // beyond the depositor's accepted schedule. Version-gated
+                    // (DEP-18): only ledgers upgraded to `fee-cap-v3` enforce it,
+                    // so an upgraded node never retroactively faults a FeeCollect
+                    // cosigned under an older ruleset.
+                    if ruleset_enforces_fee_cap(&pre.active_ruleset_name) {
+                        let max_due = deposit.calculate_fees_due(*block_height);
+                        if *amount > max_due {
+                            violations.push(ConformanceViolation::FeeExceedsAssessment {
+                                collected: *amount,
+                                max_due,
+                            });
+                        }
                     }
                 }
             }

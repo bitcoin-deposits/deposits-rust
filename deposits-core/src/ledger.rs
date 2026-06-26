@@ -897,19 +897,12 @@ impl Ledger {
             // Post-hook: stamp opened_at_block for fresh deposits (block_height
             // isn't carried in the operation itself).
             if let LedgerOperation::DepositOpen { deposit_id, .. } = &op {
-                // Fall back to the ledger genesis when the open's envelope block
-                // is 0 (deposit opened during bringup before the wallet had a
-                // synced tip) — otherwise the baseline stays at 0 and fees would
-                // appear to accrue from block 0.
-                let open_block = if update.block_height > 0 {
-                    update.block_height
-                } else {
-                    state.genesis_block
-                };
-                if let Some(deposit) = state.deposits.get_mut(deposit_id) {
-                    deposit.opened_at_block = open_block;
-                    if deposit.last_fee_assessment == 0 {
-                        deposit.last_fee_assessment = open_block;
+                if update.block_height > 0 {
+                    if let Some(deposit) = state.deposits.get_mut(deposit_id) {
+                        deposit.opened_at_block = update.block_height;
+                        if deposit.last_fee_assessment == 0 {
+                            deposit.last_fee_assessment = update.block_height;
+                        }
                     }
                 }
             }
@@ -1062,19 +1055,12 @@ impl Ledger {
         // chain_hash() after operator signing via finalize_chain_hash()
         self.state.chain_tip_hash = new_hash;
 
-        // Set opened_at_block and initial last_fee_assessment for new deposits.
-        // Fall back to genesis when the block height is 0 (open during bringup
-        // before a synced tip), so fees don't appear to accrue from block 0.
+        // Set opened_at_block and initial last_fee_assessment for new deposits
         if let LedgerOperation::DepositOpen { deposit_id, .. } = &operation {
-            let open_block = if block_height > 0 {
-                block_height
-            } else {
-                self.state.genesis_block
-            };
             if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
-                deposit.opened_at_block = open_block;
+                deposit.opened_at_block = block_height;
                 if deposit.last_fee_assessment == 0 {
-                    deposit.last_fee_assessment = open_block;
+                    deposit.last_fee_assessment = block_height;
                 }
             }
         }
@@ -1231,19 +1217,12 @@ impl Ledger {
                 .apply_signed(&staged.update, &authorizer)?;
         self.state = new_state;
 
-        // Set opened_at_block and initial last_fee_assessment for new deposits.
-        // Fall back to genesis when the block height is 0 (open during bringup
-        // before a synced tip), so fees don't appear to accrue from block 0.
+        // Set opened_at_block and initial last_fee_assessment for new deposits
         if let LedgerOperation::DepositOpen { deposit_id, .. } = &staged.operation {
-            let open_block = if staged.update.block_height > 0 {
-                staged.update.block_height
-            } else {
-                self.state.genesis_block
-            };
             if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
-                deposit.opened_at_block = open_block;
+                deposit.opened_at_block = staged.update.block_height;
                 if deposit.last_fee_assessment == 0 {
-                    deposit.last_fee_assessment = open_block;
+                    deposit.last_fee_assessment = staged.update.block_height;
                 }
             }
         }

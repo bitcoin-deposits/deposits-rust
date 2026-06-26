@@ -58,6 +58,7 @@ pub fn lookup(name: &str) -> Option<&'static Ruleset> {
         "legacy" => Some(&LEGACY),
         "cltv-offset-literal" => Some(&CLTV_OFFSET_LITERAL),
         "cltv-offset-v2" => Some(&CLTV_OFFSET_V2),
+        "fee-cap-v3" => Some(&FEE_CAP_V3),
         _ => None,
     }
 }
@@ -79,7 +80,12 @@ pub fn resolve_or_legacy(name: Option<&str>) -> &'static Ruleset {
 /// `QuorumMemberResponse` so an operator can pick a `protocol_version`
 /// at `quorum begin` time that every member can validate.
 pub fn all_supported_names() -> Vec<&'static str> {
-    vec![LEGACY.name, CLTV_OFFSET_LITERAL.name, CLTV_OFFSET_V2.name]
+    vec![
+        LEGACY.name,
+        CLTV_OFFSET_LITERAL.name,
+        CLTV_OFFSET_V2.name,
+        FEE_CAP_V3.name,
+    ]
 }
 
 /// Decide whether a candidate member's declared `supported_rulesets`
@@ -170,6 +176,20 @@ pub static CLTV_OFFSET_LITERAL: Ruleset = Ruleset {
 /// no-op-timelock vulnerability.
 pub static CLTV_OFFSET_V2: Ruleset = Ruleset {
     name: "cltv-offset-v2",
+    tier_config_factory: cltv_offset_v2_tier_config,
+};
+
+/// Same on-chain reserves cascade as [`CLTV_OFFSET_V2`] — byte-identical UTXO
+/// scripts, i.e. the same reserves-cascade family — plus the off-chain
+/// ledger-op conformance rule from DEP-07: cosigners reject a `FeeCollect`
+/// exceeding one assessment period (`FeeExceedsAssessment`). Because the
+/// reserves shape is unchanged, a ledger adopts this via a cheap `QuorumUpgrade`
+/// (DEP-18) instead of an on-chain rotation. The op-rule is gated in
+/// deposits-protocol (`ruleset_enforces_fee_cap`); this entry exists so reserves
+/// reconstruction and quorum-member support resolve `fee-cap-v3` to the v2
+/// cascade.
+pub static FEE_CAP_V3: Ruleset = Ruleset {
+    name: "fee-cap-v3",
     tier_config_factory: cltv_offset_v2_tier_config,
 };
 

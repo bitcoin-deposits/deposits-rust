@@ -288,41 +288,33 @@ fn fee_collect_over_one_period_is_rejected() {
     let one_period = state.deposits.get(&deposit_id).unwrap().calculate_fees_due(2016);
     let greedy = one_period + 4_000_000;
 
-    let (_next, violations) = state
-        .apply_with_verifier(
-            &LedgerOperation::FeeCollect {
-                deposit_id,
-                amount: greedy,
-                block_height: 955_504,
-            },
-            &AllowAll,
-            0,
-        )
-        .unwrap();
+    let fee_collect = |amount: u64| LedgerOperation::FeeCollect {
+        deposit_id,
+        amount,
+        block_height: 955_504,
+    };
+    let exceeds = |vs: &[ConformanceViolation]| {
+        vs.iter()
+            .any(|v| matches!(v, ConformanceViolation::FeeExceedsAssessment { .. }))
+    };
 
+    // Dormant on `legacy` (DEP-18 version gate): the over-cap amount must NOT
+    // be faulted, so an upgraded node never retroactively confiscates a
+    // FeeCollect cosigned before the ledger adopts fee-cap-v3.
+    let (_l, legacy_v) = state.apply_with_verifier(&fee_collect(greedy), &AllowAll, 0).unwrap();
     assert!(
-        violations
-            .iter()
-            .any(|v| matches!(v, ConformanceViolation::FeeExceedsAssessment { .. })),
-        "expected FeeExceedsAssessment, got {violations:?}"
+        !exceeds(&legacy_v),
+        "fee cap must be dormant on legacy, got {legacy_v:?}"
     );
 
-    // The exact one-period amount at the same block conforms.
-    let due_now = state.deposits.get(&deposit_id).unwrap().calculate_fees_due(955_504);
-    let (_n2, ok) = state
-        .apply_with_verifier(
-            &LedgerOperation::FeeCollect {
-                deposit_id,
-                amount: due_now,
-                block_height: 955_504,
-            },
-            &AllowAll,
-            0,
-        )
-        .unwrap();
-    assert!(
-        !ok.iter()
-            .any(|v| matches!(v, ConformanceViolation::FeeExceedsAssessment { .. })),
-        "one-period amount must conform, got {ok:?}"
-    );
+    // Active on fee-cap-v3: the over-cap amount is rejected.
+    let mut v3 = state.clone();
+    v3.active_ruleset_name = "fee-cap-v3".to_string();
+    let (_g, greedy_v) = v3.apply_with_verifier(&fee_collect(greedy), &AllowAll, 0).unwrap();
+    assert!(exceeds(&greedy_v), "expected FeeExceedsAssessment, got {greedy_v:?}");
+
+    // The exact one-period amount conforms even on fee-cap-v3.
+    let due_now = v3.deposits.get(&deposit_id).unwrap().calculate_fees_due(955_504);
+    let (_o, ok_v) = v3.apply_with_verifier(&fee_collect(due_now), &AllowAll, 0).unwrap();
+    assert!(!exceeds(&ok_v), "one-period amount must conform, got {ok_v:?}");
 }
