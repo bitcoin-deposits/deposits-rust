@@ -48,3 +48,4 @@ deposits-web/explorer/playwright-report/
 /deposits-audit-wasm/target/
 /deposits-audit/Cargo.lock
 /deposits-audit-wasm/Cargo.lock
+deposits-web/explorer/tlv-catalog.js

@@ -75,6 +75,8 @@ export function installBreadcrumbs(current, opts = {}) {
     crumbs.push({ label: `deposit ${short(deposit)}`, href: null });
   } else if (current === 'deposits') {
     crumbs.push({ label: 'deposits', href: null });
+  } else if (current === 'firehose') {
+    crumbs.push({ label: 'live', href: null });
   } else if (current === 'update') {
     crumbs.push({ label: 'update', href: null });
   }
@@ -118,6 +120,7 @@ export function installTopNav(opts = {}) {
   const path = window.location.pathname;
   let active;
   if (path.startsWith('/nodes')) active = 'nodes';
+  else if (path.startsWith('/firehose')) active = 'live';
   else if (path.startsWith('/deposit')) active = 'deposits'; // /deposit + /deposits
   else active = 'ledgers'; // /ledgers, /explorer, /ledger, /update, /
 
@@ -139,6 +142,8 @@ export function installTopNav(opts = {}) {
     { key: 'nodes', label: 'nodes', href: `${ovBase}/nodes${relayFrag}` },
     { key: 'ledgers', label: 'ledgers', href: `${ovBase}/ledgers${relayFrag}` },
     { key: 'deposits', label: 'deposits', href: depositsHref },
+    // Firehose is global (all ledgers); always live, on the overview host.
+    { key: 'live', label: 'live', href: `${ovBase}/firehose${relayFrag}` },
   ];
   const html = items.map((it) => {
     const cls = [it.key === active ? 'active' : '', !it.href ? 'disabled' : '']
