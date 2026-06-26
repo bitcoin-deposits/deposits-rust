@@ -910,21 +910,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let same_ledger = peer.ledger_id == bot.ledger_id;
         let rail = if same_ledger { "transfer" } else { "lightning" };
 
-        // Transfers are msat-native, so they carry the sub-sat amount as sized.
-        // Lightning can't: the operator floors the invoice up to a whole sat and
-        // lightning_pay adds a routing-fee budget on top, so a sub-sat balance
-        // would size an amount the lock can't cover. For the LN rail, floor to
-        // whole sats with the same fee lightning_pay uses and skip if a whole
-        // sat + its fee won't fit the budget.
+        // Both rails are msat-native now (operators mint sub-sat invoices), so
+        // each carries the sub-sat amount as sized. But size_payment sized the
+        // amount against the *transfer* fee (~0.2%); the Lightning rail's
+        // routing-fee budget is larger (1%, min 1 sat), so the transfer-sized
+        // amount + LN fee overruns `spend` and the InvoiceLock gets rejected for
+        // insufficient funds. Re-derive the LN amount so amount + max(amount/100,
+        // 1 sat) <= spend, and cap it penny-scale so we don't try to push a
+        // whole accumulated balance through one mainnet hop (routing liquidity).
         let (amount_msats, fee_msats) = if same_ledger {
             (amount_msats, fee_msats)
         } else {
-            let whole = (amount_msats / 1000) * 1000;
-            let ln_fee = (whole / 100).max(1000);
-            if whole == 0 || (whole + ln_fee) as i64 > spend {
-                continue; // too small for the Lightning rail — wait for more
+            const LN_CAP_MSATS: u64 = 1_000_000; // ≤ 1000 sat per LN hop
+            let s = spend.max(0) as u64;
+            // 1%-dominated regime: amount + amount/100 <= s.
+            let mut ln_amount = (s * 100 / 101).min(LN_CAP_MSATS).min(amount_msats);
+            let mut ln_fee = (ln_amount / 100).max(1000);
+            if (ln_amount + ln_fee) as i64 > spend {
+                // small-balance regime where the flat 1-sat fee floor binds.
+                ln_amount = s.saturating_sub(1000).min(LN_CAP_MSATS);
+                ln_fee = 1000;
             }
-            (whole, ln_fee)
+            if ln_amount == 0 || (ln_amount + ln_fee) as i64 > spend {
+                continue; // can't cover even a 1-sat fee — wait for more
+            }
+            (ln_amount, ln_fee)
         };
         let total_debit = amount_msats as i64 + fee_msats as i64;
 
