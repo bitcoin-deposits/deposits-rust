@@ -70,6 +70,14 @@ pub enum ConformanceViolation {
         max_due: u64,
     },
 
+    /// QuorumUpgrade (DEP-18) named a ruleset this implementation doesn't know.
+    UnknownRuleset { name: String },
+
+    /// QuorumUpgrade (DEP-18) tried to move to a ruleset in a different
+    /// reserves-cascade family. That changes the on-chain reserves script, so it
+    /// requires a QuorumBegin (reserves rotation), not an off-chain upgrade.
+    RulesetFamilyMismatch { from: String, to: String },
+
     /// DepositOpen's `descriptor` exceeded the active quorum's
     /// `max_descriptor_bytes` policy. Without this, an outsized
     /// descriptor could bloat every cosigner's signing path.
@@ -145,6 +153,14 @@ impl std::fmt::Display for ConformanceViolation {
                 f,
                 "fee_collect amount {} exceeds the one-period assessment due ({})",
                 collected, max_due,
+            ),
+            Self::UnknownRuleset { name } => {
+                write!(f, "quorum_upgrade names unknown ruleset {:?}", name)
+            }
+            Self::RulesetFamilyMismatch { from, to } => write!(
+                f,
+                "quorum_upgrade {:?}->{:?} changes reserves-cascade family (use quorum_begin)",
+                from, to,
             ),
             Self::DescriptorTooLarge { actual, max } => write!(
                 f,

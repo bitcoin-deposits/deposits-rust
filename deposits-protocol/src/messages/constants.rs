@@ -50,6 +50,8 @@ pub mod consts {
     pub const COLLATERAL_CONSENT_RESPONSE: u16 = 0x809D;
     // 0x809F was COLLATERAL_LOCK (removed with collateral-in-UTXO migration)
     pub const QUORUM_JOIN: u16 = 0x80AB;
+    /// DEP-18 off-chain consensus-version upgrade (op-rules-only change).
+    pub const QUORUM_UPGRADE: u16 = 0x80B7;
 
     // Deposit operations
     pub const DEPOSIT_OPEN: u16 = 0x80D1;

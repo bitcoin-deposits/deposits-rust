@@ -739,6 +739,54 @@ impl Node {
         }
     }
 
+    /// DEP-18 off-chain consensus-version upgrade. Builds a `QuorumUpgrade`
+    /// op and commits it through the normal cosign+append path. Conformance
+    /// (run by every cosigner) enforces that the target is a known ruleset in
+    /// the same reserves-cascade family — so this never moves reserves on-chain.
+    pub(crate) async fn process_quorum_upgrade_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        let new_version = match request
+            .params
+            .get("new_protocol_version")
+            .and_then(|v| v.as_str())
+        {
+            Some(s) => s.to_string(),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing new_protocol_version parameter".to_string()),
+                )
+            }
+        };
+
+        // Fail fast on an unknown ruleset with a clear message (conformance
+        // would also reject it, but only after building/cosigning).
+        if deposits_core::ruleset::lookup(&new_version).is_none() {
+            return (false, None, Some(format!("unknown ruleset {:?}", new_version)));
+        }
+
+        let op = deposits_core::messages::LedgerOperation::QuorumUpgrade {
+            new_protocol_version: new_version.clone(),
+        };
+        match self.commit_operation(&request.ledger_id, op).await {
+            Ok(content_hash) => (
+                true,
+                Some(
+                    serde_json::json!({
+                        "new_protocol_version": new_version,
+                        "content_hash": content_hash,
+                    })
+                    .to_string(),
+                ),
+                None,
+            ),
+            Err(e) => (false, None, Some(format!("quorum_upgrade failed: {}", e))),
+        }
+    }
+
     pub(crate) async fn process_quorum_begin_request(
         &self,
         request: &crate::nostr::LedgerRequest,

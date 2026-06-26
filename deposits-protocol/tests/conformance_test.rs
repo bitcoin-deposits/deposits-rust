@@ -318,3 +318,76 @@ fn fee_collect_over_one_period_is_rejected() {
     let (_o, ok_v) = v3.apply_with_verifier(&fee_collect(due_now), &AllowAll, 0).unwrap();
     assert!(!exceeds(&ok_v), "one-period amount must conform, got {ok_v:?}");
 }
+
+#[test]
+fn quorum_upgrade_same_family_applies() {
+    // DEP-18: a QuorumUpgrade within the same reserves-cascade family
+    // (cltv-offset-v2 -> fee-cap-v3) conforms and flips active_ruleset_name
+    // off-chain, with no reserves change.
+    let mut state = make_state();
+    state.active_ruleset_name = "cltv-offset-v2".to_string();
+
+    let (next, violations) = state
+        .apply_with_verifier(
+            &LedgerOperation::QuorumUpgrade {
+                new_protocol_version: "fee-cap-v3".to_string(),
+            },
+            &AllowAll,
+            0,
+        )
+        .unwrap();
+
+    assert!(violations.is_empty(), "expected clean upgrade, got {violations:?}");
+    assert_eq!(next.active_ruleset_name, "fee-cap-v3");
+}
+
+#[test]
+fn quorum_upgrade_rejects_family_change_and_unknown() {
+    // Changing the reserves-cascade family (legacy -> fee-cap-v3) must be
+    // refused — that needs a QuorumBegin (on-chain UTXO change).
+    let state = make_state(); // active_ruleset_name defaults to "legacy"
+    let (_n, vs) = state
+        .apply_with_verifier(
+            &LedgerOperation::QuorumUpgrade {
+                new_protocol_version: "fee-cap-v3".to_string(),
+            },
+            &AllowAll,
+            0,
+        )
+        .unwrap();
+    assert!(
+        vs.iter()
+            .any(|v| matches!(v, ConformanceViolation::RulesetFamilyMismatch { .. })),
+        "expected RulesetFamilyMismatch, got {vs:?}"
+    );
+
+    // An unknown target ruleset is refused outright.
+    let mut v2 = make_state();
+    v2.active_ruleset_name = "cltv-offset-v2".to_string();
+    let (_n2, vs2) = v2
+        .apply_with_verifier(
+            &LedgerOperation::QuorumUpgrade {
+                new_protocol_version: "totally-bogus".to_string(),
+            },
+            &AllowAll,
+            0,
+        )
+        .unwrap();
+    assert!(
+        vs2.iter()
+            .any(|v| matches!(v, ConformanceViolation::UnknownRuleset { .. })),
+        "expected UnknownRuleset, got {vs2:?}"
+    );
+}
+
+#[test]
+fn quorum_upgrade_codec_roundtrip() {
+    use deposits_protocol::tlv::{TlvDecode, TlvEncode};
+    let op = LedgerOperation::QuorumUpgrade {
+        new_protocol_version: "fee-cap-v3".to_string(),
+    };
+    let bytes = op.tlv_encode();
+    let back = LedgerOperation::tlv_decode(&bytes).unwrap();
+    assert_eq!(op, back);
+    assert_eq!(back.discriminant(), 45);
+}

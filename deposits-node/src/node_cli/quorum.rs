@@ -19,6 +19,7 @@ pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::E
         eprintln!("  remove         Remove a quorum member from our ledger");
         eprintln!("  join           Record that we joined another operator's quorum");
         eprintln!("  begin          Activate quorum-based Taproot spending");
+        eprintln!("  upgrade        Off-chain consensus-version bump (DEP-18; same reserves family)");
         eprintln!("  repair         Re-establish quorum past `quorum_expiry` via the DEP-05 §Lifecycle cascade");
         eprintln!("  refresh        Re-add active members and rotate when all responded (idempotent)");
         eprintln!("  request        Request a peer to join our quorum");
@@ -33,6 +34,7 @@ pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::E
         "remove" => quorum_remove(&args[1..]).await,
         "join" => quorum_join_cmd(&args[1..]).await,
         "begin" => quorum_begin(&args[1..]).await,
+        "upgrade" => quorum_upgrade(&args[1..]).await,
         "repair" => quorum_repair(&args[1..]).await,
         "refresh" => quorum_refresh(&args[1..]).await,
         "request" => quorum_request(&args[1..]).await,
@@ -183,6 +185,75 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         println!("  Tier 2: Emergency recovery (extended timeout)");
     }
 
+    Ok(())
+}
+
+/// DEP-18 off-chain consensus-version upgrade. Moves the ledger to a target
+/// ruleset in the SAME reserves-cascade family (op-rules only — e.g. enabling
+/// the DEP-07 fee cap via `fee-cap-v3`). No reserves rotation, no on-chain TX —
+/// just a cosigned ledger op. A family-changing target is rejected by
+/// conformance and must use `quorum begin` instead.
+///
+/// Usage: deposits-node quorum upgrade [<reserves_id>] <new_protocol_version>
+async fn quorum_upgrade(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut positionals: Vec<String> = Vec::new();
+    let mut config_args: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else {
+            positionals.push(args[i].clone());
+        }
+        i += 1;
+    }
+
+    let (reserves_id, new_version) = match positionals.as_slice() {
+        [v] => (None, v.clone()),
+        [r, v] => (Some(r.clone()), v.clone()),
+        _ => {
+            return Err(
+                "Usage: deposits-node quorum upgrade [<reserves_id>] <new_protocol_version>".into(),
+            )
+        }
+    };
+
+    let config = parse_config(&config_args)?;
+    let node = Node::new(config.clone()).await?;
+    let ledger_id = match reserves_id {
+        Some(id) => super::resolve_to_ledger_id(&node, &id)?,
+        None => match node.get_primary_ledger() {
+            Some((lid, _)) => lid,
+            None => return Err("No ledger found. Open a ledger first with 'ledger open'.".into()),
+        },
+    };
+    drop(node);
+
+    println!("Upgrading ledger consensus version via daemon...");
+    println!("  Ledger: {}...", &ledger_id[..16.min(ledger_id.len())]);
+    println!("  Target ruleset: {}", new_version);
+
+    let mut params = serde_json::Map::new();
+    params.insert(
+        "new_protocol_version".to_string(),
+        serde_json::json!(new_version),
+    );
+    let result = send_daemon_request(
+        &config,
+        &ledger_id,
+        "quorum_upgrade",
+        serde_json::Value::Object(params),
+    )
+    .await?;
+
+    println!("\nUpgrade committed.");
+    if let Some(h) = result.get("content_hash").and_then(|v| v.as_str()) {
+        println!("  Update hash: {}", h);
+    }
     Ok(())
 }
 

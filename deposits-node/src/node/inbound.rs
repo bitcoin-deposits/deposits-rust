@@ -102,6 +102,7 @@ impl Node {
             "quorum_remove",
             "quorum_join",
             "quorum_begin",
+            "quorum_upgrade",
             // consent_request targets the operator of the *member's*
             // collateral ledger (`#l = member_ledger_id`). Any non-operator
             // who happens to subscribe to that ledger (e.g. via the consent
@@ -417,6 +418,7 @@ impl Node {
             "quorum_join" => self.process_quorum_join_request(&request).await,
             "consent_request" => self.process_consent_request(&request).await,
             "quorum_begin" => self.process_quorum_begin_request(&request).await,
+            "quorum_upgrade" => self.process_quorum_upgrade_request(&request).await,
             "resync" => self.process_resync_request(&request).await,
             "health_status" => self.process_health_status_request().await,
             "health_ping" => self.process_health_ping_request(&request).await,

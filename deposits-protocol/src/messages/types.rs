@@ -547,6 +547,17 @@ pub enum LedgerOperation {
         membership_expires: u32,
     },
 
+    /// Off-chain consensus-version upgrade (DEP-18). A cosigned ledger op that
+    /// moves the ledger's `active_ruleset_name` to a target ruleset in the SAME
+    /// reserves-cascade family — an op-rules-only change (e.g. enabling the
+    /// DEP-07 fee cap via `fee-cap-v3`). No reserves move, no membership change,
+    /// no on-chain transaction. A target that changes the reserves family is
+    /// rejected by conformance and must use `QuorumBegin` instead.
+    QuorumUpgrade {
+        /// Target protocol-ruleset name to activate for this ledger.
+        new_protocol_version: String,
+    },
+
     // ========== Maintenance (1) ==========
     /// Collect maintenance fees from a deposit
     FeeCollect {
@@ -742,6 +753,7 @@ impl LedgerOperation {
             Self::QuorumAddMember { .. } => 43,
             Self::QuorumRemoveMember { .. } => 44,
             Self::QuorumJoin { .. } => 46,
+            Self::QuorumUpgrade { .. } => 45,
             Self::FeeCollect { .. } => 50,
             // Custody dispute operations
             Self::DisputeEnter { .. } => 54, // Opens dispute, transitions to DISPUTED
@@ -778,6 +790,7 @@ impl LedgerOperation {
             Self::QuorumAddMember { .. } => consts::QUORUM_ADD_MEMBER,
             Self::QuorumRemoveMember { .. } => consts::QUORUM_REMOVE_MEMBER,
             Self::QuorumJoin { .. } => consts::QUORUM_JOIN,
+            Self::QuorumUpgrade { .. } => consts::QUORUM_UPGRADE,
             Self::FeeCollect { .. } => consts::MAINTENANCE_FEE_COLLECT,
             Self::DisputeEnter { .. } => consts::LEDGER_UPDATE,
             Self::DisputeAcquire { .. } => consts::LEDGER_UPDATE,
@@ -822,6 +835,7 @@ impl LedgerOperation {
             43 => consts::QUORUM_ADD_MEMBER,
             44 => consts::QUORUM_REMOVE_MEMBER,
             46 => consts::QUORUM_JOIN,
+            45 => consts::QUORUM_UPGRADE,
             50 => consts::MAINTENANCE_FEE_COLLECT,
             54 | 55 | 56 | 57 | 80 => consts::LEDGER_UPDATE,
             60 => consts::LEDGER_CLOSE,
@@ -1466,6 +1480,11 @@ impl BinaryCodec for LedgerOperation {
                 write_string(w, ledger_id)?;
                 write_u32(w, *membership_expires)?;
             }
+            Self::QuorumUpgrade {
+                new_protocol_version,
+            } => {
+                write_string(w, new_protocol_version)?;
+            }
             Self::FeeCollect {
                 deposit_id,
                 amount,
@@ -1875,6 +1894,9 @@ impl BinaryCodec for LedgerOperation {
                 operator_id: read_pubkey(r)?,
                 ledger_id: read_string(r)?,
                 membership_expires: read_u32(r)?,
+            }),
+            45 => Ok(Self::QuorumUpgrade {
+                new_protocol_version: read_string(r)?,
             }),
             // Fee operations (50)
             50 => {

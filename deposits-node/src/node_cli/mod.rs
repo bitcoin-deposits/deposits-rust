@@ -1564,6 +1564,9 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 ),
                 LedgerOperation::InvoiceFail { .. } => ("InvoiceFail", String::new()),
                 LedgerOperation::InvoiceFulfill { .. } => ("InvoiceFulfill", String::new()),
+                LedgerOperation::QuorumUpgrade {
+                    new_protocol_version,
+                } => ("QuorumUpgrade", format!("ruleset {}", new_protocol_version)),
                 LedgerOperation::FeeCollect { .. } => ("FeeCollect", String::new()),
                 LedgerOperation::DisputeEnter {
                     last_valid_sequence,

@@ -34,6 +34,29 @@ pub fn ruleset_enforces_fee_cap(ruleset_name: &str) -> bool {
     matches!(ruleset_name, "fee-cap-v3")
 }
 
+/// Whether this binary knows the named ruleset at all. Mirrors the
+/// `deposits-core::ruleset` registry's `lookup`, kept here because conformance
+/// (which can't depend on deposits-core) needs to reject a `QuorumUpgrade` to an
+/// unknown target. Keep the two in sync when adding a ruleset.
+pub fn ruleset_known(ruleset_name: &str) -> bool {
+    !reserves_family(ruleset_name).is_empty()
+}
+
+/// The on-chain reserves-cascade family a ruleset belongs to (DEP-18). Two
+/// rulesets in the same family produce byte-identical reserves UTXO scripts and
+/// differ only in off-chain op rules, so a ledger may move between them with a
+/// cheap `QuorumUpgrade` (no reserves move). Returns "" for unknown names.
+/// Mirrors `deposits-core::ruleset`'s reserves factories: `fee-cap-v3` reuses
+/// the `cltv-offset-v2` cascade.
+pub fn reserves_family(ruleset_name: &str) -> &'static str {
+    match ruleset_name {
+        "legacy" => "legacy",
+        "cltv-offset-literal" => "cltv-offset-literal",
+        "cltv-offset-v2" | "fee-cap-v3" => "cltv-offset-v2",
+        _ => "",
+    }
+}
+
 // ============================================================================
 // Ledger State
 // ============================================================================
@@ -809,6 +832,15 @@ impl LedgerState {
                     });
                 }
             }
+            LedgerOperation::QuorumUpgrade {
+                new_protocol_version,
+            } => {
+                // DEP-18 off-chain version bump: adopt the target op-rules
+                // ruleset. Conformance (below) has already enforced that it is
+                // a known ruleset in the same reserves-cascade family, so the
+                // on-chain reserves UTXO is unaffected.
+                next.active_ruleset_name = new_protocol_version.clone();
+            }
             LedgerOperation::DisputeEnter {
                 last_valid_sequence,
                 ..
@@ -1418,6 +1450,30 @@ impl LedgerState {
                             });
                         }
                     }
+                }
+            }
+        }
+
+        // QuorumUpgrade (DEP-18): an off-chain version bump may only move the
+        // ledger to a known ruleset in the SAME reserves-cascade family — that
+        // keeps the on-chain reserves UTXO valid without a rotation. A target in
+        // a different family, or an unknown one, MUST use QuorumBegin instead.
+        if let LedgerOperation::QuorumUpgrade {
+            new_protocol_version,
+        } = operation
+        {
+            if let Some(pre) = pre_state {
+                if !ruleset_known(new_protocol_version) {
+                    violations.push(ConformanceViolation::UnknownRuleset {
+                        name: new_protocol_version.clone(),
+                    });
+                } else if reserves_family(new_protocol_version)
+                    != reserves_family(&pre.active_ruleset_name)
+                {
+                    violations.push(ConformanceViolation::RulesetFamilyMismatch {
+                        from: pre.active_ruleset_name.clone(),
+                        to: new_protocol_version.clone(),
+                    });
                 }
             }
         }

@@ -568,6 +568,11 @@ impl TlvEncode for LedgerOperation {
                     .string_field(RESERVES_ID, ledger_id)
                     .u32_field(MEMBERSHIP_EXPIRES, *membership_expires);
             }
+            Self::QuorumUpgrade {
+                new_protocol_version,
+            } => {
+                builder = builder.string_field(PROTOCOL_VERSION, new_protocol_version);
+            }
             Self::FeeCollect {
                 deposit_id,
                 amount,
@@ -858,6 +863,9 @@ impl TlvDecode for LedgerOperation {
                 // Note: TLV field ID is RESERVES_ID (58) for wire compatibility
                 ledger_id: reader.read_string(RESERVES_ID)?,
                 membership_expires: reader.read_u32(MEMBERSHIP_EXPIRES)?,
+            }),
+            45 => Ok(Self::QuorumUpgrade {
+                new_protocol_version: reader.read_string(PROTOCOL_VERSION)?,
             }),
             50 => Ok(Self::FeeCollect {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
