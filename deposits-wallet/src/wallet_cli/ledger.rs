@@ -337,6 +337,7 @@ async fn ledger_show(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 fn format_operation(op: &LedgerOperation) -> (String, Option<deposits_core::types::DepositId>) {
     match op {
         LedgerOperation::LedgerOpen { .. } => ("LedgerOpen".to_string(), None),
+        LedgerOperation::QuorumUpgrade { .. } => ("QuorumUpgrade".to_string(), None),
         LedgerOperation::QuorumAddMember { .. } => ("QuorumAdd".to_string(), None),
         LedgerOperation::QuorumRemoveMember { .. } => ("QuorumRemove".to_string(), None),
         LedgerOperation::QuorumJoin { .. } => ("QuorumJoin".to_string(), None),

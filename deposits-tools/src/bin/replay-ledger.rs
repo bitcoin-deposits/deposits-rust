@@ -90,6 +90,9 @@ fn short_deposit_id(id: &[u8; 16]) -> String {
 /// Format a LedgerOperation into a one-line summary
 fn format_op(op: &LedgerOperation) -> String {
     match op {
+        LedgerOperation::QuorumUpgrade {
+            new_protocol_version,
+        } => format!("QuorumUpgrade  ruleset={}", new_protocol_version),
         LedgerOperation::LedgerOpen {
             reserves_amount,
             genesis_block,

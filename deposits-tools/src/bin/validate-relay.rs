@@ -432,6 +432,7 @@ fn op_name(op: &LedgerOperation) -> &'static str {
     match op {
         LedgerOperation::LedgerOpen { .. } => "LedgerOpen",
         LedgerOperation::QuorumBegin { .. } => "QuorumBegin",
+        LedgerOperation::QuorumUpgrade { .. } => "QuorumUpgrade",
         LedgerOperation::DepositOpen { .. } => "DepositOpen",
         LedgerOperation::DepositClose { .. } => "DepositClose",
         LedgerOperation::FeeChange { .. } => "FeeChange",

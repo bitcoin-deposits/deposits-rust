@@ -1788,6 +1788,11 @@ fn describe_op(
     match op {
         L::DepositOpen { .. } => row("DepositOpen", None, "account opened".to_string()),
         L::DepositClose { .. } => row("DepositClose", None, "account closed".to_string()),
+        L::QuorumUpgrade { new_protocol_version } => row(
+            "QuorumUpgrade",
+            None,
+            format!("consensus ruleset → {}", new_protocol_version),
+        ),
         L::FeeChange { .. } => {
             row("FeeChange", None, "fee schedule updated".to_string())
         }
