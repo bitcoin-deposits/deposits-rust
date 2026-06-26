@@ -22,6 +22,24 @@ All fee arithmetic uses integer division with floor rounding. Implementations MU
 
 The operator appends `FeeCollect` (disc 50) with the computed fee, which is deducted from the deposit's balance and added to the ledger's `fees_accumulated` counter (see below).
 
+### Assessment baseline and the one-period cap
+
+`blocks_elapsed` is measured from the deposit's `last_fee_assessment`. This is stamped to the deposit's **open block** at `DepositOpen`, and advanced to the collection block on every `FeeCollect`. The op does not carry a block height; the open block comes from the `DepositOpen` update envelope. If that envelope's block height is 0 — a deposit opened during bringup before the operator's wallet had a synced tip — implementations MUST fall back to the ledger's `genesis_block`, so the baseline is never left at 0.
+
+A single `FeeCollect` MUST assess **at most one** `frequency_blocks` period, no matter how many periods have actually elapsed:
+
+    assessed_blocks = min(blocks_elapsed, frequency_blocks)
+    total_fee       = fixed_portion(assessed_blocks) + proportional_portion(assessed_blocks)
+
+`FeeCollect` advances `last_fee_assessment` to the collection block, so any un-assessed remainder is **forgiven, not carried forward**. A deposit that sat dormant — opened-but-unfunded, or whose baseline was somehow never stamped and so appears open since genesis — can therefore never be billed years of backlog in a single sweep. (Without this cap, a deposit with a zero baseline would, on its first funded collection, be charged roughly `current_block / 52560` years of fees at once.)
+
+### Cosigner conformance rules for FeeCollect
+
+Both checks read the **pre-state** deposit (its `balance` and `last_fee_assessment` *before* this op), so every cosigner derives the same bound deterministically from replay. Cosigners MUST reject a `FeeCollect` that violates either:
+
+- **`FeeWindowNotElapsed`** — `block_height < last_fee_assessment + frequency_blocks`. Operators cannot accelerate assessment past the cadence the depositor accepted at open.
+- **`FeeExceedsAssessment`** — `amount` exceeds the one-period assessment due for the pre-state deposit at `block_height` (`amount > calculate_fees_due(pre_state, block_height)`, where `calculate_fees_due` applies the cap above). The operator MAY collect less — rounding, or a partial sweep when the balance can't cover a full period — but never more. This bounds operator over-billing at the consensus layer: cosigners independently recompute the cap and refuse to sign an over-large fee, rather than trusting the amount the operator put in the op.
+
 ## Per-Transfer Fees (TransferFeeSchedule)
 
 Each transfer out of a deposit incurs a fee:

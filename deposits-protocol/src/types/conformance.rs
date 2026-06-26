@@ -59,6 +59,17 @@ pub enum ConformanceViolation {
         next_allowed_block: u32,
     },
 
+    /// FeeCollect tried to take more than one assessment period's worth of
+    /// custody fee. The amount must not exceed `calculate_fees_due` for the
+    /// pre-state deposit at the op's block height — which is itself capped to a
+    /// single `frequency_blocks` period. This bounds the operator: it can never
+    /// sweep years of backlog (the block-0 accrual bug) or otherwise over-bill
+    /// a deposit beyond the schedule the depositor accepted at open.
+    FeeExceedsAssessment {
+        collected: u64,
+        max_due: u64,
+    },
+
     /// DepositOpen's `descriptor` exceeded the active quorum's
     /// `max_descriptor_bytes` policy. Without this, an outsized
     /// descriptor could bloat every cosigner's signing path.
@@ -129,6 +140,11 @@ impl std::fmt::Display for ConformanceViolation {
                 f,
                 "fee_collect at block {} fires before next allowed assessment at block {}",
                 current_block, next_allowed_block,
+            ),
+            Self::FeeExceedsAssessment { collected, max_due } => write!(
+                f,
+                "fee_collect amount {} exceeds the one-period assessment due ({})",
+                collected, max_due,
             ),
             Self::DescriptorTooLarge { actual, max } => write!(
                 f,

@@ -1376,8 +1376,8 @@ impl LedgerState {
         // signature plumbing is needed.
         if let LedgerOperation::FeeCollect {
             deposit_id,
+            amount,
             block_height,
-            ..
         } = operation
         {
             if let Some(pre) = pre_state {
@@ -1389,6 +1389,18 @@ impl LedgerState {
                         violations.push(ConformanceViolation::FeeWindowNotElapsed {
                             current_block: *block_height,
                             next_allowed_block: next_allowed,
+                        });
+                    }
+                    // Bound the amount: at most one assessment period is due
+                    // (calculate_fees_due caps to a single frequency_blocks
+                    // period). The operator may collect less, never more — this
+                    // is what stops a years-of-backlog sweep or any over-bill
+                    // beyond the depositor's accepted schedule.
+                    let max_due = deposit.calculate_fees_due(*block_height);
+                    if *amount > max_due {
+                        violations.push(ConformanceViolation::FeeExceedsAssessment {
+                            collected: *amount,
+                            max_due,
                         });
                     }
                 }

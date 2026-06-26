@@ -262,3 +262,67 @@ fn fee_collect_is_conforming() {
 
     assert!(violations.is_empty());
 }
+
+#[test]
+fn fee_collect_over_one_period_is_rejected() {
+    // The block-0 fee-explosion guard at the consensus layer: even though the
+    // deposit's last_fee_assessment is 0 (looks open since genesis), an operator
+    // cannot sweep years of backlog — the amount must not exceed one period's
+    // assessment. A patched cosigner rejects the over-large FeeCollect.
+    let state = make_state();
+    let state = open_deposit(&state, "pk(aabbcc)");
+    let deposit_id = compute_deposit_id("pk(aabbcc)");
+
+    let state = state
+        .apply(&LedgerOperation::InvoiceCredit {
+            payment_hash: [0xaa; 32],
+            deposit_id,
+            amount: 100_000,
+            invoice_id: "test".to_string(),
+            sequence_number: 1,
+            wallet_authorization: None,
+        })
+        .unwrap();
+
+    // Ask for ~18 years of backlog instead of the one capped period.
+    let one_period = state.deposits.get(&deposit_id).unwrap().calculate_fees_due(2016);
+    let greedy = one_period + 4_000_000;
+
+    let (_next, violations) = state
+        .apply_with_verifier(
+            &LedgerOperation::FeeCollect {
+                deposit_id,
+                amount: greedy,
+                block_height: 955_504,
+            },
+            &AllowAll,
+            0,
+        )
+        .unwrap();
+
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, ConformanceViolation::FeeExceedsAssessment { .. })),
+        "expected FeeExceedsAssessment, got {violations:?}"
+    );
+
+    // The exact one-period amount at the same block conforms.
+    let due_now = state.deposits.get(&deposit_id).unwrap().calculate_fees_due(955_504);
+    let (_n2, ok) = state
+        .apply_with_verifier(
+            &LedgerOperation::FeeCollect {
+                deposit_id,
+                amount: due_now,
+                block_height: 955_504,
+            },
+            &AllowAll,
+            0,
+        )
+        .unwrap();
+    assert!(
+        !ok.iter()
+            .any(|v| matches!(v, ConformanceViolation::FeeExceedsAssessment { .. })),
+        "one-period amount must conform, got {ok:?}"
+    );
+}
