@@ -17,6 +17,11 @@ impl Node {
     /// - amount_sats: amount for the invoice
     /// - description: optional invoice description
     /// - receive_witness: required if the deposit has receive_requires_sig set
+    #[tracing::instrument(
+        name = "make_invoice",
+        skip_all,
+        fields(ledger = %request.ledger_id, payment_hash = tracing::field::Empty)
+    )]
     pub(crate) async fn process_make_invoice_request(
         &self,
         request: &crate::nostr::LedgerRequest,
@@ -220,6 +225,12 @@ impl Node {
                         arr
                     }
                 };
+
+                // Tag the span with the payment_hash now that it's known — every
+                // subsequent log line for this invoice (and across processes
+                // that handle the same hash) carries it for correlation.
+                tracing::Span::current()
+                    .record("payment_hash", hex::encode(payment_hash).as_str());
 
                 // Track the pending invoice for crediting when paid
                 let pending = PendingInvoice {
@@ -481,6 +492,14 @@ impl Node {
         (true, Some(result.to_string()), None)
     }
 
+    #[tracing::instrument(
+        name = "pay_invoice",
+        skip_all,
+        fields(
+            ledger = %request.ledger_id,
+            payment_hash = request.params.get("payment_hash").and_then(|v| v.as_str()).unwrap_or(""),
+        )
+    )]
     pub(crate) async fn process_pay_invoice_request(
         &self,
         request: &crate::nostr::LedgerRequest,

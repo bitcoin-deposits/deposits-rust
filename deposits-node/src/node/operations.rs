@@ -135,6 +135,11 @@ impl Node {
     /// context, dispatches the `Commit` event, awaits the reply,
     /// and persists `<id>.jsonl` for crash safety.
     #[tracing::instrument(name = "commit_operation", skip(self, operation), fields(ledger = &ledger_id[..16.min(ledger_id.len())]))]
+    #[tracing::instrument(
+        name = "commit_operation",
+        skip_all,
+        fields(ledger = %ledger_id, op = operation.discriminant())
+    )]
     pub async fn commit_operation(
         &self,
         ledger_id: &str,

@@ -57,7 +57,15 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         // stdout output (e.g. `transport-pubkey` printing a single hex
         // line for bash capture) aren't polluted by structured log
         // output. fmt::layer's default writer is stdout, which conflicts.
-        let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+        // `with_span_events(CLOSE)` makes every #[instrument] span emit a line
+        // when it closes, carrying `time.busy`/`time.idle` — that's the span
+        // metric. Combined with the span-scope field prefix (e.g. the
+        // payment_hash on the make_invoice/pay_invoice spans), every nested log
+        // line is tagged with the correlation id, so a single payment can be
+        // followed across handlers and grepped across processes.
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE);
 
         match std::env::var("TRACING_FLAME_PATH") {
             Ok(path) if !path.is_empty() => {

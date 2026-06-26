@@ -117,6 +117,10 @@ fn describe_metrics() {
         "Time to complete a co-sign request"
     );
     describe_histogram!(
+        "cosign_phase_seconds",
+        "Co-sign request time split by phase (queue = semaphore wait, rtt = round-trip)"
+    );
+    describe_histogram!(
         "ledger_operation_duration_seconds",
         "Time to complete a ledger operation"
     );
@@ -468,6 +472,14 @@ pub fn record_request_processing(action: &str, ledger_id: &str, success: bool, d
 /// Record co-sign request duration.
 pub fn record_cosign_duration(duration: Duration) {
     histogram!("cosign_request_duration_seconds").record(duration.as_secs_f64());
+}
+
+/// Record a phase of the co-sign request, split so a slow cosign can be
+/// attributed: `queue` = time blocked on the serializing semaphore (back-
+/// pressure under load), `rtt` = network round-trip to collect cosignatures.
+pub fn record_cosign_phase(phase: &str, duration: Duration) {
+    histogram!("cosign_phase_seconds", "phase" => phase.to_string())
+        .record(duration.as_secs_f64());
 }
 
 /// Record ledger operation duration.

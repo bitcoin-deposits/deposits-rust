@@ -306,6 +306,15 @@ impl Node {
     /// # Returns
     /// A CoSignResult containing the co-signer's signature and the member's ledger hash
     #[tracing::instrument(name = "request_cosign", skip(self, update), fields(ledger = &ledger_id[..16.min(ledger_id.len())], seq = update.sequence_number))]
+    #[tracing::instrument(
+        name = "request_cosign",
+        skip_all,
+        fields(
+            ledger = %ledger_id,
+            seq = update.sequence_number,
+            content_hash = %hex::encode(update.content_hash),
+        )
+    )]
     pub async fn request_cosign(
         &self,
         ledger_id: &str,
@@ -315,12 +324,20 @@ impl Node {
 
         // Acquire semaphore to serialize cosign requests. Multiple concurrent
         // mini loops compete for shared channels and cause distributed deadlocks
-        // when all operators are in batch-await simultaneously.
+        // when all operators are in batch-await simultaneously. Time spent
+        // blocked here is back-pressure — split it out so a slow cosign can be
+        // attributed to queueing vs. the actual round-trip.
+        let queue_start = std::time::Instant::now();
         let _permit = self
             .cosign_semaphore
             .acquire()
             .await
             .map_err(|_| Error::Protocol("Cosign semaphore closed".to_string()))?;
+        let queued = queue_start.elapsed();
+        metrics::record_cosign_phase("queue", queued);
+        if queued.as_millis() > 50 {
+            tracing::debug!(queued_ms = queued.as_millis() as u64, "cosign permit acquired after queue wait");
+        }
 
         // Compute cosign data
         let cosign_data = update.cosign_data();
@@ -479,6 +496,7 @@ impl Node {
 
         let results = collector.take_results();
         let cosign_rtt = cosign_send_time.elapsed();
+        metrics::record_cosign_phase("rtt", cosign_rtt);
 
         if results.len() < threshold {
             return Err(Error::Protocol(format!(

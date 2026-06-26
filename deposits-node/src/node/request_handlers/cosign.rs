@@ -15,6 +15,14 @@ impl Node {
     ///
     /// The signature covers: cosign_data || our_ledger_content_hash
     /// This binds the co-signature to the current state of our own ledger.
+    // Cosigner side of the round-trip. Tagged with the same `content_hash` the
+    // requester's `request_cosign` span carries, so a slow cosign can be traced
+    // across the two processes by grepping that hash.
+    #[tracing::instrument(
+        name = "cosign_sign",
+        skip_all,
+        fields(content_hash = request.params.get("content_hash_hex").and_then(|v| v.as_str()).unwrap_or(""))
+    )]
     pub(crate) async fn process_cosign_request(
         &self,
         request: &crate::nostr::LedgerRequest,
