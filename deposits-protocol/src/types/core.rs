@@ -519,6 +519,13 @@ impl Deposit {
     }
 
     /// Calculate fees due since last assessment.
+    ///
+    /// At most ONE assessment period is ever charged in a single collection. A
+    /// deposit that sat dormant — opened-but-unfunded, or whose
+    /// `last_fee_assessment` was never stamped (left at 0) and so appears to
+    /// have been open since genesis — must not be billed years of backlog in one
+    /// sweep. `FeeCollect` advances `last_fee_assessment` to the current block,
+    /// so the un-assessed remainder is forgiven rather than carried forward.
     pub fn calculate_fees_due(&self, current_block: u32) -> u64 {
         if current_block <= self.last_fee_assessment {
             return 0;
@@ -527,7 +534,9 @@ impl Deposit {
         if blocks_elapsed < self.fees.frequency_blocks {
             return 0;
         }
-        self.fees.calculate_fee(self.balance, blocks_elapsed)
+        // Cap to a single period regardless of how long it has actually been.
+        let assessed_blocks = blocks_elapsed.min(self.fees.frequency_blocks);
+        self.fees.calculate_fee(self.balance, assessed_blocks)
     }
 
     /// Collect fees and update last assessment block.
@@ -1270,5 +1279,51 @@ mod descriptor_witness_serde_tests {
         // Mixed/empty stack still works.
         let empty: DescriptorWitness = serde_json::from_str(r#"{"stack":[]}"#).unwrap();
         assert!(empty.stack.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fee_assessment_tests {
+    use super::{Deposit, FeeStructure};
+
+    /// A deposit whose `last_fee_assessment` was never stamped (left at 0) must
+    /// not be billed years of backlog on its first collection — at most one
+    /// period. This is the block-0 fee-explosion regression (a 5k-sat deposit
+    /// was once swept ~4k because it appeared open since genesis).
+    #[test]
+    fn fees_capped_to_one_period_even_from_block_zero() {
+        let fees = FeeStructure::default(); // 120k msat/yr fixed + 200 bps, 2016-blk period
+        let mut d = Deposit::new("pk(test)".to_string(), Some(fees.clone()));
+        d.balance = 5_000_000; // 5k sat
+        d.last_fee_assessment = 0; // never stamped — looks open since genesis
+
+        let current = 955_504; // ~18 years of blocks since 0
+        let due = d.calculate_fees_due(current);
+
+        // Exactly one period, NOT the full ~18-year accrual.
+        let one_period = fees.calculate_fee(d.balance, fees.frequency_blocks);
+        assert_eq!(due, one_period);
+
+        // And dramatically less than the uncapped amount would have been.
+        let uncapped = fees.calculate_fee(d.balance, current);
+        assert!(uncapped > 3_000_000, "sanity: uncapped really is huge");
+        assert!(due < 50_000, "capped fee is one small period, got {due}");
+    }
+
+    /// Normal cadence is unchanged: nothing due before a full period, exactly
+    /// one period due at/after the boundary.
+    #[test]
+    fn fees_normal_cadence_unchanged() {
+        let fees = FeeStructure::default();
+        let mut d = Deposit::new("pk(test)".to_string(), Some(fees.clone()));
+        d.balance = 1_000_000;
+        d.last_fee_assessment = 900_000;
+
+        // Just shy of one period → nothing due.
+        assert_eq!(d.calculate_fees_due(900_000 + fees.frequency_blocks - 1), 0);
+        // Exactly one period → one period's fee.
+        let at_boundary = d.calculate_fees_due(900_000 + fees.frequency_blocks);
+        assert_eq!(at_boundary, fees.calculate_fee(d.balance, fees.frequency_blocks));
+        assert!(at_boundary > 0);
     }
 }
