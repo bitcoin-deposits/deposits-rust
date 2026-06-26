@@ -135,7 +135,8 @@ impl Node {
             .and_then(|v| v.as_str())
             .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()));
 
-        let amount_msat = amount_sats * 1000;
+        // NOTE: do not reconstruct amount_msat from amount_sats here — that would
+        // re-floor sub-sat requests. amount_msat already holds the exact value.
 
         // Check collateral obligation limits before creating the invoice
         if let Some(err) = self.check_collateral_obligation_limit(&request.ledger_id, amount_msat) {
