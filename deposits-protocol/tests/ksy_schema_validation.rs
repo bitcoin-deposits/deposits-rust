@@ -361,12 +361,13 @@ fn schema_invoice_lock() {
 
 #[test]
 fn schema_invoice_fail() {
+    // InvoiceFail carries no amount — the locked amount is recovered from the
+    // open InvoiceLock by payment_id; the op only references the lock.
     validate_schema(
         32,
         "InvoiceFail",
         &[
             (DEPOSIT_ID, deposit_id()),
-            (AMOUNT, u64_bytes(5_000_000)),
             (PAYMENT_ID, hash32()),
             (SEQUENCE_NUMBER, u64_bytes(44)),
         ],
