@@ -503,6 +503,28 @@ impl Bot {
         Ok((bolt11, payment_hash, amount_msats))
     }
 
+    /// Ask our operator for the authoritative balance of our own deposit and
+    /// return the *available* (balance − locked) in msats.
+    ///
+    /// The streamed local estimate only ever drifts upward: on every relay
+    /// resubscribe the operator re-sends our deposit's historical InvoiceCredit
+    /// updates and we re-add each (and the relay even republishes duplicates),
+    /// while we never observe the matching debits. Left unchecked the bot thinks
+    /// it's rich, over-sizes every forward, and the operator rejects it forever.
+    /// Snapping to this ground truth before sizing a payment is what keeps it
+    /// from getting stuck.
+    async fn query_balance(&self) -> Result<i64, String> {
+        let params = serde_json::json!({ "deposit_id": hex::encode(self.deposit_id) });
+        let resp = self.send_request(&self.ledger_id, "balance_query", params).await?;
+        if !resp.success {
+            return Err(resp.error.unwrap_or_else(|| "balance_query rejected".into()));
+        }
+        let r = resp.result.ok_or("balance_query: no result")?;
+        let bal = r.get("balance_msats").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        let locked = r.get("locked_msats").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        Ok((bal - locked).max(0))
+    }
+
     /// Pay `peer` on a *different* ledger over Lightning: mint its invoice on
     /// its ledger, then `pay_invoice` from our deposit on our ledger. Funds
     /// leave us and land in the peer's deposit as an InvoiceCredit.
@@ -831,6 +853,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if bot.timeout_height.load(Ordering::Relaxed) == 0 {
             continue; // no usable timeout height yet
         }
+
+        // Snap to the operator's authoritative balance before sizing a payment.
+        // The streamed local estimate drifts upward (replayed/duplicate credit
+        // updates with no matching debits), which otherwise makes us over-send
+        // and stick in a reject loop. Ground-truth wins.
+        match bot.query_balance().await {
+            Ok(avail) => bot.balance.store(avail, Ordering::Relaxed),
+            Err(e) => eprintln!("  (balance check failed: {} — using local estimate)", e),
+        }
+
         let available = bot.balance.load(Ordering::Relaxed);
         let spend = available - cfg.reserve_msats;
         if available < cfg.floor_msats || spend < (cfg.min_payment_sats as i64 * 1000) {
