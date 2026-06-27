@@ -1586,7 +1586,15 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 Ok(())
             } else {
                 let error = response.error.as_deref().unwrap_or("Unknown error");
-                Err(format!("Payment failed: {}", error).into())
+                // "still reconciling — do not retry" is a pending success (the
+                // recipient is credited; the operator settles the source-side
+                // fulfill async), not a failure. Label it accordingly.
+                if error.contains("reconcil") || error.contains("do not retry") {
+                    println!("  payment sent — settling on the operator; run `deposits-wallet sync` shortly to confirm.");
+                    Ok(())
+                } else {
+                    Err(format!("Payment failed: {}", error).into())
+                }
             }
         }
         Err(e) => Err(format!(

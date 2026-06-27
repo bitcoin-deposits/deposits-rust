@@ -2825,7 +2825,7 @@ window.doAutoSpread = async function() {
         transferred++;
         log(`₿${amount.toLocaleString()} → ${dest.alias}`, 'success');
       } else {
-        log(`Payment failed: ${payResp.error}`, 'error');
+        logPayError(payResp.error);
       }
     } catch (e) {
       log(`Transfer error: ${e.message}`, 'error');
@@ -2923,7 +2923,7 @@ window.doRebalance = async function() {
         transferred++;
         log(`₿${amount.toLocaleString()}: ${source.alias} → ${dest.alias}`, 'success');
       } else {
-        log(`Payment failed: ${payResp.error}`, 'error');
+        logPayError(payResp.error);
       }
     } catch (e) {
       log(`Transfer error: ${e.message}`, 'error');
@@ -3515,7 +3515,7 @@ window.doWalletPayInvoice = async function() {
       document.getElementById('wallet-send-bolt11').value = '';
       syncAll();
     } else {
-      log(`Payment failed: ${response.error}`, 'error');
+      logPayError(response.error);
     }
   } catch (e) { log(`Payment error: ${e.message}`, 'error'); }
 };
@@ -4328,7 +4328,7 @@ window.doPayInvoiceSubmit = async function() {
       document.getElementById('pay-invoice-input').style.display = 'none';
       syncAll();
     } else {
-      log(`Payment failed: ${response.error}`, 'error');
+      logPayError(response.error);
     }
   } catch (e) {
     log(`Payment error: ${e.message}`, 'error');
@@ -5242,7 +5242,7 @@ window.doPayInvoice = async function() {
       log(`Payment sent!`, 'success');
       syncAll();
     } else {
-      log(`Payment failed: ${response.error}`, 'error');
+      logPayError(response.error);
     }
   } catch (e) {
     log(`Payment error: ${e.message}`, 'error');
@@ -5275,6 +5275,19 @@ function log(msg, cls = '') {
   if (cls === 'error') {
     document.getElementById('error-modal-msg').textContent = msg;
     document.getElementById('error-modal').classList.add('visible');
+  }
+}
+
+// A pay_invoice "still reconciling — do not retry" response is a pending
+// success: the recipient is already credited and the operator settles the
+// source-side fulfill asynchronously. Surface it as info (no scary error
+// modal), not a failure.
+function logPayError(err) {
+  const s = String(err || '');
+  if (/reconcil|do not retry/i.test(s)) {
+    log('Payment sent — settling on the operator; it will confirm on the next sync.', 'info');
+  } else {
+    log(`Payment failed: ${s}`, 'error');
   }
 }
 
