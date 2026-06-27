@@ -3082,6 +3082,13 @@ window.showWalletSend = function() {
   document.getElementById('wallet-send-address-input').style.display = 'none';
   document.getElementById('wallet-send-transfer-input').style.display = 'none';
 };
+// Collapse the Send panel (and its sub-inputs) after a payment goes through.
+window.closeWalletSend = function() {
+  document.getElementById('wallet-send').style.display = 'none';
+  document.getElementById('wallet-send-invoice-input').style.display = 'none';
+  document.getElementById('wallet-send-address-input').style.display = 'none';
+  document.getElementById('wallet-send-transfer-input').style.display = 'none';
+};
 
 let scanStream = null;
 let scanTimer = null;
@@ -3281,6 +3288,7 @@ window.doWalletTransfer = async function() {
 
     if (completeResponse.success) {
       log(`Transferred ₿${amount} to ${toAlias}!`, 'success');
+      closeWalletSend();
       syncAll();
     } else {
       log(`Transfer complete failed: ${completeResponse.error}`, 'error');
@@ -3476,6 +3484,7 @@ window.doWalletPayInvoice = async function() {
         try {
           await bridgePayInvoice(deposit, bolt11, bridges[0]);
           document.getElementById('wallet-send-bolt11').value = '';
+          closeWalletSend();
         } catch (be) {
           log(`Bridge pay failed: ${be.message}`, 'error');
         }
@@ -3513,6 +3522,7 @@ window.doWalletPayInvoice = async function() {
     if (response.success) {
       log('Payment sent!', 'success');
       document.getElementById('wallet-send-bolt11').value = '';
+      closeWalletSend();
       syncAll();
     } else {
       logPayError(response.error);
@@ -3564,6 +3574,7 @@ window.doWalletWithdraw = async function() {
 
     if (response.success) {
       log(`Withdrawal accepted! ₿${amount} to ${address}`, 'success');
+      closeWalletSend();
       syncAll();
     } else {
       log(`Withdrawal failed: ${response.error}`, 'error');
@@ -4074,6 +4085,7 @@ window.doWithdraw = async function() {
 
     if (response.success) {
       log(`Withdrawal accepted! ₿${amount} to ${address}`, 'success');
+      closeWalletSend();
       syncAll();
     } else {
       log(`Withdrawal failed: ${response.error}`, 'error');
