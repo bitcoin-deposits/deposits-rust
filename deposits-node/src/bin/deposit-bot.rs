@@ -454,15 +454,45 @@ impl Bot {
             return Err(format!("lock rejected: {}", lock.error.unwrap_or_default()));
         }
 
+        // The TransferLock is now committed on-ledger. Completing it needs a
+        // cosign round, which can time out under load. We hold the preimage and
+        // transfer_id, and completing is idempotent, so RETRY rather than
+        // abandon — dropping the preimage here is what stranded funds in
+        // un-completable locks during the cosign-timeout era.
         let complete_params = serde_json::json!({
             "transfer_id": hex::encode(transfer_id),
             "preimage": hex::encode(preimage),
         });
-        let complete = self.send_request(&self.ledger_id, "transfer_complete", complete_params).await?;
-        if !complete.success {
-            return Err(format!("complete rejected: {}", complete.error.unwrap_or_default()));
+        let mut last_err = String::new();
+        for attempt in 1..=4u32 {
+            match self
+                .send_request(&self.ledger_id, "transfer_complete", complete_params.clone())
+                .await
+            {
+                Ok(resp) if resp.success => return Ok(()),
+                Ok(resp) => last_err = resp.error.unwrap_or_default(),
+                Err(e) => last_err = e,
+            }
+            // A prior attempt may have landed but its response was lost; the
+            // operator then reports the transfer as already resolved/unknown.
+            // Treat that as success — the lock is no longer open.
+            let le = last_err.to_lowercase();
+            if le.contains("already")
+                || le.contains("not found")
+                || le.contains("unknown transfer")
+                || le.contains("no open transfer")
+            {
+                return Ok(());
+            }
+            if attempt < 4 {
+                eprintln!(
+                    "  · transfer_complete attempt {}/4 failed ({}) — retrying with same preimage",
+                    attempt, last_err
+                );
+                tokio::time::sleep(Duration::from_millis(2000)).await;
+            }
         }
-        Ok(())
+        Err(format!("complete rejected after 4 attempts: {}", last_err))
     }
 
     /// Ask `ledger_id`'s operator to mint a BOLT11 for `deposit_id` (the same
@@ -537,6 +567,12 @@ impl Bot {
         let r = resp.result.ok_or("balance_query: no result")?;
         let bal = r.get("balance_msats").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
         let locked = r.get("locked_msats").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
+        eprintln!(
+            "  · balance_query: balance={} msat locked={} msat available={} msat",
+            bal,
+            locked,
+            (bal - locked).max(0)
+        );
         Ok((bal - locked).max(0))
     }
 
@@ -867,6 +903,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
 
         if bot.timeout_height.load(Ordering::Relaxed) == 0 {
+            eprintln!("  · tick skip: no timeout_height yet");
             continue; // no usable timeout height yet
         }
 
@@ -894,6 +931,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // happily leave 5% on the table to always complete.
         let spend = (available - cfg.reserve_msats) * 95 / 100;
         if available < cfg.floor_msats || spend < (cfg.min_payment_msats as i64) {
+            eprintln!(
+                "  · tick skip below-floor: available={} msat spend={} msat (floor={} min={})",
+                available, spend, cfg.floor_msats, cfg.min_payment_msats
+            );
             continue; // below floor — idle until we receive
         }
 
@@ -903,8 +944,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             bot.cfg_fee_rate_bps,
             cfg.min_payment_msats,
         ) else {
+            eprintln!("  · tick skip: size_payment(spend={}) returned None", spend);
             continue;
         };
+        eprintln!(
+            "  · tick: available={} msat → amount={} fee={} ({} peers)",
+            available, amount_msats, fee_msats, bot.peers.len()
+        );
         // Pick a peer and a rail: same ledger → transfer, else → Lightning.
         let peer = bot.peers[rng.gen_range(0..bot.peers.len())].clone();
         let same_ledger = peer.ledger_id == bot.ledger_id;
@@ -964,7 +1010,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // yet (a double-spend attempt). The next-tick balance_query
                 // picks up the real outcome.
                 if e.contains("reconciling") || e.contains("do not retry") {
-                    eprintln!("  ⧖ {} in flight (reconciling) — backing off", rail);
+                    eprintln!(
+                        "  ⧖ {} {} msat to {}… in flight (reconciling, funds moved) — backing off",
+                        rail,
+                        amount_msats,
+                        &hex::encode(peer.deposit_id)[..8],
+                    );
                     tokio::time::sleep(Duration::from_secs(8)).await;
                     continue;
                 }
