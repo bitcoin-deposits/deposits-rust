@@ -1019,32 +1019,36 @@ impl Node {
                     None => false,
                 };
                 if !resolved {
-                    match cli.get_payment_preimage(&payment_hex) {
-                        Ok(Some(p)) => {
-                            preimage = p;
-                            tracing::info!(
-                                "pay_invoice {}: outbound had no preimage; \
-                                 fell back to get-payment-details (cross-node self-pay)",
-                                &payment_hex[..16]
-                            );
-                        }
-                        Ok(None) => {
-                            tracing::warn!(
-                                "pay_invoice {}: LDK marked succeeded but no preimage on \
-                                 list-payments or get-payment-details yet — leaving the \
-                                 InvoiceLock open for auto_complete_outbound to reconcile",
-                                &payment_hex[..16]
-                            );
-                            return pending_reconcile();
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "pay_invoice {}: LDK preimage lookup failed: {} — leaving the \
-                                 InvoiceLock open for auto_complete_outbound to reconcile",
-                                &payment_hex[..16],
-                                e
-                            );
-                            return pending_reconcile();
+                    // Cross-node self-pay: the preimage lives on the receive-side
+                    // BOLT11 record (`get-payment-details`), which lands a beat
+                    // after the outbound flips to Succeeded. Poll for it within the
+                    // remaining 60s budget rather than bailing to "reconciling" on
+                    // the first miss — pay_invoice should block until it can return
+                    // the final outcome, not punt a just-settled payment to
+                    // auto_complete_outbound.
+                    loop {
+                        match cli.get_payment_preimage(&payment_hex) {
+                            Ok(Some(p)) => {
+                                preimage = p;
+                                tracing::info!(
+                                    "pay_invoice {}: outbound had no preimage; \
+                                     fell back to get-payment-details (cross-node self-pay)",
+                                    &payment_hex[..16]
+                                );
+                                break;
+                            }
+                            Ok(None) | Err(_) => {
+                                if tokio::time::Instant::now() >= resolve_deadline {
+                                    tracing::warn!(
+                                        "pay_invoice {}: succeeded but no preimage on \
+                                         get-payment-details within budget — leaving the \
+                                         InvoiceLock open for auto_complete_outbound",
+                                        &payment_hex[..16]
+                                    );
+                                    return pending_reconcile();
+                                }
+                                tokio::time::sleep(poll_interval).await;
+                            }
                         }
                     }
                 }
