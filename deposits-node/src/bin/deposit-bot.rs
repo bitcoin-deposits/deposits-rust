@@ -576,6 +576,20 @@ impl Bot {
         Ok((bal - locked).max(0))
     }
 
+    /// Ask our operator for the real routing-fee estimate for paying `invoice`
+    /// (quote_invoice → estimate_routing_fee), returning total_fee_msats.
+    async fn quote_fee(&self, invoice: &str) -> Result<u64, String> {
+        let params = serde_json::json!({ "invoice": invoice });
+        let resp = self.send_request(&self.ledger_id, "quote_invoice", params).await?;
+        if !resp.success {
+            return Err(resp.error.unwrap_or_else(|| "quote_invoice rejected".into()));
+        }
+        let r = resp.result.ok_or("quote_invoice: no result")?;
+        r.get("total_fee_msats")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "quote_invoice: no total_fee_msats".to_string())
+    }
+
     /// Pay `peer` on a *different* ledger over Lightning: mint its invoice on
     /// its ledger, then `pay_invoice` from our deposit on our ledger. Funds
     /// leave us and land in the peer's deposit as an InvoiceCredit.
@@ -584,11 +598,18 @@ impl Bot {
             .make_invoice_for(&peer.ledger_id, peer.deposit_id, amount_msats, "swarm")
             .await?;
 
-        // Fee budget on top of the invoice amount: the LN routing reserve plus
-        // the operator's margin. The operator caps routing at this; we sign it
-        // into the preimage so it can't be inflated. 1% (min 1 sat) is plenty
-        // for the small amounts the swarm moves.
-        let fee_msats = (amount_msats / 100).max(1000);
+        // Fee budget on top of the invoice amount. Quote the operator's real
+        // routing estimate (quote_invoice → estimate_routing_fee) instead of a
+        // hardcoded 1-sat floor — the floor is what stranded sub-sat bots below
+        // the LN economic minimum. Fall back to a small heuristic if the quote
+        // is unavailable. The operator caps routing at this signed budget.
+        let fee_msats = match self.quote_fee(&invoice).await {
+            Ok(f) => f.max(amount_msats / 100), // never below ~1% of amount
+            Err(e) => {
+                eprintln!("  · quote_invoice failed ({}); using heuristic fee", e);
+                (amount_msats / 100).max(50)
+            }
+        };
 
         // Sign the dep-17 InvoiceLock preimage so the operator can lock our
         // funds against the descriptor (mirrors the wallet's pay_invoice).
@@ -967,20 +988,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (amount_msats, fee_msats) = if same_ledger {
             (amount_msats, fee_msats)
         } else {
+            // Cross-ledger LN. The real routing fee is quoted (quote_invoice →
+            // estimate_routing_fee) inside lightning_pay; here we only reserve a
+            // small nominal buffer for the affordability pre-check — no 1-sat
+            // floor, which previously stranded sub-sat balances below the LN
+            // minimum. Cap penny-scale so we don't push a whole balance through
+            // one mainnet hop.
             const LN_CAP_MSATS: u64 = 1_000_000; // ≤ 1000 sat per LN hop
-            let s = spend.max(0) as u64;
-            // 1%-dominated regime: amount + amount/100 <= s.
-            let mut ln_amount = (s * 100 / 101).min(LN_CAP_MSATS).min(amount_msats);
-            let mut ln_fee = (ln_amount / 100).max(1000);
-            if (ln_amount + ln_fee) as i64 > spend {
-                // small-balance regime where the flat 1-sat fee floor binds.
-                ln_amount = s.saturating_sub(1000).min(LN_CAP_MSATS);
-                ln_fee = 1000;
+            let fee_buffer = (amount_msats / 100).max(10); // ~1%, min 10 msat
+            let mut ln_amount = amount_msats.min(LN_CAP_MSATS);
+            if (ln_amount + fee_buffer) as i64 > spend {
+                ln_amount = (spend.max(0) as u64).saturating_sub(fee_buffer);
             }
-            if ln_amount == 0 || (ln_amount + ln_fee) as i64 > spend {
-                continue; // can't cover even a 1-sat fee — wait for more
+            if ln_amount < cfg.min_payment_msats || (ln_amount + fee_buffer) as i64 > spend {
+                eprintln!(
+                    "  · tick skip LN: amount={} + fee_buffer={} won't fit spend={}",
+                    ln_amount, fee_buffer, spend
+                );
+                continue;
             }
-            (ln_amount, ln_fee)
+            (ln_amount, fee_buffer)
         };
         let total_debit = amount_msats as i64 + fee_msats as i64;
 
