@@ -1906,7 +1906,14 @@ impl Node {
                 let mut total_drained = 0usize;
                 let mut cosign_count = 0usize;
 
-                while let Some(request) = self.nostr.try_recv_request() {
+                // Priority lane first: a waiting quorum cosign request is always
+                // pulled ahead of wallet requests, so a wallet-request flood
+                // can't bury it past its staleness deadline (head-of-line fix).
+                while let Some(request) = self
+                    .nostr
+                    .try_recv_priority_request()
+                    .or_else(|| self.nostr.try_recv_request())
+                {
                     let already_processed = {
                         let processed = self.processed_requests.lock().unwrap();
                         if processed.contains(&request.event_id) {

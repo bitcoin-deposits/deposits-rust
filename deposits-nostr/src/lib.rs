@@ -357,6 +357,14 @@ pub struct NostrTransport {
     /// Sender for ledger requests
     request_tx: mpsc::UnboundedSender<LedgerRequest>,
 
+    /// Priority lane for time-critical quorum cosign requests (cosign_update /
+    /// cosign_offer / cosign_invoice). Drained ahead of `request_rx` so a flood
+    /// of wallet requests can't bury a cosign request past its ~2s staleness
+    /// deadline (which would drop us to a sub-threshold cosignature count).
+    priority_request_rx: std::sync::Mutex<mpsc::UnboundedReceiver<LedgerRequest>>,
+    /// Sender for priority (cosign) requests.
+    priority_request_tx: mpsc::UnboundedSender<LedgerRequest>,
+
     /// Pending inbound ledger responses.
     /// Wrapped in Mutex so try_recv can take &self.
     response_rx: std::sync::Mutex<mpsc::UnboundedReceiver<LedgerResponse>>,
@@ -1565,6 +1573,7 @@ impl NostrTransport {
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         let (ledger_tx, ledger_rx) = mpsc::unbounded_channel();
         let (request_tx, request_rx) = mpsc::unbounded_channel();
+        let (priority_request_tx, priority_request_rx) = mpsc::unbounded_channel();
         let (response_tx, response_rx) = mpsc::unbounded_channel();
         let (dispute_tx, dispute_rx) = mpsc::unbounded_channel();
         let (fraud_proof_tx, fraud_proof_rx) = mpsc::unbounded_channel();
@@ -1618,6 +1627,8 @@ impl NostrTransport {
             ledger_tx,
             request_rx: std::sync::Mutex::new(request_rx),
             request_tx,
+            priority_request_rx: std::sync::Mutex::new(priority_request_rx),
+            priority_request_tx,
             response_rx: std::sync::Mutex::new(response_rx),
             response_tx,
             dispute_rx: std::sync::Mutex::new(dispute_rx),
@@ -4856,8 +4867,8 @@ impl NostrTransport {
                         // Return directly — never enters request_rx
                         return Some(request);
                     }
-                    // Non-matching request: route to channel as normal
-                    let _ = self.request_tx.send(request);
+                    // Non-matching request: route to the priority or normal lane
+                    self.route_request(request);
                 }
                 return None;
             }
@@ -4971,7 +4982,7 @@ impl NostrTransport {
             } else if kind_num == KIND_LEDGER_REQUEST {
                 match self.process_ledger_request(&event) {
                     Ok(request) => {
-                        let _ = self.request_tx.send(request);
+                        self.route_request(request);
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -5426,9 +5437,32 @@ impl NostrTransport {
         self.request_rx.lock().unwrap().try_recv().ok()
     }
 
+    /// Receive the next *priority* (quorum cosign) request (non-blocking).
+    /// The main loop drains this ahead of `try_recv_request` so cosign requests
+    /// don't queue behind a wallet-request flood and age past their deadline.
+    pub fn try_recv_priority_request(&self) -> Option<LedgerRequest> {
+        self.priority_request_rx.lock().unwrap().try_recv().ok()
+    }
+
+    /// Whether an action belongs in the priority (quorum cosign) lane. Cosign
+    /// requests carry a ~2s staleness deadline (`inbound.rs`); burying them
+    /// behind wallet traffic drops us below the cosignature threshold.
+    pub fn is_priority_request(action: &str) -> bool {
+        matches!(action, "cosign_update" | "cosign_offer" | "cosign_invoice")
+    }
+
+    /// Route a parsed request to the priority or normal lane by action.
+    fn route_request(&self, request: LedgerRequest) {
+        if Self::is_priority_request(&request.action) {
+            let _ = self.priority_request_tx.send(request);
+        } else {
+            let _ = self.request_tx.send(request);
+        }
+    }
+
     /// Queue a request for processing (used by polling fallback)
     pub fn queue_request(&self, request: LedgerRequest) {
-        let _ = self.request_tx.send(request);
+        self.route_request(request);
     }
 
     /// Receive the next ledger response (non-blocking)
