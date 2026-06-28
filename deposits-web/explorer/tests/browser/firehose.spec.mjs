@@ -90,6 +90,20 @@ test.describe('firehose', () => {
     expect(html).toContain('class="op credit"'); // op badge is the link, still styled
   });
 
+  test('lock holds, fulfill settles — op badge classes reflect balance effect', async ({ page }) => {
+    const cls = async (disc) => page.evaluate((d) => {
+      const ev = { id: 'c' + d, created_at: 1_700_000_000, tags: [['d', 'aa'.repeat(8)], ['t', String(d)]], content: '' };
+      return window.__rowHtml(window.__decodeEvent(ev));
+    }, disc);
+    const credit = await cls(30);   // InvoiceCredit — inflow
+    const lock = await cls(31);     // InvoiceLock — pending hold
+    const fulfill = await cls(33);  // InvoiceFulfill — settled outflow
+    expect(credit).toContain('class="op credit"');
+    expect(lock).toContain('class="op lock"');
+    expect(fulfill).toContain('class="op settle"');   // NOT credit
+    expect(fulfill).not.toContain('class="op credit"');
+  });
+
   test('only recent entries flash; the load-time backlog stays quiet', async ({ page }) => {
     const nowSec = Math.floor(Date.now() / 1000);
     await page.evaluate((ts) => {

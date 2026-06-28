@@ -55,6 +55,8 @@
       font:600 0.72rem var(--mono); white-space:nowrap; }
     .op.credit{background:rgba(76,174,90,0.15);color:var(--green);}
     .op.lock{background:rgba(240,173,78,0.15);color:var(--yellow);}
+    .op.settle{background:rgba(70,199,199,0.14);color:#46c7c7;}
+    .op.fail{background:var(--border);color:var(--fg-muted);}
     .op.deposit{background:rgba(91,141,239,0.15);color:var(--blue);}
     .op.quorum{background:rgba(181,140,240,0.15);color:var(--purple);}
     .op.dispute{background:rgba(217,83,79,0.18);color:var(--red);}
@@ -129,9 +131,13 @@ function fmtTime(t){ const d=t?new Date(t*1000):new Date(); return d.toTimeStrin
 
 function opClass(name){
   if(!name) return 'unknown';
-  if(name.endsWith('Credit')||name==='InvoiceFulfill'||name==='OnchainFulfill') return 'credit';
-  if(name.endsWith('Lock')) return 'lock';
-  if(name.endsWith('Fail')) return 'lock';
+  // Classify by the op's effect on a deposit's balance. A Lock only *holds*
+  // funds (balance unchanged, locked++); the matching Fulfill is what settles
+  // the outflow. Coloring Fulfill as a credit (inflow) was backwards.
+  if(name.endsWith('Credit')) return 'credit';        // inflow
+  if(name.endsWith('Lock')) return 'lock';            // pending hold
+  if(name.endsWith('Fulfill')||name.endsWith('Complete')) return 'settle'; // settled movement
+  if(name.endsWith('Fail')||name.endsWith('Timeout')) return 'fail';       // released / cancelled
   if(name.startsWith('Dispute')||name==='LedgerClose'||name==='DepositClose') return 'dispute';
   if(name.startsWith('Quorum')||name.startsWith('Ledger')) return 'quorum';
   if(name.startsWith('Transfer')) return 'transfer';

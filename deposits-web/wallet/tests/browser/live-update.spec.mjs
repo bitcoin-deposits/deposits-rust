@@ -42,4 +42,27 @@ test.describe('wallet live deposit updates', () => {
     expect(r.afterOther).toBe(r.afterOurs); // foreign op ignored
     expect(r.afterDup).toBe(r.afterOurs);   // duplicate event deduped
   });
+
+  test('history sign: lock holds, fulfill debits, credit adds', async ({ page }) => {
+    const s = await page.evaluate(() => {
+      const f = window._test.historyOpSign;
+      return {
+        credit: f('InvoiceCredit'),
+        lock: f('InvoiceLock'),
+        fulfill: f('InvoiceFulfill'),
+        fee: f('FeeCollect'),
+        fail: f('InvoiceFail'),
+      };
+    });
+    // Credit is the inflow (+); lock only holds (no sign); fulfill is the
+    // settled outflow (−); fee is a settled debit (−); fail releases (neutral).
+    expect(s.credit.sign).toBe('+');
+    expect(s.credit.hold).toBe(false);
+    expect(s.lock.hold).toBe(true);
+    expect(s.lock.sign).toBe('');     // a hold, never a minus
+    expect(s.fulfill.sign).toBe('-'); // the real outflow
+    expect(s.fulfill.hold).toBe(false);
+    expect(s.fee.sign).toBe('-');
+    expect(s.fail.sign).toBe('');
+  });
 });

@@ -1119,6 +1119,7 @@ if (typeof window !== 'undefined' &&
     handleLedgerUpdate: (ev) => handleLedgerUpdate(ev),
     getOurDepositIds: () => getOurDepositIds(),
     liveSyncCount: () => _liveSyncCount,
+    historyOpSign: (opName) => historyOpSign(opName),
     // Live-drill surface (tests/browser/bridge-live.spec.mjs): drive the
     // DEP-10 bridge flows against a real cluster + bridge daemon.
     connect: () => connect(),
@@ -2997,6 +2998,26 @@ async function fetchHistory() {
   renderHistory();
 }
 
+// Map an op name to its display treatment from the perspective of one of OUR
+// deposits (history is scoped to our deposit ids). A Lock only *holds* funds
+// (balance unchanged, locked++) — it's pending, not a settled move; the matching
+// Fulfill is the real outflow. FeeCollect is a settled debit. TransferComplete
+// is direction-dependent (source debits, dest credits) so it stays neutral.
+// Mirrors deposits-protocol LedgerState::apply. Exposed via window._test.
+function historyOpSign(opName) {
+  if (opName.includes('Credit') || opName.includes('Increase') || opName === 'DepositOpen')
+    return { sign: '+', color: 'var(--balance)', hold: false };
+  if (opName.includes('Fulfill') || opName === 'FeeCollect')
+    return { sign: '-', color: 'var(--red)', hold: false };
+  if (opName.includes('Lock'))
+    return { sign: '', color: 'var(--yellow)', hold: true };
+  if (opName.includes('Fail') || opName.includes('Timeout'))
+    return { sign: '', color: 'var(--muted)', hold: false };
+  if (opName.includes('Decrease') || opName.includes('Close') || opName.includes('Dispute'))
+    return { sign: '', color: 'var(--red)', hold: false };
+  return { sign: '', color: 'var(--text)', hold: false };
+}
+
 function renderHistory() {
   const container = document.getElementById('history-list');
   if (historyEvents.length === 0) {
@@ -3037,21 +3058,8 @@ function renderHistory() {
     } catch {}
     if (!ledgerId) ledgerId = tags.d || '';
 
-    // Determine sign and color
-    let sign = '', color = 'var(--text)';
-    if (opName.includes('Credit') || opName.includes('Fulfill') || opName === 'OnchainCredit') {
-      sign = '+'; color = 'var(--balance)';
-    } else if (opName.includes('Lock') || opName === 'FeeCollect') {
-      sign = '-'; color = 'var(--yellow)';
-    } else if (opName.includes('Fail') || opName.includes('Timeout')) {
-      sign = ''; color = 'var(--red)';
-    } else if (opName.includes('Decrease') || opName.includes('Close') || opName.includes('Dispute')) {
-      sign = ''; color = 'var(--red)';
-    } else if (opName.includes('Increase') || opName === 'DepositOpen') {
-      color = 'var(--balance)';
-    }
-
-    const entry = { opName, amount, sign, color, timeAgo: formatTimeAgo(ev.created_at), ledgerId, seq };
+    const { sign, color, hold } = historyOpSign(opName);
+    const entry = { opName, amount, sign, color, hold, timeAgo: formatTimeAgo(ev.created_at), ledgerId, seq };
 
     // Add to each affected deposit
     for (const depId of depositIds) {
@@ -3074,7 +3082,11 @@ function renderHistory() {
       <div style="font-weight:600; font-size:12px; margin-bottom:4px; color:var(--text);">${esc(alias)}</div>`;
     for (const e of entries) {
       const amtSats = Math.round(e.amount / 1000);
-      const amtStr = amtSats > 0 ? `${e.sign}₿${amtSats.toLocaleString()}` : '';
+      // Holds (locks) render the amount with a "held" tag and no +/− — the
+      // funds are reserved, not yet moved. Settled ops carry their sign.
+      const amtStr = amtSats > 0
+        ? (e.hold ? `₿${amtSats.toLocaleString()} held` : `${e.sign}₿${amtSats.toLocaleString()}`)
+        : '';
       html += `<div style="display:flex; align-items:baseline; gap:8px; padding:3px 0 3px 8px; border-bottom:1px solid var(--border); font-size:11px; cursor:pointer;" onclick="openLedgerEntry('${e.ledgerId}', ${e.seq})">
         <span style="color:${e.color}; font-weight:600; min-width:100px;">${e.opName}</span>
         <span class="amt" style="flex:1; color:${e.color};">${amtStr}</span>
