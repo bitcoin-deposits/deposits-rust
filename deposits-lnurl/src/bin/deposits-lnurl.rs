@@ -386,7 +386,7 @@ struct StaticAssets {
     explorer_deposits: &'static str,
     explorer_firehose: &'static str,
     wallet_index: &'static str,
-    request_to_pay: &'static str,
+    request_payment: &'static str,
 }
 
 impl StaticAssets {
@@ -406,7 +406,7 @@ impl StaticAssets {
             explorer_deposits: load("explorer/deposits.html"),
             explorer_firehose: load("explorer/firehose.html"),
             wallet_index:      load("wallet/index.html"),
-            request_to_pay:    load("explorer/request-to-pay.html"),
+            request_payment:    load("explorer/request-payment.html"),
         }
     }
 }
@@ -625,7 +625,7 @@ async fn lnurlp_callback(
 }
 
 /// Core LNURL-pay invoice creation. Shared by the Host-routed `/lnurl/callback`
-/// (ledger from subdomain) and the same-origin `/api/request-to-pay` (ledger as
+/// (ledger from subdomain) and the same-origin `/api/request-payment` (ledger as
 /// an explicit param). Sends a `make_invoice` request to the operator's
 /// deposits-node and returns the BOLT11.
 async fn make_lnurl_invoice(
@@ -899,22 +899,22 @@ fn normalize_ledger(s: &str) -> Option<String> {
 }
 
 #[derive(Deserialize)]
-struct RequestToPayParams {
+struct RequestPaymentParams {
     ledger: String,
     deposit: String,
     amount_sats: u64,
     message: Option<String>,
 }
 
-/// GET /api/request-to-pay?ledger=&deposit=&amount_sats=&message=
+/// GET /api/request-payment?ledger=&deposit=&amount_sats=&message=
 ///
-/// Same-origin invoice creation for the `/request-to-pay` page. Unlike the
+/// Same-origin invoice creation for the `/request-payment` page. Unlike the
 /// LNURL callback, the ledger is an explicit param (not the Host subdomain), so
 /// the page works from any host and targets any ledger without a cross-origin
 /// fetch. Returns `{ pr: <bolt11> }`.
-async fn request_to_pay_invoice(
+async fn request_payment_invoice(
     State(state): State<Arc<AppState>>,
-    Query(q): Query<RequestToPayParams>,
+    Query(q): Query<RequestPaymentParams>,
 ) -> Result<Json<CallbackResponse>, (StatusCode, Json<LnurlError>)> {
     let ledger_id = normalize_ledger(&q.ledger)
         .ok_or_else(|| lnurl_err("ledger must be 64-char hex or 52-char bech32-data"))?;
@@ -926,9 +926,9 @@ async fn request_to_pay_invoice(
     make_lnurl_invoice(state, ledger_id, q.deposit, params).await
 }
 
-/// GET /request-to-pay — the page that drives `request_to_pay_invoice`.
-async fn request_to_pay_page() -> Html<&'static str> {
-    Html(assets().request_to_pay)
+/// GET /request-payment — the page that drives `request_payment_invoice`.
+async fn request_payment_page() -> Html<&'static str> {
+    Html(assets().request_payment)
 }
 
 // ============================================================================
@@ -1234,8 +1234,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/.well-known/lnurlp/:deposit_id", get(lnurlp_metadata))
         .route("/lnurl/callback/:deposit_id", get(lnurlp_callback))
         // Same-origin "request to pay": page + its invoice-creation API.
-        .route("/request-to-pay", get(request_to_pay_page))
-        .route("/api/request-to-pay", get(request_to_pay_invoice))
+        .route("/request-payment", get(request_payment_page))
+        .route("/api/request-payment", get(request_payment_invoice))
         // Explorer + wallet pages — Host-aware default plus explicit
         // paths for dev. HTML is loaded from DEPOSITS_WEB_DIR at startup
         // (see StaticAssets). See the handler docs for routing rules.
@@ -1326,7 +1326,7 @@ mod ledger_norm_tests {
 
     #[test]
     fn accepts_bech32_subdomain_form() {
-        // The /request-to-pay page may pass the bech32 subdomain label.
+        // The /request-payment page may pass the bech32 subdomain label.
         let hex = "57f60e1dbef339e25e53efe356b2291e2c10ebdeaf95069a9876172fdad6d610";
         let sub = ledger_to_subdomain(hex).expect("encode");
         assert_eq!(normalize_ledger(&sub), Some(hex.to_string()));

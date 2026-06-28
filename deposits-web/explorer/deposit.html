@@ -518,7 +518,7 @@ function render(depositId, ledgerId, updates) {
     <span style="color:var(--fg-dim)">·</span>
     <a href="/ledger#ledger=${encodeURIComponent(ledgerId)}&relay=${encodeURIComponent(RELAY_URL)}">ledger ${escapeHtml(fmt.short(ledgerId, 16))}</a>
     <span style="color:var(--fg-dim)">·</span>
-    <a href="/request-to-pay#ledger=${encodeURIComponent(ledgerId)}&deposit=${encodeURIComponent(depositId)}&relay=${encodeURIComponent(RELAY_URL)}" style="color:var(--accent)">request payment ↗</a>
+    <a href="/request-payment#ledger=${encodeURIComponent(ledgerId)}&deposit=${encodeURIComponent(depositId)}&relay=${encodeURIComponent(RELAY_URL)}" style="color:var(--accent)">request payment ↗</a>
   `;
 
   const descCard = descriptor

@@ -186,7 +186,7 @@ async function generate() {
     const params = new URLSearchParams({ ledger, deposit, amount_sats: String(amount) });
     if (message) params.set('message', message);
     if (relay) params.set('relay', relay);
-    const resp = await fetch('/api/request-to-pay?' + params.toString());
+    const resp = await fetch('/api/request-payment?' + params.toString());
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || !data.pr) {
       throw new Error(data.reason || data.error || `request failed (${resp.status})`);
