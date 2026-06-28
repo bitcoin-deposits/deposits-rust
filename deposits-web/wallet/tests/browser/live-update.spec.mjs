@@ -64,4 +64,27 @@ test.describe('wallet live deposit updates', () => {
     expect(s.fail.sign).toBe('');
     expect(s.lock).toEqual(s.fail);   // lock follows fail
   });
+
+  test('history dedups (ledger,seq) re-signs, interleaves chronologically, attributes deposits', async ({ page }) => {
+    const r = await page.evaluate(() => {
+      const idToAlias = { aa: 'deposit-1', bb: 'deposit-2' };
+      const decoded = [
+        // two re-signs of the same (L1, seq 5) — must collapse to ONE row
+        { id: 'e1', ts: 100, iTags: ['aa'], opName: 'DepositOpen', amount: 0, seq: 5, ledgerId: 'L1', ok: true },
+        { id: 'e2', ts: 100, iTags: ['aa'], opName: 'DepositOpen', amount: 0, seq: 5, ledgerId: 'L1', ok: true },
+        { id: 'e3', ts: 300, iTags: ['bb'], opName: 'InvoiceCredit', amount: 64000, seq: 9, ledgerId: 'L2', ok: true },
+        { id: 'e4', ts: 200, iTags: ['aa'], opName: 'InvoiceCredit', amount: 10000, seq: 6, ledgerId: 'L1', ok: true },
+        // undecodable — keyed by event id, must NOT collapse despite same seq 0
+        { id: 'e5', ts: 50, iTags: ['bb'], opName: '?', amount: 0, seq: 0, ledgerId: '', ok: false },
+        { id: 'e6', ts: 51, iTags: ['bb'], opName: '?', amount: 0, seq: 0, ledgerId: '', ok: false },
+      ];
+      return window._test.buildHistoryRows(decoded, idToAlias)
+        .map(x => ({ op: x.opName, who: x.who, ts: x.ts }));
+    });
+    expect(r.filter(x => x.op === 'DepositOpen').length).toBe(1);   // re-sign collapsed
+    expect(r.filter(x => x.op === '?').length).toBe(2);             // undecodable kept distinct
+    expect(r.map(x => x.ts)).toEqual([300, 200, 100, 51, 50]);      // newest-first, interleaved
+    expect(r.find(x => x.ts === 300).who).toBe('deposit-2');        // deposit attribution
+    expect(r.find(x => x.ts === 200).who).toBe('deposit-1');
+  });
 });

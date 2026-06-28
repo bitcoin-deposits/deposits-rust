@@ -1120,6 +1120,7 @@ if (typeof window !== 'undefined' &&
     getOurDepositIds: () => getOurDepositIds(),
     liveSyncCount: () => _liveSyncCount,
     historyOpSign: (opName) => historyOpSign(opName),
+    buildHistoryRows: (decoded, idToAlias) => buildHistoryRows(decoded, idToAlias),
     // Live-drill surface (tests/browser/bridge-live.spec.mjs): drive the
     // DEP-10 bridge flows against a real cluster + bridge daemon.
     connect: () => connect(),
@@ -3018,6 +3019,31 @@ function historyOpSign(opName) {
   return { sign: '', color: 'var(--text)' };
 }
 
+// Dedup re-signed/forked updates, attribute each to its deposit alias(es), and
+// sort newest-first into one interleaved list. A re-cosigned or forked update
+// reappears on the relay with a NEW event id but the SAME (ledger, sequence) —
+// fetchEvents only dedups by event id, so those showed as duplicate rows.
+// `decoded` items: { id, ts, iTags[], opName, amount, seq, ledgerId, ok }.
+// Pure (given idToAlias); exposed for tests via window._test.
+function buildHistoryRows(decoded, idToAlias) {
+  const seen = new Set();
+  const rows = [];
+  for (const ev of decoded) {
+    const key = ev.ok ? `${ev.ledgerId}:${ev.seq}` : `id:${ev.id}`;
+    if (seen.has(key)) continue;  // collapse (ledger, seq) re-signs/forks
+    seen.add(key);
+    const aliases = [...new Set((ev.iTags || []).map(id => idToAlias[id]).filter(Boolean))];
+    const who = aliases.length ? aliases.join(', ')
+      : (ev.iTags && ev.iTags[0] ? ev.iTags[0].slice(0, 8) + '…'
+                                 : 'ledger ' + (ev.ledgerId || '').slice(0, 8) + '…');
+    const { sign, color } = historyOpSign(ev.opName);
+    rows.push({ opName: ev.opName, amount: ev.amount, sign, color, who,
+                ts: ev.ts || 0, timeAgo: formatTimeAgo(ev.ts), ledgerId: ev.ledgerId, seq: ev.seq });
+  }
+  rows.sort((a, b) => b.ts - a.ts);  // newest first, interleaved across deposits
+  return rows;
+}
+
 function renderHistory() {
   const container = document.getElementById('history-list');
   if (historyEvents.length === 0) {
@@ -3026,75 +3052,55 @@ function renderHistory() {
     return;
   }
 
-  // Build deposit ID → alias map
+  // deposit_id → alias, for the deposit column.
   const idToAlias = {};
-  const idToLedger = {};
   for (const d of state.deposits) {
     if (!d.deposit_pubkey) continue;
-    const pubkey = hexToBytes(d.deposit_pubkey);
-    const id = bytesToHex(computeDepositId(pubkey));
+    const id = bytesToHex(computeDepositId(hexToBytes(d.deposit_pubkey)));
     idToAlias[id] = d.alias;
-    idToLedger[id] = d.ledger_id;
   }
 
-  // Decode all events and group by deposit
-  const byDeposit = new Map(); // alias → [{opName, amount, sign, color, timeAgo, ledgerId, seq}]
-  for (const ev of historyEvents) {
-    const depositIds = (ev.tags || []).filter(t => t[0] === 'i').map(t => t[1]);
+  // Decode each event (recover the FULL 64-char ledger_id — the `d` tag is only
+  // the 16-char ledger_tag prefix), then dedup/attribute/sort.
+  const decoded = historyEvents.map(ev => {
     const tags = Object.fromEntries((ev.tags || []).map(t => [t[0], t[1]]));
-
-    // Decode the TLV to recover the FULL 64-char ledger_id. The
-    // outer `d` tag carries only the 16-char ledger_tag prefix
-    // (per deposits-nostr `ledger_tag()`); using it for navigation
-    // produces a truncated bech32 subdomain.
-    let opName = '?', amount = 0, seq = 0, ledgerId = '';
+    const iTags = (ev.tags || []).filter(t => t[0] === 'i').map(t => t[1]);
+    let opName = '?', amount = 0, seq = 0, ledgerId = '', ok = false;
     try {
       const u = decodeUpdate(ev.content);
-      opName = u.opName;
-      seq = u.seq;
-      ledgerId = u.ledgerIdHex || '';
+      opName = u.opName; seq = u.seq; ledgerId = u.ledgerIdHex || '';
       const amtField = u.opFields.find(f => f.type === 2);
       if (amtField && amtField.u64 !== null) amount = amtField.u64;
+      ok = true;
     } catch {}
     if (!ledgerId) ledgerId = tags.d || '';
+    return { id: ev.id, ts: ev.created_at || 0, iTags, opName, amount, seq, ledgerId, ok };
+  });
+  const rows = buildHistoryRows(decoded, idToAlias);
 
-    const { sign, color } = historyOpSign(opName);
-    const entry = { opName, amount, sign, color, timeAgo: formatTimeAgo(ev.created_at), ledgerId, seq };
+  const pages = Math.max(1, Math.ceil(rows.length / HISTORY_PAGE_SIZE));
+  if (historyPage >= pages) historyPage = pages - 1;
+  if (historyPage < 0) historyPage = 0;
+  const slice = rows.slice(historyPage * HISTORY_PAGE_SIZE, historyPage * HISTORY_PAGE_SIZE + HISTORY_PAGE_SIZE);
 
-    // Add to each affected deposit
-    for (const depId of depositIds) {
-      const alias = idToAlias[depId] || depId.slice(0, 8) + '...';
-      if (!byDeposit.has(alias)) byDeposit.set(alias, []);
-      byDeposit.get(alias).push(entry);
-    }
-    // Events without deposit IDs go to "Ledger"
-    if (depositIds.length === 0) {
-      const key = 'Ledger ' + ledgerId.slice(0, 8) + '...';
-      if (!byDeposit.has(key)) byDeposit.set(key, []);
-      byDeposit.get(key).push(entry);
-    }
-  }
+  container.innerHTML = slice.map(e => {
+    const amtSats = Math.round(e.amount / 1000);
+    // Settled ops carry their sign; informative ops (lock/fail) show the amount
+    // neutrally (no sign), labelled by the op name beside it.
+    const amtStr = amtSats > 0 ? `${e.sign}₿${amtSats.toLocaleString()}` : '';
+    return `<div style="display:flex; align-items:baseline; gap:8px; padding:4px 0 4px 4px; border-bottom:1px solid var(--border); font-size:11px; cursor:pointer;" onclick="openLedgerEntry('${e.ledgerId}', ${e.seq})">
+      <span style="color:var(--text); min-width:64px; max-width:64px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(e.who)}">${esc(e.who)}</span>
+      <span style="color:${e.color}; font-weight:600; min-width:92px;">${esc(e.opName)}</span>
+      <span class="amt" style="flex:1; color:${e.color};">${amtStr}</span>
+      <span style="color:var(--muted); white-space:nowrap;">${esc(e.timeAgo)}</span>
+    </div>`;
+  }).join('');
 
-  // Render grouped by deposit, paginated across total entries
-  let html = '';
-  for (const [alias, entries] of byDeposit) {
-    html += `<div style="margin-bottom:12px;">
-      <div style="font-weight:600; font-size:12px; margin-bottom:4px; color:var(--text);">${esc(alias)}</div>`;
-    for (const e of entries) {
-      const amtSats = Math.round(e.amount / 1000);
-      // Settled ops carry their sign; informative ops (lock/fail) show the
-      // amount neutrally (no sign), labelled by the op name beside it.
-      const amtStr = amtSats > 0 ? `${e.sign}₿${amtSats.toLocaleString()}` : '';
-      html += `<div style="display:flex; align-items:baseline; gap:8px; padding:3px 0 3px 8px; border-bottom:1px solid var(--border); font-size:11px; cursor:pointer;" onclick="openLedgerEntry('${e.ledgerId}', ${e.seq})">
-        <span style="color:${e.color}; font-weight:600; min-width:100px;">${e.opName}</span>
-        <span class="amt" style="flex:1; color:${e.color};">${amtStr}</span>
-        <span style="color:var(--muted); white-space:nowrap;">${e.timeAgo}</span>
-      </div>`;
-    }
-    html += `</div>`;
-  }
-  container.innerHTML = html;
-  document.getElementById('history-pager').innerHTML = '';
+  document.getElementById('history-pager').innerHTML = pages > 1
+    ? `<button ${historyPage === 0 ? 'disabled' : ''} onclick="historyPrev()" style="font-size:11px; padding:2px 10px;">‹ newer</button>`
+      + `<span style="color:var(--muted); font-size:11px; align-self:center;">${historyPage + 1} / ${pages}</span>`
+      + `<button ${historyPage >= pages - 1 ? 'disabled' : ''} onclick="historyNext()" style="font-size:11px; padding:2px 10px;">older ›</button>`
+    : '';
 }
 
 window.historyPrev = function() { if (historyPage > 0) { historyPage--; renderHistory(); } };
