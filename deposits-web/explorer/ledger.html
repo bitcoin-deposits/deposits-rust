@@ -392,7 +392,7 @@
 
 <script type="module">
 import { OP_NAMES, FIELD_NAMES } from './tlv-catalog.js';
-import { fetchCosignerLedgerMap, installBreadcrumbs, installTopNav } from './shared.js';
+import { fetchCosignerLedgerMap, installBreadcrumbs, installTopNav, nostrFetchAll } from './shared.js';
 
 // Breadcrumb trail (overview › ledger). Reads ledger/relay from the URL.
 installBreadcrumbs('ledger');
@@ -1050,9 +1050,11 @@ async function runAudit(ledgerId) {
   try {
     const mod = await loadWasmAudit();
     // Full update set for this ledger (no op-type filter, unlike the overview).
-    const events = await nostrFetch(
+    // Paginate past the relay's per-REQ cap (default 500) — a capped audit would
+    // silently miss updates and report a wrong solvency picture.
+    const events = await nostrFetchAll(
       RELAY_URL,
-      { kinds: [9100], '#d': [ledgerId.slice(0, 16)], limit: 5000 },
+      { kinds: [9100], '#d': [ledgerId.slice(0, 16)] },
       { timeoutMs: 15000 },
     );
     const contents = events.map(e => e.content);

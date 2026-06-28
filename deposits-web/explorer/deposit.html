@@ -251,7 +251,7 @@
 <script type="module">
 import { OP_NAMES, FIELD_NAMES } from './tlv-catalog.js';
 import {
-  getParam, bytesToHex, b64ToBytes, nostrFetch, parseTlv,
+  getParam, bytesToHex, b64ToBytes, nostrFetchAll, parseTlv,
   renderDescriptorRows, installBreadcrumbs, installTopNav,
 } from './shared.js';
 
@@ -605,8 +605,10 @@ async function main() {
 
   // Server-side filter by the `i` tag (affected deposit ids) keeps this
   // O(this-deposit's-activity) regardless of how large the ledger is.
-  const events = await nostrFetch(RELAY_URL, {
-    kinds: [9100], '#d': [ledgerId.slice(0, 16)], '#i': [depositId], limit: 1000,
+  // nostrFetchAll paginates past the relay's per-REQ cap (default 500) so a
+  // busy deposit's full op trail loads, not just the most recent page.
+  const events = await nostrFetchAll(RELAY_URL, {
+    kinds: [9100], '#d': [ledgerId.slice(0, 16)], '#i': [depositId],
   });
 
   if (!events.length) {

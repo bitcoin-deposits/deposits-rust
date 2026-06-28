@@ -203,6 +203,35 @@ export function nostrFetch(relayUrl, filter, { timeoutMs = 8000 } = {}) {
   });
 }
 
+// Fetch *every* event matching `filter`, paginating past the relay's per-REQ
+// cap (strfry `maxFilterLimit` defaults to 500) with `until` windows, deduped
+// by event id. `filter.limit` sets the page size (default 500). Use this for
+// "full history" loads (a deposit's whole op trail, a ledger audit) where a
+// single capped REQ would silently truncate. `_fetch` is injectable for tests.
+export async function nostrFetchAll(
+  relayUrl, filter, { timeoutMs = 8000, maxPages = 1000, _fetch = nostrFetch } = {},
+) {
+  const pageSize = filter.limit || 500;
+  const byId = new Map();
+  let until;
+  for (let i = 0; i < maxPages; i++) {
+    const f = { ...filter, limit: pageSize };
+    if (until != null) f.until = until;  // inclusive; id-dedup covers the overlap
+    const page = await _fetch(relayUrl, f, { timeoutMs });
+    if (!page.length) break;
+    let added = 0, oldest = Infinity;
+    for (const ev of page) {
+      if (!byId.has(ev.id)) { byId.set(ev.id, ev); added++; }
+      if (ev.created_at < oldest) oldest = ev.created_at;
+    }
+    // Stop on the last (partial) page, or a full page of all duplicates (e.g.
+    // more than pageSize events sharing one timestamp) — advancing would loop.
+    if (page.length < pageSize || added === 0) break;
+    until = oldest;
+  }
+  return [...byId.values()];
+}
+
 // ── BIP-152 / Bitcoin VarInt (Compact Size) ──────────────────────────
 function readVarint(buf, off) {
   const b = buf[off];
