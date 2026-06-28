@@ -116,6 +116,7 @@ document.getElementById('relay-url').textContent = RELAY_URL;
 
 const MAX_ROWS = 300;
 const KIND = 9100;
+const FRESH_WINDOW_SEC = 30;  // flash only entries this recent — not the load-time backlog
 const AMOUNT_TAG = 2;   // inner-op TLV: amount (msats)
 const OP_DISC_TAG = 0;  // inner-op TLV: discriminant
 
@@ -144,7 +145,11 @@ function opClass(name){
 // tests as window.__decodeEvent.
 function decodeEvent(ev){
   const tag = (k) => (ev.tags || []).find(t => t[0] === k)?.[1];
-  const ledger = (tag('d') || '').toLowerCase();
+  // The relay `d` tag is only a 16-hex prefix (deposits-nostr `ledger_tag`),
+  // which /ledger rejects as "neither 64-hex nor bech32". Recover the full id
+  // from the outer SignedLedgerUpdate TLV (tag 2) below; fall back to prefix.
+  const ledgerPrefix = (tag('d') || '').toLowerCase();
+  let ledgerFull = null;
   const seq = tag('n');
   const deposit = (tag('i') || '').toLowerCase();
   let opDisc = tag('t') != null ? Number(tag('t')) : null;
@@ -152,6 +157,8 @@ function decodeEvent(ev){
   try {
     const raw = b64ToBytes(ev.content);
     const outer = parseTlv(raw);
+    const lidVal = outer.find(r => r.type === 2)?.value;  // full 32-byte ledger_id
+    if (lidVal && lidVal.length === 32) ledgerFull = bytesToHex(lidVal);
     const msg = outer.find(r => r.type === 8)?.value;  // message (inner op)
     if (msg) {
       const inner = parseTlv(msg);
@@ -164,20 +171,30 @@ function decodeEvent(ev){
     }
   } catch {}
   const op = opDisc != null ? (OP_NAMES[opDisc] || ('Unknown('+opDisc+')')) : '?';
-  return { id: ev.id, ts: ev.created_at, ledger, seq, deposit, op, amount };
+  return { id: ev.id, ts: ev.created_at, ledger: ledgerFull || ledgerPrefix, seq, deposit, op, amount };
 }
 window.__decodeEvent = decodeEvent;
 
 function rowHtml(r){
   const frag = (l) => `ledger=${encodeURIComponent(l)}&relay=${encodeURIComponent(RELAY_URL)}`;
+  // The specific ledger entry — per-event view, keyed by the nostr event id.
+  // Time and op badge both drill into it; ledger/deposit go to their own pages.
+  const entry = r.id
+    ? `/update#event=${encodeURIComponent(r.id)}&`
+      + (r.ledger ? frag(r.ledger) : `relay=${encodeURIComponent(RELAY_URL)}`)
+    : null;
+  const t = entry ? `<a href="${entry}">${esc(fmtTime(r.ts))}</a>` : esc(fmtTime(r.ts));
+  const opBadge = entry
+    ? `<a href="${entry}" class="op ${opClass(r.op)}">${esc(r.op)}</a>`
+    : `<span class="op ${opClass(r.op)}">${esc(r.op)}</span>`;
   const lid = r.ledger
     ? `<a href="/ledger#${frag(r.ledger)}">${esc(shortHex(r.ledger,16))}</a>`
     : '—';
   const did = r.deposit
     ? `<a href="/deposit#deposit=${encodeURIComponent(r.deposit)}&${frag(r.ledger)}">${esc(shortHex(r.deposit,12))}</a>`
     : '—';
-  return `<div class="t">${esc(fmtTime(r.ts))}</div>`
-    + `<span class="op ${opClass(r.op)}">${esc(r.op)}</span>`
+  return `<div class="t">${t}</div>`
+    + opBadge
     + `<div class="lid">${lid}${r.seq!=null?` <span style="color:var(--fg-dim)">#${esc(r.seq)}</span>`:''}</div>`
     + `<div class="did">${did}</div>`
     + `<div class="amt">${r.amount!=null?esc(fmtMsats(r.amount)):''}</div>`;
@@ -204,7 +221,10 @@ function addEvent(ev){
   const r = decodeEvent(ev);
   const ts = r.ts || 0;
   const div = document.createElement('div');
-  div.className = 'row fresh';
+  // Flash only genuinely-new entries. The relay replays a backlog on load (and
+  // may resend old events); those used to light up the whole page on arrival.
+  const isFresh = ts >= (Date.now() / 1000) - FRESH_WINDOW_SEC;
+  div.className = isFresh ? 'row fresh' : 'row';
   div.dataset.ts = String(ts);
   div.innerHTML = rowHtml(r);
   // Insert sorted by created_at descending (newest on top). Blind prepend

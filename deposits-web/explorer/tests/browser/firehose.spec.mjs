@@ -70,4 +70,34 @@ test.describe('firehose', () => {
     const html = await page.evaluate(() => window.__rowHtml(window.__decodeEvent({ id: 'x', tags: [], content: '' })));
     expect(html).toContain('—'); // em-dash placeholder for ledger/deposit
   });
+
+  test('recovers the full 64-hex ledger id from event content', async ({ page }) => {
+    // The relay `d` tag is only a 16-hex prefix; the full ledger_id (outer TLV
+    // tag 2) is needed for a /ledger link that doesn't 400 as "not 64-hex".
+    const ev = { id: 'evtL', created_at: 1_700_000_000, tags: [['d', '57f60e1dbef339e2']], content: contents[0] };
+    const r = await page.evaluate((e) => window.__decodeEvent(e), ev);
+    expect(r.ledger).toMatch(/^[0-9a-f]{64}$/);
+    expect(r.ledger.startsWith('57f60e1dbef339e2')).toBe(true);
+    const html = await page.evaluate((e) => window.__rowHtml(window.__decodeEvent(e)), ev);
+    expect(html).toContain(`/ledger#ledger=${r.ledger}`); // full id, not the prefix
+  });
+
+  test('time and op both drill into the per-entry update view', async ({ page }) => {
+    const ev = { id: 'evtE', created_at: 1_700_000_000, tags: [['d', '57f60e1dbef339e2'], ['t', '30']], content: '' };
+    const html = await page.evaluate((e) => window.__rowHtml(window.__decodeEvent(e)), ev);
+    const hits = (html.match(/\/update#event=evtE/g) || []).length;
+    expect(hits).toBe(2); // the time cell and the op badge
+    expect(html).toContain('class="op credit"'); // op badge is the link, still styled
+  });
+
+  test('only recent entries flash; the load-time backlog stays quiet', async ({ page }) => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    await page.evaluate((ts) => {
+      window.__addEvent({ id: 'old1', created_at: ts - 600, tags: [['d', 'bb'.repeat(8)], ['t', '30']], content: '' });
+      window.__addEvent({ id: 'new1', created_at: ts,       tags: [['d', 'cc'.repeat(8)], ['t', '30']], content: '' });
+    }, nowSec);
+    const rows = await page.$$eval('#rows .row', els => els.map(e => ({ ts: Number(e.dataset.ts), fresh: e.classList.contains('fresh') })));
+    expect(rows.find(r => r.ts === nowSec - 600).fresh).toBe(false);
+    expect(rows.find(r => r.ts === nowSec).fresh).toBe(true);
+  });
 });
