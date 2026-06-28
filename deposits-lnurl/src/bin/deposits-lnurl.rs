@@ -386,6 +386,7 @@ struct StaticAssets {
     explorer_deposits: &'static str,
     explorer_firehose: &'static str,
     wallet_index: &'static str,
+    request_to_pay: &'static str,
 }
 
 impl StaticAssets {
@@ -405,6 +406,7 @@ impl StaticAssets {
             explorer_deposits: load("explorer/deposits.html"),
             explorer_firehose: load("explorer/firehose.html"),
             wallet_index:      load("wallet/index.html"),
+            request_to_pay:    load("wallet/request-to-pay.html"),
         }
     }
 }
@@ -619,7 +621,19 @@ async fn lnurlp_callback(
 ) -> Result<Json<CallbackResponse>, (StatusCode, Json<LnurlError>)> {
     let ledger_id = extract_ledger_from_host(&host, &state.domain)
         .ok_or_else(|| lnurl_err("Could not determine ledger from host. Subdomain must be the full 52-char bech32 (or 64-char hex) ledger ID."))?;
+    make_lnurl_invoice(state, ledger_id, deposit_id, params).await
+}
 
+/// Core LNURL-pay invoice creation. Shared by the Host-routed `/lnurl/callback`
+/// (ledger from subdomain) and the same-origin `/api/request-to-pay` (ledger as
+/// an explicit param). Sends a `make_invoice` request to the operator's
+/// deposits-node and returns the BOLT11.
+async fn make_lnurl_invoice(
+    state: Arc<AppState>,
+    ledger_id: String,
+    deposit_id: String,
+    params: CallbackParams,
+) -> Result<Json<CallbackResponse>, (StatusCode, Json<LnurlError>)> {
     if params.amount < state.min_msats || params.amount > state.max_msats {
         return Err(lnurl_err(&format!(
             "Amount must be between {} and {} msats",
@@ -873,6 +887,48 @@ async fn lnurlp_callback(
         routes: vec![],
         attestations,
     }))
+}
+
+/// Accept a ledger id as 64-char hex or 52-char bech32-data; normalize to 64-hex.
+fn normalize_ledger(s: &str) -> Option<String> {
+    let v = s.trim().to_lowercase();
+    if v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(v);
+    }
+    subdomain_to_ledger(&v)
+}
+
+#[derive(Deserialize)]
+struct RequestToPayParams {
+    ledger: String,
+    deposit: String,
+    amount_sats: u64,
+    message: Option<String>,
+}
+
+/// GET /api/request-to-pay?ledger=&deposit=&amount_sats=&message=
+///
+/// Same-origin invoice creation for the `/request-to-pay` page. Unlike the
+/// LNURL callback, the ledger is an explicit param (not the Host subdomain), so
+/// the page works from any host and targets any ledger without a cross-origin
+/// fetch. Returns `{ pr: <bolt11> }`.
+async fn request_to_pay_invoice(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RequestToPayParams>,
+) -> Result<Json<CallbackResponse>, (StatusCode, Json<LnurlError>)> {
+    let ledger_id = normalize_ledger(&q.ledger)
+        .ok_or_else(|| lnurl_err("ledger must be 64-char hex or 52-char bech32-data"))?;
+    let params = CallbackParams {
+        amount: q.amount_sats.saturating_mul(1000),
+        comment: q.message.filter(|m| !m.is_empty()),
+        nostr: None,
+    };
+    make_lnurl_invoice(state, ledger_id, q.deposit, params).await
+}
+
+/// GET /request-to-pay — the page that drives `request_to_pay_invoice`.
+async fn request_to_pay_page() -> Html<&'static str> {
+    Html(assets().request_to_pay)
 }
 
 // ============================================================================
@@ -1177,6 +1233,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/.well-known/lnurlp/:deposit_id", get(lnurlp_metadata))
         .route("/lnurl/callback/:deposit_id", get(lnurlp_callback))
+        // Same-origin "request to pay": page + its invoice-creation API.
+        .route("/request-to-pay", get(request_to_pay_page))
+        .route("/api/request-to-pay", get(request_to_pay_invoice))
         // Explorer + wallet pages — Host-aware default plus explicit
         // paths for dev. HTML is loaded from DEPOSITS_WEB_DIR at startup
         // (see StaticAssets). See the handler docs for routing rules.
@@ -1250,5 +1309,33 @@ mod static_asset_tests {
         // Genuinely missing in both → 404.
         let r = web_assets_service(root).oneshot(req("/nope.js")).await.unwrap();
         assert_eq!(r.status(), StatusCode::NOT_FOUND, "missing asset");
+    }
+}
+
+#[cfg(test)]
+mod ledger_norm_tests {
+    use super::{ledger_to_subdomain, normalize_ledger};
+
+    #[test]
+    fn accepts_64_hex_passthrough() {
+        let hex = "a".repeat(64);
+        assert_eq!(normalize_ledger(&hex), Some(hex.clone()));
+        // case-insensitive
+        assert_eq!(normalize_ledger(&"A".repeat(64)), Some(hex));
+    }
+
+    #[test]
+    fn accepts_bech32_subdomain_form() {
+        // The /request-to-pay page may pass the bech32 subdomain label.
+        let hex = "57f60e1dbef339e25e53efe356b2291e2c10ebdeaf95069a9876172fdad6d610";
+        let sub = ledger_to_subdomain(hex).expect("encode");
+        assert_eq!(normalize_ledger(&sub), Some(hex.to_string()));
+    }
+
+    #[test]
+    fn rejects_junk() {
+        assert_eq!(normalize_ledger(""), None);
+        assert_eq!(normalize_ledger("not-a-ledger"), None);
+        assert_eq!(normalize_ledger(&"a".repeat(63)), None); // wrong length, not bech32
     }
 }

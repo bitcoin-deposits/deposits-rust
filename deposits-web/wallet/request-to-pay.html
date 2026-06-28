@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Request to Pay · deposits</title>
+  <style>
+    :root {
+      --bg:#11131f; --bg-elev:#181c2c; --bg-card:#1d2237; --border:#2a304a;
+      --fg:#e7e9f0; --fg-strong:#fff; --muted:#8d96b3; --dim:#5b6386;
+      --accent:#f7931a; --green:#4cae5a; --red:#d9534f;
+      --mono: ui-monospace,"SF Mono","Roboto Mono",Menlo,Consolas,monospace;
+      --sans: -apple-system,BlinkMacSystemFont,"Inter","Segoe UI",system-ui,sans-serif;
+    }
+    * { box-sizing:border-box; }
+    html,body { background:var(--bg); }
+    body { margin:0; color:var(--fg); font:14px/1.5 var(--sans); -webkit-font-smoothing:antialiased; }
+    a { color:inherit; } a:hover { color:var(--accent); }
+    .topnav { display:flex; align-items:center; gap:0.45rem; padding:0.85rem 1.25rem;
+      background:var(--bg-elev); border-bottom:1px solid var(--border); }
+    .logo { color:var(--accent); font-size:1.25rem; line-height:1; }
+    .name { color:var(--fg-strong); font-weight:600; }
+    .sub { color:var(--muted); font-size:0.85rem; }
+    main { max-width:440px; margin:0 auto; padding:1.5rem 1.25rem 4rem; }
+    h1 { font-size:1.15rem; margin:0 0 0.25rem; color:var(--fg-strong); }
+    .lead { color:var(--muted); font-size:0.85rem; margin:0 0 1.25rem; }
+    label { display:block; font-size:0.78rem; color:var(--muted); margin:0.7rem 0 0.2rem; }
+    input, textarea { width:100%; background:var(--bg-card); border:1px solid var(--border);
+      color:var(--fg); border-radius:6px; padding:0.55rem 0.7rem; font:inherit; }
+    input:focus, textarea:focus { outline:none; border-color:var(--accent); }
+    input.mono { font-family:var(--mono); font-size:0.8rem; }
+    textarea { resize:vertical; min-height:2.4rem; }
+    .btn { width:100%; margin-top:1.1rem; background:var(--accent); border:none; color:#1a1205;
+      font:600 0.95rem var(--sans); border-radius:7px; padding:0.7rem; cursor:pointer; }
+    .btn:disabled { opacity:0.55; cursor:default; }
+    .btn.secondary { background:var(--bg-card); color:var(--fg); border:1px solid var(--border); margin-top:0.6rem; }
+    .err { color:var(--red); font-size:0.85rem; margin-top:0.8rem; min-height:1em; }
+    .result { display:none; margin-top:1.25rem; text-align:center; }
+    .result.show { display:block; }
+    .qr-wrap { background:#fff; display:inline-block; padding:10px; border-radius:8px; }
+    canvas { display:block; image-rendering:pixelated; }
+    .amt { font-size:1.6rem; font-weight:300; color:var(--accent); margin:0.5rem 0 0.1rem; letter-spacing:-0.5px; }
+    .for { color:var(--muted); font-size:0.85rem; margin-bottom:0.9rem; word-break:break-word; }
+    .invoice { font-family:var(--mono); font-size:0.7rem; color:var(--muted); background:var(--bg-card);
+      border:1px solid var(--border); border-radius:6px; padding:0.6rem; margin-top:0.9rem;
+      word-break:break-all; max-height:5.5rem; overflow:auto; text-align:left; }
+    .row { display:flex; gap:0.6rem; }
+    .row .btn { flex:1; }
+    footer { margin-top:2rem; color:var(--dim); font-size:0.78rem; text-align:center; }
+  </style>
+</head>
+<body>
+  <nav class="topnav"><span class="logo">⟁</span><span class="name">deposits</span><span class="sub">request to pay</span></nav>
+  <main>
+    <h1>Request a Lightning payment</h1>
+    <p class="lead">Generate an invoice for a deposit. Share the QR or the invoice string with whoever's paying.</p>
+
+    <div id="form">
+      <label for="ledger">Ledger</label>
+      <input id="ledger" class="mono" placeholder="64-hex or bech32 ledger id" autocomplete="off">
+      <label for="deposit">Deposit</label>
+      <input id="deposit" class="mono" placeholder="deposit id" autocomplete="off">
+      <label for="amount">Amount (sats)</label>
+      <input id="amount" type="number" min="1" step="1" placeholder="1000" inputmode="numeric">
+      <label for="message">Message <span style="color:var(--dim)">(optional)</span></label>
+      <textarea id="message" placeholder="what's this for?"></textarea>
+      <button class="btn" id="gen">Generate invoice</button>
+      <div class="err" id="err"></div>
+    </div>
+
+    <div class="result" id="result">
+      <div class="amt" id="r-amt"></div>
+      <div class="for" id="r-for"></div>
+      <div class="qr-wrap"><canvas id="qr"></canvas></div>
+      <div class="invoice" id="r-invoice"></div>
+      <div class="row">
+        <button class="btn" id="copy">Copy invoice</button>
+      </div>
+      <button class="btn secondary" id="again">New request</button>
+    </div>
+
+    <footer>invoice is created by the operator for this deposit · expires per the operator's policy</footer>
+  </main>
+
+<script type="module">
+import qrcode from './vendor/qrcode-generator.js';
+
+const $ = (id) => document.getElementById(id);
+const qp = new URLSearchParams(location.hash.replace(/^#/, '') || location.search);
+
+// Prefill from the URL so a request is shareable/linkable.
+for (const k of ['ledger', 'deposit', 'amount', 'message']) {
+  const v = qp.get(k);
+  if (v != null) $(k).value = v;
+}
+// Carry the relay through to the API if provided (operator may scope by it).
+const relay = qp.get('relay') || '';
+
+function renderQR(canvas, text, targetSize = 220) {
+  const qr = qrcode(0, 'L');
+  qr.addData(text.toUpperCase());  // uppercase → alphanumeric mode → smaller QR
+  qr.make();
+  const modules = qr.getModuleCount();
+  const border = 4;
+  const total = modules + border * 2;
+  const scale = Math.max(2, Math.floor(targetSize / total));
+  const px = total * scale;
+  canvas.width = px; canvas.height = px;
+  canvas.style.width = px + 'px'; canvas.style.height = px + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, px, px);
+  ctx.fillStyle = '#000';
+  for (let r = 0; r < modules; r++)
+    for (let c = 0; c < modules; c++)
+      if (qr.isDark(r, c)) ctx.fillRect((c + border) * scale, (r + border) * scale, scale, scale);
+}
+
+function showError(msg) { $('err').textContent = msg || ''; }
+
+async function generate() {
+  const ledger = $('ledger').value.trim();
+  const deposit = $('deposit').value.trim();
+  const amount = parseInt($('amount').value, 10);
+  const message = $('message').value.trim();
+  showError('');
+  if (!ledger || !deposit) return showError('Ledger and deposit are required.');
+  if (!Number.isInteger(amount) || amount <= 0) return showError('Enter an amount in sats.');
+
+  const btn = $('gen');
+  btn.disabled = true; btn.textContent = 'Requesting invoice…';
+  try {
+    const params = new URLSearchParams({ ledger, deposit, amount_sats: String(amount) });
+    if (message) params.set('message', message);
+    if (relay) params.set('relay', relay);
+    const resp = await fetch('/api/request-to-pay?' + params.toString());
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.pr) {
+      const reason = data.reason || data.error || `request failed (${resp.status})`;
+      throw new Error(reason);
+    }
+    showInvoice(data.pr, amount, message);
+  } catch (e) {
+    showError(e.message || String(e));
+  } finally {
+    btn.disabled = false; btn.textContent = 'Generate invoice';
+  }
+}
+
+let currentInvoice = '';
+function showInvoice(pr, amountSats, message) {
+  currentInvoice = pr;
+  $('r-amt').textContent = '₿ ' + amountSats.toLocaleString() + ' sat';
+  $('r-for').textContent = message ? '“' + message + '”' : '';
+  $('r-invoice').textContent = pr;
+  renderQR($('qr'), pr);
+  $('form').style.display = 'none';
+  $('result').classList.add('show');
+}
+
+$('copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(currentInvoice);
+    $('copy').textContent = 'Copied!';
+    setTimeout(() => ($('copy').textContent = 'Copy invoice'), 1500);
+  } catch {
+    // Fallback: select the invoice text for manual copy.
+    const r = document.createRange(); r.selectNodeContents($('r-invoice'));
+    const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+  }
+});
+
+$('again').addEventListener('click', () => {
+  $('result').classList.remove('show');
+  $('form').style.display = '';
+  $('amount').value = ''; $('message').value = '';
+});
+
+$('gen').addEventListener('click', generate);
+for (const id of ['ledger', 'deposit', 'amount', 'message'])
+  $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter' && id !== 'message') generate(); });
+
+// Auto-generate when the URL fully specifies the request (shareable link).
+if (qp.get('ledger') && qp.get('deposit') && qp.get('amount')) generate();
+</script>
+</body>
+</html>
