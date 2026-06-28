@@ -1114,6 +1114,11 @@ if (typeof window !== 'undefined' &&
     maybeBuildReceiveWitness: (d, t) => maybeBuildReceiveWitness(d, t),
     deriveSecretKey: (seed, i) => deriveSecretKey(seed, i),
     getCompressedPubkey: (sk) => getCompressedPubkey(sk),
+    // Live-update surface (tests/browser/live-update.spec.mjs): drive the relay
+    // event handler and observe that our deposit's updates schedule a refresh.
+    handleLedgerUpdate: (ev) => handleLedgerUpdate(ev),
+    getOurDepositIds: () => getOurDepositIds(),
+    liveSyncCount: () => _liveSyncCount,
     // Live-drill surface (tests/browser/bridge-live.spec.mjs): drive the
     // DEP-10 bridge flows against a real cluster + bridge daemon.
     connect: () => connect(),
@@ -1574,6 +1579,20 @@ function scheduleReconnectSync() {
   }, 1500);
 }
 
+// Debounced balance refresh triggered by a live ledger update on one of our
+// deposits. A short delay coalesces a burst (transfer lock + complete, or an
+// LN lock + fulfill) into a single sync. `_liveSyncCount` is observed by tests.
+let _liveSyncTimer = null;
+let _liveSyncCount = 0;
+function scheduleLiveSync() {
+  _liveSyncCount++;
+  if (_liveSyncTimer) clearTimeout(_liveSyncTimer);
+  _liveSyncTimer = setTimeout(() => {
+    _liveSyncTimer = null;
+    if (state.deposits && state.deposits.length) syncAll().then(() => renderDeposits());
+  }, 400);
+}
+
 function connect() {
   // Close existing sockets
   for (const s of sockets) { try { s.ws.close(); } catch {} }
@@ -1780,18 +1799,25 @@ function handleLedgerUpdate(event) {
   if (seenUpdateIds.has(event.id)) return;
   seenUpdateIds.add(event.id);
 
+  // Is this update tagged with one of our deposits? The relay already filters by
+  // #i, but match locally too (other subscriptions deliver here, and the id set
+  // can lag a resubscribe). The decision is tag-only, so it holds even for ops
+  // whose content we don't decode.
+  const iTags = (event.tags || []).filter(t => t[0] === 'i').map(t => t[1]);
+  const ourIds = getOurDepositIds();
+  const matched = iTags.find(id => ourIds.includes(id));
+  if (!matched) return;
+
+  // Any state-changing op on our deposit warrants a prompt balance refresh — not
+  // just credits. Transfers out, LN fulfill/fail, and fee collects all move the
+  // balance and previously waited for the next debounced/manual sync to appear.
+  scheduleLiveSync();
+
+  // Credits additionally get a toast + close the receive pane.
   try {
     const u = decodeUpdate(event.content);
-    // Only care about credit operations
     if (u.opName !== 'InvoiceCredit' && u.opName !== 'OnchainCredit' && u.opName !== 'DepositCredit') return;
 
-    // Check if any tagged deposit ID is ours
-    const iTags = (event.tags || []).filter(t => t[0] === 'i').map(t => t[1]);
-    const ourIds = getOurDepositIds();
-    const matched = iTags.find(id => ourIds.includes(id));
-    if (!matched) return;
-
-    // Find the deposit
     const deposit = state.deposits.find(d => {
       if (!d.deposit_pubkey) return false;
       return bytesToHex(computeDepositId(hexToBytes(d.deposit_pubkey))) === matched;
@@ -1803,9 +1829,6 @@ function handleLedgerUpdate(event) {
     const alias = deposit ? deposit.alias : matched.slice(0, 8) + '...';
 
     log(`Received ₿${amtSats.toLocaleString()} on ${alias} (${u.opName})`, 'success');
-
-    // Update local balance and sync
-    syncAll().then(() => renderDeposits());
 
     // Close receive pane
     document.getElementById('wallet-receive').style.display = 'none';
