@@ -54,9 +54,10 @@
     .op { justify-self:start; display:inline-block; padding:0.1rem 0.5rem; border-radius:3px;
       font:600 0.72rem var(--mono); white-space:nowrap; }
     .op.credit{background:rgba(76,174,90,0.15);color:var(--green);}
-    .op.lock{background:rgba(240,173,78,0.15);color:var(--yellow);}
     .op.settle{background:rgba(70,199,199,0.14);color:#46c7c7;}
-    .op.fail{background:var(--border);color:var(--fg-muted);}
+    /* Locks (pending holds) and fails (released holds) are informative lifecycle
+       markers, not value movements — both rendered muted/de-emphasized. */
+    .op.lock,.op.fail{background:var(--border);color:var(--fg-muted);}
     .op.deposit{background:rgba(91,141,239,0.15);color:var(--blue);}
     .op.quorum{background:rgba(181,140,240,0.15);color:var(--purple);}
     .op.dispute{background:rgba(217,83,79,0.18);color:var(--red);}

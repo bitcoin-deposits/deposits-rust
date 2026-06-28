@@ -43,7 +43,7 @@ test.describe('wallet live deposit updates', () => {
     expect(r.afterDup).toBe(r.afterOurs);   // duplicate event deduped
   });
 
-  test('history sign: lock holds, fulfill debits, credit adds', async ({ page }) => {
+  test('history sign: only credit (+) and fulfill/fee (−) move; lock follows fail', async ({ page }) => {
     const s = await page.evaluate(() => {
       const f = window._test.historyOpSign;
       return {
@@ -54,15 +54,14 @@ test.describe('wallet live deposit updates', () => {
         fail: f('InvoiceFail'),
       };
     });
-    // Credit is the inflow (+); lock only holds (no sign); fulfill is the
-    // settled outflow (−); fee is a settled debit (−); fail releases (neutral).
-    expect(s.credit.sign).toBe('+');
-    expect(s.credit.hold).toBe(false);
-    expect(s.lock.hold).toBe(true);
-    expect(s.lock.sign).toBe('');     // a hold, never a minus
-    expect(s.fulfill.sign).toBe('-'); // the real outflow
-    expect(s.fulfill.hold).toBe(false);
-    expect(s.fee.sign).toBe('-');
+    // Value movements carry a sign; lifecycle markers don't.
+    expect(s.credit.sign).toBe('+');  // inflow
+    expect(s.fulfill.sign).toBe('-'); // settled outflow
+    expect(s.fee.sign).toBe('-');     // settled debit
+    // Lock (pending hold) and Fail (released hold) are both informative — same
+    // neutral treatment, no sign.
+    expect(s.lock.sign).toBe('');
     expect(s.fail.sign).toBe('');
+    expect(s.lock).toEqual(s.fail);   // lock follows fail
   });
 });
