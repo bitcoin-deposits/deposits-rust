@@ -30,6 +30,11 @@
     input:focus, textarea:focus { outline:none; border-color:var(--accent); }
     input.mono { font-family:var(--mono); font-size:0.8rem; }
     textarea { resize:vertical; min-height:2.4rem; }
+    .ctx { display:flex; align-items:baseline; justify-content:space-between; gap:0.5rem;
+      background:var(--bg-card); border:1px solid var(--border); border-radius:6px; padding:0.5rem 0.7rem; }
+    .ctx .k { color:var(--muted); font-size:0.72rem; text-transform:uppercase; letter-spacing:0.05em; }
+    .ctx .v { font-family:var(--mono); font-size:0.8rem; color:var(--fg); }
+    .ctx button { background:none; border:none; color:var(--accent); font:inherit; font-size:0.75rem; cursor:pointer; padding:0; }
     .btn { width:100%; margin-top:1.1rem; background:var(--accent); border:none; color:#1a1205;
       font:600 0.95rem var(--sans); border-radius:7px; padding:0.7rem; cursor:pointer; }
     .btn:disabled { opacity:0.55; cursor:default; }
@@ -44,8 +49,6 @@
     .invoice { font-family:var(--mono); font-size:0.7rem; color:var(--muted); background:var(--bg-card);
       border:1px solid var(--border); border-radius:6px; padding:0.6rem; margin-top:0.9rem;
       word-break:break-all; max-height:5.5rem; overflow:auto; text-align:left; }
-    .row { display:flex; gap:0.6rem; }
-    .row .btn { flex:1; }
     footer { margin-top:2rem; color:var(--dim); font-size:0.78rem; text-align:center; }
   </style>
 </head>
@@ -56,8 +59,16 @@
     <p class="lead">Generate an invoice for a deposit. Share the QR or the invoice string with whoever's paying.</p>
 
     <div id="form">
-      <label for="ledger">Ledger</label>
-      <input id="ledger" class="mono" placeholder="64-hex or bech32 ledger id" autocomplete="off">
+      <!-- Ledger comes from the page context (subdomain or #ledger=) when present. -->
+      <div id="ledger-ctx" class="ctx" style="display:none;">
+        <span><span class="k">Ledger</span> &nbsp;<span class="v" id="ledger-short"></span></span>
+        <button id="ledger-change" type="button">change</button>
+      </div>
+      <div id="ledger-row" style="display:none;">
+        <label for="ledger">Ledger</label>
+        <input id="ledger" class="mono" placeholder="64-hex or bech32 ledger id" autocomplete="off">
+      </div>
+
       <label for="deposit">Deposit</label>
       <input id="deposit" class="mono" placeholder="deposit id" autocomplete="off">
       <label for="amount">Amount (sats)</label>
@@ -73,9 +84,7 @@
       <div class="for" id="r-for"></div>
       <div class="qr-wrap"><canvas id="qr"></canvas></div>
       <div class="invoice" id="r-invoice"></div>
-      <div class="row">
-        <button class="btn" id="copy">Copy invoice</button>
-      </div>
+      <button class="btn" id="copy">Copy invoice</button>
       <button class="btn secondary" id="again">New request</button>
     </div>
 
@@ -88,13 +97,57 @@ import qrcode from './vendor/qrcode-generator.js';
 const $ = (id) => document.getElementById(id);
 const qp = new URLSearchParams(location.hash.replace(/^#/, '') || location.search);
 
-// Prefill from the URL so a request is shareable/linkable.
-for (const k of ['ledger', 'deposit', 'amount', 'message']) {
+const BECH32 = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+function bech32ToHex(s) {
+  let acc = 0, bits = 0; const out = [];
+  for (const ch of s.toLowerCase()) {
+    const v = BECH32.indexOf(ch);
+    if (v < 0) return null;
+    acc = (acc << 5) | v; bits += 5;
+    if (bits >= 8) { bits -= 8; out.push((acc >> bits) & 0xff); }
+  }
+  if (out.length !== 32) return null;
+  return out.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+// A ledger id from a value (64-hex or 52-bech32) → 64-hex, else null.
+function toHexLedger(v) {
+  if (!v) return null;
+  const s = v.trim().toLowerCase();
+  if (s.length === 64 && /^[0-9a-f]+$/.test(s)) return s;
+  if (s.length === 52) return bech32ToHex(s);
+  return null;
+}
+// Resolve the ledger from #ledger=/?ledger=, else the host subdomain. The page
+// is meant to live on a ledger subdomain or be reached from a ledger/deposit
+// page, so the ledger is usually already in context.
+function resolveLedger() {
+  const fromParam = toHexLedger(qp.get('ledger'));
+  if (fromParam) return fromParam;
+  const sub = location.hostname.split('.')[0];
+  return toHexLedger(sub);
+}
+
+const relay = qp.get('relay') || '';
+
+// Wire up the ledger context vs. manual-entry rows.
+const ctxLedger = resolveLedger();
+if (ctxLedger) {
+  $('ledger').value = ctxLedger;
+  $('ledger-short').textContent = ctxLedger.slice(0, 10) + '…' + ctxLedger.slice(-8);
+  $('ledger-ctx').style.display = 'flex';
+} else {
+  $('ledger-row').style.display = 'block';
+}
+$('ledger-change').addEventListener('click', () => {
+  $('ledger-ctx').style.display = 'none';
+  $('ledger-row').style.display = 'block';
+  $('ledger').focus();
+});
+
+for (const k of ['deposit', 'amount', 'message']) {
   const v = qp.get(k);
   if (v != null) $(k).value = v;
 }
-// Carry the relay through to the API if provided (operator may scope by it).
-const relay = qp.get('relay') || '';
 
 function renderQR(canvas, text, targetSize = 220) {
   const qr = qrcode(0, 'L');
@@ -123,7 +176,8 @@ async function generate() {
   const amount = parseInt($('amount').value, 10);
   const message = $('message').value.trim();
   showError('');
-  if (!ledger || !deposit) return showError('Ledger and deposit are required.');
+  if (!ledger) return showError('A ledger is required.');
+  if (!deposit) return showError('A deposit is required.');
   if (!Number.isInteger(amount) || amount <= 0) return showError('Enter an amount in sats.');
 
   const btn = $('gen');
@@ -135,8 +189,7 @@ async function generate() {
     const resp = await fetch('/api/request-to-pay?' + params.toString());
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || !data.pr) {
-      const reason = data.reason || data.error || `request failed (${resp.status})`;
-      throw new Error(reason);
+      throw new Error(data.reason || data.error || `request failed (${resp.status})`);
     }
     showInvoice(data.pr, amount, message);
   } catch (e) {
@@ -163,7 +216,6 @@ $('copy').addEventListener('click', async () => {
     $('copy').textContent = 'Copied!';
     setTimeout(() => ($('copy').textContent = 'Copy invoice'), 1500);
   } catch {
-    // Fallback: select the invoice text for manual copy.
     const r = document.createRange(); r.selectNodeContents($('r-invoice'));
     const s = getSelection(); s.removeAllRanges(); s.addRange(r);
   }
@@ -176,11 +228,11 @@ $('again').addEventListener('click', () => {
 });
 
 $('gen').addEventListener('click', generate);
-for (const id of ['ledger', 'deposit', 'amount', 'message'])
-  $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter' && id !== 'message') generate(); });
+for (const id of ['ledger', 'deposit', 'amount'])
+  $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') generate(); });
 
-// Auto-generate when the URL fully specifies the request (shareable link).
-if (qp.get('ledger') && qp.get('deposit') && qp.get('amount')) generate();
+// Auto-generate when the request is fully specified (shareable deep link).
+if ($('ledger').value && qp.get('deposit') && qp.get('amount')) generate();
 </script>
 </body>
 </html>

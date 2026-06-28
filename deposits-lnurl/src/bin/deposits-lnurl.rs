@@ -406,7 +406,7 @@ impl StaticAssets {
             explorer_deposits: load("explorer/deposits.html"),
             explorer_firehose: load("explorer/firehose.html"),
             wallet_index:      load("wallet/index.html"),
-            request_to_pay:    load("wallet/request-to-pay.html"),
+            request_to_pay:    load("explorer/request-to-pay.html"),
         }
     }
 }
