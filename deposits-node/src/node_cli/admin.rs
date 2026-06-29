@@ -30,12 +30,45 @@ pub async fn admin_command(args: &[String]) -> Result<(), Box<dyn std::error::Er
     }
     match args[0].as_str() {
         "buffer" => buffer_subcommand(&args[1..]).await,
+        "resync-owned" => resync_owned(&args[1..]).await,
         cmd => {
             eprintln!("unknown admin subcommand: {}", cmd);
             print_usage();
             Ok(())
         }
     }
+}
+
+/// `admin resync-owned [<ledger_id>]` — ask the running daemon to adopt the
+/// relay's canonical cosigned tip for an owned ledger (or all owned ledgers if
+/// none given). The on-demand form of the startup catch-up.
+async fn resync_owned(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut ledger_id: Option<String> = None;
+    let mut config_args: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            config_args.push(args[i].clone());
+            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                config_args.push(args[i + 1].clone());
+                i += 1;
+            }
+        } else if ledger_id.is_none() {
+            ledger_id = Some(args[i].clone());
+        }
+        i += 1;
+    }
+    let config = parse_config(&config_args)?;
+    let mut params = serde_json::json!({});
+    if let Some(lid) = ledger_id {
+        params["ledger_id"] = serde_json::Value::String(lid);
+    }
+    let result = send_admin_daemon_request(&config, "admin_resync_owned", params).await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
+    );
+    Ok(())
 }
 
 fn print_usage() {
@@ -49,6 +82,9 @@ fn print_usage() {
     eprintln!("      drain the buffer via InvoiceLock + InvoiceFulfill (no Lightning)");
     eprintln!("  buffer list");
     eprintln!("      list all opened buffer deposits and their balances");
+    eprintln!("  resync-owned [<ledger_id>]");
+    eprintln!("      adopt the relay's canonical cosigned tip for an owned ledger");
+    eprintln!("      (or all owned ledgers); recovers an operator that regressed");
 }
 
 async fn buffer_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {

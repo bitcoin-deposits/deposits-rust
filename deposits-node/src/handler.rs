@@ -1760,6 +1760,85 @@ impl DepositsHandler {
 
         Ok(applied)
     }
+
+    /// Adopt the relay's newer cosigned updates for a ledger we operate, IN
+    /// PLACE on the shared `Arc<RwLock<Ledger>>` (the same one the ledger's
+    /// actor holds — so this advances the operator's writer view, never a second
+    /// copy). `fetched` is the relay's chain for this ledger; we keep only the
+    /// real operator's signed updates beyond our tip, require the first to chain
+    /// onto our tip (else it's a fork at the tip → adopt nothing, never purge an
+    /// operated ledger), and apply via `apply_updates_to_ledger` (prefix-safe).
+    ///
+    /// This is the load-bearing recovery for an operator that restarted behind
+    /// its own already-cosigned chain (local state regressed). A cosigned update
+    /// is authentic — only the operator could have signed it and the quorum
+    /// cosigned it — so adopting it is correct, not a trust concession. Returns
+    /// the number of updates applied. Split from the relay fetch (in
+    /// `Node::catch_up_owned_ledger`) so the decision is unit-testable.
+    pub fn adopt_owned_updates(
+        &self,
+        ledger_id: &str,
+        fetched: Vec<SignedLedgerUpdate>,
+    ) -> usize {
+        let (local_next_seq, local_tip_hash, operator) = {
+            let ledgers = self.ledgers.lock().unwrap();
+            let Some(arc) = ledgers.get(ledger_id) else {
+                return 0;
+            };
+            let l = arc.read().unwrap();
+            (l.next_sequence(), l.tail_hash(), l.state.operator_key)
+        };
+
+        let mut new_updates: Vec<_> = fetched
+            .into_iter()
+            .filter(|u| u.sequence_number >= local_next_seq && u.operator_id == operator)
+            .collect();
+        new_updates.sort_by_key(|u| u.sequence_number);
+        new_updates.dedup_by_key(|u| u.sequence_number);
+        if new_updates.is_empty() {
+            return 0; // already at or ahead of the relay — nothing to adopt
+        }
+
+        if new_updates[0].sequence_number == local_next_seq
+            && new_updates[0].previous_hash != local_tip_hash
+        {
+            tracing::error!(
+                "adopt_owned_updates {}…: relay diverges from our tip at seq {} — not adopting (manual reconciliation needed)",
+                &ledger_id[..16.min(ledger_id.len())],
+                local_next_seq,
+            );
+            return 0;
+        }
+
+        match self.apply_updates_to_ledger(ledger_id, new_updates) {
+            Ok(applied) => {
+                if applied > 0 {
+                    let tip = self
+                        .ledgers
+                        .lock()
+                        .unwrap()
+                        .get(ledger_id)
+                        .map(|a| a.read().unwrap().state.sequence)
+                        .unwrap_or(0);
+                    tracing::info!(
+                        "adopt_owned_updates {}…: adopted {} cosigned update(s) from relay, tip now seq {}",
+                        &ledger_id[..16.min(ledger_id.len())],
+                        applied,
+                        tip,
+                    );
+                }
+                applied
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "adopt_owned_updates {}…: apply failed: {}",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    e
+                );
+                0
+            }
+        }
+    }
 }
 
 // ============================================================================

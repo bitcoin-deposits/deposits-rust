@@ -1013,6 +1013,95 @@ impl Node {
 
     /// Run the main event loop.
     /// Takes `&Arc<Self>` to enable per-ledger parallel dispatch via `tokio::spawn`.
+    /// Fetch the relay's chain for one of our OWN ledgers and adopt anything
+    /// newer than our local tip (see `adopt_owned_updates`). Used by the
+    /// one-shot startup catch-up and the `recovery resync-owned` command.
+    pub(crate) async fn catch_up_owned_ledger(&self, ledger_id: &str) -> Result<usize, Error> {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use nostr_sdk::{Filter, Kind, Timestamp};
+
+        let mut all_fetched: Vec<deposits_core::SignedLedgerUpdate> = Vec::new();
+        let mut cursor_ts: u64 = 0;
+        let mut pages = 0u32;
+        loop {
+            let mut filter = Filter::new()
+                .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
+                .custom_tag(
+                    crate::nostr::TAG_LEDGER_ID,
+                    [crate::nostr::ledger_tag(ledger_id)],
+                )
+                .limit(Self::RELAY_FETCH_PAGE_LIMIT);
+            if cursor_ts > 0 {
+                filter = filter.since(Timestamp::from(cursor_ts));
+            }
+            let events = self
+                .nostr
+                .fetch_client()
+                .fetch_events(vec![filter], Some(std::time::Duration::from_secs(15)))
+                .await
+                .map_err(|e| Error::Protocol(format!("catch_up fetch: {}", e)))?;
+            if events.is_empty() {
+                break;
+            }
+            let mut page_max_ts = cursor_ts;
+            let mut page_count = 0usize;
+            for event in events.iter() {
+                let ts = event.created_at.as_u64();
+                if let Ok(b) = BASE64.decode(&event.content) {
+                    if let Ok(u) = deposits_core::SignedLedgerUpdate::tlv_decode(&b) {
+                        if ts > page_max_ts {
+                            page_max_ts = ts;
+                        }
+                        all_fetched.push(u);
+                        page_count += 1;
+                    }
+                }
+            }
+            pages += 1;
+            if page_max_ts <= cursor_ts
+                || page_count < Self::RELAY_FETCH_MIN_PAGE
+                || pages >= Self::RELAY_FETCH_MAX_PAGES
+            {
+                break;
+            }
+            cursor_ts = page_max_ts;
+            tokio::task::yield_now().await;
+        }
+
+        Ok(self.handler.adopt_owned_updates(ledger_id, all_fetched))
+    }
+
+    /// One-shot at startup: for every ledger WE operate, adopt any newer
+    /// cosigned seqs the relay holds (local state can regress on restart and
+    /// lose updates we'd already published + the quorum cosigned). Without this
+    /// the operator would re-issue a conflicting seq and fork. Backgrounded by
+    /// the caller so relay fetches don't delay the main loop.
+    pub(crate) async fn catch_up_owned_ledgers_at_startup(self: &Arc<Self>) {
+        let owned: Vec<String> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter(|(_, a)| a.read().unwrap().operator_key() == self.node_id)
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        for lid in owned {
+            match self.catch_up_owned_ledger(&lid).await {
+                Ok(n) if n > 0 => tracing::info!(
+                    "startup catch-up: owned ledger {}… adopted {} update(s) from relay",
+                    &lid[..16.min(lid.len())],
+                    n
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    "startup catch-up: owned ledger {}… failed: {}",
+                    &lid[..16.min(lid.len())],
+                    e
+                ),
+            }
+        }
+    }
+
     pub async fn run(self: &Arc<Self>) -> Result<(), Error> {
         // Apply-edge dispute driver. When an actor signals
         // `dispute_wakeup` (after observing a fork-branch
@@ -1039,6 +1128,18 @@ impl Node {
                     )
                     .await;
                 }
+            });
+        }
+
+        // One-shot startup catch-up: adopt any newer cosigned seqs the relay has
+        // for ledgers WE operate (local state may have regressed on restart).
+        // Backgrounded so the paginated relay fetches don't delay the main loop;
+        // it advances the shared Arc in place, so the operator resumes writing
+        // from the real tip once it lands.
+        {
+            let node = Arc::clone(self);
+            tokio::spawn(async move {
+                node.catch_up_owned_ledgers_at_startup().await;
             });
         }
 

@@ -434,6 +434,57 @@ impl Node {
         (true, Some(result.to_string()), None)
     }
 
+    /// Admin: explicitly resync an owned ledger (or all owned ledgers) to the
+    /// relay's canonical cosigned tip — the on-demand form of the startup
+    /// catch-up, for when an operator regressed behind its own already-cosigned
+    /// chain and you don't want to wait for a restart. Adopts in place on the
+    /// shared Arc (advances the actor too); a fork at our tip is left untouched
+    /// for manual reconciliation. Optional `ledger_id` param; absent → all owned.
+    pub(crate) async fn process_admin_resync_owned_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+    ) -> (bool, Option<String>, Option<String>) {
+        if let Err(denial) = self.check_admin_authorized(request) {
+            return denial;
+        }
+
+        let targets: Vec<String> = match request.params.get("ledger_id").and_then(|v| v.as_str()) {
+            Some(lid) => vec![lid.to_string()],
+            None => {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .iter()
+                    .filter(|(_, a)| a.read().unwrap().operator_key() == self.node_id)
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            }
+        };
+
+        let mut resynced = Vec::new();
+        for lid in targets {
+            let adopted = self.catch_up_owned_ledger(&lid).await.unwrap_or(0);
+            let tip = self
+                .handler
+                .ledgers
+                .lock()
+                .unwrap()
+                .get(&lid)
+                .map(|a| a.read().unwrap().state.sequence)
+                .unwrap_or(0);
+            resynced.push(serde_json::json!({
+                "ledger_id": lid,
+                "adopted": adopted,
+                "tip_seq": tip,
+            }));
+        }
+
+        (
+            true,
+            Some(serde_json::json!({ "resynced": resynced }).to_string()),
+            None,
+        )
+    }
+
     /// Admin: drop an unfunded, PreQuorum ledger this node operates — for
     /// clearing orphan ledgers left by a messy bring-up.
     ///

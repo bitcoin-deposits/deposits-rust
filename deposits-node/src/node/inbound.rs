@@ -383,6 +383,7 @@ impl Node {
             "admin_buffer_drain" => self.process_admin_buffer_drain_request(&request).await,
             "admin_buffer_list" => self.process_admin_buffer_list_request(&request).await,
             "admin_status" => self.process_admin_status_request(&request).await,
+            "admin_resync_owned" => self.process_admin_resync_owned_request(&request).await,
             "ledger_drop" => self.process_ledger_drop_request(&request).await,
             "advertise_status" => self.process_advertise_status_request(&request).await,
             "advertise_set" => self.process_advertise_set_request(&request).await,
