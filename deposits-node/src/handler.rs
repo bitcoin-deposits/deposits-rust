@@ -1693,14 +1693,23 @@ impl DepositsHandler {
         let mut applied = 0;
 
         for update in updates {
-            // Verify this update follows the current chain
+            // Verify this update follows the current chain. Stop (don't error
+            // out) at the first non-chaining update so the validated prefix
+            // before it is still applied and persisted — a single broken/forked
+            // update partway through a relay batch must not discard the real,
+            // cosigned updates ahead of it (otherwise a node behind the relay
+            // never catches up past the break).
             if update.previous_hash != ledger.tail_hash() {
-                return Err(format!(
-                    "Update {} has wrong previous_hash (expected {}, got {})",
+                tracing::warn!(
+                    "apply_updates_to_ledger {}: chain break at seq {} (expected prev {}, got {}) — \
+                     applied {} so far, stopping",
+                    ledger_id,
                     update.sequence_number,
                     hex::encode(&ledger.tail_hash()[..8]),
-                    hex::encode(&update.previous_hash[..8])
-                ));
+                    hex::encode(&update.previous_hash[..8]),
+                    applied,
+                );
+                break;
             }
 
             // Run the state machine — don't just append. Appending to history

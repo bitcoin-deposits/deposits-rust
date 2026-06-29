@@ -528,16 +528,23 @@ impl Node {
 
         use nostr_sdk::{Filter, Kind, Timestamp};
 
-        // Skip our own ledgers — they're managed via open_ledger, not reimport
-        {
+        // Our own ledgers are normally managed via open_ledger — we're the
+        // writer, so we're ahead of the relay and reimport is a no-op. But if we
+        // came up BEHIND the relay (local state regressed on restart and lost
+        // updates we'd already published *and* the quorum cosigned), we must
+        // adopt those newer cosigned seqs — they're authentic (only we could
+        // have signed them, and they carry quorum cosignatures) — rather than
+        // fork by re-issuing a conflicting seq. So don't skip outright: run the
+        // incremental fast path (which no-ops when we're already caught up), but
+        // never the destructive purge / genesis-rebuild path for an owned
+        // ledger (that would discard authoritative local state for a possibly
+        // forked relay copy).
+        let is_own = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            let is_own = ledgers.iter().any(|(k, arc)| {
+            ledgers.iter().any(|(k, arc)| {
                 k.starts_with(ledger_id) && arc.read().unwrap().operator_key() == self.node_id
-            });
-            if is_own {
-                return Ok(()); // silently skip our own ledger
-            }
-        }
+            })
+        };
 
         let local_tip_seq = {
             let ledgers = self.handler.ledgers.lock().unwrap();
@@ -696,6 +703,19 @@ impl Node {
             if new_updates[0].sequence_number == local_next_seq
                 && new_updates[0].previous_hash != local_tip_hash
             {
+                if is_own {
+                    // Our own operated ledger disagrees with the relay at our
+                    // very tip — a genuine fork, not a catch-up. Never
+                    // purge+rebuild an owned ledger from the relay; that would
+                    // throw away authoritative local state. Leave it for manual
+                    // reconciliation.
+                    tracing::error!(
+                        "Owned ledger {}... diverges from relay at seq {} (tip fork) — NOT purging, needs manual reconciliation",
+                        &ledger_id[..16.min(ledger_id.len())],
+                        local_next_seq,
+                    );
+                    return Ok(());
+                }
                 tracing::warn!(
                     "Chain break on ledger {}... at seq {} — purging and re-importing from genesis",
                     &ledger_id[..16.min(ledger_id.len())],
@@ -733,6 +753,14 @@ impl Node {
         }
 
         if need_full_reimport {
+            if is_own {
+                // Never rebuild an operated ledger from genesis off the relay.
+                tracing::error!(
+                    "Refusing genesis rebuild of owned ledger {}... from relay",
+                    &ledger_id[..16.min(ledger_id.len())],
+                );
+                return Ok(());
+            }
             // --- Slow path: new ledger, full import from genesis ---
             let mut updates: Vec<deposits_core::SignedLedgerUpdate> = all_fetched;
             updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.content_hash));
