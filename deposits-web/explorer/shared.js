@@ -120,7 +120,7 @@ export function installTopNav(opts = {}) {
   const path = window.location.pathname;
   let active;
   if (path.startsWith('/nodes')) active = 'nodes';
-  else if (path.startsWith('/live') || path.startsWith('/firehose')) active = 'live';
+  else if (path.startsWith('/live')) active = 'live';
   else if (path.startsWith('/deposit')) active = 'deposits'; // /deposit + /deposits
   else active = 'ledgers'; // /ledgers, /explorer, /ledger, /update, /
 
