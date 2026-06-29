@@ -1,5 +1,58 @@
 use super::*;
 
+/// Process-global TTL cache for `list_payments`.
+///
+/// Both `auto_credit_received_payments` and `auto_complete_outbound_payments`
+/// poll the LN backend every periodic tick (every 5s under fast-poll). Without
+/// this, each re-dumps the node's ENTIRE payment history — thousands of entries
+/// and growing — just to match a handful of pending hashes (the log line
+/// "Lightning backend returned 2120 payments" every few seconds). One shared
+/// snapshot per TTL is plenty: settlement detection tolerates a few seconds of
+/// staleness, and the next tick credits/fulfills anything missed. Single LN
+/// backend per process (`from_env`), so a global cache is correct.
+static LN_PAYMENTS_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<
+        Option<(std::time::Instant, std::sync::Arc<Vec<crate::lightning_backend::PaymentInfo>>)>,
+    >,
+> = std::sync::OnceLock::new();
+
+type PaymentsSnapshot = std::sync::Arc<Vec<crate::lightning_backend::PaymentInfo>>;
+type PaymentsCell = std::sync::Mutex<Option<(std::time::Instant, PaymentsSnapshot)>>;
+
+/// Cache core: return the snapshot in `cell` if younger than `ttl`, else
+/// `fetch` a fresh one and store it. Split out from `cached_list_payments` so
+/// the TTL behaviour is unit-testable without a live LN backend.
+fn cached_list_payments_in<F>(
+    cell: &PaymentsCell,
+    ttl: std::time::Duration,
+    fetch: F,
+) -> Result<PaymentsSnapshot, crate::Error>
+where
+    F: FnOnce() -> Result<Vec<crate::lightning_backend::PaymentInfo>, crate::Error>,
+{
+    if let Some((at, snapshot)) = cell.lock().unwrap().as_ref() {
+        if at.elapsed() < ttl {
+            return Ok(snapshot.clone());
+        }
+    }
+    let fresh = std::sync::Arc::new(fetch()?);
+    *cell.lock().unwrap() = Some((std::time::Instant::now(), fresh.clone()));
+    Ok(fresh)
+}
+
+/// Return a recent `list_payments` snapshot, refreshing from the backend only
+/// when the cached one is older than `ttl`.
+fn cached_list_payments(ttl: std::time::Duration) -> Result<PaymentsSnapshot, crate::Error> {
+    let cell = LN_PAYMENTS_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    cached_list_payments_in(cell, ttl, || {
+        crate::lightning_backend::from_env().list_payments()
+    })
+}
+
+/// How stale a `list_payments` snapshot may be before a refresh. Decouples the
+/// LN poll from the (fast) periodic cadence so we don't re-dump every 5s.
+const LN_PAYMENTS_TTL: std::time::Duration = std::time::Duration::from_secs(20);
+
 impl Node {
     // Auto-Response Tasks
     // ========================================================================
@@ -367,12 +420,12 @@ impl Node {
 
         tracing::info!("auto_credit: checking {} pending invoice(s)", pending.len());
 
-        // Query the Lightning backend for payment status
-        let cli = crate::lightning_backend::from_env();
-        let payments = match cli.list_payments() {
+        // Query the Lightning backend for payment status (cached snapshot, so we
+        // don't re-dump the whole payment history every tick).
+        let payments = match cached_list_payments(LN_PAYMENTS_TTL) {
             Ok(payments) => {
-                tracing::info!(
-                    "auto_credit: Lightning backend returned {} payments",
+                tracing::debug!(
+                    "auto_credit: matching against {} payment(s) (cached snapshot)",
                     payments.len()
                 );
                 payments
@@ -518,7 +571,7 @@ impl Node {
         );
 
         let cli = crate::lightning_backend::from_env();
-        let payments = match cli.list_payments() {
+        let payments = match cached_list_payments(LN_PAYMENTS_TTL) {
             Ok(payments) => payments,
             Err(e) => {
                 // The LN node is unreachable — exactly when locks pile up. We
@@ -1433,5 +1486,32 @@ struct InFlightGuard {
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.set.lock().unwrap().remove(&self.id);
+    }
+}
+
+#[cfg(test)]
+mod ln_payments_cache_tests {
+    use super::{cached_list_payments_in, PaymentsCell};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    // The whole point of the cache: auto_credit + auto_complete poll every few
+    // seconds, but the backend is hit at most once per TTL — not re-dumping the
+    // full payment history on every tick.
+    #[test]
+    fn refreshes_only_after_ttl_elapses() {
+        let cell: PaymentsCell = std::sync::Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+        let ttl = Duration::from_millis(60);
+
+        // First call fetches; a second within the TTL is served from cache.
+        cached_list_payments_in(&cell, ttl, || { calls.fetch_add(1, Ordering::SeqCst); Ok(vec![]) }).unwrap();
+        cached_list_payments_in(&cell, ttl, || { calls.fetch_add(1, Ordering::SeqCst); Ok(vec![]) }).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "second call within TTL must not hit the backend");
+
+        // After the TTL, the next call refreshes.
+        std::thread::sleep(Duration::from_millis(75));
+        cached_list_payments_in(&cell, ttl, || { calls.fetch_add(1, Ordering::SeqCst); Ok(vec![]) }).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "call after TTL must refresh from the backend");
     }
 }
