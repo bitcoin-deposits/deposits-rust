@@ -341,38 +341,77 @@ impl Node {
         // (0-indexed: first entry = seq 0).  Our local copy should have the same
         // number of entries as the operator had before appending.
         //
-        // Only reject if we're BEHIND the operator (we're missing history they already
-        // have). Being AHEAD is fine — Nostr broadcasts arrive at quorum members faster
-        // than cosign requests, so at high TPS members are typically 1-2 seqs ahead.
-        // The stale recovery block above handles the "we're behind" case; this block
-        // is a safety net for exact-match validation only.
+        // Anti-equivocation gate: a cosigner only ever signs a STRICTLY-ADVANCING
+        // sequence (the next one we don't have yet), or — idempotently — the
+        // *exact* update it already holds at an already-committed sequence.
+        // Putting our signature on a DIFFERENT update at a sequence we've already
+        // committed is equivocation, and it's the whole reason a single operator
+        // state-rollback cascaded into two separately-2/2-cosigned seq-11080s:
+        // the old gate only rejected "ahead of me" and happily re-signed anything
+        // at-or-below our tip. Cosigners are kept current by the freshness barrier,
+        // so checking the request against our own committed history is sufficient.
         if let Some(ref arc) = operator_ledger_arc {
             let ledger = arc.read().unwrap();
             let expected_seq = ledger.next_sequence();
-            if sequence_number > expected_seq {
-                tracing::info!(
-                    "Cosign seq mismatch: expected {}, got {} for {}...",
-                    expected_seq,
-                    sequence_number,
-                    &request.ledger_id[..16.min(request.ledger_id.len())]
-                );
-                return (
-                    false,
-                    None,
-                    Some(format!(
-                        "Seq mismatch: expected {}, got {}",
-                        expected_seq, sequence_number
-                    )),
-                );
-            }
-
-            if let Some(last_update) = ledger.history.last() {
-                let prev_hash = last_update.content_hash;
-                tracing::trace!(
-                    "Validating co-sign for seq {} (prev_hash: {}...)",
-                    sequence_number,
-                    &hex::encode(&prev_hash[..4])
-                );
+            // What (if anything) we already committed at this sequence — looked
+            // up in our in-memory history window (newest-first).
+            let committed = ledger
+                .history
+                .iter()
+                .rev()
+                .find(|u| u.sequence_number == sequence_number)
+                .map(|u| u.content_hash);
+            let lid = &request.ledger_id[..16.min(request.ledger_id.len())];
+            match cosign_seq_gate(sequence_number, expected_seq, committed, _content_hash) {
+                CosignSeqGate::Allow => {}
+                CosignSeqGate::Behind => {
+                    tracing::info!(
+                        "Cosign seq mismatch: expected {}, got {} for {}...",
+                        expected_seq, sequence_number, lid
+                    );
+                    return (
+                        false,
+                        None,
+                        Some(format!(
+                            "Seq mismatch: expected {}, got {}",
+                            expected_seq, sequence_number
+                        )),
+                    );
+                }
+                CosignSeqGate::Equivocation => {
+                    tracing::warn!(
+                        "Cosign REFUSED (equivocation): seq {} already committed to a \
+                         different update than requested ({}…) for {}...",
+                        sequence_number,
+                        hex::encode(&_content_hash[..4]),
+                        lid
+                    );
+                    return (
+                        false,
+                        None,
+                        Some(format!(
+                            "Equivocation refused: seq {} already committed to a different update",
+                            sequence_number
+                        )),
+                    );
+                }
+                CosignSeqGate::OutsideWindow => {
+                    tracing::warn!(
+                        "Cosign REFUSED: seq {} below tip {} but outside history window \
+                         for {}... — cannot verify non-equivocation",
+                        sequence_number,
+                        expected_seq.saturating_sub(1),
+                        lid
+                    );
+                    return (
+                        false,
+                        None,
+                        Some(format!(
+                            "Cannot verify seq {} (below tip, outside window)",
+                            sequence_number
+                        )),
+                    );
+                }
             }
         }
 
@@ -1013,4 +1052,85 @@ impl Node {
         (true, Some(result.to_string()), None)
     }
 
+}
+
+/// Outcome of the anti-equivocation sequence gate (see `cosign_seq_gate`).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CosignSeqGate {
+    /// Sign it: either the next sequence we don't have, or the *identical*
+    /// update we already hold at an already-committed sequence (idempotent).
+    Allow,
+    /// The request is ahead of us — we're missing history; catch up, don't sign.
+    Behind,
+    /// A *different* update at a sequence we already committed → equivocation.
+    Equivocation,
+    /// Below our tip but pruned out of our history window — can't prove it isn't
+    /// equivocation, so refuse.
+    OutsideWindow,
+}
+
+/// The cosigner's core safety rule, factored out pure so it's unit-testable.
+///
+/// A correct cosigner only ever puts its signature on a STRICTLY-ADVANCING
+/// sequence (`expected_seq`, the next one it doesn't yet have), or — to tolerate
+/// the high-TPS case where a member runs 1-2 seqs ahead of the cosign request —
+/// the *exact same* update it already committed at an already-passed sequence.
+/// Signing a *different* update at an already-committed sequence is equivocation,
+/// which is how one operator state-rollback produced two separately-2/2-cosigned
+/// seq-11080s. The old gate only rejected the `Behind` case.
+pub(crate) fn cosign_seq_gate(
+    sequence_number: u64,
+    expected_seq: u64,
+    committed_hash_at_seq: Option<[u8; 32]>,
+    requested_hash: [u8; 32],
+) -> CosignSeqGate {
+    use std::cmp::Ordering::*;
+    match sequence_number.cmp(&expected_seq) {
+        Greater => CosignSeqGate::Behind,
+        Equal => CosignSeqGate::Allow, // the next update we don't have yet
+        Less => match committed_hash_at_seq {
+            Some(h) if h == requested_hash => CosignSeqGate::Allow, // idempotent re-sign
+            Some(_) => CosignSeqGate::Equivocation,
+            None => CosignSeqGate::OutsideWindow,
+        },
+    }
+}
+
+#[cfg(test)]
+mod cosign_seq_gate_tests {
+    use super::{cosign_seq_gate, CosignSeqGate};
+    const A: [u8; 32] = [0xAA; 32];
+    const B: [u8; 32] = [0xBB; 32];
+
+    #[test]
+    fn signs_the_next_sequence() {
+        // tip=9 (expected_seq=10), asked to sign 10 → the normal next update.
+        assert_eq!(cosign_seq_gate(10, 10, None, A), CosignSeqGate::Allow);
+    }
+
+    #[test]
+    fn refuses_when_behind() {
+        // asked to sign 12 but we only expect 10 → we're missing history.
+        assert_eq!(cosign_seq_gate(12, 10, None, A), CosignSeqGate::Behind);
+    }
+
+    #[test]
+    fn idempotent_resign_of_identical_update_allowed() {
+        // We're ahead (expected 10) and asked to re-sign 8 with the SAME hash
+        // we committed there → fine (high-TPS retry case).
+        assert_eq!(cosign_seq_gate(8, 10, Some(A), A), CosignSeqGate::Allow);
+    }
+
+    #[test]
+    fn different_update_at_committed_seq_is_equivocation() {
+        // The whole incident: asked to sign a DIFFERENT update at a seq we
+        // already committed → refuse. (Pre-fix this returned Allow.)
+        assert_eq!(cosign_seq_gate(8, 10, Some(A), B), CosignSeqGate::Equivocation);
+    }
+
+    #[test]
+    fn below_tip_but_pruned_is_refused() {
+        // Below tip but not in our window → can't verify → refuse.
+        assert_eq!(cosign_seq_gate(8, 10, None, A), CosignSeqGate::OutsideWindow);
+    }
 }
