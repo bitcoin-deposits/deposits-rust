@@ -1728,50 +1728,76 @@ impl NostrTransport {
     /// Subscribe with compacted global filters (3 kind-based filters instead of per-ledger).
     /// Replaces subscribe_to_ledgers_batch for the daemon. Per-ledger filtering happens
     /// in-process via interested_ledgers, not at the relay level.
+    /// The operator's standing inbound filters, built with a fresh `since`
+    /// (short lookback to keep the on-(re)subscribe historical dump tiny).
+    fn global_filters() -> Vec<Filter> {
+        let since = nostr_sdk::Timestamp::now() - 5;
+        vec![
+            // Requests (ephemeral kind 20101)
+            Filter::new().kind(Kind::Custom(KIND_LEDGER_REQUEST)).since(since),
+            // Responses (ephemeral kind 20102)
+            Filter::new().kind(Kind::Custom(KIND_LEDGER_RESPONSE)).since(since),
+            // Updates (durable kind 9100)
+            Filter::new().kind(Kind::Custom(KIND_LEDGER_UPDATE)).since(since),
+            // Disputes (durable kind 9103)
+            Filter::new().kind(Kind::Custom(KIND_LEDGER_DISPUTE)).since(since),
+            // Fraud proofs (durable kind 9101)
+            Filter::new().kind(Kind::Custom(KIND_FRAUD_PROOF)).since(since),
+        ]
+    }
+
+    /// (Re)issue the global subscription under a FIXED subscription id, so a
+    /// refresh overwrites the existing REQ rather than piling up a new one each
+    /// time. Always sends.
+    async fn issue_global_subscription(&self) -> Result<(), Error> {
+        self.client
+            .subscribe_with_id(
+                SubscriptionId::new("global_compacted"),
+                Self::global_filters(),
+                None,
+            )
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to subscribe (global): {}", e)))?;
+        self.active_subscriptions
+            .write()
+            .unwrap()
+            .insert("global_compacted".to_string());
+        Ok(())
+    }
+
     pub async fn subscribe_global(&self) -> Result<(), Error> {
-        let sub_key = "global_compacted".to_string();
         {
             let subs = self.active_subscriptions.read().unwrap();
-            if subs.contains(&sub_key) {
+            if subs.contains("global_compacted") {
                 return Ok(());
             }
         }
-
-        let since = nostr_sdk::Timestamp::now() - 5;
-
-        let filters = vec![
-            // Requests (ephemeral kind 20101)
-            Filter::new()
-                .kind(Kind::Custom(KIND_LEDGER_REQUEST))
-                .since(since),
-            // Responses (ephemeral kind 20102)
-            Filter::new()
-                .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
-                .since(since),
-            // Updates (durable kind 9100)
-            Filter::new()
-                .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-                .since(since),
-            // Disputes (durable kind 9103)
-            Filter::new()
-                .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
-                .since(since),
-            // Fraud proofs (durable kind 9101)
-            Filter::new()
-                .kind(Kind::Custom(KIND_FRAUD_PROOF))
-                .since(since),
-        ];
-
-        self.client
-            .subscribe(filters, None)
-            .await
-            .map_err(|e| Error::Nostr(format!("Failed to subscribe (global): {}", e)))?;
-
-        self.active_subscriptions.write().unwrap().insert(sub_key);
+        self.issue_global_subscription().await?;
         tracing::info!(
-            "Subscribed with 4 global compacted filters (requests, responses, updates, disputes)"
+            "Subscribed with 5 global compacted filters (requests, responses, updates, disputes, fraud)"
         );
         Ok(())
+    }
+
+    /// Re-issue the global subscription unconditionally. Heals a "relay-deaf"
+    /// daemon — one whose REQ was silently dropped (relay restart, or a CLOSED
+    /// the client never noticed) while the socket stayed up, so it kept
+    /// publishing ads but stopped answering requests. The operator loop calls
+    /// this on relay reconnect and on a slow heartbeat; `subscribe_global`
+    /// alone can't self-heal because it no-ops once subscribed.
+    pub async fn refresh_global_subscription(&self) -> Result<(), Error> {
+        self.issue_global_subscription().await?;
+        tracing::debug!("Refreshed global subscription (relay-deaf guard)");
+        Ok(())
+    }
+
+    /// True if at least one fast relay is currently connected.
+    pub async fn any_relay_connected(&self) -> bool {
+        self.client
+            .relays()
+            .await
+            .values()
+            .any(|r| r.status() == nostr_sdk::RelayStatus::Connected)
     }
 
     /// Get our nostr keys for signing
@@ -5627,5 +5653,39 @@ mod ledger_advertisement_tests {
         assert_eq!(bps, 50);
         // 52560 / 2016 = 26 periods/year; 2_500_000 / 26 = 96_153 msats/period
         assert_eq!(fixed_per_period, 96_153);
+    }
+}
+
+#[cfg(test)]
+mod relay_deaf_guard_tests {
+    use super::*;
+
+    /// The operator's standing inbound filters must cover requests (the kind
+    /// that goes "deaf" and strands the swarm) plus responses, updates,
+    /// disputes, and fraud proofs. `refresh_global_subscription` re-issues
+    /// exactly these on reconnect, so a dropped filter here is what would let a
+    /// daemon publish ads but answer nothing.
+    #[test]
+    fn global_filters_cover_the_inbound_kinds() {
+        let filters = NostrTransport::global_filters();
+        assert_eq!(filters.len(), 5, "expected 5 global filters");
+        let mut kinds: Vec<u16> = filters
+            .iter()
+            .flat_map(|f| f.kinds.iter().flatten().map(|k| k.as_u16()))
+            .collect();
+        kinds.sort_unstable();
+        assert_eq!(
+            kinds,
+            vec![
+                KIND_LEDGER_UPDATE,   // 9100
+                KIND_FRAUD_PROOF,     // 9101
+                KIND_LEDGER_DISPUTE,  // 9103
+                KIND_LEDGER_REQUEST,  // 20101 — the relay-deaf-critical one
+                KIND_LEDGER_RESPONSE, // 20102
+            ],
+        );
+        // Every filter must carry a `since` so a refresh only pulls a tiny
+        // forward window, not a full history re-dump (which risks EAGAIN drops).
+        assert!(filters.iter().all(|f| f.since.is_some()), "all filters need a `since`");
     }
 }

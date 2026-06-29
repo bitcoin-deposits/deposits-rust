@@ -1194,6 +1194,12 @@ impl Node {
 
         // Track last request poll time (fallback for missed subscription events)
         let mut last_poll = tokio::time::Instant::now();
+
+        // Relay-deaf guard: re-issue the global subscription on relay reconnect,
+        // plus a slow heartbeat as a backstop for silent REQ drops (where the
+        // socket stays up but the relay forgot our subscription).
+        let mut was_relay_connected = true;
+        let mut last_sub_refresh = tokio::time::Instant::now();
         let poll_interval = tokio::time::Duration::from_secs(30); // Safety net only — subscriptions handle real-time delivery
 
         // Track last periodic tasks time (wallet sync, auto-complete deposits, etc.)
@@ -1520,17 +1526,42 @@ impl Node {
                         }
                     }
 
-                    // Subscribe with compacted global filters (4 filters instead of 36+ per-ledger).
+                    // Subscribe with compacted global filters (5 filters instead of 36+ per-ledger).
                     // Per-ledger filtering happens in-process via interested_ledgers.
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        self.nostr.subscribe_global(),
-                    )
-                    .await
+                    //
+                    // Re-issue the subscription on relay reconnect (and on a 60s
+                    // backstop for silent drops) so the daemon can't go
+                    // "relay-deaf" — publishing ads but answering nothing.
+                    // subscribe_global() no-ops once subscribed, so it can't
+                    // self-heal a dropped REQ on its own.
                     {
-                        Ok(Err(e)) => tracing::debug!("Global subscribe failed: {}", e),
-                        Err(_) => tracing::error!("subscribe_global timed out after 5s"),
-                        _ => {}
+                        let connected = self.nostr.any_relay_connected().await;
+                        let reconnected = connected && !was_relay_connected;
+                        was_relay_connected = connected;
+                        let backstop_due =
+                            last_sub_refresh.elapsed() >= std::time::Duration::from_secs(60);
+                        let r = if reconnected || backstop_due {
+                            last_sub_refresh = tokio::time::Instant::now();
+                            if reconnected {
+                                tracing::info!("relay reconnected — refreshing global subscription");
+                            }
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                self.nostr.refresh_global_subscription(),
+                            )
+                            .await
+                        } else {
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                self.nostr.subscribe_global(),
+                            )
+                            .await
+                        };
+                        match r {
+                            Ok(Err(e)) => tracing::debug!("Global subscribe failed: {}", e),
+                            Err(_) => tracing::error!("subscribe/refresh global timed out after 5s"),
+                            _ => {}
+                        }
                     }
 
                     // Background gap-fill for stale joined ledgers.
