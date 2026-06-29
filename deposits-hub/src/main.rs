@@ -862,9 +862,16 @@ fn cmd_status(args: &[String]) -> Result<(), String> {
                         .filter(|l| l.get("quorum_active").and_then(|v| v.as_bool()).unwrap_or(false))
                         .count();
                     let member_count = ledgers.len() - owned.len();
+                    // Running commit of this daemon. Older daemons predate the
+                    // SHA field and report nothing — show "sha=?" for those.
+                    // Flag any node not on the hub's own build as stale code.
+                    let sha = res.get("sha").and_then(|v| v.as_str()).unwrap_or("?");
+                    let stale = sha != "?" && sha != env!("GIT_SHA");
                     println!(
-                        "{}  tip={}  wallet={} sats  owned: {}/{} active (+{} member replicas)",
+                        "{}  sha={}{}  tip={}  wallet={} sats  owned: {}/{} active (+{} member replicas)",
                         name,
+                        sha,
+                        if stale { " (STALE — not hub's build)" } else { "" },
                         tip,
                         bal,
                         owned_active,

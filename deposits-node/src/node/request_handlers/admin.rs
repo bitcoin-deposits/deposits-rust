@@ -429,6 +429,11 @@ impl Node {
             "network": format!("{:?}", self.wallet.network()),
             "chain_tip": chain_tip,
             "wallet_balance_sats": wallet_balance,
+            // Which commit this daemon is actually running — so `deposits-hub
+            // status` can flag a node still on stale code after a redeploy.
+            "version": env!("CARGO_PKG_VERSION"),
+            "sha": env!("GIT_SHA"),
+            "built": env!("BUILD_TIMESTAMP"),
             "ledgers": ledgers,
         });
         (true, Some(result.to_string()), None)
