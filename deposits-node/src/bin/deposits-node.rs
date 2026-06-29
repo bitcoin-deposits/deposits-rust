@@ -121,8 +121,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "health" => node_cli::health::health_command(&args[2..]).await?,
         "version" | "--version" | "-V" => {
             println!(
-                "deposits-node {} (built {})",
+                "deposits-node {} (sha {}, built {})",
                 env!("CARGO_PKG_VERSION"),
+                env!("GIT_SHA"),
                 env!("BUILD_TIMESTAMP")
             );
         }

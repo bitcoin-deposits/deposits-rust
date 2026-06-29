@@ -160,6 +160,15 @@ fn main() -> ExitCode {
             print!("{}", USAGE);
             Ok(())
         }
+        "version" | "-V" | "--version" => {
+            println!(
+                "deposits-hub {} (sha {}, built {})",
+                env!("CARGO_PKG_VERSION"),
+                env!("GIT_SHA"),
+                env!("BUILD_TIMESTAMP")
+            );
+            Ok(())
+        }
         "run" => cmd_run(rest),
         "pubkey" => cmd_pubkey(rest),
         "approve" => cmd_approve(rest),

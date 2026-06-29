@@ -49,7 +49,12 @@ impl Node {
             tracing::warn!("Failed to subscribe globally: {}", e);
         }
 
-        tracing::info!("Node started, listening for messages");
+        tracing::info!(
+            "Node started, listening for messages — deposits-node {} (sha {}, built {})",
+            env!("CARGO_PKG_VERSION"),
+            env!("GIT_SHA"),
+            env!("BUILD_TIMESTAMP")
+        );
         Ok(())
     }
 

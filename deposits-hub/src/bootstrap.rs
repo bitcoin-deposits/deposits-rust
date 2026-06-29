@@ -475,6 +475,25 @@ fn node_name(i: u32) -> String {
     format!("node{}", i)
 }
 
+/// Run `<node_bin> version` and return its trimmed first line (e.g.
+/// `deposits-node 0.1.0 (sha abc123, built …)`). Lets bootstrap show the exact
+/// commit of the binary it's deploying — the stale-binary guard.
+fn node_binary_version(node_bin: &Path) -> Result<String, String> {
+    let out = std::process::Command::new(node_bin)
+        .arg("version")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("exited {}", out.status));
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .map(|l| l.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "empty version output".to_string())
+}
+
 /// Run the deposits-node CLI with config flags appended; capture output.
 async fn node_cli(
     args: &BootstrapArgs,
@@ -652,6 +671,23 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     }
     let args = parse_args(rest)?;
     std::fs::create_dir_all(&args.data_dir).map_err(|e| e.to_string())?;
+
+    // Which code is being deployed? Print the hub's own commit and — the part
+    // that actually matters — the SHA baked into the node binary we're about to
+    // (re)spawn. A redeploy that restarts daemons onto a stale binary is exactly
+    // the failure this surfaces: if `node binary` SHA doesn't match what you
+    // just built, you're shipping old code.
+    println!(
+        "deploy — hub {} (sha {}, built {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_SHA"),
+        env!("BUILD_TIMESTAMP")
+    );
+    println!("       — node binary {}", args.node_bin.display());
+    match node_binary_version(&args.node_bin) {
+        Ok(v) => println!("       — {}", v),
+        Err(e) => println!("       — WARNING: could not read node binary version: {}", e),
+    }
 
     let master = state::HubState::load_or_init_master_seed(&args.data_dir)
         .map_err(|e| format!("master seed: {:?}", e))?;

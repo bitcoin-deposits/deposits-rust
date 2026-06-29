@@ -1,9 +1,8 @@
 use std::process::Command;
 
-/// Emit `BUILD_TIMESTAMP` and `GIT_SHA` so the binary can report exactly which
-/// commit it was built from. The stale-binary redeploy incident (a restart that
-/// silently re-ran old code) is why the SHA is baked in and logged at startup —
-/// `grep` the daemon log and the deployed commit is right there.
+/// Emit `BUILD_TIMESTAMP` and `GIT_SHA` so the hub can report exactly which
+/// commit it (and the node binary it deploys) was built from. Mirror of
+/// `deposits-node/build.rs`; see that file for the why (stale-binary redeploy).
 fn main() {
     let timestamp = Command::new("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
@@ -14,13 +13,12 @@ fn main() {
 
     println!("cargo:rustc-env=GIT_SHA={}", git_sha());
 
-    // Rebuild when HEAD moves (commit / checkout) so the SHA stays current.
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/index");
 }
 
 /// `<short-sha>` or `<short-sha>-dirty`, falling back to `"unknown"` outside a
-/// git checkout (e.g. a vendored source tarball).
+/// git checkout.
 fn git_sha() -> String {
     let sha = Command::new("git")
         .args(["rev-parse", "--short=12", "HEAD"])
