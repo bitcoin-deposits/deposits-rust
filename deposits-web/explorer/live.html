@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Firehose · Deposits Explorer</title>
+  <title>Live · Deposits Explorer</title>
   <style>
     :root {
       --bg:#11131f; --bg-elev:#181c2c; --bg-card:#1d2237; --bg-card-h:#232943;
@@ -42,6 +42,12 @@
       color:var(--fg); border-radius:6px; padding:0.35rem 0.8rem; font:inherit; font-size:0.85rem; cursor:pointer; }
     .btn:hover { border-color:var(--accent); }
     .btn.paused { color:var(--yellow); border-color:var(--yellow); }
+
+    .chart { border:1px solid var(--border); border-radius:8px; background:var(--bg-elev);
+      padding:0.5rem 0.6rem; margin-bottom:0.9rem; }
+    .chart .lbl { color:var(--fg-dim); font-size:0.66rem; text-transform:uppercase;
+      letter-spacing:0.06em; margin-bottom:0.25rem; }
+    .chart canvas { width:100%; height:44px; display:block; }
 
     .feed { border:1px solid var(--border); border-radius:8px; overflow:hidden; }
     .row { display:grid; grid-template-columns:5.5rem 8.5rem 1fr 1fr auto;
@@ -89,11 +95,16 @@
 
   <main>
     <div class="bar">
-      <h1><span class="live-dot" id="dot"></span>firehose</h1>
+      <h1><span class="live-dot" id="dot"></span>live</h1>
       <span class="stat"><b id="count">0</b> updates</span>
       <span class="stat"><b id="rate">0</b>/min</span>
       <span class="stat" id="status">connecting…</span>
       <button class="btn" id="pause">pause</button>
+    </div>
+
+    <div class="chart">
+      <div class="lbl">activity · updates/sec (last 60s)</div>
+      <canvas id="spark"></canvas>
     </div>
 
     <div class="feed">
@@ -108,7 +119,7 @@
 import { OP_NAMES } from './tlv-catalog.js';
 import { getParam, parseTlv, b64ToBytes, bytesToHex, installBreadcrumbs, installTopNav } from './shared.js';
 
-installBreadcrumbs('firehose');
+installBreadcrumbs('live');
 installTopNav();
 
 const RELAY_URL =
@@ -214,6 +225,9 @@ const emptyEl = document.getElementById('empty');
 let total = 0, paused = false, ws = null;
 const seen = new Set();
 const recent = []; // timestamps (ms) for rate
+const CHART_SECONDS = 60;
+const buckets = new Array(CHART_SECONDS).fill(0); // per-second arrival counts; newest = last
+window.__activityBuckets = buckets; // exposed for tests
 
 function addEvent(ev){
   if (!ev || !ev.id || seen.has(ev.id)) return;
@@ -222,6 +236,7 @@ function addEvent(ev){
   total++;
   document.getElementById('count').textContent = total.toLocaleString();
   recent.push(Date.now());
+  buckets[buckets.length - 1]++; // count this second's arrivals (chart tracks activity even when paused)
   if (paused) return;
 
   if (emptyEl && emptyEl.parentNode) emptyEl.remove();
@@ -250,7 +265,34 @@ setInterval(() => {
   const cut = Date.now() - 60_000;
   while (recent.length && recent[0] < cut) recent.shift();
   document.getElementById('rate').textContent = recent.length.toString();
+  // Roll the activity histogram one second forward, then redraw.
+  buckets.push(0);
+  while (buckets.length > CHART_SECONDS) buckets.shift();
+  drawChart();
 }, 1000);
+
+// Activity sparkline: per-second arrival counts, oldest→newest left→right.
+function drawChart(){
+  const cv = document.getElementById('spark');
+  if (!cv) return;
+  const w = cv.clientWidth || 600, h = 44;
+  if (cv.width !== w) cv.width = w;
+  if (cv.height !== h) cv.height = h;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  const max = Math.max(1, ...buckets);
+  const n = buckets.length;
+  const bw = w / n;
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#f7931a';
+  ctx.fillStyle = accent;
+  for (let i = 0; i < n; i++){
+    if (!buckets[i]) continue;
+    const bh = Math.max(1, Math.round((buckets[i] / max) * (h - 2)));
+    ctx.fillRect(i * bw, h - bh, Math.max(1, bw - 1), bh);
+  }
+}
+window.__drawChart = drawChart;
+drawChart();
 
 function setStatus(text, live){
   document.getElementById('status').textContent = text;

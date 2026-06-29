@@ -14,13 +14,13 @@ const contents = JSON.parse(readFileSync(FIXTURE, 'utf8'));
 
 async function load(page) {
   // Dead relay → connect() fails fast, no real network; decode fns are set
-  // first. Static server serves the .html (the extensionless /firehose route is
+  // first. Static server serves the .html (the extensionless /live route is
   // prod-only, in deposits-lnurl).
-  await page.goto('/firehose.html#relay=ws://127.0.0.1:1');
+  await page.goto('/live.html#relay=ws://127.0.0.1:1');
   await page.waitForFunction(() => typeof window.__decodeEvent === 'function');
 }
 
-test.describe('firehose', () => {
+test.describe('live feed', () => {
   test.beforeEach(async ({ page }) => load(page));
 
   test('decodes ledger/op/deposit/seq from event tags', async ({ page }) => {
@@ -113,5 +113,16 @@ test.describe('firehose', () => {
     const rows = await page.$$eval('#rows .row', els => els.map(e => ({ ts: Number(e.dataset.ts), fresh: e.classList.contains('fresh') })));
     expect(rows.find(r => r.ts === nowSec - 600).fresh).toBe(false);
     expect(rows.find(r => r.ts === nowSec).fresh).toBe(true);
+  });
+
+  test('activity chart counts each arrival in the current second bucket', async ({ page }) => {
+    const sum = () => page.evaluate(() => window.__activityBuckets.reduce((a, b) => a + b, 0));
+    const before = await sum();
+    await page.evaluate(() => window.__addEvent({
+      id: 'chart1', created_at: Math.floor(Date.now() / 1000),
+      tags: [['d', 'aa'.repeat(8)], ['t', '30']], content: '',
+    }));
+    expect(await sum()).toBe(before + 1);
+    await page.evaluate(() => window.__drawChart()); // redraw is well-formed for any bucket state
   });
 });

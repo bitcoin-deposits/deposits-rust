@@ -344,13 +344,13 @@ async fn explorer_deposits() -> Html<&'static str> {
     Html(assets().explorer_deposits)
 }
 
-/// GET /firehose
+/// GET /live (and /firehose alias)
 ///
 /// Live view of every kind:9100 ledger update across all ledgers — a streaming
 /// Nostr subscription rendered as it arrives. Pure client-side; no ledger
 /// context needed.
-async fn explorer_firehose() -> Html<&'static str> {
-    Html(assets().explorer_firehose)
+async fn explorer_live() -> Html<&'static str> {
+    Html(assets().explorer_live)
 }
 
 /// GET /wallet
@@ -384,7 +384,7 @@ struct StaticAssets {
     explorer_update: &'static str,
     explorer_deposit: &'static str,
     explorer_deposits: &'static str,
-    explorer_firehose: &'static str,
+    explorer_live: &'static str,
     wallet_index: &'static str,
     request_payment: &'static str,
 }
@@ -404,7 +404,7 @@ impl StaticAssets {
             explorer_update:   load("explorer/update.html"),
             explorer_deposit:  load("explorer/deposit.html"),
             explorer_deposits: load("explorer/deposits.html"),
-            explorer_firehose: load("explorer/firehose.html"),
+            explorer_live: load("explorer/live.html"),
             wallet_index:      load("wallet/index.html"),
             request_payment:    load("explorer/request-payment.html"),
         }
@@ -1250,7 +1250,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/update", get(explorer_update))
         .route("/deposit", get(explorer_deposit))
         .route("/deposits", get(explorer_deposits))
-        .route("/firehose", get(explorer_firehose))
+        .route("/live", get(explorer_live))
+        .route("/firehose", get(explorer_live)) // back-compat alias
         .route("/wallet", get(wallet_index))
         // Everything else (sw.js, tlv-catalog.js, vendor/*, the explorer's
         // shared.js) is a static file under deposits-web/. Serve the

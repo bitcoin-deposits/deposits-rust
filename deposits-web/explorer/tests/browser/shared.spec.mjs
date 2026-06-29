@@ -6,7 +6,7 @@
 import { test, expect } from '@playwright/test';
 
 async function load(page) {
-  await page.goto('/firehose.html#relay=ws://127.0.0.1:1');
+  await page.goto('/live.html#relay=ws://127.0.0.1:1');
   await page.waitForFunction(() => typeof window.__decodeEvent === 'function');
 }
 
