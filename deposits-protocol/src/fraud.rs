@@ -1687,9 +1687,19 @@ pub fn verify_fraud_broadcast(
             verify_uncredited_onchain(proof, &accused_history, block_oracle)?;
         }
         FraudProofType::NonConformingUpdate => {
-            // Not yet implemented at this layer — placeholder accept.
-            // Receiver-side validator dispatch is a separate piece of
-            // work tracked alongside the conformance test surface.
+            // FAIL CLOSED. This legacy variant has no implemented verifier, and
+            // an accept-by-default here is a confiscation hole: callers that
+            // ground a confiscation by running verify_fraud_broadcast (the
+            // cosign/resolution path) would treat a bogus NonConformingUpdate
+            // proof as verified and act on it. The superseding framing is
+            // `NonConformingCosignature` (keys the fault to whoever signed the
+            // bad update, with a real replay-based verifier). Reject until/unless
+            // a genuine verifier is implemented for this variant.
+            return Err(
+                "NonConformingUpdate has no verifier — use NonConformingCosignature; \
+                 rejecting (fail-closed)"
+                    .to_string(),
+            );
         }
         FraudProofType::QuorumExpired => {
             let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
