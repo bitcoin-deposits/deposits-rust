@@ -1109,6 +1109,101 @@ impl Node {
         }
     }
 
+    /// Fully verify a fraud broadcast against our own view of the world.
+    ///
+    /// A fraud notice (kind:9101, or one re-fetched off the relay during a
+    /// confiscation decision) is a SIGNAL to verify, never authoritative on its
+    /// own — anyone can publish a well-formed-looking `FraudBroadcast` carrying
+    /// any `proof_type`. This gap-fills the referenced ledgers from the relay,
+    /// then runs the protocol-layer `verify_fraud_broadcast` (structural +
+    /// embedding + causal chain + per-type evidence) plus the
+    /// `WinnerCollateralDeviation` on-chain step. `Ok(())` means the fault is
+    /// real. Shared by the inbound receive path (`handle_fraud_proof`) and the
+    /// confiscation proof-type resolver so both ground on identical checks.
+    pub(crate) async fn verify_fraud_broadcast_locally(
+        &self,
+        broadcast: &deposits_core::fraud::FraudBroadcast,
+    ) -> Result<(), String> {
+        // 0. Gap-fill any referenced ledgers we don't already have.
+        //    `verify_fraud_broadcast` queries the LedgerProvider for the
+        //    embedding ledger AND every causal-chain link's ledger; missing →
+        //    reject. Cosigners only hold replicas of ledgers they joined, so
+        //    pre-fetch from the durable relay before verifying.
+        let mut needed: std::collections::HashSet<String> =
+            std::iter::once(broadcast.embedding.ledger_id.clone()).collect();
+        for link in &broadcast.causal_chain {
+            needed.insert(link.ledger_id.clone());
+        }
+        // NonConformingCosignature names a separate fault ledger inside the
+        // evidence; its verifier needs that ledger's history to replay state.
+        if let deposits_core::fraud::FraudEvidence::NonConformingCosignature {
+            fault_ledger_id, ..
+        } = &broadcast.proof.evidence
+        {
+            needed.insert(fault_ledger_id.clone());
+        }
+        for lid in &needed {
+            let have = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers.contains_key(lid)
+            };
+            if have {
+                continue;
+            }
+            if let Err(e) = self.reimport_joined_ledger(lid).await {
+                tracing::warn!(
+                    "Fraud-proof gap-fill failed for ledger {}: {} \
+                     (verification will refuse if this ledger is referenced)",
+                    &lid[..16.min(lid.len())],
+                    e
+                );
+            }
+        }
+
+        // Structural + embedding + causal chain + per-type evidence — all in
+        // the protocol-layer verifier so unit tests exercise the same path.
+        struct DaemonLedgers<'a> {
+            handler: &'a Arc<crate::handler::DepositsHandler>,
+        }
+        impl<'a> deposits_core::fraud::LedgerProvider for DaemonLedgers<'a> {
+            fn ledger_history(
+                &self,
+                ledger_id: &str,
+            ) -> Option<Vec<deposits_core::types::SignedLedgerUpdate>> {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(ledger_id)
+                    .map(|arc| arc.read().unwrap().history.clone())
+            }
+        }
+        // `confirms_block` fails closed (None on unknown / not-best-chain /
+        // network error), so the verifier's chain checks can't be spoofed.
+        struct WalletOracle<'a> {
+            wallet: &'a crate::wallet::Wallet,
+        }
+        impl<'a> deposits_core::fraud::BlockOracle for WalletOracle<'a> {
+            fn confirms(&self, hash: &[u8; 32]) -> Option<u32> {
+                self.wallet.confirms_block(hash)
+            }
+        }
+
+        // Synchronous structural + embedding + causal + per-type evidence
+        // check. provider/oracle are created and used entirely within this
+        // sync call (no await), so no non-Send guard is held across an await —
+        // keeps this helper usable from spawned (Send) tasks like the
+        // confiscation driver. The WinnerCollateralDeviation on-chain step
+        // (which holds `&dyn BlockOracle` across an await, and isn't part of
+        // confiscation resolution anyway) stays in the inbound receive path.
+        let provider = DaemonLedgers {
+            handler: &self.handler,
+        };
+        let oracle = WalletOracle {
+            wallet: &self.wallet,
+        };
+        deposits_core::fraud::verify_fraud_broadcast(broadcast, &provider, &oracle)?;
+        Ok(())
+    }
+
     /// Handle an incoming fraud proof broadcast.
     ///
     /// Verifies the proof hash against the embedding, then checks if we're
@@ -1125,124 +1220,34 @@ impl Node {
             &ledger_id[..16.min(ledger_id.len())]
         );
 
-        // 0. Gap-fill any referenced ledgers we don't already have.
-        //    `verify_fraud_broadcast` queries the LedgerProvider for the
-        //    embedding ledger AND every causal-chain link's ledger.
-        //    Missing → reject. Cosigners only hold replicas of ledgers
-        //    they joined, so e.g. a `StaleCosignature` whose causal
-        //    chain references a peer member's collateral ledger will
-        //    fail to verify on every cosigner who isn't a member of
-        //    THAT ledger — i.e. almost every cosigner — even though
-        //    the broadcast itself is well-formed and the relay has
-        //    every link's history. Pre-fetch from the durable relay
-        //    before verifying so the verifier sees a complete view.
-        //
-        //    `reimport_joined_ledger` is the standard gap-fill path;
-        //    it skips ledgers we already own/operate, paginates back
-        //    through Nostr to fetch missing updates, and inserts them
-        //    into `handler.ledgers` under the plain ledger_id key —
-        //    exactly what the LedgerProvider below reads from.
-        let mut needed: std::collections::HashSet<String> =
-            std::iter::once(broadcast.embedding.ledger_id.clone()).collect();
-        for link in &broadcast.causal_chain {
-            needed.insert(link.ledger_id.clone());
-        }
-        // NonConformingCosignature names a *separate* fault ledger
-        // inside the evidence; verify_non_conforming_cosignature
-        // needs its history to replay state. Add it to gap-fill set.
-        if let deposits_core::fraud::FraudEvidence::NonConformingCosignature {
-            fault_ledger_id, ..
-        } = &broadcast.proof.evidence
-        {
-            needed.insert(fault_ledger_id.clone());
-        }
-        for lid in &needed {
-            let have = {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                ledgers.contains_key(lid)
-            };
-            if have {
-                continue;
-            }
-            tracing::info!(
-                "Fraud-proof gap-fill: fetching missing ledger {}... from relay",
-                &lid[..16.min(lid.len())]
-            );
-            if let Err(e) = self.reimport_joined_ledger(lid).await {
-                tracing::warn!(
-                    "Fraud-proof gap-fill failed for ledger {}: {} \
-                     (verification will likely refuse if this ledger is referenced)",
-                    &lid[..16.min(lid.len())],
-                    e
-                );
-            }
-        }
-
-        // 1-3. Structural sanity, embedding, causal chain, AND per-type
-        // evidence verification — all live in
-        // `deposits_protocol::fraud::verify_fraud_broadcast` so unit tests
-        // can exercise the full receiver pipeline against in-memory
-        // ledger fixtures + a mock block oracle.
+        // A fraud notice is a SIGNAL, not authoritative: fully verify it
+        // (gap-fill + structural/embedding/causal/per-type evidence + the
+        // on-chain WinnerCollateralDeviation step) before acting on it.
         let proof_hash_hex = hex::encode(broadcast.proof.proof_hash());
-
-        struct DaemonLedgers<'a> {
-            handler: &'a Arc<crate::handler::DepositsHandler>,
-        }
-        impl<'a> deposits_core::fraud::LedgerProvider for DaemonLedgers<'a> {
-            fn ledger_history(
-                &self,
-                ledger_id: &str,
-            ) -> Option<Vec<deposits_core::types::SignedLedgerUpdate>> {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                ledgers
-                    .get(ledger_id)
-                    .map(|arc| arc.read().unwrap().history.clone())
-            }
-        }
-
-        // Block oracle resolves arbitrary block hashes against esplora
-        // (same client `Wallet::fetch_block_info` uses for tip queries).
-        // `Wallet::confirms_block` returns `None` on unknown / not-in-
-        // best-chain / network error, so the verifier's "is the block
-        // in my chain?" check fails closed.
-        struct WalletOracle<'a> {
-            wallet: &'a crate::wallet::Wallet,
-        }
-        impl<'a> deposits_core::fraud::BlockOracle for WalletOracle<'a> {
-            fn confirms(&self, hash: &[u8; 32]) -> Option<u32> {
-                self.wallet.confirms_block(hash)
-            }
-        }
-
-        let provider = DaemonLedgers {
-            handler: &self.handler,
-        };
-        let oracle = WalletOracle {
-            wallet: &self.wallet,
-        };
-        if let Err(e) = deposits_core::fraud::verify_fraud_broadcast(
-            broadcast,
-            &provider,
-            &oracle,
-        ) {
-            tracing::warn!(
-                "Fraud proof rejected ({}...): {}",
-                &proof_hash_hex[..16],
-                e
-            );
+        if let Err(e) = self.verify_fraud_broadcast_locally(broadcast).await {
+            tracing::warn!("Fraud proof rejected ({}...): {}", &proof_hash_hex[..16], e);
             return;
         }
 
-        // WinnerCollateralDeviation needs an extra step the protocol-layer
-        // dispatch couldn't run (no I/O at that layer): fetch the on-chain
-        // claim TX + the value the lottery output held, and feed both into
-        // `verify_winner_collateral_deviation`. The pure verifier returns
-        // Ok(()) iff a deviation is provable. See DEP-03 §"Claim
-        // transaction (multi-input)".
+        // WinnerCollateralDeviation needs an on-chain step the pure verifier
+        // can't run (fetch the claim TX + lottery output value). Receive-path
+        // only — it holds `&dyn BlockOracle` across an await and isn't part of
+        // confiscation resolution, so it's kept out of the shared Send helper.
         if matches!(
             broadcast.proof.proof_type,
             deposits_core::fraud::FraudProofType::WinnerCollateralDeviation
         ) {
+            struct WalletOracle<'a> {
+                wallet: &'a crate::wallet::Wallet,
+            }
+            impl<'a> deposits_core::fraud::BlockOracle for WalletOracle<'a> {
+                fn confirms(&self, hash: &[u8; 32]) -> Option<u32> {
+                    self.wallet.confirms_block(hash)
+                }
+            }
+            let oracle = WalletOracle {
+                wallet: &self.wallet,
+            };
             if let Err(e) = self
                 .verify_winner_collateral_deviation_onchain(broadcast, &oracle)
                 .await

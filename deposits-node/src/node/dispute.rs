@@ -1420,17 +1420,34 @@ impl Node {
             .await
             .ok()?;
 
-        // Pick the most recent broadcast that decodes cleanly.
-        let mut latest: Option<(u64, deposits_core::fraud::FraudProofType)> = None;
-        for event in events.iter() {
-            if let Ok(broadcast) = serde_json::from_str::<FraudBroadcast>(&event.content) {
-                let ts = event.created_at.as_u64();
-                if latest.as_ref().map(|(t, _)| ts > *t).unwrap_or(true) {
-                    latest = Some((ts, broadcast.proof.proof_type));
-                }
+        // A relay kind:9101 is only a SIGNAL — anyone can publish a
+        // well-formed-looking FraudBroadcast with any proof_type. Independently
+        // verify each before trusting it, or a bogus notice could drive an
+        // unjustified confiscation (the cosign tx-shape verifier confirms the tx
+        // *matches* the proof_type, not that the *fault is real*). Return the
+        // most-recent broadcast that actually verifies — gap-fill + structural +
+        // embedding + causal chain + per-type evidence + on-chain steps, the
+        // same checks the inbound receive path runs.
+        let mut candidates: Vec<(u64, FraudBroadcast)> = events
+            .iter()
+            .filter_map(|e| {
+                serde_json::from_str::<FraudBroadcast>(&e.content)
+                    .ok()
+                    .map(|b| (e.created_at.as_u64(), b))
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+        for (_ts, broadcast) in &candidates {
+            match self.verify_fraud_broadcast_locally(broadcast).await {
+                Ok(()) => return Some(broadcast.proof.proof_type.clone()),
+                Err(e) => tracing::debug!(
+                    "Ignoring unverifiable fraud broadcast for {}...: {}",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    e
+                ),
             }
         }
-        latest.map(|(_, pt)| pt)
+        None
     }
 
     /// Fallback evidence path for the QuorumExpired-in-DisputeEnter
