@@ -2050,6 +2050,52 @@ impl NostrTransport {
         Ok((event_id, used_created_at))
     }
 
+    /// Publish a `FraudBroadcast` as a kind:9101 event, tagged with the
+    /// accused ledger's `d` tag so cosigners' `fetch_fraud_proof_type_for_ledger`
+    /// (which filters `kind=9101 AND #d=<ledger_tag>`) finds it on the relay.
+    /// In-process mirror of `recovery publish-fraud-broadcast`, so the daemon
+    /// can emit a proof autonomously the moment it detects equivocation.
+    pub async fn broadcast_fraud_proof(
+        &self,
+        broadcast: &deposits_protocol::fraud::FraudBroadcast,
+    ) -> Result<String, Error> {
+        let content = serde_json::to_string(broadcast)
+            .map_err(|e| Error::Nostr(format!("serialize fraud broadcast: {}", e)))?;
+        let ledger_tag_value = ledger_tag(&broadcast.proof.ledger_id).to_string();
+        let event = EventBuilder::new(Kind::Custom(KIND_FRAUD_PROOF), &content)
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_ID),
+                [ledger_tag_value],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("sign fraud proof: {}", e)))?;
+        let event_id = event.id.to_hex();
+
+        {
+            let relays = self.client.relays().await;
+            let urls: Vec<RelayUrl> = relays.keys().cloned().collect();
+            tokio::time::timeout(
+                Self::SEND_TIMEOUT,
+                self.client
+                    .send_msg_to(urls, ClientMessage::event(event.clone())),
+            )
+            .await
+            .map_err(|_| Error::Nostr("broadcast fraud proof timed out".to_string()))?
+            .map_err(|e| Error::Nostr(format!("broadcast fraud proof: {}", e)))?;
+        }
+        if let Some(ref tx) = self.mirror_tx {
+            let _ = tx.send(event);
+        }
+
+        tracing::warn!(
+            "Broadcast fraud proof (kind:9101): {:?} against {}... on ledger {}...",
+            broadcast.proof.proof_type,
+            &broadcast.proof.accused[..16.min(broadcast.proof.accused.len())],
+            &broadcast.proof.ledger_id[..16.min(broadcast.proof.ledger_id.len())]
+        );
+        Ok(event_id)
+    }
+
     /// Subscribe to ledger updates for a specific ledger.
     ///
     /// The ledger_id is a 64-char hex hash that uniquely identifies the ledger.

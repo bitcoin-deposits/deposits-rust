@@ -490,6 +490,131 @@ impl Node {
         }
     }
 
+    /// Realize the protocol's confiscation lifecycle for a detected
+    /// equivocation: build the self-contained `Equivocation` fraud proof,
+    /// anchor its hash on one of our own active ledgers (DEP-12
+    /// `DeliveryEmbed`), and broadcast it (kind:9101). The existing receiver
+    /// pipeline (`verify_fraud_broadcast` → DEP-06 confiscation cascade) takes
+    /// it from there. `update_a`/`update_b` are both operator-signed updates at
+    /// the same `(ledger_id, sequence_number)` with different `content_hash`.
+    pub(crate) async fn emit_equivocation_proof(
+        &self,
+        update_a: deposits_core::types::SignedLedgerUpdate,
+        update_b: deposits_core::types::SignedLedgerUpdate,
+    ) {
+        use deposits_core::fraud::{
+            CausalLink, FraudBroadcast, FraudEvidence, FraudProof, FraudProofType, ProofEmbedding,
+        };
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tlv::TlvDecode;
+        use deposits_core::TlvEncode;
+
+        let accused_ledger = update_a.ledger_id_hex();
+        let seq = update_a.sequence_number;
+        let accused = hex::encode(update_a.operator_id.serialize());
+
+        let proof = FraudProof {
+            proof_type: FraudProofType::Equivocation,
+            accused: accused.clone(),
+            ledger_id: accused_ledger.clone(),
+            evidence: FraudEvidence::Equivocation {
+                sequence: seq,
+                update_a_hex: hex::encode(update_a.tlv_encode()),
+                update_b_hex: hex::encode(update_b.tlv_encode()),
+            },
+        };
+        let proof_hash = proof.proof_hash();
+
+        // Anchor the accusation on a ledger WE operate with an active quorum
+        // (DEP-12 embed must land on the reporter's own cosigned chain).
+        let embed_ledger = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers.iter().find_map(|(lid, arc)| {
+                let l = arc.read().unwrap();
+                (l.operator_key() == self.node_id
+                    && l.state.quorum_state == deposits_core::QuorumState::Active)
+                    .then(|| lid.clone())
+            })
+        };
+        let Some(embed_ledger) = embed_ledger else {
+            tracing::warn!(
+                "Equivocation on {}... seq {}: no active ledger we operate to anchor the proof — not emitting",
+                &accused_ledger[..16.min(accused_ledger.len())],
+                seq
+            );
+            return;
+        };
+
+        // Idempotency (survives restarts, no in-memory state): if this exact
+        // proof_hash is already embedded on our ledger, we already emitted.
+        let carries_hash = |u: &deposits_core::types::SignedLedgerUpdate| {
+            LedgerOperation::tlv_decode(&u.message)
+                .ok()
+                .and_then(|op| op.embedded_hash().copied())
+                .is_some_and(|h| h == proof_hash)
+        };
+        let already = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .get(&embed_ledger)
+                .is_some_and(|arc| arc.read().unwrap().history.iter().any(carries_hash))
+        };
+        if already {
+            return;
+        }
+
+        // Embed proof_hash on our own ledger (cosigned DeliveryEmbed).
+        let operation = LedgerOperation::DeliveryEmbed {
+            request_hash: proof_hash,
+            target_ledger_id: update_a.ledger_id,
+            target_operator: update_a.operator_id,
+        };
+        if let Err(e) = self.commit_operation(&embed_ledger, operation).await {
+            tracing::error!(
+                "Equivocation proof: failed to embed on {}...: {} — not emitting",
+                &embed_ledger[..16.min(embed_ledger.len())],
+                e
+            );
+            return;
+        }
+
+        // Read back the embed update we just committed (located by proof_hash).
+        let embedding = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers.get(&embed_ledger).and_then(|arc| {
+                let l = arc.read().unwrap();
+                l.history.iter().rev().find(|u| carries_hash(u)).map(|u| {
+                    ProofEmbedding {
+                        ledger_id: embed_ledger.clone(),
+                        sequence: u.sequence_number,
+                        update_hash: hex::encode(u.content_hash),
+                        field: "delivery_request_hash".into(),
+                    }
+                })
+            })
+        };
+        let Some(embedding) = embedding else {
+            tracing::error!("Equivocation proof: embed committed but not found in history");
+            return;
+        };
+
+        let broadcast = FraudBroadcast {
+            proof,
+            embedding,
+            causal_chain: Vec::<CausalLink>::new(),
+        };
+        match self.nostr.broadcast_fraud_proof(&broadcast).await {
+            Ok(id) => tracing::warn!(
+                "Emitted Equivocation proof vs {}... on {}... seq {} (event {}) — confiscation should follow",
+                &accused[..16.min(accused.len())],
+                &accused_ledger[..16.min(accused_ledger.len())],
+                seq,
+                id
+            ),
+            Err(e) => tracing::error!("Failed to broadcast equivocation proof: {}", e),
+        }
+    }
+
     /// Handle an incoming ledger update - validate and auto-dispute if invalid
     #[tracing::instrument(
         name = "handle_ledger_update",
@@ -500,7 +625,10 @@ impl Node {
             content = hex::encode(&inbound.update.content_hash[..8]),
         ),
     )]
-    pub(crate) async fn handle_ledger_update(&self, inbound: crate::nostr::InboundLedgerUpdate) {
+    pub(crate) async fn handle_ledger_update(
+        self: &std::sync::Arc<Self>,
+        inbound: crate::nostr::InboundLedgerUpdate,
+    ) {
         // Check if we care about this ledger (we're a quorum member)
         if !self.is_quorum_member_of_ledger(&inbound.ledger_id) {
             return; // Not our concern
@@ -568,6 +696,44 @@ impl Node {
             handle.try_send(super::ledger_actor::LedgerEvent::Inbound(Box::new(
                 inbound.update.clone(),
             )));
+        }
+
+        // ── Equivocation detection ──────────────────────────────────────
+        // If the operator signed a DIFFERENT update at a sequence we already
+        // hold, that's provable double-signing (both bear the operator's
+        // BIP-340 signature). Cheap synchronous check here; the emit (build
+        // proof + DEP-12 embed + kind:9101 broadcast, which cosigns on our
+        // own ledger) is spawned so it never blocks ingest. We never accuse
+        // ourselves — operator-side guards (catch-up + the cosign gate)
+        // handle self-correction; this path is for cosigners reporting a
+        // faulty operator.
+        if inbound.update.operator_id != self.node_id {
+            let conflict = {
+                let l = ledger_arc.read().unwrap();
+                if inbound.update.operator_id == l.state.parent_pubkey {
+                    l.history
+                        .iter()
+                        .rev()
+                        .find(|u| updates_equivocate(u, &inbound.update))
+                        .cloned()
+                } else {
+                    None
+                }
+            };
+            if let Some(committed) = conflict {
+                tracing::warn!(
+                    "EQUIVOCATION detected on {}... seq {}: operator double-signed ({} vs {}) — emitting fraud proof",
+                    &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                    inbound.update.sequence_number,
+                    &hex::encode(committed.content_hash)[..8],
+                    &hex::encode(inbound.update.content_hash)[..8],
+                );
+                let node = std::sync::Arc::clone(self);
+                let incoming = inbound.update.clone();
+                tokio::spawn(async move {
+                    node.emit_equivocation_proof(committed, incoming).await;
+                });
+            }
         }
 
         // Previously: skip if it's our own ledger ("stale in-memory state
@@ -1559,5 +1725,91 @@ impl Node {
             .insert(fork_key.clone(), Arc::new(RwLock::new(fork)));
 
         Ok(fork_key)
+    }
+}
+
+/// Two updates double-sign the same slot: same ledger + sequence + operator,
+/// but different `content_hash`. That's provable equivocation (each bears the
+/// operator's signature). Pure so it's unit-testable; `verify_equivocation`
+/// re-checks the same invariant on every receiver (defense in depth), so a
+/// false positive here can't drive a confiscation on its own.
+pub(crate) fn updates_equivocate(
+    a: &deposits_core::types::SignedLedgerUpdate,
+    b: &deposits_core::types::SignedLedgerUpdate,
+) -> bool {
+    a.ledger_id == b.ledger_id
+        && a.sequence_number == b.sequence_number
+        && a.operator_id == b.operator_id
+        && a.content_hash != b.content_hash
+}
+
+#[cfg(test)]
+mod equivocation_detection_tests {
+    use super::updates_equivocate;
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use deposits_core::types::SignedLedgerUpdate;
+
+    fn pk(seed: u8) -> PublicKey {
+        let secp = Secp256k1::new();
+        PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[seed; 32]).unwrap())
+    }
+
+    fn upd(ledger: [u8; 32], seq: u64, op: PublicKey, content: [u8; 32]) -> SignedLedgerUpdate {
+        SignedLedgerUpdate {
+            message: Vec::new(),
+            message_type: 0,
+            operator_id: op,
+            ledger_id: ledger,
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash: content,
+            block_height: 0,
+            block_hash: [0u8; 32],
+            cosign_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn same_slot_different_content_is_equivocation() {
+        let (l, op) = ([1u8; 32], pk(0x11));
+        let a = upd(l, 11080, op, [0xAA; 32]);
+        let b = upd(l, 11080, op, [0xBB; 32]);
+        assert!(updates_equivocate(&a, &b));
+    }
+
+    #[test]
+    fn identical_update_is_not_equivocation() {
+        let (l, op) = ([1u8; 32], pk(0x11));
+        let a = upd(l, 11080, op, [0xAA; 32]);
+        assert!(!updates_equivocate(&a, &a.clone()));
+    }
+
+    #[test]
+    fn different_sequence_is_not_equivocation() {
+        let (l, op) = ([1u8; 32], pk(0x11));
+        let a = upd(l, 11080, op, [0xAA; 32]);
+        let b = upd(l, 11081, op, [0xBB; 32]);
+        assert!(!updates_equivocate(&a, &b));
+    }
+
+    #[test]
+    fn different_operator_is_not_equivocation() {
+        // Two operators colliding on a seq isn't one operator double-signing.
+        let l = [1u8; 32];
+        let a = upd(l, 11080, pk(0x11), [0xAA; 32]);
+        let b = upd(l, 11080, pk(0x22), [0xBB; 32]);
+        assert!(!updates_equivocate(&a, &b));
+    }
+
+    #[test]
+    fn different_ledger_is_not_equivocation() {
+        let op = pk(0x11);
+        let a = upd([1u8; 32], 11080, op, [0xAA; 32]);
+        let b = upd([2u8; 32], 11080, op, [0xBB; 32]);
+        assert!(!updates_equivocate(&a, &b));
     }
 }
