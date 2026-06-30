@@ -644,6 +644,7 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::QuorumAddMember { .. } => "QuorumAddMember",
         LedgerOperation::QuorumRemoveMember { .. } => "QuorumRemoveMember",
         LedgerOperation::QuorumBegin { .. } => "QuorumBegin",
+        LedgerOperation::QuorumUpgrade { .. } => "QuorumUpgrade",
         LedgerOperation::QuorumJoin { .. } => "QuorumJoin",
         LedgerOperation::DisputeEnter { .. } => "DisputeEnter",
         LedgerOperation::DisputeArmed { .. } => "DisputeArmed",
