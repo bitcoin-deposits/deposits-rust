@@ -353,16 +353,29 @@ impl Node {
         if let Some(ref arc) = operator_ledger_arc {
             let ledger = arc.read().unwrap();
             let expected_seq = ledger.next_sequence();
-            // What (if anything) we already committed at this sequence — looked
-            // up in our in-memory history window (newest-first).
-            let committed = ledger
-                .history
-                .iter()
-                .rev()
-                .find(|u| u.sequence_number == sequence_number)
-                .map(|u| u.content_hash);
+            // For an already-committed sequence, decide idempotent-vs-equivocation
+            // from the SIGNED bytes: does cosign_data (seq||prev_hash||message)
+            // reconstruct the exact update we hold at that seq? We deliberately do
+            // NOT key off the request's content_hash_hex — it's attacker-supplied
+            // and decoupled from what actually gets signed, so a requester could
+            // pass the genuine committed hash here while signing a different
+            // cosign_data. `None` = the seq is below our in-memory window.
+            let resign_matches = if sequence_number < expected_seq {
+                ledger
+                    .history
+                    .iter()
+                    .rev()
+                    .find(|u| u.sequence_number == sequence_number)
+                    .map(|u| {
+                        cosign_data.len() > 40
+                            && cosign_data[8..40] == u.previous_hash[..]
+                            && cosign_data[40..] == u.message[..]
+                    })
+            } else {
+                None
+            };
             let lid = &request.ledger_id[..16.min(request.ledger_id.len())];
-            match cosign_seq_gate(sequence_number, expected_seq, committed, _content_hash) {
+            match cosign_seq_gate(sequence_number, expected_seq, resign_matches) {
                 CosignSeqGate::Allow => {}
                 CosignSeqGate::Behind => {
                     tracing::info!(
@@ -1078,19 +1091,28 @@ pub(crate) enum CosignSeqGate {
 /// Signing a *different* update at an already-committed sequence is equivocation,
 /// which is how one operator state-rollback produced two separately-2/2-cosigned
 /// seq-11080s. The old gate only rejected the `Behind` case.
+///
+/// For the already-committed (`< expected_seq`) case the caller passes
+/// `resign_matches_committed`: `Some(true)` iff the *signed bytes* (`cosign_data`'s
+/// `previous_hash` + `message`) reconstruct the exact update we hold at that
+/// sequence, `Some(false)` if they reconstruct a different one (equivocation),
+/// `None` if the sequence is below our in-memory window. This MUST be derived
+/// from `cosign_data` (what actually gets signed), never from the request's
+/// `content_hash_hex` claim — that field is attacker-supplied and decoupled from
+/// the signature, so trusting it would let a requester pass the genuine
+/// committed hash through the gate while signing a different update.
 pub(crate) fn cosign_seq_gate(
     sequence_number: u64,
     expected_seq: u64,
-    committed_hash_at_seq: Option<[u8; 32]>,
-    requested_hash: [u8; 32],
+    resign_matches_committed: Option<bool>,
 ) -> CosignSeqGate {
     use std::cmp::Ordering::*;
     match sequence_number.cmp(&expected_seq) {
         Greater => CosignSeqGate::Behind,
         Equal => CosignSeqGate::Allow, // the next update we don't have yet
-        Less => match committed_hash_at_seq {
-            Some(h) if h == requested_hash => CosignSeqGate::Allow, // idempotent re-sign
-            Some(_) => CosignSeqGate::Equivocation,
+        Less => match resign_matches_committed {
+            Some(true) => CosignSeqGate::Allow, // idempotent re-sign of the same bytes
+            Some(false) => CosignSeqGate::Equivocation,
             None => CosignSeqGate::OutsideWindow,
         },
     }
@@ -1099,38 +1121,37 @@ pub(crate) fn cosign_seq_gate(
 #[cfg(test)]
 mod cosign_seq_gate_tests {
     use super::{cosign_seq_gate, CosignSeqGate};
-    const A: [u8; 32] = [0xAA; 32];
-    const B: [u8; 32] = [0xBB; 32];
 
     #[test]
     fn signs_the_next_sequence() {
         // tip=9 (expected_seq=10), asked to sign 10 → the normal next update.
-        assert_eq!(cosign_seq_gate(10, 10, None, A), CosignSeqGate::Allow);
+        assert_eq!(cosign_seq_gate(10, 10, None), CosignSeqGate::Allow);
     }
 
     #[test]
     fn refuses_when_behind() {
         // asked to sign 12 but we only expect 10 → we're missing history.
-        assert_eq!(cosign_seq_gate(12, 10, None, A), CosignSeqGate::Behind);
+        assert_eq!(cosign_seq_gate(12, 10, None), CosignSeqGate::Behind);
     }
 
     #[test]
-    fn idempotent_resign_of_identical_update_allowed() {
-        // We're ahead (expected 10) and asked to re-sign 8 with the SAME hash
-        // we committed there → fine (high-TPS retry case).
-        assert_eq!(cosign_seq_gate(8, 10, Some(A), A), CosignSeqGate::Allow);
+    fn idempotent_resign_of_identical_bytes_allowed() {
+        // We're ahead (expected 10), re-sign 8, and cosign_data reconstructs the
+        // SAME update we committed there → fine (high-TPS retry case).
+        assert_eq!(cosign_seq_gate(8, 10, Some(true)), CosignSeqGate::Allow);
     }
 
     #[test]
-    fn different_update_at_committed_seq_is_equivocation() {
-        // The whole incident: asked to sign a DIFFERENT update at a seq we
-        // already committed → refuse. (Pre-fix this returned Allow.)
-        assert_eq!(cosign_seq_gate(8, 10, Some(A), B), CosignSeqGate::Equivocation);
+    fn different_bytes_at_committed_seq_is_equivocation() {
+        // The whole incident: cosign_data reconstructs a DIFFERENT update than
+        // what we committed at that seq → refuse. (Pre-fix the gate keyed off the
+        // attacker-supplied content_hash and could be tricked into Allow.)
+        assert_eq!(cosign_seq_gate(8, 10, Some(false)), CosignSeqGate::Equivocation);
     }
 
     #[test]
     fn below_tip_but_pruned_is_refused() {
         // Below tip but not in our window → can't verify → refuse.
-        assert_eq!(cosign_seq_gate(8, 10, None, A), CosignSeqGate::OutsideWindow);
+        assert_eq!(cosign_seq_gate(8, 10, None), CosignSeqGate::OutsideWindow);
     }
 }
