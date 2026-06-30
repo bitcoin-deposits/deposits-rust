@@ -220,3 +220,85 @@ fn fraud_proof_equivocation_drives_confiscation() {
         txid, op_idx
     );
 }
+
+/// End-to-end of the AUTO-emit path (the lifecycle trigger). Unlike the test
+/// above — which hand-builds, embeds, and publishes the kind:9101 broadcast —
+/// here we publish NOTHING by hand. The operator double-signs a sequence and
+/// the cosigners' daemons must, on their own: detect the equivocation on
+/// inbound ingest (`handle_ledger_update` → `updates_equivocate`), build the
+/// `Equivocation` FraudProof, anchor it via a cosigned DEP-12 embed on one of
+/// their own ledgers, broadcast it (kind:9101), and the confiscation cascade
+/// must fire. This proves the dormant machinery is actually wired to a trigger.
+#[test]
+#[ignore]
+fn equivocation_auto_emits_and_confiscates() {
+    if !cluster_available() {
+        eprintln!("skipping: cluster not running — start with ./bin/setup.sh 3");
+        return;
+    }
+
+    let node = build_node_with_danger();
+
+    // Fund every op-key P2WPKH (RC6 auto-arm needs a UTXO per disputant).
+    for op_idx in 0..16 {
+        let _ = fund_operator_key_address(op_idx, 100_000);
+    }
+    mine_blocks(2);
+
+    // Fresh victim ledger on op0 + 3 healthy cosigners.
+    let accused_op_idx: usize = 0;
+    let victim = match open_victim_quorum_ledger(&node, accused_op_idx, 10_000, 3) {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "skipping: couldn't open a fresh Q=3 victim — rerun against `setup.sh --fresh 3`."
+            );
+            return;
+        }
+    };
+    let accused_ledger = victim.victim_ledger.clone();
+    let cosigner_op_indices: Vec<usize> =
+        victim.members.iter().map(|(op_idx, _, _)| *op_idx).collect();
+    eprintln!(
+        "[setup] accused=op{} ledger={}… cosigners={:?}",
+        accused_op_idx,
+        &accused_ledger[..16],
+        cosigner_op_indices
+    );
+
+    // Operator double-signs seq N. `danger fork-update` broadcasts U_A, waits
+    // 4s, then broadcasts the conflicting U_B — so cosigners ingest U_A and
+    // advance, then see U_B at the same seq. That second ingest is exactly
+    // what the detector keys on. We intentionally ignore the printed TLV here.
+    let mut fork_args: Vec<String> =
+        vec!["danger".into(), "fork-update".into(), accused_ledger.clone()];
+    for op_idx in &cosigner_op_indices {
+        fork_args.push("--cosigner-seed".into());
+        fork_args.push(op_seed(*op_idx));
+    }
+    let out = Command::new(&node)
+        .args(&fork_args)
+        .args(["--seed", &op_seed(accused_op_idx)])
+        .args(["--name", &format!("op{}", accused_op_idx)])
+        .args(["--network", "regtest"])
+        .args(["--data-dir", op_data_dir(accused_op_idx).to_str().unwrap()])
+        .args(["--esplora", ELECTRS_URL])
+        .args(["--relay", relay_ledgers()])
+        .output()
+        .expect("invoke danger fork-update");
+    assert!(
+        out.status.success(),
+        "danger fork-update failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    eprintln!("[fork-update]\n{}", String::from_utf8_lossy(&out.stdout));
+
+    // NO hand-built proof, NO embed, NO publish. The cosigner daemons must do
+    // all of it autonomously. Poll for the resulting confiscation TX.
+    let (op_idx, txid) = poll_confiscation_txid(&accused_ledger, Duration::from_secs(300));
+    eprintln!(
+        "[ok] AUTO-emitted equivocation proof drove confiscation: tx {} (observed via op{})",
+        txid, op_idx
+    );
+}
