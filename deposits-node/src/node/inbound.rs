@@ -650,6 +650,63 @@ impl Node {
             }
         }
 
+        // ── Non-conforming-cosignature detection ────────────────────────
+        // A quorum-cosigned update from the operator that FAILS our conformance
+        // check means the quorum colluded (or a cosigner is faulty) — honest
+        // cosigners refuse non-conforming updates at cosign time, so a cosigned
+        // one reaching us is the collusion signal. Arm a dispute; the
+        // confiscation grounds via `fetch_non_conforming_cosig_inline_evidence`
+        // (self-verifying replay over relay history). Only meaningful at the next
+        // sequence, where `check_speculative` applies cleanly onto our tip; an
+        // update WE cosigned passes (we checked it), so honest flow never arms.
+        // Never accuse ourselves.
+        if inbound.update.operator_id != self.node_id && !inbound.update.cosignatures.is_empty() {
+            let non_conforming = {
+                let l = ledger_arc.read().unwrap();
+                if inbound.update.operator_id == l.state.parent_pubkey
+                    && inbound.update.sequence_number == l.next_sequence()
+                {
+                    deposits_core::messages::LedgerOperation::tlv_decode(&inbound.update.message)
+                        .ok()
+                        .map(|op| {
+                            let h = self.wallet.get_block_height().unwrap_or(0);
+                            !l.state
+                                .check_speculative(
+                                    &op,
+                                    &deposits_core::dep16::Dep16Authorizer::new(),
+                                    h,
+                                )
+                                .is_empty()
+                        })
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            };
+            if non_conforming {
+                let last_valid = inbound.update.sequence_number.saturating_sub(1);
+                tracing::warn!(
+                    "NON-CONFORMING COSIGNED update on {}... seq {}: quorum cosigned an update that fails conformance — arming dispute",
+                    &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                    inbound.update.sequence_number,
+                );
+                let node = std::sync::Arc::clone(self);
+                let ledger_id = inbound.ledger_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = node
+                        .auto_arm_for_dispute_with_anchor(&ledger_id, last_valid, None)
+                        .await
+                    {
+                        tracing::error!(
+                            "Non-conforming-cosig: failed to arm dispute on {}...: {}",
+                            &ledger_id[..16.min(ledger_id.len())],
+                            e
+                        );
+                    }
+                });
+            }
+        }
+
         // Previously: skip if it's our own ledger ("stale in-memory state
         // causes the daemon to dispute itself"). Auditing the post-skip
         // flow shows the worry is already covered by other guards:

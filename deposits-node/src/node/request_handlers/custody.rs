@@ -1686,14 +1686,20 @@ impl Node {
                 .await
             {
                 Some(pt) => pt,
-                None => self
+                None => match self
                     .fetch_equivocation_inline_evidence(&request.ledger_id)
                     .await
-                    .ok_or_else(|| {
-                        "no kind:9101 fraud broadcast, fork-branch QuorumExpired \
-                         evidence, or on-relay equivocation evidence for this ledger"
-                            .to_string()
-                    })?,
+                {
+                    Some(pt) => pt,
+                    None => self
+                        .fetch_non_conforming_cosig_inline_evidence(&request.ledger_id)
+                        .await
+                        .ok_or_else(|| {
+                            "no kind:9101 fraud broadcast, or fork-branch QuorumExpired / \
+                             equivocation / non-conforming-cosignature evidence for this ledger"
+                                .to_string()
+                        })?,
+                },
             },
         };
         let is_respectful = proof_type.is_respectful();

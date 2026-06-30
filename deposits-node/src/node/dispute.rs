@@ -1629,6 +1629,88 @@ impl Node {
         None
     }
 
+    /// Self-verifying inline evidence for a NonConformingCosignature confiscation
+    /// — counterpart to [`fetch_equivocation_inline_evidence`]. The fault is a
+    /// quorum-cosigned update that fails conformance: honest cosigners refuse
+    /// such updates at cosign time, so a cosigned non-conforming update on the
+    /// relay is proof the quorum colluded (or a cosigner is faulty). We fetch the
+    /// ledger's history and, newest-first (the fault is typically the operator's
+    /// latest cosigned op), reuse the audited `verify_non_conforming_cosignature`
+    /// replay verifier on each cosigned update; the first that verifies grounds
+    /// the confiscation. No embedding/9101 needed — the bad update is already
+    /// durable on the relay.
+    pub(crate) async fn fetch_non_conforming_cosig_inline_evidence(
+        &self,
+        ledger_id: &str,
+    ) -> Option<deposits_core::fraud::FraudProofType> {
+        use deposits_core::fraud::{FraudEvidence, FraudProof, FraudProofType};
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tlv::TlvDecode;
+        use deposits_core::SignedLedgerUpdate;
+        use deposits_core::TlvEncode;
+
+        let mut updates: Vec<SignedLedgerUpdate> =
+            self.fetch_all_ledger_updates_paginated(ledger_id).await;
+        if updates.is_empty() {
+            return None;
+        }
+        updates.sort_by_key(|u| u.sequence_number);
+
+        // Equivocation/non-conformance is the original operator's misbehavior.
+        let original_operator = updates
+            .iter()
+            .find(|u| u.sequence_number == 0)
+            .map(|u| u.operator_id)?;
+        let accused = hex::encode(original_operator.serialize());
+
+        // The operator's QuorumBegin sequences — governing_quorumbegin_seq for a
+        // fault at seq N is the latest QB at seq <= N.
+        let qb_seqs: Vec<u64> = updates
+            .iter()
+            .filter(|u| u.operator_id == original_operator)
+            .filter(|u| {
+                matches!(
+                    LedgerOperation::tlv_decode(&u.message),
+                    Ok(LedgerOperation::QuorumBegin { .. })
+                )
+            })
+            .map(|u| u.sequence_number)
+            .collect();
+
+        for u in updates.iter().rev() {
+            // Only quorum-cosigned updates can be a NonConformingCosignature.
+            if u.cosignatures.is_empty() {
+                continue;
+            }
+            let Some(&governing_qb) =
+                qb_seqs.iter().filter(|&&s| s <= u.sequence_number).max()
+            else {
+                continue; // pre-quorum update — not confiscation-relevant
+            };
+            let proof = FraudProof {
+                proof_type: FraudProofType::NonConformingCosignature,
+                accused: accused.clone(),
+                ledger_id: ledger_id.to_string(),
+                evidence: FraudEvidence::NonConformingCosignature {
+                    fault_ledger_id: ledger_id.to_string(),
+                    fault_sequence: u.sequence_number,
+                    governing_quorumbegin_seq: governing_qb,
+                    fault_update_hex: hex::encode(u.tlv_encode()),
+                },
+            };
+            if deposits_core::fraud::verify_non_conforming_cosignature(
+                &proof,
+                &updates,
+                &deposits_core::types::DenyAll,
+            )
+            .is_ok()
+            {
+                return Some(FraudProofType::NonConformingCosignature);
+            }
+        }
+        None
+    }
+
     /// Auto-initiate confiscation when all participants are armed
     ///
     /// For each ledger where we're armed but confiscation hasn't happened yet,
@@ -2153,7 +2235,10 @@ impl Node {
                 Some(pt) => Some(pt),
                 None => match self.fetch_quorum_expired_inline_evidence(&ledger_id).await {
                     Some(pt) => Some(pt),
-                    None => self.fetch_equivocation_inline_evidence(&ledger_id).await,
+                    None => match self.fetch_equivocation_inline_evidence(&ledger_id).await {
+                        Some(pt) => Some(pt),
+                        None => self.fetch_non_conforming_cosig_inline_evidence(&ledger_id).await,
+                    },
                 },
             };
             let is_respectful = proof_type.map(|pt| pt.is_respectful()).unwrap_or(false);

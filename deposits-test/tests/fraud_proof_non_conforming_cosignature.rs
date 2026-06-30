@@ -262,6 +262,85 @@ fn fraud_proof_non_conforming_cosignature_drives_cross_ledger_confiscation() {
     );
 }
 
+/// AUTO-detect variant: the daemons must drive the whole thing. We forge a
+/// quorum-cosigned NON-CONFORMING update on the fault ledger and broadcast it
+/// (no hand-built FraudProof, no embed, no publish). The fault ledger's
+/// cosigners must detect it on ingest (`check_speculative` fails on a cosigned
+/// update → the collusion signal), arm a dispute, ground the confiscation via
+/// `fetch_non_conforming_cosig_inline_evidence`, and confiscate the fault
+/// ledger. Same-ledger confiscation (the operator landed bad cosigned work),
+/// the simpler counterpart to the cross-ledger contagion test above.
+#[test]
+#[ignore]
+fn non_conforming_cosignature_auto_detects_and_confiscates() {
+    if !cluster_available() {
+        eprintln!("skipping: cluster not running — start with ./bin/setup.sh 3");
+        return;
+    }
+
+    let node = build_node_with_danger();
+
+    for op_idx in 0..16 {
+        let _ = fund_operator_key_address(op_idx, 100_000);
+    }
+    mine_blocks(2);
+
+    let fault_op_idx: usize = 0;
+    let fault_victim = match open_victim_quorum_ledger(&node, fault_op_idx, 10_000, 3) {
+        Some(v) => v,
+        None => {
+            eprintln!("skipping: couldn't open a fresh Q=3 fault victim — rerun against setup.sh --fresh 3");
+            return;
+        }
+    };
+    let fault_ledger_id = fault_victim.victim_ledger.clone();
+    let cosigner_op_indices: Vec<usize> =
+        fault_victim.members.iter().map(|(op_idx, _, _)| *op_idx).collect();
+    eprintln!(
+        "[setup] fault_op=op{} ledger={}… cosigners={:?}",
+        fault_op_idx,
+        &fault_ledger_id[..16],
+        cosigner_op_indices
+    );
+
+    // Forge + broadcast a quorum-cosigned non-conforming update. We publish
+    // NOTHING else — the cosigners' daemons must detect, arm, and confiscate.
+    let mut forge_args: Vec<String> = vec![
+        "danger".into(),
+        "forge-non-conforming-cosig".into(),
+        fault_ledger_id.clone(),
+    ];
+    for op_idx in &cosigner_op_indices {
+        forge_args.push("--cosigner-seed".into());
+        forge_args.push(op_seed(*op_idx));
+    }
+    let out = Command::new(&node)
+        .args(&forge_args)
+        .args(["--seed", &op_seed(fault_op_idx)])
+        .args(["--name", &format!("op{}", fault_op_idx)])
+        .args(["--network", "regtest"])
+        .args(["--data-dir", op_data_dir(fault_op_idx).to_str().unwrap()])
+        .args(["--esplora", ELECTRS_URL])
+        .args(["--relay", relay_ledgers()])
+        .output()
+        .expect("spawn danger forge-non-conforming-cosig");
+    assert!(
+        out.status.success(),
+        "danger forge-non-conforming-cosig failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    eprintln!("[forge]\n{}", String::from_utf8_lossy(&out.stdout));
+
+    // Poll for confiscation on the FAULT ledger, driven entirely by the
+    // daemons' auto-detection.
+    let (op_idx, txid) = poll_confiscation_txid(&fault_ledger_id, Duration::from_secs(300));
+    eprintln!(
+        "[ok] AUTO-detected non-conforming cosignature drove confiscation: tx {} (via op{})",
+        txid, op_idx
+    );
+}
+
 /// Walk `op_idx`'s view of `ledger_id` for the most recent
 /// `QuorumBegin`, return its declared `quorum_members` pubkeys.
 fn read_quorum_members_of(
