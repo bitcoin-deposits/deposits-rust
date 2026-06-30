@@ -490,128 +490,42 @@ impl Node {
         }
     }
 
-    /// Realize the protocol's confiscation lifecycle for a detected
-    /// equivocation: build the self-contained `Equivocation` fraud proof,
-    /// anchor its hash on one of our own active ledgers (DEP-12
-    /// `DeliveryEmbed`), and broadcast it (kind:9101). The existing receiver
-    /// pipeline (`verify_fraud_broadcast` → DEP-06 confiscation cascade) takes
-    /// it from there. `update_a`/`update_b` are both operator-signed updates at
-    /// the same `(ledger_id, sequence_number)` with different `content_hash`.
+    /// Drive the confiscation lifecycle for a detected equivocation by arming a
+    /// dispute on the accused ledger — the same fork-branch `DisputeEnter` +
+    /// auto-arm path the expiry case uses (`auto_arm_for_dispute_with_anchor`).
+    /// The evidence is self-contained and already on the relay (the operator's
+    /// two conflicting `(seq, content)` updates), so cosigners ground the
+    /// confiscation via `fetch_equivocation_inline_evidence` — no kind:9101
+    /// embedding/causal-chain needed (a cosigner can't embed on a ledger it
+    /// doesn't operate). `last_valid_sequence = equiv_seq − 1`: everything
+    /// strictly before the equivocated seq stays canonical and replays onto the
+    /// fork. No grace period — equivocation is provable misbehavior, unlike a
+    /// deadline miss where the operator gets a self-rescue window.
     pub(crate) async fn emit_equivocation_proof(
         &self,
         update_a: deposits_core::types::SignedLedgerUpdate,
-        update_b: deposits_core::types::SignedLedgerUpdate,
+        _update_b: deposits_core::types::SignedLedgerUpdate,
     ) {
-        use deposits_core::fraud::{
-            CausalLink, FraudBroadcast, FraudEvidence, FraudProof, FraudProofType, ProofEmbedding,
-        };
-        use deposits_core::messages::LedgerOperation;
-        use deposits_core::tlv::TlvDecode;
-        use deposits_core::TlvEncode;
-
         let accused_ledger = update_a.ledger_id_hex();
-        let seq = update_a.sequence_number;
-        let accused = hex::encode(update_a.operator_id.serialize());
+        let equiv_seq = update_a.sequence_number;
+        let last_valid = equiv_seq.saturating_sub(1);
 
-        let proof = FraudProof {
-            proof_type: FraudProofType::Equivocation,
-            accused: accused.clone(),
-            ledger_id: accused_ledger.clone(),
-            evidence: FraudEvidence::Equivocation {
-                sequence: seq,
-                update_a_hex: hex::encode(update_a.tlv_encode()),
-                update_b_hex: hex::encode(update_b.tlv_encode()),
-            },
-        };
-        let proof_hash = proof.proof_hash();
-
-        // Anchor the accusation on a ledger WE operate with an active quorum
-        // (DEP-12 embed must land on the reporter's own cosigned chain).
-        let embed_ledger = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.iter().find_map(|(lid, arc)| {
-                let l = arc.read().unwrap();
-                (l.operator_key() == self.node_id
-                    && l.state.quorum_state == deposits_core::QuorumState::Active)
-                    .then(|| lid.clone())
-            })
-        };
-        let Some(embed_ledger) = embed_ledger else {
-            tracing::warn!(
-                "Equivocation on {}... seq {}: no active ledger we operate to anchor the proof — not emitting",
+        match self
+            .auto_arm_for_dispute_with_anchor(&accused_ledger, last_valid, None)
+            .await
+        {
+            Ok(()) => tracing::warn!(
+                "Equivocation on {}... seq {}: armed dispute fork (last_valid={}) — confiscation cascade should follow",
                 &accused_ledger[..16.min(accused_ledger.len())],
-                seq
-            );
-            return;
-        };
-
-        // Idempotency (survives restarts, no in-memory state): if this exact
-        // proof_hash is already embedded on our ledger, we already emitted.
-        let carries_hash = |u: &deposits_core::types::SignedLedgerUpdate| {
-            LedgerOperation::tlv_decode(&u.message)
-                .ok()
-                .and_then(|op| op.embedded_hash().copied())
-                .is_some_and(|h| h == proof_hash)
-        };
-        let already = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers
-                .get(&embed_ledger)
-                .is_some_and(|arc| arc.read().unwrap().history.iter().any(carries_hash))
-        };
-        if already {
-            return;
-        }
-
-        // Embed proof_hash on our own ledger (cosigned DeliveryEmbed).
-        let operation = LedgerOperation::DeliveryEmbed {
-            request_hash: proof_hash,
-            target_ledger_id: update_a.ledger_id,
-            target_operator: update_a.operator_id,
-        };
-        if let Err(e) = self.commit_operation(&embed_ledger, operation).await {
-            tracing::error!(
-                "Equivocation proof: failed to embed on {}...: {} — not emitting",
-                &embed_ledger[..16.min(embed_ledger.len())],
-                e
-            );
-            return;
-        }
-
-        // Read back the embed update we just committed (located by proof_hash).
-        let embedding = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(&embed_ledger).and_then(|arc| {
-                let l = arc.read().unwrap();
-                l.history.iter().rev().find(|u| carries_hash(u)).map(|u| {
-                    ProofEmbedding {
-                        ledger_id: embed_ledger.clone(),
-                        sequence: u.sequence_number,
-                        update_hash: hex::encode(u.content_hash),
-                        field: "delivery_request_hash".into(),
-                    }
-                })
-            })
-        };
-        let Some(embedding) = embedding else {
-            tracing::error!("Equivocation proof: embed committed but not found in history");
-            return;
-        };
-
-        let broadcast = FraudBroadcast {
-            proof,
-            embedding,
-            causal_chain: Vec::<CausalLink>::new(),
-        };
-        match self.nostr.broadcast_fraud_proof(&broadcast).await {
-            Ok(id) => tracing::warn!(
-                "Emitted Equivocation proof vs {}... on {}... seq {} (event {}) — confiscation should follow",
-                &accused[..16.min(accused.len())],
-                &accused_ledger[..16.min(accused_ledger.len())],
-                seq,
-                id
+                equiv_seq,
+                last_valid
             ),
-            Err(e) => tracing::error!("Failed to broadcast equivocation proof: {}", e),
+            Err(e) => tracing::error!(
+                "Equivocation on {}... seq {}: failed to arm dispute: {}",
+                &accused_ledger[..16.min(accused_ledger.len())],
+                equiv_seq,
+                e
+            ),
         }
     }
 

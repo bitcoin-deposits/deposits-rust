@@ -1557,6 +1557,61 @@ impl Node {
         None
     }
 
+    /// Self-verifying inline evidence for an Equivocation confiscation —
+    /// counterpart to [`fetch_quorum_expired_inline_evidence`]. Equivocation
+    /// needs no embedding/causal-chain: the proof is the operator's own two
+    /// conflicting updates, which are already durable on the relay (the
+    /// operator broadcast both as kind:9100). We fetch the ledger's full
+    /// history and look for the original operator double-signing — two updates
+    /// at the same `sequence_number` with different `content_hash`, both
+    /// bearing a valid operator signature. One such pair is unrecoverable proof
+    /// of misbehavior, so any cosigner can independently confirm a confiscation
+    /// is grounded without trusting a third party.
+    pub(crate) async fn fetch_equivocation_inline_evidence(
+        &self,
+        ledger_id: &str,
+    ) -> Option<deposits_core::fraud::FraudProofType> {
+        use deposits_core::fraud::FraudProofType;
+        use deposits_core::SignedLedgerUpdate;
+        use std::collections::HashMap;
+
+        let updates: Vec<SignedLedgerUpdate> =
+            self.fetch_all_ledger_updates_paginated(ledger_id).await;
+        if updates.is_empty() {
+            return None;
+        }
+
+        // The original operator owns sequence 0 — equivocation is *their*
+        // double-signing (fork-branch updates from disputants don't count).
+        let original_operator = updates
+            .iter()
+            .find(|u| u.sequence_number == 0)
+            .map(|u| u.operator_id)?;
+
+        // Group the original operator's updates by sequence; any sequence with
+        // ≥2 distinct, signature-valid content_hashes is an equivocation.
+        let mut by_seq: HashMap<u64, Vec<&SignedLedgerUpdate>> = HashMap::new();
+        for u in &updates {
+            if u.operator_id == original_operator {
+                by_seq.entry(u.sequence_number).or_default().push(u);
+            }
+        }
+        for group in by_seq.values() {
+            for i in 0..group.len() {
+                for j in (i + 1)..group.len() {
+                    let (a, b) = (group[i], group[j]);
+                    if a.content_hash != b.content_hash
+                        && a.verify_operator_signature().is_ok()
+                        && b.verify_operator_signature().is_ok()
+                    {
+                        return Some(FraudProofType::Equivocation);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Auto-initiate confiscation when all participants are armed
     ///
     /// For each ledger where we're armed but confiscation hasn't happened yet,
@@ -2079,7 +2134,10 @@ impl Node {
             let fee = fee_rate * estimated_vsize;
             let proof_type = match self.fetch_fraud_proof_type_for_ledger(&ledger_id).await {
                 Some(pt) => Some(pt),
-                None => self.fetch_quorum_expired_inline_evidence(&ledger_id).await,
+                None => match self.fetch_quorum_expired_inline_evidence(&ledger_id).await {
+                    Some(pt) => Some(pt),
+                    None => self.fetch_equivocation_inline_evidence(&ledger_id).await,
+                },
             };
             let is_respectful = proof_type.map(|pt| pt.is_respectful()).unwrap_or(false);
 

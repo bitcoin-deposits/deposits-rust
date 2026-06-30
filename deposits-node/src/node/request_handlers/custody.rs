@@ -1681,14 +1681,20 @@ impl Node {
         //    on the relay.
         let proof_type = match self.fetch_fraud_proof_type_for_ledger(&request.ledger_id).await {
             Some(pt) => pt,
-            None => self
+            None => match self
                 .fetch_quorum_expired_inline_evidence(&request.ledger_id)
                 .await
-                .ok_or_else(|| {
-                    "no kind:9101 fraud broadcast or fork-branch \
-                     QuorumExpired evidence on relay for this ledger"
-                        .to_string()
-                })?,
+            {
+                Some(pt) => pt,
+                None => self
+                    .fetch_equivocation_inline_evidence(&request.ledger_id)
+                    .await
+                    .ok_or_else(|| {
+                        "no kind:9101 fraud broadcast, fork-branch QuorumExpired \
+                         evidence, or on-relay equivocation evidence for this ledger"
+                            .to_string()
+                    })?,
+            },
         };
         let is_respectful = proof_type.is_respectful();
 
