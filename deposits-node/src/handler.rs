@@ -243,6 +243,80 @@ impl DepositsHandler {
             .cloned()
     }
 
+    /// After winning a confiscation lottery, make the resolved dispute fork the
+    /// daemon's authoritative copy of the BASE ledger so we actually operate it
+    /// as the new custodian.
+    ///
+    /// A winning cosigner holds two entries for the same on-chain ledger: the
+    /// stale JOINED base entry (`ledger_id`, still keyed to the fraudulent
+    /// operator) and the resolved FORK entry (`<ledger_id>_<seq>_<pk16>`, whose
+    /// `DisputeAcquire` rotated `operator_key` to us and cleared the dispute).
+    /// Deposit-open requests resolve by BASE `ledger_id`, so without this the
+    /// daemon would keep serving `wallet open` off the stale entry (old
+    /// operator, disputed) and the recovered ledger stays unserviceable.
+    ///
+    /// Promote by pointing the base key at the fork's `Arc<RwLock<Ledger>>`
+    /// (same allocation, so a later actor + our own catch-up all see one
+    /// state), persist under the base filename, and return `true`. The caller
+    /// must `ensure_actor_for(ledger_id)` afterward so the base ledger has a
+    /// writer. Idempotent: returns `false` if there's no eligible fork or the
+    /// base entry already reflects us as operator.
+    pub fn promote_dispute_fork_to_base(&self, ledger_id: &str) -> Result<bool, String> {
+        let our_id = self.our_node_id;
+
+        // Already operating the base entry? Nothing to do.
+        {
+            let ledgers = self.ledgers.lock().unwrap();
+            if let Some(base) = ledgers.get(ledger_id) {
+                if base.read().unwrap().state.operator_key == our_id {
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Find our resolved fork: same base id, operator rotated to us,
+        // dispute cleared to Normal.
+        let fork_key = {
+            let ledgers = self.ledgers.lock().unwrap();
+            ledgers
+                .keys()
+                .filter(|k| k.starts_with(ledger_id) && k.len() > ledger_id.len())
+                .find(|k| {
+                    ledgers
+                        .get(*k)
+                        .map(|arc| {
+                            let l = arc.read().unwrap();
+                            l.state.operator_key == our_id
+                                && l.state.dispute_state
+                                    == deposits_core::types::DisputeState::Normal
+                        })
+                        .unwrap_or(false)
+                })
+                .cloned()
+        };
+
+        let Some(fork_key) = fork_key else {
+            return Ok(false);
+        };
+
+        // Point the base key at the fork's Arc (shared allocation).
+        {
+            let mut ledgers = self.ledgers.lock().unwrap();
+            let Some(fork_arc) = ledgers.get(&fork_key).cloned() else {
+                return Ok(false);
+            };
+            ledgers.insert(ledger_id.to_string(), fork_arc);
+        }
+
+        self.persist_ledger_to_disk(ledger_id)?;
+        tracing::info!(
+            "Promoted resolved dispute fork {} to operate base ledger {} as new custodian",
+            &fork_key[..32.min(fork_key.len())],
+            &ledger_id[..16.min(ledger_id.len())],
+        );
+        Ok(true)
+    }
+
     /// Find the original (non-fork) entry for a ledger_id.
     pub fn find_original(&self, ledger_id: &str) -> Option<String> {
         let ledgers = self.ledgers.lock().unwrap();
@@ -1800,6 +1874,83 @@ impl DepositsHandler {
         self.persist_ledger_to_disk(ledger_id)?;
 
         Ok(applied)
+    }
+
+    /// Apply + persist an update we authored ourselves onto `ledger_id`,
+    /// running the state machine so derived state (custody, dispute state,
+    /// tip, sequence) advances, then flushing to disk.
+    ///
+    /// Unlike `apply_updates_to_ledger`, this does NOT re-verify chain
+    /// continuity against `tail_hash()`. It exists for the winner's
+    /// `DisputeAcquire` on its own dispute fork: that update chains off the
+    /// fork's `DisputeArmed` using the SAME `previous_hash` we broadcast to
+    /// the relay (see `dispute::claim_lottery`), so the local copy and the
+    /// wire copy are byte-identical — but the fork's in-memory `tail_hash()`
+    /// is the DisputeArmed's `chain_hash()`, which the broadcast update does
+    /// not (by the existing dispute wire convention) reference. Re-deriving
+    /// `previous_hash` here would fork the local copy away from the published
+    /// one, so we take the authored update verbatim and only run the state
+    /// machine + advance the tip.
+    ///
+    /// Safe against the fork's actor for the same reasons
+    /// `apply_updates_to_ledger` is: it holds the ledger write lock
+    /// atomically with no awaits mid-apply, and it's idempotent (a duplicate
+    /// seq+content_hash is a no-op). Returns `Ok(true)` if it appended,
+    /// `Ok(false)` if the update was already present.
+    pub fn commit_self_authored_update(
+        &self,
+        ledger_id: &str,
+        operation: &deposits_core::messages::LedgerOperation,
+        update: SignedLedgerUpdate,
+        block_height: u32,
+    ) -> Result<bool, String> {
+        let ledger_arc = {
+            let ledgers = self.ledgers.lock().unwrap();
+            ledgers
+                .get(ledger_id)
+                .cloned()
+                .ok_or_else(|| format!("Ledger not found: {}", ledger_id))?
+        };
+
+        {
+            let mut ledger = ledger_arc.write().unwrap();
+
+            // Idempotent across periodic retries of the claim task.
+            let already = ledger.history.iter().any(|u| {
+                u.sequence_number == update.sequence_number
+                    && u.content_hash == update.content_hash
+            });
+            if already {
+                return Ok(false);
+            }
+
+            // Run the state machine + conformance verifier so custody /
+            // dispute state / balances advance (not just the chain tip).
+            match ledger.apply_and_check(operation, block_height) {
+                Ok(violations) if !violations.is_empty() => {
+                    tracing::warn!(
+                        "commit_self_authored_update {}: conformance violations at seq {}: {:?}",
+                        ledger_id,
+                        update.sequence_number,
+                        violations
+                    );
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "apply failed at seq {}: {}",
+                        update.sequence_number, e
+                    ));
+                }
+                _ => {}
+            }
+
+            ledger.state.sequence = update.sequence_number;
+            ledger.state.chain_tip_hash = update.chain_hash();
+            ledger.history.push(update);
+        }
+
+        self.persist_ledger_to_disk(ledger_id)?;
+        Ok(true)
     }
 
     /// Adopt the relay's newer cosigned updates for a ledger we operate, IN

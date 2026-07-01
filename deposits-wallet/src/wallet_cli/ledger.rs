@@ -191,11 +191,25 @@ async fn find_ledger_id(
     client: &Client,
     prefix: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    // Fetch all updates to find matching ledger_id
+    // Fetch all updates to find matching ledger_id.
     let filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_UPDATE));
     let events = fetch_all_events_paginated(client, filter).await?;
 
     for event in events {
+        // The `TAG_LEDGER_ID` tag is only a 16-hex *prefix* (relay-filterable),
+        // so a full 64-hex ledger_id would never `starts_with` it. The full id
+        // lives in the event's TLV content — decode it and match the caller's
+        // prefix (which may itself be a full 64-hex id) against the full id.
+        // Falls back to the tag prefix for a truncated caller prefix that the
+        // tag can still satisfy.
+        if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
+            if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
+                let full = update.ledger_id_hex();
+                if full.starts_with(prefix) || prefix.starts_with(&full) {
+                    return Ok(Some(full));
+                }
+            }
+        }
         if let Some(lid) = event.tags.iter().find_map(|tag| {
             if tag.kind() == TagKind::SingleLetter(TAG_LEDGER_ID) {
                 tag.content().map(|s| s.to_string())
@@ -203,7 +217,7 @@ async fn find_ledger_id(
                 None
             }
         }) {
-            if lid.starts_with(prefix) {
+            if lid.starts_with(prefix) || prefix.starts_with(&lid) {
                 return Ok(Some(lid));
             }
         }
@@ -604,7 +618,15 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
         return Ok(());
     }
 
-    // Decode and sort updates
+    // Decode and sort updates. The trace dedups by sequence number
+    // (first-seen wins), but a disputed ledger has MULTIPLE fork branches
+    // publishing at the SAME sequence: the losing candidates' `DisputeYield`
+    // and the winner's `DisputeAcquire` both land at `armed_seq + 1`. If a
+    // Yield is seen first, the trace shows the ledger as still DISPUTED even
+    // though custody was resolved. Rank the winning custody-resolution
+    // (`DisputeAcquire`) ahead of everything else at the same sequence so the
+    // dedup keeps it — mirroring the daemon's reimport, which prefers the
+    // DisputeAcquire branch when a fork contests a sequence.
     let mut updates: Vec<SignedLedgerUpdate> = Vec::new();
     for event in &events {
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
@@ -613,7 +635,18 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
             }
         }
     }
-    updates.sort_by_key(|u| u.sequence_number);
+    // Priority: DisputeAcquire (0) > everything else (1). Lower sorts first.
+    let acquire_priority = |u: &SignedLedgerUpdate| -> u8 {
+        match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeAcquire { .. }) => 0,
+            _ => 1,
+        }
+    };
+    updates.sort_by(|a, b| {
+        a.sequence_number
+            .cmp(&b.sequence_number)
+            .then_with(|| acquire_priority(a).cmp(&acquire_priority(b)))
+    });
 
     // Track custody state
     let mut current_operator: Option<bitcoin::secp256k1::PublicKey> = None;

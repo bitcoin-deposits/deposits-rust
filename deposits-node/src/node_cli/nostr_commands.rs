@@ -1569,13 +1569,23 @@ pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::er
 
     let client = get_or_create_client(&relay_url).await?;
 
-    // DisputeEnter is a LedgerOperation, so look in KIND_LEDGER_UPDATE events
+    // Dispute ops are ordinary `LedgerOperation`s, published as
+    // KIND_LEDGER_UPDATE events tagged with `TAG_LEDGER_ID` (16-hex prefix)
+    // and carrying a base64-encoded `SignedLedgerUpdate` TLV in `content` —
+    // exactly like every other ledger update (see
+    // `deposits_nostr::broadcast_ledger_update`). The previous version here
+    // queried the wrong tag (`TAG_LEDGER_REQ`, used only for out-of-band
+    // requests) and tried to JSON-parse the content for a `message` hex
+    // field, so it never matched a single real update and reported every
+    // ledger — disputed or not — as SAFE. Query + decode the same way the
+    // wallet's `ledger custody` trace and the node's `auto_rotate_to_quorum`
+    // do, and paginate so a DisputeAcquire at the tail of a long chain isn't
+    // hidden behind the relay's per-query cap.
     let update_filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_REQ, [ledger_id.as_str()]);
+        .custom_tag(crate::nostr::TAG_LEDGER_ID, [ledger_tag(ledger_id.as_str())]);
 
-    let update_events = client
-        .fetch_events(vec![update_filter], Some(std::time::Duration::from_secs(5)))
+    let update_events = fetch_all_events_paginated(&client, update_filter)
         .await
         .map_err(|e| format!("Failed to fetch updates: {}", e))?;
 
@@ -1585,37 +1595,32 @@ pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::er
     let mut disputers: Vec<String> = Vec::new();
 
     for event in update_events.iter() {
-        if let Ok(update) = serde_json::from_str::<serde_json::Value>(&event.content) {
-            if let Some(message_hex) = update.get("message").and_then(|v| v.as_str()) {
-                if let Ok(message_bytes) = hex::decode(message_hex) {
-                    if message_bytes.len() >= 2 {
-                        let msg_type = (message_bytes[0] as u16) << 8 | message_bytes[1] as u16;
-
-                        // DisputeEnter = 0x0036 (54)
-                        if msg_type == 0x0036 {
-                            has_custody_dispute = true;
-                            // The disputer is who signed the update, extract from event pubkey
-                            let author = event.pubkey.to_string();
-                            if !disputers.contains(&author) {
-                                disputers.push(author);
-                            }
-                        }
-
-                        // DisputeAcquire = 0x0037 (55)
-                        if msg_type == 0x0037 {
-                            has_custody_acquire = true;
-                            if let Ok(op) = LedgerOperation::tlv_decode(&message_bytes) {
-                                if let LedgerOperation::DisputeAcquire {
-                                    new_custodian: nc, ..
-                                } = op
-                                {
-                                    new_custodian = Some(hex::encode(nc.serialize()));
-                                }
-                            }
-                        }
-                    }
+        let Ok(tlv_bytes) = BASE64.decode(&event.content) else {
+            continue;
+        };
+        let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) else {
+            continue;
+        };
+        let Ok(op) = LedgerOperation::tlv_decode(&update.message) else {
+            continue;
+        };
+        match op {
+            LedgerOperation::DisputeEnter { .. } => {
+                has_custody_dispute = true;
+                // The disputant is the update's operator_id (the fork-branch
+                // signer), not the Nostr event author (a delegate key).
+                let author = hex::encode(update.operator_id.serialize());
+                if !disputers.contains(&author) {
+                    disputers.push(author);
                 }
             }
+            LedgerOperation::DisputeAcquire {
+                new_custodian: nc, ..
+            } => {
+                has_custody_acquire = true;
+                new_custodian = Some(hex::encode(nc.serialize()));
+            }
+            _ => {}
         }
     }
 

@@ -1733,6 +1733,56 @@ impl Node {
             .map_err(|e| Error::Protocol(format!("Failed to broadcast DisputeAcquire: {:?}", e)))?;
 
         tracing::info!("DisputeAcquire published! We are now the operator.");
+
+        // Persist the DisputeAcquire to our OWN local fork ledger. Publishing
+        // to Nostr alone left the on-chain win invisible to every local
+        // reader: the DisputeAcquire never entered the winner's fork history,
+        // so `deposits-wallet ledger custody` / `dispute status` /
+        // `poll_dispute_acquire` (which scan the fork JSONL) still saw a
+        // DISPUTED ledger under the original operator. Apply the SAME update
+        // we just broadcast — byte-for-byte — through the state machine so
+        // `state.operator_key` rotates to us, the disputed state clears
+        // (`DisputeState::Normal`), the chain tip/sequence advance, and the
+        // fork file on disk records the resolution. Routed through
+        // `handler.commit_self_authored_update` (allowlisted, lock-serialized,
+        // no mid-apply awaits) so it can't race the fork's actor.
+        //
+        // The fork is stored under a compound key
+        // (`<ledger_id>_<seq>_<pk16>`); locate it via `find_our_fork`. If we
+        // somehow have no local fork (e.g. a manual-recovery operator without
+        // a persisted fork), skip local persistence rather than fail — the
+        // broadcast already succeeded and losers reconverge from the relay.
+        if let Some(fork_key) = self.handler.find_our_fork(ledger_id) {
+            match self.handler.commit_self_authored_update(
+                &fork_key,
+                &operation,
+                signed_update.clone(),
+                current_block,
+            ) {
+                Ok(true) => tracing::info!(
+                    "DisputeAcquire applied + persisted to local fork {} \
+                     (custody rotated to us, dispute cleared)",
+                    &fork_key[..16.min(fork_key.len())],
+                ),
+                Ok(false) => tracing::debug!(
+                    "DisputeAcquire already present on fork {} — skipping",
+                    &fork_key[..16.min(fork_key.len())],
+                ),
+                Err(e) => tracing::warn!(
+                    "Failed to persist DisputeAcquire to fork {}: {} \
+                     (broadcast still succeeded)",
+                    &fork_key[..16.min(fork_key.len())],
+                    e
+                ),
+            }
+        } else {
+            tracing::debug!(
+                "No local fork for {} — skipping local DisputeAcquire persist \
+                 (broadcast already published)",
+                &ledger_id[..16.min(ledger_id.len())],
+            );
+        }
+
         Ok(())
     }
 
@@ -3248,6 +3298,38 @@ impl Node {
                         &ledger_id[..16]
                     );
 
+                    // Promote our resolved fork to BE the base ledger so the
+                    // daemon operates it as the new custodian and can serve
+                    // `deposit_open` (which resolves by base ledger_id). Without
+                    // this the winner keeps the stale joined base entry (old
+                    // operator, still disputed) and the recovered ledger stays
+                    // unserviceable despite the on-chain win + published
+                    // DisputeAcquire.
+                    match self.handler.promote_dispute_fork_to_base(&ledger_id) {
+                        Ok(true) => {
+                            // The base entry's Arc (and thus operator_key) just
+                            // changed to us. Drop any stale `is_operator_of_ledger`
+                            // cache entry keyed to the pre-promotion (joined)
+                            // ledger, or the deposit-open gate would keep
+                            // dropping requests as `not_operator` despite the
+                            // custody transfer.
+                            self.operator_of_cache.lock().unwrap().remove(&ledger_id);
+                            self.ensure_actor_for(&ledger_id);
+                            tracing::info!(
+                                "Now operating base ledger {} as new custodian",
+                                &ledger_id[..16]
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to promote fork for {}: {}",
+                                &ledger_id[..16],
+                                e
+                            );
+                        }
+                    }
+
                     // Auto-rotate
                     match self.auto_rotate_to_quorum(&ledger_id).await {
                         Ok(()) => {
@@ -3288,7 +3370,39 @@ impl Node {
 
         let our_pubkey = self.node_id;
 
-        // Paginated relay fetch — bloated forks would otherwise
+        // Fast, race-free path: consult our OWN local fork first. When we win,
+        // `claim_lottery` applies + persists the DisputeAcquire to the fork
+        // (see `commit_self_authored_update`), so the fork history is the
+        // authoritative local record of the win — available immediately, with
+        // no dependence on the broadcast having propagated back through the
+        // relay. Before this, `auto_post_win_cleanup` could poll the relay in
+        // the window between claim and relay-propagation, see no DisputeAcquire,
+        // conclude `not_winner`, write the terminal marker, and NEVER rotate /
+        // re-open the recovered ledger — leaving the winner's own ledger
+        // unserviceable despite the on-chain win.
+        if let Some(fork_key) = self.handler.find_our_fork(ledger_id) {
+            let has_local_acquire = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(&fork_key)
+                    .map(|arc| {
+                        let l = arc.read().unwrap();
+                        l.history.iter().any(|u| {
+                            u.operator_id == our_pubkey
+                                && matches!(
+                                    LedgerOperation::tlv_decode(&u.message),
+                                    Ok(LedgerOperation::DisputeAcquire { .. })
+                                )
+                        })
+                    })
+                    .unwrap_or(false)
+            };
+            if has_local_acquire {
+                return Ok(true);
+            }
+        }
+
+        // Fallback: paginated relay fetch — bloated forks would otherwise
         // hide DisputeAcquire at the tail beyond a single 500-event
         // window.
         let paginated_updates = self.fetch_all_ledger_updates_paginated(ledger_id).await;
