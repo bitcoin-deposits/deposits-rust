@@ -4220,11 +4220,20 @@ impl NostrTransport {
     /// ledger-update chains means the genesis / QuorumBegin (oldest events)
     /// never come back. Mirrors the wallet's `fetch_all_events_paginated`.
     async fn fetch_events_paginated(&self, base_filter: Filter) -> Result<Vec<Event>, Error> {
+        // Requested limit per page. The relay caps each query at its own maximum
+        // (often below this), which is exactly why termination must NOT depend on
+        // page size — a short page is normal, not end-of-data. We stop on a stall
+        // (no new events) instead. See `plan_paged_fetch`.
         const PAGE: usize = 500;
+        // Runaway guard only (5M events); real chains end via the stall long
+        // before this.
+        const MAX_PAGES: u32 = 10_000;
+
         let mut all: Vec<Event> = Vec::new();
         let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
         let mut until: Option<Timestamp> = None;
-        let mut stalls = 0usize;
+        let mut stalls = 0u32;
+        let mut pages = 0u32;
 
         loop {
             let mut filter = base_filter.clone().limit(PAGE);
@@ -4238,12 +4247,16 @@ impl NostrTransport {
                 .await
                 .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
 
-            let batch = events.len();
-            let mut oldest: Option<Timestamp> = None;
+            if events.is_empty() {
+                break;
+            }
+
+            let mut oldest: Option<u64> = None;
             let mut fresh = 0usize;
             for event in events.into_iter() {
-                if oldest.is_none() || event.created_at < oldest.unwrap() {
-                    oldest = Some(event.created_at);
+                let ts = event.created_at.as_u64();
+                if oldest.is_none() || ts < oldest.unwrap() {
+                    oldest = Some(ts);
                 }
                 if seen.insert(event.id) {
                     all.push(event);
@@ -4251,24 +4264,14 @@ impl NostrTransport {
                 }
             }
 
-            // End of data: a short page means the relay had nothing older.
-            if batch < PAGE {
-                break;
-            }
-            // No progress (relay re-served the same page): bail after a few tries.
-            if fresh == 0 {
-                stalls += 1;
-                if stalls > 3 {
-                    break;
+            pages += 1;
+            match plan_paged_fetch(fresh, oldest, pages, MAX_PAGES, &mut stalls) {
+                PagedFetchStep::Stop => break,
+                // Page older (inclusive `until`; dedup handles boundary events
+                // that share that exact timestamp).
+                PagedFetchStep::Continue { until_secs } => {
+                    until = Some(Timestamp::from(until_secs))
                 }
-            } else {
-                stalls = 0;
-            }
-            // Page older via the oldest created_at (inclusive; dedup handles the
-            // boundary events that share that exact timestamp).
-            match oldest {
-                Some(ts) => until = Some(ts),
-                None => break,
             }
         }
 
@@ -5790,5 +5793,106 @@ mod relay_deaf_guard_tests {
         // Every filter must carry a `since` so a refresh only pulls a tiny
         // forward window, not a full history re-dump (which risks EAGAIN drops).
         assert!(filters.iter().all(|f| f.since.is_some()), "all filters need a `since`");
+    }
+}
+
+/// What `fetch_events_paginated` should do after fetching one page.
+#[derive(Debug, PartialEq, Eq)]
+enum PagedFetchStep {
+    /// Fetch another page with `until` lowered to this timestamp (seconds).
+    Continue { until_secs: u64 },
+    /// Stop — the full result set has been walked (or the runaway cap tripped).
+    Stop,
+}
+
+/// Pure loop-control for backward `until` pagination of a newest-first,
+/// cap-limited relay. `fresh` is the count of NEW (deduped) events in the page
+/// just fetched; `oldest_secs` the oldest `created_at` in it.
+///
+/// It terminates on a stall (a short run of pages with no new events), NOT on
+/// page size — the relay caps each query below our requested limit, so a short
+/// page is normal. Depending on page size here is exactly the bug that made a
+/// single capped page look like the whole ledger, so depositors never saw the
+/// genesis/QuorumBegin and couldn't open a deposit.
+fn plan_paged_fetch(
+    fresh: usize,
+    oldest_secs: Option<u64>,
+    pages: u32,
+    max_pages: u32,
+    stalls: &mut u32,
+) -> PagedFetchStep {
+    if fresh == 0 {
+        *stalls += 1;
+        if *stalls > 3 {
+            return PagedFetchStep::Stop;
+        }
+    } else {
+        *stalls = 0;
+    }
+    if pages >= max_pages {
+        return PagedFetchStep::Stop;
+    }
+    match oldest_secs {
+        Some(s) => PagedFetchStep::Continue { until_secs: s },
+        None => PagedFetchStep::Stop,
+    }
+}
+
+#[cfg(test)]
+mod paged_fetch_tests {
+    use super::{plan_paged_fetch, PagedFetchStep};
+
+    /// The core regression: a full page that the relay capped below our
+    /// requested limit must keep paging, not be read as end-of-data.
+    #[test]
+    fn capped_full_page_keeps_paging() {
+        let mut stalls = 0;
+        assert_eq!(
+            plan_paged_fetch(500, Some(1_000), 1, 10_000, &mut stalls),
+            PagedFetchStep::Continue { until_secs: 1_000 }
+        );
+    }
+
+    #[test]
+    fn stops_after_a_run_of_empty_pages() {
+        let mut stalls = 0;
+        for _ in 0..3 {
+            assert_eq!(
+                plan_paged_fetch(0, Some(7), 5, 10_000, &mut stalls),
+                PagedFetchStep::Continue { until_secs: 7 }
+            );
+        }
+        assert_eq!(
+            plan_paged_fetch(0, Some(7), 5, 10_000, &mut stalls),
+            PagedFetchStep::Stop
+        );
+    }
+
+    #[test]
+    fn fresh_events_reset_stall_counter() {
+        let mut stalls = 0;
+        plan_paged_fetch(0, Some(9), 1, 10_000, &mut stalls);
+        plan_paged_fetch(0, Some(8), 2, 10_000, &mut stalls);
+        assert_eq!(stalls, 2);
+        plan_paged_fetch(300, Some(7), 3, 10_000, &mut stalls);
+        assert_eq!(stalls, 0);
+    }
+
+    #[test]
+    fn runaway_cap_stops() {
+        let mut stalls = 0;
+        assert_eq!(
+            plan_paged_fetch(500, Some(1), 10_000, 10_000, &mut stalls),
+            PagedFetchStep::Stop
+        );
+    }
+
+    #[test]
+    fn missing_oldest_stops() {
+        let mut stalls = 0;
+        assert_eq!(
+            plan_paged_fetch(1, None, 1, 10_000, &mut stalls),
+            PagedFetchStep::Stop
+        );
     }
 }

@@ -1,5 +1,54 @@
 use super::*;
 
+/// What the backward-`until` reimport pagination loop should do after a page.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReimportPage {
+    /// Fetch another page with `until` lowered to this timestamp.
+    Continue { until_ts: u64 },
+    /// Stop — the whole chain has been walked (or a safety cap tripped).
+    Stop,
+}
+
+/// Pure loop-control for paging a newest-first, cap-limited relay backwards.
+///
+/// `fresh` is the count of NEW (deduped) events in the page just fetched;
+/// `page_min_ts` the oldest `created_at` in it. We keep going as long as pages
+/// bring new events, terminating only on a short run of empty pages or the
+/// page cap.
+///
+/// Crucially it NEVER stops based on page *size*. The relay caps each query
+/// well below our requested limit (~500 vs 5000), so the old
+/// `page_count < RELAY_FETCH_MIN_PAGE` (1000) exit fired on the very first page
+/// and, combined with a forward-`since` cursor that only re-fetched the newest
+/// page, left any member more than one page behind permanently stranded — the
+/// root of the joined-ledger wedge. Terminating on a stall instead is robust to
+/// whatever the relay's real cap turns out to be.
+pub(crate) fn plan_reimport_page(
+    fresh: usize,
+    page_min_ts: Option<u64>,
+    pages: u32,
+    max_pages: u32,
+    stalls: &mut u32,
+) -> ReimportPage {
+    if fresh == 0 {
+        *stalls += 1;
+        if *stalls > 3 {
+            return ReimportPage::Stop;
+        }
+    } else {
+        *stalls = 0;
+    }
+    if pages >= max_pages {
+        return ReimportPage::Stop;
+    }
+    // `until` is inclusive, so keep the oldest timestamp and let dedup drop the
+    // boundary events we've already ingested.
+    match page_min_ts {
+        Some(ts) => ReimportPage::Continue { until_ts: ts },
+        None => ReimportPage::Stop,
+    }
+}
+
 impl Node {
     /// Start listening for messages
     pub async fn start(&self) -> Result<(), Error> {
@@ -552,13 +601,27 @@ impl Node {
                 .unwrap_or(0)
         };
 
-        // Paginate forward using Nostr event created_at timestamps.
-        // The relay returns newest-first capped by maxFilterLimit per query,
-        // so we advance `since` after each page to walk forward through history.
-        let mut cursor_ts: u64 = 0;
+        // Paginate the FULL chain by walking created_at BACKWARDS. The relay
+        // returns newest-first and caps each query at its own maxFilterLimit
+        // (observed ~500, far below RELAY_FETCH_PAGE_LIMIT), so one query only
+        // ever yields the newest page. Start at the tip and lower `until` to the
+        // oldest event seen each round, deduping by event id, until a page
+        // brings nothing new.
+        //
+        // The previous version advanced `since` FORWARD, which against a
+        // newest-first relay just re-fetched the top page and stopped after one
+        // round — and its `page_count < RELAY_FETCH_MIN_PAGE` (1000) exit fired
+        // immediately because the relay's real page is ~500. Net effect: a
+        // member more than one page behind could never catch up, which is
+        // exactly how joined ledgers wedged. Terminate on a stall (no new
+        // events), NOT on page size, so we don't depend on knowing the cap.
+        let mut until_ts: Option<u64> = None;
+        let mut seen_ids: std::collections::HashSet<nostr_sdk::EventId> =
+            std::collections::HashSet::new();
 
         let mut all_fetched: Vec<deposits_core::SignedLedgerUpdate> = Vec::new();
         let mut pages = 0u32;
+        let mut stalls = 0u32;
         let max_pages = Self::RELAY_FETCH_MAX_PAGES;
 
         loop {
@@ -570,8 +633,8 @@ impl Node {
                 )
                 .limit(Self::RELAY_FETCH_PAGE_LIMIT);
 
-            if cursor_ts > 0 {
-                filter = filter.since(Timestamp::from(cursor_ts));
+            if let Some(ts) = until_ts {
+                filter = filter.until(Timestamp::from(ts));
             }
 
             let events = self
@@ -585,39 +648,40 @@ impl Node {
                 break;
             }
 
-            let mut page_max_ts = cursor_ts;
+            let mut page_min_ts: Option<u64> = None;
             let mut page_count = 0usize;
+            let mut fresh = 0usize;
             for event in events.iter() {
                 let event_ts = event.created_at.as_u64();
+                if page_min_ts.is_none() || event_ts < page_min_ts.unwrap() {
+                    page_min_ts = Some(event_ts);
+                }
+                page_count += 1;
+                // Dedup across pages: the oldest-timestamp boundary events
+                // reappear on the next (inclusive `until`) query.
+                if !seen_ids.insert(event.id) {
+                    continue;
+                }
                 if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
                     if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
-                        if event_ts > page_max_ts {
-                            page_max_ts = event_ts;
-                        }
                         all_fetched.push(update);
-                        page_count += 1;
+                        fresh += 1;
                     }
                 }
             }
 
             pages += 1;
             tracing::debug!(
-                "reimport_joined_ledger {}...: page {} fetched {} updates (cursor_ts={}, max_ts={})",
-                &ledger_id[..16.min(ledger_id.len())], pages, page_count, cursor_ts, page_max_ts,
+                "reimport_joined_ledger {}...: page {} fetched {} events ({} new, until_ts={:?}, min_ts={:?})",
+                &ledger_id[..16.min(ledger_id.len())], pages, page_count, fresh, until_ts, page_min_ts,
             );
 
-            // If the max timestamp didn't advance or we got fewer events than
-            // our page size, we've reached the end.
-            if page_max_ts <= cursor_ts
-                || page_count < Self::RELAY_FETCH_MIN_PAGE
-                || pages >= max_pages
-            {
-                break;
+            // A page with no new events means we've walked the whole chain (or
+            // the relay is re-serving the boundary); bail after a few stalls.
+            match plan_reimport_page(fresh, page_min_ts, pages, max_pages, &mut stalls) {
+                ReimportPage::Stop => break,
+                ReimportPage::Continue { until_ts: next } => until_ts = Some(next),
             }
-
-            // Advance cursor past the newest event in this page (no overlap buffer
-            // needed — dedup below handles any duplicates from boundary events).
-            cursor_ts = page_max_ts;
             tokio::task::yield_now().await;
         }
 
@@ -2328,5 +2392,76 @@ impl Node {
                 tracing::warn!("[SLOW_LOOP] Run loop iteration took {:?}", loop_elapsed);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pagination_tests {
+    use super::{plan_reimport_page, ReimportPage};
+
+    /// The regression that stranded lagging members: the relay caps each query
+    /// far below our requested limit, so a full-but-capped page must NOT be read
+    /// as end-of-data. As long as the page brought new events, keep paging.
+    #[test]
+    fn capped_full_page_keeps_paging() {
+        let mut stalls = 0;
+        // 500 fresh events (relay cap), requested limit was 5000. Must continue,
+        // lowering `until` to the oldest timestamp seen.
+        assert_eq!(
+            plan_reimport_page(500, Some(1_000), 1, 50, &mut stalls),
+            ReimportPage::Continue { until_ts: 1_000 }
+        );
+        assert_eq!(stalls, 0);
+    }
+
+    /// Walking backward eventually re-serves only already-seen boundary events
+    /// (fresh == 0). Tolerate a few such stalls, then stop.
+    #[test]
+    fn stops_after_a_run_of_empty_pages() {
+        let mut stalls = 0;
+        // Three empty pages still continue (relay might be re-serving a boundary
+        // timestamp); the fourth ends it.
+        for _ in 0..3 {
+            assert_eq!(
+                plan_reimport_page(0, Some(42), 5, 50, &mut stalls),
+                ReimportPage::Continue { until_ts: 42 }
+            );
+        }
+        assert_eq!(
+            plan_reimport_page(0, Some(42), 5, 50, &mut stalls),
+            ReimportPage::Stop
+        );
+    }
+
+    /// A page with new events resets the stall counter, so an intermittent empty
+    /// page doesn't prematurely end a long walk.
+    #[test]
+    fn fresh_events_reset_stall_counter() {
+        let mut stalls = 0;
+        plan_reimport_page(0, Some(10), 1, 50, &mut stalls); // stall 1
+        plan_reimport_page(0, Some(9), 2, 50, &mut stalls); // stall 2
+        assert_eq!(stalls, 2);
+        plan_reimport_page(500, Some(8), 3, 50, &mut stalls); // progress
+        assert_eq!(stalls, 0);
+    }
+
+    /// The page cap is a hard safety valve even while events keep arriving.
+    #[test]
+    fn stops_at_max_pages() {
+        let mut stalls = 0;
+        assert_eq!(
+            plan_reimport_page(500, Some(1), 50, 50, &mut stalls),
+            ReimportPage::Stop
+        );
+    }
+
+    /// No oldest timestamp (empty page decoded to nothing) ends the walk.
+    #[test]
+    fn missing_min_ts_stops() {
+        let mut stalls = 0;
+        assert_eq!(
+            plan_reimport_page(1, None, 1, 50, &mut stalls),
+            ReimportPage::Stop
+        );
     }
 }
