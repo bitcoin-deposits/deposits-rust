@@ -1623,7 +1623,12 @@ impl LedgerState {
     #[inline]
     fn add_balance_delta(&mut self, before: u64, after: u64) {
         let next = self.total_deposit_balance as i128 + after as i128 - before as i128;
-        self.total_deposit_balance = next.max(0) as u64;
+        // Clamp to [0, u64::MAX] rather than truncating the downcast. Real msat
+        // totals (≤ 21M BTC ≈ 2.1e18) never approach u64::MAX (1.8e19), so this
+        // ceiling is unreachable in production — but clamping matches the
+        // saturating semantics of `fold_deposit_balance` and avoids a silent
+        // wrap-to-tiny-value if a pathological caller ever did overflow.
+        self.total_deposit_balance = next.clamp(0, u64::MAX as i128) as u64;
     }
 
     /// Get the declared collateral amount for this ledger (msats).

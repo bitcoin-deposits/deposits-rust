@@ -1692,9 +1692,18 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             record_withdrawal: None,
         });
     } else if aux < 17 && !op.deposits.is_empty() {
-        // Adversarial OnchainCredit: amount=0 (rejected) or non-existent deposit.
+        // Adversarial OnchainCredit: amount=0 (rejected) or a huge over-credit.
+        // The over-credit is capped at u64::MAX / 4096 (≈ 45k BTC in msat) rather
+        // than u64::MAX / 2: still astronomically larger than any honest reserve,
+        // so it exercises the same over-reservation / profit paths, but bounded so
+        // that even a runaway adversary maxing out every deposit can't push the
+        // aggregate `total_deposit_balance` past u64::MAX. Keeping the true total
+        // representable is what lets the incremental balance cache stay exactly in
+        // step with `fold_deposit_balance` (the debug drift-guard in apply_in_place
+        // asserts that equality); the saturating fold and a wrapping incremental
+        // cache only diverge once the sum actually overflows u64.
         let (did, _, _) = pick_deposit(op, rng)?;
-        let amount = if rng.range(2) == 0 { 0 } else { u64::MAX / 2 };
+        let amount = if rng.range(2) == 0 { 0 } else { u64::MAX / 4096 };
         return Some(GeneratedOp {
             op: LedgerOperation::OnchainCredit {
                 txid: [0xBA; 32],
