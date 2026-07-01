@@ -391,6 +391,81 @@ fn run_lottery(contributions: &[usize]) -> Result<XOnlyPublicKey, String> {
 // Tests
 // ============================================================================
 
+/// End-to-end: build the lottery from preimages produced by the real
+/// `LotteryOutput::derive_lottery_preimage` (the signer/node derivation),
+/// then spend the on-chain claim leaf through the script interpreter.
+///
+/// This is the regression guard for the "32-byte fixed preimage" bug:
+/// a preimage whose length is out of `[17, 16+N]` fails the leaf's
+/// `OP_SIZE` bounds and the lottery-claim leaf is unspendable. Here we
+/// prove the derived preimages (a) satisfy the on-chain `OP_SIZE` bounds
+/// (the script runs to a TRUE), and (b) dispatch to the same winner
+/// `calculate_winner` computes off-chain — i.e. off-chain calc and the
+/// on-chain leaf agree on the derived lengths, for every supported N.
+#[test]
+fn derived_preimages_spend_the_claim_leaf_and_agree_with_calculate_winner() {
+    use bitcoin::hashes::{sha256, HashEngine};
+    for n in 2..=deposits_core::MAX_DISPUTANTS {
+        // Distinct per-participant seeds, as different signers would have.
+        let mut participants = Vec::with_capacity(n);
+        let mut preimages = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut eng = sha256::Hash::engine();
+            eng.input(b"e2e-derived-preimage");
+            eng.input(&(n as u64).to_le_bytes());
+            eng.input(&(i as u64).to_le_bytes());
+            let seed: [u8; 32] = sha256::Hash::from_engine(eng).to_byte_array();
+            let pre = LotteryOutput::derive_lottery_preimage(&seed, n).unwrap();
+            assert!(
+                (17..=16 + n).contains(&pre.len()),
+                "n={} i={} derived len {} out of range",
+                n,
+                i,
+                pre.len()
+            );
+            let commit = hash160::Hash::hash(&pre).to_byte_array();
+            participants.push(LotteryParticipant::new(
+                pk((i + 1) as u8),
+                commit,
+                "bcrt1p...".to_string(),
+            ));
+            preimages.push(pre);
+        }
+
+        // Off-chain winner from the same lengths.
+        let off_chain = LotteryOutput::calculate_winner(&preimages).unwrap();
+
+        // On-chain: run the claim script through the interpreter.
+        let builder = LotteryScriptBuilder::new(
+            participants.clone(),
+            standard_recovery_voters(),
+            3,
+            Network::Regtest,
+        );
+        let script = builder.build_lottery_script().unwrap();
+        let sig = vec![0xAA; 64];
+        let mut witness = vec![sig];
+        for p in preimages.iter().rev() {
+            witness.push(p.clone());
+        }
+        let mut interp = Interp::new(witness);
+        interp
+            .run(&script)
+            .unwrap_or_else(|e| panic!("n={}: derived preimages failed the leaf: {}", n, e));
+        let top = interp.stack.last().expect("empty stack");
+        assert!(read_scriptbool(top), "n={}: script returned FALSE", n);
+        let winner_pk = XOnlyPublicKey::from_slice(interp.last_checked_pubkey.unwrap().as_slice())
+            .unwrap();
+        assert_eq!(
+            winner_pk,
+            participants[off_chain].pubkey,
+            "n={}: on-chain dispatch disagrees with calculate_winner (idx {})",
+            n,
+            off_chain
+        );
+    }
+}
+
 #[test]
 fn primary_lottery_dispatches_correctly_at_n3() {
     // Sum = 1+2+1 = 4, 4 mod 3 = 1 → participant index 1 wins.

@@ -1599,6 +1599,99 @@ impl LotteryOutput {
         Ok(sum % n)
     }
 
+    /// Derive a dispute-lottery preimage of the correct length from a
+    /// 256-bit entropy seed and the disputant count `n`.
+    ///
+    /// # Why this exists
+    ///
+    /// The lottery selects the winner from the *byte lengths* of the
+    /// revealed preimages: `contribution_i = LEN(preimage_i) - 16`, and
+    /// `winner = (Σ contribution_i) mod n`. For the commit-reveal
+    /// randomness-extraction property to hold, an honest disputant must
+    /// choose its length uniformly from `[17, 16+n]` — equivalently its
+    /// contribution uniformly from the complete residue system
+    /// `{1, .., n}` mod `n`. See `CUSTODY_LOTTERY.md` §"Why this is fair".
+    ///
+    /// A prior implementation returned the raw 32-byte HMAC directly as
+    /// the preimage. Length 32 is out of range for every realistic `n`
+    /// (the on-chain claim leaf enforces `LEN ∈ [17, 16+n]` via `OP_SIZE`
+    /// and [`calculate_winner`] rejects it), so the fast lottery-claim
+    /// leaf was unspendable. This helper fixes that: same seed → same
+    /// length → same bytes → same `HASH160`, at both arm-time (commitment)
+    /// and reveal-time.
+    ///
+    /// # Length derivation (uniform over `[17, 16+n]`)
+    ///
+    /// The 256-bit seed is reduced mod `n` to pick the contribution:
+    ///
+    /// ```text
+    /// contribution = (seed mod n) + 1     // uniform-ish in [1, n]
+    /// length       = 16 + contribution    // in [17, 16+n]
+    /// ```
+    ///
+    /// With a 256-bit uniform seed and `n <= MAX_DISPUTANTS = 15`, the
+    /// modulo bias away from perfectly-uniform is at most
+    /// `n / 2^256 < 2^-252`, i.e. cryptographically negligible: no
+    /// residue class is favoured in any way an adversary could exploit.
+    ///
+    /// # Preimage bytes (anti-grinding)
+    ///
+    /// The preimage's *content* must (a) be a deterministic function of
+    /// the seed so arm and reveal agree byte-for-byte, and (b) carry
+    /// enough entropy that an adversary cannot, after seeing the target
+    /// length, grind a *different* preimage of a *different* length with
+    /// the same `HASH160` (a length swap would move the sum). The bytes
+    /// are the first `length` bytes of `SHA256("deposits/lottery/preimage/v1"
+    /// || seed || n)`, re-expanded by re-hashing if `length` ever exceeds
+    /// 32 (it never does for `n <= 15`, where `length <= 31`, but the
+    /// expansion keeps the helper total-correct for the full domain).
+    /// Because `length >= 17`, the preimage carries at least 136 bits of
+    /// entropy — HASH160's 160-bit output means a second-preimage of a
+    /// different length costs ~2^80 work, far beyond any disputant.
+    ///
+    /// `n` must be in `2..=MAX_DISPUTANTS`; the returned preimage always
+    /// satisfies `calculate_winner`'s per-preimage bound for that `n` and
+    /// the on-chain leaf built with the same `bounds_n = n`.
+    pub fn derive_lottery_preimage(seed: &[u8; 32], n: usize) -> DepositsResult<Vec<u8>> {
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
+        if !(2..=crate::constants::MAX_DISPUTANTS).contains(&n) {
+            return Err(DepositsError::InvalidState(format!(
+                "lottery preimage derivation needs 2 <= n <= {} (got {})",
+                crate::constants::MAX_DISPUTANTS,
+                n
+            )));
+        }
+
+        // Reduce the 256-bit seed mod n via Horner's method over bytes,
+        // most-significant first: seed mod n = (((b0)*256 + b1)*256 + ...) mod n.
+        // This is exact for the full 256-bit value without bignum types.
+        let mut residue: u64 = 0;
+        for &byte in seed.iter() {
+            residue = (residue * 256 + byte as u64) % (n as u64);
+        }
+        let contribution = (residue as usize) + 1; // in [1, n]
+        let length = 16 + contribution; // in [17, 16+n]
+
+        // Deterministic preimage bytes: SHA256(domain || seed || n_le),
+        // expanded by counter re-hashing if length > 32 (unreachable for
+        // n <= 15, kept for total correctness).
+        let mut out = Vec::with_capacity(length);
+        let mut counter: u32 = 0;
+        while out.len() < length {
+            let mut eng = sha256::Hash::engine();
+            eng.input(b"deposits/lottery/preimage/v1");
+            eng.input(seed);
+            eng.input(&(n as u64).to_le_bytes());
+            eng.input(&counter.to_le_bytes());
+            let block = sha256::Hash::from_engine(eng).to_byte_array();
+            let take = (length - out.len()).min(block.len());
+            out.extend_from_slice(&block[..take]);
+            counter += 1;
+        }
+        debug_assert_eq!(out.len(), length);
+        Ok(out)
+    }
+
     /// Create a witness for claiming the lottery output.
     ///
     /// The winner must provide their signature and all participants' preimages.
@@ -2148,6 +2241,84 @@ mod tests {
         ];
         let winner = LotteryOutput::calculate_winner(&preimages).unwrap();
         assert_eq!(winner, 0); // (1 + 1) % 2 = 0
+    }
+
+    #[test]
+    fn derive_lottery_preimage_length_in_range_and_deterministic() {
+        // For every supported n, the derived preimage must land in
+        // [17, 16+n] and be stable across calls (arm == reveal).
+        for n in 2..=crate::constants::MAX_DISPUTANTS {
+            for s in 0u8..32u8 {
+                let seed = [s; 32];
+                let p1 = LotteryOutput::derive_lottery_preimage(&seed, n).unwrap();
+                let p2 = LotteryOutput::derive_lottery_preimage(&seed, n).unwrap();
+                assert_eq!(p1, p2, "same seed+n must yield identical bytes");
+                assert!(
+                    (17..=16 + n).contains(&p1.len()),
+                    "n={} seed={} len={} out of [17,{}]",
+                    n,
+                    s,
+                    p1.len(),
+                    16 + n
+                );
+                // A single derived preimage must satisfy calculate_winner's
+                // per-preimage bound when placed among n preimages.
+                let batch: Vec<Vec<u8>> = (0..n)
+                    .map(|i| {
+                        LotteryOutput::derive_lottery_preimage(&[s.wrapping_add(i as u8); 32], n)
+                            .unwrap()
+                    })
+                    .collect();
+                LotteryOutput::calculate_winner(&batch)
+                    .expect("derived batch must be a valid winner input");
+            }
+        }
+    }
+
+    #[test]
+    fn derive_lottery_preimage_length_is_uniform() {
+        // The contribution (len-16) must be ~uniform over [1,n]. Drive
+        // the derivation with many distinct random-ish seeds and assert
+        // every residue class 1..=n is hit and the distribution is close
+        // to flat (chi-square-free sanity: no class < half or > double
+        // the expected count over a large sample).
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
+        for &n in &[2usize, 3, 5, 7, 15] {
+            let trials = 20_000usize;
+            let mut counts = vec![0usize; n + 1]; // index by contribution 1..=n
+            for i in 0..trials {
+                let mut eng = sha256::Hash::engine();
+                eng.input(b"uniformity-test");
+                eng.input(&(i as u64).to_le_bytes());
+                let seed = sha256::Hash::from_engine(eng).to_byte_array();
+                let p = LotteryOutput::derive_lottery_preimage(&seed, n).unwrap();
+                let contribution = p.len() - 16;
+                counts[contribution] += 1;
+            }
+            let expected = trials / n;
+            for c in 1..=n {
+                assert!(counts[c] > 0, "n={} residue class {} never hit", n, c);
+                assert!(
+                    counts[c] > expected / 2 && counts[c] < expected * 2,
+                    "n={} class {} count {} far from expected {}",
+                    n,
+                    c,
+                    counts[c],
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn derive_lottery_preimage_rejects_bad_n() {
+        let seed = [1u8; 32];
+        assert!(LotteryOutput::derive_lottery_preimage(&seed, 1).is_err());
+        assert!(LotteryOutput::derive_lottery_preimage(
+            &seed,
+            crate::constants::MAX_DISPUTANTS + 1
+        )
+        .is_err());
     }
 
     #[test]

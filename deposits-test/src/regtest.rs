@@ -590,6 +590,27 @@ pub fn publish_fraud_broadcast(
 ///
 /// Returns the txid of the funding transaction. Caller is responsible
 /// for mining sufficient confirmations (default cosigner policy is 1).
+/// The operator's on-chain identity pubkey (`m/86'/0'/0'/0/0` from the
+/// op seed) — the key that becomes `new_custodian` in a `DisputeAcquire`
+/// when this operator wins the lottery. Returned as compressed-hex and
+/// as x-only-hex so callers can match either form.
+pub fn op_identity_pubkey(op_idx: usize) -> (String, String) {
+    use bitcoin::secp256k1::{PublicKey, Secp256k1};
+    use std::str::FromStr;
+    let seed = op_seed(op_idx);
+    let seed_bytes = hex::decode(&seed).expect("op seed hex");
+    let secp = Secp256k1::new();
+    let xpriv =
+        bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Regtest, &seed_bytes).expect("xpriv");
+    let path = bitcoin::bip32::DerivationPath::from_str("m/86'/0'/0'/0/0").unwrap();
+    let derived = xpriv.derive_priv(&secp, &path).expect("derive");
+    let pk = PublicKey::from_secret_key(&secp, &derived.private_key);
+    (
+        hex::encode(pk.serialize()),
+        hex::encode(pk.x_only_public_key().0.serialize()),
+    )
+}
+
 pub fn fund_operator_key_address(op_idx: usize, amount_sats: u64) -> bitcoin::Txid {
     use bitcoin::secp256k1::{PublicKey, Secp256k1};
     use std::str::FromStr;
@@ -1167,6 +1188,87 @@ pub fn ledger_health(op_idx: usize, ledger_id: &str) -> String {
     let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
     combined.push_str(&String::from_utf8_lossy(&out.stderr));
     combined
+}
+
+/// Query `deposits-node nostr dispute status <ledger>` and return the
+/// combined stdout+stderr. The command prints one of
+/// `DISPUTE_STATUS: SAFE | DISPUTED | RESOLVED`, and (on RESOLVED) a
+/// `New custodian:` line. This is the depositor-facing serviceability
+/// signal: a wallet refuses to open on DISPUTED and proceeds on
+/// SAFE/RESOLVED.
+pub fn dispute_status(op_idx: usize, ledger_id: &str) -> String {
+    let seed = op_seed(op_idx);
+    let data_dir = op_data_dir(op_idx);
+    let name = format!("op{}", op_idx);
+    let out = Command::new(node_bin())
+        .args(["nostr", "dispute", "status", ledger_id])
+        .args(["--seed", &seed])
+        .args(["--name", &name])
+        .args(["--network", "regtest"])
+        .args(["--data-dir", data_dir.to_str().unwrap()])
+        .args(["--esplora", ELECTRS_URL])
+        .args(["--relay", relay_ledgers()])
+        .output()
+        .expect("deposits-node nostr dispute status");
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    combined
+}
+
+/// True iff any operator's fork of `ledger_id` carries a confirmed
+/// `DisputeAcquire` (winner selected + custody transferred). Scans every
+/// op's on-disk fork JSONLs — the winner publishes DisputeAcquire on its
+/// own fork branch, whose file name is prefixed by the base `ledger_id`.
+pub fn dispute_acquire_custodian(ledger_id: &str) -> Option<bitcoin::secp256k1::PublicKey> {
+    use deposits_protocol::messages::LedgerOperation;
+    use deposits_protocol::tlv::TlvDecode;
+    for op_idx in 0..10 {
+        let dir = op_data_dir(op_idx).join("wallet/ledgers");
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().into_owned();
+            // Base ledger file and every fork branch begin with the id.
+            if !fname.starts_with(ledger_id) {
+                continue;
+            }
+            let stem = fname.trim_end_matches(".jsonl");
+            let history = read_ledger_history(&op_data_dir(op_idx), stem);
+            for u in history.iter().rev() {
+                if let Ok(LedgerOperation::DisputeAcquire { new_custodian, .. }) =
+                    LedgerOperation::tlv_decode(&u.message)
+                {
+                    return Some(new_custodian);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Poll until a `DisputeAcquire` (custody transfer to the lottery
+/// winner) appears on any op's fork of `ledger_id`, mining a couple of
+/// blocks each cycle to advance confirmations / CSV windows that the
+/// reveal→claim→acquire cascade waits on. Returns the new custodian, or
+/// `None` on timeout.
+pub fn poll_dispute_acquire(
+    ledger_id: &str,
+    timeout: Duration,
+) -> Option<bitcoin::secp256k1::PublicKey> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if let Some(nc) = dispute_acquire_custodian(ledger_id) {
+            return Some(nc);
+        }
+        // Nudge chain forward: reveal fires at confiscation +3 confs, and
+        // the claim leaf / CSV paths need blocks. The shared auto-miner
+        // also mines, but explicit blocks keep the test deterministic.
+        mine_blocks(2);
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    None
 }
 
 /// True iff bitcoind is reachable AND the release binaries are built.

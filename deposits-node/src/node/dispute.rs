@@ -134,6 +134,34 @@ pub(crate) fn recovery_voters_from_updates(
     Some((recovery_voters, recovery_threshold))
 }
 
+/// Disputant count `N` for this dispute's lottery, derived from a
+/// ledger/fork history.
+///
+/// `N` fixes both the on-chain claim leaf's per-preimage length bound
+/// `[17, 16+N]` and the winner arithmetic `sum mod N`, so the preimage
+/// length chosen at arm-time must target the *same* `N` used at
+/// confiscation-build and reveal/claim time. By the protocol invariant
+/// "disputants = Q exactly" (operator barred from disputing own ledger),
+/// `N = Q = |quorum_members \ {operator}|` from the latest `QuorumBegin`
+/// — the same set [`recovery_voters_from_updates`] returns. That value is
+/// immutable once `QuorumBegin` is on the fork, so every party and every
+/// phase computes the identical `N`.
+///
+/// Returns `None` when no `QuorumBegin`/`LedgerOpen` is present or when
+/// the resulting count falls outside the script's supported band
+/// `2..=MAX_DISPUTANTS`.
+pub(crate) fn dispute_lottery_n_from_history(
+    history: &[deposits_core::SignedLedgerUpdate],
+) -> Option<usize> {
+    let (voters, _threshold) = recovery_voters_from_updates(history)?;
+    let n = voters.len();
+    if (2..=deposits_core::MAX_DISPUTANTS).contains(&n) {
+        Some(n)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod confiscation_outputs_tests {
     use super::*;
@@ -856,17 +884,46 @@ impl Node {
                         (*commitment_hash, true)
                     } else {
                         // First arm: derive the preimage from the
-                        // signer's identity secret. Same derivation at
-                        // reveal time reproduces the same 32 bytes,
-                        // so we never persist it to disk and a
-                        // disk-full event can't lose the dispute.
-                        let preimage = self
+                        // signer's identity secret. The signer returns a
+                        // fixed 32-byte HMAC *seed*; we shape it into a
+                        // preimage whose *length* carries the lottery
+                        // entropy and lands in `[17, 16+N]` for this
+                        // dispute's disputant count `N` (= Q, from the
+                        // fork's QuorumBegin — see `dispute_lottery_n`).
+                        // The same seed + same `N` at reveal time
+                        // reproduces the identical bytes, so we never
+                        // persist it to disk and a disk-full event can't
+                        // lose the dispute, while `HASH160(preimage)`
+                        // stays consistent between commit and reveal.
+                        let seed = self
                             .handler
                             .signer
                             .derive_dispute_lottery_preimage(ledger_id, last_valid_seq)
                             .map_err(|e| {
                                 Error::Protocol(format!(
                                     "derive lottery preimage: {}",
+                                    e
+                                ))
+                            })?;
+                        // Compute N from the fork history we already hold
+                        // (fork_ledger is write-locked here — do NOT call
+                        // self.dispute_lottery_n, which would re-lock and
+                        // deadlock).
+                        let n = dispute_lottery_n_from_history(&fork_ledger.history)
+                            .ok_or_else(|| {
+                                Error::Protocol(
+                                    "cannot determine lottery N (Q) for dispute \
+                                     preimage length at arm time"
+                                        .to_string(),
+                                )
+                            })?;
+                        let preimage =
+                            deposits_core::tapscript_reserves::LotteryOutput::derive_lottery_preimage(
+                                &seed, n,
+                            )
+                            .map_err(|e| {
+                                Error::Protocol(format!(
+                                    "shape lottery preimage: {}",
                                     e
                                 ))
                             })?;
@@ -1037,12 +1094,43 @@ impl Node {
         let after_id = fork_key.get(65..)?;
         let seq_end = after_id.find('_')?;
         let last_valid_seq: u64 = after_id[..seq_end].parse().ok()?;
-        let derived = self
+        // The signer returns a fixed 32-byte HMAC *seed*; the on-chain
+        // lottery selects the winner from the preimage *length*, so we
+        // shape the seed into a preimage whose length lands in the valid
+        // range `[17, 16+N]` for this dispute's disputant count `N`.
+        // `N` is derived from the fork's QuorumBegin (disputants = Q
+        // exactly; see `dispute_lottery_n`), which is immutable and thus
+        // identical at arm-time and reveal-time — so the committed
+        // `HASH160(preimage)` still matches the revealed bytes.
+        let seed = self
             .handler
             .signer
             .derive_dispute_lottery_preimage(ledger_id, last_valid_seq)
             .ok()?;
-        Some(derived.to_vec())
+        let n = self.dispute_lottery_n(&fork_key)?;
+        deposits_core::tapscript_reserves::LotteryOutput::derive_lottery_preimage(&seed, n).ok()
+    }
+
+    /// Number of disputants `N` this dispute's lottery is built for.
+    ///
+    /// The on-chain claim leaf bounds every preimage to `[17, 16+N]` and
+    /// [`LotteryOutput::calculate_winner`] computes `sum mod N`, both with
+    /// `N = participants.len()` at confiscation-build time. By the
+    /// protocol invariant "disputants = Q exactly" (the operator is barred
+    /// from disputing their own ledger and every cosigner disputes a
+    /// forked operator — see DEP-06 §"The Lottery"), that count equals the
+    /// quorum size `Q = |quorum_members \ {operator}|` from the fork's
+    /// latest `QuorumBegin`. That value is fixed at `QuorumBegin` and so is
+    /// identical whether computed at arm-time or reveal-time, which is what
+    /// keeps the committed `HASH160(preimage)` consistent with the revealed
+    /// preimage's length.
+    ///
+    /// Returns `None` if the fork or its `QuorumBegin` cannot be found.
+    fn dispute_lottery_n(&self, fork_key: &str) -> Option<usize> {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        let fork_arc = ledgers.get(fork_key)?;
+        let fork = fork_arc.read().unwrap();
+        dispute_lottery_n_from_history(&fork.history)
     }
 
     /// Idempotency check for "have we published our lottery reveal for

@@ -56,6 +56,35 @@ This holds because addition mod N has the one-time-pad property: adding a unifor
 
 The hash commitment matters because HASH160 outputs are 20 bytes regardless of preimage length. Committing a hash leaks zero information about the chosen length, so no participant can observe another's contribution before locking in their own.
 
+### How the preimage (and its length) is derived
+
+A disputant must reproduce the *exact same preimage bytes* at reveal time that it committed to `HASH160(·)` at arm time — otherwise the hash check fails and its leaf is unspendable. It must also do so without persisting the preimage to disk (a disk-full event mid-dispute must not lose the ability to reveal). Both are satisfied by deriving the preimage deterministically from the signer's identity secret:
+
+```
+seed   = HMAC-SHA256(identity_secret; "deposits/lottery/v1" || ledger_id || last_valid_sequence)   // 32 bytes
+contribution = (seed mod N) + 1                       // in [1, N]
+length       = 16 + contribution                       // in [17, 16+N]
+preimage     = first `length` bytes of
+               SHA256("deposits/lottery/preimage/v1" || seed || N)   // re-hash-expanded if length > 32
+commitment_hash = HASH160(preimage)
+```
+
+The length is what carries the entropy. Reducing a uniform 256-bit `seed` mod `N` yields a contribution that is uniform over the complete residue system `{1, .., N}` to within a modulo bias of `< N/2^256 < 2^-252` — cryptographically indistinguishable from a fair die. The preimage's *content* is a second, independent hash of the seed, so it is unpredictable to everyone but the deriver and (because `length ≥ 17`) carries ≥ 136 bits of entropy: an adversary who learns the target length still cannot grind a *different*-length preimage with a colliding `HASH160` for under ~2^80 work.
+
+Implemented in `LotteryOutput::derive_lottery_preimage` (deposits-core); the signer emits only the 32-byte `seed` (`Signer::derive_dispute_lottery_preimage`), and the node shapes it into the length-correct preimage at both the arm-time commitment and the reveal, so the two are byte-identical by construction.
+
+### Reconciling `N` at arm time
+
+`N` appears in three places that must agree exactly, or the claim leaf either misawards or (safely) becomes unspendable:
+
+1. the length range each armer chooses (`[17, 16+N]`),
+2. the on-chain claim leaf's `OP_SIZE` bound (`17..=16+N`) and its `sum mod N` dispatch, built into the confiscation TX,
+3. the off-chain `calculate_winner` (`sum mod n`).
+
+An armer commits before it can observe the final set of armers, so it cannot read `N` off the completed lottery. The reconciliation rests on the protocol invariant **disputants = Q exactly**: the operator is barred from disputing its own ledger and every cosigner disputes a forked operator, so the disputant count equals the quorum size `Q = |quorum_members \ {operator}|` fixed at `QuorumBegin`. That value is immutable and readable from the fork history by every party at every phase, so arm-time, confiscation-build, reveal, and `calculate_winner` all derive the *same* `N = Q` (`dispute_lottery_n_from_history` in deposits-node; `Q` = the set `recovery_voters_from_updates` returns).
+
+Failure mode if fewer than `Q` actually arm (so the confiscation TX is built with `N' < Q`): an armer's committed length was chosen for `Q`, so it may exceed `16+N'`. The on-chain `OP_SIZE ≤ 16+N'` check then *rejects* that preimage and the primary claim leaf is unspendable — **it never misawards.** The dispute falls to the K=1 partial-reveal leaf (one missing armer) or the CSV recovery cascade; funds stay safe on-chain. In other words, a mispredicted `N` degrades liveness, never safety. Under the shipping policy (`VALID_QUORUM_SIZES = {3,5,7}`, all cosigners dispute) the common case is `armed = Q` and every path agrees precisely.
+
 ## Protocol Flow
 
 ### Phase 1: Dispute & Arm

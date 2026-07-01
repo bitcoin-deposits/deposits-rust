@@ -302,3 +302,173 @@ fn equivocation_auto_emits_and_confiscates() {
         txid, op_idx
     );
 }
+
+/// Serviceability bar (DEP-06 blocker fix): the confiscation cascade must
+/// carry all the way through winner-selection to a *serviceable* recovered
+/// ledger — not merely land the confiscation TX.
+///
+/// This is the regression guard for the fixed-length lottery-preimage bug:
+/// `derive_dispute_lottery_preimage` used to return a 32-byte preimage, so
+/// the fast lottery-claim leaf's `OP_SIZE` bound (`17..=16+N`, = `17..=19`
+/// at Q=3) rejected it and the claim was unspendable — the pipeline died
+/// at winner-selection and the forked ledger never got a `DisputeAcquire`,
+/// staying `DISPUTED` forever. With the length-shaping fix, an honest
+/// cosigner wins, publishes `DisputeAcquire`, and the ledger becomes
+/// depositable again under the new custodian.
+///
+/// Assertions past the confiscation TX:
+///   1. a `DisputeAcquire` appears (winner selected → custody transferred),
+///   2. `dispute status` reports `RESOLVED` (not `DISPUTED`),
+///   3. the new custodian is one of the honest cosigners (not the accused),
+///   4. a depositor can `deposits-wallet open` a deposit on the ledger.
+#[test]
+#[ignore]
+fn equivocation_recovers_to_serviceable_ledger() {
+    if !cluster_available() {
+        eprintln!("skipping: cluster not running — start with ./bin/setup.sh 3 --fresh");
+        return;
+    }
+
+    let node = build_node_with_danger();
+    for op_idx in 0..16 {
+        let _ = fund_operator_key_address(op_idx, 100_000);
+    }
+    mine_blocks(2);
+
+    let accused_op_idx: usize = 0;
+    let victim = match open_victim_quorum_ledger(&node, accused_op_idx, 10_000, 3) {
+        Some(v) => v,
+        None => {
+            eprintln!("skipping: couldn't open a fresh Q=3 victim — rerun against `setup.sh --fresh 3`.");
+            return;
+        }
+    };
+    let accused_ledger = victim.victim_ledger.clone();
+    let cosigner_op_indices: Vec<usize> =
+        victim.members.iter().map(|(op_idx, _, _)| *op_idx).collect();
+    let (_accused_full, accused_pk) = op_identity_pubkey(accused_op_idx);
+    eprintln!(
+        "[setup] accused=op{} ({}…) ledger={}… cosigners={:?}",
+        accused_op_idx,
+        &accused_pk[..12],
+        &accused_ledger[..16],
+        cosigner_op_indices
+    );
+
+    // Equivocate: double-sign the same sequence to both branches.
+    let mut fork_args: Vec<String> =
+        vec!["danger".into(), "fork-update".into(), accused_ledger.clone()];
+    for op_idx in &cosigner_op_indices {
+        fork_args.push("--cosigner-seed".into());
+        fork_args.push(op_seed(*op_idx));
+    }
+    let out = Command::new(&node)
+        .args(&fork_args)
+        .args(["--seed", &op_seed(accused_op_idx)])
+        .args(["--name", &format!("op{}", accused_op_idx)])
+        .args(["--network", "regtest"])
+        .args(["--data-dir", op_data_dir(accused_op_idx).to_str().unwrap()])
+        .args(["--esplora", ELECTRS_URL])
+        .args(["--relay", relay_ledgers()])
+        .output()
+        .expect("invoke danger fork-update");
+    assert!(
+        out.status.success(),
+        "danger fork-update failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 1. Confiscation TX must land (arm → confiscate).
+    let (obs_op, txid) = poll_confiscation_txid(&accused_ledger, Duration::from_secs(300));
+    eprintln!("[ok] confiscation TX {} (via op{})", txid, obs_op);
+
+    // 2. Reveal → winner-selection → DisputeAcquire. This is the step the
+    //    fixed-length preimage bug used to kill: the claim leaf was
+    //    unspendable so no DisputeAcquire ever appeared.
+    let new_custodian = poll_dispute_acquire(&accused_ledger, Duration::from_secs(420))
+        .unwrap_or_else(|| {
+            panic!(
+                "no DisputeAcquire within timeout for ledger {} — winner-selection stalled \
+                 (the fixed-length preimage regression, or claim leaf unspendable)",
+                &accused_ledger[..16]
+            )
+        });
+    let custodian_hex = hex::encode(new_custodian.serialize());
+    eprintln!("[ok] DisputeAcquire → new custodian {}…", &custodian_hex[..16]);
+
+    // 3. New custodian must be an honest cosigner, never the accused.
+    let custodian_xonly = hex::encode(new_custodian.x_only_public_key().0.serialize());
+    assert_ne!(
+        custodian_xonly, accused_pk,
+        "winner must not be the accused equivocator"
+    );
+    let honest: Vec<String> = cosigner_op_indices
+        .iter()
+        .map(|i| op_identity_pubkey(*i).1)
+        .collect();
+    assert!(
+        honest.contains(&custodian_xonly),
+        "new custodian {} not among honest cosigners {:?}",
+        &custodian_xonly[..16],
+        honest
+    );
+
+    // 4. `dispute status` must report RESOLVED (not DISPUTED).
+    let mut resolved = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut last_status = String::new();
+    while std::time::Instant::now() < deadline {
+        last_status = dispute_status(cosigner_op_indices[0], &accused_ledger);
+        if last_status.contains("DISPUTE_STATUS: RESOLVED") {
+            resolved = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    assert!(
+        resolved,
+        "dispute status never became RESOLVED; last:\n{}",
+        last_status
+    );
+    assert!(
+        !last_status.contains("DISPUTE_STATUS: DISPUTED"),
+        "ledger still reports DISPUTED after recovery"
+    );
+    eprintln!("[ok] dispute status = RESOLVED");
+
+    // 5. Serviceability: a depositor can open a deposit on the recovered
+    //    ledger. Give the new custodian a moment to auto-continue and
+    //    begin cosigning, then open.
+    mine_blocks(2);
+    std::thread::sleep(Duration::from_secs(5));
+    let wdir = tempdir();
+    let (sec_hex, _xonly) = keygen();
+    let nsec = wdir.join("wallet.nsec");
+    std::fs::write(&nsec, &sec_hex).expect("write wallet nsec");
+
+    let mut opened = false;
+    let mut last_open = String::new();
+    for attempt in 0..6 {
+        let (ok, msg) = wallet_open(
+            &accused_ledger,
+            &format!("post-recovery-{}", attempt),
+            &nsec,
+            &wdir,
+            &[],
+        );
+        last_open = msg;
+        if ok {
+            opened = true;
+            break;
+        }
+        mine_blocks(1);
+        std::thread::sleep(Duration::from_secs(5));
+    }
+    assert!(
+        opened,
+        "deposit could not be opened on the recovered ledger; last wallet output:\n{}",
+        last_open
+    );
+    eprintln!("[ok] SERVICEABLE: a deposit opened on the recovered ledger under the new custodian");
+}

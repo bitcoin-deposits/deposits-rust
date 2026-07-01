@@ -372,14 +372,18 @@ pub trait Signer: Send + Sync {
         ))
     }
 
-    /// Deterministically derive the lottery preimage for a dispute. A
-    /// disputant arms by committing `HASH160(preimage)`; the preimage
-    /// must survive across restarts (so the eventual reveal matches
-    /// the commitment) but must not be predictable to other parties.
-    /// HMAC-SHA256 of the signer's identity secret keyed by
-    /// `(ledger_id, last_valid_sequence)` satisfies both: it's stable
-    /// per node-and-dispute, never persisted, and recoverable from
-    /// seed alone.
+    /// Deterministically derive the lottery-preimage *seed* for a
+    /// dispute. A disputant arms by committing `HASH160(preimage)`, where
+    /// `preimage = LotteryOutput::derive_lottery_preimage(seed, N)` shapes
+    /// this seed into bytes whose *length* lands in `[17, 16+N]` (the
+    /// length carries the lottery entropy). The seed must survive across
+    /// restarts (so the eventual reveal reproduces the identical bytes and
+    /// matches the commitment) but must not be predictable to other
+    /// parties. HMAC-SHA256 of the signer's identity secret keyed by
+    /// `(ledger_id, last_valid_sequence)` satisfies both: it's stable per
+    /// node-and-dispute, never persisted, and recoverable from the
+    /// identity secret alone. The signer returns only the seed and is
+    /// oblivious to `N`; the length policy lives entirely in the node.
     fn derive_dispute_lottery_preimage(
         &self,
         ledger_id: &str,
