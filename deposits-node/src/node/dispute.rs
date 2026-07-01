@@ -836,6 +836,38 @@ impl Node {
             }
         }
 
+        // Determine the lottery's disputant count `N` (= Q) BEFORE taking
+        // the fork write-lock (this is an async relay fetch and must not
+        // straddle a held lock). We derive `N` from the ledger's canonical
+        // chain fetched from the relay — the SAME source
+        // `initiate_confiscations` uses to build the on-chain claim leaf's
+        // `OP_SIZE` bounds — rather than the local fork history, which for
+        // a disputing cosigner can be sparse (e.g. missing `QuorumBegin`).
+        // Deriving both `N`s from the identical canonical source is what
+        // guarantees the committed preimage length lands in the leaf's
+        // `[17, 16+N]` band. Falls back to the local fork history if the
+        // relay fetch yields nothing (offline / relay hiccup).
+        let arm_n: usize = {
+            let fetched = self
+                .fetch_all_ledger_updates_paginated(ledger_id)
+                .await;
+            let from_relay = dispute_lottery_n_from_history(&fetched);
+            match from_relay {
+                Some(n) => n,
+                None => {
+                    let local = fork_arc.read().unwrap();
+                    dispute_lottery_n_from_history(&local.history).ok_or_else(|| {
+                        Error::Protocol(
+                            "cannot determine lottery N (Q) for dispute preimage \
+                             length at arm time (no QuorumBegin on relay or local \
+                             fork history)"
+                                .to_string(),
+                        )
+                    })?
+                }
+            }
+        };
+
         // 3. Publish DisputeArmed with preimage commitment on the fork
         {
             let mut fork_ledger = fork_arc.write().unwrap();
@@ -905,18 +937,9 @@ impl Node {
                                     e
                                 ))
                             })?;
-                        // Compute N from the fork history we already hold
-                        // (fork_ledger is write-locked here — do NOT call
-                        // self.dispute_lottery_n, which would re-lock and
-                        // deadlock).
-                        let n = dispute_lottery_n_from_history(&fork_ledger.history)
-                            .ok_or_else(|| {
-                                Error::Protocol(
-                                    "cannot determine lottery N (Q) for dispute \
-                                     preimage length at arm time"
-                                        .to_string(),
-                                )
-                            })?;
+                        // `N` (= Q) was resolved above from the canonical
+                        // relay chain, before this write-lock was taken.
+                        let n = arm_n;
                         let preimage =
                             deposits_core::tapscript_reserves::LotteryOutput::derive_lottery_preimage(
                                 &seed, n,
@@ -1076,7 +1099,7 @@ impl Node {
     /// the signer using the fork's `last_valid_seq` parsed from the
     /// fork tracking key. Returns `None` if we have no fork for this
     /// ledger.
-    fn lottery_preimage(&self, ledger_id: &str) -> Option<Vec<u8>> {
+    async fn lottery_preimage(&self, ledger_id: &str) -> Option<Vec<u8>> {
         let preimage_file = self.data_dir.join(format!(
             "lottery_preimage_{}.hex",
             &ledger_id[..16.min(ledger_id.len())]
@@ -1098,16 +1121,20 @@ impl Node {
         // lottery selects the winner from the preimage *length*, so we
         // shape the seed into a preimage whose length lands in the valid
         // range `[17, 16+N]` for this dispute's disputant count `N`.
-        // `N` is derived from the fork's QuorumBegin (disputants = Q
-        // exactly; see `dispute_lottery_n`), which is immutable and thus
-        // identical at arm-time and reveal-time — so the committed
-        // `HASH160(preimage)` still matches the revealed bytes.
+        // `N` (= Q) is derived from the ledger's canonical relay chain —
+        // the SAME source the confiscation build uses for the on-chain
+        // `OP_SIZE` bounds — so arm-time and reveal-time derive the
+        // identical `N` and the committed `HASH160(preimage)` matches the
+        // revealed bytes. Falls back to the local fork history if the
+        // relay fetch yields nothing.
         let seed = self
             .handler
             .signer
             .derive_dispute_lottery_preimage(ledger_id, last_valid_seq)
             .ok()?;
-        let n = self.dispute_lottery_n(&fork_key)?;
+        let fetched = self.fetch_all_ledger_updates_paginated(ledger_id).await;
+        let n = dispute_lottery_n_from_history(&fetched)
+            .or_else(|| self.dispute_lottery_n(&fork_key))?;
         deposits_core::tapscript_reserves::LotteryOutput::derive_lottery_preimage(&seed, n).ok()
     }
 
@@ -1195,7 +1222,7 @@ impl Node {
             return;
         }
 
-        let preimage = match self.lottery_preimage(ledger_id) {
+        let preimage = match self.lottery_preimage(ledger_id).await {
             Some(p) => p,
             None => {
                 tracing::debug!("No preimage available for ledger {}", &ledger_id[..16]);
