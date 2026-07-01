@@ -4213,6 +4213,68 @@ impl NostrTransport {
     /// Fetch ledger updates for a specific ledger
     ///
     /// Used by clients to verify quorum membership by checking for QuorumAddMember operations.
+    /// Fetch every event matching `base_filter`, paging backwards through
+    /// `created_at` so we retrieve the FULL result set rather than just the
+    /// relay's default page (~500 events). Without this, any query that can
+    /// exceed one page silently truncates to the most-recent page — which for
+    /// ledger-update chains means the genesis / QuorumBegin (oldest events)
+    /// never come back. Mirrors the wallet's `fetch_all_events_paginated`.
+    async fn fetch_events_paginated(&self, base_filter: Filter) -> Result<Vec<Event>, Error> {
+        const PAGE: usize = 500;
+        let mut all: Vec<Event> = Vec::new();
+        let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
+        let mut until: Option<Timestamp> = None;
+        let mut stalls = 0usize;
+
+        loop {
+            let mut filter = base_filter.clone().limit(PAGE);
+            if let Some(ts) = until {
+                filter = filter.until(ts);
+            }
+
+            let events = self
+                .client
+                .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+                .await
+                .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
+
+            let batch = events.len();
+            let mut oldest: Option<Timestamp> = None;
+            let mut fresh = 0usize;
+            for event in events.into_iter() {
+                if oldest.is_none() || event.created_at < oldest.unwrap() {
+                    oldest = Some(event.created_at);
+                }
+                if seen.insert(event.id) {
+                    all.push(event);
+                    fresh += 1;
+                }
+            }
+
+            // End of data: a short page means the relay had nothing older.
+            if batch < PAGE {
+                break;
+            }
+            // No progress (relay re-served the same page): bail after a few tries.
+            if fresh == 0 {
+                stalls += 1;
+                if stalls > 3 {
+                    break;
+                }
+            } else {
+                stalls = 0;
+            }
+            // Page older via the oldest created_at (inclusive; dedup handles the
+            // boundary events that share that exact timestamp).
+            match oldest {
+                Some(ts) => until = Some(ts),
+                None => break,
+            }
+        }
+
+        Ok(all)
+    }
+
     pub async fn fetch_ledger_updates(
         &self,
         ledger_id: &str,
@@ -4223,11 +4285,10 @@ impl NostrTransport {
             .kind(Kind::Custom(KIND_LEDGER_UPDATE))
             .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id)]);
 
-        let events = self
-            .client
-            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
-            .await
-            .map_err(|e| Error::Nostr(format!("Failed to fetch ledger updates: {}", e)))?;
+        // Paginate: a busy ledger has far more than one relay page of updates,
+        // and the genesis/QuorumBegin lives at the OLD end. A single capped
+        // fetch would drop it and make the ledger un-openable for depositors.
+        let events = self.fetch_events_paginated(filter).await?;
 
         let mut updates = Vec::new();
         for event in events.iter() {
@@ -4271,13 +4332,9 @@ impl NostrTransport {
             .custom_tag(TAG_DEPOSIT_ID, [deposit_id_hex])
             .author(operator_pubkey);
 
-        let events = self
-            .client
-            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
-            .await
-            .map_err(|e| {
-                Error::Nostr(format!("Failed to fetch deposit updates: {}", e))
-            })?;
+        // Paginate: a long-lived deposit accrues more than one relay page of
+        // updates; a single capped fetch would drop its earliest history.
+        let events = self.fetch_events_paginated(filter).await?;
 
         let mut updates = Vec::new();
         for event in events.iter() {
