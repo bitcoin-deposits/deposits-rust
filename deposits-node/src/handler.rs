@@ -677,6 +677,47 @@ impl DepositsHandler {
             }
         }
 
+        // Restore fork-branch ownership after reload.
+        //
+        // `parent_pubkey` marks who OPERATES a dispute fork; the dispute
+        // pipeline (`initiate_confiscations`, `auto_lottery_claim_or_yield`,
+        // `auto_reveal_on_confiscation`) all gate on
+        // `parent_pubkey == our_node_id` to decide "this is my fork."
+        // But `parent_pubkey` is only ever set imperatively by
+        // `auto_arm_for_dispute_with_anchor` (in-memory) — no `apply()`
+        // sets it, so a plain replay from the JSONL leaves it at the
+        // original operator's key (the LedgerOpen default). After a
+        // daemon restart mid-dispute, every dispute stage would then skip
+        // the disputer's own fork and the confiscation/lottery/continue
+        // arc would silently stall.
+        //
+        // Heal it here: a fork-branch file (`ledger_id.len() > 64`)
+        // carries the disputer's DisputeEnter/DisputeArmed past
+        // `last_valid_sequence`, authored under their own `operator_id`
+        // (patched at arm time). The author of the first fork-branch
+        // DisputeEnter/DisputeArmed is the fork owner.
+        if is_fork_file {
+            use deposits_core::messages::LedgerOperation;
+            let fork_owner = ledger.history.iter().find_map(|u| {
+                match LedgerOperation::tlv_decode(&u.message) {
+                    Ok(LedgerOperation::DisputeEnter { .. })
+                    | Ok(LedgerOperation::DisputeArmed { .. }) => Some(u.operator_id),
+                    _ => None,
+                }
+            });
+            if let Some(owner) = fork_owner {
+                if ledger.state.parent_pubkey != owner {
+                    tracing::debug!(
+                        "Restored fork parent_pubkey for {} to {} (was {})",
+                        ledger_id,
+                        owner,
+                        ledger.state.parent_pubkey
+                    );
+                    ledger.state.parent_pubkey = owner;
+                }
+            }
+        }
+
         if replayed > 0 {
             tracing::debug!(
                 "Loaded ledger {} with {} updates ({} state changes replayed)",

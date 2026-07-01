@@ -72,6 +72,68 @@ pub fn build_expected_confiscation_outputs(
     ])
 }
 
+/// Derive the canonical lottery `recovery_voters` set (and its threshold)
+/// from a ledger's update history.
+///
+/// The confiscation TX that `initiate_confiscations` broadcasts pays a
+/// Taproot lottery output whose address is a function of BOTH the
+/// DisputeArmed participants AND the recovery-voter set (the recovery
+/// leaves + partial-reveal leaves are committed into the tree — see
+/// `LotteryScriptBuilder::build`). If any later step reconstructs that
+/// address with a *different* recovery-voter set, `find_utxo_for_script`
+/// returns `None` and the reveal→claim→DisputeAcquire chain silently
+/// stalls (funds are safe on-chain, but the ledger is never continued).
+///
+/// The canonical set is exactly the members of the ledger's **latest
+/// `QuorumBegin`** (highest sequence), minus the original operator. That
+/// is the set `initiate_confiscations` (line ~2154) and the cosigner-side
+/// verifier / manual `recovery claim` (custody.rs ~1810) both use, so it
+/// is the set the on-chain UTXO actually commits to. Deriving from
+/// `QuorumAddMember` rows instead is wrong: forks rebroadcast the
+/// operator's adds alongside their own dispute-time adds, so the set
+/// drifts and the reconstructed address misses the real UTXO.
+///
+/// Returns `None` if no `QuorumBegin` or no `LedgerOpen` is observed.
+pub(crate) fn recovery_voters_from_updates(
+    updates: &[deposits_core::SignedLedgerUpdate],
+) -> Option<(Vec<bitcoin::secp256k1::XOnlyPublicKey>, usize)> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+
+    let mut original_operator: Option<bitcoin::secp256k1::PublicKey> = None;
+    let mut latest_qb_seq: Option<u64> = None;
+    let mut qb_members: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
+
+    for update in updates {
+        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+            match op {
+                LedgerOperation::LedgerOpen { operator_id, .. } => {
+                    original_operator = Some(operator_id);
+                }
+                LedgerOperation::QuorumBegin { quorum_members, .. } => {
+                    let seq = update.sequence_number;
+                    if latest_qb_seq.map(|cur| seq > cur).unwrap_or(true) {
+                        latest_qb_seq = Some(seq);
+                        qb_members = quorum_members.into_iter().map(|m| m.pubkey).collect();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let original_operator = original_operator?;
+    latest_qb_seq?;
+
+    let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = qb_members
+        .iter()
+        .filter(|pk| **pk != original_operator)
+        .map(|pk| pk.x_only_public_key().0)
+        .collect();
+    let recovery_threshold = (recovery_voters.len() / 2) + 1;
+    Some((recovery_voters, recovery_threshold))
+}
+
 #[cfg(test)]
 mod confiscation_outputs_tests {
     use super::*;
@@ -185,6 +247,219 @@ mod confiscation_outputs_tests {
         let compressed = bitcoin::CompressedPublicKey::from_slice(&pubkey_bytes).unwrap();
         let expected_addr = bitcoin::Address::p2wpkh(&compressed, Network::Regtest);
         assert_eq!(outs[1].script_pubkey, expected_addr.script_pubkey());
+    }
+}
+
+#[cfg(test)]
+mod recovery_voter_derivation_tests {
+    use super::*;
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
+    use deposits_core::messages::{LedgerOperation, QuorumMemberRef};
+    use deposits_core::tapscript_reserves::{LotteryParticipant, LotteryScriptBuilder};
+    use deposits_core::{SignedLedgerUpdate, TlvEncode};
+
+    fn pk(seed: u8) -> PublicKey {
+        let secp = Secp256k1::new();
+        PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[seed; 32]).unwrap())
+    }
+
+    fn update(seq: u64, operator_id: PublicKey, op: LedgerOperation) -> SignedLedgerUpdate {
+        SignedLedgerUpdate {
+            message: op.tlv_encode(),
+            message_type: 0x8001,
+            operator_id,
+            ledger_id: [0u8; 32],
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash: [0u8; 32],
+            block_height: 100 + seq as u32,
+            block_hash: [0u8; 32],
+            cosign_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: Vec::new(),
+        }
+    }
+
+    fn qb(members: &[PublicKey]) -> LedgerOperation {
+        LedgerOperation::QuorumBegin {
+            reserves_id: "bcrt1q...".to_string(),
+            spending_txid: [0; 32],
+            new_outpoint_txid: [0; 32],
+            new_outpoint_vout: 0,
+            amount: 1_000_000,
+            quorum_expiry: 1_000_000,
+            ledger_hash: [0; 32],
+            quorum_members: members
+                .iter()
+                .copied()
+                .map(QuorumMemberRef::pubkey_only)
+                .collect(),
+            collateral_amount: 0,
+            protocol_version: None,
+        }
+    }
+
+    /// The canonical recovery-voter set is the latest QuorumBegin's
+    /// members minus the operator — NOT the union of QuorumAddMember rows
+    /// (which include fork-time additions) and NOT the DisputeArmed set.
+    #[test]
+    fn recovery_voters_come_from_latest_quorum_begin_minus_operator() {
+        let operator = pk(1);
+        let m1 = pk(2);
+        let m2 = pk(3);
+        let m3 = pk(4);
+        // A stray member added post-fork; must NOT leak into recovery set.
+        let fork_added = pk(9);
+
+        let updates = vec![
+            update(
+                0,
+                operator,
+                LedgerOperation::LedgerOpen {
+                    operator_id: operator,
+                    reserves_id: "bcrt1q...".to_string(),
+                    genesis_block: 0,
+                    reserves_amount: 100_000,
+                    collateral_amount: 0,
+                },
+            ),
+            // Fork-time QuorumAddMember rows the old code would have folded in.
+            update(
+                6,
+                m1,
+                LedgerOperation::QuorumAddMember {
+                    quorum_member: fork_added,
+                    quorum_member_signature: [0u8; 64],
+                    member_ledger_id: "x".to_string(),
+                    min_fee_bps: None,
+                    min_fee_fixed: None,
+                    max_fee_period: None,
+                    membership_until: None,
+                    dispute_response_blocks: None,
+                    dispute_arm_blocks: None,
+                    service_response_blocks: None,
+                    max_transfer_timeout_blocks: None,
+                    max_descriptor_bytes: None,
+                    compensation_bps: None,
+                    compensation_deposit_id: None,
+                    compensation_frequency_blocks: None,
+                    member_response: None,
+                    member_signature: None,
+                },
+            ),
+            // The canonical committed quorum (what the reserves UTXO used).
+            update(4, operator, qb(&[operator, m1, m2, m3])),
+        ];
+
+        let (voters, threshold) =
+            recovery_voters_from_updates(&updates).expect("QuorumBegin present");
+
+        let mut got: Vec<XOnlyPublicKey> = voters.clone();
+        got.sort_by_key(|k| k.serialize());
+        let mut want: Vec<XOnlyPublicKey> =
+            vec![m1, m2, m3].iter().map(|p| p.x_only_public_key().0).collect();
+        want.sort_by_key(|k| k.serialize());
+
+        assert_eq!(got, want, "recovery voters must be QB members minus operator");
+        assert!(
+            !voters.contains(&fork_added.x_only_public_key().0),
+            "fork-time QuorumAddMember must not leak into recovery voters"
+        );
+        assert!(
+            !voters.contains(&operator.x_only_public_key().0),
+            "operator must be excluded from recovery voters"
+        );
+        assert_eq!(threshold, (3 / 2) + 1);
+    }
+
+    /// Regression for the confiscation-completion stall: the lottery
+    /// address rebuilt with QuorumBegin-derived recovery voters (what the
+    /// fix uses) matches the on-chain confiscation output, while the old
+    /// stub (recovery voters = DisputeArmed participants) produced a
+    /// DIFFERENT address that `find_utxo_for_script` never matched — so
+    /// the claim silently failed and the ledger stayed disputed.
+    #[test]
+    fn quorum_begin_voters_match_confiscation_address_but_participant_stub_does_not() {
+        let operator = pk(1);
+        let m1 = pk(2);
+        let m2 = pk(3);
+        let m3 = pk(4);
+        // Two disputants (a subset of the quorum).
+        let d1 = pk(2);
+        let d2 = pk(3);
+
+        let participants = vec![
+            LotteryParticipant::new(d1.x_only_public_key().0, [1u8; 20], "bcrt1qaaa".to_string()),
+            LotteryParticipant::new(d2.x_only_public_key().0, [2u8; 20], "bcrt1qbbb".to_string()),
+        ];
+        let mut sorted = participants.clone();
+        sorted.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+
+        // Canonical (on-chain) recovery voters = QB members minus operator.
+        let canonical_voters: Vec<XOnlyPublicKey> =
+            vec![m1, m2, m3].iter().map(|p| p.x_only_public_key().0).collect();
+        let canonical_threshold = (canonical_voters.len() / 2) + 1;
+        let onchain_addr = LotteryScriptBuilder::new(
+            sorted.clone(),
+            canonical_voters.clone(),
+            canonical_threshold,
+            bitcoin::Network::Regtest,
+        )
+        .build()
+        .unwrap()
+        .address;
+
+        // Fix path: derive voters from QuorumBegin → must reproduce address.
+        let updates = vec![
+            update(
+                0,
+                operator,
+                LedgerOperation::LedgerOpen {
+                    operator_id: operator,
+                    reserves_id: "bcrt1q...".to_string(),
+                    genesis_block: 0,
+                    reserves_amount: 100_000,
+                    collateral_amount: 0,
+                },
+            ),
+            update(4, operator, qb(&[operator, m1, m2, m3])),
+        ];
+        let (fix_voters, fix_threshold) =
+            recovery_voters_from_updates(&updates).expect("QB present");
+        let fix_addr = LotteryScriptBuilder::new(
+            sorted.clone(),
+            fix_voters,
+            fix_threshold,
+            bitcoin::Network::Regtest,
+        )
+        .build()
+        .unwrap()
+        .address;
+        assert_eq!(
+            fix_addr, onchain_addr,
+            "QuorumBegin-derived voters must reproduce the on-chain lottery address"
+        );
+
+        // Old stub: recovery voters = DisputeArmed participants → wrong addr.
+        let stub_voters: Vec<XOnlyPublicKey> =
+            sorted.iter().map(|p| p.pubkey).collect();
+        let stub_threshold = (stub_voters.len() / 2) + 1;
+        let stub_addr = LotteryScriptBuilder::new(
+            sorted.clone(),
+            stub_voters,
+            stub_threshold,
+            bitcoin::Network::Regtest,
+        )
+        .build()
+        .unwrap()
+        .address;
+        assert_ne!(
+            stub_addr, onchain_addr,
+            "the old participant-derived stub must NOT match the on-chain address \
+             (this mismatch is the confiscation-completion stall)"
+        );
     }
 }
 
@@ -906,7 +1181,16 @@ impl Node {
                         return None;
                     }
                     let l = arc.read().unwrap();
-                    if l.operator_key() != self.node_id {
+                    // Ownership predicate: `parent_pubkey == our_pubkey`.
+                    // A dispute fork inherits the ORIGINAL operator's
+                    // `operator_key` (never patched), so keying on
+                    // `operator_key()` here always skips a disputer's own
+                    // fork — leaving the reveal→claim→DisputeAcquire chain
+                    // dead. `auto_arm_for_dispute_with_anchor` sets
+                    // `parent_pubkey` to the disputer's key; that is the
+                    // same predicate `initiate_confiscations` uses, so all
+                    // three dispute stages agree on which fork is ours.
+                    if l.state.parent_pubkey != self.node_id {
                         return None;
                     }
                     if l.state.dispute_state != deposits_core::types::DisputeState::Armed {
@@ -1025,10 +1309,18 @@ impl Node {
         // Sort participants by x-only pubkey for deterministic order
         participants.sort_by(|a, b| a.1.pubkey.serialize().cmp(&b.1.pubkey.serialize()));
 
-        // Collect revealed preimages
-        let mut preimages: std::collections::HashMap<String, Vec<u8>> =
-            std::collections::HashMap::new();
-
+        // Collect revealed preimages.
+        //
+        // Preimages are matched to participants by HASH160(preimage) ==
+        // commitment_hash, NOT by the reveal event's author key. The
+        // reveal is a Nostr request authored by the node's Nostr/delegate
+        // key, which is NOT the same as the participant's on-chain
+        // (bitcoin x-only) operator key committed in DisputeArmed. Keying
+        // the preimage map by `event.pubkey` and looking it up by the
+        // participant's x-only key therefore never matched, and the claim
+        // stalled forever on "Missing preimage from participant". The
+        // commitment hash is the authorless, cryptographically-bound link.
+        let mut revealed_preimages: Vec<Vec<u8>> = Vec::new();
         for event in reveal_events.iter() {
             let is_lottery_reveal = event.tags.iter().any(|tag| {
                 tag.kind() == TagKind::custom("action")
@@ -1042,29 +1334,29 @@ impl Node {
                 if let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) {
                     if let Some(preimage_hex) = content.get("preimage").and_then(|v| v.as_str()) {
                         if let Ok(preimage) = hex::decode(preimage_hex) {
-                            preimages.insert(event.pubkey.to_string(), preimage);
+                            if !revealed_preimages.contains(&preimage) {
+                                revealed_preimages.push(preimage);
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Not ready if not all preimages revealed
-        if preimages.len() < participants.len() {
-            return Ok(false);
-        }
-
-        // Match preimages to participants
+        // Match each participant to a revealed preimage by commitment hash.
+        use bitcoin::hashes::{hash160, Hash as _};
         let mut ordered_preimages: Vec<Vec<u8>> = Vec::new();
-        for (pubkey, _participant) in &participants {
-            let x_only = pubkey.x_only_public_key().0;
-            let pubkey_str = x_only.to_string();
-            if let Some(preimage) = preimages.get(&pubkey_str) {
-                ordered_preimages.push(preimage.clone());
-            } else {
-                return Err(Error::Protocol(
-                    "Missing preimage from participant".to_string(),
-                ));
+        for (_pubkey, participant) in &participants {
+            let matched = revealed_preimages.iter().find(|p| {
+                hash160::Hash::hash(p).to_byte_array() == participant.commitment_hash
+            });
+            match matched {
+                Some(preimage) => ordered_preimages.push(preimage.clone()),
+                None => {
+                    // Not all commitments revealed yet — not an error,
+                    // just wait for the remaining reveal(s).
+                    return Ok(false);
+                }
             }
         }
 
@@ -1073,6 +1365,18 @@ impl Node {
             .map_err(|e| Error::Protocol(format!("Failed to calculate winner: {:?}", e)))?;
 
         let (winner_pubkey, _winner_participant) = &participants[winner_index];
+
+        // Recovery voters for the on-chain lottery address MUST come from
+        // the ledger's latest QuorumBegin (minus operator) — the same set
+        // `initiate_confiscations` committed to when it paid the lottery
+        // UTXO. Any other set yields a different Taproot address and the
+        // claim finds no UTXO to spend.
+        let (recovery_voters, recovery_threshold) =
+            recovery_voters_from_updates(&paginated_updates).ok_or_else(|| {
+                Error::Protocol(
+                    "No QuorumBegin/LedgerOpen found to derive recovery voters".to_string(),
+                )
+            })?;
 
         if *winner_pubkey == our_pubkey {
             // WE WON - claim the lottery
@@ -1083,6 +1387,8 @@ impl Node {
                 &ordered_preimages,
                 winner_index,
                 &our_armed,
+                recovery_voters,
+                recovery_threshold,
             )
             .await?;
         } else {
@@ -1108,6 +1414,8 @@ impl Node {
         ordered_preimages: &[Vec<u8>],
         winner_index: usize,
         our_armed: &deposits_core::SignedLedgerUpdate,
+        recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey>,
+        recovery_threshold: usize,
     ) -> Result<(), Error> {
         use bitcoin::hashes::{sha256, Hash};
         use bitcoin::sighash::{SighashCache, TapSighashType};
@@ -1125,19 +1433,18 @@ impl Node {
         let lottery_participants: Vec<LotteryParticipant> =
             participants.iter().map(|(_, p)| p.clone()).collect();
 
-        // Get recovery voters (need to fetch from ledger)
-        // For now, use participants as recovery voters
-        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = participants
-            .iter()
-            .map(|(pk, _)| pk.x_only_public_key().0)
-            .collect();
-
-        let recovery_threshold = (recovery_voters.len() / 2) + 1;
+        // Recovery voters are supplied by the caller, derived from the
+        // ledger's latest QuorumBegin (minus operator) — the SAME set the
+        // confiscation TX committed to on-chain. Deriving them from the
+        // DisputeArmed participants here (the old stub) produced a
+        // different Taproot address, so `find_utxo_for_script` below found
+        // no UTXO and the claim silently failed — leaving the ledger
+        // disputed forever.
 
         // Build the lottery output
         let lottery_builder = LotteryScriptBuilder::new(
             lottery_participants.clone(),
-            recovery_voters.clone(),
+            recovery_voters,
             recovery_threshold,
             self.wallet.network(),
         );
@@ -2619,7 +2926,13 @@ impl Node {
                         return None;
                     }
                     let l = arc.read().unwrap();
-                    if l.operator_key() != self.node_id {
+                    // See `auto_lottery_claim_or_yield`: a dispute fork
+                    // inherits the original operator's `operator_key`, so
+                    // ownership must key on `parent_pubkey` (set to the
+                    // disputer) — matching `initiate_confiscations`. Using
+                    // `operator_key()` here skipped the disputer's own fork
+                    // and the confiscation-confirmed reveal never fired.
+                    if l.state.parent_pubkey != self.node_id {
                         return None;
                     }
                     if l.state.dispute_state != deposits_core::types::DisputeState::Armed {
@@ -2668,14 +2981,9 @@ impl Node {
         ledger_id: &str,
         min_confirmations: u32,
     ) -> Result<bool, Error> {
-        use crate::nostr::KIND_LEDGER_UPDATE;
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        use bitcoin::secp256k1::PublicKey;
         use deposits_core::messages::LedgerOperation;
         use deposits_core::tapscript_reserves::{LotteryParticipant, LotteryScriptBuilder};
         use deposits_core::TlvDecode;
-
-        use nostr_sdk::{Filter, Kind};
 
         // Paginated relay fetch — bloated forks would otherwise
         // hide DisputeArmed at the tail beyond a single 500-event
@@ -2689,44 +2997,30 @@ impl Node {
             ));
         }
 
-        // Extract DisputeArmed participants AND quorum members (must match auto_confiscate)
+        // Extract DisputeArmed participants. The recovery-voter set is
+        // derived separately (below) from the canonical latest-QuorumBegin
+        // source so the reconstructed lottery address matches the one the
+        // confiscation TX actually paid.
         let mut participants: Vec<LotteryParticipant> = Vec::new();
-        let mut quorum_members: Vec<PublicKey> = Vec::new();
-        let mut original_operator: Option<PublicKey> = None;
 
         for update in &paginated_updates {
             if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                match op {
-                            LedgerOperation::LedgerOpen { operator_id, .. } => {
-                                original_operator = Some(operator_id);
-                            }
-                            LedgerOperation::QuorumAddMember { quorum_member, .. } => {
-                                // Only use QuorumAddMember from original operator's updates
-                                // (must match auto_confiscate's filtering)
-                                let is_from_original = original_operator
-                                    .map(|op| update.operator_id == op)
-                                    .unwrap_or(true);
-                                if is_from_original && !quorum_members.contains(&quorum_member) {
-                                    quorum_members.push(quorum_member);
-                                }
-                            }
-                            LedgerOperation::DisputeArmed {
-                                commitment_hash,
-                                target_reserves,
-                                ..
-                            } => {
-                                let x_only = update.operator_id.x_only_public_key().0;
-                                if !participants.iter().any(|p| p.pubkey == x_only) {
-                                    participants.push(LotteryParticipant::new(
-                                        x_only,
-                                        commitment_hash,
-                                        target_reserves,
-                                    ));
-                                }
-                            }
-                            _ => {}
-                        }
+                if let LedgerOperation::DisputeArmed {
+                    commitment_hash,
+                    target_reserves,
+                    ..
+                } = op
+                {
+                    let x_only = update.operator_id.x_only_public_key().0;
+                    if !participants.iter().any(|p| p.pubkey == x_only) {
+                        participants.push(LotteryParticipant::new(
+                            x_only,
+                            commitment_hash,
+                            target_reserves,
+                        ));
                     }
+                }
+            }
         }
 
         if participants.len() < 2 {
@@ -2738,17 +3032,16 @@ impl Node {
         // Sort participants by x-only pubkey for deterministic order
         participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
 
-        // Build recovery voters from quorum_members (must match auto_confiscate)
-        if let Some(orig_op) = original_operator {
-            quorum_members.retain(|pk| *pk != orig_op);
-        }
-
-        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = quorum_members
-            .iter()
-            .filter(|pk| original_operator != Some(**pk))
-            .map(|pk| pk.x_only_public_key().0)
-            .collect();
-        let recovery_threshold = (recovery_voters.len() / 2) + 1;
+        // Recovery voters = latest-QuorumBegin members minus operator.
+        // MUST match `initiate_confiscations` (the on-chain payer), or the
+        // rebuilt lottery address won't find the confiscation UTXO and we
+        // never trigger the reveal.
+        let (recovery_voters, recovery_threshold) =
+            recovery_voters_from_updates(&paginated_updates).ok_or_else(|| {
+                Error::Protocol(
+                    "No QuorumBegin/LedgerOpen found to derive recovery voters".to_string(),
+                )
+            })?;
 
         let lottery_builder = LotteryScriptBuilder::new(
             participants,
