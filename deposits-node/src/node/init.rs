@@ -578,6 +578,20 @@ impl Node {
         Ok(sk)
     }
 
+    /// Tear down any existing actor for `ledger_id` and spawn a fresh one
+    /// bound to the CURRENT `handler.ledgers` Arc.
+    ///
+    /// `ensure_actor_for` is a no-op when an actor already exists — but after a
+    /// dispute-fork promotion the base key points at a NEW `Arc<RwLock<Ledger>>`
+    /// (the resolved fork), while the old actor still holds the stale joined
+    /// copy. Dropping the handle closes the old actor's inbox (its `run` loop
+    /// exits when the channel closes); `ensure_actor_for` then rebinds to the
+    /// promoted Arc so the operator's commits advance the real custody state.
+    pub(crate) fn respawn_actor_for(&self, ledger_id: &str) {
+        self.ledger_actors.lock().unwrap().remove(ledger_id);
+        self.ensure_actor_for(ledger_id);
+    }
+
     pub(crate) fn ensure_actor_for(&self, ledger_id: &str) {
         {
             let map = self.ledger_actors.lock().unwrap();

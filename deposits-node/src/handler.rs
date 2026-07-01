@@ -264,18 +264,9 @@ impl DepositsHandler {
     pub fn promote_dispute_fork_to_base(&self, ledger_id: &str) -> Result<bool, String> {
         let our_id = self.our_node_id;
 
-        // Already operating the base entry? Nothing to do.
-        {
-            let ledgers = self.ledgers.lock().unwrap();
-            if let Some(base) = ledgers.get(ledger_id) {
-                if base.read().unwrap().state.operator_key == our_id {
-                    return Ok(false);
-                }
-            }
-        }
-
         // Find our resolved fork: same base id, operator rotated to us,
-        // dispute cleared to Normal.
+        // dispute cleared to Normal, and role Operator (it's the authoritative
+        // custody copy we built + signed).
         let fork_key = {
             let ledgers = self.ledgers.lock().unwrap();
             ledgers
@@ -289,6 +280,7 @@ impl DepositsHandler {
                             l.state.operator_key == our_id
                                 && l.state.dispute_state
                                     == deposits_core::types::DisputeState::Normal
+                                && l.role == deposits_core::ledger::LedgerRole::Operator
                         })
                         .unwrap_or(false)
                 })
@@ -299,15 +291,41 @@ impl DepositsHandler {
             return Ok(false);
         };
 
-        // Point the base key at the fork's Arc (shared allocation).
+        // Point the base key at the fork's Arc (shared allocation), UNLESS the
+        // base already IS that Arc (idempotent — a prior promotion). We must
+        // NOT early-return merely because the base's `operator_key` is us: a
+        // joined-member base copy can converge to us as operator via
+        // `reimport_joined_ledger` (which applies the winning fork's
+        // DisputeAcquire) yet keep `role = Partner` AND a stale `state.sequence`
+        // — its history reaches the DisputeAcquire but the derived cursor lags,
+        // so committing a fresh op picks an already-taken sequence and the
+        // quorum refuses it as an equivocation. The fork copy has the clean,
+        // consistent operator state (role Operator, sequence == tip), so always
+        // adopt it as the base.
         {
             let mut ledgers = self.ledgers.lock().unwrap();
             let Some(fork_arc) = ledgers.get(&fork_key).cloned() else {
                 return Ok(false);
             };
+            if let Some(base_arc) = ledgers.get(ledger_id) {
+                if Arc::ptr_eq(base_arc, &fork_arc) {
+                    return Ok(false); // already promoted
+                }
+            }
             ledgers.insert(ledger_id.to_string(), fork_arc);
         }
 
+        // Force a FULL rewrite of the base JSONL. `persist_ledger_to_disk` is
+        // append-only and only re-emits the State/Role lines every ~100
+        // appends — but we just replaced the base's entire ledger (new Role,
+        // new State, a different history tail), so an append would leave the
+        // stale joined-copy State/Role on disk and the next daemon start would
+        // reload the pre-promotion ledger. Reset the append cursor so the
+        // persist does a clean rewrite from the promoted ledger.
+        self.persisted_update_counts
+            .lock()
+            .unwrap()
+            .remove(ledger_id);
         self.persist_ledger_to_disk(ledger_id)?;
         tracing::info!(
             "Promoted resolved dispute fork {} to operate base ledger {} as new custodian",

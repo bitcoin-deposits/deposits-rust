@@ -4098,10 +4098,20 @@ impl NostrTransport {
             return Ok(Some(ad.clone()));
         }
 
+        // Fetch ALL advertisements for this ledger and pick the NEWEST.
+        // A single ledger can carry several ads under different author keys:
+        // every quorum member mirrors the operator's ad, and after a
+        // confiscation recovery the OLD operator's ad (mirrored by members)
+        // lingers alongside the NEW custodian's fresh ad. `.limit(1)` +
+        // `next()` returned an arbitrary one — often the stale ad pointing at
+        // the ousted (now non-responsive) operator — so `deposit_open` was DM'd
+        // to a dead operator and timed out. The new custodian re-advertises
+        // after winning, so its ad is the most recent; prefer newest
+        // `created_at` (matches how `fetch_price_and_tip` disambiguates
+        // multi-publisher feeds).
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
-            .custom_tag(TAG_LEDGER_ID, [ledger_id])
-            .limit(1);
+            .custom_tag(TAG_LEDGER_ID, [ledger_id]);
 
         let events = self
             .client
@@ -4109,7 +4119,7 @@ impl NostrTransport {
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch advertisement: {}", e)))?;
 
-        if let Some(event) = events.iter().next() {
+        if let Some(event) = events.iter().max_by_key(|e| e.created_at.as_u64()) {
             if let Ok(mut ad) = serde_json::from_str::<LedgerAdvertisement>(&event.content) {
                 ad.event_id = event.id.to_hex();
                 ad.timestamp = event.created_at.as_u64();
