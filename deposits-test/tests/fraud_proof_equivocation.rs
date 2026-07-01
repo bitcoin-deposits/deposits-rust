@@ -383,7 +383,46 @@ fn equivocation_recovers_to_serviceable_ledger() {
     let (obs_op, txid) = poll_confiscation_txid(&accused_ledger, Duration::from_secs(300));
     eprintln!("[ok] confiscation TX {} (via op{})", txid, obs_op);
 
-    // 2. Reveal → winner-selection → DisputeAcquire. This is the step the
+    // 2a. On-chain lottery claim — the DEFINITIVE proof of the fix. The
+    //     confiscation TX paid a single P2TR lottery output; the fast
+    //     lottery-claim leaf (unspendable since inception under the 32-byte
+    //     preimage bug) must now be spent by the winner, revealing preimages
+    //     whose lengths sit in `[17, 16+N]` (= [17,19] at Q=3). We assert
+    //     both that the leaf was spent AND that the revealed preimages carry
+    //     valid lengths — the exact regression the fix closes.
+    let lottery_addr = lottery_output_address(&txid)
+        .expect("confiscation TX must have a P2TR lottery output");
+    eprintln!("[info] lottery output address: {}", lottery_addr);
+    let (claim_txid, witness_lens) =
+        poll_lottery_claim_witness(&lottery_addr, Duration::from_secs(300)).unwrap_or_else(|| {
+            panic!(
+                "lottery-claim leaf never spent for {} — the fast claim path is still \
+                 unspendable (fixed-length preimage regression)",
+                &accused_ledger[..16]
+            )
+        });
+    eprintln!(
+        "[ok] lottery-claim leaf SPENT: tx {} witness item lens {:?}",
+        claim_txid, witness_lens
+    );
+    // Witness = [winner_sig(64), preimage_0, .., preimage_{N-1}, leaf, control].
+    // The preimages are the middle items; every one must be in [17, 16+N]=[17,19].
+    let preimage_lens: Vec<usize> = witness_lens
+        .iter()
+        .copied()
+        .filter(|&l| (17..=19).contains(&l))
+        .collect();
+    assert!(
+        preimage_lens.len() >= 3,
+        "expected ≥3 length-valid preimages (17..=19) in the claim witness, got lens {:?}",
+        witness_lens
+    );
+    eprintln!(
+        "[ok] winner selected on-chain from length-carrying preimages {:?}",
+        preimage_lens
+    );
+
+    // 2b. Reveal → winner-selection → DisputeAcquire. This is the step the
     //    fixed-length preimage bug used to kill: the claim leaf was
     //    unspendable so no DisputeAcquire ever appeared.
     let new_custodian = poll_dispute_acquire(&accused_ledger, Duration::from_secs(420))

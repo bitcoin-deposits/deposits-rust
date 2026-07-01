@@ -1171,6 +1171,70 @@ fn is_address_fully_spent(address_str: &str) -> bool {
     utxos.is_empty()
 }
 
+/// Poll until the confiscation output (`reserves_addr` was already spent
+/// INTO it; here we watch the lottery P2TR output itself) is spent by the
+/// lottery-claim TX — i.e. the fast lottery-claim leaf was successfully
+/// spent by the winner. Returns the claim txid and its input-0 witness
+/// item byte-lengths (so callers can assert the revealed preimages sit in
+/// the valid `[17, 16+N]` band — the exact thing the fixed-length-preimage
+/// bug broke). Mines blocks each cycle to advance confirmations.
+///
+/// `lottery_addr` is the confiscation TX's P2TR output address (the
+/// lottery UTXO). Returns `None` on timeout.
+pub fn poll_lottery_claim_witness(
+    lottery_addr: &str,
+    timeout: Duration,
+) -> Option<(String, Vec<usize>)> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if let Some(txid) = find_spending_txid_for_address(lottery_addr) {
+            // Fetch the claim TX and return input-0 witness item lengths.
+            let url = format!("{}/tx/{}", ELECTRS_URL, txid);
+            if let Ok(resp) = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap()
+                .get(&url)
+                .send()
+            {
+                if let Ok(v) = resp.json::<serde_json::Value>() {
+                    if let Some(w) = v["vin"][0]["witness"].as_array() {
+                        let lens: Vec<usize> = w
+                            .iter()
+                            .filter_map(|x| x.as_str())
+                            .map(|h| h.len() / 2)
+                            .collect();
+                        return Some((txid, lens));
+                    }
+                }
+            }
+            return Some((txid, vec![]));
+        }
+        mine_blocks(2);
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    None
+}
+
+/// The confiscation TX's single P2TR output address (the lottery UTXO),
+/// read from the on-chain TX that spent the ledger's reserves address.
+pub fn lottery_output_address(reserves_spend_txid: &str) -> Option<String> {
+    let url = format!("{}/tx/{}", ELECTRS_URL, reserves_spend_txid);
+    let v: serde_json::Value = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?
+        .get(&url)
+        .send()
+        .ok()?
+        .json()
+        .ok()?;
+    v["vout"]
+        .as_array()?
+        .iter()
+        .find_map(|o| o["scriptpubkey_address"].as_str().map(|s| s.to_string()))
+}
+
 pub fn ledger_health(op_idx: usize, ledger_id: &str) -> String {
     let seed = op_seed(op_idx);
     let data_dir = op_data_dir(op_idx);
