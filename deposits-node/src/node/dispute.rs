@@ -3314,11 +3314,14 @@ impl Node {
                             // dropping requests as `not_operator` despite the
                             // custody transfer.
                             self.operator_of_cache.lock().unwrap().remove(&ledger_id);
-                            // Promotion overwrote the base Arc IN PLACE, so the
-                            // live actor already writes the resolved state; only
-                            // spawn one if the base never had an actor (e.g. we
-                            // registered the fork Arc under a fresh base key).
-                            self.ensure_actor_for(&ledger_id);
+                            // Rebind the actor to the promoted base Arc. Even
+                            // though promotion overwrites the current map Arc in
+                            // place, the live actor may hold an EARLIER Arc that
+                            // a prior `reimport_joined_ledger` purge+reinsert
+                            // orphaned from the map — respawning guarantees the
+                            // single writer commits against the resolved state
+                            // (correct next sequence), not a stale seq-5 copy.
+                            self.respawn_actor_for(&ledger_id);
                             tracing::info!(
                                 "Now operating base ledger {} as new custodian",
                                 &ledger_id[..16]

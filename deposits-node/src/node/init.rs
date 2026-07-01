@@ -578,6 +578,24 @@ impl Node {
         Ok(sk)
     }
 
+    /// Drop any existing actor for `ledger_id` and spawn a fresh one bound to
+    /// the CURRENT `handler.ledgers` Arc.
+    ///
+    /// A ledger's `LedgerActor` (the single writer) captures a *clone* of the
+    /// specific `Arc<RwLock<Ledger>>` present at spawn time. Two things can
+    /// later leave that clone orphaned from the map: `reimport_joined_ledger`'s
+    /// "chain break → purge + reinsert" (a brand-new Arc), and a dispute-fork
+    /// promotion (the base entry adopts the resolved fork's state). The actor
+    /// then keeps committing against a stale allocation — so the first fresh
+    /// `deposit_open` on a recovered ledger staged at an already-taken sequence
+    /// and the quorum refused it as an equivocation. Removing the handle closes
+    /// the old actor's inbox (its `recv` loop ends once the last sender drops);
+    /// `ensure_actor_for` then rebinds to the current Arc.
+    pub(crate) fn respawn_actor_for(&self, ledger_id: &str) {
+        self.ledger_actors.lock().unwrap().remove(ledger_id);
+        self.ensure_actor_for(ledger_id);
+    }
+
     pub(crate) fn ensure_actor_for(&self, ledger_id: &str) {
         {
             let map = self.ledger_actors.lock().unwrap();
