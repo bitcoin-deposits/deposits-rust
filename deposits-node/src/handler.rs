@@ -291,28 +291,55 @@ impl DepositsHandler {
             return Ok(false);
         };
 
-        // Point the base key at the fork's Arc (shared allocation), UNLESS the
-        // base already IS that Arc (idempotent — a prior promotion). We must
-        // NOT early-return merely because the base's `operator_key` is us: a
-        // joined-member base copy can converge to us as operator via
-        // `reimport_joined_ledger` (which applies the winning fork's
-        // DisputeAcquire) yet keep `role = Partner` AND a stale `state.sequence`
-        // — its history reaches the DisputeAcquire but the derived cursor lags,
-        // so committing a fresh op picks an already-taken sequence and the
-        // quorum refuses it as an equivocation. The fork copy has the clean,
-        // consistent operator state (role Operator, sequence == tip), so always
-        // adopt it as the base.
+        // Adopt the resolved fork as the base ledger. We must NOT early-return
+        // merely because the base's `operator_key` is already us: a joined-member
+        // base copy can converge to us as operator via `reimport_joined_ledger`
+        // (which applies the winning fork's DisputeAcquire) yet keep
+        // `role = Partner` AND a stale sequence cursor / truncated history — so
+        // committing a fresh op picks an already-taken sequence and the quorum
+        // refuses it as an equivocation. The fork copy has the clean, consistent
+        // operator state, so adopt it.
+        //
+        // Copy the fork's role+state+history IN PLACE into the EXISTING base
+        // `Arc<RwLock<Ledger>>` rather than swapping the map entry to a new Arc.
+        // The base's live `LedgerActor` (the single writer) and every reader
+        // hold clones of that specific Arc; swapping the map entry would leave
+        // the actor writing a now-orphaned allocation (stale sequence), which is
+        // exactly what produced the seq-collision on the first fresh open. An
+        // in-place overwrite keeps the actor bound to the one shared allocation
+        // that now carries the resolved custody state.
         {
-            let mut ledgers = self.ledgers.lock().unwrap();
+            let ledgers = self.ledgers.lock().unwrap();
             let Some(fork_arc) = ledgers.get(&fork_key).cloned() else {
                 return Ok(false);
             };
-            if let Some(base_arc) = ledgers.get(ledger_id) {
-                if Arc::ptr_eq(base_arc, &fork_arc) {
-                    return Ok(false); // already promoted
+            match ledgers.get(ledger_id) {
+                Some(base_arc) if !Arc::ptr_eq(base_arc, &fork_arc) => {
+                    let base_arc = base_arc.clone();
+                    let resolved = fork_arc.read().unwrap().clone();
+                    // Idempotency guard: if the base already reflects the fork's
+                    // resolved tip under us as Operator, nothing to do.
+                    {
+                        let b = base_arc.read().unwrap();
+                        if b.role == deposits_core::ledger::LedgerRole::Operator
+                            && b.state.operator_key == our_id
+                            && b.next_sequence() == resolved.next_sequence()
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    *base_arc.write().unwrap() = resolved;
+                }
+                Some(_) => return Ok(false), // base IS the fork Arc — already promoted
+                None => {
+                    // No base entry yet — register the fork Arc under the base key.
+                    drop(ledgers);
+                    self.ledgers
+                        .lock()
+                        .unwrap()
+                        .insert(ledger_id.to_string(), fork_arc);
                 }
             }
-            ledgers.insert(ledger_id.to_string(), fork_arc);
         }
 
         // Force a FULL rewrite of the base JSONL. `persist_ledger_to_disk` is

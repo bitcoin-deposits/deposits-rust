@@ -3314,10 +3314,11 @@ impl Node {
                             // dropping requests as `not_operator` despite the
                             // custody transfer.
                             self.operator_of_cache.lock().unwrap().remove(&ledger_id);
-                            // Rebind the actor to the promoted (resolved-fork)
-                            // Arc — a stale joined-copy actor would otherwise
-                            // keep writing the pre-promotion state.
-                            self.respawn_actor_for(&ledger_id);
+                            // Promotion overwrote the base Arc IN PLACE, so the
+                            // live actor already writes the resolved state; only
+                            // spawn one if the base never had an actor (e.g. we
+                            // registered the fork Arc under a fresh base key).
+                            self.ensure_actor_for(&ledger_id);
                             tracing::info!(
                                 "Now operating base ledger {} as new custodian",
                                 &ledger_id[..16]
