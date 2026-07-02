@@ -34,49 +34,59 @@ impl Node {
             .await
             .map_err(|e| Error::Protocol(format!("Failed to fetch: {}", e)))?;
 
-        // Find our DisputeAcquire and quorum members
-        let mut current_reserves_address: Option<String> = None;
-        let mut our_latest: Option<SignedLedgerUpdate> = None;
-        let mut quorum_members: Vec<PublicKey> = Vec::new();
-        // Pubkey → member_ledger_id, sourced from QuorumAddMember ops as
-        // we walk the history. Used at QuorumBegin construction time
-        // below to populate `QuorumMemberRef.member_ledger_id` so the
-        // rotation summary doesn't lose the per-member ledger pairing.
-        let mut member_ledger_ids: std::collections::HashMap<PublicKey, String> =
-            std::collections::HashMap::new();
-
+        // Decode every fetched update once so we can (a) find OUR
+        // DisputeAcquire + latest signed op, and (b) derive the canonical
+        // recovery quorum from the ledger's CANONICAL (pre-dispute)
+        // QuorumBegin — the members the reserves UTXO actually committed to,
+        // minus the accused operator. See below for why QuorumAddMember
+        // scanning is WRONG here.
+        let mut all_updates: Vec<SignedLedgerUpdate> = Vec::new();
         for event in events.iter() {
             if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
                 if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
-                    if update.operator_id == our_pubkey {
-                        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                            if let LedgerOperation::DisputeAcquire {
-                                ref new_reserves_address,
-                                ..
-                            } = op
-                            {
-                                current_reserves_address = Some(new_reserves_address.clone());
-                            }
-                            if let LedgerOperation::QuorumAddMember {
-                                quorum_member,
-                                ref member_ledger_id,
-                                ..
-                            } = op
-                            {
-                                if !quorum_members.contains(&quorum_member) {
-                                    quorum_members.push(quorum_member);
-                                }
-                                member_ledger_ids
-                                    .insert(quorum_member, member_ledger_id.clone());
-                            }
-                        }
-                        if our_latest.is_none()
-                            || update.sequence_number > our_latest.as_ref().unwrap().sequence_number
-                        {
-                            our_latest = Some(update);
-                        }
+                    all_updates.push(update);
+                }
+            }
+        }
+
+        // Find our DisputeAcquire and quorum members
+        let mut current_reserves_address: Option<String> = None;
+        let mut our_latest: Option<SignedLedgerUpdate> = None;
+        // Pubkey → member_ledger_id, sourced from the original QuorumAddMember
+        // rows (which DO carry the per-member ledger pairing) for the honest
+        // recovery members only. Used at QuorumBegin construction time so the
+        // rotation summary doesn't lose the pairing.
+        let mut member_ledger_ids: std::collections::HashMap<PublicKey, String> =
+            std::collections::HashMap::new();
+
+        for update in &all_updates {
+            if update.operator_id == our_pubkey {
+                if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    if let LedgerOperation::DisputeAcquire {
+                        ref new_reserves_address,
+                        ..
+                    } = op
+                    {
+                        current_reserves_address = Some(new_reserves_address.clone());
                     }
                 }
+                if our_latest.is_none()
+                    || update.sequence_number > our_latest.as_ref().unwrap().sequence_number
+                {
+                    our_latest = Some(update.clone());
+                }
+            }
+            // Harvest member→ledger_id pairings from ALL QuorumAddMember rows;
+            // we filter to the canonical recovery set below.
+            if let Ok(LedgerOperation::QuorumAddMember {
+                quorum_member,
+                ref member_ledger_id,
+                ..
+            }) = LedgerOperation::tlv_decode(&update.message)
+            {
+                member_ledger_ids
+                    .entry(quorum_member)
+                    .or_insert_with(|| member_ledger_id.clone());
             }
         }
 
@@ -85,9 +95,66 @@ impl Node {
         let our_latest =
             our_latest.ok_or_else(|| Error::Protocol("No latest update found".to_string()))?;
 
+        // The rotation quorum MUST be the ledger's canonical honest cosigners
+        // — the CANONICAL QuorumBegin's members minus the accused operator —
+        // NOT the union of QuorumAddMember rows. The fork-arming path
+        // (`create_dispute_fork`) appends QuorumAddMember rows for the
+        // winner's OTHER, unrelated ledgers' members; scanning those rows
+        // promoted the wrong set into the rotation QuorumBegin, so every
+        // honest cosigner's cosignature was rejected as
+        // "Cosigner … not in quorum" and no post-recovery deposit could
+        // reach threshold. `recovery_voters_from_updates` is the SAME
+        // canonical derivation the on-chain confiscation voter set uses.
+        let (recovery_voters_xonly, _threshold) =
+            crate::node::dispute::recovery_voters_from_updates(&all_updates)
+                .ok_or_else(|| {
+                    Error::Protocol(
+                        "cannot derive recovery quorum: no canonical QuorumBegin in history"
+                            .to_string(),
+                    )
+                })?;
+        let recovery_xonly: std::collections::HashSet<_> =
+            recovery_voters_xonly.iter().copied().collect();
+        // Map the canonical x-only voters back to the full compressed pubkeys
+        // seen in history (QuorumBegin/QuorumAddMember rows), so VoterSet and
+        // QuorumMemberRef carry 33-byte keys. Always include our own key.
+        let mut quorum_members: Vec<PublicKey> = Vec::new();
+        let mut seen: std::collections::HashSet<[u8; 33]> = std::collections::HashSet::new();
+        let mut consider = |pk: PublicKey, out: &mut Vec<PublicKey>, seen: &mut std::collections::HashSet<[u8; 33]>| {
+            if pk == our_pubkey || recovery_xonly.contains(&pk.x_only_public_key().0) {
+                if seen.insert(pk.serialize()) {
+                    out.push(pk);
+                }
+            }
+        };
+        consider(our_pubkey, &mut quorum_members, &mut seen);
+        for update in &all_updates {
+            if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                match op {
+                    LedgerOperation::QuorumBegin { quorum_members: qm, .. } => {
+                        for m in qm {
+                            consider(m.pubkey, &mut quorum_members, &mut seen);
+                        }
+                    }
+                    LedgerOperation::QuorumAddMember { quorum_member, .. } => {
+                        consider(quorum_member, &mut quorum_members, &mut seen);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         if quorum_members.is_empty() {
             return Err(Error::Protocol("No quorum members found".to_string()));
         }
+        tracing::info!(
+            "Recovery rotation quorum ({} members): {:?}",
+            quorum_members.len(),
+            quorum_members
+                .iter()
+                .map(|m| hex::encode(&m.serialize()[..4]))
+                .collect::<Vec<_>>()
+        );
 
         tracing::info!(
             "Rotating from {} with {} quorum members",
@@ -315,6 +382,30 @@ impl Node {
             .await
             .map_err(|e| Error::Protocol(format!("Failed to broadcast QuorumBegin: {:?}", e)))?;
 
+        // Apply the rotation QuorumBegin to our OWN base ledger too. Publishing
+        // to the relay alone left the winner's local base stuck at the
+        // DisputeAcquire tip (seq N): the losers fetched + applied this seq-(N+1)
+        // QuorumBegin and advanced, but the winner's next_sequence stayed N+1,
+        // so a subsequent `deposit_open` committed a DepositOpen at the SAME
+        // seq the network already holds a QuorumBegin for — and every cosigner
+        // refused it as an equivocation ("seq N+1 already committed to a
+        // different update"). Applying locally keeps the winner in lockstep
+        // with what it just broadcast, so the re-opened deposits land at N+2+.
+        if let Err(e) = self
+            .handler
+            .apply_updates_to_ledger(ledger_id, vec![signed_update])
+        {
+            tracing::warn!(
+                "Rotation QuorumBegin broadcast but not applied to local base {}: {} \
+                 (local base will lag the relay by one op)",
+                &ledger_id[..16.min(ledger_id.len())],
+                e
+            );
+        }
+        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
+            tracing::warn!("Failed to persist rotated base ledger {}: {}", ledger_id, e);
+        }
+
         tracing::info!(
             "QuorumBegin published. New reserves at: {}",
             taproot_output.address
@@ -474,10 +565,33 @@ impl Node {
                     Error::Protocol(format!("Failed to broadcast DepositOpen: {:?}", e))
                 })?;
 
+            // Apply the re-opened DepositOpen to our OWN base ledger too — the
+            // same lockstep invariant as the rotation QuorumBegin above.
+            // Without it the winner's local next_sequence trails every op it
+            // continues, and the next real depositor's open collides with an
+            // already-committed sequence.
+            if let Err(e) = self
+                .handler
+                .apply_updates_to_ledger(ledger_id, vec![signed_update.clone()])
+            {
+                tracing::warn!(
+                    "Continued DepositOpen broadcast but not applied to local base {}: {}",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    e
+                );
+            }
+
             tracing::info!("Re-opened deposit {}...", hex::encode(&deposit_id[..8]));
 
             // Update our_latest for next iteration
             our_latest = signed_update;
+        }
+        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
+            tracing::warn!(
+                "Failed to persist continued base ledger {}: {}",
+                ledger_id,
+                e
+            );
         }
 
         tracing::info!("Ledger continue complete");

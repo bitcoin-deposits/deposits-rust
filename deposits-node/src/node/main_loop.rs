@@ -396,19 +396,29 @@ impl Node {
                     let next = if children.len() == 1 {
                         children[0]
                     } else {
-                        // Fork: peek one step ahead and pick best branch
+                        // Fork: walk each branch to its end and pick the best.
+                        // Prefer a branch carrying a DisputeAcquire ANYWHERE
+                        // (resolved custody transfer) over the longest —
+                        // checking only the immediate child misses the
+                        // Acquire, which lands several ops past the fork.
                         let mut best_child: Option<&deposits_core::SignedLedgerUpdate> = None;
                         let mut best_has_acquire = false;
                         let mut best_depth = 0usize;
                         for &child in children {
-                            let has_acquire = LedgerOperation::tlv_decode(&child.message)
-                                .map(|op| matches!(op, LedgerOperation::DisputeAcquire { .. }))
-                                .unwrap_or(false);
+                            let branch_is_acquire = |u: &deposits_core::SignedLedgerUpdate| {
+                                LedgerOperation::tlv_decode(&u.message)
+                                    .map(|op| matches!(op, LedgerOperation::DisputeAcquire { .. }))
+                                    .unwrap_or(false)
+                            };
+                            let mut has_acquire = branch_is_acquire(child);
                             // Count chain length from this child (iterative peek)
                             let mut depth = 1usize;
                             let mut h = child.chain_hash();
                             while let Some(next_children) = by_prev.get(&h) {
                                 if let Some(first) = next_children.first() {
+                                    if branch_is_acquire(first) {
+                                        has_acquire = true;
+                                    }
                                     h = first.chain_hash();
                                     depth += 1;
                                 } else {
@@ -858,6 +868,11 @@ impl Node {
 
         if need_full_reimport {
             // --- Slow path: new ledger, full import from genesis ---
+            tracing::debug!(
+                "reimport_joined_ledger {}...: slow-path full reimport ({} fetched updates)",
+                &ledger_id[..16.min(ledger_id.len())],
+                all_fetched.len(),
+            );
             let mut updates: Vec<deposits_core::SignedLedgerUpdate> = all_fetched;
             updates.sort_by_key(|u| (u.sequence_number, u.operator_id.serialize(), u.content_hash));
             updates.dedup_by(|a, b| {
@@ -917,13 +932,28 @@ impl Node {
                         let mut best_has_acquire = false;
                         let mut best_depth = 0usize;
                         for &child in children {
-                            let has_acquire = LedgerOperation::tlv_decode(&child.message)
-                                .map(|op| matches!(op, LedgerOperation::DisputeAcquire { .. }))
-                                .unwrap_or(false);
+                            // Walk this branch to its end via chain_hash(),
+                            // recording BOTH its depth AND whether a
+                            // DisputeAcquire appears ANYWHERE on it — not just
+                            // as the immediate child. The DisputeAcquire sits
+                            // several ops past the fork point (after the
+                            // rotation QuorumAddMembers + DisputeArmed), so an
+                            // immediate-child-only check never sees it and the
+                            // resolved branch loses the tiebreak to the stale
+                            // disputed branch.
+                            let branch_is_acquire = |u: &deposits_core::SignedLedgerUpdate| {
+                                LedgerOperation::tlv_decode(&u.message)
+                                    .map(|op| matches!(op, LedgerOperation::DisputeAcquire { .. }))
+                                    .unwrap_or(false)
+                            };
+                            let mut has_acquire = branch_is_acquire(child);
                             let mut depth = 1usize;
                             let mut h = child.chain_hash();
                             while let Some(next_children) = by_prev.get(&h) {
                                 if let Some(first) = next_children.first() {
+                                    if branch_is_acquire(first) {
+                                        has_acquire = true;
+                                    }
                                     h = first.chain_hash();
                                     depth += 1;
                                 } else {
@@ -953,8 +983,35 @@ impl Node {
                 best_chain.iter().map(|u| (*u).clone()).collect();
 
             if filtered.is_empty() {
+                // Diagnostic: the branch-walk found no chain from the
+                // genesis previous_hash ([0;32]). Log the genesis linkage so
+                // convergence stalls are debuggable instead of silent.
+                let genesis_seqs: Vec<(u64, String, String)> = updates
+                    .iter()
+                    .filter(|u| u.sequence_number == 0)
+                    .map(|u| {
+                        (
+                            u.sequence_number,
+                            hex::encode(u.previous_hash),
+                            hex::encode(u.chain_hash()),
+                        )
+                    })
+                    .collect();
+                tracing::warn!(
+                    "reimport_joined_ledger {}...: best-chain walk produced EMPTY chain from \
+                     {} updates — genesis(seq0) links {:?}",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    updates.len(),
+                    genesis_seqs,
+                );
                 return Err(Error::Protocol("No valid chain found".into()));
             }
+            tracing::debug!(
+                "reimport_joined_ledger {}...: best-chain walk selected {} updates (tip_seq {})",
+                &ledger_id[..16.min(ledger_id.len())],
+                filtered.len(),
+                filtered.last().map(|u| u.sequence_number).unwrap_or(0),
+            );
 
             let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
                 .map_err(|e| Error::Protocol(format!("Bad hex: {}", e)))

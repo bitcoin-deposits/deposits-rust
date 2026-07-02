@@ -778,61 +778,91 @@ impl Node {
             if !quorum_members_to_add.is_empty() {
                 // Add quorum members to the fork
                 for (member, member_ledger_id) in &quorum_members_to_add {
-                    let mut fork_ledger = fork_arc.write().unwrap();
+                    // Append + operator-sign + finalize EACH member in its own
+                    // step. Chaining every op on the parent's `chain_hash()` is
+                    // the whole-recovered-chain invariant (see the
+                    // `recovery_chaining` module) — but
+                    // `append_operation_with_block` advances `chain_tip_hash`
+                    // only to the new op's `content_hash`; it becomes the
+                    // `chain_hash()` solely when `sign_last_update` finalizes.
+                    // Appending the whole batch first and signing once at the
+                    // end (the old shape) chained the 2nd..Nth QuorumAddMember
+                    // on their predecessor's `content_hash`, so a loser
+                    // reimporting the resolved chain via the `chain_hash()`
+                    // branch-walk stopped at the first internal link — the
+                    // fork's depth read as 1, the disputed op0 branch won the
+                    // depth tiebreak, and the loser converged onto the STALE
+                    // chain (0/2 cosigs on every post-recovery deposit).
+                    let appended = {
+                        let mut fork_ledger = fork_arc.write().unwrap();
 
-                    // QuorumAddMember on a fork stages into
-                    // `next_quorum_members`; the fork has no
-                    // QuorumBegin to promote them to the active set, so
-                    // skip-if-already must consult both lists or every
-                    // periodic re-appends the same member forever.
-                    let already_known = fork_ledger
-                        .state
-                        .quorum_members
-                        .iter()
-                        .chain(fork_ledger.state.next_quorum_members.iter())
-                        .any(|m| m.pubkey == *member);
-                    if already_known {
-                        continue;
-                    }
+                        // QuorumAddMember on a fork stages into
+                        // `next_quorum_members`; the fork has no
+                        // QuorumBegin to promote them to the active set, so
+                        // skip-if-already must consult both lists or every
+                        // periodic re-appends the same member forever.
+                        let already_known = fork_ledger
+                            .state
+                            .quorum_members
+                            .iter()
+                            .chain(fork_ledger.state.next_quorum_members.iter())
+                            .any(|m| m.pubkey == *member);
+                        if already_known {
+                            continue;
+                        }
 
-                    let add_op = LedgerOperation::QuorumAddMember {
-                        quorum_member: *member,
-                        quorum_member_signature: [0u8; 64],
-                        member_ledger_id: member_ledger_id.clone(),
-                        min_fee_bps: None,
-                        min_fee_fixed: None,
-                        max_fee_period: None,
-                        membership_until: None,
-                        dispute_response_blocks: None,
-                        dispute_arm_blocks: None,
-                        service_response_blocks: None,
-                        max_transfer_timeout_blocks: None,
-                        max_descriptor_bytes: None,
-                        compensation_bps: None,
-                        compensation_deposit_id: None,
-                        compensation_frequency_blocks: None,
-                        member_response: None,
-                        member_signature: None,
+                        let add_op = LedgerOperation::QuorumAddMember {
+                            quorum_member: *member,
+                            quorum_member_signature: [0u8; 64],
+                            member_ledger_id: member_ledger_id.clone(),
+                            min_fee_bps: None,
+                            min_fee_fixed: None,
+                            max_fee_period: None,
+                            membership_until: None,
+                            dispute_response_blocks: None,
+                            dispute_arm_blocks: None,
+                            service_response_blocks: None,
+                            max_transfer_timeout_blocks: None,
+                            max_descriptor_bytes: None,
+                            compensation_bps: None,
+                            compensation_deposit_id: None,
+                            compensation_frequency_blocks: None,
+                            member_response: None,
+                            member_signature: None,
+                        };
+
+                        match fork_ledger.append_operation_with_block(
+                            add_op,
+                            current_block,
+                            block_hash,
+                        ) {
+                            Err(e) => {
+                                tracing::warn!("Failed to add quorum member to fork: {:?}", e);
+                                false
+                            }
+                            Ok(_) => {
+                                if let Some(update) = fork_ledger.history.last_mut() {
+                                    update.operator_id = our_pubkey;
+                                }
+                                tracing::info!(
+                                    "Added quorum member to fork: {}...",
+                                    &hex::encode(member.serialize())[..16]
+                                );
+                                added_new_operations = true;
+                                true
+                            }
+                        }
+                        // fork write-lock dropped here so sign_last_update
+                        // (which re-locks the ledger map) can run.
                     };
 
-                    if let Err(e) =
-                        fork_ledger.append_operation_with_block(add_op, current_block, block_hash)
-                    {
-                        tracing::warn!("Failed to add quorum member to fork: {:?}", e);
-                    } else {
-                        if let Some(update) = fork_ledger.history.last_mut() {
-                            update.operator_id = our_pubkey;
-                        }
-                        tracing::info!(
-                            "Added quorum member to fork: {}...",
-                            &hex::encode(member.serialize())[..16]
-                        );
-                        added_new_operations = true;
+                    // Sign + finalize this member's op so `chain_tip_hash`
+                    // advances to its `chain_hash()` — making the NEXT
+                    // member's `previous_hash` a chain_hash, not a content_hash.
+                    if appended {
+                        self.sign_last_update(&fork_key)?;
                     }
                 }
-
-                // Sign after adding members
-                self.sign_last_update(&fork_key)?;
             }
         }
 
@@ -3608,5 +3638,96 @@ mod recovery_chaining_tests {
 
         LedgerConformanceValidator::validate_hash_chain(&[u0, u1, u2, u3])
             .expect("multi-hop recovery tail must validate");
+    }
+
+    fn quorum_add_member(member: PublicKey) -> LedgerOperation {
+        LedgerOperation::QuorumAddMember {
+            quorum_member: member,
+            quorum_member_signature: [0u8; 64],
+            member_ledger_id: "ledger".to_string(),
+            min_fee_bps: None,
+            min_fee_fixed: None,
+            max_fee_period: None,
+            membership_until: None,
+            dispute_response_blocks: None,
+            dispute_arm_blocks: None,
+            service_response_blocks: None,
+            max_transfer_timeout_blocks: None,
+            max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
+            member_response: None,
+            member_signature: None,
+        }
+    }
+
+    /// Regression guard for the loser-convergence stall: the fork-arming
+    /// rotation appends SEVERAL `QuorumAddMember` ops back-to-back (one per
+    /// carried quorum member). The buggy shape appended the whole batch and
+    /// signed once at the end, so the 2nd..Nth op chained on its
+    /// predecessor's `content_hash` (not `chain_hash`). `validate_hash_chain`
+    /// rejects that — and, worse, a loser's `best_chain` walk (which steps
+    /// `chain_hash()`) stopped at the first internal link, read the resolved
+    /// fork's depth as 1, and lost the depth tiebreak to the disputed branch.
+    /// The fix signs+finalizes each op in turn, so every internal link is a
+    /// `chain_hash`. This test asserts the multi-`QuorumAddMember` rotation
+    /// validates when chain_hash-linked, and is rejected when the internal
+    /// links regress to content_hash.
+    #[test]
+    fn multi_quorum_add_member_rotation_must_chain_on_chain_hash() {
+        let operator = pk(1);
+        let winner = pk(2);
+        let m1 = pk(10);
+        let m2 = pk(11);
+
+        // Common prefix: genesis by the original operator.
+        let u0 = signed(0, operator, &ledger_open(operator), [0u8; 32]);
+        // Fork tail authored by the winner: DisputeEnter, then THREE
+        // QuorumAddMember (the rotation), then DisputeArmed, DisputeAcquire.
+        let u1 = signed(
+            1,
+            winner,
+            &LedgerOperation::DisputeEnter {
+                last_valid_sequence: 0,
+                reason: "auto_dispute".to_string(),
+                anchor_block_hash: None,
+                anchor_block_height: None,
+            },
+            u0.chain_hash(),
+        );
+        let u2 = signed(2, winner, &quorum_add_member(winner), u1.chain_hash());
+        let u3 = signed(3, winner, &quorum_add_member(m1), u2.chain_hash());
+        let u4 = signed(4, winner, &quorum_add_member(m2), u3.chain_hash());
+        let u5 = signed(
+            5,
+            winner,
+            &LedgerOperation::DisputeArmed {
+                armed_block: 105,
+                commitment_hash: [9u8; 20],
+                target_reserves: "bcrt1qwinner".to_string(),
+                replacement_collateral: None,
+            },
+            u4.chain_hash(),
+        );
+        let u6 = signed(6, winner, &dispute_acquire(winner), u5.chain_hash());
+
+        LedgerConformanceValidator::validate_hash_chain(&[
+            u0.clone(),
+            u1.clone(),
+            u2.clone(),
+            u3.clone(),
+            u4.clone(),
+            u5.clone(),
+            u6.clone(),
+        ])
+        .expect("chain_hash-linked multi-member rotation must validate");
+
+        // Regress ONE internal QuorumAddMember link to content_hash (the old
+        // append-all-then-sign-once shape) — validation must reject it.
+        let u3_bad = signed(3, winner, &quorum_add_member(m1), u2.content_hash);
+        assert_ne!(u2.content_hash, u2.chain_hash());
+        LedgerConformanceValidator::validate_hash_chain(&[u0, u1, u2, u3_bad])
+            .expect_err("content_hash-linked internal rotation op must be rejected");
     }
 }
