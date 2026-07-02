@@ -176,8 +176,9 @@ async fn fetch_ledger_updates_from_relay(
     let client = node.nostr.fetch_client();
     let mut all_updates = Vec::new();
     let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-    let mut cursor_ts: u64 = 0;
+    let mut until_ts: Option<u64> = None;
     let mut pages = 0u32;
+    let mut stalls = 0u32;
 
     loop {
         let mut filter = Filter::new()
@@ -187,12 +188,13 @@ async fn fetch_ledger_updates_from_relay(
                 [crate::nostr::ledger_tag(ledger_id)],
             )
             .limit(PAGE_LIMIT);
-        if cursor_ts > 0 {
-            // Walk newer-than-cursor on each iteration — the relay
-            // still returns newest-first within the window, so we
-            // shift the floor up after every page and drain the
-            // whole timeline this way.
-            filter = filter.since(Timestamp::from(cursor_ts));
+        if let Some(ts) = until_ts {
+            // Page BACKWARDS: the relay returns newest-first and caps each
+            // query below our limit, so lower the ceiling to the oldest event
+            // seen and walk toward genesis. The old forward `.since` cursor only
+            // ever drained the newest page — a deep fork's early QuorumBegin
+            // (needed for lottery-N / recovery-voter derivation) never came back.
+            filter = filter.until(Timestamp::from(ts));
         }
 
         let events = match client.fetch_events(vec![filter], Some(PAGE_TIMEOUT)).await {
@@ -203,35 +205,41 @@ async fn fetch_ledger_updates_from_relay(
             break;
         }
 
-        let mut page_max_ts = cursor_ts;
-        let mut page_added = 0usize;
+        let mut page_min_ts: Option<u64> = None;
+        let mut fresh = 0usize;
         for event in events.iter() {
             let ts = event.created_at.as_u64();
-            if ts > page_max_ts {
-                page_max_ts = ts;
+            if page_min_ts.is_none() || ts < page_min_ts.unwrap() {
+                page_min_ts = Some(ts);
             }
             if let Ok(tlv) = BASE64.decode(&event.content) {
                 if let Ok(u) = deposits_core::types::SignedLedgerUpdate::tlv_decode(&tlv) {
                     if seen.insert(u.content_hash) {
                         all_updates.push(u);
-                        page_added += 1;
+                        fresh += 1;
                     }
                 }
             }
         }
-        let _ = page_added;
         pages += 1;
-        // Stop when the page didn't push the cursor forward (no
-        // events newer than what we already saw) or we hit the
-        // page cap. The "page fewer than limit" check is the
-        // natural end-of-stream signal.
-        if page_max_ts <= cursor_ts
-            || events.len() < PAGE_LIMIT
-            || pages >= MAX_PAGES
-        {
+        // Terminate on a stall (a page with no NEW events — the whole chain is
+        // walked) or the page cap, never on page size (the relay caps below
+        // PAGE_LIMIT, so a short page is normal, not end-of-stream).
+        if fresh == 0 {
+            stalls += 1;
+            if stalls > 3 {
+                break;
+            }
+        } else {
+            stalls = 0;
+        }
+        if pages >= MAX_PAGES {
             break;
         }
-        cursor_ts = page_max_ts;
+        match page_min_ts {
+            Some(ts) => until_ts = Some(ts),
+            None => break,
+        }
     }
 
     all_updates

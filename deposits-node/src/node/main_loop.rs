@@ -535,8 +535,18 @@ impl Node {
         let client = self.nostr.fetch_client();
         let mut all = Vec::new();
         let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-        let mut cursor_ts: u64 = 0;
+        // Page created_at BACKWARDS so the ENTIRE chain comes back, including
+        // the genesis / QuorumBegin (the OLDEST events). The old forward
+        // `.since` cursor against a newest-first relay only ever returned the
+        // newest page, and `page_count < RELAY_FETCH_MIN_PAGE` exited after one
+        // ~500-event page — so on a deep ledger (thousands of updates, e.g. a
+        // long-lived disputed one) the early QuorumBegin never came back and
+        // arm-time lottery-N derivation failed with "cannot determine lottery
+        // N". Same bug/fix as `reimport_joined_ledger`; terminate on a stall,
+        // never on page size (the relay caps below our requested limit).
+        let mut until_ts: Option<u64> = None;
         let mut pages = 0u32;
+        let mut stalls = 0u32;
 
         loop {
             let mut filter = Filter::new()
@@ -546,8 +556,8 @@ impl Node {
                     [crate::nostr::ledger_tag(ledger_id)],
                 )
                 .limit(Self::RELAY_FETCH_PAGE_LIMIT);
-            if cursor_ts > 0 {
-                filter = filter.since(Timestamp::from(cursor_ts));
+            if let Some(ts) = until_ts {
+                filter = filter.until(Timestamp::from(ts));
             }
 
             let events = match client
@@ -561,12 +571,12 @@ impl Node {
                 break;
             }
 
-            let page_count = events.len();
-            let mut page_max_ts = cursor_ts;
+            let mut page_min_ts: Option<u64> = None;
+            let mut fresh = 0usize;
             for event in events.iter() {
                 let ts = event.created_at.as_u64();
-                if ts > page_max_ts {
-                    page_max_ts = ts;
+                if page_min_ts.is_none() || ts < page_min_ts.unwrap() {
+                    page_min_ts = Some(ts);
                 }
                 if let Ok(tlv) = BASE64.decode(&event.content) {
                     if let Ok(u) =
@@ -574,18 +584,22 @@ impl Node {
                     {
                         if seen.insert(u.content_hash) {
                             all.push(u);
+                            fresh += 1;
                         }
                     }
                 }
             }
             pages += 1;
-            if page_max_ts <= cursor_ts
-                || page_count < Self::RELAY_FETCH_MIN_PAGE
-                || pages >= Self::RELAY_FETCH_MAX_PAGES
-            {
-                break;
+            match plan_reimport_page(
+                fresh,
+                page_min_ts,
+                pages,
+                Self::RELAY_FETCH_MAX_PAGES,
+                &mut stalls,
+            ) {
+                ReimportPage::Stop => break,
+                ReimportPage::Continue { until_ts: next } => until_ts = Some(next),
             }
-            cursor_ts = page_max_ts;
         }
         all
     }
@@ -1207,9 +1221,17 @@ impl Node {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         use nostr_sdk::{Filter, Kind, Timestamp};
 
+        // Page created_at BACKWARDS to retrieve the FULL owned chain from
+        // genesis (a forward `.since` cursor + `page_count < MIN_PAGE` exit only
+        // ever fetched the newest page — `recovery resync-owned from 0` and
+        // deep-ledger catch-up would silently drop everything older). Same
+        // fix/pattern as `fetch_all_ledger_updates_paginated` /
+        // `reimport_joined_ledger`; terminate on a stall, not on page size.
         let mut all_fetched: Vec<deposits_core::SignedLedgerUpdate> = Vec::new();
-        let mut cursor_ts: u64 = 0;
+        let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        let mut until_ts: Option<u64> = None;
         let mut pages = 0u32;
+        let mut stalls = 0u32;
         loop {
             let mut filter = Filter::new()
                 .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
@@ -1218,8 +1240,8 @@ impl Node {
                     [crate::nostr::ledger_tag(ledger_id)],
                 )
                 .limit(Self::RELAY_FETCH_PAGE_LIMIT);
-            if cursor_ts > 0 {
-                filter = filter.since(Timestamp::from(cursor_ts));
+            if let Some(ts) = until_ts {
+                filter = filter.until(Timestamp::from(ts));
             }
             let events = self
                 .nostr
@@ -1230,28 +1252,33 @@ impl Node {
             if events.is_empty() {
                 break;
             }
-            let mut page_max_ts = cursor_ts;
-            let mut page_count = 0usize;
+            let mut page_min_ts: Option<u64> = None;
+            let mut fresh = 0usize;
             for event in events.iter() {
                 let ts = event.created_at.as_u64();
+                if page_min_ts.is_none() || ts < page_min_ts.unwrap() {
+                    page_min_ts = Some(ts);
+                }
                 if let Ok(b) = BASE64.decode(&event.content) {
                     if let Ok(u) = deposits_core::SignedLedgerUpdate::tlv_decode(&b) {
-                        if ts > page_max_ts {
-                            page_max_ts = ts;
+                        if seen.insert(u.content_hash) {
+                            all_fetched.push(u);
+                            fresh += 1;
                         }
-                        all_fetched.push(u);
-                        page_count += 1;
                     }
                 }
             }
             pages += 1;
-            if page_max_ts <= cursor_ts
-                || page_count < Self::RELAY_FETCH_MIN_PAGE
-                || pages >= Self::RELAY_FETCH_MAX_PAGES
-            {
-                break;
+            match plan_reimport_page(
+                fresh,
+                page_min_ts,
+                pages,
+                Self::RELAY_FETCH_MAX_PAGES,
+                &mut stalls,
+            ) {
+                ReimportPage::Stop => break,
+                ReimportPage::Continue { until_ts: next } => until_ts = Some(next),
             }
-            cursor_ts = page_max_ts;
             tokio::task::yield_now().await;
         }
 
