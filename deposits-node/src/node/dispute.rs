@@ -1678,18 +1678,31 @@ impl Node {
 
         let message_bytes = operation.tlv_encode();
 
-        // Build update continuing from our DisputeArmed
+        // Build update continuing from our DisputeArmed.
+        //
+        // The chain links on the PARENT's `chain_hash()`, NOT its
+        // `content_hash`. `chain_hash = SHA256(content_hash ||
+        // operator_signature)` — the exact value `commit_staged` /
+        // `finalize_chain_hash` write to `state.chain_tip_hash`, and the
+        // exact value `validate_hash_chain` compares each `previous_hash`
+        // against. `our_armed` is the winner's own DisputeArmed, fetched
+        // fully-signed from the relay, so its `operator_signature` is
+        // populated and `chain_hash()` is well-defined. Chaining on
+        // `content_hash` (the old behavior) produced a `previous_hash`
+        // that `import_ledger` rejected as a broken chain, so losing
+        // cosigners could never converge onto the resolved chain.
+        let parent_chain_hash = our_armed.chain_hash();
         let sequence = our_armed.sequence_number + 1;
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&our_armed.content_hash);
+        hash_input.extend_from_slice(&parent_chain_hash);
         hash_input.extend_from_slice(&message_bytes);
         let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
         // Sign the update
         let update_msg = format!(
             "deposits:ledger:{}:{}:{}",
-            hex::encode(our_armed.content_hash),
+            hex::encode(parent_chain_hash),
             sequence,
             hex::encode(new_hash)
         );
@@ -1720,7 +1733,7 @@ impl Node {
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
-            previous_hash: our_armed.content_hash,
+            previous_hash: parent_chain_hash,
             content_hash: new_hash,
             block_height: current_block,
             block_hash: current_block_hash,
@@ -1806,18 +1819,23 @@ impl Node {
         let operation = LedgerOperation::DisputeYield;
         let message_bytes = operation.tlv_encode();
 
-        // Build update continuing from our DisputeArmed
+        // Build update continuing from our DisputeArmed. Chain on the
+        // parent's `chain_hash()` (= SHA256(content_hash ||
+        // operator_signature)), the same convention as every normal op and
+        // the winner's DisputeAcquire — so the whole recovered chain uses
+        // ONE convention and `validate_hash_chain` stays strict.
+        let parent_chain_hash = our_armed.chain_hash();
         let sequence = our_armed.sequence_number + 1;
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&our_armed.content_hash);
+        hash_input.extend_from_slice(&parent_chain_hash);
         hash_input.extend_from_slice(&message_bytes);
         let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
         // Sign the update
         let update_msg = format!(
             "deposits:ledger:{}:{}:{}",
-            hex::encode(our_armed.content_hash),
+            hex::encode(parent_chain_hash),
             sequence,
             hex::encode(new_hash)
         );
@@ -1848,7 +1866,7 @@ impl Node {
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
-            previous_hash: our_armed.content_hash,
+            previous_hash: parent_chain_hash,
             content_hash: new_hash,
             block_height: current_block,
             block_hash: current_block_hash,
@@ -3425,5 +3443,170 @@ impl Node {
         }
 
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod recovery_chaining_tests {
+    //! The dispute-recovery ops (DisputeAcquire / DisputeYield / the
+    //! rotation QuorumBegin / the re-opened DepositOpens) are hand-built in
+    //! `claim_lottery`, `publish_custody_yield`, `auto_rotate_to_quorum`, and
+    //! `auto_continue_ledger`. They MUST chain on the parent's `chain_hash()`
+    //! (= SHA256(content_hash || operator_signature)) — the single convention
+    //! `validate_hash_chain` enforces — so a loser reimporting the resolved
+    //! chain from the relay accepts it. These tests reproduce that hand-built
+    //! chaining byte-for-byte and assert `validate_hash_chain` accepts it, and
+    //! that the OLD `content_hash` convention is rejected (regression guard).
+    use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::validation::LedgerConformanceValidator;
+    use deposits_core::{SignedLedgerUpdate, TlvEncode};
+
+    fn pk(seed: u8) -> PublicKey {
+        let secp = Secp256k1::new();
+        PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[seed; 32]).unwrap())
+    }
+
+    /// Build a signed update chaining on `prev` (already the parent's
+    /// chain_hash, or [0;32] for genesis). `content_hash` is computed the
+    /// same way the recovery builders and `append_operation_with_block` do:
+    /// SHA256(seq_le || prev || message). A non-zero operator_signature is
+    /// stamped so `chain_hash()` (which folds it in) is meaningful.
+    fn signed(seq: u64, operator: PublicKey, op: &LedgerOperation, prev: [u8; 32]) -> SignedLedgerUpdate {
+        let message = op.tlv_encode();
+        let mut hash_input = Vec::new();
+        hash_input.extend_from_slice(&seq.to_le_bytes());
+        hash_input.extend_from_slice(&prev);
+        hash_input.extend_from_slice(&message);
+        let content_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
+        SignedLedgerUpdate {
+            message,
+            message_type: 0x8001,
+            operator_id: operator,
+            ledger_id: [7u8; 32],
+            sequence_number: seq,
+            previous_hash: prev,
+            content_hash,
+            block_height: 100 + seq as u32,
+            block_hash: [0u8; 32],
+            // Distinct non-zero sig per seq so chain_hash != content_hash and
+            // each parent's chain_hash is unique.
+            operator_signature: [seq as u8 + 1; 64],
+            cosign_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: Vec::new(),
+        }
+    }
+
+    fn ledger_open(operator: PublicKey) -> LedgerOperation {
+        LedgerOperation::LedgerOpen {
+            operator_id: operator,
+            reserves_id: "bcrt1qopen".to_string(),
+            genesis_block: 0,
+            reserves_amount: 1_000_000,
+            collateral_amount: 0,
+        }
+    }
+
+    fn dispute_acquire(new_custodian: PublicKey) -> LedgerOperation {
+        LedgerOperation::DisputeAcquire {
+            new_custodian,
+            claim_txid: [3u8; 32],
+            new_reserves_address: "bcrt1qwinner".to_string(),
+        }
+    }
+
+    fn deposit_open(id: u8) -> LedgerOperation {
+        LedgerOperation::DepositOpen {
+            deposit_id: [id; 16],
+            descriptor: "wpkh(deadbeef)".to_string(),
+            fees: None,
+            transfer_fees: None,
+            payment_hash: None,
+            invoice: None,
+            cosigner_guarantee_signature: None,
+            receive_requires_sig: false,
+            fee_change_after_blocks: None,
+            fee_change_notice_blocks: None,
+            fee_change_limit_bps: None,
+        }
+    }
+
+    /// A recovered chain — pre-dispute op(s) authored by the original
+    /// operator, then the winner's DisputeAcquire and a re-opened
+    /// DepositOpen authored by the new custodian — validates end to end
+    /// when every link chains on the parent's `chain_hash()`.
+    #[test]
+    fn recovered_chain_links_on_chain_hash_and_validates() {
+        let operator = pk(1);
+        let winner = pk(2);
+
+        // seq 0: LedgerOpen (genesis, prev = [0;32]).
+        let u0 = signed(0, operator, &ledger_open(operator), [0u8; 32]);
+        // seq 1: winner's DisputeAcquire chains on u0.chain_hash().
+        let u1 = signed(1, winner, &dispute_acquire(winner), u0.chain_hash());
+        // seq 2: re-opened DepositOpen chains on u1.chain_hash().
+        let u2 = signed(2, winner, &deposit_open(0xAB), u1.chain_hash());
+
+        LedgerConformanceValidator::validate_hash_chain(&[u0, u1, u2])
+            .expect("recovered chain chained on chain_hash() must validate");
+    }
+
+    /// Regression guard: the OLD convention (chaining the recovery op on the
+    /// parent's `content_hash`) breaks `validate_hash_chain` — this is the
+    /// exact "Hash chain broken at sequence N: prev_hash mismatch" that
+    /// blocked loser convergence before the fix.
+    #[test]
+    fn recovery_op_chained_on_content_hash_is_rejected() {
+        let operator = pk(1);
+        let winner = pk(2);
+
+        let u0 = signed(0, operator, &ledger_open(operator), [0u8; 32]);
+        // WRONG: chain the DisputeAcquire on u0.content_hash (old behavior).
+        let u1_bad = signed(1, winner, &dispute_acquire(winner), u0.content_hash);
+
+        // content_hash != chain_hash (operator_signature is non-zero), so the
+        // validator's expected_prev (= u0.chain_hash()) mismatches.
+        assert_ne!(u0.content_hash, u0.chain_hash());
+        let err = LedgerConformanceValidator::validate_hash_chain(&[u0, u1_bad])
+            .expect_err("content_hash-chained recovery op must be rejected");
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("prev_hash mismatch") || msg.to_lowercase().contains("hashchainbroken"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+
+    /// The multi-hop rotation tail (DisputeAcquire → QuorumBegin →
+    /// DepositOpen, all by the new custodian) also validates — mirrors
+    /// `auto_rotate_to_quorum` + `auto_continue_ledger` chaining each op on
+    /// the previous signed update's `chain_hash()`.
+    #[test]
+    fn multi_hop_recovery_tail_validates() {
+        let operator = pk(1);
+        let winner = pk(2);
+
+        let u0 = signed(0, operator, &ledger_open(operator), [0u8; 32]);
+        let u1 = signed(1, winner, &dispute_acquire(winner), u0.chain_hash());
+        let qb = LedgerOperation::QuorumBegin {
+            reserves_id: "bcrt1qrot".to_string(),
+            spending_txid: [0; 32],
+            new_outpoint_txid: [1; 32],
+            new_outpoint_vout: 0,
+            amount: 900_000,
+            quorum_expiry: 1_000_000,
+            ledger_hash: u1.content_hash,
+            quorum_members: vec![deposits_core::messages::QuorumMemberRef::pubkey_only(winner)],
+            collateral_amount: 0,
+            protocol_version: None,
+        };
+        let u2 = signed(2, winner, &qb, u1.chain_hash());
+        let u3 = signed(3, winner, &deposit_open(0xCD), u2.chain_hash());
+
+        LedgerConformanceValidator::validate_hash_chain(&[u0, u1, u2, u3])
+            .expect("multi-hop recovery tail must validate");
     }
 }

@@ -255,16 +255,24 @@ impl Node {
 
         let message_bytes = operation.tlv_encode();
 
+        // Chain the rotation's QuorumBegin on the parent's `chain_hash()`
+        // (= SHA256(content_hash || operator_signature)) — the unified
+        // convention `validate_hash_chain` enforces. `our_latest` is the
+        // winner's own DisputeAcquire, fetched fully-signed from the relay.
+        // NOTE: `ledger_hash` (the QuorumBegin state commitment, used by the
+        // tapscript reserves builder above) intentionally stays
+        // `our_latest.content_hash` — that's a state anchor, not a chain link.
+        let parent_chain_hash = our_latest.chain_hash();
         let sequence = our_latest.sequence_number + 1;
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&our_latest.content_hash);
+        hash_input.extend_from_slice(&parent_chain_hash);
         hash_input.extend_from_slice(&message_bytes);
         let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
         let update_msg = format!(
             "deposits:ledger:{}:{}:{}",
-            hex::encode(our_latest.content_hash),
+            hex::encode(parent_chain_hash),
             sequence,
             hex::encode(new_hash)
         );
@@ -296,7 +304,7 @@ impl Node {
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
-            previous_hash: our_latest.content_hash,
+            previous_hash: parent_chain_hash,
             content_hash: new_hash,
             block_height: current_block,
             block_hash,
@@ -406,16 +414,23 @@ impl Node {
 
             let message_bytes = operation.tlv_encode();
 
+            // Chain each re-opened DepositOpen on the parent's
+            // `chain_hash()` (unified convention). On the first iteration
+            // the parent is the winner's QuorumBegin; on later iterations
+            // it's the DepositOpen we built last pass — which we sign
+            // below, so its `operator_signature` (and thus `chain_hash()`)
+            // is populated before it becomes the next parent.
+            let parent_chain_hash = our_latest.chain_hash();
             let sequence = our_latest.sequence_number + 1;
             let mut hash_input = Vec::new();
             hash_input.extend_from_slice(&sequence.to_le_bytes());
-            hash_input.extend_from_slice(&our_latest.content_hash);
+            hash_input.extend_from_slice(&parent_chain_hash);
             hash_input.extend_from_slice(&message_bytes);
             let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
             let update_msg = format!(
                 "deposits:ledger:{}:{}:{}",
-                hex::encode(our_latest.content_hash),
+                hex::encode(parent_chain_hash),
                 sequence,
                 hex::encode(new_hash)
             );
@@ -446,7 +461,7 @@ impl Node {
                 operator_id: our_pubkey,
                 ledger_id: ledger_id_bytes,
                 sequence_number: sequence,
-                previous_hash: our_latest.content_hash,
+                previous_hash: parent_chain_hash,
                 content_hash: new_hash,
                 block_height: current_block,
                 block_hash,

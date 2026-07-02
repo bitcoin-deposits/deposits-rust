@@ -375,11 +375,21 @@ impl Node {
 
             // Walk the chain iteratively from genesis. At forks, pick the
             // branch that contains DisputeAcquire (or the longest if tied).
+            //
+            // The chain links parent→child on the PARENT's `chain_hash()`
+            // (= SHA256(content_hash || operator_signature)), NOT its
+            // `content_hash`: that's what each update's `previous_hash`
+            // holds, and what `by_prev` is keyed on. Walking via
+            // `content_hash` (the old behavior) stopped at seq 0 — every
+            // seq-1 `previous_hash` was the genesis `chain_hash`, which
+            // `by_prev.get(&genesis.content_hash)` never matched. Step via
+            // `chain_hash()` so the whole recovered chain (including the
+            // dispute-recovery ops now chained on `chain_hash`) links.
             let best_chain = {
                 let mut chain: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
-                let mut content_hash = [0u8; 32];
+                let mut cursor = [0u8; 32];
                 loop {
-                    let Some(children) = by_prev.get(&content_hash) else {
+                    let Some(children) = by_prev.get(&cursor) else {
                         break;
                     };
                     // Single child (common case): just follow it
@@ -396,10 +406,10 @@ impl Node {
                                 .unwrap_or(false);
                             // Count chain length from this child (iterative peek)
                             let mut depth = 1usize;
-                            let mut h = child.content_hash;
+                            let mut h = child.chain_hash();
                             while let Some(next_children) = by_prev.get(&h) {
                                 if let Some(first) = next_children.first() {
-                                    h = first.content_hash;
+                                    h = first.chain_hash();
                                     depth += 1;
                                 } else {
                                     break;
@@ -419,7 +429,7 @@ impl Node {
                             None => break,
                         }
                     };
-                    content_hash = next.content_hash;
+                    cursor = next.chain_hash();
                     chain.push(next);
                 }
                 chain
@@ -740,11 +750,51 @@ impl Node {
                 )
             };
 
+            // Custody-transfer detection (DEP-06 loser convergence). The
+            // fast path filters relay events to `main_chain_operator` (our
+            // current view's operator). But a resolved dispute rotates
+            // custody to a DIFFERENT operator: the winner's DisputeAcquire
+            // — and every op after it (QuorumBegin rotation, re-opened
+            // DepositOpens) — is authored by that new custodian, so the
+            // operator filter drops the ENTIRE resolved tail and we'd
+            // report "already caught up" while stuck on the pre-dispute
+            // chain. A loser cosigner would then never converge, and a
+            // fresh deposit on the recovered ledger couldn't reach cosign
+            // threshold. When the relay carries a DisputeAcquire that names
+            // a `new_custodian` other than our current operator, force the
+            // full genesis reimport so the branch-preferring `best_chain`
+            // walk adopts the resolved (DisputeAcquire-bearing) chain.
+            let relay_transfers_custody_away = all_fetched.iter().any(|u| {
+                matches!(
+                    LedgerOperation::tlv_decode(&u.message),
+                    Ok(LedgerOperation::DisputeAcquire { new_custodian, .. })
+                        if new_custodian != main_chain_operator
+                )
+            });
+
+            if relay_transfers_custody_away {
+                tracing::warn!(
+                    "Relay carries a DisputeAcquire transferring custody away from our \
+                     current operator on ledger {}... — forcing full reimport so we \
+                     converge onto the resolved chain",
+                    &ledger_id[..16.min(ledger_id.len())],
+                );
+                // Drop our stale pre-dispute view and let the slow path
+                // rebuild from genesis, preferring the resolved branch.
+                // The full history is refetched from the relay below, so
+                // the loser converges onto — never loses — the ledger.
+                self.handler.ledgers.lock().unwrap().remove(ledger_id);
+                self.cosign_member_cache.lock().unwrap().remove(ledger_id);
+                self.invalidate_joined_ledger_cache();
+                need_full_reimport = true;
+            }
+
             // Filter, sort, dedup relay events to those beyond our tip
             let mut new_updates: Vec<_> = all_fetched
                 .iter()
                 .filter(|u| {
-                    u.sequence_number >= local_next_seq
+                    !need_full_reimport
+                        && u.sequence_number >= local_next_seq
                         && u.operator_id == main_chain_operator
                 })
                 .cloned()
@@ -752,7 +802,7 @@ impl Node {
             new_updates.sort_by_key(|u| u.sequence_number);
             new_updates.dedup_by_key(|u| u.sequence_number);
 
-            if new_updates.is_empty() {
+            if !need_full_reimport && new_updates.is_empty() {
                 tracing::debug!(
                     "Ledger {}... already up to date (tip seq={})",
                     &ledger_id[..16.min(ledger_id.len())],
@@ -761,8 +811,13 @@ impl Node {
                 return Ok(()); // Already caught up — not an error
             }
 
-            // Verify the first new update chains from our tip
-            if new_updates[0].sequence_number == local_next_seq
+            // Verify the first new update chains from our tip. Skipped when a
+            // custody transfer already forced a full reimport (new_updates is
+            // empty then — the resolved tail is authored by the winner, not
+            // our current operator — so fall through to the genesis rebuild).
+            if need_full_reimport {
+                // Fall through to the slow path below.
+            } else if new_updates[0].sequence_number == local_next_seq
                 && new_updates[0].previous_hash != local_tip_hash
             {
                 tracing::warn!(
@@ -842,11 +897,17 @@ impl Node {
                 map
             };
 
+            // Walk links parent→child on the parent's `chain_hash()`
+            // (= SHA256(content_hash || operator_signature)) — the value
+            // held in each `previous_hash` and keyed in `by_prev`. See the
+            // matching walk in `auto_import_joined_ledgers` for why stepping
+            // via `content_hash` stopped at seq 0 under the unified
+            // dispute-recovery chaining convention.
             let best_chain = {
                 let mut chain: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
-                let mut content_hash = [0u8; 32];
+                let mut cursor = [0u8; 32];
                 loop {
-                    let Some(children) = by_prev.get(&content_hash) else {
+                    let Some(children) = by_prev.get(&cursor) else {
                         break;
                     };
                     let next = if children.len() == 1 {
@@ -860,10 +921,10 @@ impl Node {
                                 .map(|op| matches!(op, LedgerOperation::DisputeAcquire { .. }))
                                 .unwrap_or(false);
                             let mut depth = 1usize;
-                            let mut h = child.content_hash;
+                            let mut h = child.chain_hash();
                             while let Some(next_children) = by_prev.get(&h) {
                                 if let Some(first) = next_children.first() {
-                                    h = first.content_hash;
+                                    h = first.chain_hash();
                                     depth += 1;
                                 } else {
                                     break;
@@ -883,7 +944,7 @@ impl Node {
                             None => break,
                         }
                     };
-                    content_hash = next.content_hash;
+                    cursor = next.chain_hash();
                     chain.push(next);
                 }
                 chain
