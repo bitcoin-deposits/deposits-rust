@@ -1548,6 +1548,22 @@ impl Node {
             tokio::time::Duration::from_secs(600)
         };
 
+        // Ledger healing (Kind 9100 chains). The relay expires durable
+        // ledger-update events out of its retention window; the daemon holds
+        // the full chain locally, so it periodically re-publishes any update
+        // missing from the relay to keep the chain backfilled (see
+        // `node::heal`). Heavy (paginated relay fetch + bounded re-publish per
+        // owned ledger) and only relevant on the retention timescale, so it
+        // runs on a slow cadence and is spawned so it never blocks the loop.
+        // Under fast_poll (regtest) it runs promptly so tests don't wait an
+        // hour to observe healing.
+        let mut last_heal = tokio::time::Instant::now();
+        let heal_interval = if self.fast_poll {
+            tokio::time::Duration::from_secs(30)
+        } else {
+            tokio::time::Duration::from_secs(3600)
+        };
+
         if self.fast_poll {
             tracing::info!(
                 "Fast poll mode enabled: periodic=5s, wallet_sync=30s, poll=30s, reload=2s"
@@ -1583,6 +1599,18 @@ impl Node {
                     crate::node_cli::republish_ledger_advertisements(&node).await;
                 });
                 last_advertise = tokio::time::Instant::now();
+            }
+
+            // Self-healing ledger chains (Kind 9100): re-publish any owned-ledger
+            // updates the relay has expired from its retention window. Spawned so
+            // the paginated relay fetches + bounded re-publish never block the
+            // loop.
+            if last_heal.elapsed() >= heal_interval {
+                let node = Arc::clone(self);
+                tokio::spawn(async move {
+                    node.auto_heal_ledgers().await;
+                });
+                last_heal = tokio::time::Instant::now();
             }
 
             // Periodic tasks (every 5s fast / 60s normal)

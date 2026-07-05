@@ -592,6 +592,7 @@ impl Node {
 pub mod auto_tasks;
 pub mod coordination;
 pub mod dispute;
+pub mod heal;
 pub mod inbound;
 pub mod init;
 pub mod ledger_actor;
