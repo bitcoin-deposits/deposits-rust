@@ -118,6 +118,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "nostr" => nostr_commands::nostr_command(&args[2..]).await?,
         "recovery" => recovery::recovery_command(&args[2..]).await?,
         "disputes" => node_cli::disputes::disputes_command(&args[2..]).await?,
+        "archive" => node_cli::archive::archive_command(&args[2..]).await?,
         "health" => node_cli::health::health_command(&args[2..]).await?,
         "version" | "--version" | "-V" => {
             println!(

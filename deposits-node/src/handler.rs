@@ -1295,6 +1295,68 @@ impl DepositsHandler {
         Some(updates)
     }
 
+    /// Append accepted updates to `{data_dir}/ledgers/{ledger_id}.jsonl` in the
+    /// same append-only `LedgerLogRow::Update` format the daemon persists —
+    /// deduped by `content_hash` against what the file already holds, and NEVER
+    /// truncating the file (a fork-branch key gets its own file). Returns the
+    /// number of new rows written.
+    ///
+    /// This is the durable-write half of the `archive` subcommand's reuse of the
+    /// daemon's persistence: the file it produces is byte-compatible with
+    /// [`Self::read_persisted_history_at`], so a diff/backfill pass round-trips
+    /// through the exact same reader the daemon's healer uses. The `Update`
+    /// variant is private to this module, so the archivist writes through here
+    /// rather than re-deriving the JSONL shape.
+    ///
+    /// Safety: only ever appends the rows handed to it. The archivist only hands
+    /// it updates that have already passed [`crate::node_cli::archive`]'s
+    /// quorum-cosig + hash-chain validation, so a compromised relay can never
+    /// get uncosigned/forged bytes into the archive through this path.
+    pub fn archive_append_updates_at(
+        data_dir: &std::path::Path,
+        ledger_id: &str,
+        updates: &[SignedLedgerUpdate],
+    ) -> std::io::Result<usize> {
+        use std::io::Write;
+
+        let ledgers_dir = data_dir.join("ledgers");
+        fs::create_dir_all(&ledgers_dir)?;
+        let ledger_file = ledgers_dir.join(format!("{}.jsonl", ledger_id));
+
+        // Dedup against what's already on disk (append-only, so we never rewrite
+        // or drop existing rows) — matches the daemon's content_hash dedup.
+        let existing: std::collections::HashSet<[u8; 32]> =
+            Self::read_persisted_history_at(data_dir, ledger_id)
+                .unwrap_or_default()
+                .iter()
+                .map(|u| u.content_hash)
+                .collect();
+
+        let to_write: Vec<&SignedLedgerUpdate> = updates
+            .iter()
+            .filter(|u| !existing.contains(&u.content_hash))
+            .collect();
+        if to_write.is_empty() {
+            return Ok(0);
+        }
+
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&ledger_file)?;
+        let mut writer = std::io::BufWriter::new(file);
+        let mut written = 0usize;
+        for update in to_write {
+            let row = LedgerLogRow::Update((*update).clone());
+            let line = serde_json::to_string(&row)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            writeln!(writer, "{}", line)?;
+            written += 1;
+        }
+        writer.flush()?;
+        Ok(written)
+    }
+
     /// Insert a signed ledger update into the event store.
     /// Returns true if the event was new (not a duplicate).
     pub fn insert_event(&self, update: &SignedLedgerUpdate) -> bool {

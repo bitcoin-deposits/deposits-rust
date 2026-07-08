@@ -8,6 +8,7 @@
 //! CLI command modules for deposits-node.
 
 pub mod admin;
+pub mod archive;
 pub mod bootstrap;
 pub mod deposit;
 pub mod disputes;
@@ -118,6 +119,8 @@ COMMANDS:
     health          Cluster health checks (ping, chains, relays)
     bootstrap       Helper bring-up flows (init, reserves, quorum)
     admin           Admin daemon-side operations (buffer)
+    archive         Semi-trusted archivist: durable validated copy of every
+                    quorum's ledger (updates + disputes + fraud); backfill relays
     help            Show this help message
 
 RESERVES SUBCOMMANDS:
